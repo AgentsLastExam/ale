@@ -21,8 +21,9 @@ bootstrap:
     @scripts/bootstrap.sh
 
 # Verify this tree behaves exactly like main; prints a fix for every failure.
+# --no-project skips the lockfile entirely, so UV_FROZEN would be a no-op warning.
 doctor:
-    @uv run --no-project python scripts/doctor.py
+    @env -u UV_FROZEN uv run --no-project python scripts/doctor.py
 
 # Create a worktree under ../ale-worktrees/<name> and bootstrap it in one step.
 wt name:
