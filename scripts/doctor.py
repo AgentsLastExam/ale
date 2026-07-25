@@ -154,17 +154,16 @@ def check_caches(root: Path) -> list[Result]:
     return results
 
 
-def check_secrets() -> list[Result]:
-    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    path = Path(os.environ.get("ALE_SECRETS_FILE") or config_home / "ale" / "secrets.env")
+def check_secrets(root: Path) -> list[Result]:
+    """Credentials live in the checkout, so each tree can target its own provider."""
+    path = Path(os.environ.get("ALE_ENV_FILE") or root / ".env")
     if not path.exists():
         return [
             Result(
                 WARN,
                 "secrets",
                 f"{path} missing — live agent runs and gated assets will fail",
-                f"mkdir -p {path.parent} && "
-                f"printf 'ANTHROPIC_API_KEY=...\\nHF_TOKEN=...\\n' > {path}",
+                "cp .env.example .env  (then fill in ANTHROPIC_API_KEY)",
             )
         ]
     keys = {
@@ -172,7 +171,7 @@ def check_secrets() -> list[Result]:
         for line in path.read_text().splitlines()
         if "=" in line and not line.lstrip().startswith("#")
     }
-    missing = sorted({"ANTHROPIC_API_KEY", "HF_TOKEN"} - keys)
+    missing = sorted({"ANTHROPIC_API_KEY"} - {k for k in keys if k})
     if missing:
         return [
             Result(WARN, "secrets", f"{path} lacks {', '.join(missing)}", f"add them to {path}")
@@ -294,7 +293,7 @@ def main() -> int:
     results += check_python(root)
     results += check_lock(root)
     results += check_caches(root)
-    results += check_secrets()
+    results += check_secrets(root)
     results += check_sandbox_backends()
 
     width = max(len(r.name) for r in results)

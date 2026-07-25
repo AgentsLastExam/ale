@@ -9,7 +9,6 @@ that imports it.
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -27,6 +26,7 @@ from ale.run.gateway.session import GatewaySession, Limits
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.kits import read_lock, scan_kits, write_lock
+from ale.run.secrets import provider_credentials
 from ale.run.sources import Registry, resolve
 from ale.run.tasksets.manifest import ManifestTaskset
 
@@ -180,11 +180,17 @@ async def _run_one(
     needs_model = settings.agent.name not in {"oracle", "nop"}
 
     if needs_model:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        api_key, upstream = provider_credentials()
         if not api_key:
-            typer.echo("ANTHROPIC_API_KEY is not set; see `just doctor`", err=True)
+            typer.echo(
+                "no ANTHROPIC_API_KEY: copy .env.example to .env and fill it in", err=True
+            )
             return EXIT_BAD_REFERENCE
-        gateway = Gateway(api_key=api_key, host=_gateway_host(settings))
+        gateway = Gateway(
+            api_key=api_key,
+            upstream=settings.gateway.base_url or upstream,
+            host=_gateway_host(settings),
+        )
         gateway_url = await gateway.start()
         session = gateway.open_session(
             GatewaySession(
