@@ -21,11 +21,13 @@ DEFAULT_REGISTRY = "ghcr.io/agentslastexam"
 def resolve_ref(image: ImageRef) -> str:
     """Expand a short image name to a full reference.
 
-    A name containing a slash or a registry host is already qualified and is left alone,
-    so a task can point anywhere when it needs to.
+    The rule is deliberately blunt: an unqualified name means one of ours, and anything
+    else must be written in full (``docker.io/library/python:3.12-slim``). Guessing
+    instead — treating some bare names as public and others as ours — would make the
+    meaning of a manifest depend on what happens to exist in a registry today.
     """
     name = image.name
-    if "/" in name or name.startswith("localhost"):
+    if "/" in name:
         return f"{name}:{image.tag}"
     return f"{DEFAULT_REGISTRY}/{name}:{image.tag}"
 

@@ -22,14 +22,14 @@ from ale.run.tasksets.manifest import ManifestTaskset
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-IMAGE = "python:3.12-slim"
+IMAGE = "docker.io/library/python:3.12-slim"
 
 
 def write_repo(root: Path, *, with_oracle: bool = True, verify_body: str | None = None) -> Path:
     """Lay out a minimal task repository: manifest, instruction, setup, verify, oracle."""
     root.mkdir(parents=True, exist_ok=True)
     (root / "domain.yaml").write_text(
-        "name: demo\nrequires_core: '>=0.1,<0.2'\ndefault_image: python:3.12-slim\n"
+        "name: demo\nrequires_core: '>=0.1,<0.2'\ndefault_image: docker.io/library/python:3.12-slim\n"
     )
     task = root / "tasks" / "hello"
     (task / "setup").mkdir(parents=True)

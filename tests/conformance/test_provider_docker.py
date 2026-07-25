@@ -18,7 +18,7 @@ class TestDockerProvider(ProviderConformance):
     """
 
     provider = DockerProvider()
-    image_ref = "python:3.12-slim"
+    image_ref = "docker.io/library/python:3.12-slim"
 
 
 @pytest.mark.asyncio
@@ -30,7 +30,7 @@ async def test_blocked_network_has_no_route_off_the_host() -> None:
     provider = DockerProvider()
     request = SandboxRequest(
         episode_id="netprobe",
-        image_ref="python:3.12-slim",
+        image_ref="docker.io/library/python:3.12-slim",
         resources=Resources(cpus=1, memory_mb=512),
         network=NetworkPolicy(mode=NetworkMode.BLOCK),
     )
