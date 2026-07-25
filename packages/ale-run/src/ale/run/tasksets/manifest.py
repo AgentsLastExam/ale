@@ -69,9 +69,12 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 class TaskFolder:
     """The on-disk form of a task, and the paths its stages use."""
 
-    def __init__(self, root: Path, repo_root: Path | None = None) -> None:
+    def __init__(
+        self, root: Path, repo_root: Path | None = None, assets_lock: AssetsLock | None = None
+    ) -> None:
         self.root = root.resolve()
         self.repo_root = (repo_root or _find_repo_root(self.root)).resolve()
+        self.assets_lock = assets_lock or AssetsLock()
 
     @property
     def relative_path(self) -> str:
@@ -164,11 +167,11 @@ class ManifestTaskset(Taskset):
     def _task_folders(self) -> Iterator[TaskFolder]:
         """Yield the task folders selected by this taskset's path."""
         if (self.path / TASK_MANIFEST).is_file():
-            yield TaskFolder(self.path, self.repo_root)
+            yield TaskFolder(self.path, self.repo_root, self.assets)
             return
         search_root = self.path if self.path != self.repo_root else self.repo_root / TASKS_DIR
         for manifest in sorted(search_root.rglob(TASK_MANIFEST)):
-            folder = TaskFolder(manifest.parent, self.repo_root)
+            folder = TaskFolder(manifest.parent, self.repo_root, self.assets)
             if self.task_filter and self.task_filter not in folder.relative_path:
                 continue
             yield folder
@@ -184,9 +187,9 @@ class ManifestTaskset(Taskset):
         base_params = dict(raw.pop("params", {}) or {})
         variants = raw.pop("variants", None)
 
-        for variant_name, params in self._variants(base_params, variants):
+        for variant_name, params, overrides in self._variants(base_params, variants):
             spec = self._build_spec(
-                raw=raw,
+                raw=raw | overrides,
                 folder=folder,
                 task_id=task_id,
                 variant=variant_name,
@@ -197,10 +200,16 @@ class ManifestTaskset(Taskset):
 
     def _variants(
         self, base_params: dict[str, Any], variants: list[dict[str, Any]] | None
-    ) -> Iterator[tuple[str | None, dict[str, Any]]]:
-        """One entry per task instance: a single unnamed one, or one per variant."""
+    ) -> Iterator[tuple[str | None, dict[str, Any], dict[str, Any]]]:
+        """One entry per task instance: a single unnamed one, or one per variant.
+
+        A variant may override more than parameters. Data bundles are per variant in
+        practice — each has its own inputs and its own gold answers — so a variant can
+        also name its own assets, and may declare an image when it genuinely needs a
+        different one (a GUI variant beside a file-only one).
+        """
         if not variants:
-            yield None, base_params
+            yield None, base_params, {}
             return
         seen: set[str] = set()
         for entry in variants:
@@ -210,7 +219,12 @@ class ManifestTaskset(Taskset):
             if name in seen:
                 raise TaskDefinitionError(f"duplicate variant name: {name}")
             seen.add(name)
-            yield name, base_params | dict(entry.get("params", {}) or {})
+            overrides = {
+                key: value
+                for key, value in entry.items()
+                if key in {"image", "setup", "verify", "harness_family", "resources", "timeouts"}
+            }
+            yield name, base_params | dict(entry.get("params", {}) or {}), overrides
 
     def _build_spec(
         self,

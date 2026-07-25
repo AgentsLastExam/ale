@@ -182,9 +182,7 @@ async def _run_one(
     if needs_model:
         api_key, upstream = provider_credentials()
         if not api_key:
-            typer.echo(
-                "no ANTHROPIC_API_KEY: copy .env.example to .env and fill it in", err=True
-            )
+            typer.echo("no ANTHROPIC_API_KEY: copy .env.example to .env and fill it in", err=True)
             return EXIT_BAD_REFERENCE
         gateway = Gateway(
             api_key=api_key,

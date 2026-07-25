@@ -30,6 +30,7 @@ from ale.core.task import Task
 from ale.core.taskspec import HarnessFamily, Workspace
 from ale.core.trace import ExecRecord, InstructionRecord, NoteRecord, TraceLayer, VerifierRecord
 from ale.core.verdict import Verdict
+from ale.run.assets import stage_components
 from ale.run.harnesses.builtin import ORACLE_DIR
 from ale.run.images import resolve_ref
 
@@ -106,6 +107,7 @@ class StandardEnvironment(Environment):
         if files := folder.visible_files():
             await sandbox.upload_dir(str(files), Workspace.INPUT)
 
+        await self._stage_assets(ctx, sandbox, folder, ctx.spec.setup.assets, stage="setup")
         await self._install_kits(ctx, sandbox, folder, ctx.spec.setup.kits)
 
         if setup_dir := folder.stage_dir("setup"):
@@ -162,6 +164,7 @@ class StandardEnvironment(Environment):
             raise TaskError("task has no verify stage")
 
         await sandbox.upload_dir(str(verify_dir), str(VERIFY_DIR))
+        await self._stage_assets(ctx, sandbox, folder, ctx.spec.verify.assets, stage="verify")
         await self._install_kits(ctx, sandbox, folder, ctx.spec.verify.kits)
 
         result = await self._run_stage(ctx, sandbox, VERIFY_DIR, Phase.VERIFY)
@@ -223,6 +226,30 @@ class StandardEnvironment(Environment):
         listing = await sandbox.exec(["sh", "-c", f"ls -d {KITS_ROOT}/* 2>/dev/null || true"])
         paths = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
         return ":".join(paths)
+
+    async def _stage_assets(
+        self,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        folder: object,
+        components: tuple[str, ...],
+        *,
+        stage: str,
+    ) -> None:
+        """Project declared components into the workspace for this stage.
+
+        The materialised keys and origins are kept for provenance: a run served from a
+        pre-baked image has to be as explainable as one that downloaded everything.
+        """
+        if not components:
+            return
+        taskset = getattr(folder, "assets_lock", None)
+        if taskset is None:
+            raise TaskError("this task declares assets, but its domain has no asset lock")
+        staged = await stage_components(sandbox, taskset, components, stage=stage)  # type: ignore[arg-type]
+        ctx.extras.setdefault("assets", []).extend(  # type: ignore[union-attr]
+            {"component": a.component, "key": a.key, "origin": a.origin.value} for a in staged
+        )
 
     async def _install_kits(
         self, ctx: EpisodeContext, sandbox: Sandbox, folder: object, kits: tuple[str, ...]
