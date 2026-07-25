@@ -35,6 +35,13 @@ __all__ = ["DockerProvider", "DockerSandbox"]
 GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
 LABEL = "ale.episode"
 
+#: The name a sandbox uses for its gateway. It is mapped to the host's address *on the
+#: container's own bridge* rather than to docker's usual host-gateway: an ``--internal``
+#: network has no default route at all, so the only address that works is one inside the
+#: sandbox's own subnet. That is the provider's half of the deny-all bargain — no route
+#: off the host, and exactly one destination still reachable.
+HOST_ALIAS = "ale-gateway.internal"
+
 
 async def _docker(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
@@ -74,6 +81,16 @@ class DockerSandbox(Sandbox):
         self.network = network
         self._client = client
         self.state = SandboxState.READY
+
+    @property
+    def gateway_url(self) -> str | None:
+        """The gateway as this container can reach it.
+
+        The host binds to every interface; a container cannot use that address, so the
+        URL is rewritten here rather than in the gateway — which is exactly the point of
+        the gateway knowing nothing about providers.
+        """
+        return _reachable(self.request.gateway_url)
 
     async def exec(
         self,
@@ -175,7 +192,9 @@ class DockerProvider(Provider):
         for key, value in request.env.items():
             argv += ["-e", f"{key}={value}"]
         if request.gateway_url:
-            argv += ["-e", f"ALE_GATEWAY_URL={request.gateway_url}"]
+            host_ip = await self._bridge_host_ip(network)
+            argv += ["--add-host", f"{HOST_ALIAS}:{host_ip}"]
+            argv += ["-e", f"ALE_GATEWAY_URL={_reachable(request.gateway_url)}"]
         argv += [request.image_ref, "sleep", "infinity"]
 
         code, _, stderr = await _docker(*argv, timeout=300)
@@ -217,6 +236,21 @@ class DockerProvider(Provider):
             raise ProviderStartError(f"could not create isolated network: {stderr.strip()}")
         return network
 
+    async def _bridge_host_ip(self, network: str | None) -> str:
+        """The host's address on a container's network.
+
+        On an isolated bridge this is the only host address a sandbox can dial, which is
+        why it is read from the network rather than assumed.
+        """
+        if network is None:
+            return "host-gateway"
+        code, out, stderr = await _docker(
+            "network", "inspect", network, "--format", "{{(index .IPAM.Config 0).Gateway}}"
+        )
+        if code != 0 or not out.strip():
+            raise ProviderStartError(f"could not read the gateway address of {network}: {stderr}")
+        return out.strip()
+
     async def _install_guestd(self, container: str) -> None:
         """Copy the guest service in.
 
@@ -256,3 +290,13 @@ class DockerProvider(Provider):
             await client.close()
             raise ProviderStartError(f"guest service did not answer: {exc}") from exc
         return client
+
+
+def _reachable(url: str | None) -> str | None:
+    """Rewrite a host-side gateway URL into one a container can dial."""
+    if not url:
+        return url
+    for bound in ("0.0.0.0", "127.0.0.1", "localhost", "[::]"):
+        if f"//{bound}:" in url:
+            return url.replace(f"//{bound}:", f"//{HOST_ALIAS}:", 1)
+    return url

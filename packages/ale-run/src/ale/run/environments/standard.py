@@ -135,8 +135,12 @@ class StandardEnvironment(Environment):
             await self._upload_oracle(task, sandbox)
 
         await harness.install(sandbox)
+        # The session the agent gets carries the sandbox's own view of the gateway.
+        session = ctx.session.model_copy(
+            update={"gateway_url": sandbox.gateway_url or ctx.session.gateway_url}
+        )
         run = await harness.launch(
-            spec.instruction, sandbox, ctx.session, timeout_sec=spec.timeouts.agent
+            spec.instruction, sandbox, session, timeout_sec=spec.timeouts.agent
         )
         ctx.trace.write_semantic(
             NoteRecord(
