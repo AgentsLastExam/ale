@@ -1,0 +1,258 @@
+"""Container backend.
+
+Shells out to the docker CLI rather than binding an SDK: the CLI is stable, already
+installed wherever docker is, and keeps this provider readable.
+
+Network isolation is topological, not rule-based. Each run gets its own
+``--internal`` bridge, which has no route off the host, and the gateway is attached to
+that bridge. Deny-all with a single controlled egress therefore falls out of the
+network's shape — there are no firewall rules to survive a daemon restart, and nothing
+inside the sandbox can lift them.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import shutil
+import uuid
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
+
+from ale.core.errors import ProviderStartError
+from ale.core.sandbox import (
+    Capabilities,
+    ExecResult,
+    Provider,
+    Sandbox,
+    SandboxRequest,
+    SandboxState,
+)
+from ale.core.taskspec import NetworkMode
+from ale.run.transport import GuestClient, StdioTransport
+
+__all__ = ["DockerProvider", "DockerSandbox"]
+
+GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
+LABEL = "ale.episode"
+
+
+async def _docker(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
+    proc = await asyncio.create_subprocess_exec(
+        "docker",
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        raise ProviderStartError(
+            f"docker {' '.join(argv[:2])} timed out after {timeout:g}s"
+        ) from None
+    return (
+        proc.returncode or 0,
+        stdout.decode("utf-8", "replace"),
+        stderr.decode("utf-8", "replace"),
+    )
+
+
+class DockerSandbox(Sandbox):
+    """One container, driven through the guest service."""
+
+    def __init__(
+        self,
+        *,
+        sandbox_id: str,
+        request: SandboxRequest,
+        container: str,
+        network: str | None,
+        client: GuestClient,
+    ) -> None:
+        super().__init__(sandbox_id=sandbox_id, request=request)
+        self.container = container
+        self.network = network
+        self._client = client
+        self.state = SandboxState.READY
+
+    async def exec(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: float | None = None,
+    ) -> ExecResult:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        exit_code, stdout, stderr = await self._client.exec(
+            argv, cwd=cwd, env=env, timeout_sec=timeout_sec
+        )
+        return ExecResult(
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            duration_ms=int((loop.time() - started) * 1000),
+        )
+
+    async def write_file(self, path: PurePosixPath | str, data: bytes) -> None:
+        await self._client.write_file(str(path), data)
+
+    async def read_file(self, path: PurePosixPath | str) -> bytes:
+        return await self._client.read_file(str(path))
+
+    async def upload_dir(self, source: str, target: PurePosixPath | str) -> None:
+        await self._client.mkdirs(str(target))
+        code, _, stderr = await _docker("cp", f"{Path(source)}/.", f"{self.container}:{target}")
+        if code != 0:
+            raise ProviderStartError(f"upload to {target} failed: {stderr.strip()}")
+
+    async def download_dir(self, source: PurePosixPath | str, target: str) -> None:
+        Path(target).mkdir(parents=True, exist_ok=True)
+        code, _, stderr = await _docker("cp", f"{self.container}:{source}/.", target)
+        if code != 0:
+            raise ProviderStartError(f"download from {source} failed: {stderr.strip()}")
+
+    async def screenshot(self) -> bytes:
+        return await self._client.screenshot()
+
+    async def inject_input(self, actions: Sequence[object]) -> int:
+        # Accept either raw dicts or DesktopAction models, so callers need no adapter.
+        payload = [
+            action if isinstance(action, dict) else action.model_dump(mode="json")  # type: ignore[union-attr]
+            for action in actions
+        ]
+        return await self._client.inject_input(payload)
+
+    async def destroy(self) -> None:
+        """Idempotent: teardown also runs on failure paths, sometimes twice."""
+        if self.state is SandboxState.DESTROYED:
+            return
+        self.state = SandboxState.DESTROYED
+        await self._client.close()
+        await _docker("rm", "-f", "-v", self.container, timeout=60)
+        if self.network:
+            await _docker("network", "rm", self.network, timeout=60)
+
+
+class DockerProvider(Provider):
+    """Supplies container sandboxes."""
+
+    name = "docker"
+
+    def __init__(self, *, guestd_source: Path | None = None) -> None:
+        self._guestd_source = guestd_source or Path(__file__).resolve().parents[1] / "guestd"
+
+    def capabilities(self) -> Capabilities:
+        return Capabilities(
+            os="linux",
+            gui=True,  # depends on the image; the GUI base image provides a desktop
+            gpus=0,
+            network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.OPEN}),
+        )
+
+    async def preflight(self) -> None:
+        if shutil.which("docker") is None:
+            raise ProviderStartError("docker is not installed — see `just doctor`")
+        code, _, stderr = await _docker("info", "--format", "{{.ServerVersion}}", timeout=30)
+        if code != 0:
+            raise ProviderStartError(f"docker daemon unreachable: {stderr.strip()}")
+
+    async def create(self, request: SandboxRequest) -> Sandbox:
+        self.accepts(request)
+        sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
+        container = f"ale-{sandbox_id}"
+        network = await self._ensure_network(sandbox_id, request)
+
+        argv = [
+            "run", "-d", "--name", container,
+            "--label", f"{LABEL}={request.episode_id}",
+            "--cpus", str(request.resources.cpus),
+            "--memory", f"{request.resources.memory_mb}m",
+        ]  # fmt: skip
+        if network:
+            argv += ["--network", network]
+        for key, value in request.env.items():
+            argv += ["-e", f"{key}={value}"]
+        if request.gateway_url:
+            argv += ["-e", f"ALE_GATEWAY_URL={request.gateway_url}"]
+        argv += [request.image_ref, "sleep", "infinity"]
+
+        code, _, stderr = await _docker(*argv, timeout=300)
+        if code != 0:
+            if network:
+                await _docker("network", "rm", network)
+            raise ProviderStartError(f"could not start container: {stderr.strip()}")
+
+        try:
+            await self._install_guestd(container)
+            client = await self._connect(container)
+        except Exception:
+            await _docker("rm", "-f", "-v", container)
+            if network:
+                await _docker("network", "rm", network)
+            raise
+
+        return DockerSandbox(
+            sandbox_id=sandbox_id,
+            request=request,
+            container=container,
+            network=network,
+            client=client,
+        )
+
+    async def _ensure_network(self, sandbox_id: str, request: SandboxRequest) -> str | None:
+        """Create the per-episode network.
+
+        ``block`` uses ``--internal``: the bridge has no route off the host, so the only
+        thing reachable is whatever else is attached to it — the gateway. ``open`` uses
+        the default bridge. ``allowlist`` is not offered yet, and the capability check
+        rejects it rather than silently degrading to open.
+        """
+        if request.network.mode is not NetworkMode.BLOCK:
+            return None
+        network = f"ale-net-{sandbox_id}"
+        code, _, stderr = await _docker("network", "create", "--internal", network, timeout=60)
+        if code != 0:
+            raise ProviderStartError(f"could not create isolated network: {stderr.strip()}")
+        return network
+
+    async def _install_guestd(self, container: str) -> None:
+        """Copy the guest service in.
+
+        Base images bake it, but copying keeps the provider usable with any image and
+        guarantees the running code matches this checkout — worth the few milliseconds.
+        """
+        code, _, stderr = await _docker("exec", container, "mkdir", "-p", str(GUESTD_DIR))
+        if code != 0:
+            raise ProviderStartError(f"could not prepare guest directory: {stderr.strip()}")
+        for name in ("main.py", "protocol.py", "gui.py"):
+            source = self._guestd_source / name
+            if not source.exists():
+                continue
+            code, _, stderr = await _docker(
+                "cp", str(source), f"{container}:{GUESTD_DIR}/{name}", timeout=60
+            )
+            if code != 0:
+                raise ProviderStartError(f"could not install {name}: {stderr.strip()}")
+
+    async def _connect(self, container: str) -> GuestClient:
+        transport = StdioTransport(
+            [
+                "docker",
+                "exec",
+                "-i",
+                container,
+                "python3",
+                str(GUESTD_DIR / "main.py"),
+                "--stdio",
+            ]
+        )
+        await transport.start()
+        client = GuestClient(transport)
+        try:
+            await asyncio.wait_for(client.health(), timeout=60)
+        except Exception as exc:
+            await client.close()
+            raise ProviderStartError(f"guest service did not answer: {exc}") from exc
+        return client
