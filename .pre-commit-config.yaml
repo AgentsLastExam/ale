@@ -1,0 +1,34 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=512]
+
+  - repo: local
+    hooks:
+      - id: uv-lock-check
+        name: uv.lock matches pyproject
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        files: (pyproject\.toml|uv\.lock)$
+
+      - id: import-boundaries
+        name: import boundaries (Constitution IV)
+        entry: uv run lint-imports
+        language: system
+        pass_filenames: false
+        files: \.py$

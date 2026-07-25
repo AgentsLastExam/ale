@@ -1,0 +1,49 @@
+[project]
+name = "ale-workspace"
+version = "0.0.0"
+description = "ALE engine workspace root (never published)"
+requires-python = ">=3.12"
+dependencies = ["ale-core", "ale-run"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "import-linter>=2.1",
+    "pre-commit>=4.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+ale-core = { workspace = true }
+ale-run = { workspace = true }
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["packages/ale-core/src", "packages/ale-run/src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["B008"]  # typer uses function calls in argument defaults
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "unit: pure in-process tests, no external services",
+    "conformance: contract suites run against a concrete implementation",
+    "integration: end-to-end tests that provision real sandboxes",
+    "needs_docker: requires a working container runtime",
+    "needs_kvm: requires hardware virtualisation (/dev/kvm)",
+    "needs_hf_gated: requires an authorised Hugging Face token for gated datasets",
+]
+
+[tool.pytest]
+# Keep default output terse; CI adds -v where useful.

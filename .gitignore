@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ALE runtime output (never committed)
+runs/
+.ale-cache/
+*.qcow2
+task-data/
+
+# Local environment
+.env
+.env.*
+secrets.env
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

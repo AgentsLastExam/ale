@@ -1,0 +1,53 @@
+name: images
+
+on:
+  push:
+    branches: [main]
+    paths: ['images/**']
+  pull_request:
+    paths: ['images/**']
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        image: [cli, gui]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute content tag
+        id: tag
+        run: |
+          hash=$(git ls-files -s images/base/${{ matrix.image }} packages/ale-run/src/ale/run/guestd \
+                 | sha256sum | cut -c1-12)
+          echo "content=$hash" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: images/base/${{ matrix.image }}/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/agentslastexam/sandbox-base-${{ matrix.image }}:latest
+            ${{ env.REGISTRY }}/agentslastexam/sandbox-base-${{ matrix.image }}:${{ steps.tag.outputs.content }}
+          labels: ale.content_hash=${{ steps.tag.outputs.content }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

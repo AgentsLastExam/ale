@@ -1,0 +1,72 @@
+# Development
+
+## The environment contract
+
+One rule makes everything else work: **the committed `uv.lock` is the only source of
+truth, and every command goes through `uv run`.** No virtualenv activation, no
+`pip install`, no hand-built environments.
+
+```bash
+just bootstrap        # uv sync --frozen + pre-commit hooks
+uv run pytest -m unit
+uv run ale --help
+```
+
+## Worktrees
+
+Worktrees live in `../ale-worktrees/<name>`, one per feature or track:
+
+```bash
+just wt us1-gateway   # creates the worktree, branch, and a ready-to-use environment
+cd ../ale-worktrees/us1-gateway
+just doctor
+```
+
+### Why each tree gets its own `.venv`
+
+Workspace members (`ale-core`, `ale-run`) are installed as *editables pointing at
+absolute paths*. A venv shared between worktrees would therefore import another
+tree's source — silently, and only sometimes. So sharing is not a shortcut, it is a
+bug generator.
+
+Speed comes from elsewhere: uv's global cache (`~/.cache/uv`) holds already-built
+wheels and installs them into a new tree by **hardlink**, so a fresh worktree is ready
+in seconds and nothing is rebuilt. `just doctor` verifies that the cache and your
+checkout are on the same filesystem, because hardlinks cannot cross filesystems — that
+is the one condition under which installs silently degrade to copies.
+
+### Shared state, by default
+
+| What | Where | Note |
+|---|---|---|
+| Built wheels | `~/.cache/uv` (uv default) | shared by every tree; hardlinked in |
+| Task checkouts, guest disks, HF assets | `~/.cache/ale` (`ALE_CACHE_DIR`) | a new worktree never re-downloads multi-GB artifacts |
+| Secrets | `~/.config/ale/secrets.env` (`ALE_SECRETS_FILE`) | one file on the host; never copied into a tree or a sandbox |
+
+All three are defaults, not required environment variables — a plain `git clone` behaves
+identically to a worktree.
+
+## When something looks wrong
+
+Run `just doctor` first. It checks the interpreter, lockfile sync, venv freshness,
+cache locations and filesystem, secrets, container runtime, KVM and QEMU, and prints
+the exact command that fixes each failure. It is standard-library only, so it works
+even before `uv sync`.
+
+## Host prerequisites
+
+| Backend | Requirement | Status check |
+|---|---|---|
+| container (default) | Docker Engine (or Podman) reachable | `just doctor` |
+| virtual machine | `/dev/kvm` plus `qemu-system-x86_64`, `qemu-img` | `just doctor` |
+
+Machines without KVM can still run everything on the container backend; machines
+without a container runtime cannot run the default path.
+
+## Conventions
+
+- Everything in this repository is written in standard English.
+- Names come from [`docs/specs/lexicon.md`](specs/lexicon.md); each has one meaning.
+- Read `docs/specs/` and `docs/adr/` before changing a contract; record new decisions
+  as an ADR in the same change.
+- Commit per task or logical group; keep `uv.lock` committed and in sync.

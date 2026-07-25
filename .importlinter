@@ -1,0 +1,48 @@
+; Structural decoupling, enforced mechanically (Constitution IV).
+; Run with: uv run lint-imports
+
+[importlinter]
+root_packages =
+    ale.core
+    ale.run
+include_external_packages = True
+
+[importlinter:contract:core-independent]
+name = ale.core never depends on the orchestrator
+type = forbidden
+source_modules =
+    ale.core
+forbidden_modules =
+    ale.run
+
+[importlinter:contract:gateway-provider-decoupling]
+name = the gateway knows nothing about providers (its only interface is a URL + token)
+type = forbidden
+source_modules =
+    ale.run.gateway
+forbidden_modules =
+    ale.run.providers
+    ale.run.environments
+
+[importlinter:contract:guestd-stdlib-only]
+name = the guest service imports neither engine code nor third-party packages
+type = forbidden
+source_modules =
+    ale.run.guestd
+forbidden_modules =
+    ale.core
+    ale.run.engine
+    ale.run.gateway
+    ale.run.providers
+    aiohttp
+    pydantic
+    typer
+    yaml
+
+[importlinter:contract:harness-provider-decoupling]
+name = harnesses talk to sandboxes through the contract, not through a provider
+type = forbidden
+source_modules =
+    ale.run.harnesses
+forbidden_modules =
+    ale.run.providers

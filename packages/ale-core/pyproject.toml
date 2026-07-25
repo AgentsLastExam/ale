@@ -1,0 +1,15 @@
+[project]
+name = "ale-core"
+version = "0.1.0"
+description = "ALE core contracts: task specs, environments, harnesses, traces, provenance"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.9"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# `ale` is a PEP 420 namespace package shared with ale-run: there is deliberately no
+# src/ale/__init__.py in either package.
+[tool.hatch.build.targets.wheel]
+packages = ["src/ale"]
