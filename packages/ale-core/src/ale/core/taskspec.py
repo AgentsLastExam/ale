@@ -4,33 +4,40 @@ A ``TaskSpec`` is frozen, fully serialisable, and self-contained: everything nee
 provision a sandbox, brief an agent and score the result. Its hash identifies the task
 instance in provenance records and in resume decisions, so it covers the *rendered*
 instruction — what the agent actually saw — not a template.
+
+Three shapes here are worth reading twice:
+
+* ``id`` is opaque. The domain and the variant are their own fields, and nothing in the
+  framework parses the identifier.
+* ``setup`` and ``verify`` are the same shape. Scripts are not declared at all: a
+  stage's folder is copied in and its entry point runs, so the task's layout on disk is
+  its execution semantics.
+* ``Workspace`` paths are fixed and identical for every task. Data reaches them from the
+  store (see :mod:`ale.core.store`), which is what lets one image hold many tasks' data.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ale.core.ids import TaskId, content_hash
 
 __all__ = [
-    "AssetRef",
-    "AssetsStep",
     "HarnessFamily",
     "ImageRef",
-    "KitRef",
-    "KitStep",
     "NetworkMode",
     "NetworkPolicy",
     "PhaseTimeouts",
     "Resources",
-    "ScriptStep",
-    "SetupStep",
+    "SetupStage",
+    "StageSpec",
     "TaskSpec",
     "ToolProvision",
     "ValidateSpec",
+    "VerifyStage",
     "Workspace",
 ]
 
@@ -38,7 +45,11 @@ _FROZEN = ConfigDict(frozen=True, extra="forbid")
 
 
 class Workspace(StrEnum):
-    """The fixed in-sandbox layout. Instructions reference these paths literally."""
+    """The fixed in-sandbox layout. Instructions reference these paths literally.
+
+    Identical for every task, so no prompt and no script ever depends on a task's name,
+    its domain, or where its folder happens to sit.
+    """
 
     INPUT = "/ale/input"
     SOFTWARE = "/ale/software"
@@ -71,56 +82,34 @@ class ImageRef(BaseModel):
         return f"{self.name}:{self.tag}"
 
 
-class AssetRef(BaseModel):
-    """A component of a domain's pinned asset bundle."""
+class StageSpec(BaseModel):
+    """What a stage needs beyond its own folder.
+
+    Assets are named; their visibility (setup or verify) lives in the domain's asset
+    lock, so answer data cannot be staged early by a task that asks for it in the wrong
+    place. Kits are named too; their versions come from the kit lock.
+    """
 
     model_config = _FROZEN
 
-    component: str
-    stage: Literal["setup", "verify"] = "setup"
-    """``setup`` lands in the workspace before the agent; ``verify`` only at scoring."""
-
-    lock: str = "assets.lock.yaml"
+    assets: tuple[str, ...] = ()
+    kits: tuple[str, ...] = ()
 
 
-class KitRef(BaseModel):
-    """A versioned code package injected into the sandbox."""
+class SetupStage(StageSpec):
+    """Preparation that runs before the agent."""
 
-    model_config = _FROZEN
-
-    name: str
-    version: str
-
-
-class ScriptStep(BaseModel):
-    """Run a script from the task folder inside the sandbox."""
-
-    model_config = _FROZEN
-
-    kind: Literal["script"] = "script"
-    script: str = Field(description="Path relative to the task folder, e.g. setup/prepare.sh")
-    timeout_sec: float | None = Field(default=None, gt=0)
+    prebakeable: bool = Field(
+        default=False,
+        description=(
+            "True when this setup is deterministic and may be baked into an image "
+            "ahead of time. A setup that mints a per-episode secret is not."
+        ),
+    )
 
 
-class AssetsStep(BaseModel):
-    """Materialise an asset component into the workspace."""
-
-    model_config = _FROZEN
-
-    kind: Literal["assets"] = "assets"
-    assets: AssetRef
-
-
-class KitStep(BaseModel):
-    """Materialise a kit into the sandbox."""
-
-    model_config = _FROZEN
-
-    kind: Literal["kit"] = "kit"
-    kit: KitRef
-
-
-SetupStep = Annotated[ScriptStep | AssetsStep | KitStep, Field(discriminator="kind")]
+class VerifyStage(StageSpec):
+    """Scoring that runs after the agent, in a workspace the agent never saw."""
 
 
 class Resources(BaseModel):
@@ -146,13 +135,17 @@ class NetworkMode(StrEnum):
 
 
 class NetworkPolicy(BaseModel):
-    """Egress policy. The gateway is reachable in every mode, and only the gateway
-    holds real credentials."""
+    """Egress policy.
+
+    The gateway is reachable in every mode, and only the gateway holds real credentials.
+    """
 
     model_config = _FROZEN
 
     mode: NetworkMode = NetworkMode.BLOCK
     allowed_hosts: tuple[str, ...] = ()
+
+    # --- validation ---
 
     @model_validator(mode="after")
     def _check_hosts(self) -> Self:
@@ -196,6 +189,8 @@ class ValidateSpec(BaseModel):
     min_reward: float = Field(default=1.0, ge=0.0, le=1.0)
     reason: str | None = Field(default=None, description="Required when mode is manual")
 
+    # --- validation ---
+
     @model_validator(mode="after")
     def _check_reason(self) -> Self:
         if self.mode == "manual" and not self.reason:
@@ -209,6 +204,9 @@ class TaskSpec(BaseModel):
     model_config = _FROZEN
 
     id: TaskId
+    domain: str = Field(description="Namespace that maps to a task repository")
+    variant: str | None = Field(default=None, description="Named parameterisation, if any")
+
     spec_type: str = "core/v1"
     environment: str = "core/standard"
     harness_family: HarnessFamily = HarnessFamily.AUTONOMOUS
@@ -220,7 +218,8 @@ class TaskSpec(BaseModel):
     resources: Resources = Resources()
     network: NetworkPolicy = NetworkPolicy()
     timeouts: PhaseTimeouts = PhaseTimeouts()
-    setup: tuple[SetupStep, ...] = ()
+    setup: SetupStage = SetupStage()
+    verify: VerifyStage = VerifyStage()
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(
         default_factory=dict, description="Values substituted into the instruction"
@@ -233,25 +232,18 @@ class TaskSpec(BaseModel):
     )
 
     @property
-    def family(self) -> str:
-        """The identifier without its variant suffix."""
-        return self.id.family
-
-    @property
-    def variant(self) -> str | None:
-        return self.id.variant
-
-    @property
     def spec_hash(self) -> str:
         """``sha256:<hex>`` over the canonical form. The task instance's identity."""
         return content_hash(self.model_dump(mode="json", by_alias=True))
 
-    def asset_refs(self, stage: Literal["setup", "verify"] | None = None) -> tuple[AssetRef, ...]:
-        """Asset components declared by this task, optionally filtered by stage."""
-        refs = tuple(s.assets for s in self.setup if isinstance(s, AssetsStep))
-        if stage is None:
-            return refs
-        return tuple(ref for ref in refs if ref.stage == stage)
+    @property
+    def label(self) -> str:
+        """Human-facing name: ``demo-hello`` or ``demo-hello@hard``.
 
-    def kit_refs(self) -> tuple[KitRef, ...]:
-        return tuple(s.kit for s in self.setup if isinstance(s, KitStep))
+        Display only. Nothing parses it back.
+        """
+        return f"{self.id}@{self.variant}" if self.variant else str(self.id)
+
+    def needs_gui(self) -> bool:
+        """Whether this task requires a desktop-capable sandbox."""
+        return self.harness_family is HarnessFamily.POLICY or "desktop" in self.tools.mcp_servers

@@ -80,26 +80,6 @@ class Verdict(BaseModel):
     )
     failure: FailureInfo | None = None
 
-    @model_validator(mode="after")
-    def _check_consistency(self) -> Self:
-        if self.rewards is not None:
-            if not self.rewards:
-                raise ValueError("rewards must be omitted rather than empty")
-            primary = self.primary or "reward"
-            if primary not in self.rewards:
-                raise ValueError(f"primary key {primary!r} is not present in rewards")
-        elif self.primary is not None:
-            raise ValueError("primary was given without rewards")
-
-        if self.status is Status.COMPLETED:
-            if self.rewards is None:
-                raise ValueError("a completed episode must carry rewards")
-            if self.failure is not None:
-                raise ValueError("a completed episode must not carry failure info")
-        elif self.failure is None:
-            raise ValueError(f"status {self.status} requires failure info")
-        return self
-
     @property
     def primary_reward(self) -> float | None:
         """The headline score, or ``None`` when the episode produced no score."""
@@ -136,3 +116,25 @@ class Verdict(BaseModel):
             metrics=metrics or {},
             failure=FailureInfo(error_class=type(error).__name__, message=str(error), phase=phase),
         )
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> Self:
+        if self.rewards is not None:
+            if not self.rewards:
+                raise ValueError("rewards must be omitted rather than empty")
+            primary = self.primary or "reward"
+            if primary not in self.rewards:
+                raise ValueError(f"primary key {primary!r} is not present in rewards")
+        elif self.primary is not None:
+            raise ValueError("primary was given without rewards")
+
+        if self.status is Status.COMPLETED:
+            if self.rewards is None:
+                raise ValueError("a completed episode must carry rewards")
+            if self.failure is not None:
+                raise ValueError("a completed episode must not carry failure info")
+        elif self.failure is None:
+            raise ValueError(f"status {self.status} requires failure info")
+        return self

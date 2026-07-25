@@ -20,6 +20,10 @@ Read this before touching the repository. It is short on purpose.
 - Use the names in `docs/specs/lexicon.md`. Each term has exactly one meaning; a
   sandbox is never called an "environment", and `Environment` only ever means the
   administration layer that turns one task into one episode.
+- Lay a model class out in this order: **fields → properties and methods → validators**,
+  with the validators last under a `# --- validation ---` marker. Pydantic does not care
+  about order, so this is free readability: the top of a class says what the thing *is*,
+  and correctness checks stay in the model without interrupting that.
 - Respect the import boundaries in `.importlinter` — they are the mechanical form of
   the architecture:
   - `ale.core` never imports `ale.run`

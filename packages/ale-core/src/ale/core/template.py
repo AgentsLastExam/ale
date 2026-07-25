@@ -22,11 +22,19 @@ from ale.core.errors import TaskDefinitionError
 
 __all__ = ["find_legacy_patterns", "render_instruction"]
 
-# Patterns that only appear in prompts written against the legacy path-templating model.
+# Patterns that only appear in prompts written against the legacy path-templating model,
+# plus one that would re-introduce the coupling we just removed: the store is an
+# orchestration detail, and a prompt that names it ties the task to where its data
+# happens to live today.
 _LEGACY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("legacy Python attribute interpolation", re.compile(r"\{self\.[A-Za-z_][A-Za-z0-9_]*\}")),
     ("legacy Windows task root", re.compile(r"[Ee]:\\+agenthle", re.IGNORECASE)),
     ("legacy Linux task root", re.compile(r"/media/user/data/agenthle")),
+    ("a store path (use the fixed workspace instead)", re.compile(r"/ale/store\b")),
+    (
+        "a per-task workspace path (the workspace is the same for every task)",
+        re.compile(r"/ale/(?:tasks|task)/"),
+    ),
 )
 
 _PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")

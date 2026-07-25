@@ -36,8 +36,8 @@ GUESTD = Path(__file__).resolve().parents[2] / "packages/ale-run/src/ale/run/gue
 def make_lock(**overrides: object) -> RunLock:
     base: dict[str, object] = {
         "task": TaskProvenance(
-            id=TaskId("demo/hello"),
-            family="demo/hello",
+            id=TaskId("demo-hello"),
+            domain="demo",
             spec_hash=DIGEST,
             source=TaskSource(
                 kind="registry",
@@ -77,8 +77,8 @@ class TestRunLock:
     def test_local_source_is_not_reportable(self) -> None:
         lock = make_lock(
             task=TaskProvenance(
-                id=TaskId("demo/hello"),
-                family="demo/hello",
+                id=TaskId("demo-hello"),
+                domain="demo",
                 spec_hash=DIGEST,
                 source=TaskSource(kind="local", path="/home/dev/tasks/hello"),
             )

@@ -6,12 +6,12 @@ import pytest
 from pydantic import ValidationError
 
 from ale.core.errors import TaskDefinitionError
-from ale.core.ids import TaskId, canonical_json, content_hash
+from ale.core.ids import TaskId, canonical_json, content_hash, slugify_path
 from ale.core.taskspec import (
     ImageRef,
     NetworkMode,
     NetworkPolicy,
-    ScriptStep,
+    SetupStage,
     TaskSpec,
     ValidateSpec,
 )
@@ -23,7 +23,8 @@ pytestmark = pytest.mark.unit
 
 def make_spec(**overrides: object) -> TaskSpec:
     base: dict[str, object] = {
-        "id": TaskId("demo/hello"),
+        "id": TaskId("demo-hello"),
+        "domain": "demo",
         "instruction": "Write hello into /ale/output/result.txt",
         "image": ImageRef(name="sandbox-base-cli", tag="0.1.0"),
     }
@@ -31,20 +32,21 @@ def make_spec(**overrides: object) -> TaskSpec:
 
 
 class TestTaskId:
-    def test_parses_domain_family_and_variant(self) -> None:
-        tid = TaskId("robotics/uav/drone_hover@hard")
-        assert tid.domain == "robotics"
-        assert tid.family == "robotics/uav/drone_hover"
-        assert tid.variant == "hard"
+    def test_accepts_a_flat_slug(self) -> None:
+        assert TaskId("robotics-uav-drone_hover") == "robotics-uav-drone_hover"
 
-    def test_single_variant_task_has_no_suffix(self) -> None:
-        tid = TaskId("demo/hello")
-        assert tid.variant is None
-        assert tid.family == "demo/hello"
+    def test_flattens_a_folder_path(self) -> None:
+        assert slugify_path("demo/hello") == "demo-hello"
+        assert slugify_path("uav/control/drone_hover") == "uav-control-drone_hover"
 
-    @pytest.mark.parametrize(
-        "bad", ["Demo/hello", "demo", "demo//hello", "demo/hello@a@b", "demo/hello@", "-x/y"]
-    )
+    def test_is_opaque(self) -> None:
+        """Nothing may recover structure from an id: that is the whole point."""
+        tid = TaskId("demo-hello")
+        assert not hasattr(tid, "domain")
+        assert not hasattr(tid, "variant")
+        assert not hasattr(tid, "family")
+
+    @pytest.mark.parametrize("bad", ["Demo-hello", "demo/hello", "demo hello", "-x", "demo@hard"])
     def test_rejects_malformed(self, bad: str) -> None:
         with pytest.raises(ValueError):
             TaskId(bad)
@@ -64,10 +66,11 @@ class TestCanonicalHashing:
         assert one.spec_hash == make_spec().spec_hash
 
     def test_variants_have_distinct_identities(self) -> None:
-        base = make_spec(id=TaskId("demo/hello@base"))
-        hard = make_spec(id=TaskId("demo/hello@hard"))
-        assert base.family == hard.family == "demo/hello"
+        base = make_spec(variant="base", params={"n": 3})
+        hard = make_spec(variant="hard", params={"n": 10})
+        assert base.id == hard.id  # the id is the family; the variant is its own field
         assert base.spec_hash != hard.spec_hash
+        assert hard.label == "demo-hello@hard"
 
 
 class TestTaskSpec:
@@ -86,7 +89,7 @@ class TestTaskSpec:
             spec.instruction = "changed"  # type: ignore[misc]
 
     def test_round_trips_through_json(self) -> None:
-        spec = make_spec(setup=(ScriptStep(script="setup/prepare.sh"),))
+        spec = make_spec(setup=SetupStage(assets=("hello_inputs",), kits=("prep",)))
         restored = TaskSpec.model_validate_json(spec.model_dump_json(by_alias=True))
         assert restored == spec
         assert restored.spec_hash == spec.spec_hash

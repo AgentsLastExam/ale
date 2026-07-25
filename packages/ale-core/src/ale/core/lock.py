@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ale.core.errors import ProvenanceIncompleteError
 from ale.core.ids import TaskId
+from ale.core.store import AssetOrigin
 
 __all__ = [
     "AgentProvenance",
@@ -48,6 +49,13 @@ class TaskSource(BaseModel):
     commit: str | None = Field(default=None, description="Resolved commit, never a branch name")
     path: str = Field(description="Task folder path within the repository, or an absolute path")
 
+    @property
+    def is_reproducible(self) -> bool:
+        """Local checkouts are fine for authoring, but they cannot be re-fetched."""
+        return self.kind == "registry"
+
+    # --- validation ---
+
     @model_validator(mode="after")
     def _check_kind(self) -> Self:
         if self.kind == "registry" and not (self.repo and self.commit):
@@ -56,17 +64,13 @@ class TaskSource(BaseModel):
             raise ValueError("a local source has neither repo nor commit")
         return self
 
-    @property
-    def is_reproducible(self) -> bool:
-        """Local checkouts are fine for authoring, but they cannot be re-fetched."""
-        return self.kind == "registry"
-
 
 class TaskProvenance(BaseModel):
     model_config = _FROZEN
 
     id: TaskId
-    family: str
+    domain: str
+    variant: str | None = None
     spec_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     source: TaskSource
     requires_core: str | None = None
@@ -101,19 +105,26 @@ class JudgeProvenance(BaseModel):
 
 
 class AssetProvenance(BaseModel):
+    """One asset component as it was actually materialised.
+
+    ``origin`` matters: a run served from a pre-baked image must stay as explainable as
+    one that downloaded everything, and ``data_key`` is what makes the two comparable.
+    """
+
     model_config = _FROZEN
 
     component: str
     repo: str
     revision: str
+    data_key: str
+    origin: AssetOrigin
 
 
 class KitProvenance(BaseModel):
     model_config = _FROZEN
 
     name: str
-    version: str
-    content_hash: str | None = None
+    content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class GatewayProvenance(BaseModel):

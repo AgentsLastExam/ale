@@ -48,9 +48,12 @@ resources: { cpus: 1, memory_mb: 1024 }
 network: { mode: block }           # block | allowlist (+ allowed_hosts) | open
 timeouts: { setup: 120, agent: 900, verify: 300 }
 setup:
-  - script: setup/prepare.sh
-  - assets: { component: hello_data, stage: setup }   # stage: setup | verify
-  - kit: { name: grader-protocol, version: "0.5" }
+  assets: [hello_inputs]           # names; visibility comes from assets.lock.yaml
+  kits:   [data-prep]              # names; versions come from kits.lock.yaml
+  prebakeable: false               # true only if this setup is deterministic
+verify:
+  assets: [hello_answers]
+  kits:   [grader-protocol]
 params: { n: 3 }
 variants:
   - { name: base }
@@ -60,9 +63,16 @@ metadata: { tags: [smoke] }
 extras: {}                         # namespaced experiments only
 ```
 
-The identifier is derived from the path and never written in the file.
+The identifier is derived from the folder path (`tasks/demo/hello` → `demo-hello`) and
+never written in the file. It is opaque: the domain and the variant are separate fields,
+and nothing in the framework parses an identifier (ADR 0006).
+
+Scripts are not declared. A stage's folder is copied into the sandbox when that stage
+runs, and its entry point (`setup/run.sh`, `verify/run.sh`) executes if present.
 
 ## Workspace
+
+Every task sees the same layout, so no prompt or script depends on a task's name:
 
 | Path | Available | Contents |
 |---|---|---|
@@ -71,9 +81,36 @@ The identifier is derived from the path and never written in the file.
 | `/ale/output` | agent | deliverables; collected as artifacts, read by verify |
 | `/ale/work` | agent | scratch, never collected |
 | `/ale/reference` | verify only | gold answers and other verification-only assets |
+| `/ale/kits/<name>` | the stage that asked | shared domain libraries, on `PYTHONPATH` |
 
 Windows guests map the same names under `C:\ale\`. Instructions state these paths
-literally; path templating is not supported (see ADR 0005).
+literally; path templating is not supported (ADR 0005).
+
+Data reaches the workspace from the **store** (`/ale/store/<data_key>/…`), which is an
+engine-only concern and may hold many tasks' data or be baked into an image (ADR 0007).
+Instructions must never name a store path.
+
+## Assets and kits
+
+```yaml
+# assets.lock.yaml — visibility travels with the data, not with the task
+components:
+  hello_inputs:  { path: artifacts/inputs.tar.zst,  visibility: setup }
+  hello_answers: { path: artifacts/answers.tar.zst, visibility: verify }
+```
+
+A component marked `verify` can never be staged before the agent, whatever a task
+requests; asking for one in `setup` is a lint error.
+
+```
+kits/grader-protocol/
+├── kit.toml           # name, package, python_min, runtime (stdlib | image_deps)
+└── grader_protocol/   # the package itself
+```
+
+Kits are copied to `/ale/kits/<name>` and added to `PYTHONPATH` — never pip-installed,
+because guest interpreters are not ours to manage. `ale kit lock` records each kit's
+content hash in `kits.lock.yaml`; task manifests reference kits by name only.
 
 ## Instruction rendering
 
