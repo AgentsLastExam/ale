@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from ale.core.errors import TaskDefinitionError
 from ale.core.ids import TaskId, canonical_json, content_hash, slugify_path
 from ale.core.taskspec import (
+    AssetMount,
     ImageRef,
     NetworkMode,
     NetworkPolicy,
@@ -89,7 +90,11 @@ class TestTaskSpec:
             spec.instruction = "changed"  # type: ignore[misc]
 
     def test_round_trips_through_json(self) -> None:
-        spec = make_spec(setup=SetupStage(assets=("hello_inputs",), kits=("prep",)))
+        spec = make_spec(
+            setup=SetupStage(
+                assets=(AssetMount(component="hello_inputs", dest="/data"),), kits=("prep",)
+            )
+        )
         restored = TaskSpec.model_validate_json(spec.model_dump_json(by_alias=True))
         assert restored == spec
         assert restored.spec_hash == spec.spec_hash

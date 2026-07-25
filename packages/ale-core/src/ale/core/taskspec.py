@@ -12,8 +12,11 @@ Three shapes here are worth reading twice:
 * ``setup`` and ``verify`` are the same shape. Scripts are not declared at all: a
   stage's folder is copied in and its entry point runs, so the task's layout on disk is
   its execution semantics.
-* ``Workspace`` paths are fixed and identical for every task. Data reaches them from the
-  store (see :mod:`ale.core.store`), which is what lets one image hold many tasks' data.
+* Data placement is the task's decision. A task says where each asset lands and which
+  paths to collect afterwards; the framework guarantees *when* things appear, not where.
+  Fixing a global layout here would force every domain into one shape and buy nothing —
+  answers stay away from an agent because verify-stage assets are materialised during
+  scoring, whatever path they use.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ale.core.ids import TaskId, content_hash
 
 __all__ = [
+    "AssetMount",
     "HarnessFamily",
     "ImageRef",
     "NetworkMode",
@@ -38,25 +42,9 @@ __all__ = [
     "ToolProvision",
     "ValidateSpec",
     "VerifyStage",
-    "Workspace",
 ]
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
-
-
-class Workspace(StrEnum):
-    """The fixed in-sandbox layout. Instructions reference these paths literally.
-
-    Identical for every task, so no prompt and no script ever depends on a task's name,
-    its domain, or where its folder happens to sit.
-    """
-
-    INPUT = "/ale/input"
-    SOFTWARE = "/ale/software"
-    OUTPUT = "/ale/output"
-    WORK = "/ale/work"
-    REFERENCE = "/ale/reference"
-    """Verification only: never present while the agent is running."""
 
 
 class HarnessFamily(StrEnum):
@@ -82,17 +70,28 @@ class ImageRef(BaseModel):
         return f"{self.name}:{self.tag}"
 
 
-class StageSpec(BaseModel):
-    """What a stage needs beyond its own folder.
+class AssetMount(BaseModel):
+    """One asset component, and where this task wants it.
 
-    Assets are named; their visibility (setup or verify) lives in the domain's asset
-    lock, so answer data cannot be staged early by a task that asks for it in the wrong
-    place. Kits are named too; their versions come from the kit lock.
+    The destination is the task's decision, not the framework's. A simulation domain
+    that needs its scenes at ``/opt/sim/scenes`` says so; nothing here imposes a layout.
+    What the framework guarantees is *timing* — a component declared under ``verify`` is
+    materialised only during scoring — and timing, not location, is what keeps answers
+    away from an agent.
     """
 
     model_config = _FROZEN
 
-    assets: tuple[str, ...] = ()
+    component: str
+    dest: str = Field(description="Absolute path in the sandbox where this lands")
+
+
+class StageSpec(BaseModel):
+    """What a stage needs beyond its own folder."""
+
+    model_config = _FROZEN
+
+    assets: tuple[AssetMount, ...] = ()
     kits: tuple[str, ...] = ()
 
 
@@ -220,6 +219,10 @@ class TaskSpec(BaseModel):
     timeouts: PhaseTimeouts = PhaseTimeouts()
     setup: SetupStage = SetupStage()
     verify: VerifyStage = VerifyStage()
+    artifacts: tuple[str, ...] = Field(
+        default=(),
+        description="Absolute sandbox paths collected after the agent runs",
+    )
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(
         default_factory=dict, description="Values substituted into the instruction"

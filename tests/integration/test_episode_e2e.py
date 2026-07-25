@@ -40,6 +40,7 @@ def write_repo(root: Path, *, with_oracle: bool = True, verify_body: str | None 
         image: {IMAGE}
         resources: {{ cpus: 1, memory_mb: 512 }}
         timeouts: {{ setup: 120, agent: 120, verify: 120 }}
+        artifacts: [/ale/output]
         params: {{ greeting: hello }}
         validate: {{ min_reward: 1.0 }}
         """).strip()
@@ -49,7 +50,8 @@ def write_repo(root: Path, *, with_oracle: bool = True, verify_body: str | None 
         "into /ale/output/result.txt\n"
     )
     (task / "setup" / "run.sh").write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'world' > /ale/input/word.txt\n"
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /ale/input /ale/output\n"
+        "printf 'world' > /ale/input/word.txt\n"
     )
     (task / "verify" / "run.sh").write_text(
         verify_body
@@ -125,7 +127,8 @@ async def test_agent_never_sees_verification_material(tmp_path: Path) -> None:
 
     probe = task_root / "setup" / "run.sh"
     probe.write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'world' > /ale/input/word.txt\n"
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /ale/input /ale/output\n"
+        "printf 'world' > /ale/input/word.txt\n"
         "for p in /ale/verify /ale/oracle /ale/reference; do\n"
         '  if [ -e "$p" ]; then echo "LEAK: $p" >&2; exit 17; fi\n'
         "done\n"

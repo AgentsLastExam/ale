@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from ale.core.ids import TaskId
 from ale.core.kit import KitManifest, KitRuntime, KitsLock, LockedKit
 from ale.core.store import STORE_ROOT, AssetOrigin, StoreEntry, StoreManifest, data_key
-from ale.core.taskspec import ImageRef, SetupStage, TaskSpec, VerifyStage, Workspace
+from ale.core.taskspec import AssetMount, ImageRef, SetupStage, TaskSpec, VerifyStage
 
 pytestmark = pytest.mark.unit
 
@@ -126,16 +126,28 @@ class TestStages:
     def test_setup_may_be_declared_prebakeable(self) -> None:
         """Deterministic setup can be baked ahead; per-episode setup cannot."""
         assert self.make().setup.prebakeable is False
-        spec = self.make(setup=SetupStage(assets=("inputs",), prebakeable=True))
+        spec = self.make(
+            setup=SetupStage(
+                assets=(AssetMount(component="inputs", dest="/data/in"),), prebakeable=True
+            )
+        )
         assert spec.setup.prebakeable
 
     def test_verify_stage_carries_its_own_assets_and_kits(self) -> None:
-        spec = self.make(verify=VerifyStage(assets=("answers",), kits=("grader-protocol",)))
-        assert spec.verify.assets == ("answers",)
+        spec = self.make(
+            verify=VerifyStage(
+                assets=(AssetMount(component="answers", dest="/gold"),),
+                kits=("grader-protocol",),
+            )
+        )
+        assert spec.verify.assets[0].component == "answers"
         assert spec.verify.kits == ("grader-protocol",)
 
-    def test_workspace_is_identical_for_every_task(self) -> None:
-        assert Workspace.INPUT == "/ale/input"
-        assert Workspace.REFERENCE == "/ale/reference"
-        for path in Workspace:
-            assert "demo" not in path and "task" not in path
+    def test_a_task_chooses_where_its_data_lands(self) -> None:
+        """No global layout: a simulation domain can put scenes wherever it needs them."""
+        spec = self.make(
+            setup=SetupStage(assets=(AssetMount(component="scenes", dest="/opt/sim/scenes"),)),
+            artifacts=("/opt/sim/runs",),
+        )
+        assert spec.setup.assets[0].dest == "/opt/sim/scenes"
+        assert spec.artifacts == ("/opt/sim/runs",)

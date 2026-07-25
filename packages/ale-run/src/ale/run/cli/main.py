@@ -26,7 +26,6 @@ from ale.run.gateway.session import GatewaySession, Limits
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.kits import read_lock, scan_kits, write_lock
-from ale.run.migrate import MigrationReport, rebuild_bundle
 from ale.run.secrets import provider_credentials
 from ale.run.sources import Registry, resolve
 from ale.run.tasksets.manifest import ManifestTaskset
@@ -39,8 +38,6 @@ app = typer.Typer(
 )
 kit_app = typer.Typer(help="Work with the shared libraries a domain ships to its tasks.")
 app.add_typer(kit_app, name="kit")
-data_app = typer.Typer(help="Rebuild legacy task data into the assets layout.")
-app.add_typer(data_app, name="data")
 
 EXIT_SOME_FAILED = 2
 EXIT_BAD_REFERENCE = 3
@@ -117,40 +114,6 @@ def kit_lock(
         return
     path = write_lock(repo, current)
     typer.echo(f"wrote {path} ({len(current.kits)} kit(s))")
-
-
-@data_app.command("rebuild")
-def data_rebuild(
-    source: Annotated[Path, typer.Argument(help="Legacy tree: <domain>/<task>/<variant>/...")],
-    target: Annotated[Path, typer.Argument(help="Where to write the rebuilt assets")],
-    domain: Annotated[str | None, typer.Option("--domain", help="Rebuild one domain only")] = None,
-) -> None:
-    """Rebuild legacy bundles: fix embedded paths, split answers from inputs.
-
-    Run once per data drop. The output is what gets published to the assets repository;
-    nothing at run time depends on the legacy layout afterwards.
-    """
-    total = MigrationReport()
-    for domain_dir in sorted(p for p in source.iterdir() if p.is_dir()):
-        if domain and domain_dir.name != domain:
-            continue
-        for task_dir in sorted(p for p in domain_dir.iterdir() if p.is_dir()):
-            for variant_dir in sorted(p for p in task_dir.iterdir() if p.is_dir()):
-                report = rebuild_bundle(
-                    variant_dir,
-                    target,
-                    domain=domain_dir.name,
-                    task=task_dir.name,
-                    variant=variant_dir.name,
-                )
-                total.bundles += report.bundles
-                total.files_copied += report.files_copied
-                total.files_rewritten += report.files_rewritten
-                total.rewrites.extend(report.rewrites)
-
-    typer.echo(total.summary())
-    for line in total.rewrites:
-        typer.echo(f"  rewrote {line}")
 
 
 # --- internals ---

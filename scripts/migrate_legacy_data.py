@@ -1,21 +1,20 @@
-"""Rebuilding legacy task data for the new scheme.
+#!/usr/bin/env python3
+"""One-off: rewrite legacy absolute paths in task data, then publish it.
 
-The previous framework kept every task's data in one bucket, laid out as
-``<domain>/<task>/<variant>/{input,software,reference}``, and the files inside refer to
-absolute paths that only existed in that framework's virtual machines. Both facts have
-to change before the data can be used here, and neither should be worked around at run
+The previous framework's data files refer to paths that only existed inside its virtual
+machines (``/media/user/data/agenthle/<domain>/<task>/<variant>/input`` and friends).
+Those references have to be fixed once, at migration time, rather than shimmed at run
 time — a task that needs a shim to read its own inputs is a task nobody can reason about.
 
-So the data is rebuilt once, and two things are fixed while it is in flight:
+The directory layout is left exactly as it is. A task addresses whichever subdirectory it
+needs by declaring a component for it, so nothing has to be restructured.
 
-* **paths** — every reference to the old roots becomes the fixed workspace path, because
-  the workspace is now identical for every task;
-* **shape** — a bundle is split so that gold answers are a separate component. Visibility
-  is declared per component, and a bundle that mixes inputs with answers forces every
-  task to declare the same data twice, once for each stage.
+Usage:
+    python scripts/migrate_legacy_data.py <source-tree> <target-tree> [--domain NAME]
 
-The result is uploaded to the assets repository, whose commits are immutable — which is
-also what finally makes a data version something a run can pin.
+The target is what gets uploaded to the assets repository. This script is deliberately
+not part of the `ale` command line: it runs once per data drop, not as part of anyone's
+workflow.
 """
 
 from __future__ import annotations
@@ -36,7 +35,9 @@ _LEGACY_ROOTS = (
     r"[A-Za-z]:[/\\]agenthle",
 )
 
-#: Where each legacy subdirectory lands in the fixed workspace.
+#: What each legacy subdirectory becomes. These are the paths the rebuilt tasks declare,
+#: matching the convention the demo tasks use; a domain that wants another layout says so
+#: in its own manifests and passes different values here.
 _WORKSPACE = {
     "input": "/ale/input",
     "output": "/ale/output",
@@ -116,35 +117,57 @@ def _copy_tree(
 def rebuild_bundle(
     source: Path, target_root: Path, *, domain: str, task: str, variant: str
 ) -> MigrationReport:
-    """Rebuild one legacy variant bundle into the new layout.
+    """Copy one legacy variant bundle, rewriting the paths inside it.
 
-    Produces two components rather than one::
-
-        <domain>/<task>/<variant>/agent/{input,software}   staged before the agent runs
-        <domain>/<task>/<variant>/reference/               staged only during scoring
-
-    Splitting them is what lets a task name each component once, and what makes
-    "answers cannot reach the agent" a property of the data rather than a rule someone
-    has to remember.
+    The layout is preserved: ``input``, ``software`` and ``reference`` stay where they
+    are, and a task points a component at whichever one it needs.
     """
     report = MigrationReport(bundles=1)
     base = target_root / domain / task / variant
-
-    for subdir in ("input", "software"):
+    for subdir in ("input", "software", "reference"):
         _copy_tree(
             source / subdir,
-            base / "agent" / subdir,
+            base / subdir,
             domain=domain,
             task=task,
             variant=variant,
             report=report,
         )
-    _copy_tree(
-        source / "reference",
-        base / "reference",
-        domain=domain,
-        task=task,
-        variant=variant,
-        report=report,
-    )
     return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path)
+    parser.add_argument("target", type=Path)
+    parser.add_argument("--domain", help="Migrate one domain only")
+    args = parser.parse_args(argv)
+
+    total = MigrationReport()
+    for domain_dir in sorted(p for p in args.source.iterdir() if p.is_dir()):
+        if args.domain and domain_dir.name != args.domain:
+            continue
+        for task_dir in sorted(p for p in domain_dir.iterdir() if p.is_dir()):
+            for variant_dir in sorted(p for p in task_dir.iterdir() if p.is_dir()):
+                report = rebuild_bundle(
+                    variant_dir,
+                    args.target,
+                    domain=domain_dir.name,
+                    task=task_dir.name,
+                    variant=variant_dir.name,
+                )
+                total.bundles += report.bundles
+                total.files_copied += report.files_copied
+                total.files_rewritten += report.files_rewritten
+                total.rewrites.extend(report.rewrites)
+
+    print(total.summary())
+    for line in total.rewrites:
+        print(f"  rewrote {line}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

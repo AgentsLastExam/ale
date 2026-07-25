@@ -23,18 +23,10 @@ from ale.core.domain import AssetsLock, Visibility
 from ale.core.errors import AssetError
 from ale.core.sandbox import Sandbox
 from ale.core.store import AssetOrigin, data_key
-from ale.core.taskspec import Workspace
+from ale.core.taskspec import AssetMount
 from ale.run.sources import cache_root
 
 __all__ = ["MaterialisedAsset", "fetch_component", "stage_components"]
-
-#: Subdirectories of a component bundle, and where each is projected in the workspace.
-#: `reference` is the one that must never appear before scoring.
-_PROJECTION: dict[str, str] = {
-    "input": Workspace.INPUT,
-    "software": Workspace.SOFTWARE,
-    "reference": Workspace.REFERENCE,
-}
 
 
 @dataclass(frozen=True)
@@ -64,75 +56,74 @@ async def fetch_component(lock: AssetsLock, component: str) -> MaterialisedAsset
     if (target / ".complete").is_file():
         return MaterialisedAsset(component, key, AssetOrigin.CACHE, target)
 
-    source = f"{lock.repo.rstrip('/')}/{spec.path.lstrip('/')}"
-    await _download(source, target)
+    await _download(lock, spec.path.strip("/"), target)
     (target / ".complete").write_text(key, encoding="utf-8")
     return MaterialisedAsset(component, key, AssetOrigin.DOWNLOAD, target)
 
 
-async def _download(source: str, target: Path) -> None:
-    """Copy a bundle out of object storage.
+async def _download(lock: AssetsLock, subpath: str, target: Path) -> None:
+    """Fetch one subdirectory of the assets dataset.
 
-    ``gsutil`` is used rather than a client library: it is already installed wherever
-    these buckets are used, it handles auth the way the rest of the team's tooling does,
-    and it keeps this module free of a cloud SDK dependency.
+    The revision is a commit, and dataset commits are immutable — which is what makes a
+    recorded data version something a later run can actually reproduce, rather than a
+    label on a path whose contents may have changed underneath it.
     """
-    if not source.startswith("gs://"):
-        raise AssetError(f"unsupported asset source {source!r}; only gs:// is implemented")
-
     staging = target.with_suffix(".partial")
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True, exist_ok=True)
 
-    proc = await asyncio.create_subprocess_exec(
-        "gsutil",
-        "-q",
-        "-m",
-        "cp",
-        "-r",
-        f"{source.rstrip('/')}/*",
-        str(staging),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise AssetError(f"could not fetch {source}: {stderr.decode('utf-8', 'replace').strip()}")
+    def _snapshot() -> str:
+        from huggingface_hub import snapshot_download
 
-    # Rename last, so an interrupted download never looks complete.
+        return snapshot_download(
+            repo_id=lock.repo,
+            repo_type="dataset",
+            revision=lock.revision or None,
+            allow_patterns=[f"{subpath}/**"],
+            local_dir=str(staging),
+        )
+
+    try:
+        await asyncio.to_thread(_snapshot)
+    except Exception as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise AssetError(f"could not fetch {lock.repo}:{subpath}: {exc}") from exc
+
+    # The snapshot mirrors the repository layout; keep only the part asked for, and
+    # rename last so an interrupted download never looks complete.
+    fetched = staging / subpath
+    if not fetched.is_dir():
+        shutil.rmtree(staging, ignore_errors=True)
+        raise AssetError(f"{subpath} is not present in {lock.repo}@{lock.revision}")
     shutil.rmtree(target, ignore_errors=True)
-    staging.rename(target)
+    fetched.rename(target)
+    shutil.rmtree(staging, ignore_errors=True)
 
 
 async def stage_components(
     sandbox: Sandbox,
     lock: AssetsLock,
-    components: tuple[str, ...],
+    mounts: tuple[AssetMount, ...],
     *,
     stage: Visibility,
 ) -> list[MaterialisedAsset]:
-    """Project components into the workspace for one stage.
+    """Copy components into the sandbox at the destinations the task asked for.
 
     Raises:
         AssetError: if a component's declared visibility does not permit this stage.
-            The check is here as well as in the loader because this is the last place
-            it can be caught before answers would reach a sandbox.
+            The check is repeated here because this is the last point before the data
+            would actually land in a sandbox.
     """
     materialised: list[MaterialisedAsset] = []
-    for name in components:
-        spec = lock.component(name)
+    for mount in mounts:
+        spec = lock.component(mount.component)
         if spec.visibility == "verify" and stage != "verify":
-            raise AssetError(f"asset {name!r} is verify-only and cannot be staged for the agent")
+            raise AssetError(
+                f"asset {mount.component!r} is verify-only and cannot be staged for the agent"
+            )
 
-        asset = await fetch_component(lock, name)
-        for subdir, destination in _PROJECTION.items():
-            source = asset.path / subdir
-            if not source.is_dir():
-                continue
-            if subdir == "reference" and stage != "verify":
-                continue  # gold data waits for scoring
-            await sandbox.exec(["mkdir", "-p", destination])
-            await sandbox.upload_dir(str(source), destination)
+        asset = await fetch_component(lock, mount.component)
+        await sandbox.exec(["mkdir", "-p", mount.dest])
+        await sandbox.upload_dir(str(asset.path), mount.dest)
         materialised.append(asset)
     return materialised

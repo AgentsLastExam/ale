@@ -27,7 +27,7 @@ from ale.core.harness import AutonomousHarness, PolicyHarness
 from ale.core.kit import KITS_ROOT
 from ale.core.sandbox import Sandbox, SandboxRequest
 from ale.core.task import Task
-from ale.core.taskspec import HarnessFamily, Workspace
+from ale.core.taskspec import HarnessFamily
 from ale.core.trace import ExecRecord, InstructionRecord, NoteRecord, TraceLayer, VerifierRecord
 from ale.core.verdict import Verdict
 from ale.run.assets import stage_components
@@ -39,13 +39,6 @@ __all__ = ["StandardEnvironment"]
 SETUP_DIR = PurePosixPath("/ale/setup")
 VERIFY_DIR = PurePosixPath("/ale/verify")
 VERDICT_PATH = PurePosixPath("/ale/verify/rewards.json")
-
-_WORKSPACE_DIRS = (
-    Workspace.INPUT,
-    Workspace.SOFTWARE,
-    Workspace.OUTPUT,
-    Workspace.WORK,
-)
 
 
 class StandardEnvironment(Environment):
@@ -92,20 +85,29 @@ class StandardEnvironment(Environment):
         return await ctx.sandboxes.acquire(request)
 
     async def _setup(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
-        """Build the workspace and run the task's own preparation.
+        """Stage what the task declared, then run its own preparation.
 
         Only agent-visible material is uploaded: the manifest, the verify stage and the
         oracle stay on the host until they are needed, which is what keeps answers out
         of reach rather than merely out of sight.
+
+        Directories come from the task — its asset destinations and the paths it wants
+        collected — so a domain that needs a different layout simply declares one.
         """
-        await sandbox.exec(["mkdir", "-p", *(str(path) for path in _WORKSPACE_DIRS)])
+        declared = [mount.dest for mount in ctx.spec.setup.assets] + list(ctx.spec.artifacts)
+        if declared:
+            await sandbox.exec(["mkdir", "-p", *declared])
 
         folder = getattr(task, "folder", None)
         if folder is None:
             return
 
         if files := folder.visible_files():
-            await sandbox.upload_dir(str(files), Workspace.INPUT)
+            # A task's own small files land beside its first declared asset, or in the
+            # first path it asked to have collected — whichever it declared.
+            destination = _default_files_dest(ctx)
+            await sandbox.exec(["mkdir", "-p", destination])
+            await sandbox.upload_dir(str(files), destination)
 
         await self._stage_assets(ctx, sandbox, folder, ctx.spec.setup.assets, stage="setup")
         await self._install_kits(ctx, sandbox, folder, ctx.spec.setup.kits)
@@ -182,8 +184,10 @@ class StandardEnvironment(Environment):
 
     async def _teardown(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         # Collection is best effort: a sandbox that died still has to be released.
-        with contextlib.suppress(Exception):
-            await ctx.artifacts.collect(sandbox, Workspace.OUTPUT, "output")
+        for index, path in enumerate(ctx.spec.artifacts):
+            name = Path(path).name or f"artifact-{index}"
+            with contextlib.suppress(Exception):
+                await ctx.artifacts.collect(sandbox, path, name)
         await ctx.sandboxes.release(sandbox)
 
     # --- helpers ---
@@ -193,7 +197,7 @@ class StandardEnvironment(Environment):
     ) -> int:
         entry = directory / "run.sh"
         env = {
-            "ALE_TASK_DIR": str(Workspace.WORK),
+            "ALE_STAGE_DIR": str(directory),
             "ALE_PARAMS_JSON": str(directory / "params.json"),
             "ALE_VERDICT_PATH": str(VERDICT_PATH),
             "PYTHONPATH": str(KITS_ROOT / "*"),
@@ -297,3 +301,12 @@ def _digest(text: str) -> str:
     from hashlib import sha256
 
     return f"sha256:{sha256(text.encode('utf-8')).hexdigest()}"
+
+
+def _default_files_dest(ctx: EpisodeContext) -> str:
+    """Where a task's own ``files/`` directory goes when it declared no home for it."""
+    if ctx.spec.setup.assets:
+        return ctx.spec.setup.assets[0].dest
+    if ctx.spec.artifacts:
+        return str(PurePosixPath(ctx.spec.artifacts[0]).parent)
+    return "/ale/input"

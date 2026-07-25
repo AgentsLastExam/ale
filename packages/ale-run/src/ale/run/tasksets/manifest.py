@@ -25,13 +25,7 @@ from ale.core.errors import TaskDefinitionError
 from ale.core.ids import slugify_path
 from ale.core.kit import KitsLock
 from ale.core.task import Task, Taskset
-from ale.core.taskspec import (
-    ImageRef,
-    SetupStage,
-    TaskSpec,
-    VerifyStage,
-    Workspace,
-)
+from ale.core.taskspec import ImageRef, SetupStage, TaskSpec, VerifyStage
 from ale.core.template import render_instruction
 from ale.core.verdict import Rewards
 
@@ -269,19 +263,19 @@ class ManifestTaskset(Taskset):
 
     def _check_visibility(self, folder: TaskFolder, setup: SetupStage, verify: VerifyStage) -> None:
         """Answer material may not be staged before the agent."""
-        for name in setup.assets:
+        for mount in setup.assets:
             try:
-                visibility = self.assets.visibility_of(name)
+                visibility = self.assets.visibility_of(mount.component)
             except KeyError as exc:
                 raise TaskDefinitionError(f"{folder.relative_path}: {exc}") from exc
             if visibility == "verify":
                 raise TaskDefinitionError(
-                    f"{folder.relative_path}: asset {name!r} is marked verify-only in "
-                    f"{ASSETS_LOCK} and cannot be staged for the agent"
+                    f"{folder.relative_path}: asset {mount.component!r} is marked "
+                    f"verify-only in {ASSETS_LOCK} and cannot be staged for the agent"
                 )
-        for name in verify.assets:
+        for mount in verify.assets:
             try:
-                self.assets.component(name)
+                self.assets.component(mount.component)
             except KeyError as exc:
                 raise TaskDefinitionError(f"{folder.relative_path}: {exc}") from exc
 
@@ -312,8 +306,3 @@ def load_task_folder(path: Path) -> ManifestTask:
 def kit_source_dir(repo_root: Path, name: str) -> Path:
     """Where a kit's package lives in a checkout."""
     return repo_root / "kits" / name
-
-
-def workspace_target(visibility: str) -> str:
-    """Where a component of this visibility is materialised."""
-    return Workspace.REFERENCE if visibility == "verify" else Workspace.INPUT

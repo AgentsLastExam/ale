@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "ALE orchestrator: providers, gateway, guest service, harnesses, CLI"
 requires-python = ">=3.12"
 dependencies = [
+    "huggingface-hub>=0.27",
     "ale-core",
     "typer>=0.15",
     "aiohttp>=3.11",
