@@ -2,14 +2,14 @@
 
 Data travels in two hops, and the split is the point (ADR 0007):
 
-1. **fetch** — a component lands in the store, addressed by a key derived from its
-   content coordinates rather than from any task's name. The store may be an image
-   layer, the host cache, or a download, and a task renamed tomorrow still finds it.
-2. **stage** — the store is projected into the fixed workspace an episode sees.
+1. **fetch** — a component lands in the host store, addressed by a key derived from
+   where the data came from rather than from any task's name, so a renamed task still
+   finds it and two tasks sharing a component share one copy.
+2. **stage** — the component is copied into a sandbox, at the path the task asked for.
 
-The projection is where visibility is enforced. A component the domain's asset lock
-marks ``verify`` is staged into ``/ale/reference`` during scoring and is simply not
-present while the agent runs — not hidden, absent.
+Staging is where visibility is enforced. A component the domain's asset lock marks
+``verify`` is copied in only during scoring, so while the agent runs it is not merely
+hidden — it is absent.
 """
 
 from __future__ import annotations
