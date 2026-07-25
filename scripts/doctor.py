@@ -180,6 +180,19 @@ def check_secrets() -> list[Result]:
     return [Result(OK, "secrets", f"{path} ({len(keys)} keys)")]
 
 
+def _group_membership_pending(group: str) -> bool:
+    """Whether the user belongs to ``group`` on disk but not in this process."""
+    code, out = _run("getent", "group", group)
+    if code != 0 or ":" not in out:
+        return False
+    members = out.rsplit(":", 1)[-1].split(",")
+    user = os.environ.get("USER", "")
+    if user not in members:
+        return False
+    _, current = _run("id", "-nG")
+    return group not in current.split()
+
+
 def check_sandbox_backends() -> list[Result]:
     results: list[Result] = []
 
@@ -197,13 +210,23 @@ def check_sandbox_backends() -> list[Result]:
         code, out = _run(runtime, "info", "--format", "{{.ServerVersion}}")
         if code == 0:
             results.append(Result(OK, "container runtime", f"{runtime} {out.strip()}"))
+        elif _group_membership_pending(runtime):
+            # Classic footgun: usermod succeeded, but this shell predates it.
+            results.append(
+                Result(
+                    FAIL,
+                    "container runtime",
+                    f"you are in the '{runtime}' group, but this shell started before that",
+                    f"log out and back in, or run commands as: sg {runtime} -c '<cmd>'",
+                )
+            )
         else:
             results.append(
                 Result(
                     FAIL,
                     "container runtime",
                     f"{runtime} present but daemon unreachable",
-                    f"sudo systemctl start {runtime} (and add yourself to the '{runtime}' group)",
+                    f"sudo systemctl start {runtime} && sudo usermod -aG {runtime} $USER",
                 )
             )
 

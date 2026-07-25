@@ -1,0 +1,221 @@
+"""Provenance, configuration, tracing and the guest protocol."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from ale.core.config import GatewayLimits, RunConfig, load_run_config, merge_layers, parse_override
+from ale.core.errors import ConfigError, ProvenanceIncompleteError, ProviderCapabilityError
+from ale.core.ids import TaskId
+from ale.core.lock import (
+    AgentProvenance,
+    FrameworkProvenance,
+    GatewayProvenance,
+    ImageProvenance,
+    RunLock,
+    TaskProvenance,
+    TaskSource,
+)
+from ale.core.sandbox import Capabilities
+from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from ale.core.trace import DesktopAction, ExecRecord, TraceLayer, TraceWriter, read_records
+
+pytestmark = pytest.mark.unit
+
+DIGEST = "sha256:" + "0" * 64
+
+GUESTD = Path(__file__).resolve().parents[2] / "packages/ale-run/src/ale/run/guestd/main.py"
+
+
+def make_lock(**overrides: object) -> RunLock:
+    base: dict[str, object] = {
+        "task": TaskProvenance(
+            id=TaskId("demo/hello"),
+            family="demo/hello",
+            spec_hash=DIGEST,
+            source=TaskSource(
+                kind="registry",
+                repo="https://example.invalid/x.git",
+                commit="abc",
+                path="tasks/demo/hello",
+            ),
+        ),
+        "image": ImageProvenance(ref="sandbox-base-cli:0.1.0", digest=DIGEST),
+        "agent": AgentProvenance(
+            harness="claude-code",
+            family="autonomous",
+            version="2.1.170",
+            integrity=f"baked:{DIGEST}",
+            model="claude-opus-4-8",
+        ),
+        "framework": FrameworkProvenance(version="0.1.0", commit="deadbee"),
+        "gateway": GatewayProvenance(dialect="anthropic"),
+        "config_hash": DIGEST,
+        "seed": 7,
+    }
+    return RunLock(**(base | overrides))  # type: ignore[arg-type]
+
+
+class TestRunLock:
+    def test_accepts_a_complete_record(self) -> None:
+        make_lock().require_reportable()
+
+    def test_rejects_a_tag_where_a_digest_belongs(self) -> None:
+        with pytest.raises(ValidationError):
+            ImageProvenance(ref="x:latest", digest="latest")
+
+    def test_registry_source_requires_a_resolved_commit(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskSource(kind="registry", repo="https://example.invalid/x.git", path="tasks/x")
+
+    def test_local_source_is_not_reportable(self) -> None:
+        lock = make_lock(
+            task=TaskProvenance(
+                id=TaskId("demo/hello"),
+                family="demo/hello",
+                spec_hash=DIGEST,
+                source=TaskSource(kind="local", path="/home/dev/tasks/hello"),
+            )
+        )
+        with pytest.raises(ProvenanceIncompleteError, match="local path"):
+            lock.require_reportable()
+
+    def test_unresolved_framework_commit_is_not_reportable(self) -> None:
+        lock = make_lock(framework=FrameworkProvenance(version="0.1.0", commit="unknown"))
+        with pytest.raises(ProvenanceIncompleteError, match="commit"):
+            lock.require_reportable()
+
+
+class TestConfigLayering:
+    def test_precedence_is_cli_over_run_over_preset(self) -> None:
+        merged = merge_layers(
+            preset={"agent": {"model": "preset-model", "name": "claude-code"}},
+            run={"agent": {"model": "run-model"}},
+            overrides=["agent.model=cli-model"],
+        )
+        assert merged["agent"]["model"] == "cli-model"
+        assert merged["agent"]["name"] == "claude-code"  # untouched keys survive
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("agent.kwargs.max_turns=50", 50),
+            ("gateway.limits.max_cost_usd=2.5", 2.5),
+            ("resume=false", False),
+            ("agent.model=claude-opus-4-8", "claude-opus-4-8"),
+            ('agent.model="quoted value"', "quoted value"),
+        ],
+    )
+    def test_override_values_are_toml_typed(self, text: str, expected: object) -> None:
+        _, value = parse_override(text)
+        assert value == expected
+
+    def test_malformed_override_is_an_error(self) -> None:
+        with pytest.raises(ConfigError):
+            parse_override("no-equals-sign")
+
+    def test_unknown_key_is_an_error_not_a_no_op(self, tmp_path: Path) -> None:
+        run = tmp_path / "run.toml"
+        run.write_text("[agent]\nmodle = 'typo'\n")  # note the typo
+        with pytest.raises(ConfigError):
+            load_run_config(run_path=run)
+
+    def test_config_hash_tracks_effective_values(self) -> None:
+        one = RunConfig()
+        two = RunConfig(gateway={"limits": GatewayLimits(max_cost_usd=1.0)})  # type: ignore[arg-type]
+        assert one.config_hash != two.config_hash
+        assert one.config_hash == RunConfig().config_hash
+
+    def test_budget_ceilings_are_on_by_default(self) -> None:
+        limits = RunConfig().gateway.limits
+        assert limits.max_total_tokens and limits.max_cost_usd
+
+
+class TestCapabilities:
+    def test_rejects_gui_task_on_headless_provider(self) -> None:
+        caps = Capabilities(gui=False, network_modes=frozenset({NetworkMode.BLOCK}))
+        with pytest.raises(ProviderCapabilityError, match="desktop"):
+            caps.check(Resources(), NetworkPolicy(), needs_gui=True)
+
+    def test_rejects_unsupported_network_mode(self) -> None:
+        caps = Capabilities(network_modes=frozenset({NetworkMode.OPEN}))
+        with pytest.raises(ProviderCapabilityError, match="network mode"):
+            caps.check(Resources(), NetworkPolicy(mode=NetworkMode.BLOCK), needs_gui=False)
+
+    def test_accepts_a_satisfiable_request(self) -> None:
+        caps = Capabilities(
+            gui=True, network_modes=frozenset({NetworkMode.BLOCK}), max_cpus=4, max_memory_mb=8192
+        )
+        caps.check(Resources(cpus=2, memory_mb=2048), NetworkPolicy(), needs_gui=True)
+
+
+class TestTrace:
+    def test_writes_and_reads_records(self, tmp_path: Path) -> None:
+        writer = TraceWriter(tmp_path)
+        writer.write_semantic(
+            ExecRecord(seq=writer.next_seq(TraceLayer.SEMANTIC), argv_digest=DIGEST, exit_code=0)
+        )
+        records = list(read_records(writer.path(TraceLayer.SEMANTIC)))
+        assert records[0]["kind"] == "exec"
+        assert records[0]["seq"] == 0
+
+    def test_torn_final_line_does_not_hide_earlier_records(self, tmp_path: Path) -> None:
+        path = tmp_path / "trace.semantic.jsonl"
+        path.write_text(json.dumps({"seq": 0, "kind": "note", "message": "ok"}) + '\n{"seq": 1,')
+        assert [r["seq"] for r in read_records(path)] == [0]
+
+    def test_desktop_actions_are_typed(self) -> None:
+        action = DesktopAction(type="click", coordinate=(512, 340))
+        assert action.coordinate == (512, 340)
+        with pytest.raises(ValidationError):
+            DesktopAction(type="teleport")  # type: ignore[arg-type]
+
+
+class TestGuestProtocol:
+    """The guest service is exercised as a subprocess: that is how it really runs."""
+
+    def _talk(self, *messages: dict[str, object]) -> list[dict[str, object]]:
+        payload = "\n".join(json.dumps(m) for m in messages) + "\n"
+        proc = subprocess.run(
+            [sys.executable, str(GUESTD), "--stdio"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+
+    def test_health_reports_the_protocol_version(self) -> None:
+        (reply,) = self._talk({"id": 1, "op": "health"})
+        assert reply["ok"] is True
+        assert reply["data"]["proto"] == 1  # type: ignore[index]
+
+    def test_exec_streams_output_then_reports_exit_code(self) -> None:
+        replies = self._talk({"id": 2, "op": "exec", "params": {"argv": ["echo", "hi"]}})
+        assert any(r.get("event") == "stdout_chunk" for r in replies)
+        assert replies[-1]["data"]["exit_code"] == 0  # type: ignore[index]
+
+    def test_file_round_trip(self, tmp_path: Path) -> None:
+        target = tmp_path / "probe.txt"
+        replies = self._talk(
+            {"id": 3, "op": "write_file", "params": {"path": str(target), "b64": "aGVsbG8="}},
+            {"id": 4, "op": "read_file", "params": {"path": str(target)}},
+        )
+        assert target.read_bytes() == b"hello"
+        assert any(r.get("event") == "chunk" for r in replies)
+
+    def test_unknown_operation_is_reported_not_fatal(self) -> None:
+        replies = self._talk({"id": 5, "op": "nope"}, {"id": 6, "op": "health"})
+        assert replies[0]["error"]["code"] == "unsupported"  # type: ignore[index]
+        assert replies[1]["ok"] is True  # the session survives
+
+    def test_missing_file_is_a_typed_error(self) -> None:
+        (reply,) = self._talk({"id": 7, "op": "read_file", "params": {"path": "/no/such/file"}})
+        assert reply["error"]["code"] == "not_found"  # type: ignore[index]

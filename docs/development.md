@@ -63,6 +63,20 @@ even before `uv sync`.
 Machines without KVM can still run everything on the container backend; machines
 without a container runtime cannot run the default path.
 
+## Workflow
+
+This repository is developed primarily by one maintainer, so the process is
+deliberately light:
+
+- **Commit straight to `main`.** No pull request is required for your own work; CI
+  runs on every push and is the safety net.
+- Use a worktree (`just wt <name>`) when you want parallel tracks or a risky change,
+  not as a ritual for every edit.
+- Keep the *substance* of the norms even where the ceremony is dropped: when a change
+  adds an abstraction, the commit message says what it buys and what it replaces; when
+  it borrows from an existing implementation, it says what was deliberately changed.
+- Run `just lint && just test` before pushing. That is the whole checklist.
+
 ## Conventions
 
 - Everything in this repository is written in standard English.

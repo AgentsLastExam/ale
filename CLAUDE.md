@@ -27,8 +27,10 @@ Read this before touching the repository. It is short on purpose.
   - `ale.run.guestd` imports the standard library only
   - harnesses reach sandboxes through the contract, not through a provider
 - Before implementing a component, read the reference implementation listed for it in
-  `specs/001-phase0-demo-e2e/tasks.md`. Borrow what is proven; say in the pull request
-  what you deliberately changed.
+  `specs/001-phase0-demo-e2e/tasks.md`. Borrow what is proven; say in the commit
+  message what you deliberately changed.
+- Commit straight to `main`; no pull request ceremony is required here. Run
+  `just lint && just test` first — that is the whole checklist.
 
 ## Contracts and decisions
 
