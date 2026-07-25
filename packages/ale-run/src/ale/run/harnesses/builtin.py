@@ -64,6 +64,13 @@ class OracleHarness(AutonomousHarness):
         result = await sandbox.exec(
             ["bash", str(entry)],
             cwd=str(ORACLE_DIR),
+            # The oracle stands in for an agent, but it is task code and gets the same
+            # environment contract a stage does — otherwise a solution that works during
+            # authoring fails during validation for reasons that have nothing to do with it.
+            env={
+                "ALE_TASK_DIR": "/ale/work",
+                "ALE_PARAMS_JSON": str(ORACLE_DIR / "params.json"),
+            },
             timeout_sec=timeout_sec,
         )
         return AgentRun(

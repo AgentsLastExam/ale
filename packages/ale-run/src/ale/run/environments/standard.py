@@ -31,6 +31,7 @@ from ale.core.taskspec import HarnessFamily, Workspace
 from ale.core.trace import ExecRecord, InstructionRecord, NoteRecord, TraceLayer, VerifierRecord
 from ale.core.verdict import Verdict
 from ale.run.harnesses.builtin import ORACLE_DIR
+from ale.run.images import resolve_ref
 
 __all__ = ["StandardEnvironment"]
 
@@ -80,7 +81,7 @@ class StandardEnvironment(Environment):
         spec = ctx.spec
         request = SandboxRequest(
             episode_id=ctx.episode_id,
-            image_ref=str(spec.image),
+            image_ref=resolve_ref(spec.image),
             resources=spec.resources,
             network=spec.network,
             gateway_url=ctx.session.gateway_url or None,
