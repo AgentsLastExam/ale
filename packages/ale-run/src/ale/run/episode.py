@@ -26,10 +26,12 @@ from ale.core.errors import (
     TaskError,
 )
 from ale.core.harness import HarnessSession
+from ale.core.lock import RunLock
 from ale.core.sandbox import Provider, Sandbox, SandboxRequest
 from ale.core.task import Task
 from ale.core.trace import PhaseSpan, TimingRecord, TraceLayer, TraceWriter, read_records
 from ale.core.verdict import Status, Verdict
+from ale.run.provenance import ProvenanceInputs, build_lock
 
 __all__ = ["EpisodeResult", "run_episode"]
 
@@ -61,6 +63,8 @@ class EpisodeResult:
     verdict: Verdict
     run_dir: Path
     duration_sec: float
+    lock: RunLock | None = None
+    """Absent when the caller asked for no provenance, or the episode never provisioned."""
 
 
 class _Lease:
@@ -137,6 +141,7 @@ async def run_episode(
     seed: int = 0,
     work_dir: str = "/ale/work",
     collect_artifacts: bool = True,
+    provenance: ProvenanceInputs | None = None,
 ) -> EpisodeResult:
     """Administer one task and return its verdict.
 
@@ -175,13 +180,42 @@ async def run_episode(
 
     duration = time.monotonic() - started
     _write_timing(ctx.trace, episode_dir, duration, tuple(ctx.phases))
+    lock = _write_lock(ctx, task, provenance, seed=seed) if provenance else None
 
     return EpisodeResult(
         episode_id=episode_id,
         verdict=verdict,
         run_dir=episode_dir,
         duration_sec=duration,
+        lock=lock,
     )
+
+
+def _write_lock(
+    ctx: EpisodeContext, task: Task, inputs: ProvenanceInputs, *, seed: int
+) -> RunLock | None:
+    """Bind the verdict to everything that produced it.
+
+    An episode that died before provisioning has no image digest, and inventing one
+    would be worse than having no lock: the point of the record is that every field in
+    it was observed. Such a run simply cannot be reported, which is the correct outcome.
+    """
+    if ctx.image_digest is None:
+        return None
+
+    lock = build_lock(
+        inputs,
+        ctx.spec,
+        image_digest=ctx.image_digest,
+        assets=tuple(ctx.assets),
+        kits=tuple(ctx.kits),
+        seed=seed,
+        requires_core=getattr(getattr(task, "folder", None), "requires_core", None),
+    )
+    (ctx.run_dir / "lock.json").write_text(
+        lock.model_dump_json(indent=2, by_alias=True) + "\n", encoding="utf-8"
+    )
+    return lock
 
 
 def _write_timing(

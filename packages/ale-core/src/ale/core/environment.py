@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from ale.core.harness import HarnessSession
+from ale.core.lock import AssetProvenance, KitProvenance
 from ale.core.sandbox import Sandbox, SandboxRequest
 from ale.core.taskspec import TaskSpec
 from ale.core.trace import PhaseSpan, TraceWriter
@@ -114,6 +115,17 @@ class EpisodeContext:
 
     phases: list[PhaseSpan] = field(default_factory=list)
     """Filled in as each phase completes; folded into the episode's timing record."""
+
+    image_digest: str | None = None
+    """Resolved when the sandbox is provisioned — the tag alone proves nothing."""
+
+    assets: list[AssetProvenance] = field(default_factory=list)
+    kits: list[KitProvenance] = field(default_factory=list)
+    """What this episode actually materialised, recorded as it happens.
+
+    An episode observes these; a caller cannot assert them in advance, which is why they
+    accumulate here rather than being passed in.
+    """
 
     seed: int = 0
     extras: dict[str, object] = field(default_factory=dict)

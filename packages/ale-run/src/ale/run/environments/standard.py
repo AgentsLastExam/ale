@@ -26,6 +26,7 @@ from ale.core.environment import Environment, EpisodeContext, Phase
 from ale.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
 from ale.core.harness import AutonomousHarness, PolicyHarness
 from ale.core.kit import KITS_ROOT
+from ale.core.lock import AssetProvenance, KitProvenance
 from ale.core.sandbox import Sandbox, SandboxRequest
 from ale.core.task import Task
 from ale.core.taskspec import AssetMount
@@ -40,7 +41,8 @@ from ale.core.trace import (
 from ale.core.verdict import Verdict
 from ale.run.assets import stage_mounts
 from ale.run.harnesses.builtin import ORACLE_DIR
-from ale.run.images import resolve_ref
+from ale.run.images import resolve_digest, resolve_ref
+from ale.run.kits import hash_kit
 
 __all__ = ["StandardEnvironment"]
 
@@ -81,16 +83,22 @@ class StandardEnvironment(Environment):
 
     async def _provision(self, ctx: EpisodeContext) -> Sandbox:
         spec = ctx.spec
+        reference = resolve_ref(spec.image)
         request = SandboxRequest(
             episode_id=ctx.episode_id,
-            image_ref=resolve_ref(spec.image),
+            image_ref=reference,
             resources=spec.resources,
             network=spec.network,
             gateway_url=ctx.session.gateway_url or None,
             env={"ALE_EPISODE_ID": ctx.episode_id},
             needs_gui=False,
         )
-        return await ctx.sandboxes.acquire(request)
+        sandbox = await ctx.sandboxes.acquire(request)
+        # After acquisition: the image is present locally by now, whether it was already
+        # there or had to be pulled.
+        with contextlib.suppress(Exception):
+            ctx.image_digest = await resolve_digest(reference)
+        return sandbox
 
     async def _setup(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         """Stage what the task declared, then run its own preparation.
@@ -249,10 +257,16 @@ class StandardEnvironment(Environment):
         """
         if not mounts:
             return
-        staged = await stage_mounts(sandbox, mounts)
-        ctx.extras.setdefault("assets", []).extend(  # type: ignore[union-attr]
-            {"path": a.mount.path, "key": a.key, "origin": a.origin.value} for a in staged
-        )
+        for asset in await stage_mounts(sandbox, mounts):
+            ctx.assets.append(
+                AssetProvenance(
+                    component=asset.mount.path,
+                    repo=asset.mount.repo,
+                    revision=asset.mount.revision,
+                    data_key=asset.key,
+                    origin=asset.origin,
+                )
+            )
 
     async def _install_kits(
         self, ctx: EpisodeContext, sandbox: Sandbox, folder: object, kits: tuple[str, ...]
@@ -266,6 +280,7 @@ class StandardEnvironment(Environment):
                 raise TaskError(f"kit {name!r} is declared but not present at {source}")
             await sandbox.exec(["mkdir", "-p", str(KITS_ROOT / name)])
             await sandbox.upload_dir(str(source), str(KITS_ROOT / name))
+            ctx.kits.append(KitProvenance(name=name, content_hash=hash_kit(source)))
 
     async def _upload_oracle(self, task: Task, sandbox: Sandbox) -> None:
         folder = getattr(task, "folder", None)

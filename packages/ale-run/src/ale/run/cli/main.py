@@ -26,6 +26,8 @@ from ale.run.gateway.session import GatewaySession, Limits
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.kits import read_lock, scan_kits, write_lock
+from ale.run.ledger import Ledger, episode_identity
+from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.secrets import provider_credentials
 from ale.run.sources import Registry, resolve
 from ale.run.tasksets.manifest import ManifestTaskset
@@ -76,10 +78,33 @@ def run(
     tasks_ref: Annotated[
         str | None, typer.Option("--tasks-ref", help="Override the registry pin")
     ] = None,
+    episodes: Annotated[int, typer.Option("-n", "--episodes", min=1)] = 1,
+    run_id: Annotated[
+        str | None, typer.Option("--run-id", help="Resume this run instead of starting one")
+    ] = None,
+    no_resume: Annotated[
+        bool, typer.Option("--no-resume", help="Re-run episodes already recorded complete")
+    ] = False,
+    require_reportable: Annotated[
+        bool,
+        typer.Option(
+            "--require-reportable",
+            help="Fail unless every episode's provenance could back a published result",
+        ),
+    ] = False,
 ) -> None:
-    """Run one task and report its verdict."""
-    settings = _config(config, overrides, agent=agent, model=model, provider=provider)
-    exit_code = asyncio.run(_run_one(reference, settings, runs_dir, tasks_ref))
+    """Run a task and report its verdict.
+
+    Re-invoking with the same ``--run-id`` continues where an interrupted run stopped:
+    episodes are matched by what they are, not by when they ran.
+    """
+    flags = [*(overrides or []), f"episodes={episodes}"]
+    if no_resume:
+        flags.append("resume=false")
+    settings = _config(config, flags, agent=agent, model=model, provider=provider)
+    exit_code = asyncio.run(
+        _run_one(reference, settings, runs_dir, tasks_ref, run_id, require_reportable)
+    )
     raise typer.Exit(exit_code)
 
 
@@ -166,7 +191,12 @@ def _registry() -> Registry | None:
 
 
 async def _run_one(
-    reference: str, settings: RunConfig, runs_dir: Path, tasks_ref: str | None
+    reference: str,
+    settings: RunConfig,
+    runs_dir: Path,
+    tasks_ref: str | None,
+    run_id: str | None = None,
+    require_reportable: bool = False,
 ) -> int:
     try:
         resolved = resolve(reference, registry=_registry(), ref=tasks_ref)
@@ -174,6 +204,23 @@ async def _run_one(
     except AleError as error:
         typer.echo(f"{error}", err=True)
         return EXIT_BAD_REFERENCE
+
+    run_id = run_id or uuid.uuid4().hex[:8]
+    run_dir = runs_dir / run_id
+    harness = _harness(settings)
+    inputs = ProvenanceInputs(
+        source=resolved.source,
+        agent=agent_provenance(harness, settings.agent.model),
+        gateway=gateway_provenance(settings),
+        config_hash=settings.config_hash,
+    )
+
+    identity = episode_identity(
+        task.spec,
+        agent=f"{inputs.agent.harness}@{inputs.agent.version}",
+        seed=settings.seed,
+        config_hash=settings.config_hash,
+    )
 
     gateway = None
     gateway_url, token = "", ""
@@ -199,24 +246,78 @@ async def _run_one(
         )
         token = session.token
 
+    ledger = Ledger(run_dir)
+    ledger.open_run(run_id, settings.config_hash)
+    # Resume compares what an episode *is*, so a rerun with a different seed or a
+    # different agent is correctly new work rather than something to skip. Repeats of
+    # one identity are counted, not merely detected: asking for five episodes after
+    # three finished must run two more, and a set could only ever say "yes, some".
+    done = (
+        sum(1 for row in ledger.episodes(run_id) if row.identity == identity and row.succeeded)
+        if settings.resume
+        else 0
+    )
+    failures = 0
+
     try:
-        result = await run_episode(
-            task,
-            StandardEnvironment(_harness(settings)),
-            _provider(settings),
-            run_dir=runs_dir / uuid.uuid4().hex[:8],
-            gateway_url=gateway_url,
-            token=token,
-            model=settings.agent.model,
-            seed=settings.seed,
-            work_dir=settings.work_dir,
-        )
+        for index in range(settings.episodes):
+            if index < done:
+                typer.echo(f"skip  {task.spec.label}: episode {index + 1} already complete")
+                continue
+
+            result = await run_episode(
+                task,
+                StandardEnvironment(harness),
+                _provider(settings),
+                run_dir=run_dir,
+                gateway_url=gateway_url,
+                token=token,
+                model=settings.agent.model,
+                seed=settings.seed,
+                work_dir=settings.work_dir,
+                collect_artifacts=settings.artifacts.collect == "host",
+                provenance=inputs,
+            )
+            ledger.start_episode(
+                episode_id=result.episode_id, run_id=run_id, identity=identity, spec=task.spec
+            )
+            ledger.finish_episode(
+                result.episode_id,
+                result.verdict,
+                result.lock.model_dump(mode="json") if result.lock else None,
+            )
+            ledger.event(result.episode_id, "finished", status=result.verdict.status.value)
+
+            _report(result)
+            reportable = _check_reportable(result)
+            unusable = require_reportable and not reportable
+            if result.verdict.status is not Status.COMPLETED or unusable:
+                failures += 1
     finally:
+        ledger.close()
         if gateway is not None:
             await gateway.stop()
 
-    _report(result)
-    return 0 if result.verdict.status is Status.COMPLETED else EXIT_SOME_FAILED
+    typer.echo(f"run {run_id}: {settings.episodes - failures}/{settings.episodes} completed")
+    return 0 if failures == 0 else EXIT_SOME_FAILED
+
+
+def _check_reportable(result) -> bool:  # type: ignore[no-untyped-def]
+    """Say whether this result could back a published number (Constitution III).
+
+    Always said out loud, never silently enforced. Running a task from a local path is
+    how authoring works and must stay frictionless, but the run still states plainly
+    that the result is not publishable — the failure mode worth designing against is a
+    number that quietly loses its provenance, not an author who is told about it.
+    ``--require-reportable`` is what turns the statement into a gate.
+    """
+    if result.lock is None:
+        typer.echo("  not reportable: no provenance was recorded", err=True)
+        return False
+    problems = result.lock.missing_for_report()
+    for problem in problems:
+        typer.echo(f"  not reportable: {problem}", err=True)
+    return not problems
 
 
 async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:

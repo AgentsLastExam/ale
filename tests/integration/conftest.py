@@ -1,0 +1,71 @@
+"""Shared scaffolding for the container-backed tests.
+
+The task repository these build is the smallest thing the loader accepts, which is also
+what makes it a useful fixture: if a change breaks the minimum, every test here fails at
+once rather than one obscure case failing later.
+"""
+
+from __future__ import annotations
+
+import textwrap
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+
+IMAGE = "docker.io/library/python:3.12-slim"
+
+VERIFY_DEFAULT = textwrap.dedent("""
+    #!/usr/bin/env bash
+    set -euo pipefail
+    expected="hello world"
+    actual="$(cat /ale/output/result.txt 2>/dev/null || true)"
+    if [ "$actual" = "$expected" ]; then
+        printf '{"rewards": {"reward": 1.0}}' > "$ALE_VERDICT_PATH"
+    else
+        printf '{"rewards": {"reward": 0.0}}' > "$ALE_VERDICT_PATH"
+    fi
+""").strip()
+
+SETUP_DEFAULT = (
+    "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /ale/input /ale/output\n"
+    "printf 'world' > /ale/input/word.txt\n"
+)
+
+
+def _write_repo(root: Path, *, with_oracle: bool = True, verify_body: str | None = None) -> Path:
+    """Lay out a minimal task repository: manifest, instruction, setup, verify, oracle."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "domain.yaml").write_text("name: demo\nrequires_core: '>=0.1,<0.2'\n")
+    task = root / "tasks" / "hello"
+    (task / "setup").mkdir(parents=True)
+    (task / "verify").mkdir()
+
+    (task / "task.yaml").write_text(
+        textwrap.dedent(f"""
+        image: {IMAGE}
+        resources: {{ cpus: 1, memory_mb: 512 }}
+        timeouts: {{ setup: 120, agent: 120, verify: 120 }}
+        artifacts: [/ale/output]
+        params: {{ greeting: hello }}
+        validate: {{ min_reward: 1.0 }}
+        """).strip()
+    )
+    (task / "instruction.md").write_text(
+        "Write ${greeting} followed by the word in /ale/input/word.txt "
+        "into /ale/output/result.txt\n"
+    )
+    (task / "setup" / "run.sh").write_text(SETUP_DEFAULT)
+    (task / "verify" / "run.sh").write_text(verify_body or VERIFY_DEFAULT)
+    if with_oracle:
+        (task / "oracle").mkdir()
+        (task / "oracle" / "run.sh").write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\n"
+            "printf 'hello %s' \"$(cat /ale/input/word.txt)\" > /ale/output/result.txt\n"
+        )
+    return task
+
+
+@pytest.fixture
+def write_repo() -> Callable[..., Path]:
+    return _write_repo

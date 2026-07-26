@@ -7,7 +7,7 @@ no model and no gateway — everything else is the production path.
 
 from __future__ import annotations
 
-import textwrap
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -22,57 +22,6 @@ from ale.run.tasksets.manifest import ManifestTaskset
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-IMAGE = "docker.io/library/python:3.12-slim"
-
-
-def write_repo(root: Path, *, with_oracle: bool = True, verify_body: str | None = None) -> Path:
-    """Lay out a minimal task repository: manifest, instruction, setup, verify, oracle."""
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "domain.yaml").write_text("name: demo\nrequires_core: '>=0.1,<0.2'\n")
-    task = root / "tasks" / "hello"
-    (task / "setup").mkdir(parents=True)
-    (task / "verify").mkdir()
-
-    (task / "task.yaml").write_text(
-        textwrap.dedent(f"""
-        image: {IMAGE}
-        resources: {{ cpus: 1, memory_mb: 512 }}
-        timeouts: {{ setup: 120, agent: 120, verify: 120 }}
-        artifacts: [/ale/output]
-        params: {{ greeting: hello }}
-        validate: {{ min_reward: 1.0 }}
-        """).strip()
-    )
-    (task / "instruction.md").write_text(
-        "Write ${greeting} followed by the word in /ale/input/word.txt "
-        "into /ale/output/result.txt\n"
-    )
-    (task / "setup" / "run.sh").write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /ale/input /ale/output\n"
-        "printf 'world' > /ale/input/word.txt\n"
-    )
-    (task / "verify" / "run.sh").write_text(
-        verify_body
-        or textwrap.dedent("""
-            #!/usr/bin/env bash
-            set -euo pipefail
-            expected="hello world"
-            actual="$(cat /ale/output/result.txt 2>/dev/null || true)"
-            if [ "$actual" = "$expected" ]; then
-                printf '{"rewards": {"reward": 1.0}}' > "$ALE_VERDICT_PATH"
-            else
-                printf '{"rewards": {"reward": 0.0}}' > "$ALE_VERDICT_PATH"
-            fi
-        """).strip()
-    )
-    if with_oracle:
-        (task / "oracle").mkdir()
-        (task / "oracle" / "run.sh").write_text(
-            "#!/usr/bin/env bash\nset -euo pipefail\n"
-            "printf 'hello %s' \"$(cat /ale/input/word.txt)\" > /ale/output/result.txt\n"
-        )
-    return task
-
 
 async def run_one(task_root: Path, run_dir: Path, harness: object):  # type: ignore[no-untyped-def]
     task = next(iter(ManifestTaskset(task_root).load()))
@@ -85,7 +34,7 @@ async def run_one(task_root: Path, run_dir: Path, harness: object):  # type: ign
 
 
 @pytest.mark.asyncio
-async def test_oracle_solves_the_task(tmp_path: Path) -> None:
+async def test_oracle_solves_the_task(tmp_path: Path, write_repo: Callable[..., Path]) -> None:
     """The admission gate: a task whose own solution scores full marks."""
     task_root = write_repo(tmp_path / "repo")
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
@@ -95,7 +44,9 @@ async def test_oracle_solves_the_task(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_idle_agent_scores_zero_but_completes(tmp_path: Path) -> None:
+async def test_idle_agent_scores_zero_but_completes(
+    tmp_path: Path, write_repo: Callable[..., Path]
+) -> None:
     """Doing nothing is a legitimate zero, not an error."""
     task_root = write_repo(tmp_path / "repo")
     result = await run_one(task_root, tmp_path / "runs", NopHarness())
@@ -105,7 +56,9 @@ async def test_idle_agent_scores_zero_but_completes(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_broken_verifier_is_a_task_error_not_a_zero(tmp_path: Path) -> None:
+async def test_broken_verifier_is_a_task_error_not_a_zero(
+    tmp_path: Path, write_repo: Callable[..., Path]
+) -> None:
     """A verifier that writes nothing is a defect in the task, and must say so."""
     task_root = write_repo(
         tmp_path / "repo",
@@ -118,7 +71,9 @@ async def test_broken_verifier_is_a_task_error_not_a_zero(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_agent_never_sees_verification_material(tmp_path: Path) -> None:
+async def test_agent_never_sees_verification_material(
+    tmp_path: Path, write_repo: Callable[..., Path]
+) -> None:
     """The reason answers stay on the host until scoring."""
     task_root = write_repo(tmp_path / "repo")
     (task_root / "verify" / "answer.txt").write_text("hello world")
@@ -138,7 +93,9 @@ async def test_agent_never_sees_verification_material(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_traces_and_artifacts_are_written(tmp_path: Path) -> None:
+async def test_traces_and_artifacts_are_written(
+    tmp_path: Path, write_repo: Callable[..., Path]
+) -> None:
     task_root = write_repo(tmp_path / "repo")
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
 
