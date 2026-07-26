@@ -8,12 +8,13 @@
 # shared cache and reads `<path>/<task>`. Override the pin with `--tasks-ref`.
 
 [domains.demo]
-repo = "https://github.com/rdi-berkeley/agents-last-exam.git"
+repo = "https://github.com/AgentsLastExam/ale-tasks-152.git"
 path = "tasks/demo"
-default_ref = "feat/tasks-v2"   # the rebuilt tasks; moves to main once merged
+default_ref = "main"
 
 # Subject domains are registered as their tasks are rebuilt to the current standard.
+# The previous framework's repository is source material only — never a run-time source.
 # [domains.business_finance]
-# repo = "https://github.com/rdi-berkeley/agents-last-exam.git"
+# repo = "https://github.com/AgentsLastExam/ale-tasks-152.git"
 # path = "tasks/business_finance"
-# default_ref = "feat/tasks-v2"
+# default_ref = "main"

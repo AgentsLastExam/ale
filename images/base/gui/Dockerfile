@@ -771,7 +771,12 @@ COPY packages/ale-run/src/ale/run/guestd/ /opt/ale/guestd/
 # works instead of shelling out to ImageMagick for ~400ms. A provider reads this if it
 # exists and falls back to `python3` otherwise, which keeps the choice with the image
 # rather than hard-coding one image's layout into the engine.
-RUN ln -sf /opt/env/venv/bin/python /opt/ale/python
+# A wrapper, not a symlink. Python derives sys.prefix from the path it was invoked
+# through, so a symlinked venv interpreter looks like a plain interpreter at /opt/ale
+# and loses the venv's site-packages entirely — the fast screenshot path would silently
+# fall back forever, which is exactly what it did until this was caught.
+RUN printf '#!/bin/sh\nexec /opt/env/venv/bin/python "$@"\n' > /opt/ale/python \
+    && chmod 0755 /opt/ale/python
 
 # The framework's own namespace. Task data goes wherever each task declares it.
 RUN mkdir -p /ale/kits /ale/store && chmod -R 0777 /ale

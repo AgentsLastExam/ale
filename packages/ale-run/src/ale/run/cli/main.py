@@ -71,7 +71,7 @@ def root(
 def run(
     reference: Annotated[str, typer.Argument(help="Task path, or <domain>/<task>")],
     agent: Annotated[
-        str, typer.Option("--agent", help="claude-code, oracle or nop")
+        str, typer.Option("--agent", help="claude-code, computer-use, oracle or nop")
     ] = "claude-code",
     model: Annotated[str, typer.Option("--model")] = "",
     provider: Annotated[str, typer.Option("--provider")] = "docker",
@@ -209,10 +209,16 @@ def _harness(settings: RunConfig):  # type: ignore[no-untyped-def]
             return OracleHarness()
         case "nop":
             return NopHarness()
+        case "computer-use":
+            from ale.run.harnesses.computer_use import ComputerUseHarness
+
+            return ComputerUseHarness(model=settings.agent.model, **settings.agent.kwargs)
         case "claude-code":
             return ClaudeCodeHarness(cli_version=settings.agent.version, **settings.agent.kwargs)
         case unknown:
-            raise AleError(f"unknown agent {unknown!r}; try claude-code, oracle or nop")
+            raise AleError(
+                f"unknown agent {unknown!r}; try claude-code, computer-use, oracle or nop"
+            )
 
 
 def _provider(settings: RunConfig):  # type: ignore[no-untyped-def]
