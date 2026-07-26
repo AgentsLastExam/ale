@@ -9,7 +9,6 @@ from ale.core.ids import TaskId
 from ale.core.kit import KitManifest, KitRuntime, KitsLock, LockedKit
 from ale.core.store import STORE_ROOT, AssetOrigin, StoreEntry, StoreManifest, data_key
 from ale.core.taskspec import (
-    ArtifactSpec,
     AssetMount,
     ImageRef,
     SetupStage,
@@ -163,12 +162,7 @@ class TestStages:
                     ),
                 )
             ),
-            artifacts=(ArtifactSpec(path="/opt/sim/runs"),),
+            artifacts=("/opt/sim/runs",),
         )
         assert spec.setup.assets[0].dest == "/opt/sim/scenes"
-        assert spec.artifacts[0].path == "/opt/sim/runs"
-
-    def test_an_artifact_may_be_left_in_the_sandbox(self) -> None:
-        """Not everything worth writing is worth copying back."""
-        spec = self.make(artifacts=(ArtifactSpec(path="/scratch", collect="none"),))
-        assert spec.artifacts[0].collect == "none"
+        assert spec.artifacts[0] == "/opt/sim/runs"

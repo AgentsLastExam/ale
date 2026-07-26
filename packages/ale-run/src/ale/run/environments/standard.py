@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import json
 import shlex
+import time
 from pathlib import Path, PurePosixPath
 
 from ale.core.environment import Environment, EpisodeContext, Phase
@@ -28,7 +29,14 @@ from ale.core.kit import KITS_ROOT
 from ale.core.sandbox import Sandbox, SandboxRequest
 from ale.core.task import Task
 from ale.core.taskspec import AssetMount
-from ale.core.trace import ExecRecord, InstructionRecord, NoteRecord, TraceLayer, VerifierRecord
+from ale.core.trace import (
+    ExecRecord,
+    InstructionRecord,
+    NoteRecord,
+    PhaseSpan,
+    TraceLayer,
+    VerifierRecord,
+)
 from ale.core.verdict import Verdict
 from ale.run.assets import stage_mounts
 from ale.run.harnesses.builtin import ORACLE_DIR
@@ -51,16 +59,16 @@ class StandardEnvironment(Environment):
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
         spec = task.spec
-        sandbox = await self._provision(ctx)
+        sandbox = await self._timed(ctx, Phase.PROVISION, self._provision(ctx))
         try:
             await self._with_deadline(
-                Phase.SETUP, spec.timeouts.setup, self._setup(task, ctx, sandbox)
+                ctx, Phase.SETUP, spec.timeouts.setup, self._setup(task, ctx, sandbox)
             )
             await self._with_deadline(
-                Phase.AGENT, spec.timeouts.agent, self._agent(task, ctx, sandbox)
+                ctx, Phase.AGENT, spec.timeouts.agent, self._agent(task, ctx, sandbox)
             )
             rewards = await self._with_deadline(
-                Phase.VERIFY, spec.timeouts.verify, self._verify(task, ctx, sandbox)
+                ctx, Phase.VERIFY, spec.timeouts.verify, self._verify(task, ctx, sandbox)
             )
         finally:
             # Teardown runs on every path, including cancellation.
@@ -97,7 +105,7 @@ class StandardEnvironment(Environment):
         declared = [
             ctx.work_dir,
             *(mount.dest for mount in ctx.spec.setup.assets),
-            *(artifact.path for artifact in ctx.spec.artifacts),
+            *ctx.spec.artifacts,
         ]
         await sandbox.exec(["mkdir", "-p", *declared])
 
@@ -183,12 +191,10 @@ class StandardEnvironment(Environment):
 
     async def _teardown(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         # Collection is best effort: a sandbox that died still has to be released.
-        for index, artifact in enumerate(ctx.spec.artifacts):
-            if artifact.collect == "none":
-                continue
-            name = Path(artifact.path).name or f"artifact-{index}"
+        for index, path in enumerate(ctx.spec.artifacts):
+            name = Path(path).name or f"artifact-{index}"
             with contextlib.suppress(Exception):
-                await ctx.artifacts.collect(sandbox, artifact.path, name)
+                await ctx.artifacts.collect(sandbox, path, name)
         await ctx.sandboxes.release(sandbox)
 
     # --- helpers ---
@@ -283,11 +289,24 @@ class StandardEnvironment(Environment):
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise VerifierOutputError(f"verify wrote malformed rewards: {exc}") from exc
 
-    async def _with_deadline(self, phase: Phase, seconds: float, coro):  # type: ignore[no-untyped-def]
+    async def _with_deadline(self, ctx, phase: Phase, seconds: float, coro):  # type: ignore[no-untyped-def]
         try:
-            return await asyncio.wait_for(coro, timeout=seconds)
+            return await self._timed(ctx, phase, asyncio.wait_for(coro, timeout=seconds))
         except TimeoutError as exc:
             raise PhaseTimeoutError(phase.value, seconds) from exc
+
+    async def _timed(self, ctx: EpisodeContext, phase: Phase, coro):  # type: ignore[no-untyped-def]
+        """Record how long a phase took, whether or not it succeeded.
+
+        A phase that timed out or crashed is the one you most want the duration of, so
+        the span is written on the way out rather than on success.
+        """
+        started = time.monotonic()
+        try:
+            return await coro
+        finally:
+            elapsed = int((time.monotonic() - started) * 1000)
+            ctx.phases.append(PhaseSpan(name=phase.value, duration_ms=elapsed))
 
 
 def _digest(text: str) -> str:

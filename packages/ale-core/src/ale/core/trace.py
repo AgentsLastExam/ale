@@ -75,6 +75,12 @@ class TransportRecord(BaseModel):
 
     refusal_limit: str | None = None
 
+    upstream_status: int | None = Field(
+        default=None,
+        description="Provider HTTP status when the call did not succeed. A failed call "
+        "is still a call: without it a run that burned an hour on 529s looks idle.",
+    )
+
 
 class DesktopAction(BaseModel):
     """A normalised desktop action.

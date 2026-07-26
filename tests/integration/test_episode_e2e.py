@@ -38,7 +38,7 @@ def write_repo(root: Path, *, with_oracle: bool = True, verify_body: str | None 
         image: {IMAGE}
         resources: {{ cpus: 1, memory_mb: 512 }}
         timeouts: {{ setup: 120, agent: 120, verify: 120 }}
-        artifacts: [{{ path: /ale/output }}]
+        artifacts: [/ale/output]
         params: {{ greeting: hello }}
         validate: {{ min_reward: 1.0 }}
         """).strip()

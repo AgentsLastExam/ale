@@ -19,7 +19,7 @@ from __future__ import annotations
 import tomllib
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,6 +28,7 @@ from ale.core.ids import content_hash
 
 __all__ = [
     "AgentConfig",
+    "ArtifactPolicy",
     "GatewayLimits",
     "RunConfig",
     "load_run_config",
@@ -50,6 +51,20 @@ class GatewayLimits(BaseModel):
     max_output_tokens: int | None = Field(default=None, gt=0)
     max_total_tokens: int | None = Field(default=400_000, gt=0)
     max_cost_usd: float | None = Field(default=5.0, gt=0)
+
+
+class ArtifactPolicy(BaseModel):
+    """What happens to the paths a task declared as its output.
+
+    Declaring an output and keeping a copy of it are separate decisions: the task knows
+    which paths hold its result, and the operator knows whether this particular run
+    wants them on disk. A large sweep that only needs scores discards them; a debugging
+    run keeps everything. Remote destinations belong here too when they arrive.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    collect: Literal["host", "none"] = "host"
 
 
 class AgentConfig(BaseModel):
@@ -83,6 +98,7 @@ class RunConfig(BaseModel):
         default="/ale/work",
         description="Scratch directory created in every sandbox; not a task's concern",
     )
+    artifacts: ArtifactPolicy = ArtifactPolicy()
     agent: AgentConfig = AgentConfig()
     gateway: GatewayConfig = GatewayConfig()
     episodes: int = Field(default=1, ge=1)

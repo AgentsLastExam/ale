@@ -29,7 +29,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ale.core.ids import TaskId, content_hash
 
 __all__ = [
-    "ArtifactSpec",
     "AssetMount",
     "ImageRef",
     "NetworkMode",
@@ -157,18 +156,6 @@ class PhaseTimeouts(BaseModel):
         return self.setup + self.agent + self.verify
 
 
-class ArtifactSpec(BaseModel):
-    """A path worth keeping when the episode ends, and what to do with it."""
-
-    model_config = _FROZEN
-
-    path: str = Field(description="Absolute path in the sandbox")
-    collect: Literal["host", "none"] = Field(
-        default="host",
-        description="Copy back to the run directory, or leave it in the sandbox",
-    )
-
-
 class ToolProvision(BaseModel):
     """Extra capabilities handed to the agent for this task."""
 
@@ -218,7 +205,12 @@ class TaskSpec(BaseModel):
     timeouts: PhaseTimeouts = PhaseTimeouts()
     setup: SetupStage = SetupStage()
     verify: VerifyStage = VerifyStage()
-    artifacts: tuple[ArtifactSpec, ...] = ()
+    artifacts: tuple[str, ...] = Field(
+        default=(),
+        description="Absolute sandbox paths holding this task's output. What happens to "
+        "them — kept on the host, discarded, uploaded — is a run-level decision, so it "
+        "is not written here.",
+    )
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(
         default_factory=dict, description="Values substituted into the instruction"

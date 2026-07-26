@@ -8,10 +8,9 @@ may bypass the layout, but the manifest field semantics still apply.
 ```
 <task-repo>/
 ├── domain.yaml              # one per domain namespace
-├── assets.lock.yaml         # only if the domain has large assets
 ├── kits/<name>/kit.yaml     # optional sandbox-side shared code
 ├── images/<name>/Dockerfile # optional; MUST derive from an official base image
-└── tasks/[<group>/]<task>/  # task folders; id = <domain>/[<group>/]<task>
+└── tasks/[<group>/]<task>/  # task folders; id is derived from this path
 ```
 
 ```yaml
@@ -27,14 +26,13 @@ requires_core: ">=0.1,<0.2"
 <task>/
 ├── task.yaml          # required — manifest            (invisible to the agent)
 ├── instruction.md     # required — the prompt          (visible, after rendering)
-├── verify/            # required — entry verify.sh|.py (invisible; injected at verify)
-├── oracle/            # recommended — entry solve.sh   (invisible)
-├── setup/             # optional — scripts run in the sandbox before the agent
-└── files/             # optional — small task files, ≤10 MB each (visible)
+├── verify/            # required — run.sh, copied in at scoring time
+├── oracle/            # recommended — run.sh, the task's own solution
+└── setup/             # optional — run.sh, runs in the sandbox before the agent
 ```
 
-Visibility is enforced structurally: invisible entries are never uploaded during setup
-or the agent phase.
+A stage's folder reaches the sandbox only when that stage runs, which is what keeps
+`verify/` and `oracle/` away from the agent.
 
 ## Manifest
 
@@ -58,8 +56,7 @@ verify:
     - { repo: …, revision: …, path: demo/hello/base/reference, dest: /ale/reference }
   kits: [grader-protocol]
 
-artifacts:
-  - { path: /ale/output }          # collect: host (default) | none
+artifacts: [/ale/output]           # absolute paths holding this task's output
 
 params: { n: 3 }
 variants:
@@ -80,6 +77,10 @@ runs, and its entry point (`setup/run.sh`, `verify/run.sh`) executes if present.
 **A task decides where its own data goes.** There is no framework-wide layout: a mount's
 `dest` and an artifact's `path` are absolute paths chosen by the task, so a simulation
 domain can put scenes at `/opt/sim/scenes` and nothing has to be adapted.
+
+Whether those artifacts are copied back is decided per run (`artifacts.collect` in the
+run configuration), not per task: declaring where the output lives and deciding to keep
+a copy of it are different questions, asked by different people.
 
 The framework creates the mount destinations, the artifact paths, and the run's scratch
 directory (`work_dir`, default `/ale/work`, configured per run rather than per task).

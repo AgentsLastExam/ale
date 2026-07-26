@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Protocol
 from ale.core.harness import HarnessSession
 from ale.core.sandbox import Sandbox, SandboxRequest
 from ale.core.taskspec import TaskSpec
-from ale.core.trace import TraceWriter
+from ale.core.trace import PhaseSpan, TraceWriter
 from ale.core.verdict import Verdict
 
 if TYPE_CHECKING:
@@ -111,6 +111,9 @@ class EpisodeContext:
 
     work_dir: str = "/ale/work"
     """Framework scratch inside the sandbox, created before setup runs."""
+
+    phases: list[PhaseSpan] = field(default_factory=list)
+    """Filled in as each phase completes; folded into the episode's timing record."""
 
     seed: int = 0
     extras: dict[str, object] = field(default_factory=dict)

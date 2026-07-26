@@ -225,7 +225,12 @@ class Gateway:
         streamed: list[bytes] | None,
         status: int,
     ) -> None:
+        request_digest = GatewaySession.digest(json.dumps(payload, sort_keys=True).encode())
         if status != 200:
+            # A failed call is still a call. Recording it costs one line and is the
+            # difference between "the agent stalled" and "the provider was returning
+            # 529s for eleven minutes" — the same evidence, opposite conclusions.
+            self._record(session, request_digest=request_digest, upstream_status=status)
             return
         if streamed is not None:
             input_tokens, output_tokens, stop_reason = usage_from_stream(streamed)
@@ -235,7 +240,7 @@ class Gateway:
         session.record(input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost)
         self._record(
             session,
-            request_digest=GatewaySession.digest(json.dumps(payload, sort_keys=True).encode()),
+            request_digest=request_digest,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=cost,
@@ -252,6 +257,7 @@ class Gateway:
         cost_usd: float = 0.0,
         stop_reason: str | None = None,
         refused: str | None = None,
+        upstream_status: int | None = None,
     ) -> None:
         trace = self._traces.get(session.token)
         if trace is None:
@@ -268,6 +274,7 @@ class Gateway:
                 stop_reason=stop_reason,
                 refused=refused is not None,
                 refusal_limit=refused,
+                upstream_status=upstream_status,
             )
         )
 

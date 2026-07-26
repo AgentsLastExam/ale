@@ -28,7 +28,7 @@ from ale.core.errors import (
 from ale.core.harness import HarnessSession
 from ale.core.sandbox import Provider, Sandbox, SandboxRequest
 from ale.core.task import Task
-from ale.core.trace import TimingRecord, TraceLayer, TraceWriter, read_records
+from ale.core.trace import PhaseSpan, TimingRecord, TraceLayer, TraceWriter, read_records
 from ale.core.verdict import Status, Verdict
 
 __all__ = ["EpisodeResult", "run_episode"]
@@ -107,6 +107,24 @@ class _Artifacts(ArtifactSink):
         return self.run_dir / "artifacts" / name
 
 
+@dataclass
+class _DiscardedArtifacts(ArtifactSink):
+    """Honours the declaration and keeps nothing.
+
+    A run that only wants scores should not pay to copy gigabytes back, but the task
+    still declared where its output lives — so the paths stay declared and this sink
+    drops them. Environments need no branch for it.
+    """
+
+    run_dir: Path
+
+    async def collect(self, sandbox: Sandbox, source: str, name: str) -> Path:
+        return self.path(name)
+
+    def path(self, name: str) -> Path:
+        return self.run_dir / "artifacts" / name
+
+
 async def run_episode(
     task: Task,
     environment: Environment,
@@ -118,6 +136,7 @@ async def run_episode(
     model: str = "",
     seed: int = 0,
     work_dir: str = "/ale/work",
+    collect_artifacts: bool = True,
 ) -> EpisodeResult:
     """Administer one task and return its verdict.
 
@@ -128,6 +147,7 @@ async def run_episode(
     episode_dir = run_dir / episode_id
     episode_dir.mkdir(parents=True, exist_ok=True)
 
+    sink = _Artifacts(episode_dir) if collect_artifacts else _DiscardedArtifacts(episode_dir)
     lease = _Lease(provider)
     started = time.monotonic()
     ctx = EpisodeContext(
@@ -136,7 +156,7 @@ async def run_episode(
         task_dir=getattr(getattr(task, "folder", None), "root", run_dir),
         run_dir=episode_dir,
         sandboxes=lease,
-        artifacts=_Artifacts(episode_dir),
+        artifacts=sink,
         trace=TraceWriter(episode_dir),
         budget=Budget(deadline_sec=task.spec.timeouts.total, started_at=started),
         session=HarnessSession(
@@ -154,7 +174,7 @@ async def run_episode(
         await lease.release_all()
 
     duration = time.monotonic() - started
-    _write_timing(ctx.trace, episode_dir, duration)
+    _write_timing(ctx.trace, episode_dir, duration, tuple(ctx.phases))
 
     return EpisodeResult(
         episode_id=episode_id,
@@ -164,7 +184,12 @@ async def run_episode(
     )
 
 
-def _write_timing(trace: TraceWriter, episode_dir: Path, duration_sec: float) -> None:
+def _write_timing(
+    trace: TraceWriter,
+    episode_dir: Path,
+    duration_sec: float,
+    phases: tuple[PhaseSpan, ...] = (),
+) -> None:
     """Record where the wall clock went, from evidence already on disk.
 
     One duration says almost nothing: twenty minutes could be a slow model, a slow
@@ -195,6 +220,7 @@ def _write_timing(trace: TraceWriter, episode_dir: Path, duration_sec: float) ->
             model_ms=model_ms,
             sandbox_ms=sandbox_ms,
             framework_ms=total_ms - model_ms - sandbox_ms,
+            phases=phases,
         )
     )
 

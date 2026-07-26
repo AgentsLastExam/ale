@@ -23,7 +23,7 @@ from ale.core.lock import (
     TaskSource,
 )
 from ale.core.sandbox import Capabilities
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from ale.core.taskspec import ImageRef, NetworkMode, NetworkPolicy, Resources, TaskSpec
 from ale.core.trace import (
     DesktopAction,
     ExecRecord,
@@ -33,7 +33,7 @@ from ale.core.trace import (
     TransportRecord,
     read_records,
 )
-from ale.run.episode import _write_timing
+from ale.run.episode import _DiscardedArtifacts, _write_timing
 
 pytestmark = pytest.mark.unit
 
@@ -277,3 +277,44 @@ class TestEpisodeTiming:
         ]
         assert timing["model_ms"] == 1000
         assert timing["framework_ms"] == 0
+
+
+class TestArtifactPolicy:
+    """Declaring an output and keeping a copy of it are separate decisions."""
+
+    def test_a_task_declares_paths_not_dispositions(self) -> None:
+        spec = TaskSpec(
+            id=TaskId("demo-hello"),
+            domain="demo",
+            instruction="write",
+            image=ImageRef(name="sandbox-base-cli"),
+            artifacts=("/ale/output",),
+        )
+        assert spec.artifacts == ("/ale/output",)
+
+    def test_the_run_decides_whether_to_keep_them(self) -> None:
+        assert RunConfig().artifacts.collect == "host"
+        dropped = RunConfig.model_validate({"artifacts": {"collect": "none"}})
+        assert dropped.artifacts.collect == "none"
+
+    def test_the_policy_is_part_of_the_run_identity(self) -> None:
+        """Two runs that kept different things are not the same run."""
+        kept = RunConfig()
+        dropped = RunConfig.model_validate({"artifacts": {"collect": "none"}})
+        assert kept.config_hash != dropped.config_hash
+
+    @pytest.mark.asyncio
+    async def test_discarding_still_satisfies_the_sink(self) -> None:
+        """Environments collect unconditionally; the sink is where the policy lives."""
+        sink = _DiscardedArtifacts(Path("/nowhere"))
+        assert await sink.collect(None, "/ale/output", "output") == sink.path("output")
+
+
+class TestFailedModelCalls:
+    def test_an_upstream_failure_is_still_recorded(self) -> None:
+        """Silence would read as an idle agent; it was a provider returning 529s."""
+        record = TransportRecord(
+            seq=0, episode_id="e", model="m", request_digest=DIGEST, upstream_status=529
+        )
+        assert record.upstream_status == 529
+        assert record.input_tokens == 0  # a failed call bought nothing
