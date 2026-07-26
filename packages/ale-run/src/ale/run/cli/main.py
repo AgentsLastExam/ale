@@ -21,6 +21,7 @@ from ale.core.verdict import Status
 from ale.run import __version__
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
+from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, Limits
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
@@ -263,8 +264,10 @@ async def _run_one(
     )
 
     gateway = None
-    gateway_url, token = "", ""
+    proxy = None
+    gateway_url, token, proxy_url = "", "", ""
     needs_model = settings.agent.name not in {"oracle", "nop"}
+    allowed = frozenset(task.spec.network.allowed_hosts)
 
     if needs_model:
         api_key, upstream = provider_credentials()
@@ -282,9 +285,16 @@ async def _run_one(
                 episode_id="pending",
                 model=settings.agent.model,
                 limits=Limits(**settings.gateway.limits.model_dump()),
+                # What the task declared, and nothing it did not: the proxy refuses the
+                # rest, so an agent cannot widen its own reach by asking.
+                allowed_hosts=allowed,
             )
         )
         token = session.token
+
+        if allowed:
+            proxy = EgressProxy(gateway.sessions, host=_gateway_host(settings))
+            proxy_url = await proxy.start()
 
     ledger = Ledger(run_dir)
     ledger.open_run(run_id, settings.config_hash)
@@ -317,6 +327,7 @@ async def _run_one(
                 work_dir=settings.work_dir,
                 collect_artifacts=settings.artifacts.collect == "host",
                 provenance=inputs,
+                proxy_url=proxy_url,
             )
             ledger.start_episode(
                 episode_id=result.episode_id, run_id=run_id, identity=identity, spec=task.spec
@@ -335,6 +346,8 @@ async def _run_one(
                 failures += 1
     finally:
         ledger.close()
+        if proxy is not None:
+            await proxy.stop()
         if gateway is not None:
             await gateway.stop()
 

@@ -64,6 +64,26 @@ class GatewaySession:
     usage: Usage = field(default_factory=Usage)
     seq: int = 0
 
+    allowed_hosts: frozenset[str] = frozenset()
+    """Hosts this episode may reach through the proxy, beyond the model endpoint.
+
+    Empty means none, which is the default: a task that declared no additional access
+    gets none, and cannot acquire any by asking.
+    """
+
+    def may_reach(self, host: str) -> bool:
+        """Whether ``host`` is allowlisted, matching subdomains of a declared name.
+
+        Matching is on the name the client asked for, not on a resolved address: a task
+        declares ``pypi.org`` because that is what it means, and pinning to whatever IP
+        that resolved to once would break the task rather than tighten it.
+        """
+        name = host.partition(":")[0].lower().rstrip(".")
+        return any(
+            name == allowed or name.endswith(f".{allowed}")
+            for allowed in (a.lower() for a in self.allowed_hosts)
+        )
+
     _replay: dict[str, Any] = field(default_factory=dict, repr=False)
     _inflight: dict[str, asyncio.Future[Any]] = field(default_factory=dict, repr=False)
 

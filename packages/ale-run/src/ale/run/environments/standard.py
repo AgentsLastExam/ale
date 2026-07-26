@@ -90,6 +90,7 @@ class StandardEnvironment(Environment):
             resources=spec.resources,
             network=spec.network,
             gateway_url=ctx.session.gateway_url or None,
+            proxy_url=ctx.proxy_url,
             env={"ALE_EPISODE_ID": ctx.episode_id},
             needs_gui=False,
         )

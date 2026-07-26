@@ -116,6 +116,9 @@ class EpisodeContext:
     phases: list[PhaseSpan] = field(default_factory=list)
     """Filled in as each phase completes; folded into the episode's timing record."""
 
+    proxy_url: str = ""
+    """Egress proxy for allowlist tasks; empty when none was started."""
+
     image_digest: str | None = None
     """Resolved when the sandbox is provisioned — the tag alone proves nothing."""
 

@@ -142,6 +142,7 @@ async def run_episode(
     work_dir: str = "/ale/work",
     collect_artifacts: bool = True,
     provenance: ProvenanceInputs | None = None,
+    proxy_url: str = "",
 ) -> EpisodeResult:
     """Administer one task and return its verdict.
 
@@ -169,6 +170,7 @@ async def run_episode(
         ),
         seed=seed,
         work_dir=work_dir,
+        proxy_url=proxy_url,
     )
 
     try:

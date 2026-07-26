@@ -165,7 +165,7 @@ class DockerProvider(Provider):
             os="linux",
             gui=True,  # depends on the image; the GUI base image provides a desktop
             gpus=0,
-            network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.OPEN}),
+            network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.ALLOWLIST, NetworkMode.OPEN}),
         )
 
     async def preflight(self) -> None:
@@ -193,8 +193,17 @@ class DockerProvider(Provider):
             argv += ["-e", f"{key}={value}"]
         if request.gateway_url:
             host_ip = await self._bridge_host_ip(network)
+            reachable = _reachable(request.gateway_url)
             argv += ["--add-host", f"{HOST_ALIAS}:{host_ip}"]
-            argv += ["-e", f"ALE_GATEWAY_URL={_reachable(request.gateway_url)}"]
+            argv += ["-e", f"ALE_GATEWAY_URL={reachable}"]
+        if request.network.mode is NetworkMode.ALLOWLIST and request.proxy_url:
+            # Conventional proxy variables, because that is what the tools a task will
+            # reach for already read. Traffic that ignores them has nowhere to go: the
+            # bridge has no route off the host, so this fails closed.
+            proxy = _reachable(request.proxy_url)
+            for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                argv += ["-e", f"{name}={proxy}"]
+            argv += ["-e", f"NO_PROXY={HOST_ALIAS},localhost,127.0.0.1"]
         argv += [request.image_ref, "sleep", "infinity"]
 
         code, _, stderr = await _docker(*argv, timeout=300)
@@ -223,12 +232,13 @@ class DockerProvider(Provider):
     async def _ensure_network(self, sandbox_id: str, request: SandboxRequest) -> str | None:
         """Create the per-episode network.
 
-        ``block`` uses ``--internal``: the bridge has no route off the host, so the only
-        thing reachable is whatever else is attached to it — the gateway. ``open`` uses
-        the default bridge. ``allowlist`` is not offered yet, and the capability check
-        rejects it rather than silently degrading to open.
+        ``block`` and ``allowlist`` both use ``--internal``: the bridge has no route off
+        the host, so the only reachable thing is the gateway. They differ in what the
+        gateway will then forward, not in what the sandbox can dial — which is why
+        allowlisting needs no privileged host rules and no tooling inside an image we do
+        not control. ``open`` uses the default bridge.
         """
-        if request.network.mode is not NetworkMode.BLOCK:
+        if request.network.mode is NetworkMode.OPEN:
             return None
         network = f"ale-net-{sandbox_id}"
         code, _, stderr = await _docker("network", "create", "--internal", network, timeout=60)

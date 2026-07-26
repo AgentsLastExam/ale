@@ -109,6 +109,9 @@ class SandboxRequest(BaseModel):
     env: dict[str, str] = Field(
         default_factory=dict, description="Non-secret variables; credentials stay host side"
     )
+    proxy_url: str = ""
+    """Egress proxy for ``allowlist`` mode; empty when the task declared no hosts."""
+
     needs_gui: bool = False
 
 
