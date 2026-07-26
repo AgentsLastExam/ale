@@ -3,7 +3,12 @@ name: ci
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
+
+# No pull_request trigger: development goes straight to main during the initial build-out.
+# It also removes a failure mode — the paths filter calls the PR files API, which needs a
+# `pull-requests: read` grant this repository does not give, so PR runs failed on
+# permissions rather than on anything about the code.
 
 concurrency:
   group: ci-${{ github.ref }}
