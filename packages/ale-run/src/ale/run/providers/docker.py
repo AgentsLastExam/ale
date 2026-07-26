@@ -38,6 +38,9 @@ GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
 #: a supervisor. Anything else, and we supply a command that simply stays alive.
 KEEPALIVE_LABEL = "ale.keepalive"
 
+#: An image sets this to "true" when it starts a desktop, so provisioning waits for it.
+GUI_LABEL = "ale.gui"
+
 #: Optional per-image interpreter hint; falls back to whatever `python3` resolves to.
 GUESTD_PYTHON = PurePosixPath("/opt/ale/python")
 LABEL = "ale.episode"
@@ -226,7 +229,7 @@ class DockerProvider(Provider):
         try:
             await self._install_guestd(container)
             client = await self._connect(container)
-            if request.needs_gui:
+            if request.needs_gui or await self._has_desktop(request.image_ref):
                 await self._await_desktop(client)
         except Exception:
             await _docker("rm", "-f", "-v", container)
@@ -273,6 +276,23 @@ class DockerProvider(Provider):
         if code != 0 or not out.strip():
             raise ProviderStartError(f"could not read the gateway address of {network}: {stderr}")
         return out.strip()
+
+    async def _has_desktop(self, reference: str) -> bool:
+        """Whether this image brings a desktop up, and so must be waited for.
+
+        Asked of the image rather than derived from the harness. A task's own setup can
+        need the screen — this one opens a window on it — so a desktop image has to be
+        ready whichever agent is about to run, including one that never looks at it.
+        Deriving it from the harness made `--agent nop` skip the wait and fail in setup
+        with "Can't open display", while the same task passed under a stepwise agent.
+        """
+        return await self._label(reference, GUI_LABEL) == "true"
+
+    async def _label(self, reference: str, name: str) -> str:
+        code, out, _ = await _docker(
+            "image", "inspect", "--format", f'{{{{index .Config.Labels "{name}"}}}}', reference
+        )
+        return out.strip() if code == 0 else ""
 
     async def _runs_its_own_command(self, reference: str) -> bool:
         """Whether this image's own command must be left alone.

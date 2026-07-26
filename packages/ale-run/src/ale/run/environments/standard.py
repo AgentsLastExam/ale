@@ -101,9 +101,8 @@ class StandardEnvironment(Environment):
             gateway_url=ctx.session.gateway_url or None,
             proxy_url=ctx.proxy_url,
             env={"ALE_EPISODE_ID": ctx.episode_id},
-            # Derived rather than declared: a stepwise agent works by looking at the
-            # screen, so it needs one. Asking every task to repeat that would be a field
-            # that can disagree with what actually runs.
+            # A stepwise agent needs a screen by definition. An image that brings a
+            # desktop up is waited for regardless — a task's own setup can need it too.
             needs_gui=isinstance(self.harness, PolicyHarness),
         )
         sandbox = await ctx.sandboxes.acquire(request)

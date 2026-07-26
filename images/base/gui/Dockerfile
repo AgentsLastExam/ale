@@ -787,8 +787,10 @@ RUN mkdir -p /ale/kits /ale/store && chmod -R 0777 /ale
 RUN chown -R root:root /opt/ale && chmod -R go-rwx /opt/ale
 
 
-# This image's command starts the desktop session, so it must not be replaced.
-LABEL ale.keepalive="image"
+# This image's command starts the desktop session, so it must not be replaced — and a
+# sandbox built from it is not ready until that session can actually be photographed.
+LABEL ale.keepalive="image" \
+      ale.gui="true"
 
 EXPOSE 5901 6901
 
