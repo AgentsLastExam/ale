@@ -71,7 +71,7 @@ def root(
 def run(
     reference: Annotated[str, typer.Argument(help="Task path, or <domain>/<task>")],
     agent: Annotated[
-        str, typer.Option("--agent", help="claude-code, oracle or nop")
+        str, typer.Option("--agent", help="claude-code, cua-gui, oracle or nop")
     ] = "claude-code",
     model: Annotated[str, typer.Option("--model")] = "",
     provider: Annotated[str, typer.Option("--provider")] = "docker",
@@ -211,8 +211,14 @@ def _harness(settings: RunConfig):  # type: ignore[no-untyped-def]
             return NopHarness()
         case "claude-code":
             return ClaudeCodeHarness(cli_version=settings.agent.version, **settings.agent.kwargs)
+        case "cua-gui":
+            # Imported here: cua-lite is optional and its tree is heavy, so a run that
+            # does not select it should not pay for it.
+            from ale.run.harnesses.cua_gui import CuaGuiHarness
+
+            return CuaGuiHarness(model=settings.agent.model, **settings.agent.kwargs)
         case unknown:
-            raise AleError(f"unknown agent {unknown!r}; try claude-code, oracle or nop")
+            raise AleError(f"unknown agent {unknown!r}; try claude-code, cua-gui, oracle or nop")
 
 
 def _provider(settings: RunConfig):  # type: ignore[no-untyped-def]
