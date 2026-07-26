@@ -1,6 +1,8 @@
 # 0007 — Separate the data store from the workspace
 
-**Status**: accepted (2026-07-25)
+**Status**: accepted (2026-07-25); partly superseded by [0008](0008-task-owned-paths.md) (2026-07-25) — the
+workspace half is gone and `setup.prebakeable` is deleted. The content-derived store key
+below still stands, and is what still makes pre-baking possible.
 
 ## Context
 

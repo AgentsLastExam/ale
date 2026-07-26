@@ -1,6 +1,8 @@
 # 0005 — A fixed workspace replaces path templating; variants stay parameters
 
-**Status**: accepted (2026-07-24)
+**Status**: accepted (2026-07-24); partly superseded by [0008](0008-task-owned-paths.md) (2026-07-25) — the
+fixed workspace is gone; a task declares its own absolute paths. The placeholder triage
+and strict rendering below still stand.
 
 ## Context
 

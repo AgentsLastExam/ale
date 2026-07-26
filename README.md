@@ -7,14 +7,40 @@ One engine repository, many task repositories. This repo contains no task conten
 
 ## Quickstart
 
+Three commands from a clean machine to a scored result:
+
 ```bash
 git clone git@github.com:AgentsLastExam/ale.git && cd ale
-just bootstrap                  # or: uv sync --frozen
+just bootstrap                                    # or: uv sync --frozen
 uv run ale run demo/readfile_secret --agent claude-code
 ```
 
-Task content is fetched automatically from the domain's task repository (pinned in
-[`registry.toml`](registry.toml)) and cached. `just doctor` explains anything missing.
+Task content is fetched from the domain's task repository (pinned in
+[`registry.toml`](registry.toml)) and cached; the sandbox image is pulled on first use.
+`just doctor` explains anything missing.
+
+Model access goes through the gateway, so put a key in the checkout's `.env` (copy
+`.env.example`). It never enters a sandbox — the agent gets a URL and a per-episode
+token. To try the pipeline with no key and no model at all:
+
+```bash
+uv run ale run demo/readfile_secret --agent oracle   # runs the task's own solution
+uv run ale run demo/readfile_secret --agent nop      # does nothing; scores a real zero
+```
+
+### The rest of the surface
+
+```bash
+uv run ale lint tasks/            # static checks, no container
+uv run ale validate tasks/        # every oracle must reach its declared score
+uv run ale new-task tasks/mine    # scaffold a task that already passes both
+uv run ale run <task> -n 5 --run-id sweep     # five episodes, resumable by that id
+uv run ale run <task> --require-reportable    # fail unless provenance could be published
+```
+
+Writing tasks: [docs/task-authoring.md](docs/task-authoring.md). Porting old ones:
+[docs/migration-from-legacy.md](docs/migration-from-legacy.md). What is and is not
+guaranteed: [docs/security-model.md](docs/security-model.md).
 
 ## Concepts
 
