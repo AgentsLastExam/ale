@@ -27,3 +27,6 @@ secrets.env
 .idea/
 .DS_Store
 *.swp
+
+# Worktrees live inside the repo but are separate checkouts, never content.
+.claude/worktrees/
