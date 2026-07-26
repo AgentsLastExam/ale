@@ -72,6 +72,18 @@ and nothing in the framework parses an identifier (ADR 0006).
 Scripts are not declared. A stage's folder is copied into the sandbox when that stage
 runs, and its entry point (`setup/run.sh`, `verify/run.sh`) executes if present.
 
+## Images
+
+An **unqualified** name is ours, and resolves against the project registry:
+`sandbox-base-cli` becomes `ghcr.io/agentslastexam/sandbox-base-cli`.
+
+A **public** image must be written fully qualified — `docker.io/library/python:3.12-slim`,
+not `python:3.12-slim`. Without the rule, a short public name is silently rewritten into
+our namespace and the run fails against a registry that never had it.
+
+Tags resolve to a digest at run time and the digest is recorded in provenance, so a tag
+that moved upstream is detectable rather than silently comparable.
+
 ## Paths
 
 **A task decides where its own data goes.** There is no framework-wide layout: a mount's

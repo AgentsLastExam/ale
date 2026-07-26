@@ -1,19 +1,19 @@
 # Domain namespace -> task repository.
 #
-# Several domains may share one repository (each with its own subpath), which is how
-# the Agents' Last Exam collection keeps its existing task identifiers: `demo/hello`
-# stays `demo/hello` after conversion.
+# Several domains may share one repository, each under its own subpath. The identifier a
+# task ends up with is derived from its folder path and is opaque, so moving a task
+# between subpaths is a rename, not a schema change.
 #
-# Resolution: `ale run <domain>/<task>` fetches the repository at `default_ref` into
-# the shared cache and reads `<path>/<task>`. Override the pin with `--tasks-ref`.
+# Resolution: `ale run <domain>/<task>` fetches the repository at `default_ref` into the
+# shared cache and reads `<path>/<task>`. Override the pin with `--tasks-ref`.
 
 [domains.demo]
 repo = "https://github.com/rdi-berkeley/agents-last-exam.git"
 path = "tasks/demo"
-default_ref = "main"
+default_ref = "feat/tasks-v2"   # the rebuilt tasks; moves to main once merged
 
-# Subject domains are registered as their tasks are converted to the new format.
+# Subject domains are registered as their tasks are rebuilt to the current standard.
 # [domains.business_finance]
 # repo = "https://github.com/rdi-berkeley/agents-last-exam.git"
 # path = "tasks/business_finance"
-# default_ref = "main"
+# default_ref = "feat/tasks-v2"
