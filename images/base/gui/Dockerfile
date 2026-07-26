@@ -20,5 +20,14 @@ COPY packages/ale-run/src/ale/run/guestd/ /opt/ale/guestd/
 # The framework's own namespace. Task data goes wherever each task declares.
 RUN mkdir -p /ale/kits /ale/store && chmod -R 0777 /ale /opt/ale
 
+# A container has no display manager, so X has to be started explicitly. Without this
+# the image would look like a desktop image and behave like a headless one — every
+# screenshot failing with "unable to open display".
+COPY images/base/gui/entrypoint.sh /opt/ale/entrypoint.sh
+RUN chmod 0755 /opt/ale/entrypoint.sh
+
+ENV DISPLAY=:0
+
 USER user
+ENTRYPOINT ["/opt/ale/entrypoint.sh"]
 CMD ["sleep", "infinity"]

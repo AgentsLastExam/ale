@@ -50,6 +50,11 @@ class GatewayLimits(BaseModel):
     max_input_tokens: int | None = Field(default=None, gt=0)
     max_output_tokens: int | None = Field(default=None, gt=0)
     max_total_tokens: int | None = Field(default=400_000, gt=0)
+    max_steps: int = Field(
+        default=100,
+        gt=0,
+        description="Observe-act steps a framework-driven agent may take in one episode",
+    )
     max_cost_usd: float | None = Field(default=5.0, gt=0)
 
 

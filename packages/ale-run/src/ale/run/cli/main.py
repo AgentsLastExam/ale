@@ -317,7 +317,7 @@ async def _run_one(
 
             result = await run_episode(
                 task,
-                StandardEnvironment(harness),
+                StandardEnvironment(harness, max_steps=settings.gateway.limits.max_steps),
                 _provider(settings),
                 run_dir=run_dir,
                 gateway_url=gateway_url,
