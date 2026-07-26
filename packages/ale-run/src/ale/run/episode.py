@@ -28,7 +28,7 @@ from ale.core.errors import (
 from ale.core.harness import HarnessSession
 from ale.core.sandbox import Provider, Sandbox, SandboxRequest
 from ale.core.task import Task
-from ale.core.trace import TraceWriter
+from ale.core.trace import TimingRecord, TraceLayer, TraceWriter, read_records
 from ale.core.verdict import Status, Verdict
 
 __all__ = ["EpisodeResult", "run_episode"]
@@ -117,6 +117,7 @@ async def run_episode(
     token: str = "",
     model: str = "",
     seed: int = 0,
+    work_dir: str = "/ale/work",
 ) -> EpisodeResult:
     """Administer one task and return its verdict.
 
@@ -142,6 +143,7 @@ async def run_episode(
             episode_id=episode_id, gateway_url=gateway_url, token=token, model=model
         ),
         seed=seed,
+        work_dir=work_dir,
     )
 
     try:
@@ -151,11 +153,49 @@ async def run_episode(
     finally:
         await lease.release_all()
 
+    duration = time.monotonic() - started
+    _write_timing(ctx.trace, episode_dir, duration)
+
     return EpisodeResult(
         episode_id=episode_id,
         verdict=verdict,
         run_dir=episode_dir,
-        duration_sec=time.monotonic() - started,
+        duration_sec=duration,
+    )
+
+
+def _write_timing(trace: TraceWriter, episode_dir: Path, duration_sec: float) -> None:
+    """Record where the wall clock went, from evidence already on disk.
+
+    One duration says almost nothing: twenty minutes could be a slow model, a slow
+    sandbox or slow framework code, and each has a different fix. Model time comes from
+    the gateway's own records and sandbox time from executed commands, so the split
+    cannot drift from what happened; the remainder is framework time, which is the
+    honest way to report what nobody accounted for.
+    """
+    total_ms = int(duration_sec * 1000)
+    model_ms = sum(
+        int(record.get("latency_ms") or 0)
+        for record in read_records(episode_dir / "trace.transport.jsonl")
+    )
+    sandbox_ms = sum(
+        int(record.get("duration_ms") or 0)
+        for record in read_records(episode_dir / "trace.semantic.jsonl")
+        if record.get("kind") == "exec"
+    )
+    # Clamp before taking the remainder: concurrent work can otherwise sum past the wall
+    # clock and produce a negative framework share.
+    model_ms = min(model_ms, total_ms)
+    sandbox_ms = min(sandbox_ms, total_ms - model_ms)
+
+    trace.write_semantic(
+        TimingRecord(
+            seq=trace.next_seq(TraceLayer.SEMANTIC),
+            total_ms=total_ms,
+            model_ms=model_ms,
+            sandbox_ms=sandbox_ms,
+            framework_ms=total_ms - model_ms - sandbox_ms,
+        )
     )
 
 

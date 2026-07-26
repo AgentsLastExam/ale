@@ -24,7 +24,16 @@ from ale.core.lock import (
 )
 from ale.core.sandbox import Capabilities
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
-from ale.core.trace import DesktopAction, ExecRecord, TraceLayer, TraceWriter, read_records
+from ale.core.trace import (
+    DesktopAction,
+    ExecRecord,
+    TimingRecord,
+    TraceLayer,
+    TraceWriter,
+    TransportRecord,
+    read_records,
+)
+from ale.run.episode import _write_timing
 
 pytestmark = pytest.mark.unit
 
@@ -219,3 +228,52 @@ class TestGuestProtocol:
     def test_missing_file_is_a_typed_error(self) -> None:
         (reply,) = self._talk({"id": 7, "op": "read_file", "params": {"path": "/no/such/file"}})
         assert reply["error"]["code"] == "not_found"  # type: ignore[index]
+
+
+class TestEpisodeTiming:
+    """Where the wall clock went — one duration cannot tell you what to fix."""
+
+    def test_shares_sum_to_the_total(self) -> None:
+        record = TimingRecord(seq=0, total_ms=1000, model_ms=700, sandbox_ms=200, framework_ms=100)
+        assert record.model_ms + record.sandbox_ms + record.framework_ms == record.total_ms
+
+    def test_split_is_computed_from_recorded_evidence(self, tmp_path: Path) -> None:
+        """Model time comes from the gateway's own records, so it cannot be asserted."""
+        trace = TraceWriter(tmp_path)
+        trace.write_transport(
+            TransportRecord(
+                seq=0,
+                episode_id="e",
+                model="m",
+                request_digest=DIGEST,
+                latency_ms=600,
+            )
+        )
+        trace.write_semantic(ExecRecord(seq=0, argv_digest=DIGEST, exit_code=0, duration_ms=150))
+
+        _write_timing(trace, tmp_path, duration_sec=1.0)
+
+        (timing,) = [
+            r for r in read_records(trace.path(TraceLayer.SEMANTIC)) if r["kind"] == "timing"
+        ]
+        assert timing["model_ms"] == 600
+        assert timing["sandbox_ms"] == 150
+        assert timing["framework_ms"] == 250
+
+    def test_concurrent_work_cannot_produce_a_negative_share(self, tmp_path: Path) -> None:
+        """Overlapping calls can sum past the wall clock; the remainder must stay real."""
+        trace = TraceWriter(tmp_path)
+        for seq in range(3):
+            trace.write_transport(
+                TransportRecord(
+                    seq=seq, episode_id="e", model="m", request_digest=DIGEST, latency_ms=900
+                )
+            )
+
+        _write_timing(trace, tmp_path, duration_sec=1.0)
+
+        (timing,) = [
+            r for r in read_records(trace.path(TraceLayer.SEMANTIC)) if r["kind"] == "timing"
+        ]
+        assert timing["model_ms"] == 1000
+        assert timing["framework_ms"] == 0

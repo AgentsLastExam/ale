@@ -79,6 +79,10 @@ class RunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: str = "docker"
+    work_dir: str = Field(
+        default="/ale/work",
+        description="Scratch directory created in every sandbox; not a task's concern",
+    )
     agent: AgentConfig = AgentConfig()
     gateway: GatewayConfig = GatewayConfig()
     episodes: int = Field(default=1, ge=1)

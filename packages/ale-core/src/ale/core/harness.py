@@ -25,18 +25,29 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from ale.core.sandbox import Sandbox
-from ale.core.taskspec import HarnessFamily
 from ale.core.trace import DesktopAction
 
 __all__ = [
     "AgentRun",
     "AutonomousHarness",
     "Harness",
+    "HarnessFamily",
     "HarnessSession",
     "Observation",
     "PolicyHarness",
     "ResumeSupport",
 ]
+
+
+class HarnessFamily(StrEnum):
+    """Which side owns the interaction loop.
+
+    A property of the harness, not of the task: the same task can be attempted by an
+    agent that runs itself and by one the framework drives step by step.
+    """
+
+    AUTONOMOUS = "autonomous"
+    POLICY = "policy"
 
 
 class ResumeSupport(StrEnum):

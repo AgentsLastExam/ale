@@ -28,9 +28,7 @@ IMAGE = "docker.io/library/python:3.12-slim"
 def write_repo(root: Path, *, with_oracle: bool = True, verify_body: str | None = None) -> Path:
     """Lay out a minimal task repository: manifest, instruction, setup, verify, oracle."""
     root.mkdir(parents=True, exist_ok=True)
-    (root / "domain.yaml").write_text(
-        f"name: demo\nrequires_core: '>=0.1,<0.2'\ndefault_image: {IMAGE}\n"
-    )
+    (root / "domain.yaml").write_text("name: demo\nrequires_core: '>=0.1,<0.2'\n")
     task = root / "tasks" / "hello"
     (task / "setup").mkdir(parents=True)
     (task / "verify").mkdir()
@@ -40,7 +38,7 @@ def write_repo(root: Path, *, with_oracle: bool = True, verify_body: str | None 
         image: {IMAGE}
         resources: {{ cpus: 1, memory_mb: 512 }}
         timeouts: {{ setup: 120, agent: 120, verify: 120 }}
-        artifacts: [/ale/output]
+        artifacts: [{{ path: /ale/output }}]
         params: {{ greeting: hello }}
         validate: {{ min_reward: 1.0 }}
         """).strip()

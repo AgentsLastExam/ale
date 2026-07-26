@@ -209,6 +209,7 @@ async def _run_one(
             token=token,
             model=settings.agent.model,
             seed=settings.seed,
+            work_dir=settings.work_dir,
         )
     finally:
         if gateway is not None:
@@ -238,6 +239,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
             StandardEnvironment(OracleHarness()),
             _provider(settings),
             run_dir=runs_dir / "validate",
+            work_dir=settings.work_dir,
         )
         reward = result.verdict.primary_reward
         passed = (

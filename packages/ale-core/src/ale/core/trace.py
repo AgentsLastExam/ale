@@ -34,7 +34,9 @@ __all__ = [
     "InstructionRecord",
     "NoteRecord",
     "ObservationRecord",
+    "PhaseSpan",
     "SemanticRecord",
+    "TimingRecord",
     "TraceWriter",
     "TransportRecord",
     "VerifierRecord",
@@ -149,6 +151,35 @@ class VerifierRecord(_Base):
     stdout_ref: str | None = None
 
 
+class PhaseSpan(BaseModel):
+    """How long one phase took."""
+
+    model_config = _RECORD
+
+    name: str
+    duration_ms: int = Field(default=0, ge=0)
+
+
+class TimingRecord(_Base):
+    """Where an episode's wall clock went.
+
+    A single duration answers almost nothing: an episode that took twenty minutes is a
+    slow model, a slow sandbox or a slow framework, and those have different fixes. The
+    split is computed from evidence already recorded — model time from the gateway's
+    calls, sandbox time from executed commands — so it cannot drift from what happened.
+
+    ``model_ms + sandbox_ms + framework_ms == total_ms`` by construction: the framework
+    share is the remainder, which is the honest way to report time nobody accounted for.
+    """
+
+    kind: Literal["timing"] = "timing"
+    total_ms: int = Field(ge=0)
+    model_ms: int = Field(default=0, ge=0)
+    sandbox_ms: int = Field(default=0, ge=0)
+    framework_ms: int = Field(default=0, ge=0)
+    phases: tuple[PhaseSpan, ...] = ()
+
+
 class NoteRecord(_Base):
     kind: Literal["note"] = "note"
     message: str
@@ -162,6 +193,7 @@ SemanticRecord = Annotated[
     | ObservationRecord
     | ActionRecord
     | VerifierRecord
+    | TimingRecord
     | NoteRecord,
     Field(discriminator="kind"),
 ]

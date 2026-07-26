@@ -109,6 +109,9 @@ class EpisodeContext:
     session: HarnessSession
     """Gateway address plus this episode's bearer token — never a provider credential."""
 
+    work_dir: str = "/ale/work"
+    """Framework scratch inside the sandbox, created before setup runs."""
+
     seed: int = 0
     extras: dict[str, object] = field(default_factory=dict)
 

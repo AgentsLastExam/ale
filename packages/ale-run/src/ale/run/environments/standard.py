@@ -27,10 +27,10 @@ from ale.core.harness import AutonomousHarness, PolicyHarness
 from ale.core.kit import KITS_ROOT
 from ale.core.sandbox import Sandbox, SandboxRequest
 from ale.core.task import Task
-from ale.core.taskspec import HarnessFamily
+from ale.core.taskspec import AssetMount
 from ale.core.trace import ExecRecord, InstructionRecord, NoteRecord, TraceLayer, VerifierRecord
 from ale.core.verdict import Verdict
-from ale.run.assets import stage_components
+from ale.run.assets import stage_mounts
 from ale.run.harnesses.builtin import ORACLE_DIR
 from ale.run.images import resolve_ref
 
@@ -80,7 +80,7 @@ class StandardEnvironment(Environment):
             network=spec.network,
             gateway_url=ctx.session.gateway_url or None,
             env={"ALE_EPISODE_ID": ctx.episode_id},
-            needs_gui=spec.needs_gui(),
+            needs_gui=False,
         )
         return await ctx.sandboxes.acquire(request)
 
@@ -94,9 +94,12 @@ class StandardEnvironment(Environment):
         Directories come from the task — its asset destinations and the paths it wants
         collected — so a domain that needs a different layout simply declares one.
         """
-        declared = [mount.dest for mount in ctx.spec.setup.assets] + list(ctx.spec.artifacts)
-        if declared:
-            await sandbox.exec(["mkdir", "-p", *declared])
+        declared = [
+            ctx.work_dir,
+            *(mount.dest for mount in ctx.spec.setup.assets),
+            *(artifact.path for artifact in ctx.spec.artifacts),
+        ]
+        await sandbox.exec(["mkdir", "-p", *declared])
 
         folder = getattr(task, "folder", None)
         if folder is None:
@@ -109,7 +112,7 @@ class StandardEnvironment(Environment):
             await sandbox.exec(["mkdir", "-p", destination])
             await sandbox.upload_dir(str(files), destination)
 
-        await self._stage_assets(ctx, sandbox, folder, ctx.spec.setup.assets, stage="setup")
+        await self._stage_assets(ctx, sandbox, ctx.spec.setup.assets)
         await self._install_kits(ctx, sandbox, folder, ctx.spec.setup.kits)
 
         if setup_dir := folder.stage_dir("setup"):
@@ -127,13 +130,9 @@ class StandardEnvironment(Environment):
             )
         )
 
-        if spec.harness_family is HarnessFamily.POLICY:
-            raise NotImplementedError(
-                "the policy loop is not implemented yet; this task needs an autonomous harness"
-            )
-
         harness = self.harness
-        assert isinstance(harness, AutonomousHarness)
+        if not isinstance(harness, AutonomousHarness):
+            raise NotImplementedError("the policy loop is not implemented yet")
 
         if harness.name == "oracle":
             await self._upload_oracle(task, sandbox)
@@ -166,7 +165,7 @@ class StandardEnvironment(Environment):
             raise TaskError("task has no verify stage")
 
         await sandbox.upload_dir(str(verify_dir), str(VERIFY_DIR))
-        await self._stage_assets(ctx, sandbox, folder, ctx.spec.verify.assets, stage="verify")
+        await self._stage_assets(ctx, sandbox, ctx.spec.verify.assets)
         await self._install_kits(ctx, sandbox, folder, ctx.spec.verify.kits)
 
         result = await self._run_stage(ctx, sandbox, VERIFY_DIR, Phase.VERIFY)
@@ -184,10 +183,12 @@ class StandardEnvironment(Environment):
 
     async def _teardown(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         # Collection is best effort: a sandbox that died still has to be released.
-        for index, path in enumerate(ctx.spec.artifacts):
-            name = Path(path).name or f"artifact-{index}"
+        for index, artifact in enumerate(ctx.spec.artifacts):
+            if artifact.collect == "none":
+                continue
+            name = Path(artifact.path).name or f"artifact-{index}"
             with contextlib.suppress(Exception):
-                await ctx.artifacts.collect(sandbox, path, name)
+                await ctx.artifacts.collect(sandbox, artifact.path, name)
         await ctx.sandboxes.release(sandbox)
 
     # --- helpers ---
@@ -198,6 +199,7 @@ class StandardEnvironment(Environment):
         entry = directory / "run.sh"
         env = {
             "ALE_STAGE_DIR": str(directory),
+            "ALE_WORK_DIR": ctx.work_dir,
             "ALE_PARAMS_JSON": str(directory / "params.json"),
             "ALE_VERDICT_PATH": str(VERDICT_PATH),
             "PYTHONPATH": str(KITS_ROOT / "*"),
@@ -232,27 +234,18 @@ class StandardEnvironment(Environment):
         return ":".join(paths)
 
     async def _stage_assets(
-        self,
-        ctx: EpisodeContext,
-        sandbox: Sandbox,
-        folder: object,
-        components: tuple[str, ...],
-        *,
-        stage: str,
+        self, ctx: EpisodeContext, sandbox: Sandbox, mounts: tuple[AssetMount, ...]
     ) -> None:
-        """Project declared components into the workspace for this stage.
+        """Copy this stage's declared data into the sandbox.
 
-        The materialised keys and origins are kept for provenance: a run served from a
-        pre-baked image has to be as explainable as one that downloaded everything.
+        Keys and origins are kept for provenance: a run served from cache has to be as
+        explainable as one that downloaded everything.
         """
-        if not components:
+        if not mounts:
             return
-        taskset = getattr(folder, "assets_lock", None)
-        if taskset is None:
-            raise TaskError("this task declares assets, but its domain has no asset lock")
-        staged = await stage_components(sandbox, taskset, components, stage=stage)  # type: ignore[arg-type]
+        staged = await stage_mounts(sandbox, mounts)
         ctx.extras.setdefault("assets", []).extend(  # type: ignore[union-attr]
-            {"component": a.component, "key": a.key, "origin": a.origin.value} for a in staged
+            {"path": a.mount.path, "key": a.key, "origin": a.origin.value} for a in staged
         )
 
     async def _install_kits(
@@ -307,6 +300,4 @@ def _default_files_dest(ctx: EpisodeContext) -> str:
     """Where a task's own ``files/`` directory goes when it declared no home for it."""
     if ctx.spec.setup.assets:
         return ctx.spec.setup.assets[0].dest
-    if ctx.spec.artifacts:
-        return str(PurePosixPath(ctx.spec.artifacts[0]).parent)
-    return "/ale/input"
+    return ctx.work_dir

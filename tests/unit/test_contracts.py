@@ -92,7 +92,10 @@ class TestTaskSpec:
     def test_round_trips_through_json(self) -> None:
         spec = make_spec(
             setup=SetupStage(
-                assets=(AssetMount(component="hello_inputs", dest="/data"),), kits=("prep",)
+                assets=(
+                    AssetMount(repo="org/assets", revision="abc", path="hello/input", dest="/data"),
+                ),
+                kits=("prep",),
             )
         )
         restored = TaskSpec.model_validate_json(spec.model_dump_json(by_alias=True))

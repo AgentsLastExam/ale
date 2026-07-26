@@ -19,7 +19,7 @@ from typing import Any
 
 import yaml
 
-from ale.core.domain import AssetsLock, DomainManifest
+from ale.core.domain import DomainManifest
 from ale.core.environment import EpisodeContext
 from ale.core.errors import TaskDefinitionError
 from ale.core.ids import slugify_path
@@ -34,7 +34,6 @@ __all__ = ["ManifestTask", "ManifestTaskset", "TaskFolder", "load_task_folder"]
 TASK_MANIFEST = "task.yaml"
 INSTRUCTION = "instruction.md"
 DOMAIN_MANIFEST = "domain.yaml"
-ASSETS_LOCK = "assets.lock.yaml"
 KITS_LOCK = "kits.lock.yaml"
 TASKS_DIR = "tasks"
 
@@ -63,12 +62,9 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 class TaskFolder:
     """The on-disk form of a task, and the paths its stages use."""
 
-    def __init__(
-        self, root: Path, repo_root: Path | None = None, assets_lock: AssetsLock | None = None
-    ) -> None:
+    def __init__(self, root: Path, repo_root: Path | None = None) -> None:
         self.root = root.resolve()
         self.repo_root = (repo_root or _find_repo_root(self.root)).resolve()
-        self.assets_lock = assets_lock or AssetsLock()
 
     @property
     def relative_path(self) -> str:
@@ -134,7 +130,6 @@ class ManifestTaskset(Taskset):
         self.task_filter = task_filter
         self.repo_root = _find_repo_root(self.path)
         self.domain = DomainManifest.model_validate(_read_yaml(self.repo_root / DOMAIN_MANIFEST))
-        self.assets = self._load_assets()
         self.kits = self._load_kits()
 
     def load(self) -> Iterator[Task]:
@@ -150,10 +145,6 @@ class ManifestTaskset(Taskset):
 
     # --- loading ---
 
-    def _load_assets(self) -> AssetsLock:
-        path = self.repo_root / ASSETS_LOCK
-        return AssetsLock.model_validate(_read_yaml(path)) if path.is_file() else AssetsLock()
-
     def _load_kits(self) -> KitsLock:
         path = self.repo_root / KITS_LOCK
         return KitsLock.model_validate(_read_yaml(path)) if path.is_file() else KitsLock()
@@ -161,11 +152,11 @@ class ManifestTaskset(Taskset):
     def _task_folders(self) -> Iterator[TaskFolder]:
         """Yield the task folders selected by this taskset's path."""
         if (self.path / TASK_MANIFEST).is_file():
-            yield TaskFolder(self.path, self.repo_root, self.assets)
+            yield TaskFolder(self.path, self.repo_root)
             return
         search_root = self.path if self.path != self.repo_root else self.repo_root / TASKS_DIR
         for manifest in sorted(search_root.rglob(TASK_MANIFEST)):
-            folder = TaskFolder(manifest.parent, self.repo_root, self.assets)
+            folder = TaskFolder(manifest.parent, self.repo_root)
             if self.task_filter and self.task_filter not in folder.relative_path:
                 continue
             yield folder
@@ -231,15 +222,12 @@ class ManifestTaskset(Taskset):
         template: str,
     ) -> TaskSpec:
         payload = dict(raw)
-        image = payload.pop("image", None) or self.domain.default_image
+        image = payload.pop("image", None)
         if not image:
-            raise TaskDefinitionError(
-                f"{folder.relative_path} declares no image and {DOMAIN_MANIFEST} has no default"
-            )
+            raise TaskDefinitionError(f"{folder.relative_path} declares no image")
 
         setup = SetupStage.model_validate(payload.pop("setup", None) or {})
         verify = VerifyStage.model_validate(payload.pop("verify", None) or {})
-        self._check_visibility(folder, setup, verify)
         self._check_kits(folder, setup, verify)
 
         where = f"{folder.relative_path}/{INSTRUCTION}"
@@ -260,24 +248,6 @@ class ManifestTaskset(Taskset):
         )
 
     # --- checks the loader owns ---
-
-    def _check_visibility(self, folder: TaskFolder, setup: SetupStage, verify: VerifyStage) -> None:
-        """Answer material may not be staged before the agent."""
-        for mount in setup.assets:
-            try:
-                visibility = self.assets.visibility_of(mount.component)
-            except KeyError as exc:
-                raise TaskDefinitionError(f"{folder.relative_path}: {exc}") from exc
-            if visibility == "verify":
-                raise TaskDefinitionError(
-                    f"{folder.relative_path}: asset {mount.component!r} is marked "
-                    f"verify-only in {ASSETS_LOCK} and cannot be staged for the agent"
-                )
-        for mount in verify.assets:
-            try:
-                self.assets.component(mount.component)
-            except KeyError as exc:
-                raise TaskDefinitionError(f"{folder.relative_path}: {exc}") from exc
 
     def _check_kits(self, folder: TaskFolder, setup: SetupStage, verify: VerifyStage) -> None:
         for name in (*setup.kits, *verify.kits):

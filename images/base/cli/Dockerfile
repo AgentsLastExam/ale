@@ -28,9 +28,7 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
 # The guest service: standard library only, so the system interpreter is enough.
 COPY packages/ale-run/src/ale/run/guestd/ /opt/ale/guestd/
 
-# The workspace every task sees. Created here so an episode never has to.
-RUN mkdir -p /ale/input /ale/software /ale/output /ale/work /ale/kits /ale/store \
-    && chmod 0777 /ale/input /ale/software /ale/output /ale/work
-
-WORKDIR /ale/work
+# Only the framework's own namespace. Task data goes wherever each task declares, and
+# the run's scratch directory is created per episode from the run configuration.
+RUN mkdir -p /ale/kits /ale/store && chmod -R 0777 /ale
 CMD ["sleep", "infinity"]

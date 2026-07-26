@@ -8,7 +8,14 @@ from pydantic import ValidationError
 from ale.core.ids import TaskId
 from ale.core.kit import KitManifest, KitRuntime, KitsLock, LockedKit
 from ale.core.store import STORE_ROOT, AssetOrigin, StoreEntry, StoreManifest, data_key
-from ale.core.taskspec import AssetMount, ImageRef, SetupStage, TaskSpec, VerifyStage
+from ale.core.taskspec import (
+    ArtifactSpec,
+    AssetMount,
+    ImageRef,
+    SetupStage,
+    TaskSpec,
+    VerifyStage,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -123,31 +130,45 @@ class TestStages:
         assert spec.setup.assets == () and spec.setup.kits == ()
         assert spec.verify.assets == () and spec.verify.kits == ()
 
-    def test_setup_may_be_declared_prebakeable(self) -> None:
-        """Deterministic setup can be baked ahead; per-episode setup cannot."""
-        assert self.make().setup.prebakeable is False
-        spec = self.make(
-            setup=SetupStage(
-                assets=(AssetMount(component="inputs", dest="/data/in"),), prebakeable=True
-            )
+    def test_a_mount_carries_everything_needed_to_find_it(self) -> None:
+        """A task is readable on its own: no lookup table to keep in step with it."""
+        mount = AssetMount(
+            repo="org/assets", revision="abc123", path="demo/hello/input", dest="/ale/input"
         )
-        assert spec.setup.prebakeable
+        spec = self.make(setup=SetupStage(assets=(mount,)))
+        assert spec.setup.assets[0].repo == "org/assets"
+        assert spec.setup.assets[0].dest == "/ale/input"
 
     def test_verify_stage_carries_its_own_assets_and_kits(self) -> None:
         spec = self.make(
             verify=VerifyStage(
-                assets=(AssetMount(component="answers", dest="/gold"),),
+                assets=(
+                    AssetMount(
+                        repo="org/assets", revision="abc", path="demo/answers", dest="/gold"
+                    ),
+                ),
                 kits=("grader-protocol",),
             )
         )
-        assert spec.verify.assets[0].component == "answers"
+        assert spec.verify.assets[0].dest == "/gold"
         assert spec.verify.kits == ("grader-protocol",)
 
     def test_a_task_chooses_where_its_data_lands(self) -> None:
-        """No global layout: a simulation domain can put scenes wherever it needs them."""
+        """No global layout: a simulation domain puts scenes wherever it needs them."""
         spec = self.make(
-            setup=SetupStage(assets=(AssetMount(component="scenes", dest="/opt/sim/scenes"),)),
-            artifacts=("/opt/sim/runs",),
+            setup=SetupStage(
+                assets=(
+                    AssetMount(
+                        repo="org/sim", revision="abc", path="scenes", dest="/opt/sim/scenes"
+                    ),
+                )
+            ),
+            artifacts=(ArtifactSpec(path="/opt/sim/runs"),),
         )
         assert spec.setup.assets[0].dest == "/opt/sim/scenes"
-        assert spec.artifacts == ("/opt/sim/runs",)
+        assert spec.artifacts[0].path == "/opt/sim/runs"
+
+    def test_an_artifact_may_be_left_in_the_sandbox(self) -> None:
+        """Not everything worth writing is worth copying back."""
+        spec = self.make(artifacts=(ArtifactSpec(path="/scratch", collect="none"),))
+        assert spec.artifacts[0].collect == "none"

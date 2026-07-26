@@ -1,15 +1,15 @@
-"""Materialising task data.
+"""Fetching and staging task data.
 
-Data travels in two hops, and the split is the point (ADR 0007):
+Two hops, and the split is what makes pre-baking possible later (ADR 0007):
 
-1. **fetch** — a component lands in the host store, addressed by a key derived from
-   where the data came from rather than from any task's name, so a renamed task still
-   finds it and two tasks sharing a component share one copy.
-2. **stage** — the component is copied into a sandbox, at the path the task asked for.
+1. **fetch** — a directory of published data lands in the host store under a key derived
+   from where it came from, never from any task's name. A renamed task still finds it,
+   and two tasks naming the same data share one copy.
+2. **stage** — it is copied into a sandbox at the path the task asked for.
 
-Staging is where visibility is enforced. A component the domain's asset lock marks
-``verify`` is copied in only during scoring, so while the agent runs it is not merely
-hidden — it is absent.
+Which stage lists a mount decides when it appears. Gold answers listed under ``verify``
+are copied in during scoring only, so while the agent works they are not hidden — they
+are absent.
 """
 
 from __future__ import annotations
@@ -19,21 +19,20 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from ale.core.domain import AssetsLock, Visibility
 from ale.core.errors import AssetError
 from ale.core.sandbox import Sandbox
 from ale.core.store import AssetOrigin, data_key
 from ale.core.taskspec import AssetMount
 from ale.run.sources import cache_root
 
-__all__ = ["MaterialisedAsset", "fetch_component", "stage_components"]
+__all__ = ["MaterialisedAsset", "fetch_mount", "stage_mounts"]
 
 
 @dataclass(frozen=True)
 class MaterialisedAsset:
-    """One component, and how it got here — both go into provenance."""
+    """One mount, and how it got here — both go into provenance."""
 
-    component: str
+    mount: AssetMount
     key: str
     origin: AssetOrigin
     path: Path
@@ -43,31 +42,22 @@ def _store_dir() -> Path:
     return cache_root() / "store"
 
 
-async def fetch_component(lock: AssetsLock, component: str) -> MaterialisedAsset:
-    """Bring a component into the host store, if it is not already there.
-
-    Cached by data key, so two tasks sharing a bundle download it once and a re-run
-    downloads nothing.
-    """
-    spec = lock.component(component)
-    key = data_key(lock.repo, lock.revision, component)
+async def fetch_mount(mount: AssetMount) -> MaterialisedAsset:
+    """Bring a mount's data into the host store, if it is not already there."""
+    key = data_key(mount.repo, mount.revision, mount.path)
     target = _store_dir() / key
 
     if (target / ".complete").is_file():
-        return MaterialisedAsset(component, key, AssetOrigin.CACHE, target)
+        return MaterialisedAsset(mount, key, AssetOrigin.CACHE, target)
 
-    await _download(lock, spec.path.strip("/"), target)
+    await _download(mount, target)
     (target / ".complete").write_text(key, encoding="utf-8")
-    return MaterialisedAsset(component, key, AssetOrigin.DOWNLOAD, target)
+    return MaterialisedAsset(mount, key, AssetOrigin.DOWNLOAD, target)
 
 
-async def _download(lock: AssetsLock, subpath: str, target: Path) -> None:
-    """Fetch one subdirectory of the assets dataset.
-
-    The revision is a commit, and dataset commits are immutable — which is what makes a
-    recorded data version something a later run can actually reproduce, rather than a
-    label on a path whose contents may have changed underneath it.
-    """
+async def _download(mount: AssetMount, target: Path) -> None:
+    """Fetch one directory of a dataset at a pinned commit."""
+    subpath = mount.path.strip("/")
     staging = target.with_suffix(".partial")
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True, exist_ok=True)
@@ -76,9 +66,9 @@ async def _download(lock: AssetsLock, subpath: str, target: Path) -> None:
         from huggingface_hub import snapshot_download
 
         return snapshot_download(
-            repo_id=lock.repo,
+            repo_id=mount.repo,
             repo_type="dataset",
-            revision=lock.revision or None,
+            revision=mount.revision or None,
             allow_patterns=[f"{subpath}/**"],
             local_dir=str(staging),
         )
@@ -87,42 +77,24 @@ async def _download(lock: AssetsLock, subpath: str, target: Path) -> None:
         await asyncio.to_thread(_snapshot)
     except Exception as exc:
         shutil.rmtree(staging, ignore_errors=True)
-        raise AssetError(f"could not fetch {lock.repo}:{subpath}: {exc}") from exc
+        raise AssetError(f"could not fetch {mount.repo}:{subpath}: {exc}") from exc
 
-    # The snapshot mirrors the repository layout; keep only the part asked for, and
+    # The snapshot mirrors the repository layout; keep only the directory asked for, and
     # rename last so an interrupted download never looks complete.
     fetched = staging / subpath
     if not fetched.is_dir():
         shutil.rmtree(staging, ignore_errors=True)
-        raise AssetError(f"{subpath} is not present in {lock.repo}@{lock.revision}")
+        raise AssetError(f"{subpath} is not present in {mount.repo}@{mount.revision}")
     shutil.rmtree(target, ignore_errors=True)
     fetched.rename(target)
     shutil.rmtree(staging, ignore_errors=True)
 
 
-async def stage_components(
-    sandbox: Sandbox,
-    lock: AssetsLock,
-    mounts: tuple[AssetMount, ...],
-    *,
-    stage: Visibility,
-) -> list[MaterialisedAsset]:
-    """Copy components into the sandbox at the destinations the task asked for.
-
-    Raises:
-        AssetError: if a component's declared visibility does not permit this stage.
-            The check is repeated here because this is the last point before the data
-            would actually land in a sandbox.
-    """
+async def stage_mounts(sandbox: Sandbox, mounts: tuple[AssetMount, ...]) -> list[MaterialisedAsset]:
+    """Copy each mount into the sandbox at the destination the task asked for."""
     materialised: list[MaterialisedAsset] = []
     for mount in mounts:
-        spec = lock.component(mount.component)
-        if spec.visibility == "verify" and stage != "verify":
-            raise AssetError(
-                f"asset {mount.component!r} is verify-only and cannot be staged for the agent"
-            )
-
-        asset = await fetch_component(lock, mount.component)
+        asset = await fetch_mount(mount)
         await sandbox.exec(["mkdir", "-p", mount.dest])
         await sandbox.upload_dir(str(asset.path), mount.dest)
         materialised.append(asset)

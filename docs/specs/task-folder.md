@@ -15,11 +15,10 @@ may bypass the layout, but the manifest field semantics still apply.
 ```
 
 ```yaml
-# domain.yaml
+# domain.yaml — deliberately almost empty. Data, images and collection are per task,
+# because that is where the knowledge lives.
 name: demo
 requires_core: ">=0.1,<0.2"
-requires_extensions: []          # extensions are referenced by name, never imported
-default_image: sandbox-base-cli  # optional fallback
 ```
 
 ## Task folder
@@ -42,25 +41,31 @@ or the agent phase.
 ```yaml
 spec_type: core/v1                 # default
 environment: core/standard         # default; extensions referenced by name
-harness_family: autonomous         # autonomous | policy
 image: sandbox-base-cli
 resources: { cpus: 1, memory_mb: 1024 }
 network: { mode: block }           # block | allowlist (+ allowed_hosts) | open
 timeouts: { setup: 120, agent: 900, verify: 300 }
+
 setup:
-  assets: [hello_inputs]           # names; visibility comes from assets.lock.yaml
-  kits:   [data-prep]              # names; versions come from kits.lock.yaml
-  prebakeable: false               # true only if this setup is deterministic
+  assets:                          # each mount says where the data is and where it goes
+    - repo: agents-last-exam/ale-tasks-assets
+      revision: 1d0d026c…          # a commit: two runs naming it read the same bytes
+      path: demo/hello/base/input
+      dest: /ale/input
+  kits: [data-prep]
 verify:
-  assets: [hello_answers]
-  kits:   [grader-protocol]
+  assets:
+    - { repo: …, revision: …, path: demo/hello/base/reference, dest: /ale/reference }
+  kits: [grader-protocol]
+
+artifacts:
+  - { path: /ale/output }          # collect: host (default) | none
+
 params: { n: 3 }
 variants:
   - { name: base }
   - { name: hard, params: { n: 10 } }
-validate: { min_reward: 1.0 }      # or { mode: manual, reason: "..." }
-metadata: { tags: [smoke] }
-extras: {}                         # namespaced experiments only
+validate: { min_reward: 1.0 }
 ```
 
 The identifier is derived from the folder path (`tasks/demo/hello` → `demo-hello`) and
@@ -70,68 +75,20 @@ and nothing in the framework parses an identifier (ADR 0006).
 Scripts are not declared. A stage's folder is copied into the sandbox when that stage
 runs, and its entry point (`setup/run.sh`, `verify/run.sh`) executes if present.
 
-## Workspace
+## Paths
 
-Every task sees the same layout, so no prompt or script depends on a task's name:
+**A task decides where its own data goes.** There is no framework-wide layout: a mount's
+`dest` and an artifact's `path` are absolute paths chosen by the task, so a simulation
+domain can put scenes at `/opt/sim/scenes` and nothing has to be adapted.
 
-| Path | Available | Contents |
-|---|---|---|
-| `/ale/input` | setup, agent | `files/`, assets staged for setup |
-| `/ale/software` | setup, agent | tool and runtime assets |
-| `/ale/output` | agent | deliverables; collected as artifacts, read by verify |
-| `/ale/work` | agent | scratch, never collected |
-| `/ale/reference` | verify only | gold answers and other verification-only assets |
-| `/ale/kits/<name>` | the stage that asked | shared domain libraries, on `PYTHONPATH` |
+The framework creates the mount destinations, the artifact paths, and the run's scratch
+directory (`work_dir`, default `/ale/work`, configured per run rather than per task).
+Anything else a task needs, it creates in its own setup script.
 
-Windows guests map the same names under `C:\ale\`. Instructions state these paths
-literally; path templating is not supported (ADR 0005).
+The framework keeps a small namespace of its own — `/ale/kits`, the stage directories,
+and the rewards file — because it has to put its machinery somewhere.
 
-Data reaches the workspace from the **store** (`/ale/store/<data_key>/…`), which is an
-engine-only concern and may hold many tasks' data or be baked into an image (ADR 0007).
-Instructions must never name a store path.
+What keeps gold answers away from an agent is **timing, not location**: a mount listed
+under `verify` is copied in during scoring, so while the agent works it is absent.
 
-## Assets and kits
 
-```yaml
-# assets.lock.yaml — visibility travels with the data, not with the task
-components:
-  hello_inputs:  { path: artifacts/inputs.tar.zst,  visibility: setup }
-  hello_answers: { path: artifacts/answers.tar.zst, visibility: verify }
-```
-
-A component marked `verify` can never be staged before the agent, whatever a task
-requests; asking for one in `setup` is a lint error.
-
-```
-kits/grader-protocol/
-├── kit.toml           # name, package, python_min, runtime (stdlib | image_deps)
-└── grader_protocol/   # the package itself
-```
-
-Kits are copied to `/ale/kits/<name>` and added to `PYTHONPATH` — never pip-installed,
-because guest interpreters are not ours to manage. `ale kit lock` records each kit's
-content hash in `kits.lock.yaml`; task manifests reference kits by name only.
-
-## Instruction rendering
-
-`${param}` substitution only (`string.Template`), from `params` merged with the
-variant's `params`. Strict: an unresolved placeholder or an unused declared parameter
-fails to load. The stored instruction is the rendered text, and it is what the task
-hash covers, so each variant has its own identity.
-
-Values that only exist at run time are not templated: setup writes a file and the
-instruction tells the agent to read it.
-
-## Verify and oracle
-
-Both receive `ALE_TASK_DIR`, `ALE_PARAMS_JSON` and `ALE_VERDICT_PATH`. Verify must
-write `{"rewards": {"reward": <0..1>, ...}}` to `$ALE_VERDICT_PATH`; a non-zero exit,
-a missing file or malformed content yields status `task_error`, which is distinct from
-a zero reward. `ale validate` runs `oracle/solve.sh` in place of the agent and requires
-`validate.min_reward`; a task without an oracle must declare `validate.mode: manual`
-with a reason.
-
-## Minimum task
-
-`task.yaml`, `instruction.md`, `verify/` — three files. Keeping that floor low is a
-project requirement, not an accident.

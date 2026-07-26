@@ -29,8 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ale.core.ids import TaskId, content_hash
 
 __all__ = [
+    "ArtifactSpec",
     "AssetMount",
-    "HarnessFamily",
     "ImageRef",
     "NetworkMode",
     "NetworkPolicy",
@@ -45,13 +45,6 @@ __all__ = [
 ]
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
-
-
-class HarnessFamily(StrEnum):
-    """Which side owns the interaction loop."""
-
-    AUTONOMOUS = "autonomous"
-    POLICY = "policy"
 
 
 class ImageRef(BaseModel):
@@ -71,19 +64,22 @@ class ImageRef(BaseModel):
 
 
 class AssetMount(BaseModel):
-    """One asset component, and where this task wants it.
+    """A directory of published data, and where this task wants it.
 
-    The destination is the task's decision, not the framework's. A simulation domain
-    that needs its scenes at ``/opt/sim/scenes`` says so; nothing here imposes a layout.
-    What the framework guarantees is *timing* — a component declared under ``verify`` is
-    materialised only during scoring — and timing, not location, is what keeps answers
-    away from an agent.
+    Everything needed to find the data is here, so a task is readable on its own and no
+    lookup table has to be kept in step with it. The revision is a commit: two runs that
+    name the same one read the same bytes.
+
+    Which stage lists a mount is what decides when it appears — gold answers listed under
+    ``verify`` are simply not in the sandbox while the agent works.
     """
 
     model_config = _FROZEN
 
-    component: str
-    dest: str = Field(description="Absolute path in the sandbox where this lands")
+    repo: str = Field(description="Dataset repository, e.g. agents-last-exam/ale-tasks-assets")
+    revision: str = Field(description="Commit to read; a branch name would not be reproducible")
+    path: str = Field(description="Directory within the repository")
+    dest: str = Field(description="Absolute path in the sandbox where it lands")
 
 
 class StageSpec(BaseModel):
@@ -97,14 +93,6 @@ class StageSpec(BaseModel):
 
 class SetupStage(StageSpec):
     """Preparation that runs before the agent."""
-
-    prebakeable: bool = Field(
-        default=False,
-        description=(
-            "True when this setup is deterministic and may be baked into an image "
-            "ahead of time. A setup that mints a per-episode secret is not."
-        ),
-    )
 
 
 class VerifyStage(StageSpec):
@@ -169,6 +157,18 @@ class PhaseTimeouts(BaseModel):
         return self.setup + self.agent + self.verify
 
 
+class ArtifactSpec(BaseModel):
+    """A path worth keeping when the episode ends, and what to do with it."""
+
+    model_config = _FROZEN
+
+    path: str = Field(description="Absolute path in the sandbox")
+    collect: Literal["host", "none"] = Field(
+        default="host",
+        description="Copy back to the run directory, or leave it in the sandbox",
+    )
+
+
 class ToolProvision(BaseModel):
     """Extra capabilities handed to the agent for this task."""
 
@@ -208,7 +208,6 @@ class TaskSpec(BaseModel):
 
     spec_type: str = "core/v1"
     environment: str = "core/standard"
-    harness_family: HarnessFamily = HarnessFamily.AUTONOMOUS
 
     instruction: str = Field(
         description="The rendered prompt: substitution already applied, paths literal"
@@ -219,10 +218,7 @@ class TaskSpec(BaseModel):
     timeouts: PhaseTimeouts = PhaseTimeouts()
     setup: SetupStage = SetupStage()
     verify: VerifyStage = VerifyStage()
-    artifacts: tuple[str, ...] = Field(
-        default=(),
-        description="Absolute sandbox paths collected after the agent runs",
-    )
+    artifacts: tuple[ArtifactSpec, ...] = ()
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(
         default_factory=dict, description="Values substituted into the instruction"
@@ -246,7 +242,3 @@ class TaskSpec(BaseModel):
         Display only. Nothing parses it back.
         """
         return f"{self.id}@{self.variant}" if self.variant else str(self.id)
-
-    def needs_gui(self) -> bool:
-        """Whether this task requires a desktop-capable sandbox."""
-        return self.harness_family is HarnessFamily.POLICY or "desktop" in self.tools.mcp_servers
