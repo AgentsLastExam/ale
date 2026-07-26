@@ -133,8 +133,8 @@ class ManifestTaskset(Taskset):
         self.kits = self._load_kits()
 
     def load(self) -> Iterator[Task]:
-        for folder in self._task_folders():
-            yield from self._load_folder(folder)
+        for folder in self.folders():
+            yield from self.load_folder(folder)
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -149,7 +149,7 @@ class ManifestTaskset(Taskset):
         path = self.repo_root / KITS_LOCK
         return KitsLock.model_validate(_read_yaml(path)) if path.is_file() else KitsLock()
 
-    def _task_folders(self) -> Iterator[TaskFolder]:
+    def folders(self) -> Iterator[TaskFolder]:
         """Yield the task folders selected by this taskset's path."""
         if (self.path / TASK_MANIFEST).is_file():
             yield TaskFolder(self.path, self.repo_root)
@@ -161,7 +161,7 @@ class ManifestTaskset(Taskset):
                 continue
             yield folder
 
-    def _load_folder(self, folder: TaskFolder) -> Iterator[ManifestTask]:
+    def load_folder(self, folder: TaskFolder) -> Iterator[ManifestTask]:
         raw = _read_yaml(folder.root / TASK_MANIFEST)
         instruction_path = folder.root / INSTRUCTION
         if not instruction_path.is_file():

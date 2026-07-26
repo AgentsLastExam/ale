@@ -27,7 +27,9 @@ from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.kits import read_lock, scan_kits, write_lock
 from ale.run.ledger import Ledger, episode_identity
+from ale.run.lint import lint_repository
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from ale.run.scaffold import scaffold_task
 from ale.run.secrets import provider_credentials
 from ale.run.sources import Registry, resolve
 from ale.run.tasksets.manifest import ManifestTaskset
@@ -122,6 +124,44 @@ def validate(
     settings = _config(None, None, agent="oracle", model="", provider=provider)
     exit_code = asyncio.run(_validate(reference, settings, runs_dir))
     raise typer.Exit(exit_code)
+
+
+@app.command()
+def lint(
+    reference: Annotated[Path, typer.Argument(help="Task or repository path")] = Path(),
+) -> None:
+    """Check tasks without starting a container.
+
+    The cheap half of admission: everything answerable from the files alone. Run it on
+    every save; run `ale validate` when you want a task actually solved.
+    """
+    findings = lint_repository(reference)
+    for finding in findings:
+        typer.echo(str(finding), err=True)
+    if findings:
+        typer.echo(f"{len(findings)} problem(s)", err=True)
+        raise typer.Exit(1)
+    typer.echo("ok")
+
+
+@app.command("new-task")
+def new_task(
+    path: Annotated[Path, typer.Argument(help="Where to create the task folder")],
+    force: Annotated[bool, typer.Option("--force", help="Overwrite an existing folder")] = False,
+) -> None:
+    """Scaffold a task that passes `ale lint` immediately.
+
+    The scaffold solves itself: its oracle writes what its verifier expects, so a new
+    task starts from a green `ale validate` and the author changes one thing at a time
+    from a known-good state.
+    """
+    try:
+        created = scaffold_task(path, force=force)
+    except AleError as error:
+        typer.echo(f"{error}", err=True)
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
+    typer.echo(f"created {created}")
+    typer.echo(f"next: ale lint {created}  &&  ale validate {created}")
 
 
 @kit_app.command("lock")
