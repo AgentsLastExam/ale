@@ -1,10 +1,9 @@
-"""The framework-owned observe-act loop.
+"""The stepwise path against a real desktop.
 
-What matters here is that the *framework* witnesses every observation and every action.
-An autonomous agent reports what it did; a policy agent cannot, because each step passes
-through this loop — which is what makes the two families produce comparable trajectories.
-
-The GUI image is large, so these run against it only where a real screen is required.
+The unit tests cover the environment's logic with a fake sandbox; what these add is that
+it works against an actual X server — a real screenshot, real input dispatch through
+xdotool, real blobs on disk. The guards are verified in both places on purpose: they are
+the part an agent could otherwise walk past.
 """
 
 from __future__ import annotations
@@ -96,9 +95,9 @@ async def test_a_stalled_agent_ends_the_episode(
 
     result = await run_policy(task_root, tmp_path / "runs", harness, stall_limit=3)
 
-    assert result.verdict.status is Status.AGENT_ERROR
-    assert "no progress" in (result.verdict.failure.message if result.verdict.failure else "")
-    # It stopped early rather than burning the phase deadline.
+    # Truncation is a normal ending, not an error: the episode is scored on what the
+    # agent achieved before it stopped making progress.
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert len(harness.observations) < 10
 
 
@@ -113,6 +112,5 @@ async def test_the_step_ceiling_ends_the_episode(
     # A stall limit above the step ceiling isolates the ceiling as the cause.
     result = await run_policy(task_root, tmp_path / "runs", harness, max_steps=2, stall_limit=99)
 
-    assert result.verdict.status is Status.AGENT_ERROR
-    assert "within 2 steps" in (result.verdict.failure.message if result.verdict.failure else "")
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert len(harness.observations) == 2

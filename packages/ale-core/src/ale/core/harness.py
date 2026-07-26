@@ -6,8 +6,9 @@ process runs (see ``docs/adr/0002-harness-families.md``):
 * :class:`AutonomousHarness` — the agent owns its loop. We hand over a prompt and take
   the result; what happens in between is the agent's business. It may run inside the
   sandbox or outside it against the sandbox's exposed interfaces.
-* :class:`PolicyHarness` — we own the loop and ask the harness for one decision at a
-  time, given an observation.
+* :class:`PolicyHarness` — the agent steps through a :class:`~ale.core.env.TaskEnv` we
+  hand it. It drives, but every observation and action passes through our environment,
+  so the trajectory is witnessed rather than reported.
 
 Both reach the sandbox through the contract and both send model traffic through the
 gateway, so both produce the same trace. That is what makes a CLI agent and a GUI agent
@@ -24,6 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ale.core.env import Observation, StepResult, TaskEnv
 from ale.core.sandbox import Sandbox
 from ale.core.trace import DesktopAction
 
@@ -36,6 +38,7 @@ __all__ = [
     "Observation",
     "PolicyHarness",
     "ResumeSupport",
+    "StepwisePolicy",
 ]
 
 
@@ -86,17 +89,6 @@ class AgentRun(BaseModel):
     @property
     def ok(self) -> bool:
         return self.exit_code == 0
-
-
-class Observation(BaseModel):
-    """What a policy harness is shown before it decides."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    step: int = Field(ge=0)
-    screenshot_png: bytes | None = None
-    text: str | None = None
-    instruction: str | None = Field(default=None, description="Provided on the first step")
 
 
 class Harness(ABC):
@@ -156,21 +148,51 @@ class AutonomousHarness(Harness):
 
 
 class PolicyHarness(Harness):
-    """The framework owns the loop; the harness decides one step at a time."""
+    """The agent steps through an environment we supply.
+
+    Driving is the agent's job because that is the shape most agents already have —
+    gymnasium, cua-lite and verifiers all hand an agent an environment and let it run.
+    Making the framework call ``decide(observation)`` instead would force every such
+    agent through a queue-based inversion, and would buy nothing: the recording and the
+    limits live in the environment either way.
+    """
 
     family = HarnessFamily.POLICY
 
     @abstractmethod
-    async def start(self, instruction: str, session: HarnessSession) -> None:
-        """Begin an episode."""
+    async def rollout(self, env: TaskEnv, session: HarnessSession) -> str | None:
+        """Drive ``env`` until it is done. May return a closing message.
+
+        Stop when a :class:`~ale.core.env.StepResult` reports ``done``; the environment
+        enforces its own ceilings, so ignoring that is refused rather than obeyed.
+        """
+
+
+class StepwisePolicy(PolicyHarness):
+    """A :class:`PolicyHarness` for agents that would rather be asked than drive.
+
+    Both styles are legitimate, and neither should have to adapt to the other. This
+    supplies the loop so a subclass only has to answer one question at a time.
+    """
+
+    async def rollout(self, env: TaskEnv, session: HarnessSession) -> str | None:
+        await self.start(session)
+        observation = await env.reset()
+        while True:
+            actions = await self.decide(observation)
+            result = await env.step(actions)
+            if result.done:
+                return await self.finish(result)
+            observation = result.observation
+
+    async def start(self, session: HarnessSession) -> None:
+        """Prepare for an episode. Default: nothing."""
+        return None
 
     @abstractmethod
     async def decide(self, observation: Observation) -> list[DesktopAction]:
-        """Return the actions to perform for this observation.
+        """Actions for this observation. An empty list means finished."""
 
-        An empty list means the agent considers the task finished.
-        """
-
-    async def finish(self) -> str | None:
+    async def finish(self, result: StepResult) -> str | None:
         """Release per-episode state; may return a closing message."""
         return None

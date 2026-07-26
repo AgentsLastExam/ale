@@ -47,8 +47,45 @@ def _to_pixels(coordinate: list[int] | tuple[int, int]) -> tuple[int, int]:
     return round(x * width / COORDINATE_SPACE), round(y * height / COORDINATE_SPACE)
 
 
+def _capture_in_process() -> bytes:
+    """Grab the root window through Xlib and encode with Pillow.
+
+    Roughly twenty times faster than shelling out — about 25ms against 400ms — which
+    matters because a stepwise agent takes one of these every single step.
+
+    The imports are deliberately here rather than at module scope. A guest service has
+    to run on whatever interpreter an image happens to have, so it cannot *depend* on
+    Pillow and python-xlib; an image that provides them gets the fast path, and one that
+    does not falls back below. This is the pattern cua-lite's server uses, for the same
+    reason.
+    """
+    import io
+
+    from PIL import Image
+    from Xlib import X, display
+
+    dh = display.Display()
+    try:
+        root = dh.screen().root
+        geometry = root.get_geometry()
+        width, height = geometry.width, geometry.height
+        raw = root.get_image(0, 0, width, height, X.ZPixmap, 0xFFFFFFFF)
+        image = Image.frombytes("RGB", (width, height), raw.data, "raw", "BGRX")
+    finally:
+        dh.close()
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def capture_screen() -> bytes:
-    """Capture the desktop as PNG bytes."""
+    """Capture the desktop as PNG bytes, fastest available way first."""
+    try:
+        return _capture_in_process()
+    except Exception:
+        pass
+
     for tool, argv in (
         ("scrot", ["-o", "-z"]),
         ("import", ["-window", "root"]),
@@ -59,7 +96,10 @@ def capture_screen() -> bytes:
         with tempfile.NamedTemporaryFile(suffix=".png") as tmp:
             subprocess.run([path, *argv, tmp.name], check=True, capture_output=True)
             return Path(tmp.name).read_bytes()
-    raise GuiUnavailable("no screenshot tool available (need scrot or ImageMagick import)")
+    raise GuiUnavailable(
+        "no way to capture the screen: install Pillow and python-xlib for the fast path, "
+        "or scrot / ImageMagick import as a fallback"
+    )
 
 
 def dispatch_actions(actions: list[dict[str, Any]]) -> int:

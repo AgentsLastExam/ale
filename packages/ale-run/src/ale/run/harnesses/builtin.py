@@ -10,13 +10,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 
-from ale.core.harness import (
-    AgentRun,
-    AutonomousHarness,
-    HarnessSession,
-    Observation,
-    PolicyHarness,
-)
+from ale.core.env import Observation, StepResult
+from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, StepwisePolicy
 from ale.core.sandbox import Sandbox
 from ale.core.trace import DesktopAction
 
@@ -48,13 +43,12 @@ class NopHarness(AutonomousHarness):
         return AgentRun(exit_code=0, final_message="nop harness took no action")
 
 
-class ScriptedPolicyHarness(PolicyHarness):
+class ScriptedPolicyHarness(StepwisePolicy):
     """Replays a fixed list of action batches, one per step.
 
-    The policy-family counterpart to :class:`NopHarness`: it needs no model, so the
-    framework's observe-act loop can be exercised — including its stall and step guards —
-    without a GUI agent, an API key, or a network. What a task scores under a scripted
-    policy is what the loop itself contributes.
+    The policy-family counterpart to :class:`NopHarness`: no model, no key, no network,
+    so the stepwise contract and both its guards can be exercised on their own. What a
+    task scores under a scripted policy is what the environment itself contributes.
     """
 
     name = "scripted"
@@ -62,23 +56,21 @@ class ScriptedPolicyHarness(PolicyHarness):
     def __init__(self, script: Sequence[Sequence[DesktopAction]] = ()) -> None:
         self._script = [list(batch) for batch in script]
         self.observations: list[Observation] = []
+        self._step = 0
 
     def version(self) -> str:
         return "1"
 
-    async def start(self, instruction: str, session: HarnessSession) -> None:
-        self._step = 0
-
     async def decide(self, observation: Observation) -> list[DesktopAction]:
         self.observations.append(observation)
         if self._step >= len(self._script):
-            return []  # nothing left to do, which is how a policy agent says "finished"
+            return []  # nothing left to do, which is how an agent says "finished"
         batch = self._script[self._step]
         self._step += 1
         return batch
 
-    async def finish(self) -> str | None:
-        return f"scripted harness ran {self._step} step(s)"
+    async def finish(self, result: StepResult) -> str | None:
+        return f"scripted harness ran {self._step} step(s); {result.info.get('reason', '')}"
 
 
 class OracleHarness(AutonomousHarness):

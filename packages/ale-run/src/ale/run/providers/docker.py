@@ -33,6 +33,13 @@ from ale.run.transport import GuestClient, StdioTransport
 __all__ = ["DockerProvider", "DockerSandbox"]
 
 GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
+
+#: An image sets this to "image" when its own command must run — a desktop session,
+#: a supervisor. Anything else, and we supply a command that simply stays alive.
+KEEPALIVE_LABEL = "ale.keepalive"
+
+#: Optional per-image interpreter hint; falls back to whatever `python3` resolves to.
+GUESTD_PYTHON = PurePosixPath("/opt/ale/python")
 LABEL = "ale.episode"
 
 #: The name a sandbox uses for its gateway. It is mapped to the host's address *on the
@@ -204,7 +211,11 @@ class DockerProvider(Provider):
             for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                 argv += ["-e", f"{name}={proxy}"]
             argv += ["-e", f"NO_PROXY={HOST_ALIAS},localhost,127.0.0.1"]
-        argv += [request.image_ref, "sleep", "infinity"]
+        argv += [request.image_ref]
+        if not await self._runs_its_own_command(request.image_ref):
+            # Most images have no long-lived command — `python:3.12-slim` starts a REPL
+            # and exits at once — so by default we supply one and keep the sandbox alive.
+            argv += ["sleep", "infinity"]
 
         code, _, stderr = await _docker(*argv, timeout=300)
         if code != 0:
@@ -215,6 +226,8 @@ class DockerProvider(Provider):
         try:
             await self._install_guestd(container)
             client = await self._connect(container)
+            if request.needs_gui:
+                await self._await_desktop(client)
         except Exception:
             await _docker("rm", "-f", "-v", container)
             if network:
@@ -261,6 +274,46 @@ class DockerProvider(Provider):
             raise ProviderStartError(f"could not read the gateway address of {network}: {stderr}")
         return out.strip()
 
+    async def _runs_its_own_command(self, reference: str) -> bool:
+        """Whether this image's own command must be left alone.
+
+        Overriding a command looks harmless until the image is a desktop: its X server,
+        window manager and session all start from that command, so replacing it produces
+        an image that claims a desktop and has none. But most images have nothing
+        long-lived to run, so neither answer is safe as a blanket rule — the image says
+        which it is, via a label, and an image that says nothing gets the safe default.
+        """
+        code, out, _ = await _docker(
+            "image",
+            "inspect",
+            "--format",
+            f'{{{{index .Config.Labels "{KEEPALIVE_LABEL}"}}}}',
+            reference,
+        )
+        return code == 0 and out.strip() == "image"
+
+    async def _await_desktop(self, client: GuestClient, timeout_sec: float = 120) -> None:
+        """Block until the screen can actually be captured.
+
+        A desktop image starts an X server, a window manager and a session from its own
+        command, and none of that is instant. Waiting on a marker file would work for
+        one image and be a lie for the next, so this waits on the capability itself:
+        a sandbox is ready for GUI work when a screenshot succeeds.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_sec
+        last: Exception | None = None
+        while loop.time() < deadline:
+            try:
+                await client.screenshot()
+                return
+            except Exception as exc:
+                last = exc
+                await asyncio.sleep(1.0)
+        raise ProviderStartError(
+            f"the desktop did not come up within {timeout_sec:g}s; last attempt: {last}"
+        )
+
     async def _install_guestd(self, container: str) -> None:
         """Copy the guest service in.
 
@@ -287,9 +340,13 @@ class DockerProvider(Provider):
                 "exec",
                 "-i",
                 container,
-                "python3",
-                str(GUESTD_DIR / "main.py"),
-                "--stdio",
+                # An image may bake an interpreter better suited to the guest service —
+                # one carrying Pillow and python-xlib, so the fast screenshot path works.
+                # Reading its choice keeps that knowledge in the image, where it belongs.
+                "sh",
+                "-c",
+                f'exec "$(test -x {GUESTD_PYTHON} && echo {GUESTD_PYTHON} || echo python3)" '
+                f'"{GUESTD_DIR}/main.py" --stdio',
             ]
         )
         await transport.start()

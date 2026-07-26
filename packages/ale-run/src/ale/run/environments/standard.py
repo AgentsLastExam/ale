@@ -23,25 +23,24 @@ import time
 from pathlib import Path, PurePosixPath
 
 from ale.core.environment import Environment, EpisodeContext, Phase
-from ale.core.errors import AgentError, PhaseTimeoutError, TaskError, VerifierOutputError
-from ale.core.harness import AutonomousHarness, Observation, PolicyHarness
+from ale.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
+from ale.core.harness import AutonomousHarness, PolicyHarness
 from ale.core.kit import KITS_ROOT
 from ale.core.lock import AssetProvenance, KitProvenance
 from ale.core.sandbox import Sandbox, SandboxRequest
 from ale.core.task import Task
 from ale.core.taskspec import AssetMount
 from ale.core.trace import (
-    ActionRecord,
     ExecRecord,
     InstructionRecord,
     NoteRecord,
-    ObservationRecord,
     PhaseSpan,
     TraceLayer,
     VerifierRecord,
 )
 from ale.core.verdict import Verdict
 from ale.run.assets import stage_mounts
+from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
 from ale.run.harnesses.builtin import ORACLE_DIR
 from ale.run.images import resolve_digest, resolve_ref
 from ale.run.kits import hash_kit
@@ -51,11 +50,6 @@ __all__ = ["StandardEnvironment"]
 SETUP_DIR = PurePosixPath("/ale/setup")
 VERIFY_DIR = PurePosixPath("/ale/verify")
 VERDICT_PATH = PurePosixPath("/ale/verify/rewards.json")
-
-
-DEFAULT_MAX_STEPS = 100
-#: Identical screens in a row that count as no progress. Two could be a slow redraw.
-DEFAULT_STALL_LIMIT = 3
 
 
 class StandardEnvironment(Environment):
@@ -107,7 +101,10 @@ class StandardEnvironment(Environment):
             gateway_url=ctx.session.gateway_url or None,
             proxy_url=ctx.proxy_url,
             env={"ALE_EPISODE_ID": ctx.episode_id},
-            needs_gui=False,
+            # Derived rather than declared: a stepwise agent works by looking at the
+            # screen, so it needs one. Asking every task to repeat that would be a field
+            # that can disagree with what actually runs.
+            needs_gui=isinstance(self.harness, PolicyHarness),
         )
         sandbox = await ctx.sandboxes.acquire(request)
         # After acquisition: the image is present locally by now, whether it was already
@@ -164,7 +161,7 @@ class StandardEnvironment(Environment):
 
         harness = self.harness
         if isinstance(harness, PolicyHarness):
-            await self._policy_loop(harness, ctx, sandbox)
+            await self._rollout(harness, ctx, sandbox)
             return
 
         if harness.name == "oracle":
@@ -186,97 +183,35 @@ class StandardEnvironment(Environment):
             )
         )
 
-    async def _policy_loop(
-        self, harness: PolicyHarness, ctx: EpisodeContext, sandbox: Sandbox
-    ) -> None:
-        """Drive the agent one observation at a time.
+    async def _rollout(self, harness, ctx: EpisodeContext, sandbox: Sandbox) -> None:  # type: ignore[no-untyped-def]
+        """Hand the agent a stepwise view of the sandbox and let it drive.
 
-        The framework owns this loop, which is what makes a GUI agent produce the same
-        trajectory shape as an autonomous one: every observation and every action passes
-        through here, so neither can be reported by the agent rather than witnessed.
-
-        Two guards, for the two ways a step-driven agent fails without erroring. It can
-        decide nothing useful forever, and it can act without the screen ever changing —
-        so a repeated observation is treated as no progress. Both end the episode with a
-        typed status instead of burning the phase deadline in silence.
+        The loop used to live here, which meant an agent that wanted to drive had to be
+        inverted through queues to fit. Now it drives, and the environment is still the
+        only thing touching the sandbox — so every observation and action is witnessed,
+        and the ceilings hold for an agent that never heard of them.
         """
         session = ctx.session.model_copy(
             update={"gateway_url": sandbox.gateway_url or ctx.session.gateway_url}
         )
         await harness.install(sandbox)
-        await harness.start(ctx.spec.instruction, session)
 
-        max_steps, stall_limit = self.max_steps, self.stall_limit
-        previous: str | None = None
-        stalled = 0
+        async with SandboxEnv(
+            sandbox,
+            instruction=ctx.spec.instruction,
+            trace=ctx.trace,
+            max_steps=self.max_steps,
+            stall_limit=self.stall_limit,
+        ) as env:
+            closing = await harness.rollout(env, session)
 
-        try:
-            for step in range(max_steps):
-                screenshot = await sandbox.screenshot()
-                digest = _digest_bytes(screenshot)
-                reference = await self._store_screenshot(ctx, step, screenshot)
-
-                ctx.trace.write_semantic(
-                    ObservationRecord(
-                        seq=ctx.trace.next_seq(TraceLayer.SEMANTIC),
-                        step=step,
-                        screenshot_ref=reference,
-                    )
-                )
-
-                if digest == previous:
-                    stalled += 1
-                    if stalled >= stall_limit:
-                        raise AgentError(
-                            f"no progress: the screen was identical for {stall_limit} "
-                            f"consecutive steps at step {step}"
-                        )
-                else:
-                    stalled = 0
-                previous = digest
-
-                actions = await harness.decide(
-                    Observation(
-                        step=step,
-                        screenshot_png=screenshot,
-                        instruction=ctx.spec.instruction if step == 0 else None,
-                    )
-                )
-                if not actions:
-                    break
-
-                applied = await sandbox.inject_input(actions)
-                for index, action in enumerate(actions):
-                    ctx.trace.write_semantic(
-                        ActionRecord(
-                            seq=ctx.trace.next_seq(TraceLayer.SEMANTIC),
-                            step=step,
-                            action=action,
-                            accepted=index < applied,
-                            rejection=None if index < applied else "not dispatched by the guest",
-                        )
-                    )
-            else:
-                raise AgentError(f"the agent did not finish within {max_steps} steps")
-        finally:
-            closing = await harness.finish()
-            ctx.trace.write_semantic(
-                NoteRecord(
-                    seq=ctx.trace.next_seq(TraceLayer.SEMANTIC),
-                    message="agent finished",
-                    data={"harness": harness.name, "closing": closing or ""},
-                )
+        ctx.trace.write_semantic(
+            NoteRecord(
+                seq=ctx.trace.next_seq(TraceLayer.SEMANTIC),
+                message="agent finished",
+                data={"harness": harness.name, "steps": env.step_index, "closing": closing or ""},
             )
-
-    async def _store_screenshot(self, ctx: EpisodeContext, step: int, png: bytes) -> str:
-        """Write the image beside the trace and reference it by relative path.
-
-        Inlining screenshots as base64 is how a trace becomes unreadable and unbounded —
-        a lesson the previous framework paid for.
-        """
-        path = ctx.trace.blob_path(f"step-{step:04d}.png")
-        await asyncio.to_thread(path.write_bytes, png)
-        return ctx.trace.relative(path)
+        )
 
     async def _verify(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> dict[str, float]:
         """Score the episode using the task's own verify stage.
@@ -431,12 +366,6 @@ class StandardEnvironment(Environment):
         finally:
             elapsed = int((time.monotonic() - started) * 1000)
             ctx.phases.append(PhaseSpan(name=phase.value, duration_ms=elapsed))
-
-
-def _digest_bytes(payload: bytes) -> str:
-    from hashlib import sha256
-
-    return f"sha256:{sha256(payload).hexdigest()}"
 
 
 def _digest(text: str) -> str:
