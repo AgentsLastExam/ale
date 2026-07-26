@@ -222,11 +222,19 @@ def _harness(settings: RunConfig):  # type: ignore[no-untyped-def]
 
 
 def _provider(settings: RunConfig):  # type: ignore[no-untyped-def]
-    if settings.provider != "docker":
-        raise AleError(f"unknown provider {settings.provider!r}; only docker exists so far")
-    from ale.run.providers.docker import DockerProvider
+    # Imported on demand: each provider pulls in its own tooling assumptions, and a
+    # docker run should not fail because qemu is missing.
+    match settings.provider:
+        case "docker":
+            from ale.run.providers.docker import DockerProvider
 
-    return DockerProvider()
+            return DockerProvider()
+        case "qemu":
+            from ale.run.providers.qemu import QemuProvider
+
+            return QemuProvider()
+        case unknown:
+            raise AleError(f"unknown provider {unknown!r}; try docker or qemu")
 
 
 def _registry() -> Registry | None:

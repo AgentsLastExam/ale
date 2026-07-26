@@ -71,7 +71,10 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen --all-groups
-      - run: uv run pytest -m "conformance or integration" -m "not needs_kvm"
+      # One -m, not two: a second `-m` replaces the first rather than intersecting, so
+      # the earlier form silently ran every non-KVM test including the unit suite.
+      # The desktop image is tens of gigabytes, so it stays out of hosted CI.
+      - run: uv run pytest -m "(conformance or integration) and not needs_kvm and not needs_gui"
 
   # Hardware virtualisation is not available on hosted runners; this job only runs
   # where a self-hosted runner advertises KVM.
@@ -84,4 +87,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen --all-groups
+      # Skips itself when no guest image is present, so a runner without one reports
+      # honestly rather than failing for a reason unrelated to the change.
       - run: uv run pytest -m needs_kvm
+
+  # The desktop image is far too large for hosted runners, so GUI coverage runs where
+  # it is already pulled.
+  desktop:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: [self-hosted, desktop]
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen --all-groups
+      - run: uv run pytest -m needs_gui
