@@ -21,7 +21,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-ARG CLAUDE_CODE_VERSION=latest
+# Pinned, not `latest`. An image tagged today and an image tagged next month would
+# otherwise carry different agents, and two runs compared as one. Keep in step with
+# DEFAULT_CLI_VERSION in ale/run/harnesses/claude_code.py; a mismatch is not fatal —
+# the harness installs the pinned build — but it costs every episode an npm install.
+ARG CLAUDE_CODE_VERSION=2.1.220
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 

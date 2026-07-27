@@ -32,6 +32,16 @@ __all__ = ["ClaudeCodeHarness"]
 #: the last thing it printed before the stream stopped, and two files lose that ordering.
 TRANSCRIPT_NAME = "transcript.jsonl"
 
+#: The version a run gets unless it asks for another. A pin rather than "latest", because
+#: an unpinned agent makes two runs incomparable for a reason that never appears in the
+#: result. Bumping this is a deliberate, reviewable change; images need not be rebuilt for
+#: it, since a mismatch installs the pinned build at the start of the episode.
+DEFAULT_CLI_VERSION = "2.1.220"
+
+#: Where a version this image did not bake gets installed, relative to the agent's home —
+#: the account that runs it owns it, so no privilege is needed and none is granted.
+CLI_PREFIX = ".local"
+
 
 @dataclass(frozen=True)
 class CliFlag:
@@ -89,6 +99,8 @@ class ClaudeCodeHarness(AutonomousHarness):
         self.cli_version = cli_version
         self.kwargs = kwargs
         self._resolved_version: str | None = None
+        self._prefix: str = ""
+        self._path: str = ""
 
         for flag in CLI_FLAGS:
             value = kwargs.get(flag.name)
@@ -103,26 +115,84 @@ class ClaudeCodeHarness(AutonomousHarness):
         return f"npm:{self.cli_version}" if self.cli_version else "image"
 
     async def install(self, sandbox: Sandbox) -> None:
-        """Make sure the CLI is present, and record which build actually ran.
+        """Put the pinned CLI in place, whatever the image happened to ship.
 
-        Base images bake a default build so the common path needs no network at all;
-        a run that pins a different version pays for the install and says so in
-        provenance.
+        Three cases, and the middle one is the one that matters:
+
+        * **Missing** — install it. An image is not required to bake an agent, and a run
+          that fails because the image is not the one somebody assumed is a run that
+          reports nothing about the model.
+        * **Present but a different version** — install the pinned one anyway. This is
+          what makes an experiment controlled: "claude-code" is not a version, and two
+          runs a month apart against an image tagged ``latest`` are two different agents
+          being compared as though they were one. It is also what lets the pin move
+          without rebuilding every image.
+        * **Present and already the pinned version** — do nothing, and cost no network.
+
+        Installed under the agent's own ``~/.local`` and prepended to ``PATH`` so it wins
+        over any baked copy. Prepending unconditionally rather than checking membership:
+        the directory can already be on ``PATH`` but *behind* the one holding the stale
+        copy, which looks identical until you read the version that actually ran.
+
+        Follows ``agents-last-exam``'s deployer, which had already worked all of this out.
         """
-        if self.cli_version:
-            spec = f"@anthropic-ai/claude-code@{self.cli_version}"
-            # Installing the pinned CLI is preparation, not the agent's work.
-            result = await sandbox.exec(["npm", "install", "-g", spec], timeout_sec=600)
-            if not result.ok:
-                raise AgentError(f"could not install {spec}: {result.stderr[-500:]}")
+        # Resolved rather than assumed: the home directory belongs to the image, which
+        # declares the account but not where it lives.
+        home = await sandbox.exec(["sh", "-c", "echo $HOME"], identity=Identity.AGENT)
+        self._prefix = f"{home.stdout.strip() or '/home/user'}/{CLI_PREFIX}"
+        self._path = f"{self._prefix}/bin:/usr/local/bin:/usr/bin:/bin"
 
-        probe = await sandbox.exec(["claude", "--version"], timeout_sec=60)
-        if not probe.ok:
-            raise AgentError(
-                "the claude CLI is not available in this image; bake it in or pin "
-                "agent.version so it can be installed"
+        wanted = self.cli_version or DEFAULT_CLI_VERSION
+        installed = await self._installed_version(sandbox)
+
+        if installed != wanted:
+            spec = f"@anthropic-ai/claude-code@{wanted}"
+            # As the agent: it is the agent that runs this binary, and an install into
+            # root's prefix is one the unprivileged account may not be able to execute.
+            # `--force` so a same-version residue under the prefix is overwritten cleanly.
+            result = await sandbox.exec(
+                ["npm", "install", "-g", "--force", "--prefix", self._prefix, spec],
+                env={"npm_config_cache": f"{self._prefix}/.npm-cache"},
+                timeout_sec=900,  # a cold install on an image with no cache is minutes
+                identity=Identity.AGENT,
             )
-        self._resolved_version = probe.stdout.strip().split()[0] if probe.stdout.strip() else None
+            if not result.ok:
+                detail = (result.stderr or result.stdout)[-500:]
+                if "EAI_AGAIN" in detail or "ENOTFOUND" in detail:
+                    # The ordinary case, and worth naming: a sandbox has no egress but the
+                    # gateway, so an image that does not carry the pinned build cannot
+                    # obtain it. Both ways out are the operator's to choose.
+                    raise AgentError(
+                        f"this image has {installed or 'no claude'} and the run pinned "
+                        f"{wanted}, but the sandbox has no network to install it. Either "
+                        f"rebuild the image with CLAUDE_CODE_VERSION={wanted}, or run a "
+                        f"task whose network policy reaches a registry."
+                    )
+                raise AgentError(f"could not install {spec}: {detail}")
+            installed = await self._installed_version(sandbox)
+
+        if installed != wanted:
+            raise AgentError(
+                f"the claude CLI reports {installed or 'nothing'} after installing "
+                f"{wanted}; the run would not be measuring the agent it says it is"
+            )
+        self._resolved_version = installed
+
+    async def _installed_version(self, sandbox: Sandbox) -> str | None:
+        """What ``claude --version`` says, or ``None`` when there is no claude."""
+        # Through a shell, so "there is no claude" is an exit code rather than an
+        # exception: the guest service raises when it cannot find a binary at all, and
+        # the missing case is the ordinary one here, not an error.
+        probe = await sandbox.exec(
+            ["sh", "-c", "command -v claude >/dev/null 2>&1 && claude --version"],
+            env={"PATH": self._path},
+            timeout_sec=60,
+            identity=Identity.AGENT,
+        )
+        if not probe.ok or not probe.stdout.strip():
+            return None
+        # "2.1.220 (Claude Code)" — the first field is the version.
+        return probe.stdout.strip().split()[0]
 
     async def launch(
         self,
@@ -240,6 +310,10 @@ class ClaudeCodeHarness(AutonomousHarness):
             # Somewhere writable that belongs to the agent. Left unset, the CLI writes to a
             # home directory it may not own.
             "CLAUDE_CONFIG_DIR": str(config_dir),
+            # The same search path `install` verified against. Without it the launch can
+            # run a different binary from the one whose version was checked and recorded,
+            # and provenance would name a build that never ran.
+            "PATH": self._path or "/usr/local/bin:/usr/bin:/bin",
         }
         for alias in (
             "ANTHROPIC_DEFAULT_OPUS_MODEL",

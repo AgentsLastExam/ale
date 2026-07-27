@@ -755,15 +755,24 @@ RUN sed -i \
         -e "s#/home/user/.config#/home/${USER}/.config#g" \
         /etc/supervisor/conf.d/*.conf
 
-# The Claude Code runtime, same version policy as sandbox-base-cli. A desktop image
-# without it can only serve the stepwise agent family, which was exactly the gap: a GUI
-# task became unreachable for autonomous agents not because they cannot use a screen —
-# the MCP bridge gives them one — but because the binary that drives them was missing.
+# Node, and only Node. Several autonomous harnesses are distributed as npm packages, and
+# a runtime is a property of the platform — the kind of thing an image is for.
+#
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-ARG CLAUDE_CODE_VERSION=latest
+# One agent, at one pinned version — the same pin sandbox-base-cli carries.
+#
+# Which agent a run uses is a property of the experiment, not of the image, and the
+# harness treats it that way: it compares what is here against what the run pinned and
+# installs the difference. What makes baking necessary anyway is that a sandbox has no
+# network — the only egress is the gateway — so an image that ships nothing can only
+# ever run an agent in a task that opened its network, and every GUI task is closed.
+#
+# So this is a cache of the default, not a decision. A run that pins another version and
+# can reach a registry gets that version instead, ahead of this one on PATH.
+ARG CLAUDE_CODE_VERSION=2.1.220
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 
