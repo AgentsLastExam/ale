@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
-from ale.core.errors import ProviderStartError
+from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     Capabilities,
     ExecResult,
@@ -34,10 +34,6 @@ from ale.run.transport import GuestClient, StdioTransport
 __all__ = ["DockerProvider", "DockerSandbox"]
 
 GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
-
-#: An image sets this to "image" when its own command must run — a desktop session,
-#: a supervisor. Anything else, and we supply a command that simply stays alive.
-KEEPALIVE_LABEL = "ale.keepalive"
 
 #: An image sets this to "true" when it starts a desktop, so provisioning waits for it.
 GUI_LABEL = "ale.gui"
@@ -204,6 +200,10 @@ class DockerProvider(Provider):
 
     def __init__(self, *, guestd_source: Path | None = None) -> None:
         self._guestd_source = guestd_source or Path(__file__).resolve().parents[1] / "guestd"
+        # An image's conformance cannot change while it is pinned to a digest, and the
+        # check costs a container start — so a sweep of ten thousand episodes pays for it
+        # once rather than ten thousand times.
+        self._checked: dict[str, list[str]] = {}
 
     def capabilities(self) -> Capabilities:
         return Capabilities(
@@ -222,6 +222,12 @@ class DockerProvider(Provider):
 
     async def create(self, request: SandboxRequest) -> Sandbox:
         self.accepts(request)
+        if problems := await self.check_image(request.image_ref):
+            raise ProviderCapabilityError(
+                f"{request.image_ref} cannot serve as a sandbox: {'; '.join(problems)}. "
+                "See docs/specs/sandbox-image.md"
+            )
+
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         container = f"ale-{sandbox_id}"
         network = await self._ensure_network(sandbox_id, request)
@@ -249,11 +255,12 @@ class DockerProvider(Provider):
             for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                 argv += ["-e", f"{name}={proxy}"]
             argv += ["-e", f"NO_PROXY={HOST_ALIAS},localhost,127.0.0.1"]
+        # The image's own command, always. A container lives exactly as long as its
+        # command, and substituting one replaces whatever the image starts for itself —
+        # for a desktop image, the entire graphical session. Images that have nothing to
+        # do declare a command that waits; that is part of the image contract, so there
+        # is nothing left here to decide.
         argv += [request.image_ref]
-        if not await self._runs_its_own_command(request.image_ref):
-            # Most images have no long-lived command — `python:3.12-slim` starts a REPL
-            # and exits at once — so by default we supply one and keep the sandbox alive.
-            argv += ["sleep", "infinity"]
 
         code, _, stderr = await _docker(*argv, timeout=300)
         if code != 0:
@@ -317,6 +324,62 @@ class DockerProvider(Provider):
             raise ProviderStartError(f"could not read the gateway address of {network}: {stderr}")
         return out.strip()
 
+    async def check_image(self, reference: str) -> list[str]:
+        """What this image is missing from the sandbox contract, if anything.
+
+        Checked before the sandbox is used rather than discovered through its symptoms:
+        an image with no long-lived command dies immediately, and one with no agent
+        account fails on the first thing the agent tries to do — neither failure names
+        its cause. See `docs/specs/sandbox-image.md`.
+
+        Partial by construction: whether a command *stays* running cannot be known
+        without running it, so this catches an image that declares none at all. The rest
+        surfaces as a sandbox that dies on start, which at least says so immediately.
+        """
+        if reference in self._checked:
+            return self._checked[reference]
+
+        missing: list[str] = []
+
+        code, out, _ = await _docker(
+            "image",
+            "inspect",
+            "--format",
+            "{{json .Config.Cmd}}{{json .Config.Entrypoint}}",
+            reference,
+        )
+        if code != 0:
+            return [f"image {reference} could not be inspected; is it pulled?"]
+        if out.strip().startswith("null"):
+            missing.append(
+                "no command: a container lives exactly as long as its command, and the "
+                "engine will not supply one"
+            )
+
+        probe = await _docker(
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            reference,
+            "-c",
+            f"command -v python3 >/dev/null || echo no-python3; "
+            f"id -u {await self._agent_user(reference)} >/dev/null 2>&1 || echo no-agent-user",
+            timeout=120,
+        )
+        for line in probe[1].split():
+            if line == "no-python3":
+                missing.append("no python3 on PATH: the guest service runs on it")
+            elif line == "no-agent-user":
+                user = await self._agent_user(reference)
+                missing.append(
+                    f"no unprivileged account {user!r}: the agent would have to run as root, "
+                    "and could then change the conditions it is measured under"
+                )
+
+        self._checked[reference] = missing
+        return missing
+
     async def _agent_user(self, reference: str) -> str:
         """The account this image intends the agent to be.
 
@@ -375,24 +438,6 @@ class DockerProvider(Provider):
             "image", "inspect", "--format", f'{{{{index .Config.Labels "{name}"}}}}', reference
         )
         return out.strip() if code == 0 else ""
-
-    async def _runs_its_own_command(self, reference: str) -> bool:
-        """Whether this image's own command must be left alone.
-
-        Overriding a command looks harmless until the image is a desktop: its X server,
-        window manager and session all start from that command, so replacing it produces
-        an image that claims a desktop and has none. But most images have nothing
-        long-lived to run, so neither answer is safe as a blanket rule — the image says
-        which it is, via a label, and an image that says nothing gets the safe default.
-        """
-        code, out, _ = await _docker(
-            "image",
-            "inspect",
-            "--format",
-            f'{{{{index .Config.Labels "{KEEPALIVE_LABEL}"}}}}',
-            reference,
-        )
-        return code == 0 and out.strip() == "image"
 
     async def _await_desktop(self, client: GuestClient, timeout_sec: float = 120) -> None:
         """Block until the screen can actually be captured.

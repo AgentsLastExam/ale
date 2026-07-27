@@ -1,0 +1,111 @@
+# Sandbox image specification
+
+What an image must provide to be usable as a sandbox, and how it tells the engine what it
+can do.
+
+This exists because the engine used to infer these things, and inference was wrong twice
+in ways that looked like something else. It substituted a keep-alive command and replaced
+a desktop image's entire graphical session — the image claimed a desktop and had none. It
+treated a sandbox as ready when the guest service answered, which is before the screen
+exists. **An image declares; the engine reads. It never guesses, and never probes to find
+out.**
+
+The rules below are the price of that. They are also the whole of it: an image that
+follows them needs no special handling anywhere in the engine.
+
+## Must provide
+
+**One system interpreter**, Python 3.8 or later, on `PATH` as `python3`. The guest
+service runs on it, and so do the task's stages and the agent. Anything the guest service
+needs — currently `Pillow` and `python-xlib` for in-process screen capture — is installed
+into that interpreter **at build time**.
+
+The engine never installs into a sandbox's interpreter. That environment belongs to the
+task, and a package we added to make our own code work is a package that can collide with
+what a task depends on. A task needing something different declares a different image, or
+builds what it needs inside its own setup.
+
+**An unprivileged user** with a real home directory, declared as `ale.user`. The agent
+runs as this account, and so does the oracle that stands in for it. An agent with root can
+change the network policy, the clock and the guest service driving its own sandbox, so a
+result obtained that way is not reproducible.
+
+The home directory matters: the run's workspace lives inside it, so staged files land with
+the right owner and nothing has to grant that afterwards.
+
+**A command that keeps the sandbox alive.** A container lives exactly as long as its
+command, and the engine will not supply one. An image with services to start runs them; an
+image with nothing to do runs something that simply waits. Either way the choice is the
+image's, because substituting one is how a desktop image loses its desktop.
+
+**`sudo`**, if the image is to serve tasks that declare `resources.sudo`. The engine writes
+the grant and then confirms it by using it — writing a sudoers rule succeeds in an image
+with no `sudo` binary at all, and a task told it had a privilege it never received fails
+later, far from the cause.
+
+## Must not require
+
+**An engine-specific module search path.** Shared libraries are installed where the
+interpreter already looks. A path only the engine knows is a rule every task author has to
+learn, and the one we had set a literal glob — which that variable does not expand, so one
+of its two implementations never worked.
+
+**An `ENTRYPOINT`.** It combines with the command in ways that make overriding behaviour
+hard to predict. Put what the image does in `CMD`.
+
+## Declares
+
+Labels, in `ale.*`. They are part of the image and travel with it through a registry, so
+an image someone else pulls carries the same meaning.
+
+| Label | Meaning | Absent |
+|---|---|---|
+| `ale.user` | the unprivileged account the agent runs as | `user` |
+| `ale.gui` | `"true"` when the image starts a graphical session | no desktop assumed |
+
+`ale.gui` is what tells the engine to wait before treating the sandbox as ready — and it
+waits for a screenshot to succeed, not for a marker file, because a marker is true of one
+image and a lie about the next.
+
+More will be added as base images multiply: what runtimes are present, whether a GPU is
+usable, which task families an image suits. The rule for adding one is that the engine
+would otherwise have to guess.
+
+Standard `org.opencontainers.image.*` labels are welcome alongside; they do not collide.
+
+## The engine guarantees
+
+Given a conforming image, the engine will:
+
+- install the guest service where the agent cannot read it, and run it as the framework;
+- create each path a task declared — asset destinations, artifact paths, the run's
+  workspace — and hand them to the agent user;
+- run the task's setup and verify stages as the framework, and the agent and oracle as the
+  agent user;
+- install a domain's kits where the interpreter already searches;
+- resolve the image to a digest and record it, so a moved tag is detectable;
+- wait for a declared capability to actually work before using it.
+
+It will not: alter ownership of anything a task's setup produced (that is the task's to
+decide), install into the interpreter, or substitute the image's command.
+
+## Building one
+
+Derive from an official base image. `sandbox-base-cli` and `sandbox-base-gui` both satisfy
+this contract, so an image built `FROM` either inherits it and needs only its own additions.
+
+Referencing an upstream image directly is not supported. `python:3.12-slim` has no
+unprivileged user and no long-lived command; it is a build environment, not a sandbox.
+Build a curated image from it instead — which also makes what a task runs on a deliberate
+choice rather than whatever that tag points at today.
+
+```dockerfile
+FROM ghcr.io/agentslastexam/sandbox-base-cli:0.1.0
+
+# Whatever this domain's tasks need.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# The base image's user, command and labels carry over; re-declare only what changes.
+```

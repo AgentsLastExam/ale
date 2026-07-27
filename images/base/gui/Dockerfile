@@ -769,10 +769,10 @@ RUN mkdir -p /ale/kits /ale/store && chown -R "${USER}" /ale
 RUN chown -R root:root /opt/ale && chmod -R go-rwx /opt/ale
 
 
-# This image's command starts the desktop session, so it must not be replaced — and a
-# sandbox built from it is not ready until that session can actually be photographed.
-LABEL ale.keepalive="image" \
-      ale.gui="true" \
+# What this image is, so the engine reads rather than guesses. Its command starts the
+# desktop session below, and a sandbox built from it is not ready until that session can
+# actually be photographed. See docs/specs/sandbox-image.md.
+LABEL ale.gui="true" \
       ale.user="${USER}"
 
 EXPOSE 5901 6901
