@@ -22,6 +22,7 @@ from typing import Any
 from ale.core.errors import AgentError, AgentRefusalError
 from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, ResumeSupport
 from ale.core.sandbox import Identity, Sandbox
+from ale.run.tools import stage_desktop_bridge
 
 __all__ = ["ClaudeCodeHarness"]
 
@@ -135,6 +136,19 @@ class ClaudeCodeHarness(AutonomousHarness):
         transcript_path = work_dir / TRANSCRIPT_NAME
         env = self._env(session)
 
+        # A task that declared a desktop gets one it can actually drive. Without this an
+        # autonomous agent can see a screen only by shelling out to whatever the image
+        # happens to have, which is a different action space from the one the stepwise
+        # family uses — and a task that scores differently depending on which family
+        # attempted it is not measuring the thing it claims to.
+        mcp_flags = ""
+        if sandbox.request.needs_gui:
+            config_path = await stage_desktop_bridge(sandbox, str(work_dir))
+            # Only the config. The permission mode already decides what may be called,
+            # and `--allowedTools` is a declared flag a run may set for itself — passing
+            # it from here too would silently override what the run asked for.
+            mcp_flags = f"--mcp-config {shlex.quote(config_path)}"
+
         # The CLI expects its configuration directory to exist, with these subdirectories
         # in place. It creates neither, and the failures are opaque when they are missing.
         await sandbox.exec(
@@ -157,7 +171,7 @@ class ClaudeCodeHarness(AutonomousHarness):
         command = (
             f'prompt="${prompt_var}"; unset {prompt_var}; '
             f'printf "%s" "$prompt" | '
-            f"claude --verbose --output-format=stream-json {self._flags()} --print "
+            f"claude --verbose --output-format=stream-json {self._flags()} {mcp_flags} --print "
             f"> {transcript_path} 2>&1"
         )
 
