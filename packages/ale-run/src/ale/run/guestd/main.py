@@ -236,6 +236,18 @@ def _drop_to(name: str | None, env: dict[str, str]) -> dict[str, Any]:
     env["USER"] = env["LOGNAME"] = account.pw_name
     env.setdefault("XDG_RUNTIME_DIR", f"/tmp/runtime-{account.pw_name}")
 
+    # A desktop image publishes its session bus address for exactly this. Without it a
+    # graphical program starts, creates a window nobody maps, and exits successfully —
+    # so a task author debugging a GUI setup sees a script that "worked" and a screen
+    # that did not change.
+    if "DBUS_SESSION_BUS_ADDRESS" not in env:
+        try:
+            with open("/tmp/dbus-session-bus-address") as handle:
+                if address := handle.read().strip():
+                    env["DBUS_SESSION_BUS_ADDRESS"] = address
+        except OSError:
+            pass
+
     def preexec() -> None:
         os.setgid(account.pw_gid)
         os.initgroups(account.pw_name, account.pw_gid)
