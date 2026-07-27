@@ -14,9 +14,10 @@
 # sandbox contract and, unlike theirs, also serves over TCP — a virtual machine has no
 # exec channel, so the same guest service has to be reachable both ways.
 #
-# The isolation model is theirs and is worth keeping: /opt/env is a root-owned 700 venv
-# holding Pillow and python-xlib, so the fast screenshot path has what it needs while
-# the agent cannot read or import any of it.
+# Their isolation model for the guest service is worth keeping — it lives under a
+# root-owned directory the agent cannot read, so the agent cannot learn the protocol
+# driving its own sandbox. Their separate interpreter is not: we install what the guest
+# service needs into the system Python instead.
 #
 # Rebuild with:
 #   docker build -f images/base/gui/Dockerfile -t ghcr.io/agentslastexam/sandbox-base-gui .
@@ -61,32 +62,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pulseaudio pulseaudio-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# ----- [ISOLATION 1/5] Env python: an isolated Python 3.12 venv at /opt/env/venv, separate from the agent's
-# system python. The exec_stdio server runs on it — op_screenshot's in-process XGetImage grab
-# needs Pillow + python-xlib (see exec_stdio/client.py). `uv` (a standalone binary under
-# /opt/env/bin, off the agent PATH) fetches a fully self-contained managed 3.12 and installs
-# into the venv by explicit --python target, so the agent's system python is never touched and
-# there is no shared dist-packages to clobber. setuptools is pinned <81 because it still ships
-# pkg_resources (some libs import it lazily; `uv venv` does not seed it); pip/wheel aren't
-# needed in the venv — uv does the building. Downstream layers EXTEND this same venv with their
-# own env deps (`uv pip install --python /opt/env/venv/bin/python …`) — one installer, one target.
-COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /opt/env/bin/uv
-ENV UV_PYTHON_INSTALL_DIR=/opt/env/pythons
-RUN /opt/env/bin/uv venv --python 3.12 /opt/env/venv \
-    && /opt/env/bin/uv pip install --python /opt/env/venv/bin/python --no-cache-dir \
-        setuptools==80.9.0 Pillow==10.1.0 python-xlib==0.33 \
-    && chown -R root:root /opt/env && chmod -R go-rwx /opt/env
+# One interpreter, and it is the image's own. The guest service, the task's stages and
+# the agent all use /usr/bin/python3 — so nothing has to choose between interpreters, and
+# nothing installs into the environment a task runs in.
+#
+# cua-lite kept a separate venv here for the same packages. We install them into the
+# system interpreter instead, because an engine that has to be told which of several
+# interpreters to use is one rule too many. It cost us: the hint was a symlink to the
+# venv, and Python derives its prefix from the invocation path, so the symlinked
+# interpreter silently lost the venv's packages and the fast screenshot path fell back
+# for as long as the mechanism existed.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-pil python3-xlib \
+    && rm -rf /var/lib/apt/lists/*
 
-# ----- [ISOLATION 3/5] Agent-terminal isolation: gnome-terminal forwards the LAUNCHER's environment
-# to every new terminal shell (the terminal-SERVER's env is ignored). A task config
-# that runs `gnome-terminal &` from the setup executor — which carries
-# /opt/env/venv/bin:/opt/env/bin on PATH — would hand the AGENT a terminal that can reach
-# the env python (/opt/env/venv) and any env-only CLI a downstream layer relocates into
-# /opt/env/bin, none of which the agent is meant to see. Shadow gnome-terminal with a wrapper
-# (ahead of /usr/bin on PATH, same pattern as the chrome wrapper) that scrubs /opt/env from
-# PATH before exec — so EVERY terminal, agent- or config-launched, gets the clean session PATH
-# + the system python. Setup's own gold-building steps run in the executor (not via the
-# terminal) and keep /opt/env — no regression.
+# ----- Agent-terminal isolation: gnome-terminal forwards the LAUNCHER's environment to
+# every new terminal shell (the terminal server's own environment is ignored). A task
+# that opens one from a stage script would hand the agent whatever PATH that stage had.
+# Shadowing gnome-terminal with a wrapper that resets PATH means every terminal, however
+# it was launched, starts from the same clean session environment.
+#
+# cua-lite needed this to keep an agent away from a separate engine interpreter. We have
+# only one interpreter, so that reason is gone — but a predictable PATH for anything the
+# agent opens is worth keeping on its own.
 RUN cat > /usr/local/bin/gnome-terminal <<'EOF' && chmod +x /usr/local/bin/gnome-terminal
 #!/bin/sh
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -223,15 +221,11 @@ RUN git clone --depth 1 https://github.com/trycua/noVNC.git /opt/noVNC && \
 # Note: /home/${USER} may already exist (apt drag-in during the GNOME
 # stack install). We force-chown after useradd so subsequent `USER` RUN steps can
 # write into HOME. `-m` creates the home dir if absent.
-# The agent user is deliberately NOT in group `sudo` and has NO sudoers grant:
-# this is the load-bearing isolation edit (§2.A.5). Leaving `-G sudo` in place
-# keeps Ubuntu's stock password-gated `%sudo ALL=(ALL:ALL) ALL`, and the baked
-# password below is a constant (task data even ships `echo user | sudo -S`), so a
-# `sudo` group member walks straight through the /opt/env 700 wall to root — the
-# 700 chmod is cosmetic without this. Dropping the group membership flips `sudo`
-# to "user is not in the sudoers file"; NOPASSWD:ALL is removed as
-# belt-and-suspenders. The env-facing controller channel (exec-stdio as root)
-# needs no `sudo`; per-tool root shims live in per-env sudoers.d (timedatectl…).
+# The agent user is deliberately NOT in group `sudo` and gets no sudoers grant here.
+# Ubuntu's stock `%sudo` rule is password-gated and the password baked below is a
+# constant, so group membership would be a standing route to root that no task asked
+# for — and elevation is meant to be something a task declares and provenance records.
+# When a task does declare it, the provider writes the grant at provisioning time.
 RUN useradd -m -s /bin/bash "${USER}" && \
     echo "${USER}:${USER}" | chpasswd && \
     chown -R "${USER}:${USER}" "/home/${USER}"
@@ -765,18 +759,6 @@ RUN sed -i \
 # sandbox goes through this, over stdio for containers and TCP for virtual machines.
 # Stdlib-only by contract, so it runs on whatever interpreter an image happens to have.
 COPY packages/ale-run/src/ale/run/guestd/ /opt/ale/guestd/
-
-# Which interpreter to prefer. The image knows better than we do: here it is the env
-# venv, which carries Pillow and python-xlib, so the ~24ms in-process screenshot path
-# works instead of shelling out to ImageMagick for ~400ms. A provider reads this if it
-# exists and falls back to `python3` otherwise, which keeps the choice with the image
-# rather than hard-coding one image's layout into the engine.
-# A wrapper, not a symlink. Python derives sys.prefix from the path it was invoked
-# through, so a symlinked venv interpreter looks like a plain interpreter at /opt/ale
-# and loses the venv's site-packages entirely — the fast screenshot path would silently
-# fall back forever, which is exactly what it did until this was caught.
-RUN printf '#!/bin/sh\nexec /opt/env/venv/bin/python "$@"\n' > /opt/ale/python \
-    && chmod 0755 /opt/ale/python
 
 # The framework's own namespace. Task data goes wherever each task declares it.
 RUN mkdir -p /ale/kits /ale/store && chown -R "${USER}" /ale

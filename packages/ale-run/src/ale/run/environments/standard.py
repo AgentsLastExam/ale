@@ -25,7 +25,6 @@ from pathlib import Path, PurePosixPath
 from ale.core.environment import Environment, EpisodeContext, Phase
 from ale.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
 from ale.core.harness import AutonomousHarness, PolicyHarness
-from ale.core.kit import KITS_ROOT
 from ale.core.lock import AssetProvenance, KitProvenance, SandboxProvenance
 from ale.core.sandbox import Identity, Sandbox, SandboxRequest
 from ale.core.task import Task
@@ -267,7 +266,6 @@ class StandardEnvironment(Environment):
             "ALE_WORK_DIR": ctx.work_dir,
             "ALE_PARAMS_JSON": str(directory / "params.json"),
             "ALE_VERDICT_PATH": str(VERDICT_PATH),
-            "PYTHONPATH": str(KITS_ROOT / "*"),
         }
         await sandbox.write_file(
             directory / "params.json", json.dumps(ctx.spec.params).encode("utf-8")
@@ -275,7 +273,7 @@ class StandardEnvironment(Environment):
         result = await sandbox.exec(
             ["bash", str(entry)],
             cwd=str(directory),
-            env=env | {"PYTHONPATH": await self._pythonpath(sandbox)},
+            env=env,
             timeout_sec=None,
         )
         ctx.trace.write_semantic(
@@ -291,12 +289,6 @@ class StandardEnvironment(Environment):
                 f"setup failed with exit code {result.exit_code}: {result.stderr[-500:]}"
             )
         return result.exit_code
-
-    async def _pythonpath(self, sandbox: Sandbox) -> str:
-        """Every installed kit, so a verify script can simply import what it needs."""
-        listing = await sandbox.exec(["sh", "-c", f"ls -d {KITS_ROOT}/* 2>/dev/null || true"])
-        paths = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
-        return ":".join(paths)
 
     async def _stage_assets(
         self, ctx: EpisodeContext, sandbox: Sandbox, mounts: tuple[AssetMount, ...]
@@ -322,16 +314,44 @@ class StandardEnvironment(Environment):
     async def _install_kits(
         self, ctx: EpisodeContext, sandbox: Sandbox, folder: object, kits: tuple[str, ...]
     ) -> None:
+        """Put a domain's shared libraries where the interpreter already searches.
+
+        Not a framework directory plus a search path we set: that is a rule every task
+        author has to learn, and ours was quietly wrong — it set a literal glob, which
+        the variable does not expand, so one of its two implementations never worked.
+
+        The destination is asked of the interpreter rather than assumed, since it depends
+        on the image's Python version. It is the *system* location, not one account's:
+        a kit is shared machinery that setup, verify and the agent all import, and those
+        run as different users — installing into any one of their private locations would
+        make it importable for that one and missing for the rest.
+        """
         if not kits:
             return
+
         repo_root: Path = folder.repo_root  # type: ignore[attr-defined]
+        destination = await self._site_packages(sandbox)
+
         for name in kits:
             source = repo_root / "kits" / name
             if not source.is_dir():
                 raise TaskError(f"kit {name!r} is declared but not present at {source}")
-            await sandbox.exec(["mkdir", "-p", str(KITS_ROOT / name)])
-            await sandbox.upload_dir(str(source), str(KITS_ROOT / name))
+            await sandbox.exec(["mkdir", "-p", destination])
+            await sandbox.upload_dir(str(source), destination)
             ctx.kits.append(KitProvenance(name=name, content_hash=hash_kit(source)))
+
+    async def _site_packages(self, sandbox: Sandbox) -> str:
+        """Where this image's interpreter looks for installed packages."""
+        result = await sandbox.exec(
+            ["python3", "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+        )
+        path = result.stdout.strip()
+        if result.exit_code != 0 or not path:
+            raise TaskError(
+                "could not ask the image's interpreter where user packages go; "
+                f"kits cannot be installed: {result.stderr.strip()}"
+            )
+        return path
 
     async def _upload_oracle(self, task: Task, sandbox: Sandbox) -> None:
         folder = getattr(task, "folder", None)

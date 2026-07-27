@@ -68,7 +68,6 @@ class TestKitManifest:
     def test_stdlib_kit_needs_nothing_from_the_image(self) -> None:
         kit = KitManifest(name="grader-protocol", package="grader_protocol")
         assert kit.runtime is KitRuntime.STDLIB
-        assert str(kit.mount_path()) == "/ale/kits/grader-protocol"
         assert kit.import_probe() == "import grader_protocol"
 
     def test_stdlib_kit_may_not_declare_requirements(self) -> None:

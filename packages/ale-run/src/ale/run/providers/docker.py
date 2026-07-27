@@ -49,8 +49,6 @@ USER_LABEL = "ale.user"
 #: Used when an image declares nothing, so an image predating the contract still runs.
 DEFAULT_AGENT_USER = "user"
 
-#: Optional per-image interpreter hint; falls back to whatever `python3` resolves to.
-GUESTD_PYTHON = PurePosixPath("/opt/ale/python")
 LABEL = "ale.episode"
 
 #: The name a sandbox uses for its gateway. It is mapped to the host's address *on the
@@ -444,13 +442,12 @@ class DockerProvider(Provider):
                 "exec",
                 "-i",
                 container,
-                # An image may bake an interpreter better suited to the guest service —
-                # one carrying Pillow and python-xlib, so the fast screenshot path works.
-                # Reading its choice keeps that knowledge in the image, where it belongs.
-                "sh",
-                "-c",
-                f'exec "$(test -x {GUESTD_PYTHON} && echo {GUESTD_PYTHON} || echo python3)" '
-                f'"{GUESTD_DIR}/main.py" --stdio',
+                # One interpreter, and it is the image's own. An image that needs the
+                # guest service to have Pillow installs it there; choosing between
+                # interpreters was a rule that existed only to be got wrong.
+                "python3",
+                str(GUESTD_DIR / "main.py"),
+                "--stdio",
             ]
         )
         await transport.start()

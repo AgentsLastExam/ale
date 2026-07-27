@@ -19,14 +19,11 @@ A task references a kit by name only — contributors never type a hash.
 from __future__ import annotations
 
 from enum import StrEnum
-from pathlib import PurePosixPath
 from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-__all__ = ["KITS_ROOT", "KitManifest", "KitRuntime", "KitsLock", "LockedKit"]
-
-KITS_ROOT = PurePosixPath("/ale/kits")
+__all__ = ["KitManifest", "KitRuntime", "KitsLock", "LockedKit"]
 
 
 class KitRuntime(StrEnum):
@@ -57,10 +54,6 @@ class KitManifest(BaseModel):
         default=(), description="Import names the image must provide when runtime is image_deps"
     )
     entry: str | None = Field(default=None, description="Optional module to execute")
-
-    def mount_path(self) -> PurePosixPath:
-        """Where this kit is materialised inside a sandbox."""
-        return KITS_ROOT / self.name
 
     def import_probe(self) -> str:
         """A one-liner that fails loudly if the kit cannot be imported in the guest."""
