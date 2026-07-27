@@ -109,6 +109,18 @@ class _Artifacts(ArtifactSink):
         self.collected.append(name)
         return target
 
+    async def collect_file(self, sandbox: Sandbox, source: str, name: str) -> Path:
+        """One file rather than a directory, for a harness's own logs.
+
+        Kept out of ``artifacts/``: what the agent produced and how the harness went about
+        producing it are different things, and a reader who mixes them cannot tell which
+        is which.
+        """
+        target = self.run_dir / "logs" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(await sandbox.read_file(source))
+        return target
+
     def path(self, name: str) -> Path:
         return self.run_dir / "artifacts" / name
 
@@ -126,6 +138,12 @@ class _DiscardedArtifacts(ArtifactSink):
 
     async def collect(self, sandbox: Sandbox, source: str, name: str) -> Path:
         return self.path(name)
+
+    async def collect_file(self, sandbox: Sandbox, source: str, name: str) -> Path:
+        # Harness logs follow the same switch rather than getting one of their own. "Pull
+        # nothing back" should mean what it says, and a second setting to remember is a
+        # worse trade than the kilobytes it would save.
+        return self.run_dir / "logs" / name
 
     def path(self, name: str) -> Path:
         return self.run_dir / "artifacts" / name

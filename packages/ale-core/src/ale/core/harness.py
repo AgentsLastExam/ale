@@ -106,6 +106,21 @@ class Harness(ABC):
     name: str
     family: HarnessFamily
 
+    logs: tuple[str, ...] = ()
+    """Files this harness writes about its own run, relative to the agent's home.
+
+    Not artifacts. An artifact is what the *agent produced* while doing the task, and the
+    task declares it because only the task knows what its own output is. These are what
+    the *harness* produced while running it — a transcript, a stream of tool calls, an
+    error log — and only the harness knows about them.
+
+    Keeping them apart matters because they answer different questions. Artifacts say what
+    the agent achieved, which is what the verifier scores. These say how it went about it,
+    which is the only evidence for why a score is what it is: a run that scored 1.0 by
+    reading a file and one that scored 1.0 by looking at the screen are indistinguishable
+    from the reward alone.
+    """
+
     @abstractmethod
     def version(self) -> str:
         """The agent build actually used; recorded in provenance."""

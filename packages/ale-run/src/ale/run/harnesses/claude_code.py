@@ -95,6 +95,11 @@ class ClaudeCodeHarness(AutonomousHarness):
     name = "claude-code"
     resume_support = ResumeSupport.NONE  # single-shot in Phase 0
 
+    #: Both streams are in here: the CLI is run with them interleaved on purpose, because
+    #: when it fails the reason is usually the last thing it printed before the stream
+    #: stopped, and two files lose that ordering.
+    logs = (TRANSCRIPT_NAME,)
+
     def __init__(self, *, cli_version: str | None = None, **kwargs: Any) -> None:
         self.cli_version = cli_version
         self.kwargs = kwargs

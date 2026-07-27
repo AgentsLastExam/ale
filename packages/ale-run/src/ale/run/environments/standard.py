@@ -307,6 +307,16 @@ class StandardEnvironment(Environment):
             with contextlib.suppress(Exception):
                 await ctx.artifacts.collect(sandbox, path, name)
 
+        # The harness's own logs, in their own place. What the agent produced and how the
+        # harness went about producing it are different questions with different owners:
+        # the task declares the first because only it knows what its output is, and the
+        # harness declares the second because only it knows what it writes.
+        for name in getattr(self.harness, "logs", ()):
+            with contextlib.suppress(Exception):
+                await ctx.artifacts.collect_file(
+                    sandbox, f"{ctx.home}/{name}", f"{self.harness.name}/{name}"
+                )
+
         await ctx.sandboxes.release(sandbox)
 
     # --- helpers ---

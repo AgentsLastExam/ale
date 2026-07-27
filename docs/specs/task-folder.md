@@ -114,23 +114,51 @@ less isolated than one without.
 ## Paths
 
 **A task decides where its own data goes.** There is no framework-wide layout: a mount's
-`dest` and an artifact's `path` are absolute paths chosen by the task, so a simulation
-domain can put scenes at `/opt/sim/scenes` and nothing has to be adapted.
+`dest` and an artifact's `path` are absolute paths chosen by the task.
+
+They have to be somewhere **the agent can create**, which in practice means under its home
+— `/home/user/input`, `/home/user/output`. The framework creates declared paths *as the
+agent* and never changes anyone's ownership, so a task naming a path the agent cannot
+create fails at once, saying so. That is deliberate: the alternative was creating them as
+root and handing them over, which worked until an image named its agent account something
+else, and then failed somewhere far from the cause.
+
+Absolute paths, written out. There is no placeholder to learn and nothing to expand — a
+task already names the image it runs on, so it already knows which account that image
+declares.
 
 Whether those artifacts are copied back is decided per run (`artifacts.collect` in the
 run configuration), not per task: declaring where the output lives and deciding to keep
 a copy of it are different questions, asked by different people.
 
-The framework creates the mount destinations, the artifact paths, and the run's scratch
-directory (`work_dir`, configured per run rather than per task, and inside the agent
-user's home so files land with the right owner). Anything else a task needs, it creates in
-its own setup script.
+The framework creates the mount destinations and the artifact paths. Anything else a task
+needs, it creates in its own setup script.
 
-The framework keeps the stage directories and the rewards file for its own machinery.
+There is no scratch directory to configure. The agent's home *is* the workspace, derived
+from the account the image declares.
+
+The framework keeps `/opt/ale` for its own machinery — the setup and verify stages, and
+the rewards file. It is root-owned and root-only, which is what keeps the scorer away from
+the agent; a sandbox therefore has exactly two roots, that one and the agent's home.
 Shared libraries go where the image's interpreter already searches, so there is no
 framework directory for a task author to learn.
 
 What keeps gold answers away from an agent is **timing, not location**: a mount listed
 under `verify` is copied in during scoring, so while the agent works it is absent.
+
+### Artifacts are not logs
+
+Two different things, with two different owners, collected into two different places:
+
+| | What it is | Who declares it | Where it lands |
+|---|---|---|---|
+| **artifact** | what the agent produced doing the task | the **task**, in `artifacts:` | `artifacts/` |
+| **harness log** | what the harness wrote while running it | the **harness**, in `logs` | `logs/<harness>/` |
+
+Only the task knows what its own output is; only the harness knows what it writes. They
+answer different questions — an artifact says what the agent achieved, which is what the
+verifier scores, and a log says how it went about it, which is the only evidence for why a
+score is what it is. A run that scored 1.0 by reading a file and one that scored 1.0 by
+looking at the screen are indistinguishable from the reward alone.
 
 

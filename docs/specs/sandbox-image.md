@@ -25,13 +25,19 @@ task, and a package we added to make our own code work is a package that can col
 what a task depends on. A task needing something different declares a different image, or
 builds what it needs inside its own setup.
 
-**An unprivileged user** with a real home directory, declared as `ale.user`. The agent
-runs as this account, and so does the oracle that stands in for it. An agent with root can
+**An unprivileged user** with a real home directory at `/home/<user>`, declared as
+`ale.user`. The agent runs as this account, and so does the oracle that stands in for it.
+
+The home is derived from that one declaration rather than declared separately. Two facts
+that describe the same thing can disagree, and the engine would have no way to tell which
+was right; one fact cannot. An agent with root can
 change the network policy, the clock and the guest service driving its own sandbox, so a
 result obtained that way is not reproducible.
 
-The home directory matters: the run's workspace lives inside it, so staged files land with
-the right owner and nothing has to grant that afterwards.
+The home directory matters: it *is* the run's workspace. Everything the agent touches
+lives under it — the task's declared destinations, its artifacts, the harness's own files
+— so nothing has to be granted afterwards and the engine never changes an owner. There is
+no separate scratch directory to configure.
 
 **A command that keeps the sandbox alive.** A container lives exactly as long as its
 command, and the engine will not supply one. An image with services to start runs them; an
@@ -83,6 +89,11 @@ guest service once the machine is up:
 {"user": "user", "gui": false, "port": 7411}
 ```
 
+`gui` decides one thing: whether the engine waits for a screen before treating the sandbox
+as ready. It is not used to admit or refuse a task, and not to decide what tools an agent
+is given — both of those questions answer themselves when asked, because a screenshot in a
+sandbox without a screen reports that.
+
 Same fields, same meanings, same defaults. `port` is where the guest service listens,
 which a container answers instead by being exec'd into.
 
@@ -94,17 +105,20 @@ service the image enables rather than a process the engine starts.
 
 Given a conforming image, the engine will:
 
-- install the guest service where the agent cannot read it, and run it as the framework;
-- create each path a task declared — asset destinations, artifact paths, the run's
-  workspace — and hand them to the agent user;
+- install the guest service under `/opt/ale`, which is root-owned and root-only, and run
+  it as the framework — along with the setup and verify stages and the rewards file, so
+  the scorer is out of the agent's reach by permission and not merely by timing;
+- create each path a task declared — asset destinations and artifact paths — **as the
+  agent**, so no ownership has to be changed afterwards and a path the agent could not
+  create fails immediately instead of silently working;
 - run the task's setup and verify stages as the framework, and the agent and oracle as the
   agent user;
 - install a domain's kits where the interpreter already searches;
 - resolve the image to a digest and record it, so a moved tag is detectable;
 - wait for a declared capability to actually work before using it.
 
-It will not: alter ownership of anything a task's setup produced (that is the task's to
-decide), install into the interpreter, or substitute the image's command.
+It will not: alter ownership of anything at all (that is the task's to decide), install
+into the interpreter, or substitute the image's command.
 
 ## Building one
 
