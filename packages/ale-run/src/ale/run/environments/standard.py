@@ -285,15 +285,6 @@ class StandardEnvironment(Environment):
             with contextlib.suppress(Exception):
                 await ctx.artifacts.collect(sandbox, path, name)
 
-        # The agent's own workspace, always — not because a task asked for it, but
-        # because it holds the trajectory: which tools were called, in what order, on
-        # what. That is the only evidence for *how* a reward was earned, and without it
-        # the question "did it read the file or look at the screen?" can only be argued
-        # from the score, which cannot distinguish them. A task declares what its result
-        # is; this is what the result is accounted for by.
-        with contextlib.suppress(Exception):
-            await ctx.artifacts.collect(sandbox, ctx.work_dir, "agent")
-
         await ctx.sandboxes.release(sandbox)
 
     # --- helpers ---
