@@ -90,6 +90,14 @@ def run(
         str | None, typer.Option("--tasks-ref", help="Override the registry pin")
     ] = None,
     episodes: Annotated[int, typer.Option("-n", "--episodes", min=1)] = 1,
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            "--concurrency",
+            min=1,
+            help="How many episodes to run at once; bounded by what the host can hold",
+        ),
+    ] = 1,
     run_id: Annotated[
         str | None, typer.Option("--run-id", help="Resume this run instead of starting one")
     ] = None,
@@ -109,7 +117,7 @@ def run(
     Re-invoking with the same ``--run-id`` continues where an interrupted run stopped:
     episodes are matched by what they are, not by when they ran.
     """
-    flags = [*(overrides or []), f"episodes={episodes}"]
+    flags = [*(overrides or []), f"episodes={episodes}", f"concurrency={concurrency}"]
     if no_resume:
         flags.append("resume=false")
     if base_url:
@@ -325,12 +333,14 @@ async def _run_one(
     )
     failures = 0
 
-    try:
-        for index in range(settings.episodes):
-            if index < done:
-                typer.echo(f"skip  {task.spec.label}: episode {index + 1} already complete")
-                continue
+    # Episodes of one task are independent by construction — separate sandbox, separate
+    # gateway session, separate run directory — so the only thing bounding them is what
+    # the host can hold. One at a time is the default because a VM guest is measured in
+    # gigabytes, and four of those is a choice an operator should make deliberately.
+    gate = asyncio.Semaphore(settings.concurrency)
 
+    async def one() -> Status | None:
+        async with gate:
             result = await run_episode(
                 task,
                 StandardEnvironment(harness, max_steps=settings.agent.max_steps),
@@ -349,20 +359,43 @@ async def _run_one(
                 provenance=inputs,
                 proxy_url=proxy_url,
             )
-            ledger.start_episode(
-                episode_id=result.episode_id, run_id=run_id, identity=identity, spec=task.spec
-            )
-            ledger.finish_episode(
-                result.episode_id,
-                result.verdict,
-                result.lock.model_dump(mode="json") if result.lock else None,
-            )
-            ledger.event(result.episode_id, "finished", status=result.verdict.status.value)
+        # Outside the gate: recording is cheap, and holding a slot through it would stall
+        # the next episode behind a disk write.
+        ledger.start_episode(
+            episode_id=result.episode_id, run_id=run_id, identity=identity, spec=task.spec
+        )
+        ledger.finish_episode(
+            result.episode_id,
+            result.verdict,
+            result.lock.model_dump(mode="json") if result.lock else None,
+        )
+        ledger.event(result.episode_id, "finished", status=result.verdict.status.value)
 
-            _report(result)
-            reportable = _check_reportable(result)
-            unusable = require_reportable and not reportable
-            if result.verdict.status is not Status.COMPLETED or unusable:
+        _report(result)
+        reportable = _check_reportable(result)
+        unusable = require_reportable and not reportable
+        return (
+            None
+            if result.verdict.status is Status.COMPLETED and not unusable
+            else result.verdict.status
+        )
+
+    try:
+        pending = []
+        for index in range(settings.episodes):
+            if index < done:
+                typer.echo(f"skip  {task.spec.label}: episode {index + 1} already complete")
+                continue
+            pending.append(one())
+
+        # One failing episode is a result, not an abort: the others are still work someone
+        # asked for, and a run that stops at the first failure reports a smaller sample
+        # than it took.
+        for outcome in await asyncio.gather(*pending, return_exceptions=True):
+            if isinstance(outcome, BaseException):
+                typer.echo(f"error {task.spec.label}: {outcome}")
+                failures += 1
+            elif outcome is not None:
                 failures += 1
     finally:
         ledger.close()

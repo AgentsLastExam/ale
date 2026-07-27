@@ -7,6 +7,7 @@ because it looks like success.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -139,3 +140,38 @@ class TestLedger:
 
         assert [row.episode_id for row in ledger.episodes("r1")] == ["e1"]
         ledger.close()
+
+
+class TestConcurrentEpisodes:
+    """Several episodes recording at once, one row each.
+
+    Resume reads this table, so a row lost to interleaving re-runs work that was already
+    done, and a duplicated one hides work that was not. Neither shows up in a suite that
+    only ever writes one episode at a time.
+    """
+
+    def test_every_episode_is_recorded_exactly_once(self, tmp_path: Path) -> None:
+        ledger = Ledger(tmp_path / "run")
+        ledger.open_run("run1", "sha256:cfg")
+        task = spec()
+        verdict = Verdict(status=Status.COMPLETED, rewards={"reward": 1.0})
+
+        async def record(index: int) -> None:
+            ledger.start_episode(
+                episode_id=f"e{index}", run_id="run1", identity=f"identity-{index}", spec=task
+            )
+            await asyncio.sleep(0)  # yield, so the writes genuinely interleave
+            ledger.finish_episode(f"e{index}", verdict, None)
+
+        async def all_of_them() -> None:
+            await asyncio.gather(*(record(index) for index in range(4)))
+
+        try:
+            asyncio.run(all_of_them())
+            rows = ledger.episodes("run1")
+        finally:
+            ledger.close()
+
+        assert len(rows) == 4
+        assert len({row.episode_id for row in rows}) == 4
+        assert all(row.succeeded for row in rows)
