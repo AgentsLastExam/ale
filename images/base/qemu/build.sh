@@ -38,8 +38,8 @@ if [ ! -s "$base" ]; then
     curl -fL --progress-bar -o "$base" "$BASE_URL"
 fi
 
-# Room for the desktop packages and anything a task installs. The cloud image ships a
-# 2.2GB virtual disk, which fills during the first apt run.
+# Room for anything a task installs. The cloud image ships a 2.2GB virtual disk, which
+# fills during the first apt run.
 echo ">> preparing $OUTPUT"
 cp --reflink=auto "$base" "$OUTPUT"
 qemu-img resize "$OUTPUT" "${ALE_DISK_SIZE:-20G}"
@@ -154,7 +154,6 @@ echo ">> baking the sandbox image contract"
     --copy-in "$staging/99-ale-datasource.cfg:/etc/cloud/cloud.cfg.d" \
     --copy-in "$staging/image.json:/etc/ale" \
     --run-command "chown -R root:root /opt/ale && chmod -R go-rwx /opt/ale" \
-    --run-command "mkdir -p /ale/kits /ale/store && chown -R ${AGENT_USER} /ale" \
     --run-command "systemctl enable ale-guestd.service" \
     --run-command "systemctl enable nftables.service" \
     --run-command "python3 -c 'import PIL, Xlib'" \

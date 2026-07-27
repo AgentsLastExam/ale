@@ -40,15 +40,22 @@ from ale.core.trace import (
 from ale.core.verdict import Verdict
 from ale.run.assets import stage_mounts
 from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
-from ale.run.harnesses.builtin import ORACLE_DIR
+from ale.run.harnesses.builtin import oracle_dir
 from ale.run.images import resolve_digest, resolve_ref
 from ale.run.kits import hash_kit
 
 __all__ = ["StandardEnvironment"]
 
-SETUP_DIR = PurePosixPath("/ale/setup")
-VERIFY_DIR = PurePosixPath("/ale/verify")
-VERDICT_PATH = PurePosixPath("/ale/verify/rewards.json")
+#: Where the framework's own machinery goes. Under a root-owned, root-only directory,
+#: which is the whole point: the verify stage holds the scorer and the oracle holds the
+#: answer, and until now they were kept from the agent by *timing* alone — uploaded only
+#: when needed. Permissions are a better guarantee than a schedule.
+#:
+#: It also leaves exactly two roots in a sandbox: this one, which belongs to the framework
+#: and which the agent cannot read, and the agent's home, which is entirely its own.
+SETUP_DIR = PurePosixPath("/opt/ale/setup")
+VERIFY_DIR = PurePosixPath("/opt/ale/verify")
+VERDICT_PATH = PurePosixPath("/opt/ale/verify/rewards.json")
 
 
 class StandardEnvironment(Environment):
@@ -107,6 +114,10 @@ class StandardEnvironment(Environment):
         # there or had to be pulled.
         with contextlib.suppress(Exception):
             ctx.image_digest = await resolve_digest(reference)
+        # Derived from the account the image declared, not configured anywhere. A run
+        # that could choose its own working directory was a second answer to a question
+        # the image had already answered, and two answers can disagree.
+        ctx.home = f"/home/{_agent_user(sandbox)}"
         ctx.sandbox_identity = SandboxProvenance(
             user=_agent_user(sandbox), sudo=spec.resources.sudo
         )
@@ -126,16 +137,24 @@ class StandardEnvironment(Environment):
         # so it may reach the network. What the declared policy binds is the agent.
         await sandbox.open_egress()
 
+        # Created *as the agent*, not created as root and handed over. One step instead
+        # of two, and the framework never touches anyone's ownership — which is what was
+        # decided and had drifted. It also turns the convention into a mechanism: a task
+        # that declares a path the agent cannot create fails here, immediately, instead of
+        # being quietly chowned into working and then surprising somebody on an image
+        # whose agent account is named differently.
         declared = [
-            ctx.work_dir,
             *(mount.dest for mount in ctx.spec.setup.assets),
             *ctx.spec.artifacts,
         ]
-        await sandbox.exec(["mkdir", "-p", *declared])
-        # Created by the framework, used by the agent — so they are handed over at once.
-        # What a task's own setup then produces is the task's to open up or not; the
-        # framework does not revisit ownership afterwards.
-        await sandbox.exec(["chown", _agent_user(sandbox), *declared])
+        if declared:
+            result = await sandbox.exec(["mkdir", "-p", *declared], identity=Identity.AGENT)
+            if not result.ok:
+                raise TaskError(
+                    f"the agent cannot create the paths this task declared: "
+                    f"{result.stderr.strip()}. Declared destinations belong under the "
+                    f"agent's home ({ctx.home})."
+                )
 
         folder = getattr(task, "folder", None)
         if folder is None:
@@ -172,7 +191,7 @@ class StandardEnvironment(Environment):
             return
 
         if harness.name == "oracle":
-            await self._upload_oracle(task, sandbox)
+            await self._upload_oracle(ctx, task, sandbox)
 
         # Installed first, then sealed. Putting the agent's own CLI in place is our
         # preparation, not its work; an image that has not pre-baked one would otherwise
@@ -183,7 +202,10 @@ class StandardEnvironment(Environment):
 
         # The session the agent gets carries the sandbox's own view of the gateway.
         session = ctx.session.model_copy(
-            update={"gateway_url": sandbox.gateway_url or ctx.session.gateway_url}
+            update={
+                "gateway_url": sandbox.gateway_url or ctx.session.gateway_url,
+                "home": ctx.home,
+            }
         )
         run = await harness.launch(
             spec.instruction, sandbox, session, timeout_sec=spec.timeouts.agent
@@ -219,7 +241,7 @@ class StandardEnvironment(Environment):
             max_steps=self.max_steps,
             stall_limit=self.stall_limit,
         ) as env:
-            closing = await harness.rollout(env, ctx.session)
+            closing = await harness.rollout(env, ctx.session.model_copy(update={"home": ctx.home}))
 
         ctx.trace.write_semantic(
             NoteRecord(
@@ -295,7 +317,7 @@ class StandardEnvironment(Environment):
         entry = directory / "run.sh"
         env = {
             "ALE_STAGE_DIR": str(directory),
-            "ALE_WORK_DIR": ctx.work_dir,
+            "ALE_HOME": ctx.home,
             "ALE_PARAMS_JSON": str(directory / "params.json"),
             "ALE_VERDICT_PATH": str(VERDICT_PATH),
         }
@@ -385,14 +407,18 @@ class StandardEnvironment(Environment):
             )
         return path
 
-    async def _upload_oracle(self, task: Task, sandbox: Sandbox) -> None:
+    async def _upload_oracle(self, ctx: EpisodeContext, task: Task, sandbox: Sandbox) -> None:
         folder = getattr(task, "folder", None)
-        oracle_dir = folder.stage_dir("oracle") if folder else None
-        if oracle_dir is None:
+        source = folder.stage_dir("oracle") if folder else None
+        if source is None:
             raise TaskError("validation requires an oracle stage, and this task has none")
-        await sandbox.upload_dir(str(oracle_dir), str(ORACLE_DIR))
+        # As the agent, since the agent is the account that will run it.
+        root = oracle_dir(ctx.home)
+        await sandbox.upload_dir(str(source), str(root), identity=Identity.AGENT)
         await sandbox.write_file(
-            ORACLE_DIR / "params.json", json.dumps(task.spec.params).encode("utf-8")
+            root / "params.json",
+            json.dumps(task.spec.params).encode("utf-8"),
+            identity=Identity.AGENT,
         )
 
     async def _read_rewards(self, sandbox: Sandbox) -> dict[str, float]:
@@ -442,4 +468,4 @@ def _default_files_dest(ctx: EpisodeContext) -> str:
     """Where a task's own ``files/`` directory goes when it declared no home for it."""
     if ctx.spec.setup.assets:
         return ctx.spec.setup.assets[0].dest
-    return ctx.work_dir
+    return ctx.home

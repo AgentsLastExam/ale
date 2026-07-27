@@ -9,25 +9,36 @@
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    ALE_HOME=/ale
+    PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        bash ca-certificates curl git jq python3 python3-venv sudo unzip \
+        bash ca-certificates curl git jq python3 python3-venv sudo unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Node, and only Node. Several autonomous harnesses ship as npm packages, and a runtime
 # is a property of the platform — the kind of thing an image is for.
 #
+# From nodejs.org's own tarball, pinned and checksummed, rather than a third-party apt
+# repository. NodeSource's `setup_22.x` — which this used to pipe into a shell — began
+# answering 403, and an image that cannot be rebuilt is not reproducible. It also puts the
+# same version in every image regardless of what the base distribution happens to ship:
+# jammy's `nodejs` is 12.x, which no current agent will run on.
+#
 # The agents themselves are not baked. Which agent a run uses, and at which version, is a
 # property of the experiment: an image that answers it makes every run on that image share
-# the answer whether or not anyone chose it, and `latest` — which is what this used to
-# install — makes two runs a month apart two different agents compared as one. The harness
-# installs the pinned version at the start of the episode, while the sandbox still has a
-# network; the declared policy binds the agent, not the preparation.
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+# the answer whether or not anyone chose it. The harness installs the pinned version at
+# the start of the episode, while the sandbox still has a network — the declared network
+# policy binds the agent, not the preparation.
+ARG NODE_VERSION=v22.11.0
+ARG NODE_SHA256=83bf07dd343002a26211cf1fcd46a9d9534219aad42ee02847816940bf610a72
+RUN set -eux; \
+    curl -fsSLo /tmp/node.tar.xz \
+        "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz"; \
+    echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+        --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md; \
+    rm /tmp/node.tar.xz; \
+    node --version; npm --version
 
 # The account the agent runs as. An agent with root can change the network policy, the
 # clock and the guest service itself, so a result obtained that way is not reproducible —
@@ -43,10 +54,6 @@ RUN useradd --create-home --shell /bin/bash "${AGENT_USER}"
 # its own sandbox.
 COPY packages/ale-run/src/ale/run/guestd/ /opt/ale/guestd/
 RUN chown -R root:root /opt/ale && chmod -R go-rwx /opt/ale
-
-# Only the framework's own namespace. Task data goes wherever each task declares, and the
-# run's scratch directory is created per episode from the run configuration.
-RUN mkdir -p /ale/kits /ale/store && chown -R "${AGENT_USER}" /ale
 
 # What this image is, so the engine reads rather than guesses. See
 # docs/specs/sandbox-image.md.

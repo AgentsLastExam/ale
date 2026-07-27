@@ -34,7 +34,10 @@ setup:
   # - repo: agents-last-exam/ale-tasks-assets
   #   revision: <commit>     # a commit, so two runs read the same bytes
   #   path: mydomain/mytask/input
-  #   dest: /ale/input       # your choice; there is no framework layout
+  #   dest: /home/user/input   # your choice, but it has to be somewhere the agent can
+  #                            # write — the framework creates declared paths as the
+  #                            # agent and never changes ownership, so its home is the
+  #                            # natural home for a task's data too
   kits: []
 verify:
   assets: []
@@ -42,7 +45,7 @@ verify:
 
 # Absolute paths holding this task's output. Whether a copy is kept is a run-level
 # setting (`artifacts.collect`), not this file's business.
-artifacts: [/ale/output]
+artifacts: [/home/user/output]
 
 # Substituted into instruction.md as ${greeting}. Strict both ways: every declared
 # parameter must be used, and every ${placeholder} must be declared.
@@ -59,7 +62,7 @@ metadata: { tags: [] }
 """
 
 INSTRUCTION_MD = """\
-Write the word ${greeting} into /ale/output/result.txt
+Write the word ${greeting} into /home/user/output/result.txt
 
 State paths literally, as above. The image is fixed and this task chose these paths, so
 there is nothing left for the prompt to compute.
@@ -73,7 +76,7 @@ SETUP_SH = """\
 # the run's scratch directory. Anything else is this script's to create.
 set -euo pipefail
 
-mkdir -p /ale/output
+mkdir -p /home/user/output
 """
 
 VERIFY_SH = """\
@@ -85,7 +88,7 @@ VERIFY_SH = """\
 # `task_error` — a defect in the task — and is deliberately distinct from a zero score.
 set -euo pipefail
 
-actual="$(tr -d '[:space:]' < /ale/output/result.txt 2>/dev/null || true)"
+actual="$(tr -d '[:space:]' < /home/user/output/result.txt 2>/dev/null || true)"
 
 if [ "$actual" = "hello" ]; then
     printf '{"rewards": {"reward": 1.0}}' > "$ALE_VERDICT_PATH"
@@ -102,8 +105,8 @@ ORACLE_SH = """\
 # out costs one container rather than one agent run.
 set -euo pipefail
 
-mkdir -p /ale/output
-printf 'hello\\n' > /ale/output/result.txt
+mkdir -p /home/user/output
+printf 'hello\\n' > /home/user/output/result.txt
 """
 
 _FILES = {

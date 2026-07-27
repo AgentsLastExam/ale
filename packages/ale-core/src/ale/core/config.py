@@ -115,13 +115,6 @@ class RunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: str = "docker"
-    work_dir: str = Field(
-        default="/home/user/work",
-        description=(
-            "Scratch directory created in every sandbox. Inside the agent's home, so it "
-            "is owned by the agent without anything having to grant that afterwards."
-        ),
-    )
     artifacts: ArtifactPolicy = ArtifactPolicy()
     agent: AgentConfig = AgentConfig()
     gateway: GatewayConfig = GatewayConfig()

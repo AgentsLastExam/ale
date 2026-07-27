@@ -118,7 +118,7 @@ class TestStages:
         base: dict[str, object] = {
             "id": TaskId("demo-hello"),
             "domain": "demo",
-            "instruction": "Write to /ale/output/result.txt",
+            "instruction": "Write to /home/user/output/result.txt",
             "image": ImageRef(name="sandbox-base-cli"),
         }
         return TaskSpec(**(base | overrides))  # type: ignore[arg-type]
@@ -131,11 +131,11 @@ class TestStages:
     def test_a_mount_carries_everything_needed_to_find_it(self) -> None:
         """A task is readable on its own: no lookup table to keep in step with it."""
         mount = AssetMount(
-            repo="org/assets", revision="abc123", path="demo/hello/input", dest="/ale/input"
+            repo="org/assets", revision="abc123", path="demo/hello/input", dest="/home/user/input"
         )
         spec = self.make(setup=SetupStage(assets=(mount,)))
         assert spec.setup.assets[0].repo == "org/assets"
-        assert spec.setup.assets[0].dest == "/ale/input"
+        assert spec.setup.assets[0].dest == "/home/user/input"
 
     def test_verify_stage_carries_its_own_assets_and_kits(self) -> None:
         spec = self.make(

@@ -73,12 +73,13 @@ class HarnessSession(BaseModel):
     gateway_url: str
     token: str = Field(description="Per-episode bearer; never a provider credential")
     model: str
-    work_dir: str = Field(
-        default="/home/user/work",
+    home: str = Field(
+        default="/home/user",
         description=(
-            "Where the harness may write. Supplied rather than chosen, because the agent "
-            "runs unprivileged and a path it does not own fails on the first write — with "
-            "an error about permissions that says nothing about the agent or the task."
+            "The agent's home directory, and so where a harness may write. Supplied "
+            "rather than chosen: the agent runs unprivileged, and a path it does not own "
+            "fails on the first write with an error about permissions that says nothing "
+            "about the agent or the task."
         ),
     )
 

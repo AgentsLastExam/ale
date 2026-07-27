@@ -22,14 +22,14 @@ _SOURCES = (
 )
 
 
-async def stage_desktop_bridge(sandbox: Sandbox, work_dir: str) -> str:
+async def stage_desktop_bridge(sandbox: Sandbox, home: str) -> str:
     """Put the desktop bridge where the agent can run it, and return its config path.
 
     Staged as the agent because the agent's own client is what launches it: a file the
     agent cannot execute is a server that never starts, and the failure surfaces as a
     model that simply never uses the tools.
     """
-    root = PurePosixPath(work_dir) / ".ale" / "desktop"
+    root = PurePosixPath(home) / ".ale-desktop"
     await sandbox.exec(["mkdir", "-p", str(root)], identity=Identity.AGENT)
     for source in _SOURCES:
         await sandbox.write_file(root / source.name, source.read_bytes(), identity=Identity.AGENT)

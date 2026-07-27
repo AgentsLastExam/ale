@@ -141,7 +141,6 @@ async def run_episode(
     token: str = "",
     model: str = "",
     seed: int = 0,
-    work_dir: str = "/ale/work",
     collect_artifacts: bool = True,
     provenance: ProvenanceInputs | None = None,
     proxy_url: str = "",
@@ -195,10 +194,8 @@ async def run_episode(
             gateway_url=gateway_url,
             token=session_token,
             model=model,
-            work_dir=work_dir,
         ),
         seed=seed,
-        work_dir=work_dir,
         proxy_url=proxy_url,
     )
 

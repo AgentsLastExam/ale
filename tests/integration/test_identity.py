@@ -31,8 +31,8 @@ from ale.run.tasksets.manifest import ManifestTaskset
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 ELEVATION_PROBE = """
-    if sudo -n true 2>/dev/null; then echo yes > /ale/output/sudo
-    else echo no > /ale/output/sudo; fi
+    if sudo -n true 2>/dev/null; then echo yes > /home/user/output/sudo
+    else echo no > /home/user/output/sudo; fi
     """
 
 
@@ -45,7 +45,8 @@ async def run_one(task_root: Path, run_dir: Path, **kwargs):  # type: ignore[no-
 
 def with_oracle(task_root: Path, body: str) -> None:
     (task_root / "oracle" / "run.sh").write_text(
-        "#!/usr/bin/env bash\nset -uo pipefail\nmkdir -p /ale/output\n" + textwrap.dedent(body)
+        "#!/usr/bin/env bash\nset -uo pipefail\nmkdir -p /home/user/output\n"
+        + textwrap.dedent(body)
     )
 
 
@@ -74,7 +75,7 @@ class TestWhoRunsWhat:
         access alone — and it is the only check a task gets before publication.
         """
         task_root = write_repo(tmp_path / "repo")
-        with_oracle(task_root, "id -un > /ale/output/who\n")
+        with_oracle(task_root, "id -un > /home/user/output/who\n")
 
         result = await run_one(task_root, tmp_path / "runs")
 
@@ -88,12 +89,12 @@ class TestWhoRunsWhat:
         """A task's stages are engine machinery, run on the task's behalf."""
         task_root = write_repo(tmp_path / "repo")
         (task_root / "setup" / "run.sh").write_text(
-            "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /ale/input /ale/output\n"
-            "printf 'world' > /ale/input/word.txt\nid -un > /ale/output/setup_who\n"
+            "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/input /home/user/output\n"
+            "printf 'world' > /home/user/input/word.txt\nid -un > /home/user/output/setup_who\n"
         )
         with_oracle(
             task_root,
-            "printf 'hello %s' \"$(cat /ale/input/word.txt)\" > /ale/output/result.txt\n",
+            "printf 'hello %s' \"$(cat /home/user/input/word.txt)\" > /home/user/output/result.txt\n",
         )
 
         result = await run_one(task_root, tmp_path / "runs")
@@ -114,8 +115,8 @@ class TestWhatTheAgentCanReach:
         with_oracle(
             task_root,
             """
-            if touch /ale/output/probe 2>/dev/null; then echo yes > /ale/output/writable
-            else echo no > /ale/output/writable; fi
+            if touch /home/user/output/probe 2>/dev/null; then echo yes > /home/user/output/writable
+            else echo no > /home/user/output/writable; fi
             """,
         )
 
@@ -131,8 +132,8 @@ class TestWhatTheAgentCanReach:
         with_oracle(
             task_root,
             """
-            if cat /opt/ale/guestd/main.py >/dev/null 2>&1; then echo yes > /ale/output/saw
-            else echo no > /ale/output/saw; fi
+            if cat /opt/ale/guestd/main.py >/dev/null 2>&1; then echo yes > /home/user/output/saw
+            else echo no > /home/user/output/saw; fi
             """,
         )
 
@@ -148,8 +149,8 @@ class TestWhatTheAgentCanReach:
         with_oracle(
             task_root,
             """
-            if touch /etc/ale-probe 2>/dev/null; then echo yes > /ale/output/wrote
-            else echo no > /ale/output/wrote; fi
+            if touch /etc/ale-probe 2>/dev/null; then echo yes > /home/user/output/wrote
+            else echo no > /home/user/output/wrote; fi
             """,
         )
 

@@ -758,10 +758,21 @@ RUN sed -i \
 # Node, and only Node. Several autonomous harnesses are distributed as npm packages, and
 # a runtime is a property of the platform — the kind of thing an image is for.
 #
-# Node, and only Node — see sandbox-base-cli for why the agent is not baked alongside it.
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+# Node, from nodejs.org's own tarball — see sandbox-base-cli for why.
+# xz-utils to unpack it; the desktop base does not ship one.
+RUN apt-get update && apt-get install -y --no-install-recommends xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+ARG NODE_VERSION=v22.11.0
+ARG NODE_SHA256=83bf07dd343002a26211cf1fcd46a9d9534219aad42ee02847816940bf610a72
+RUN set -eux; \
+    curl -fsSLo /tmp/node.tar.xz \
+        "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz"; \
+    echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+        --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md; \
+    rm /tmp/node.tar.xz; \
+    node --version; npm --version
 
 # One agent, at one pinned version — the same pin sandbox-base-cli carries.
 #
@@ -777,9 +788,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # sandbox goes through this, over stdio for containers and TCP for virtual machines.
 # Stdlib-only by contract, so it runs on whatever interpreter an image happens to have.
 COPY packages/ale-run/src/ale/run/guestd/ /opt/ale/guestd/
-
-# The framework's own namespace. Task data goes wherever each task declares it.
-RUN mkdir -p /ale/kits /ale/store && chown -R "${USER}" /ale
 
 # [ISOLATION 5/5] Lock /opt/ale to root:700. Same reason cua-lite locks /opt/lite: the
 # agent should not be able to read the guest service's source and learn the protocol

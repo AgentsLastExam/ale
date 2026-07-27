@@ -80,9 +80,9 @@ async def test_agent_never_sees_verification_material(
 
     probe = task_root / "setup" / "run.sh"
     probe.write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /ale/input /ale/output\n"
-        "printf 'world' > /ale/input/word.txt\n"
-        "for p in /ale/verify /ale/oracle /ale/reference; do\n"
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/input /home/user/output\n"
+        "printf 'world' > /home/user/input/word.txt\n"
+        "for p in /opt/ale/verify /home/user/reference; do\n"
         '  if [ -e "$p" ]; then echo "LEAK: $p" >&2; exit 17; fi\n'
         "done\n"
     )

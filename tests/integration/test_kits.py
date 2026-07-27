@@ -45,18 +45,18 @@ def repo_with_kit(root: Path) -> Path:
         image: {IMAGE}
         resources: {{ cpus: 1, memory_mb: 512 }}
         timeouts: {{ setup: 60, agent: 60, verify: 60 }}
-        artifacts: [/ale/output]
+        artifacts: [/home/user/output]
         verify:
           kits: [grader-protocol]
         validate: {{ min_reward: 1.0 }}
         """).strip()
     )
-    (task / "instruction.md").write_text("Write hello to /ale/output/r.txt\n")
+    (task / "instruction.md").write_text("Write hello to /home/user/output/r.txt\n")
     (task / "setup" / "run.sh").write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /ale/output\n"
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/output\n"
     )
     (task / "oracle" / "run.sh").write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\nprintf hello > /ale/output/r.txt\n"
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf hello > /home/user/output/r.txt\n"
     )
     (task / "verify" / "run.sh").write_text(
         textwrap.dedent("""
@@ -64,7 +64,7 @@ def repo_with_kit(root: Path) -> Path:
             set -euo pipefail
             python3 -c "
             import json, os, grader_protocol
-            value = open('/ale/output/r.txt').read().strip()
+            value = open('/home/user/output/r.txt').read().strip()
             json.dump({'rewards': {'reward': grader_protocol.score(value)}},
                       open(os.environ['ALE_VERDICT_PATH'], 'w'))
             "
@@ -105,11 +105,11 @@ async def test_a_setup_stage_kit_is_visible_to_the_agent(tmp_path: Path) -> None
     # Imported by the oracle, which runs as the agent.
     (task_root / "oracle" / "run.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n"
-        "python3 -c 'import grader_protocol' && printf hello > /ale/output/r.txt\n"
+        "python3 -c 'import grader_protocol' && printf hello > /home/user/output/r.txt\n"
     )
     (task_root / "verify" / "run.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n"
-        'test "$(cat /ale/output/r.txt)" = hello '
+        'test "$(cat /home/user/output/r.txt)" = hello '
         '&& printf \'{"rewards": {"reward": 1.0}}\' > "$ALE_VERDICT_PATH" '
         '|| printf \'{"rewards": {"reward": 0.0}}\' > "$ALE_VERDICT_PATH"\n'
     )

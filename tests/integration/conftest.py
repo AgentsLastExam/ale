@@ -13,6 +13,11 @@ from pathlib import Path
 
 import pytest
 
+#: Paths live under the agent's home, which is where a task's declared destinations
+#: belong: the framework creates them as the agent and never changes anyone's ownership,
+#: so a path the agent could not create is a task that fails at once rather than one that
+#: is quietly chowned into working.
+#:
 #: Our own base image, not an upstream one. The contract requires an unprivileged user,
 #: a command that keeps the sandbox alive and a guest interpreter — `python:3.12-slim`
 #: has none of those, which is exactly why tasks build on curated images instead.
@@ -22,7 +27,7 @@ VERIFY_DEFAULT = textwrap.dedent("""
     #!/usr/bin/env bash
     set -euo pipefail
     expected="hello world"
-    actual="$(cat /ale/output/result.txt 2>/dev/null || true)"
+    actual="$(cat /home/user/output/result.txt 2>/dev/null || true)"
     if [ "$actual" = "$expected" ]; then
         printf '{"rewards": {"reward": 1.0}}' > "$ALE_VERDICT_PATH"
     else
@@ -31,8 +36,8 @@ VERIFY_DEFAULT = textwrap.dedent("""
 """).strip()
 
 SETUP_DEFAULT = (
-    "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /ale/input /ale/output\n"
-    "printf 'world' > /ale/input/word.txt\n"
+    "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/input /home/user/output\n"
+    "printf 'world' > /home/user/input/word.txt\n"
 )
 
 
@@ -49,14 +54,14 @@ def _write_repo(root: Path, *, with_oracle: bool = True, verify_body: str | None
         image: {IMAGE}
         resources: {{ cpus: 1, memory_mb: 512 }}
         timeouts: {{ setup: 120, agent: 120, verify: 120 }}
-        artifacts: [/ale/output]
+        artifacts: [/home/user/output]
         params: {{ greeting: hello }}
         validate: {{ min_reward: 1.0 }}
         """).strip()
     )
     (task / "instruction.md").write_text(
-        "Write ${greeting} followed by the word in /ale/input/word.txt "
-        "into /ale/output/result.txt\n"
+        "Write ${greeting} followed by the word in /home/user/input/word.txt "
+        "into /home/user/output/result.txt\n"
     )
     (task / "setup" / "run.sh").write_text(SETUP_DEFAULT)
     (task / "verify" / "run.sh").write_text(verify_body or VERIFY_DEFAULT)
@@ -64,7 +69,7 @@ def _write_repo(root: Path, *, with_oracle: bool = True, verify_body: str | None
         (task / "oracle").mkdir()
         (task / "oracle" / "run.sh").write_text(
             "#!/usr/bin/env bash\nset -euo pipefail\n"
-            "printf 'hello %s' \"$(cat /ale/input/word.txt)\" > /ale/output/result.txt\n"
+            "printf 'hello %s' \"$(cat /home/user/input/word.txt)\" > /home/user/output/result.txt\n"
         )
     return task
 

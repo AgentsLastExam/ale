@@ -202,8 +202,8 @@ class ClaudeCodeHarness(AutonomousHarness):
         *,
         timeout_sec: float,
     ) -> AgentRun:
-        work_dir = PurePosixPath(session.work_dir)
-        transcript_path = work_dir / TRANSCRIPT_NAME
+        home = PurePosixPath(session.home)
+        transcript_path = home / TRANSCRIPT_NAME
         env = self._env(session)
 
         # Always, not only where a screen is expected. Which sandboxes have a desktop was
@@ -211,7 +211,7 @@ class ClaudeCodeHarness(AutonomousHarness):
         # answer from the wrong place is what kept them from ever being staged. The tools
         # can answer it themselves: a screenshot in a sandbox with no desktop says so, and
         # an agent reads that as easily as it reads a missing tool.
-        config_path = await stage_desktop_bridge(sandbox, str(work_dir))
+        config_path = await stage_desktop_bridge(sandbox, str(home))
         mcp_flags = f"--mcp-config {shlex.quote(config_path)}"
 
         # The CLI expects its configuration directory to exist, with these subdirectories
@@ -242,7 +242,7 @@ class ClaudeCodeHarness(AutonomousHarness):
 
         result = await sandbox.exec(
             ["bash", "-lc", command],
-            cwd=str(work_dir),
+            cwd=str(home),
             env={**env, prompt_var: instruction},
             timeout_sec=timeout_sec,
             # The thing being measured runs unprivileged, so it cannot change the
@@ -290,7 +290,7 @@ class ClaudeCodeHarness(AutonomousHarness):
         one model a run declared is what makes a third-party endpoint usable at all.
         Borrowed from Harbor, which learned it the same way.
         """
-        config_dir = PurePosixPath(session.work_dir) / "claude-config"
+        config_dir = PurePosixPath(session.home) / ".claude-config"
         env = {
             "ANTHROPIC_BASE_URL": session.gateway_url,
             "ANTHROPIC_API_KEY": session.token,

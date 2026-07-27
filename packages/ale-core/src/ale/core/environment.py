@@ -110,7 +110,14 @@ class EpisodeContext:
     session: HarnessSession
     """Gateway address plus this episode's bearer token — never a provider credential."""
 
-    work_dir: str = "/ale/work"
+    home: str = ""
+    """The agent's home directory, which is also where a run does its work.
+
+    Derived from the account the image declared, not configured: a run that could choose
+    its own scratch directory was a second answer to a question the image had already
+    answered, and the two could disagree. Everything the agent touches lives under here,
+    so nothing has to be handed to it afterwards.
+    """
     """Framework scratch inside the sandbox, created before setup runs."""
 
     phases: list[PhaseSpan] = field(default_factory=list)

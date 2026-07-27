@@ -15,9 +15,20 @@ from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, Stepwi
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.trace import DesktopAction
 
-__all__ = ["ORACLE_DIR", "NopHarness", "OracleHarness"]
+__all__ = ["NopHarness", "OracleHarness", "oracle_dir"]
 
-ORACLE_DIR = PurePosixPath("/ale/oracle")
+
+def oracle_dir(home: str) -> PurePosixPath:
+    """Where a task's own solution is staged, when one is being run.
+
+    In the agent's home, and deliberately not with the rest of the framework's machinery:
+    the oracle stands in for the agent and runs as the agent, so a root-only directory
+    would make it unreadable by the only account allowed to execute it.
+
+    Nothing leaks by putting it there. Under a real agent the oracle is never uploaded at
+    all — it is staged only by the harness that exists to run it.
+    """
+    return PurePosixPath(home) / ".ale-oracle"
 
 
 class NopHarness(AutonomousHarness):
@@ -76,8 +87,7 @@ class ScriptedPolicyHarness(StepwisePolicy):
 class OracleHarness(AutonomousHarness):
     """Runs the task's own solution in place of an agent.
 
-    The oracle is uploaded by the environment into :data:`ORACLE_DIR`, kept out of the
-    workspace so a task cannot accidentally read its own answer during a real run.
+    The environment stages it before this runs; see :func:`oracle_dir`.
     """
 
     name = "oracle"
@@ -93,16 +103,17 @@ class OracleHarness(AutonomousHarness):
         *,
         timeout_sec: float,
     ) -> AgentRun:
-        entry = ORACLE_DIR / "run.sh"
+        root = oracle_dir(session.home)
+        entry = root / "run.sh"
         result = await sandbox.exec(
             ["bash", str(entry)],
-            cwd=str(ORACLE_DIR),
+            cwd=str(root),
             # The oracle stands in for an agent, but it is task code and gets the same
             # environment contract a stage does — otherwise a solution that works during
             # authoring fails during validation for reasons that have nothing to do with it.
             env={
-                "ALE_TASK_DIR": "/ale/work",
-                "ALE_PARAMS_JSON": str(ORACLE_DIR / "params.json"),
+                "ALE_HOME": session.home,
+                "ALE_PARAMS_JSON": str(root / "params.json"),
             },
             timeout_sec=timeout_sec,
             # The oracle stands in for the agent, so it meets the agent's limits. An

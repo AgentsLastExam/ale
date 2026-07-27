@@ -283,9 +283,9 @@ class TestArtifactPolicy:
             domain="demo",
             instruction="write",
             image=ImageRef(name="sandbox-base-cli"),
-            artifacts=("/ale/output",),
+            artifacts=("/home/user/output",),
         )
-        assert spec.artifacts == ("/ale/output",)
+        assert spec.artifacts == ("/home/user/output",)
 
     def test_the_run_decides_whether_to_keep_them(self) -> None:
         assert RunConfig().artifacts.collect == "host"
@@ -302,7 +302,7 @@ class TestArtifactPolicy:
     async def test_discarding_still_satisfies_the_sink(self) -> None:
         """Environments collect unconditionally; the sink is where the policy lives."""
         sink = _DiscardedArtifacts(Path("/nowhere"))
-        assert await sink.collect(None, "/ale/output", "output") == sink.path("output")
+        assert await sink.collect(None, "/home/user/output", "output") == sink.path("output")
 
 
 class TestFailedModelCalls:

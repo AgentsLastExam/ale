@@ -26,7 +26,7 @@ def make_spec(**overrides: object) -> TaskSpec:
     base: dict[str, object] = {
         "id": TaskId("demo-hello"),
         "domain": "demo",
-        "instruction": "Write hello into /ale/output/result.txt",
+        "instruction": "Write hello into /home/user/output/result.txt",
         "image": ImageRef(name="sandbox-base-cli", tag="0.1.0"),
     }
     return TaskSpec(**(base | overrides))  # type: ignore[arg-type]
@@ -62,7 +62,7 @@ class TestCanonicalHashing:
 
     def test_spec_hash_tracks_the_rendered_instruction(self) -> None:
         one = make_spec()
-        two = make_spec(instruction="Write goodbye into /ale/output/result.txt")
+        two = make_spec(instruction="Write goodbye into /home/user/output/result.txt")
         assert one.spec_hash != two.spec_hash
         assert one.spec_hash == make_spec().spec_hash
 

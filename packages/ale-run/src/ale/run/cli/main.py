@@ -354,7 +354,6 @@ async def _run_one(
                 # rest, so an agent cannot widen its own reach by asking.
                 allowed_hosts=allowed,
                 seed=settings.seed,
-                work_dir=settings.work_dir,
                 collect_artifacts=settings.artifacts.collect == "host",
                 provenance=inputs,
                 proxy_url=proxy_url,
@@ -446,7 +445,6 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
             StandardEnvironment(OracleHarness()),
             _provider(settings),
             run_dir=runs_dir / "validate",
-            work_dir=settings.work_dir,
         )
         reward = result.verdict.primary_reward
         passed = (
