@@ -63,7 +63,31 @@ verified by `test_a_revoked_session_loses_its_egress`.
 The netprobe task additionally greps its own sandbox for credential material and fails
 if it finds any.
 
-## 4. Answers are absent, not hidden
+## 4. The agent cannot change what it is measured under
+
+The agent runs as an unprivileged account the image declares, and so does the oracle that
+stands in for it during validation. The framework's own work — installing the guest
+service, staging content, running the task's stages, collecting artifacts — runs as root.
+
+This is what stops an agent rewriting the network policy that isolates it, the clock its
+timeouts are measured against, or the guest service driving its own sandbox. None of that
+needs malice to matter: a result obtained under conditions the subject could alter is not
+a measurement.
+
+The oracle sharing the agent's limits is the load-bearing half. `ale validate` is the only
+check a task gets before publication, and an oracle with more privilege would pass exactly
+the tasks a real agent then fails on access alone.
+
+A task may declare `resources.sudo` when it genuinely needs to install software or change
+system configuration. The grant is verified rather than assumed — writing a sudoers rule
+succeeds in an image with no `sudo` binary — and recorded in provenance, because an
+episode run that way was less isolated and the two should not be compared without that
+being visible.
+
+Verified by `tests/integration/test_identity.py`: the agent cannot read the guest service,
+cannot write system paths, and cannot elevate unless its task asked.
+
+## 5. Answers are absent, not hidden
 
 `verify/`, `oracle/`, and any asset a task listed under its `verify` stage are copied
 into the sandbox **during scoring**. While the agent works they are not access-controlled
@@ -76,7 +100,7 @@ be read by anything.
 Verified by `test_agent_never_sees_verification_material`, whose setup probe exits
 non-zero if any scoring path exists during setup.
 
-## 5. Limits end episodes rather than stalling them
+## 6. Limits end episodes rather than stalling them
 
 Token, cost and turn ceilings are enforced by the gateway refusing the next call with a
 429; the episode maps that to `budget_exceeded`. Per-phase deadlines produce `timeout`.
@@ -89,7 +113,7 @@ because conflating them makes a broken task look like a hard one.
 Verified by `tests/integration/test_limits.py`, which asserts prompt typed termination
 and that no container outlives its episode.
 
-## 6. A result carries what produced it
+## 7. A result carries what produced it
 
 `RunLock` records the task source and commit, spec hash, resolved image **digest**,
 agent version and integrity, harness family, every asset revision and origin, kit
@@ -107,8 +131,9 @@ Stating these plainly is part of the model. Treating an unlisted gap as covered 
 security claims rot.
 
 **A malicious task author.** A task repository's `setup/run.sh` and `verify/run.sh` run
-in the sandbox with whatever the image allows. Tasks are reviewed content, not untrusted
-input. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are aimed at
+as root in the sandbox, and a task may declare `resources.sudo` for its agent. Tasks are
+reviewed content, not untrusted input; the identity model protects a result from its
+*agent*, not a host from its task. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are aimed at
 *broken* tasks, not hostile ones.
 
 **Container escape.** A sandbox is a Docker container with default isolation. A kernel

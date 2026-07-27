@@ -135,10 +135,72 @@ ale validate tasks/       # every oracle must reach its min_reward
 CI runs both. A task with no oracle fails admission unless it declares
 `validate: {mode: manual, reason: "..."}` — and the reason is read by a person.
 
+## Who runs what
+
+Your `setup/run.sh` and `verify/run.sh` run as **root**. They are framework machinery,
+executed on your task's behalf.
+
+The **agent runs as an unprivileged user** — and so does your **oracle**, because it
+stands in for the agent. That is deliberate: it means `ale validate` meets the same limits
+a real run will, so a task that leaves the agent unable to write something fails the gate
+instead of failing an evaluation later.
+
+**You decide what the agent can touch.** The framework creates what you declared — asset
+destinations, artifact paths, the workspace — and hands those to the agent. Anything your
+setup then produces is yours to open up:
+
+```bash
+# setup/run.sh — runs as root
+printf 'seed\n' > /ale/input/state.txt
+chown user /ale/input/state.txt      # the agent has to be able to rewrite this
+```
+
+Forget it and your own `ale validate` will tell you, because the oracle hits the same wall.
+
+If your task genuinely needs to install software or change system configuration, say so:
+
+```yaml
+resources: { cpus: 2, memory_mb: 4096, sudo: true }
+```
+
+The sandbox is configured for it and the grant is recorded in the run's provenance —
+an episode with elevation was less isolated, and results should not be compared across
+that line without it being visible.
+
+## GUI tasks
+
+A graphical program cannot talk to somebody else's session, so setup — which is root —
+drops to the desktop user:
+
+```bash
+setsid --fork runuser -u user -- eog --fullscreen /ale/input/code.png </dev/null &
+```
+
+The session's environment is supplied for you; you do not need to know where its bus is.
+
+Wait for what you actually need rather than sleeping. The first screenshot is taken the
+moment setup returns, and a window that exists is not yet a window that fills the screen.
+
+## Traps that have already cost time
+
+Each of these produced a task that looked like it worked:
+
+- **`set -e` with `pipefail` and a command substitution.** `x="$(cmd | tail -1)"` aborts
+  the whole script when `cmd` fails — which it does on the first loop iteration, before
+  the thing you are waiting for exists. Re-running by hand then passes, because by then it
+  does exist. Add `|| true`.
+- **A backgrounded process with a bare `&`.** Everything in the exec session's process
+  group dies when setup returns, so your viewer is killed the moment setup finishes. By
+  hand the shell stays alive and it survives. Use `setsid --fork`.
+- **Painting the X root window.** GNOME draws its own background over it; nothing appears.
+- **Setting the wallpaper with `gsettings` as root.** dconf cannot commit without the
+  session bus, so the value changes and the screen never repaints.
+
 ## Two things people get wrong
 
 **Assuming a directory exists.** The framework builds only what you declared. Create the
 rest yourself.
 
-**Naming a public image the short way.** An unqualified name is *ours* and resolves to the
-project registry. Public images need their full path: `docker.io/library/python:3.12-slim`.
+**Reaching for an upstream image.** `python:3.12-slim` is a build environment, not a
+sandbox: no unprivileged user, no command that keeps it alive. Build on one of ours, or
+build a curated image `FROM` one — see `docs/specs/sandbox-image.md`.

@@ -84,6 +84,33 @@ our namespace and the run fails against a registry that never had it.
 Tags resolve to a digest at run time and the digest is recorded in provenance, so a tag
 that moved upstream is detectable rather than silently comparable.
 
+## Who runs what
+
+| | Identity |
+|---|---|
+| `setup/run.sh`, `verify/run.sh` | **root** — framework machinery run on the task's behalf |
+| the agent | an **unprivileged user** the image declares |
+| `oracle/run.sh` | the **same unprivileged user**, because it stands in for the agent |
+
+The oracle's identity is not a detail: `ale validate` is the only check a task gets before
+publication, so an oracle with more privilege would pass exactly the tasks a real agent
+then fails on access alone.
+
+**A task decides what it opens up to the agent.** The framework creates what the task
+declared and hands it over; what a task's own setup then produces is the task's to make
+writable or not. There is no correcting pass, because only the task knows what the agent
+is meant to change — and forgetting is caught by the task's own validation.
+
+A task needing elevated privileges declares them with its other provisioning requests:
+
+```yaml
+resources: { cpus: 2, memory_mb: 4096, sudo: true }
+```
+
+The sandbox is configured accordingly, a backend that cannot grant it refuses rather than
+running with less, and the grant is recorded in provenance — an episode run that way was
+less isolated than one without.
+
 ## Paths
 
 **A task decides where its own data goes.** There is no framework-wide layout: a mount's
@@ -95,11 +122,13 @@ run configuration), not per task: declaring where the output lives and deciding 
 a copy of it are different questions, asked by different people.
 
 The framework creates the mount destinations, the artifact paths, and the run's scratch
-directory (`work_dir`, default `/ale/work`, configured per run rather than per task).
-Anything else a task needs, it creates in its own setup script.
+directory (`work_dir`, configured per run rather than per task, and inside the agent
+user's home so files land with the right owner). Anything else a task needs, it creates in
+its own setup script.
 
-The framework keeps a small namespace of its own — `/ale/kits`, the stage directories,
-and the rewards file — because it has to put its machinery somewhere.
+The framework keeps the stage directories and the rewards file for its own machinery.
+Shared libraries go where the image's interpreter already searches, so there is no
+framework directory for a task author to learn.
 
 What keeps gold answers away from an agent is **timing, not location**: a mount listed
 under `verify` is copied in during scoring, so while the agent works it is absent.
