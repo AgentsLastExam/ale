@@ -94,7 +94,8 @@ class TestWhoRunsWhat:
         )
         with_oracle(
             task_root,
-            "printf 'hello %s' \"$(cat /home/user/input/word.txt)\" > /home/user/output/result.txt\n",
+            "word=$(cat /home/user/input/word.txt)\n"
+            "printf 'hello %s' \"$word\" > /home/user/output/result.txt\n",
         )
 
         result = await run_one(task_root, tmp_path / "runs")

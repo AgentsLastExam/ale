@@ -69,7 +69,8 @@ def _write_repo(root: Path, *, with_oracle: bool = True, verify_body: str | None
         (task / "oracle").mkdir()
         (task / "oracle" / "run.sh").write_text(
             "#!/usr/bin/env bash\nset -euo pipefail\n"
-            "printf 'hello %s' \"$(cat /home/user/input/word.txt)\" > /home/user/output/result.txt\n"
+            "word=$(cat /home/user/input/word.txt)\n"
+            "printf 'hello %s' \"$word\" > /home/user/output/result.txt\n"
         )
     return task
 
