@@ -49,6 +49,12 @@ def usage_from_stream(events: list[bytes]) -> tuple[int, int, str | None]:
     Anthropic reports input tokens in ``message_start`` and the output total in
     ``message_delta``, so both have to be seen; a stream cut short still yields whatever
     was counted before it stopped.
+
+    Not every Anthropic-compatible provider agrees on which event carries what. GLM sends
+    zero in ``message_start`` and the real input count in ``message_delta``, so both
+    events are read for both numbers and the larger wins. Trusting one event meant
+    recording zero input tokens for every streamed call — which reads as a free request
+    rather than an unmeasured one.
     """
     input_tokens = output_tokens = 0
     stop_reason: str | None = None
@@ -62,12 +68,14 @@ def usage_from_stream(events: list[bytes]) -> tuple[int, int, str | None]:
                 continue
             if event.get("type") == "message_start":
                 usage = (event.get("message") or {}).get("usage") or {}
-                input_tokens = int(usage.get("input_tokens") or input_tokens)
-                output_tokens = int(usage.get("output_tokens") or output_tokens)
             elif event.get("type") == "message_delta":
                 usage = event.get("usage") or {}
-                output_tokens = int(usage.get("output_tokens") or output_tokens)
                 stop_reason = (event.get("delta") or {}).get("stop_reason") or stop_reason
+            else:
+                continue
+
+            input_tokens = max(input_tokens, int(usage.get("input_tokens") or 0))
+            output_tokens = max(output_tokens, int(usage.get("output_tokens") or 0))
     return input_tokens, output_tokens, stop_reason
 
 

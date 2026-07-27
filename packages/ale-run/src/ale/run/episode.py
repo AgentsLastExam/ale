@@ -31,6 +31,8 @@ from ale.core.sandbox import Provider, Sandbox, SandboxRequest
 from ale.core.task import Task
 from ale.core.trace import PhaseSpan, TimingRecord, TraceLayer, TraceWriter, read_records
 from ale.core.verdict import Status, Verdict
+from ale.run.gateway.server import Gateway
+from ale.run.gateway.session import GatewaySession, Limits
 from ale.run.provenance import ProvenanceInputs, build_lock
 
 __all__ = ["EpisodeResult", "run_episode"]
@@ -143,6 +145,9 @@ async def run_episode(
     collect_artifacts: bool = True,
     provenance: ProvenanceInputs | None = None,
     proxy_url: str = "",
+    gateway: Gateway | None = None,
+    limits: Limits | None = None,
+    allowed_hosts: frozenset[str] = frozenset(),
 ) -> EpisodeResult:
     """Administer one task and return its verdict.
 
@@ -152,6 +157,26 @@ async def run_episode(
     episode_id = f"{task.spec.id}-{uuid.uuid4().hex[:8]}"
     episode_dir = run_dir / episode_id
     episode_dir.mkdir(parents=True, exist_ok=True)
+
+    trace = TraceWriter(episode_dir)
+
+    # The session is opened here, not by the caller, for two reasons that only show up
+    # afterwards: it can carry this episode's own identifier instead of a placeholder,
+    # and it can be given the trace the gateway writes model calls into — which does not
+    # exist until the episode has a directory. Opened earlier, every transport record was
+    # simply never written.
+    session_token, session = token, None
+    if gateway is not None:
+        session = gateway.open_session(
+            GatewaySession(
+                episode_id=episode_id,
+                model=model,
+                limits=limits or Limits(),
+                allowed_hosts=allowed_hosts,
+            ),
+            trace=trace,
+        )
+        session_token = session.token
 
     sink = _Artifacts(episode_dir) if collect_artifacts else _DiscardedArtifacts(episode_dir)
     lease = _Lease(provider)
@@ -163,10 +188,14 @@ async def run_episode(
         run_dir=episode_dir,
         sandboxes=lease,
         artifacts=sink,
-        trace=TraceWriter(episode_dir),
+        trace=trace,
         budget=Budget(deadline_sec=task.spec.timeouts.total, started_at=started),
         session=HarnessSession(
-            episode_id=episode_id, gateway_url=gateway_url, token=token, model=model
+            episode_id=episode_id,
+            gateway_url=gateway_url,
+            token=session_token,
+            model=model,
+            work_dir=work_dir,
         ),
         seed=seed,
         work_dir=work_dir,
@@ -179,6 +208,9 @@ async def run_episode(
         verdict = Verdict.failed(status_for(exc), exc, phase=_phase_of(exc))
     finally:
         await lease.release_all()
+        if gateway is not None and session is not None:
+            # Tokens die with their episode, so a leaked one is not a standing grant.
+            gateway.close_session(session)
 
     duration = time.monotonic() - started
     _write_timing(ctx.trace, episode_dir, duration, tuple(ctx.phases))

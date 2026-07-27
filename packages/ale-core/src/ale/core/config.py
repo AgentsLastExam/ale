@@ -50,11 +50,6 @@ class GatewayLimits(BaseModel):
     max_input_tokens: int | None = Field(default=None, gt=0)
     max_output_tokens: int | None = Field(default=None, gt=0)
     max_total_tokens: int | None = Field(default=400_000, gt=0)
-    max_steps: int = Field(
-        default=100,
-        gt=0,
-        description="Observe-act steps a framework-driven agent may take in one episode",
-    )
     max_cost_usd: float | None = Field(default=5.0, gt=0)
 
 
@@ -79,6 +74,16 @@ class AgentConfig(BaseModel):
     model: str = "claude-opus-4-8"
     version: str | None = Field(
         default=None, description="Pin the agent build; None uses the image"
+    )
+    max_steps: int = Field(
+        default=100,
+        gt=0,
+        description=(
+            "Observe-act steps a stepwise agent may take in one episode. Here rather than "
+            "with the gateway's ceilings because the gateway does not enforce it — the "
+            "stepwise environment does, which is what makes it bind an agent that has "
+            "never heard of it."
+        ),
     )
     kwargs: dict[str, Any] = Field(
         default_factory=dict, description="Harness-specific settings, validated by the harness"

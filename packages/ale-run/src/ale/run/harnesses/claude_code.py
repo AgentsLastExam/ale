@@ -22,9 +22,11 @@ from ale.core.sandbox import Identity, Sandbox
 
 __all__ = ["ClaudeCodeHarness"]
 
-WORK_DIR = PurePosixPath("/ale/work")
-TRANSCRIPT = WORK_DIR / "transcript.jsonl"
-PROMPT_FILE = WORK_DIR / "prompt.txt"
+#: File names inside whatever workspace the session supplies. The directory itself is
+#: not ours to choose: the agent runs unprivileged and can only write what it owns.
+TRANSCRIPT_NAME = "transcript.jsonl"
+PROMPT_NAME = "prompt.txt"
+STDERR_NAME = "agent.stderr"
 
 #: Settings a run may pass through ``agent.kwargs``, and the flag each becomes.
 CLI_FLAGS: dict[str, str] = {
@@ -52,6 +54,12 @@ class ClaudeCodeHarness(AutonomousHarness):
 
     def __init__(self, *, cli_version: str | None = None, **kwargs: Any) -> None:
         self.cli_version = cli_version
+        # The CLI asks a human before touching files. There is no human here, and the
+        # isolation the prompt exists to provide is the sandbox's job — so an unset
+        # permission mode means the agent stops on its first write and reports, quite
+        # correctly, that it needs permission. Left overridable: a task studying how an
+        # agent behaves under prompting can ask for that deliberately.
+        kwargs.setdefault("permission_mode", "bypassPermissions")
         self.kwargs = kwargs
         self._resolved_version: str | None = None
 
@@ -92,17 +100,21 @@ class ClaudeCodeHarness(AutonomousHarness):
         *,
         timeout_sec: float,
     ) -> AgentRun:
-        await sandbox.write_file(PROMPT_FILE, instruction.encode("utf-8"))
+        work_dir = PurePosixPath(session.work_dir)
+        prompt_file = work_dir / PROMPT_NAME
+        transcript = work_dir / TRANSCRIPT_NAME
+        stderr_file = work_dir / STDERR_NAME
+        await sandbox.write_file(prompt_file, instruction.encode("utf-8"), identity=Identity.AGENT)
 
         argv = [
             "bash",
             "-lc",
             f"claude -p - --output-format stream-json --verbose "
-            f"{self._flags()} < {PROMPT_FILE} > {TRANSCRIPT} 2>{WORK_DIR / 'agent.stderr'}",
+            f"{self._flags()} < {prompt_file} > {transcript} 2>{stderr_file}",
         ]
         result = await sandbox.exec(
             argv,
-            cwd=str(WORK_DIR),
+            cwd=str(work_dir),
             env=self._env(session),
             timeout_sec=timeout_sec,
             # The thing being measured runs unprivileged, so it cannot change the
@@ -110,11 +122,11 @@ class ClaudeCodeHarness(AutonomousHarness):
             identity=Identity.AGENT,
         )
 
-        stderr = await self._read_text(sandbox, WORK_DIR / "agent.stderr")
+        stderr = await self._read_text(sandbox, stderr_file)
         if result.exit_code != 0:
             raise self._classify(stderr or result.stderr, result.exit_code)
 
-        transcript = await self._read_text(sandbox, TRANSCRIPT)
+        transcript = await self._read_text(sandbox, transcript)
         return AgentRun(exit_code=result.exit_code, final_message=_final_message(transcript))
 
     def parse_artifacts(self, artifacts_dir: Path) -> list[dict[str, Any]]:

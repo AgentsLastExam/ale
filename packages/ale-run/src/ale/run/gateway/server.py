@@ -17,6 +17,7 @@ What it buys, none of which an agent can opt out of:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -115,6 +116,7 @@ class Gateway:
 
     async def _messages(self, request: web.Request) -> web.StreamResponse:
         session = self._authenticate(request)
+        started = asyncio.get_running_loop().time()
         body = await request.read()
 
         try:
@@ -133,7 +135,7 @@ class Gateway:
 
         session.begin(key)
         try:
-            response = await self._forward(request, session, payload, key)
+            response = await self._forward(request, session, payload, key, started)
         except Exception as exc:
             session.finish(key, None, error=exc)
             raise
@@ -147,6 +149,7 @@ class Gateway:
         session: GatewaySession,
         payload: dict[str, Any],
         key: str,
+        started: float,
     ) -> web.StreamResponse:
         assert self._client is not None
         headers = {
@@ -160,11 +163,18 @@ class Gateway:
             f"{self.upstream}/v1/messages", json=payload, headers=headers
         ) as upstream:
             if streaming:
-                return await self._stream(request, session, upstream, key, payload)
+                return await self._stream(request, session, upstream, key, payload, started)
 
             raw = await upstream.read()
             parsed = json.loads(raw or b"{}") if upstream.status == 200 else {}
-            self._account(session, parsed, payload, streamed=None, status=upstream.status)
+            self._account(
+                session,
+                parsed,
+                payload,
+                streamed=None,
+                status=upstream.status,
+                latency_ms=_elapsed_ms(started),
+            )
             cached = {"status": upstream.status, "body": raw, "streaming": False}
             session.finish(key, cached)
             return web.Response(body=raw, status=upstream.status, content_type="application/json")
@@ -176,6 +186,7 @@ class Gateway:
         upstream: Any,
         key: str,
         payload: dict[str, Any],
+        started: float,
     ) -> web.StreamResponse:
         """Pass the event stream straight through, counting usage as it goes."""
         response = web.StreamResponse(
@@ -189,7 +200,16 @@ class Gateway:
             await response.write(chunk)
         await response.write_eof()
 
-        self._account(session, {}, payload, streamed=chunks, status=upstream.status)
+        # Measured to the end of the stream: a streamed call's cost in wall-clock time is
+        # how long the agent waited for all of it, not how quickly the first byte arrived.
+        self._account(
+            session,
+            {},
+            payload,
+            streamed=chunks,
+            status=upstream.status,
+            latency_ms=_elapsed_ms(started),
+        )
         session.finish(
             key, {"status": upstream.status, "body": b"".join(chunks), "streaming": True}
         )
@@ -224,13 +244,19 @@ class Gateway:
         *,
         streamed: list[bytes] | None,
         status: int,
+        latency_ms: int = 0,
     ) -> None:
         request_digest = GatewaySession.digest(json.dumps(payload, sort_keys=True).encode())
         if status != 200:
             # A failed call is still a call. Recording it costs one line and is the
             # difference between "the agent stalled" and "the provider was returning
             # 529s for eleven minutes" — the same evidence, opposite conclusions.
-            self._record(session, request_digest=request_digest, upstream_status=status)
+            self._record(
+                session,
+                request_digest=request_digest,
+                upstream_status=status,
+                latency_ms=latency_ms,
+            )
             return
         if streamed is not None:
             input_tokens, output_tokens, stop_reason = usage_from_stream(streamed)
@@ -245,6 +271,7 @@ class Gateway:
             output_tokens=output_tokens,
             cost_usd=cost,
             stop_reason=stop_reason,
+            latency_ms=latency_ms,
         )
 
     def _record(
@@ -258,6 +285,7 @@ class Gateway:
         stop_reason: str | None = None,
         refused: str | None = None,
         upstream_status: int | None = None,
+        latency_ms: int = 0,
     ) -> None:
         trace = self._traces.get(session.token)
         if trace is None:
@@ -275,6 +303,7 @@ class Gateway:
                 refused=refused is not None,
                 refusal_limit=refused,
                 upstream_status=upstream_status,
+                latency_ms=latency_ms,
             )
         )
 
@@ -282,3 +311,8 @@ class Gateway:
 async def _iter_chunks(upstream: Any) -> AsyncIterator[bytes]:
     async for chunk in upstream.content.iter_any():
         yield chunk
+
+
+def _elapsed_ms(started: float) -> int:
+    """Milliseconds since ``started``, on the loop's own clock."""
+    return int((asyncio.get_running_loop().time() - started) * 1000)

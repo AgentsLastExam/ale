@@ -23,7 +23,7 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession, Limits
+from ale.run.gateway.session import Limits
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.kits import read_lock, scan_kits, write_lock
@@ -279,7 +279,8 @@ async def _run_one(
 
     gateway = None
     proxy = None
-    gateway_url, token, proxy_url = "", "", ""
+    limits = None
+    gateway_url, proxy_url = "", ""
     needs_model = settings.agent.name not in {"oracle", "nop"}
     allowed = frozenset(task.spec.network.allowed_hosts)
 
@@ -294,17 +295,7 @@ async def _run_one(
             host=_gateway_host(settings),
         )
         gateway_url = await gateway.start()
-        session = gateway.open_session(
-            GatewaySession(
-                episode_id="pending",
-                model=settings.agent.model,
-                limits=Limits(**settings.gateway.limits.model_dump()),
-                # What the task declared, and nothing it did not: the proxy refuses the
-                # rest, so an agent cannot widen its own reach by asking.
-                allowed_hosts=allowed,
-            )
-        )
-        token = session.token
+        limits = Limits(**settings.gateway.limits.model_dump())
 
         if allowed:
             proxy = EgressProxy(gateway.sessions, host=_gateway_host(settings))
@@ -331,12 +322,16 @@ async def _run_one(
 
             result = await run_episode(
                 task,
-                StandardEnvironment(harness, max_steps=settings.gateway.limits.max_steps),
+                StandardEnvironment(harness, max_steps=settings.agent.max_steps),
                 _provider(settings),
                 run_dir=run_dir,
                 gateway_url=gateway_url,
-                token=token,
                 model=settings.agent.model,
+                gateway=gateway,
+                limits=limits,
+                # What the task declared, and nothing it did not: the proxy refuses the
+                # rest, so an agent cannot widen its own reach by asking.
+                allowed_hosts=allowed,
                 seed=settings.seed,
                 work_dir=settings.work_dir,
                 collect_artifacts=settings.artifacts.collect == "host",
