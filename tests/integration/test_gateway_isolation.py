@@ -19,7 +19,7 @@ from ale.run.providers.docker import DockerProvider
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-IMAGE = "docker.io/library/python:3.12-slim"
+IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
 
 
 async def _stub_upstream() -> tuple[web.AppRunner, str]:

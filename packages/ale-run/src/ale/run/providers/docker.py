@@ -22,6 +22,7 @@ from ale.core.errors import ProviderStartError
 from ale.core.sandbox import (
     Capabilities,
     ExecResult,
+    Identity,
     Provider,
     Sandbox,
     SandboxRequest,
@@ -40,6 +41,13 @@ KEEPALIVE_LABEL = "ale.keepalive"
 
 #: An image sets this to "true" when it starts a desktop, so provisioning waits for it.
 GUI_LABEL = "ale.gui"
+
+#: The unprivileged account an image intends the agent to be. Read rather than assumed:
+#: the image chose the name, created the home directory and owns the desktop session.
+USER_LABEL = "ale.user"
+
+#: Used when an image declares nothing, so an image predating the contract still runs.
+DEFAULT_AGENT_USER = "user"
 
 #: Optional per-image interpreter hint; falls back to whatever `python3` resolves to.
 GUESTD_PYTHON = PurePosixPath("/opt/ale/python")
@@ -85,12 +93,23 @@ class DockerSandbox(Sandbox):
         container: str,
         network: str | None,
         client: GuestClient,
+        agent_user: str = DEFAULT_AGENT_USER,
     ) -> None:
         super().__init__(sandbox_id=sandbox_id, request=request)
         self.container = container
         self.network = network
         self._client = client
+        self.agent_user = agent_user
         self.state = SandboxState.READY
+
+    def _as(self, identity: Identity) -> str | None:
+        """The unix user for a role, or ``None`` to keep the container's default.
+
+        Framework work stays as the image's own user, which for a sandbox image is root:
+        installing the guest service and collecting artifacts have to work whatever the
+        agent did to its own files.
+        """
+        return self.agent_user if identity is Identity.AGENT else None
 
     @property
     def gateway_url(self) -> str | None:
@@ -109,11 +128,12 @@ class DockerSandbox(Sandbox):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_sec: float | None = None,
+        identity: Identity = Identity.FRAMEWORK,
     ) -> ExecResult:
         loop = asyncio.get_running_loop()
         started = loop.time()
         exit_code, stdout, stderr = await self._client.exec(
-            argv, cwd=cwd, env=env, timeout_sec=timeout_sec
+            argv, cwd=cwd, env=env, timeout_sec=timeout_sec, run_as=self._as(identity)
         )
         return ExecResult(
             exit_code=exit_code,
@@ -122,17 +142,34 @@ class DockerSandbox(Sandbox):
             duration_ms=int((loop.time() - started) * 1000),
         )
 
-    async def write_file(self, path: PurePosixPath | str, data: bytes) -> None:
-        await self._client.write_file(str(path), data)
+    async def write_file(
+        self, path: PurePosixPath | str, data: bytes, *, identity: Identity = Identity.FRAMEWORK
+    ) -> None:
+        await self._client.write_file(str(path), data, run_as=self._as(identity))
 
     async def read_file(self, path: PurePosixPath | str) -> bytes:
         return await self._client.read_file(str(path))
 
-    async def upload_dir(self, source: str, target: PurePosixPath | str) -> None:
+    async def upload_dir(
+        self, source: str, target: PurePosixPath | str, *, identity: Identity = Identity.FRAMEWORK
+    ) -> None:
+        """Copy a directory in, owned by whoever the caller said it is for.
+
+        `docker cp` writes as root whatever `--user` would say, so ownership is set
+        afterwards rather than assumed. Staging content the agent must be able to change
+        and leaving it root-owned is the failure this exists to prevent — and one the
+        framework must not paper over later, since a task decides what it opens up.
+        """
         await self._client.mkdirs(str(target))
         code, _, stderr = await _docker("cp", f"{Path(source)}/.", f"{self.container}:{target}")
         if code != 0:
             raise ProviderStartError(f"upload to {target} failed: {stderr.strip()}")
+        if (owner := self._as(identity)) is not None:
+            code, _, stderr = await _docker(
+                "exec", self.container, "chown", "-R", owner, str(target)
+            )
+            if code != 0:
+                raise ProviderStartError(f"could not give {target} to {owner}: {stderr.strip()}")
 
     async def download_dir(self, source: PurePosixPath | str, target: str) -> None:
         Path(target).mkdir(parents=True, exist_ok=True)
@@ -226,8 +263,12 @@ class DockerProvider(Provider):
                 await _docker("network", "rm", network)
             raise ProviderStartError(f"could not start container: {stderr.strip()}")
 
+        agent_user = await self._agent_user(request.image_ref)
+
         try:
             await self._install_guestd(container)
+            if request.sudo:
+                await self._grant_sudo(container, agent_user)
             client = await self._connect(container)
             if request.needs_gui or await self._has_desktop(request.image_ref):
                 await self._await_desktop(client)
@@ -243,6 +284,7 @@ class DockerProvider(Provider):
             container=container,
             network=network,
             client=client,
+            agent_user=agent_user,
         )
 
     async def _ensure_network(self, sandbox_id: str, request: SandboxRequest) -> str | None:
@@ -276,6 +318,48 @@ class DockerProvider(Provider):
         if code != 0 or not out.strip():
             raise ProviderStartError(f"could not read the gateway address of {network}: {stderr}")
         return out.strip()
+
+    async def _agent_user(self, reference: str) -> str:
+        """The account this image intends the agent to be.
+
+        Asked of the image because the image is what created it, gave it a home and runs
+        the desktop session as it. Guessing here would mean the engine deciding who owns
+        files in somebody else's filesystem.
+        """
+        return await self._label(reference, USER_LABEL) or DEFAULT_AGENT_USER
+
+    async def _grant_sudo(self, container: str, agent_user: str) -> None:
+        """Let the agent elevate, because its task said it needs to.
+
+        Granted at provisioning rather than left to the task's setup, so that the
+        privilege is something the run configured and recorded — not something a script
+        arranged where provenance would never see it.
+        """
+        rule = f"{agent_user} ALL=(ALL) NOPASSWD: ALL"
+        code, _, stderr = await _docker(
+            "exec",
+            container,
+            "sh",
+            "-c",
+            f"mkdir -p /etc/sudoers.d && printf '%s\\n' '{rule}' > /etc/sudoers.d/ale-agent "
+            "&& chmod 0440 /etc/sudoers.d/ale-agent",
+        )
+        if code != 0:
+            raise ProviderStartError(
+                f"the task asked for elevated privileges and this image cannot grant them: "
+                f"{stderr.strip()}"
+            )
+
+        # Writing a sudoers rule succeeds in an image with no sudo at all, so the grant is
+        # confirmed by using it. Reporting a privilege that was never conferred is the
+        # failure this whole declaration exists to avoid — the task would run, fail on
+        # access, and provenance would record an isolation level that never applied.
+        code, _, stderr = await _docker("exec", "-u", agent_user, container, "sudo", "-n", "true")
+        if code != 0:
+            raise ProviderStartError(
+                f"elevated privileges were requested but {agent_user} still cannot elevate; "
+                f"this image does not support them: {stderr.strip()}"
+            )
 
     async def _has_desktop(self, reference: str) -> bool:
         """Whether this image brings a desktop up, and so must be waited for.

@@ -100,8 +100,11 @@ class RunConfig(BaseModel):
 
     provider: str = "docker"
     work_dir: str = Field(
-        default="/ale/work",
-        description="Scratch directory created in every sandbox; not a task's concern",
+        default="/home/user/work",
+        description=(
+            "Scratch directory created in every sandbox. Inside the agent's home, so it "
+            "is owned by the agent without anything having to grant that afterwards."
+        ),
     )
     artifacts: ArtifactPolicy = ArtifactPolicy()
     agent: AgentConfig = AgentConfig()

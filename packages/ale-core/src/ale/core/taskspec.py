@@ -99,7 +99,7 @@ class VerifyStage(StageSpec):
 
 
 class Resources(BaseModel):
-    """What the sandbox needs.
+    """How the sandbox must be provisioned.
 
     Single scalars: how a backend turns a request into a reservation or a hard limit is
     a runtime policy, not a property of the task.
@@ -112,6 +112,19 @@ class Resources(BaseModel):
     storage_mb: int | None = Field(default=None, ge=256)
     gpus: int = Field(default=0, ge=0)
     gpu_vram_gb: int | None = Field(default=None, ge=1)
+
+    sudo: bool = Field(
+        default=False,
+        description=(
+            "Whether the agent may elevate. Some tasks genuinely require installing "
+            "software or changing system configuration, and the alternative to saying so "
+            "is either giving every agent root or making those tasks impossible. Recorded "
+            "in provenance, because an episode run this way was less isolated than one "
+            "without — and a backend that cannot grant it refuses rather than running "
+            "with less than was declared. Stated as a need, so one declaration serves any "
+            "operating system."
+        ),
+    )
 
 
 class NetworkMode(StrEnum):

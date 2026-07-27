@@ -192,8 +192,11 @@ class GuestClient:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_sec: float | None = None,
+        run_as: str | None = None,
     ) -> tuple[int, str, str]:
         params: dict[str, Any] = {}
+        if run_as:
+            params["run_as"] = run_as
         if argv:
             params["argv"] = list(argv)
         if shell:
@@ -214,10 +217,14 @@ class GuestClient:
             _collect(events, "stderr_chunk"),
         )
 
-    async def write_file(self, path: str, data: bytes, *, mode: str | None = None) -> None:
+    async def write_file(
+        self, path: str, data: bytes, *, mode: str | None = None, run_as: str | None = None
+    ) -> None:
         params: dict[str, Any] = {"path": path, "b64": base64.b64encode(data).decode("ascii")}
         if mode:
             params["mode"] = mode
+        if run_as:
+            params["run_as"] = run_as
         await self.call("write_file", params)
 
     async def read_file(self, path: str) -> bytes:

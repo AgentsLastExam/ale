@@ -13,7 +13,10 @@ from pathlib import Path
 
 import pytest
 
-IMAGE = "docker.io/library/python:3.12-slim"
+#: Our own base image, not an upstream one. The contract requires an unprivileged user,
+#: a command that keeps the sandbox alive and a guest interpreter — `python:3.12-slim`
+#: has none of those, which is exactly why tasks build on curated images instead.
+IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
 
 VERIFY_DEFAULT = textwrap.dedent("""
     #!/usr/bin/env bash

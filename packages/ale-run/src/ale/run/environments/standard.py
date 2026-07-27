@@ -26,8 +26,8 @@ from ale.core.environment import Environment, EpisodeContext, Phase
 from ale.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
 from ale.core.harness import AutonomousHarness, PolicyHarness
 from ale.core.kit import KITS_ROOT
-from ale.core.lock import AssetProvenance, KitProvenance
-from ale.core.sandbox import Sandbox, SandboxRequest
+from ale.core.lock import AssetProvenance, KitProvenance, SandboxProvenance
+from ale.core.sandbox import Identity, Sandbox, SandboxRequest
 from ale.core.task import Task
 from ale.core.taskspec import AssetMount
 from ale.core.trace import (
@@ -104,12 +104,16 @@ class StandardEnvironment(Environment):
             # A stepwise agent needs a screen by definition. An image that brings a
             # desktop up is waited for regardless — a task's own setup can need it too.
             needs_gui=isinstance(self.harness, PolicyHarness),
+            sudo=spec.resources.sudo,
         )
         sandbox = await ctx.sandboxes.acquire(request)
         # After acquisition: the image is present locally by now, whether it was already
         # there or had to be pulled.
         with contextlib.suppress(Exception):
             ctx.image_digest = await resolve_digest(reference)
+        ctx.sandbox_identity = SandboxProvenance(
+            user=_agent_user(sandbox), sudo=spec.resources.sudo
+        )
         return sandbox
 
     async def _setup(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
@@ -128,6 +132,10 @@ class StandardEnvironment(Environment):
             *ctx.spec.artifacts,
         ]
         await sandbox.exec(["mkdir", "-p", *declared])
+        # Created by the framework, used by the agent — so they are handed over at once.
+        # What a task's own setup then produces is the task's to open up or not; the
+        # framework does not revisit ownership afterwards.
+        await sandbox.exec(["chown", _agent_user(sandbox), *declared])
 
         folder = getattr(task, "folder", None)
         if folder is None:
@@ -138,7 +146,7 @@ class StandardEnvironment(Environment):
             # first path it asked to have collected — whichever it declared.
             destination = _default_files_dest(ctx)
             await sandbox.exec(["mkdir", "-p", destination])
-            await sandbox.upload_dir(str(files), destination)
+            await sandbox.upload_dir(str(files), destination, identity=Identity.AGENT)
 
         await self._stage_assets(ctx, sandbox, ctx.spec.setup.assets)
         await self._install_kits(ctx, sandbox, folder, ctx.spec.setup.kits)
@@ -371,6 +379,11 @@ def _digest(text: str) -> str:
     from hashlib import sha256
 
     return f"sha256:{sha256(text.encode('utf-8')).hexdigest()}"
+
+
+def _agent_user(sandbox: Sandbox) -> str:
+    """The account this sandbox calls the agent, for a plain `chown`."""
+    return getattr(sandbox, "agent_user", "user")
 
 
 def _default_files_dest(ctx: EpisodeContext) -> str:

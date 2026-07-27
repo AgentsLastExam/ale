@@ -30,6 +30,7 @@ __all__ = [
     "JudgeProvenance",
     "KitProvenance",
     "RunLock",
+    "SandboxProvenance",
     "TaskProvenance",
     "TaskSource",
 ]
@@ -127,6 +128,20 @@ class KitProvenance(BaseModel):
     content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
+class SandboxProvenance(BaseModel):
+    """The isolation an episode actually ran under.
+
+    Two results obtained at different isolation levels are not comparable, and nothing
+    else in the record would reveal the difference: the task, the image and the agent can
+    all be identical while one run's agent could elevate and the other's could not.
+    """
+
+    model_config = _FROZEN
+
+    user: str = Field(description="The unprivileged account the agent ran as")
+    sudo: bool = Field(default=False, description="Whether that account could elevate")
+
+
 class GatewayProvenance(BaseModel):
     model_config = _FROZEN
 
@@ -152,6 +167,7 @@ class RunLock(BaseModel):
     agent: AgentProvenance
     framework: FrameworkProvenance
     gateway: GatewayProvenance
+    sandbox: SandboxProvenance | None = None
     config_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     seed: int
     judge: JudgeProvenance | None = None

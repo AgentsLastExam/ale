@@ -93,6 +93,7 @@ class Handler:
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
         }
+        popen_kwargs.update(_drop_to(params.get("run_as"), env))
         try:
             if shell_cmd:
                 proc = subprocess.Popen(shell_cmd, shell=True, **popen_kwargs)
@@ -134,6 +135,11 @@ class Handler:
             raise ProtocolError(ERR_PERMISSION, str(exc)) from exc
         if (mode := params.get("mode")) is not None:
             os.chmod(path, int(mode, 8) if isinstance(mode, str) else mode)
+        if (owner := _owner_of(params.get("run_as"))) is not None:
+            # Written by the service, which is root, so ownership is set explicitly.
+            # A file the agent is meant to change but cannot is the failure the identity
+            # model exists to prevent, and it surfaces far from its cause.
+            os.chown(path, *owner)
         return ok(req_id, bytes=len(data))
 
     def op_read_file(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
@@ -203,6 +209,53 @@ def _require(params: dict[str, Any], key: str) -> Any:
     if key not in params:
         raise ProtocolError(ERR_BAD_REQUEST, f"missing parameter: {key}")
     return params[key]
+
+
+def _drop_to(name: str | None, env: dict[str, str]) -> dict[str, Any]:
+    """Run a child process as ``name``, adjusting the environment to match.
+
+    Setting the uid alone is not enough: a process whose ``HOME`` still points at root's
+    home writes dotfiles it cannot read back, and a graphical program looks for its
+    session under the wrong runtime directory. So the identity and the environment that
+    describes it move together.
+
+    Silently ignored when we are not root — a guest service that is already unprivileged
+    cannot drop further, and refusing would break images that run as a normal user.
+    """
+    if not name or os.geteuid() != 0:
+        return {}
+
+    import pwd
+
+    try:
+        account = pwd.getpwnam(name)
+    except KeyError:
+        raise ProtocolError(ERR_NOT_FOUND, f"no such user in this image: {name}") from None
+
+    env["HOME"] = account.pw_dir
+    env["USER"] = env["LOGNAME"] = account.pw_name
+    env.setdefault("XDG_RUNTIME_DIR", f"/tmp/runtime-{account.pw_name}")
+
+    def preexec() -> None:
+        os.setgid(account.pw_gid)
+        os.initgroups(account.pw_name, account.pw_gid)
+        os.setuid(account.pw_uid)
+
+    return {"preexec_fn": preexec}
+
+
+def _owner_of(name: str | None) -> tuple[int, int] | None:
+    """The uid/gid pair for a user, or ``None`` when there is nothing to change."""
+    if not name or os.geteuid() != 0:
+        return None
+
+    import pwd
+
+    try:
+        account = pwd.getpwnam(name)
+    except KeyError:
+        raise ProtocolError(ERR_NOT_FOUND, f"no such user in this image: {name}") from None
+    return account.pw_uid, account.pw_gid
 
 
 def _current_user() -> str:

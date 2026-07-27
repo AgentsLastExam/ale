@@ -779,7 +779,7 @@ RUN printf '#!/bin/sh\nexec /opt/env/venv/bin/python "$@"\n' > /opt/ale/python \
     && chmod 0755 /opt/ale/python
 
 # The framework's own namespace. Task data goes wherever each task declares it.
-RUN mkdir -p /ale/kits /ale/store && chmod -R 0777 /ale
+RUN mkdir -p /ale/kits /ale/store && chown -R "${USER}" /ale
 
 # [ISOLATION 5/5] Lock /opt/ale to root:700. Same reason cua-lite locks /opt/lite: the
 # agent should not be able to read the guest service's source and learn the protocol
@@ -790,7 +790,8 @@ RUN chown -R root:root /opt/ale && chmod -R go-rwx /opt/ale
 # This image's command starts the desktop session, so it must not be replaced — and a
 # sandbox built from it is not ready until that session can actually be photographed.
 LABEL ale.keepalive="image" \
-      ale.gui="true"
+      ale.gui="true" \
+      ale.user="${USER}"
 
 EXPOSE 5901 6901
 

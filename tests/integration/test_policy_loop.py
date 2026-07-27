@@ -24,17 +24,14 @@ from ale.run.tasksets.manifest import ManifestTaskset
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
 
 GUI_IMAGE = "ghcr.io/agentslastexam/sandbox-base-gui:latest"
+CLI_IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
 
 
 def gui_repo(write_repo: Callable[..., Path], root: Path) -> Path:
     """The standard fixture task, moved onto the desktop image."""
     task_root = write_repo(root)
     manifest = task_root / "task.yaml"
-    manifest.write_text(
-        manifest.read_text().replace(
-            "image: docker.io/library/python:3.12-slim", f"image: {GUI_IMAGE}"
-        )
-    )
+    manifest.write_text(manifest.read_text().replace(f"image: {CLI_IMAGE}", f"image: {GUI_IMAGE}"))
     return task_root
 
 

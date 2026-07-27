@@ -13,12 +13,12 @@ pytestmark = [pytest.mark.conformance, pytest.mark.needs_docker]
 class TestDockerProvider(ProviderConformance):
     """Runs every assertion in the shared suite against docker.
 
-    A plain Python image is enough here: the suite tests the contract (exec, files,
-    teardown, capability rejection), not what happens to be installed.
+    Our own base image, because the suite exercises the sandbox contract — and an image
+    that does not satisfy the image contract cannot satisfy it.
     """
 
     provider = DockerProvider()
-    image_ref = "docker.io/library/python:3.12-slim"
+    image_ref = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
 
 
 @pytest.mark.asyncio
@@ -30,7 +30,7 @@ async def test_blocked_network_has_no_route_off_the_host() -> None:
     provider = DockerProvider()
     request = SandboxRequest(
         episode_id="netprobe",
-        image_ref="docker.io/library/python:3.12-slim",
+        image_ref="ghcr.io/agentslastexam/sandbox-base-cli:latest",
         resources=Resources(cpus=1, memory_mb=512),
         network=NetworkPolicy(mode=NetworkMode.BLOCK),
     )

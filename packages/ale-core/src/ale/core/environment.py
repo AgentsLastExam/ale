@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from ale.core.harness import HarnessSession
-from ale.core.lock import AssetProvenance, KitProvenance
+from ale.core.lock import AssetProvenance, KitProvenance, SandboxProvenance
 from ale.core.sandbox import Sandbox, SandboxRequest
 from ale.core.taskspec import TaskSpec
 from ale.core.trace import PhaseSpan, TraceWriter
@@ -118,6 +118,10 @@ class EpisodeContext:
 
     proxy_url: str = ""
     """Egress proxy for allowlist tasks; empty when none was started."""
+
+    sandbox_identity: SandboxProvenance | None = None
+    """Observed at provisioning: which account the agent ran as, and whether it could
+    elevate. Recorded rather than asserted, like the image digest beside it."""
 
     image_digest: str | None = None
     """Resolved when the sandbox is provisioned — the tag alone proves nothing."""

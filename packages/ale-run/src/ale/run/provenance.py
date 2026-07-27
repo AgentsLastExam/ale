@@ -28,6 +28,7 @@ from ale.core.lock import (
     JudgeProvenance,
     KitProvenance,
     RunLock,
+    SandboxProvenance,
     TaskProvenance,
     TaskSource,
 )
@@ -119,6 +120,7 @@ def build_lock(
     spec: TaskSpec,
     *,
     image_digest: str,
+    sandbox: SandboxProvenance | None = None,
     assets: tuple[AssetProvenance, ...] = (),
     kits: tuple[KitProvenance, ...] = (),
     seed: int = 0,
@@ -138,6 +140,7 @@ def build_lock(
         agent=inputs.agent,
         framework=inputs.framework,
         gateway=inputs.gateway,
+        sandbox=sandbox,
         config_hash=inputs.config_hash,
         seed=seed,
         judge=inputs.judge,

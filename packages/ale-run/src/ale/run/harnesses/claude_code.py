@@ -18,7 +18,7 @@ from typing import Any
 
 from ale.core.errors import AgentError, AgentRefusalError
 from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, ResumeSupport
-from ale.core.sandbox import Sandbox
+from ale.core.sandbox import Identity, Sandbox
 
 __all__ = ["ClaudeCodeHarness"]
 
@@ -71,6 +71,7 @@ class ClaudeCodeHarness(AutonomousHarness):
         """
         if self.cli_version:
             spec = f"@anthropic-ai/claude-code@{self.cli_version}"
+            # Installing the pinned CLI is preparation, not the agent's work.
             result = await sandbox.exec(["npm", "install", "-g", spec], timeout_sec=600)
             if not result.ok:
                 raise AgentError(f"could not install {spec}: {result.stderr[-500:]}")
@@ -104,6 +105,9 @@ class ClaudeCodeHarness(AutonomousHarness):
             cwd=str(WORK_DIR),
             env=self._env(session),
             timeout_sec=timeout_sec,
+            # The thing being measured runs unprivileged, so it cannot change the
+            # conditions of its own measurement.
+            identity=Identity.AGENT,
         )
 
         stderr = await self._read_text(sandbox, WORK_DIR / "agent.stderr")

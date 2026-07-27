@@ -12,7 +12,7 @@ from pathlib import PurePosixPath
 
 from ale.core.env import Observation, StepResult
 from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, StepwisePolicy
-from ale.core.sandbox import Sandbox
+from ale.core.sandbox import Identity, Sandbox
 from ale.core.trace import DesktopAction
 
 __all__ = ["ORACLE_DIR", "NopHarness", "OracleHarness"]
@@ -105,6 +105,11 @@ class OracleHarness(AutonomousHarness):
                 "ALE_PARAMS_JSON": str(ORACLE_DIR / "params.json"),
             },
             timeout_sec=timeout_sec,
+            # The oracle stands in for the agent, so it meets the agent's limits. An
+            # oracle with more privilege would pass exactly the tasks a real agent then
+            # fails on access alone — and this is the only check a task gets before it
+            # is published, so the gate would be blind to the one thing it must catch.
+            identity=Identity.AGENT,
         )
         return AgentRun(
             exit_code=result.exit_code,

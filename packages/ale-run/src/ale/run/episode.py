@@ -209,6 +209,7 @@ def _write_lock(
         inputs,
         ctx.spec,
         image_digest=ctx.image_digest,
+        sandbox=ctx.sandbox_identity,
         assets=tuple(ctx.assets),
         kits=tuple(ctx.kits),
         seed=seed,

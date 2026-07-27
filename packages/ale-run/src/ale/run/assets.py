@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ale.core.errors import AssetError
-from ale.core.sandbox import Sandbox
+from ale.core.sandbox import Identity, Sandbox
 from ale.core.store import AssetOrigin, data_key
 from ale.core.taskspec import AssetMount
 from ale.run.sources import cache_root
@@ -96,6 +96,8 @@ async def stage_mounts(sandbox: Sandbox, mounts: tuple[AssetMount, ...]) -> list
     for mount in mounts:
         asset = await fetch_mount(mount)
         await sandbox.exec(["mkdir", "-p", mount.dest])
-        await sandbox.upload_dir(str(asset.path), mount.dest)
+        # Staged as the agent: a task's data is the agent's to read and often to change,
+        # and ownership set on arrival is one less thing anyone has to remember.
+        await sandbox.upload_dir(str(asset.path), mount.dest, identity=Identity.AGENT)
         materialised.append(asset)
     return materialised

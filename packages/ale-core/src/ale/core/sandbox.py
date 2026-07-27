@@ -27,6 +27,7 @@ __all__ = [
     "Capabilities",
     "ExecResult",
     "GuestTransport",
+    "Identity",
     "Provider",
     "Sandbox",
     "SandboxRequest",
@@ -94,6 +95,28 @@ class Capabilities(BaseModel):
             raise ProviderCapabilityError("; ".join(problems))
 
 
+class Identity(StrEnum):
+    """Who an operation acts as inside a sandbox.
+
+    Naming the two roles rather than a user account keeps the decision at the level it is
+    actually made: some work is the framework's and some is the agent's, and which unix
+    user each maps to is the image's business.
+
+    The distinction exists so an agent cannot alter the conditions it is being measured
+    under. It is not a hardening pass — an agent with root can change the network policy,
+    the clock and the guest service, and a result obtained that way says nothing
+    reproducible.
+    """
+
+    FRAMEWORK = "framework"
+    """The engine's own work: installing the guest service, running a task's stages,
+    collecting artifacts. Must succeed regardless of what the agent did to its workspace."""
+
+    AGENT = "agent"
+    """The thing being measured — and the oracle that stands in for it, so that
+    validation meets the same limits a real run will."""
+
+
 class SandboxRequest(BaseModel):
     """What the engine asks a provider for."""
 
@@ -113,6 +136,9 @@ class SandboxRequest(BaseModel):
     """Egress proxy for ``allowlist`` mode; empty when the task declared no hosts."""
 
     needs_gui: bool = False
+
+    sudo: bool = False
+    """Whether the agent user may elevate. Declared by the task, recorded in provenance."""
 
 
 class GuestTransport(Protocol):
@@ -147,16 +173,21 @@ class Sandbox(ABC):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_sec: float | None = None,
+        identity: Identity = Identity.FRAMEWORK,
     ) -> ExecResult: ...
 
     @abstractmethod
-    async def write_file(self, path: PurePosixPath | str, data: bytes) -> None: ...
+    async def write_file(
+        self, path: PurePosixPath | str, data: bytes, *, identity: Identity = Identity.FRAMEWORK
+    ) -> None: ...
 
     @abstractmethod
     async def read_file(self, path: PurePosixPath | str) -> bytes: ...
 
     @abstractmethod
-    async def upload_dir(self, source: str, target: PurePosixPath | str) -> None: ...
+    async def upload_dir(
+        self, source: str, target: PurePosixPath | str, *, identity: Identity = Identity.FRAMEWORK
+    ) -> None: ...
 
     @abstractmethod
     async def download_dir(self, source: PurePosixPath | str, target: str) -> None: ...
