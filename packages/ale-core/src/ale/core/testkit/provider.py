@@ -12,6 +12,7 @@ from pathlib import PurePosixPath
 
 import pytest
 
+from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import Provider, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 
@@ -23,6 +24,14 @@ class ProviderConformance:
 
     provider: Provider
     image_ref: str = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
+
+    gui_image_ref: str = ""
+    """An image that starts a desktop, if this backend has one to test with.
+
+    A desktop is a property of the *image*, not of the backend: a provider that can host
+    one says so in its capabilities, but whether a given sandbox has a screen depends on
+    what it was built from. So the GUI assertions need an image that claims a desktop,
+    and skip rather than fail where none is configured."""
 
     def request(self, **overrides: object) -> SandboxRequest:
         base: dict[str, object] = {
@@ -78,3 +87,43 @@ class ProviderConformance:
 
         with pytest.raises(ProviderCapabilityError):
             self.provider.accepts(self.request(resources=Resources(gpus=1)))
+
+    @pytest.mark.asyncio
+    async def test_a_declared_desktop_can_actually_be_used(self) -> None:
+        """A provider claiming a desktop is held to it.
+
+        Declaring the capability and not supplying it is the failure mode this suite
+        exists to catch, and it is quiet: an image with no graphical session looks
+        healthy until the first screenshot, which then reports a display error rather
+        than a missing capability.
+
+        Skipped where the provider does not claim a desktop — that is an honest answer.
+        """
+        if not (self.provider.capabilities().gui and self.gui_image_ref):
+            pytest.skip("no desktop image configured for this backend")
+
+        request = self.request(image_ref=self.gui_image_ref, needs_gui=True)
+        async with await self.provider.create(request) as sandbox:
+            png = await sandbox.screenshot()
+            assert png.startswith(b"\x89PNG"), "a desktop was declared but produced no image"
+            assert len(png) > 1000, "a capture this small is an empty screen, not a desktop"
+
+    @pytest.mark.asyncio
+    async def test_a_declared_desktop_accepts_input(self) -> None:
+        """The other half of a desktop: an agent can act on it, not only look at it."""
+        if not (self.provider.capabilities().gui and self.gui_image_ref):
+            pytest.skip("no desktop image configured for this backend")
+
+        request = self.request(image_ref=self.gui_image_ref, needs_gui=True)
+        async with await self.provider.create(request) as sandbox:
+            applied = await sandbox.inject_input([{"type": "move", "coordinate": [500, 500]}])
+            assert applied == 1, "the desktop accepted no input"
+
+    @pytest.mark.asyncio
+    async def test_an_undeclared_desktop_is_refused_not_faked(self) -> None:
+        """A headless provider says so at admission rather than failing mid-episode."""
+        if self.provider.capabilities().gui:
+            pytest.skip("this provider claims a desktop")
+
+        with pytest.raises(ProviderCapabilityError):
+            self.provider.accepts(self.request(needs_gui=True))

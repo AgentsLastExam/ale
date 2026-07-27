@@ -19,6 +19,7 @@ class TestDockerProvider(ProviderConformance):
 
     provider = DockerProvider()
     image_ref = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
+    gui_image_ref = "ghcr.io/agentslastexam/sandbox-base-gui:latest"
 
 
 @pytest.mark.asyncio
