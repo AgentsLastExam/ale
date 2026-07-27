@@ -100,8 +100,10 @@ class StandardEnvironment(Environment):
             gateway_url=ctx.session.gateway_url or None,
             proxy_url=ctx.proxy_url,
             env={"ALE_EPISODE_ID": ctx.episode_id},
-            # A stepwise agent needs a screen by definition. An image that brings a
-            # desktop up is waited for regardless — a task's own setup can need it too.
+            # A stepwise agent needs a screen by definition, so it is a hard requirement
+            # here and a provider without one refuses the episode. The reverse does not
+            # hold: an autonomous agent may also land on a desktop image, and whether it
+            # did is the image's answer, read from the sandbox once it exists.
             needs_gui=isinstance(self.harness, PolicyHarness),
             sudo=spec.resources.sudo,
         )

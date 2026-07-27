@@ -142,7 +142,7 @@ class ClaudeCodeHarness(AutonomousHarness):
         # family uses — and a task that scores differently depending on which family
         # attempted it is not measuring the thing it claims to.
         mcp_flags = ""
-        if sandbox.request.needs_gui:
+        if sandbox.has_desktop:
             config_path = await stage_desktop_bridge(sandbox, str(work_dir))
             # Only the config. The permission mode already decides what may be called,
             # and `--allowedTools` is a declared flag a run may set for itself — passing

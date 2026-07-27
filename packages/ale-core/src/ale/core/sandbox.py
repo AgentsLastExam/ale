@@ -160,6 +160,12 @@ class Sandbox(ABC):
         self.sandbox_id = sandbox_id
         self.request = request
         self.state = SandboxState.CREATED
+        self.has_desktop = False
+        """Whether a graphical session is actually running in here.
+
+        Set by the provider from what the image declared, because that is the only thing
+        that knows. Asking the request instead would answer "what was hoped for" — and
+        the request is built before any image has been looked at."""
 
     @property
     def gateway_url(self) -> str | None:

@@ -275,7 +275,8 @@ class DockerProvider(Provider):
             if request.sudo:
                 await self._grant_sudo(container, agent_user)
             client = await self._connect(container)
-            if request.needs_gui or await self._has_desktop(request.image_ref):
+            desktop = request.needs_gui or await self._has_desktop(request.image_ref)
+            if desktop:
                 await self._await_desktop(client)
         except Exception:
             await _docker("rm", "-f", "-v", container)
@@ -283,7 +284,7 @@ class DockerProvider(Provider):
                 await _docker("network", "rm", network)
             raise
 
-        return DockerSandbox(
+        sandbox = DockerSandbox(
             sandbox_id=sandbox_id,
             request=request,
             container=container,
@@ -291,6 +292,8 @@ class DockerProvider(Provider):
             client=client,
             agent_user=agent_user,
         )
+        sandbox.has_desktop = desktop
+        return sandbox
 
     async def _ensure_network(self, sandbox_id: str, request: SandboxRequest) -> str | None:
         """Create the per-episode network.

@@ -314,7 +314,7 @@ class QemuProvider(Provider):
             transport = TcpTransport("127.0.0.1", host_port)
             await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
             client = GuestClient(transport)
-            agent_user = await self._read_manifest(client, request)
+            agent_user, desktop = await self._read_manifest(client, request)
             if request.sudo:
                 await self._grant_sudo(client, agent_user)
         except Exception:
@@ -323,7 +323,7 @@ class QemuProvider(Provider):
             shutil.rmtree(storage, ignore_errors=True)
             raise
 
-        return QemuSandbox(
+        sandbox = QemuSandbox(
             sandbox_id=sandbox_id,
             request=request,
             container=container,
@@ -332,6 +332,8 @@ class QemuProvider(Provider):
             client=client,
             agent_user=agent_user,
         )
+        sandbox.has_desktop = desktop
+        return sandbox
 
     async def _make_overlay(self, overlay: Path) -> None:
         """A copy-on-write clone of the golden image; the golden image is never written.
@@ -452,7 +454,9 @@ class QemuProvider(Provider):
             if code != 0:
                 raise ProviderStartError(f"could not confine the guest's network: {stderr.strip()}")
 
-    async def _read_manifest(self, client: GuestClient, request: SandboxRequest) -> str:
+    async def _read_manifest(
+        self, client: GuestClient, request: SandboxRequest
+    ) -> tuple[str, bool]:
         """Check the guest against the image contract, and return the agent's account.
 
         A container image answers these questions with labels. A disk image has nowhere to
@@ -485,7 +489,7 @@ class QemuProvider(Provider):
                 f"{MANIFEST_PATH} names {user!r} as the agent account, but no such user "
                 "exists in this guest"
             )
-        return user
+        return user, bool(manifest.get("gui"))
 
     async def _grant_sudo(self, client: GuestClient, agent_user: str) -> None:
         """Elevate the agent, and prove it took.

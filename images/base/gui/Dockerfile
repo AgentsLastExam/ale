@@ -755,6 +755,18 @@ RUN sed -i \
         -e "s#/home/user/.config#/home/${USER}/.config#g" \
         /etc/supervisor/conf.d/*.conf
 
+# The Claude Code runtime, same version policy as sandbox-base-cli. A desktop image
+# without it can only serve the stepwise agent family, which was exactly the gap: a GUI
+# task became unreachable for autonomous agents not because they cannot use a screen —
+# the MCP bridge gives them one — but because the binary that drives them was missing.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG CLAUDE_CODE_VERSION=latest
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force
+
 # Bake the guest service. Every exec, file transfer, screenshot and input event in a
 # sandbox goes through this, over stdio for containers and TCP for virtual machines.
 # Stdlib-only by contract, so it runs on whatever interpreter an image happens to have.
