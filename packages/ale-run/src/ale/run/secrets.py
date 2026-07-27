@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from ale.core.errors import ConfigError
+
 __all__ = ["ENV_FILE", "find_env_file", "load_env", "provider_credentials"]
 
 ENV_FILE = ".env"
@@ -65,14 +67,26 @@ def load_env(path: Path | None = None, *, override: bool = False) -> dict[str, s
     return loaded
 
 
-def provider_credentials() -> tuple[str, str]:
-    """The API key and upstream base URL the gateway should use.
+DEFAULT_KEY_VAR = "ANTHROPIC_API_KEY"
+DEFAULT_BASE_URL = "https://api.anthropic.com"
 
-    Returning both together is deliberate: a key belongs to an endpoint, and letting
-    them be configured independently is how a run ends up sending one provider's
-    credential to another.
+
+def provider_credentials(key_var: str = DEFAULT_KEY_VAR, base_url: str = "") -> tuple[str, str]:
+    """The API key and upstream endpoint the gateway should use.
+
+    A run names which variable holds its key and states the endpoint that key belongs to.
+    Both are per-run, because one checkout is used against several providers and the
+    alternative — one pair of well-known variable names — means editing the environment
+    between runs and, sooner or later, sending one provider's credential to another.
+
+    The key is named rather than passed. A value on the command line is in the shell's
+    history and in every process listing on the machine; a variable name is not.
     """
     load_env()
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    return key, base_url.rstrip("/")
+    key = os.environ.get(key_var, "")
+    if not key:
+        raise ConfigError(
+            f"{key_var} is not set. Put it in the checkout's .env (copy .env.example) "
+            f"or name a different variable with --api-key-env."
+        )
+    return key, (base_url or DEFAULT_BASE_URL).rstrip("/")

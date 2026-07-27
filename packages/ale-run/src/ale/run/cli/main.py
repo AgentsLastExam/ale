@@ -74,6 +74,14 @@ def run(
         str, typer.Option("--agent", help="claude-code, computer-use, oracle or nop")
     ] = "claude-code",
     model: Annotated[str, typer.Option("--model")] = "",
+    base_url: Annotated[
+        str,
+        typer.Option("--base-url", help="Model endpoint; defaults to Anthropic's"),
+    ] = "",
+    api_key_env: Annotated[
+        str,
+        typer.Option("--api-key-env", help="Which .env variable holds the key for it"),
+    ] = "",
     provider: Annotated[str, typer.Option("--provider")] = "docker",
     config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
     overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
@@ -104,6 +112,10 @@ def run(
     flags = [*(overrides or []), f"episodes={episodes}"]
     if no_resume:
         flags.append("resume=false")
+    if base_url:
+        flags.append(f"gateway.base_url={base_url}")
+    if api_key_env:
+        flags.append(f"gateway.api_key_env={api_key_env}")
     settings = _config(config, flags, agent=agent, model=model, provider=provider)
     exit_code = asyncio.run(
         _run_one(reference, settings, runs_dir, tasks_ref, run_id, require_reportable)
@@ -285,15 +297,14 @@ async def _run_one(
     allowed = frozenset(task.spec.network.allowed_hosts)
 
     if needs_model:
-        api_key, upstream = provider_credentials()
-        if not api_key:
-            typer.echo("no ANTHROPIC_API_KEY: copy .env.example to .env and fill it in", err=True)
+        try:
+            api_key, upstream = provider_credentials(
+                settings.gateway.api_key_env, settings.gateway.base_url
+            )
+        except AleError as error:
+            typer.echo(f"{error}", err=True)
             return EXIT_BAD_REFERENCE
-        gateway = Gateway(
-            api_key=api_key,
-            upstream=settings.gateway.base_url or upstream,
-            host=_gateway_host(settings),
-        )
+        gateway = Gateway(api_key=api_key, upstream=upstream, host=_gateway_host(settings))
         gateway_url = await gateway.start()
         limits = Limits(**settings.gateway.limits.model_dump())
 

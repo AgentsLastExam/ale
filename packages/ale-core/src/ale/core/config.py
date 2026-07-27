@@ -95,7 +95,18 @@ class GatewayConfig(BaseModel):
 
     dialect: str = "anthropic"
     limits: GatewayLimits = GatewayLimits()
-    base_url: str | None = Field(default=None, description="Upstream provider endpoint")
+    base_url: str = Field(
+        default="",
+        description="Upstream endpoint. Empty means Anthropic's own.",
+    )
+    api_key_env: str = Field(
+        default="ANTHROPIC_API_KEY",
+        description=(
+            "Which environment variable holds the key for that endpoint. Named rather "
+            "than passed: a value on a command line is in shell history and in every "
+            "process listing, a variable name is not."
+        ),
+    )
 
 
 class RunConfig(BaseModel):
