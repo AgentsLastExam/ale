@@ -197,9 +197,10 @@ class StandardEnvironment(Environment):
         only thing touching the sandbox — so every observation and action is witnessed,
         and the ceilings hold for an agent that never heard of them.
         """
-        session = ctx.session.model_copy(
-            update={"gateway_url": sandbox.gateway_url or ctx.session.gateway_url}
-        )
+        # The session is used as-is, unlike the autonomous path. A stepwise harness runs
+        # in this process and drives the sandbox from outside, so it reaches the gateway
+        # at the host's own address; rewriting it to the sandbox's view hands a host-side
+        # agent a hostname that only resolves inside a container.
         await harness.install(sandbox)
 
         async with SandboxEnv(
@@ -209,7 +210,7 @@ class StandardEnvironment(Environment):
             max_steps=self.max_steps,
             stall_limit=self.stall_limit,
         ) as env:
-            closing = await harness.rollout(env, session)
+            closing = await harness.rollout(env, ctx.session)
 
         ctx.trace.write_semantic(
             NoteRecord(
