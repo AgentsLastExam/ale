@@ -64,13 +64,13 @@ class TestCapabilities:
         modes = QemuProvider().capabilities().network_modes
         assert {NetworkMode.BLOCK, NetworkMode.OPEN} <= modes
 
-    def test_a_desktop_task_passes_the_backend_check(self) -> None:
-        """A screen is a property of the disk, so the refusal belongs at the image.
+    def test_a_desktop_is_not_something_admission_asks_about(self) -> None:
+        """Whether a screen exists belongs to the image, and is answered by asking for one.
 
-        This backend can host a guest that has one; whether the guest handed to it does
-        is read from its manifest once it is up, which is where the refusal happens.
+        Nothing in the request describes it, so nothing here can refuse on it. An agent
+        that asks a screenless sandbox for a screenshot is told so by the screenshot.
         """
-        QemuProvider().accepts(request(needs_gui=True))
+        QemuProvider().accepts(request())
 
 
 class TestGatewayAddressing:

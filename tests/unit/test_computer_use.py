@@ -38,9 +38,15 @@ def test_a_chord_becomes_a_key_sequence() -> None:
     assert (action.type, action.keys) == ("key", ("ctrl", "s"))
 
 
-def test_a_screenshot_request_dispatches_nothing() -> None:
-    """One is sent every step already; acting on the request would waste a round trip."""
-    assert translate_action({"action": "screenshot"}) is None
+def test_a_screenshot_request_becomes_an_action() -> None:
+    """The environment photographs the screen when asked and not otherwise.
+
+    This used to translate to nothing, because a screenshot arrived after every step
+    whether or not the model wanted one. Now the request is the only way to get one.
+    """
+    action = translate_action({"action": "screenshot"})
+    assert action is not None
+    assert action.type == "screenshot"
 
 
 def test_a_drag_carries_both_ends() -> None:

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ale.core.environment import ArtifactSink, Budget, Environment, EpisodeContext, Phase
@@ -237,6 +237,12 @@ def _write_lock(
     if ctx.image_digest is None:
         return None
 
+    # What ran, not what was asked for. The harness resolves its version while installing,
+    # which is after these inputs were built.
+    if ctx.agent_version:
+        inputs = replace(
+            inputs, agent=inputs.agent.model_copy(update={"version": ctx.agent_version})
+        )
     lock = build_lock(
         inputs,
         ctx.spec,

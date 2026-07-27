@@ -92,8 +92,25 @@ class DesktopAction(BaseModel):
     model_config = _RECORD
 
     type: Literal[
-        "click", "double_click", "right_click", "move", "drag", "scroll", "type", "key", "wait"
+        "screenshot",
+        "click",
+        "double_click",
+        "right_click",
+        "move",
+        "drag",
+        "scroll",
+        "type",
+        "key",
+        "wait",
     ]
+    """``screenshot`` is asked for, never given.
+
+    The environment does not photograph the screen after every step. An agent that has
+    not looked does not get a picture, and one that wants two in a row may have two — the
+    trajectory then records what the agent chose to see, which is the thing being studied.
+    Capturing unconditionally makes every trajectory look identical in that respect and
+    charges every step for an image the agent may not have wanted.
+    """
     coordinate: tuple[int, int] | None = None
     to: tuple[int, int] | None = Field(default=None, description="Drag destination")
     text: str | None = None

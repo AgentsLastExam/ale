@@ -182,6 +182,29 @@ class DockerSandbox(Sandbox):
         ]
         return await self._client.inject_input(payload)
 
+    async def open_egress(self) -> None:
+        """Attach the default bridge, which is where a route off the host comes from.
+
+        The isolated network stays attached throughout, so the gateway is reachable in
+        both states and its address never moves — an agent handed one URL at the start of
+        an episode must not find it stale halfway through.
+        """
+        if self.network is None:
+            return  # the task declared `open`; it is already on the bridge
+        code, _, stderr = await _docker("network", "connect", "bridge", self.container)
+        if code != 0 and "already exists" not in stderr:
+            raise ProviderStartError(f"could not open egress: {stderr.strip()}")
+
+    async def close_egress(self) -> None:
+        """Detach it again, leaving only the isolated network and the gateway on it."""
+        if self.network is None:
+            return
+        code, _, stderr = await _docker("network", "disconnect", "bridge", self.container)
+        if code != 0 and "is not connected" not in stderr:
+            # Loud, because the alternative is an agent measured with a network it was
+            # never meant to have and a lock file that says otherwise.
+            raise ProviderStartError(f"could not close egress: {stderr.strip()}")
+
     async def destroy(self) -> None:
         """Idempotent: teardown also runs on failure paths, sometimes twice."""
         if self.state is SandboxState.DESTROYED:
@@ -275,8 +298,7 @@ class DockerProvider(Provider):
             if request.sudo:
                 await self._grant_sudo(container, agent_user)
             client = await self._connect(container)
-            desktop = request.needs_gui or await self._has_desktop(request.image_ref)
-            if desktop:
+            if await self._has_desktop(request.image_ref):
                 await self._await_desktop(client)
         except Exception:
             await _docker("rm", "-f", "-v", container)
@@ -284,7 +306,7 @@ class DockerProvider(Provider):
                 await _docker("network", "rm", network)
             raise
 
-        sandbox = DockerSandbox(
+        return DockerSandbox(
             sandbox_id=sandbox_id,
             request=request,
             container=container,
@@ -292,8 +314,6 @@ class DockerProvider(Provider):
             client=client,
             agent_user=agent_user,
         )
-        sandbox.has_desktop = desktop
-        return sandbox
 
     async def _ensure_network(self, sandbox_id: str, request: SandboxRequest) -> str | None:
         """Create the per-episode network.

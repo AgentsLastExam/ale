@@ -124,6 +124,15 @@ class EpisodeContext:
     elevate. Recorded rather than asserted, like the image digest beside it."""
 
     image_digest: str | None = None
+
+    agent_version: str | None = None
+    """What the agent turned out to be, once it was installed.
+
+    Filled in during the episode rather than declared before it, for the same reason the
+    image digest is: what a run asked for and what it got are different facts, and the one
+    worth recording is the second. Read before the install it describes, this said
+    "unknown" on every run.
+    """
     """Resolved when the sandbox is provisioned — the tag alone proves nothing."""
 
     assets: list[AssetProvenance] = field(default_factory=list)

@@ -34,7 +34,6 @@ async def desktop():  # type: ignore[no-untyped-def]
             image_ref=GUI_IMAGE,
             resources=Resources(cpus=2, memory_mb=2048),
             network=NetworkPolicy(mode=NetworkMode.BLOCK),
-            needs_gui=True,
         )
     )
     await sandbox.exec(["mkdir", "-p", WORK_DIR], identity=Identity.AGENT)

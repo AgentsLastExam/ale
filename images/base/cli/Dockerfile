@@ -16,18 +16,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         bash ca-certificates curl git jq python3 python3-venv sudo unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Node is the Claude Code runtime; NodeSource keeps it current without a PPA dance.
+# Node, and only Node. Several autonomous harnesses ship as npm packages, and a runtime
+# is a property of the platform — the kind of thing an image is for.
+#
+# The agents themselves are not baked. Which agent a run uses, and at which version, is a
+# property of the experiment: an image that answers it makes every run on that image share
+# the answer whether or not anyone chose it, and `latest` — which is what this used to
+# install — makes two runs a month apart two different agents compared as one. The harness
+# installs the pinned version at the start of the episode, while the sandbox still has a
+# network; the declared policy binds the agent, not the preparation.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
-
-# Pinned, not `latest`. An image tagged today and an image tagged next month would
-# otherwise carry different agents, and two runs compared as one. Keep in step with
-# DEFAULT_CLI_VERSION in ale/run/harnesses/claude_code.py; a mismatch is not fatal —
-# the harness installs the pinned build — but it costs every episode an npm install.
-ARG CLAUDE_CODE_VERSION=2.1.220
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-    && npm cache clean --force
 
 # The account the agent runs as. An agent with root can change the network policy, the
 # clock and the guest service itself, so a result obtained that way is not reproducible —

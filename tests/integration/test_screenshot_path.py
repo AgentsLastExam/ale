@@ -47,7 +47,6 @@ async def test_the_in_process_path_is_the_one_taken() -> None:
         image_ref=GUI_IMAGE,
         resources=Resources(cpus=2, memory_mb=2048),
         network=NetworkPolicy(),
-        needs_gui=True,
     )
 
     async with await provider.create(request) as sandbox:
@@ -69,7 +68,6 @@ async def test_a_screenshot_through_the_guest_service_is_a_png() -> None:
         image_ref=GUI_IMAGE,
         resources=Resources(cpus=2, memory_mb=2048),
         network=NetworkPolicy(),
-        needs_gui=True,
     )
 
     async with await provider.create(request) as sandbox:

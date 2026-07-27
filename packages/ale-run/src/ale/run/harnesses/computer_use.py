@@ -43,7 +43,9 @@ _ACTIONS = {
     "left_click_drag": "drag",
     "right_click": "right_click",
     "double_click": "double_click",
-    "screenshot": None,  # we already send one every step; nothing to dispatch
+    # A real action now, not a no-op: the environment photographs the screen only when
+    # asked, so a model that wants to see must say so and this is how it says it.
+    "screenshot": "screenshot",
     "cursor_position": None,
     "scroll": "scroll",
     "wait": "wait",
@@ -123,15 +125,24 @@ class ComputerUseHarness(StepwisePolicy):
     # --- internals ---
 
     def _user_turn(self, observation: Observation) -> dict[str, Any]:
-        """The screenshot, framed as the result of the tool call that asked for it."""
-        image = {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/png",
-                "data": base64.b64encode(observation.screenshot_png or b"").decode(),
-            },
-        }
+        """What came back, framed as the result of the tool call that asked for it.
+
+        An observation carries an image only when the agent asked for one. Steps that did
+        something else report that they were carried out — sending an empty image block
+        instead would be a malformed request, not an empty screen.
+        """
+        image: dict[str, Any]
+        if observation.screenshot_png:
+            image = {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": base64.b64encode(observation.screenshot_png).decode(),
+                },
+            }
+        else:
+            image = {"type": "text", "text": "Done. Take a screenshot to see the result."}
         if self._pending_tool_id is not None:
             block = {
                 "type": "tool_result",

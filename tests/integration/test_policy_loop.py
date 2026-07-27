@@ -53,7 +53,7 @@ async def test_every_step_is_witnessed_by_the_framework(
     task_root = gui_repo(write_repo, tmp_path / "repo")
     harness = ScriptedPolicyHarness(
         [
-            [DesktopAction(type="click", coordinate=(500, 500))],
+            [DesktopAction(type="click", coordinate=(500, 500)), DesktopAction(type="screenshot")],
             [DesktopAction(type="type", text="hello"), DesktopAction(type="key", keys=("Return",))],
         ]
     )
@@ -66,10 +66,11 @@ async def test_every_step_is_witnessed_by_the_framework(
     observations = [r for r in records if r["kind"] == "observation"]
     actions = [r for r in records if r["kind"] == "action"]
 
-    # Three observations: two that produced actions, one that ended the episode.
-    assert len(observations) == 3
-    assert len(actions) == 3
-    assert [a["step"] for a in actions] == [0, 1, 1]
+    # One observation: the one step that asked to see. The other step acted without
+    # looking, which is now a thing an agent can choose and the trace can show.
+    assert len(observations) == 1
+    assert len(actions) == 4
+    assert [a["step"] for a in actions] == [0, 0, 1, 1]
 
     # Screenshots are files referenced by path, never inlined into the trace.
     assert all(o["screenshot_ref"].startswith("blobs/") for o in observations)

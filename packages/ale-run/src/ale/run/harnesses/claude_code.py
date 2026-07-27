@@ -111,8 +111,8 @@ class ClaudeCodeHarness(AutonomousHarness):
         return self._resolved_version or self.cli_version or "unknown"
 
     def integrity(self) -> str:
-        """What pins the binary: the image, unless a run asked for a specific build."""
-        return f"npm:{self.cli_version}" if self.cli_version else "image"
+        """What pins the binary. Always a version, never "whatever the image had"."""
+        return f"npm:{self.cli_version or DEFAULT_CLI_VERSION}"
 
     async def install(self, sandbox: Sandbox) -> None:
         """Put the pinned CLI in place, whatever the image happened to ship.
@@ -206,18 +206,13 @@ class ClaudeCodeHarness(AutonomousHarness):
         transcript_path = work_dir / TRANSCRIPT_NAME
         env = self._env(session)
 
-        # A task that declared a desktop gets one it can actually drive. Without this an
-        # autonomous agent can see a screen only by shelling out to whatever the image
-        # happens to have, which is a different action space from the one the stepwise
-        # family uses — and a task that scores differently depending on which family
-        # attempted it is not measuring the thing it claims to.
-        mcp_flags = ""
-        if sandbox.has_desktop:
-            config_path = await stage_desktop_bridge(sandbox, str(work_dir))
-            # Only the config. The permission mode already decides what may be called,
-            # and `--allowedTools` is a declared flag a run may set for itself — passing
-            # it from here too would silently override what the run asked for.
-            mcp_flags = f"--mcp-config {shlex.quote(config_path)}"
+        # Always, not only where a screen is expected. Which sandboxes have a desktop was
+        # once a question the harness asked before staging these tools, and getting the
+        # answer from the wrong place is what kept them from ever being staged. The tools
+        # can answer it themselves: a screenshot in a sandbox with no desktop says so, and
+        # an agent reads that as easily as it reads a missing tool.
+        config_path = await stage_desktop_bridge(sandbox, str(work_dir))
+        mcp_flags = f"--mcp-config {shlex.quote(config_path)}"
 
         # The CLI expects its configuration directory to exist, with these subdirectories
         # in place. It creates neither, and the failures are opaque when they are missing.

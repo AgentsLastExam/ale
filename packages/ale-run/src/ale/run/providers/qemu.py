@@ -63,6 +63,9 @@ RUNNER_BASE = "/images/base.qcow2"
 #: The interface inside the runner that the guest is attached to. Every packet the guest
 #: sends arrives on it, which is what makes one rule enough to confine it.
 GUEST_BRIDGE = "docker"
+
+#: The deny-all ruleset baked into the guest, reloaded when the agent's phase begins.
+GUEST_RULES = "/etc/nftables.conf"
 HOST_IP = "172.30.0.1"
 
 #: Where the guest writes the same facts a container image puts in labels: which account
@@ -105,12 +108,14 @@ class QemuSandbox(Sandbox):
         host_port: int,
         client: GuestClient,
         agent_user: str = DEFAULT_AGENT_USER,
+        host_ip: str = "",
     ) -> None:
         super().__init__(sandbox_id=sandbox_id, request=request)
         self.container = container
         self.storage = storage
         self.host_port = host_port
         self.agent_user = agent_user
+        self.host_ip = host_ip
         self._client = client
         self.state = SandboxState.READY
 
@@ -222,6 +227,42 @@ class QemuSandbox(Sandbox):
         ]
         return await self._client.inject_input(payload)
 
+    async def open_egress(self) -> None:
+        """Lift both halves of the confinement, for the framework's own phases.
+
+        Both, because either alone would leave the guest sealed: the runner drops what the
+        guest forwards, and the guest's own firewall permits only the runner. They are
+        applied and lifted together for the same reason they exist together.
+        """
+        if self.request.network.mode is NetworkMode.OPEN:
+            return
+        for rule in (
+            f"iptables -D FORWARD -i {GUEST_BRIDGE} ! -d {self.host_ip} -j DROP",
+            f"iptables -D INPUT -i {GUEST_BRIDGE} -j DROP",
+        ):
+            await _run("docker", "exec", self.container, "sh", "-c", rule, timeout=60)
+        await self._client.exec(["nft", "flush", "ruleset"], timeout_sec=60)
+
+    async def close_egress(self) -> None:
+        """Put both halves back, before the agent starts."""
+        if self.request.network.mode is NetworkMode.OPEN:
+            return
+        result = await self._client.exec(["nft", "-f", GUEST_RULES], timeout_sec=60)
+        if result[0] != 0:
+            raise ProviderStartError(f"could not restore the guest firewall: {result[2].strip()}")
+        for rule in (
+            f"iptables -I FORWARD -i {GUEST_BRIDGE} ! -d {self.host_ip} -j DROP",
+            f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -j DROP",
+            f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -p udp --dport 67 -j ACCEPT",
+        ):
+            code, _, stderr = await _run(
+                "docker", "exec", self.container, "sh", "-c", rule, timeout=60
+            )
+            if code != 0:
+                # Loud: the alternative is an agent measured with a network it was never
+                # meant to have and a lock file that says otherwise.
+                raise ProviderStartError(f"could not close egress: {stderr.strip()}")
+
     async def destroy(self) -> None:
         """Idempotent: teardown also runs on failure paths, sometimes twice."""
         if self.state is SandboxState.DESTROYED:
@@ -310,11 +351,11 @@ class QemuProvider(Provider):
         container = await self._boot(request, storage, host_port)
 
         try:
-            await self._wire_network(container, request)
+            host_ip = await self._wire_network(container, request)
             transport = TcpTransport("127.0.0.1", host_port)
             await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
             client = GuestClient(transport)
-            agent_user, desktop = await self._read_manifest(client, request)
+            agent_user = await self._read_manifest(client)
             if request.sudo:
                 await self._grant_sudo(client, agent_user)
         except Exception:
@@ -323,7 +364,7 @@ class QemuProvider(Provider):
             shutil.rmtree(storage, ignore_errors=True)
             raise
 
-        sandbox = QemuSandbox(
+        return QemuSandbox(
             sandbox_id=sandbox_id,
             request=request,
             container=container,
@@ -331,9 +372,8 @@ class QemuProvider(Provider):
             host_port=host_port,
             client=client,
             agent_user=agent_user,
+            host_ip=host_ip,
         )
-        sandbox.has_desktop = desktop
-        return sandbox
 
     async def _make_overlay(self, overlay: Path) -> None:
         """A copy-on-write clone of the golden image; the golden image is never written.
@@ -402,16 +442,18 @@ class QemuProvider(Provider):
             raise ProviderStartError(f"the qemu runner exited immediately: {logs.strip()}")
         return container
 
-    async def _wire_network(self, container: str, request: SandboxRequest) -> None:
-        """Give the guest exactly one destination, and enforce it where it cannot be undone.
+    async def _wire_network(self, container: str, request: SandboxRequest) -> str:
+        """Route the gateway into the guest, and report where the host is.
 
-        The guest's own firewall permits one address — the runner, at the far end of its
-        only route. That address is not the gateway, so the runner forwards that one port
-        to the host and nothing else. Two things fall out of doing it here rather than in
-        the guest: the host's address is discovered at run time instead of baked into a
-        disk, and the rule that actually confines the agent lives in a network namespace
-        the agent has no access to. The in-guest rules are defence in depth; a task may
-        declare ``sudo``, and an agent with root can flush its own tables.
+        Only the route. What *confines* the guest is installed by ``close_egress`` when
+        the agent's phase begins, because until then the sandbox is the framework's to
+        prepare — a task's setup may fetch what it needs, and the agent's own CLI may have
+        to be installed, neither of which is the thing being measured.
+
+        The forwarding is set up once and never moved: the guest's single permitted
+        address is the runner, and the runner sends that one port on to the host. Doing it
+        here rather than in the guest means the host's address is discovered at run time
+        instead of baked into a disk.
         """
         code, route, _ = await _run(
             "docker", "exec", container, "sh", "-c",
@@ -429,41 +471,19 @@ class QemuProvider(Provider):
                 f"--dport {port} -j DNAT --to-destination {host_ip}:{port}",
                 f"iptables -t nat -A POSTROUTING -p tcp -d {host_ip} --dport {port} -j MASQUERADE",
             ]
-        if request.network.mode is not NetworkMode.OPEN:
-            # Everything the guest sends leaves through this bridge, so one rule covers
-            # every protocol and every destination the forwarded port does not name.
-            #
-            # The second pair is the half that is easy to miss, and did leak: packets
-            # addressed to the runner itself are delivered locally and never reach FORWARD
-            # at all. The runner answers DNS on that address, so a guest confined by the
-            # rule above could still resolve names — the first probe to run here proved it.
-            # Forwarded gateway traffic is unaffected: it was readdressed in PREROUTING and
-            # is routed onward, not delivered locally.
-            #
-            # DHCP is the one exception. Without it a lease cannot be renewed, and a guest
-            # that loses its address mid-episode fails in a way that looks like anything
-            # but a firewall rule.
-            rules += [
-                f"iptables -I FORWARD -i {GUEST_BRIDGE} ! -d {host_ip} -j DROP",
-                f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -j DROP",
-                f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -p udp --dport 67 -j ACCEPT",
-            ]
 
         for rule in rules:
             code, _, stderr = await _run("docker", "exec", container, "sh", "-c", rule, timeout=60)
             if code != 0:
-                raise ProviderStartError(f"could not confine the guest's network: {stderr.strip()}")
+                raise ProviderStartError(f"could not route the gateway: {stderr.strip()}")
+        return host_ip
 
-    async def _read_manifest(
-        self, client: GuestClient, request: SandboxRequest
-    ) -> tuple[str, bool]:
-        """Check the guest against the image contract, and return the agent's account.
+    async def _read_manifest(self, client: GuestClient) -> str:
+        """Read which account this image calls the agent's.
 
-        A container image answers these questions with labels. A disk image has nowhere to
-        put one, so they are a file in the guest — read through the guest service, which is
-        the only channel into a machine that has no exec. Whether there is a desktop is a
-        property of the disk that was built, not of this backend, so a task that needs a
-        screen is refused here rather than failing later at the first screenshot.
+        A container image answers with a label. A disk image has nowhere to put one, so it
+        is a file in the guest — read through the guest service, which is the only channel
+        into a machine that has no exec.
         """
         result = await client.exec(["cat", MANIFEST_PATH], timeout_sec=30)
         if result[0] != 0:
@@ -476,12 +496,6 @@ class QemuProvider(Provider):
         except json.JSONDecodeError as exc:
             raise ProviderCapabilityError(f"{MANIFEST_PATH} is not valid JSON: {exc}") from exc
 
-        if request.needs_gui and not manifest.get("gui"):
-            raise ProviderCapabilityError(
-                "this task needs a desktop, and this guest image declares none; build one "
-                "that does, or run the task on a container image that carries a screen"
-            )
-
         user = str(manifest.get("user") or DEFAULT_AGENT_USER)
         code, _, _ = await client.exec(["id", "-u", user], timeout_sec=30)
         if code != 0:
@@ -489,7 +503,7 @@ class QemuProvider(Provider):
                 f"{MANIFEST_PATH} names {user!r} as the agent account, but no such user "
                 "exists in this guest"
             )
-        return user, bool(manifest.get("gui"))
+        return user
 
     async def _grant_sudo(self, client: GuestClient, agent_user: str) -> None:
         """Elevate the agent, and prove it took.

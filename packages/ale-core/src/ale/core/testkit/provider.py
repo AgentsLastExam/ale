@@ -83,7 +83,6 @@ class ProviderConformance:
         caps = self.provider.capabilities()
         if caps.gpus > 0:
             pytest.skip("provider offers GPUs; nothing to reject here")
-        from ale.core.errors import ProviderCapabilityError
 
         with pytest.raises(ProviderCapabilityError):
             self.provider.accepts(self.request(resources=Resources(gpus=1)))
@@ -102,7 +101,7 @@ class ProviderConformance:
         if not (self.provider.capabilities().gui and self.gui_image_ref):
             pytest.skip("no desktop image configured for this backend")
 
-        request = self.request(image_ref=self.gui_image_ref, needs_gui=True)
+        request = self.request(image_ref=self.gui_image_ref)
         async with await self.provider.create(request) as sandbox:
             png = await sandbox.screenshot()
             assert png.startswith(b"\x89PNG"), "a desktop was declared but produced no image"
@@ -114,16 +113,24 @@ class ProviderConformance:
         if not (self.provider.capabilities().gui and self.gui_image_ref):
             pytest.skip("no desktop image configured for this backend")
 
-        request = self.request(image_ref=self.gui_image_ref, needs_gui=True)
+        request = self.request(image_ref=self.gui_image_ref)
         async with await self.provider.create(request) as sandbox:
             applied = await sandbox.inject_input([{"type": "move", "coordinate": [500, 500]}])
             assert applied == 1, "the desktop accepted no input"
 
     @pytest.mark.asyncio
-    async def test_an_undeclared_desktop_is_refused_not_faked(self) -> None:
-        """A headless provider says so at admission rather than failing mid-episode."""
-        if self.provider.capabilities().gui:
-            pytest.skip("this provider claims a desktop")
+    async def test_a_missing_desktop_is_reported_not_faked(self) -> None:
+        """A sandbox without a screen says so when asked for one.
 
-        with pytest.raises(ProviderCapabilityError):
-            self.provider.accepts(self.request(needs_gui=True))
+        Admission does not refuse it: whether a desktop exists belongs to the image, and
+        the engine has no business predicting the answer to a question the sandbox can be
+        asked directly. What matters is that the answer is an error rather than a blank
+        image — an agent can act on the first and cannot tell the second from a dark
+        screen.
+        """
+        sandbox = await self.provider.create(self.request())  # the headless image
+        try:
+            with pytest.raises(Exception):  # noqa: B017 — providers raise their own types
+                await sandbox.screenshot()
+        finally:
+            await sandbox.destroy()

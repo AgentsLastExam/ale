@@ -75,11 +75,14 @@ class Capabilities(BaseModel):
     reset: bool = False
     snapshot: bool = False
 
-    def check(self, resources: Resources, network: NetworkPolicy, *, needs_gui: bool) -> None:
-        """Raise :class:`ProviderCapabilityError` if this provider cannot serve a task."""
+    def check(self, resources: Resources, network: NetworkPolicy) -> None:
+        """Raise :class:`ProviderCapabilityError` if this provider cannot serve a task.
+
+        A desktop is not among the things checked. Whether one exists is a property of the
+        image, not of the backend, and it is answered where it is needed — an agent that
+        asks for a screenshot in a sandbox without one is told so by the screenshot.
+        """
         problems: list[str] = []
-        if needs_gui and not self.gui:
-            problems.append("task needs a desktop, provider is headless")
         if resources.gpus > self.gpus:
             problems.append(f"task needs {resources.gpus} gpu(s), provider offers {self.gpus}")
         if network.mode not in self.network_modes:
@@ -135,8 +138,6 @@ class SandboxRequest(BaseModel):
     proxy_url: str = ""
     """Egress proxy for ``allowlist`` mode; empty when the task declared no hosts."""
 
-    needs_gui: bool = False
-
     sudo: bool = False
     """Whether the agent user may elevate. Declared by the task, recorded in provenance."""
 
@@ -160,12 +161,6 @@ class Sandbox(ABC):
         self.sandbox_id = sandbox_id
         self.request = request
         self.state = SandboxState.CREATED
-        self.has_desktop = False
-        """Whether a graphical session is actually running in here.
-
-        Set by the provider from what the image declared, because that is the only thing
-        that knows. Asking the request instead would answer "what was hoped for" — and
-        the request is built before any image has been looked at."""
 
     @property
     def gateway_url(self) -> str | None:
@@ -189,6 +184,26 @@ class Sandbox(ABC):
 
     @abstractmethod
     async def read_file(self, path: PurePosixPath | str) -> bytes: ...
+
+    async def open_egress(self) -> None:
+        """Let the sandbox reach the network, for the framework's own phases.
+
+        A task's network policy describes what binds **the agent** — that is the thing
+        being measured, and the only thing whose reach is a result rather than a detail.
+        Setup and verify are the task's own trusted code and the harness's preparation is
+        ours; holding all three to the agent's limits bought nothing and cost a great deal,
+        most visibly an agent that could not be installed into an image that had not
+        pre-baked it.
+
+        Default: nothing. A provider that cannot vary this must say so by overriding
+        :meth:`close_egress`, because a sandbox that silently stays open during the agent
+        phase would make every isolation claim in a run's provenance false.
+        """
+        return None
+
+    async def close_egress(self) -> None:
+        """Apply the task's declared policy, before the agent starts."""
+        return None
 
     @abstractmethod
     async def upload_dir(
@@ -234,4 +249,4 @@ class Provider(ABC):
 
     def accepts(self, request: SandboxRequest) -> None:
         """Raise unless this provider can serve ``request``."""
-        self.capabilities().check(request.resources, request.network, needs_gui=request.needs_gui)
+        self.capabilities().check(request.resources, request.network)

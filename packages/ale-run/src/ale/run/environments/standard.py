@@ -100,11 +100,6 @@ class StandardEnvironment(Environment):
             gateway_url=ctx.session.gateway_url or None,
             proxy_url=ctx.proxy_url,
             env={"ALE_EPISODE_ID": ctx.episode_id},
-            # A stepwise agent needs a screen by definition, so it is a hard requirement
-            # here and a provider without one refuses the episode. The reverse does not
-            # hold: an autonomous agent may also land on a desktop image, and whether it
-            # did is the image's answer, read from the sandbox once it exists.
-            needs_gui=isinstance(self.harness, PolicyHarness),
             sudo=spec.resources.sudo,
         )
         sandbox = await ctx.sandboxes.acquire(request)
@@ -127,6 +122,10 @@ class StandardEnvironment(Environment):
         Directories come from the task — its asset destinations and the paths it wants
         collected — so a domain that needs a different layout simply declares one.
         """
+        # The task's own preparation is trusted code and is not the thing being measured,
+        # so it may reach the network. What the declared policy binds is the agent.
+        await sandbox.open_egress()
+
         declared = [
             ctx.work_dir,
             *(mount.dest for mount in ctx.spec.setup.assets),
@@ -175,7 +174,13 @@ class StandardEnvironment(Environment):
         if harness.name == "oracle":
             await self._upload_oracle(task, sandbox)
 
+        # Installed first, then sealed. Putting the agent's own CLI in place is our
+        # preparation, not its work; an image that has not pre-baked one would otherwise
+        # be unusable, since the only thing a sealed sandbox can reach is the gateway.
         await harness.install(sandbox)
+        ctx.agent_version = harness.version()
+        await self._seal(ctx, sandbox)
+
         # The session the agent gets carries the sandbox's own view of the gateway.
         session = ctx.session.model_copy(
             update={"gateway_url": sandbox.gateway_url or ctx.session.gateway_url}
@@ -204,6 +209,8 @@ class StandardEnvironment(Environment):
         # at the host's own address; rewriting it to the sandbox's view hands a host-side
         # agent a hostname that only resolves inside a container.
         await harness.install(sandbox)
+        ctx.agent_version = harness.version()
+        await self._seal(ctx, sandbox)
 
         async with SandboxEnv(
             sandbox,
@@ -222,6 +229,23 @@ class StandardEnvironment(Environment):
             )
         )
 
+    async def _seal(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
+        """Apply the declared policy, and record that it was applied.
+
+        A failure here ends the episode. An agent that ran with a network it was never
+        meant to have is not a result with a caveat — it is a different experiment, and
+        the lock file would describe the one that was intended rather than the one that
+        happened.
+        """
+        await sandbox.close_egress()
+        ctx.trace.write_semantic(
+            NoteRecord(
+                seq=ctx.trace.next_seq(TraceLayer.SEMANTIC),
+                message="network sealed for the agent",
+                data={"mode": ctx.spec.network.mode.value},
+            )
+        )
+
     async def _verify(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> dict[str, float]:
         """Score the episode using the task's own verify stage.
 
@@ -235,6 +259,10 @@ class StandardEnvironment(Environment):
 
         await sandbox.upload_dir(str(verify_dir), str(VERIFY_DIR))
         await self._stage_assets(ctx, sandbox, ctx.spec.verify.assets)
+        # Scoring is the framework's own work, and a verifier may need to reach something
+        # the agent could not. The agent has already finished; nothing it does can follow.
+        await sandbox.open_egress()
+
         await self._install_kits(ctx, sandbox, folder, ctx.spec.verify.kits)
 
         result = await self._run_stage(ctx, sandbox, VERIFY_DIR, Phase.VERIFY)

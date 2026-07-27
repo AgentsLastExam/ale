@@ -758,6 +758,7 @@ RUN sed -i \
 # Node, and only Node. Several autonomous harnesses are distributed as npm packages, and
 # a runtime is a property of the platform — the kind of thing an image is for.
 #
+# Node, and only Node — see sandbox-base-cli for why the agent is not baked alongside it.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -772,10 +773,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 #
 # So this is a cache of the default, not a decision. A run that pins another version and
 # can reach a registry gets that version instead, ahead of this one on PATH.
-ARG CLAUDE_CODE_VERSION=2.1.220
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-    && npm cache clean --force
-
 # Bake the guest service. Every exec, file transfer, screenshot and input event in a
 # sandbox goes through this, over stdio for containers and TCP for virtual machines.
 # Stdlib-only by contract, so it runs on whatever interpreter an image happens to have.

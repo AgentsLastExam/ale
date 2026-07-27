@@ -21,6 +21,9 @@ from ale.run.envs import SandboxEnv
 pytestmark = pytest.mark.unit
 
 CLICK = [DesktopAction(type="click", coordinate=(10, 20))]
+SHOOT = DesktopAction(type="screenshot")
+#: A click and a look, which is what a step that wants to see the result looks like.
+CLICK_AND_LOOK = [*CLICK, SHOOT]
 
 
 def session() -> HarnessSession:
@@ -57,13 +60,33 @@ def make_env(tmp_path: Path, sandbox: FakeSandbox, **kwargs: object) -> SandboxE
 
 class TestStepping:
     @pytest.mark.asyncio
-    async def test_reset_carries_the_instruction_once(self, tmp_path: Path) -> None:
+    async def test_reset_carries_the_instruction_and_no_picture(self, tmp_path: Path) -> None:
+        """An agent that wants to see the screen asks, on this step like any other."""
         env = make_env(tmp_path, FakeSandbox())
         first = await env.reset()
         assert first.instruction == "do the thing"
+        assert first.screenshot_png is None
 
         following = await env.step(CLICK)
         assert following.observation.instruction is None
+
+    @pytest.mark.asyncio
+    async def test_a_screenshot_arrives_only_when_asked_for(self, tmp_path: Path) -> None:
+        env = make_env(tmp_path, FakeSandbox())
+        await env.reset()
+
+        assert (await env.step(CLICK)).observation.screenshot_png is None
+        assert (await env.step([SHOOT])).observation.screenshot_png is not None
+
+    @pytest.mark.asyncio
+    async def test_asking_for_a_screenshot_touches_nothing(self, tmp_path: Path) -> None:
+        """It is a request to the environment, not something done to the desktop."""
+        sandbox = FakeSandbox()
+        env = make_env(tmp_path, sandbox)
+        await env.reset()
+
+        await env.step([SHOOT])
+        assert sandbox.dispatched == []
 
     @pytest.mark.asyncio
     async def test_a_batch_is_dispatched_as_one(self, tmp_path: Path) -> None:
@@ -112,11 +135,31 @@ class TestGuards:
 
     @pytest.mark.asyncio
     async def test_an_unchanging_screen_truncates(self, tmp_path: Path) -> None:
-        """Acting while nothing changes is no progress, not patience."""
+        """Acting while nothing changes is no progress, not patience.
+
+        Judged over the screens the agent chose to look at, since those are the only ones
+        that exist now.
+        """
         env = make_env(tmp_path, FakeSandbox(frozen=True), max_steps=50, stall_limit=3)
         await env.reset()
 
-        results = [await env.step(CLICK) for _ in range(3)]
+        # Four looks to see three identical transitions: the first has nothing to differ
+        # from, since reset no longer photographs a screen nobody asked to see.
+        results = [await env.step(CLICK_AND_LOOK) for _ in range(4)]
+        assert results[-1].truncated
+        assert "no progress" in results[-1].info["reason"]
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_batch_truncates_only_when_nobody_looked(self, tmp_path: Path) -> None:
+        """The blind spot the screen signal leaves.
+
+        An agent that never asks for a screenshot cannot be judged on what the screen
+        shows, and a loop of identical actions is the same non-progress by another name.
+        """
+        env = make_env(tmp_path, FakeSandbox(), max_steps=50, stall_limit=3)
+        await env.reset()
+
+        results = [await env.step(CLICK) for _ in range(4)]
         assert results[-1].truncated
         assert "no progress" in results[-1].info["reason"]
 
@@ -126,12 +169,25 @@ class TestGuards:
         env = make_env(tmp_path, sandbox, max_steps=50, stall_limit=3)
         await env.reset()
 
-        await env.step(CLICK)
-        await env.step(CLICK)
+        await env.step(CLICK_AND_LOOK)
+        await env.step(CLICK_AND_LOOK)
         sandbox.frozen = False  # something finally happened
-        await env.step(CLICK)
+        await env.step(CLICK_AND_LOOK)
         sandbox.frozen = True
-        assert not (await env.step(CLICK)).done
+        assert not (await env.step(CLICK_AND_LOOK)).done
+
+    @pytest.mark.asyncio
+    async def test_repeating_an_action_is_fine_while_the_screen_moves(self, tmp_path: Path) -> None:
+        """Scrolling is the same action over and over, and it is progress.
+
+        The screen decides whenever the agent looked, precisely so that a deliberate
+        repetition is not mistaken for a loop.
+        """
+        env = make_env(tmp_path, FakeSandbox(), max_steps=50, stall_limit=3)
+        await env.reset()
+
+        results = [await env.step(CLICK_AND_LOOK) for _ in range(6)]
+        assert not any(result.done for result in results)
 
     @pytest.mark.asyncio
     async def test_the_guards_bind_an_agent_that_ignores_them(self, tmp_path: Path) -> None:
@@ -166,7 +222,7 @@ class TestWitnessing:
     async def test_every_observation_and_action_reaches_the_trace(self, tmp_path: Path) -> None:
         env = make_env(tmp_path, FakeSandbox())
         await env.reset()
-        await env.step([DesktopAction(type="click", coordinate=(1, 2))])
+        await env.step([DesktopAction(type="click", coordinate=(1, 2)), SHOOT])
         await env.step(
             [DesktopAction(type="type", text="x"), DesktopAction(type="key", keys=("a",))]
         )
@@ -175,15 +231,18 @@ class TestWitnessing:
         observations = [r for r in records if r["kind"] == "observation"]
         actions = [r for r in records if r["kind"] == "action"]
 
-        assert len(observations) == 3  # reset, then one after each step
-        assert len(actions) == 3
-        assert [a["step"] for a in actions] == [0, 1, 1]
+        # One observation, for the one step that asked to see. Every action is recorded
+        # either way — including the request itself, which is part of what the agent did.
+        assert len(observations) == 1
+        assert len(actions) == 4
+        assert [a["step"] for a in actions] == [0, 0, 1, 1]
 
     @pytest.mark.asyncio
     async def test_screenshots_are_files_not_inlined(self, tmp_path: Path) -> None:
         """Base64 in a trace is how it becomes unreadable and unbounded."""
         env = make_env(tmp_path, FakeSandbox())
         await env.reset()
+        await env.step([SHOOT])
 
         (observation,) = [
             r

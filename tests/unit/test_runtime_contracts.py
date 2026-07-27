@@ -147,21 +147,16 @@ class TestConfigLayering:
 
 
 class TestCapabilities:
-    def test_rejects_gui_task_on_headless_provider(self) -> None:
-        caps = Capabilities(gui=False, network_modes=frozenset({NetworkMode.BLOCK}))
-        with pytest.raises(ProviderCapabilityError, match="desktop"):
-            caps.check(Resources(), NetworkPolicy(), needs_gui=True)
-
     def test_rejects_unsupported_network_mode(self) -> None:
         caps = Capabilities(network_modes=frozenset({NetworkMode.OPEN}))
         with pytest.raises(ProviderCapabilityError, match="network mode"):
-            caps.check(Resources(), NetworkPolicy(mode=NetworkMode.BLOCK), needs_gui=False)
+            caps.check(Resources(), NetworkPolicy(mode=NetworkMode.BLOCK))
 
     def test_accepts_a_satisfiable_request(self) -> None:
         caps = Capabilities(
             gui=True, network_modes=frozenset({NetworkMode.BLOCK}), max_cpus=4, max_memory_mb=8192
         )
-        caps.check(Resources(cpus=2, memory_mb=2048), NetworkPolicy(), needs_gui=True)
+        caps.check(Resources(cpus=2, memory_mb=2048), NetworkPolicy())
 
 
 class TestTrace:
