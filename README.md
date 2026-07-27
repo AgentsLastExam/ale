@@ -12,7 +12,7 @@ Three commands from a clean machine to a scored result:
 ```bash
 git clone git@github.com:AgentsLastExam/ale.git && cd ale
 just bootstrap                                    # or: uv sync --frozen
-uv run ale run demo/readfile_secret --agent claude-code
+uv run ale run demo/hello --agent claude-code
 ```
 
 Task content is fetched from the domain's task repository (pinned in
@@ -20,12 +20,27 @@ Task content is fetched from the domain's task repository (pinned in
 `just doctor` explains anything missing.
 
 Model access goes through the gateway, so put a key in the checkout's `.env` (copy
-`.env.example`). It never enters a sandbox — the agent gets a URL and a per-episode
-token. To try the pipeline with no key and no model at all:
+`.env.example`). It never enters a sandbox — the agent gets a URL and a per-episode token,
+and the gateway meters and records every call whatever the agent does.
+
+Any Anthropic-compatible endpoint works. A run names its endpoint and which variable holds
+the key, so several can be configured at once and nothing has to be edited between runs:
 
 ```bash
-uv run ale run demo/readfile_secret --agent oracle   # runs the task's own solution
-uv run ale run demo/readfile_secret --agent nop      # does nothing; scores a real zero
+uv run ale run demo/hello --agent claude-code \
+  --model qwen-latest-series-invite-beta-v92 \
+  --base-url https://dashscope.aliyuncs.com/apps/anthropic \
+  --api-key-env QWEN_API_KEY
+```
+
+The key is *named*, never passed — a value on a command line is in shell history and in
+every process listing on the machine.
+
+To try the pipeline with no key and no model at all:
+
+```bash
+uv run ale run demo/hello --agent oracle   # runs the task's own solution
+uv run ale run demo/hello --agent nop      # does nothing; scores a real zero
 ```
 
 ### The rest of the surface
@@ -38,7 +53,27 @@ uv run ale run <task> -n 5 --run-id sweep     # five episodes, resumable by that
 uv run ale run <task> --require-reportable    # fail unless provenance could be published
 ```
 
-Writing tasks: [docs/task-authoring.md](docs/task-authoring.md). Porting old ones:
+`--run-id` is what makes an interrupted run resumable: episodes are matched by what they
+are, not by when they ran, so re-invoking the same command finishes the work rather than
+repeating it.
+
+## What a run leaves behind
+
+Under `runs/<run>/<episode>/`:
+
+- `lock.json` — everything that produced the result: task source and commit, resolved
+  image digest, agent version and identity, every asset revision, the sandbox's user and
+  whether it could elevate, configuration hash, seed, engine commit. A run whose lock
+  cannot back a published number says so.
+- `trace.transport.jsonl` — every model call, written by the gateway and by nothing else.
+  Calls that failed upstream are recorded too, with their status: silence about a failed
+  call is indistinguishable from an idle agent.
+- `trace.semantic.jsonl` — the trajectory, plus a closing record saying where the wall
+  clock went: model, sandbox, framework, and per phase.
+- `artifacts/` — the paths the task declared, if this run asked to keep them.
+
+Writing tasks: [docs/task-authoring.md](docs/task-authoring.md). Building images:
+[docs/specs/sandbox-image.md](docs/specs/sandbox-image.md). Porting old tasks:
 [docs/migration-from-legacy.md](docs/migration-from-legacy.md). What is and is not
 guaranteed: [docs/security-model.md](docs/security-model.md).
 

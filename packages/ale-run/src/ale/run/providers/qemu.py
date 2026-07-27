@@ -7,13 +7,14 @@ macOS guests) becomes "swap the guest image" rather than "write another framewor
 
 Three choices are worth stating, because each has a plausible alternative:
 
+* **The VM is hosted by a container.** Rather than running ``qemu-system-x86_64`` on the
+  host, a runner image holds it — the same one the previous framework used, which already
+  solves the parts that are tedious and easy to get subtly wrong: device permissions,
+  networking, signal handling, and a supervisor that dies with the guest rather than
+  outliving it. It also means the host needs nothing installed but Docker and ``/dev/kvm``.
 * **Overlays, not copies.** Each episode gets a qcow2 whose backing file is the golden
   image, so a pristine guest costs milliseconds and no disk. It is also the primitive a
   future ``reset()`` would use.
-* **User-mode networking.** Slirp needs no root, no tap devices and no bridge
-  management. The guest has no route to anything except what is forwarded, so the
-  default-deny posture is the network's shape rather than a rule that could be missing.
-  In-guest nftables then allows only the gateway, and is baked into the image.
 * **The guest service over a forwarded port.** One codebase, two transports: the same
   ``ale-guestd`` that Docker drives over exec-stdio is reached here over TCP.
 """
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import shutil
 import uuid
@@ -32,6 +34,7 @@ from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     Capabilities,
     ExecResult,
+    Identity,
     Provider,
     Sandbox,
     SandboxRequest,
@@ -45,11 +48,32 @@ __all__ = ["QemuProvider", "QemuSandbox"]
 #: Where the guest service listens inside the VM. Forwarded to an ephemeral host port.
 GUEST_PORT = 7411
 
-#: Slirp always presents the host at this address, which is what the in-guest firewall
-#: rule and the rewritten gateway URL both target.
-SLIRP_HOST = "10.0.2.2"
+#: The image that hosts the virtual machine (built by images/base/qemu-runner). It is
+#: inherited from the previous framework, which had already worked out the device
+#: permissions, guest bridge and signal handling a QEMU-in-a-container needs; ours is
+#: published under our own namespace so a run does not depend on an image someone else
+#: can move, and differs only in what its entrypoint checks and says.
+RUNNER_IMAGE = os.environ.get("ALE_QEMU_RUNNER", "ghcr.io/agentslastexam/ale-qemu-runner:0.1.0")
 
-BOOT_TIMEOUT_SEC = 180
+#: Where the runner expects the disk to boot, and the address it presents the host at.
+#: The in-guest firewall rule and the rewritten gateway URL both target the latter.
+RUNNER_DISK = "/storage/data.qcow2"
+RUNNER_BASE = "/images/base.qcow2"
+
+#: The interface inside the runner that the guest is attached to. Every packet the guest
+#: sends arrives on it, which is what makes one rule enough to confine it.
+GUEST_BRIDGE = "docker"
+HOST_IP = "172.30.0.1"
+
+#: Where the guest writes the same facts a container image puts in labels: which account
+#: is the agent's, and whether there is a screen. A disk image has nowhere to hang a label,
+#: so the contract of docs/specs/sandbox-image.md is carried in a file instead.
+MANIFEST_PATH = "/etc/ale/image.json"
+DEFAULT_AGENT_USER = "user"
+
+#: A guest boots an operating system, so this is minutes rather than the seconds a
+#: container takes.
+BOOT_TIMEOUT_SEC = 300
 
 
 async def _run(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
@@ -76,32 +100,43 @@ class QemuSandbox(Sandbox):
         *,
         sandbox_id: str,
         request: SandboxRequest,
-        process: asyncio.subprocess.Process,
-        overlay: Path,
+        container: str,
+        storage: Path,
         host_port: int,
         client: GuestClient,
+        agent_user: str = DEFAULT_AGENT_USER,
     ) -> None:
         super().__init__(sandbox_id=sandbox_id, request=request)
-        self.process = process
-        self.overlay = overlay
+        self.container = container
+        self.storage = storage
         self.host_port = host_port
+        self.agent_user = agent_user
         self._client = client
         self.state = SandboxState.READY
+
+    def _as(self, identity: Identity) -> str | None:
+        """Which account a call runs under.
+
+        ``None`` means "whatever the guest service already is", which is root — the
+        framework's own identity. Only the agent is stepped down, and it is stepped down
+        by name because the name is the image's to choose, not ours.
+        """
+        return self.agent_user if identity is Identity.AGENT else None
 
     @property
     def gateway_url(self) -> str | None:
         """The gateway as this guest can reach it.
 
-        Under slirp the host is always 10.0.2.2, so the host's own bind address is
-        meaningless inside — the URL is rewritten here, which is why the gateway needs
-        to know nothing about providers.
+        The guest sits behind the runner container's own network, where the host appears
+        at a fixed address — so the host's bind address is meaningless inside. Rewriting it
+        here is why the gateway needs to know nothing about providers.
         """
         url = self.request.gateway_url
         if not url:
             return None
         scheme, _, rest = url.partition("://")
         _, _, port = rest.partition(":")
-        return f"{scheme}://{SLIRP_HOST}:{port}" if port else url
+        return f"{scheme}://{HOST_IP}:{port}" if port else url
 
     async def exec(
         self,
@@ -110,11 +145,12 @@ class QemuSandbox(Sandbox):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_sec: float | None = None,
+        identity: Identity = Identity.FRAMEWORK,
     ) -> ExecResult:
         loop = asyncio.get_running_loop()
         started = loop.time()
         exit_code, stdout, stderr = await self._client.exec(
-            argv, cwd=cwd, env=env, timeout_sec=timeout_sec
+            argv, cwd=cwd, env=env, timeout_sec=timeout_sec, run_as=self._as(identity)
         )
         return ExecResult(
             exit_code=exit_code,
@@ -123,13 +159,25 @@ class QemuSandbox(Sandbox):
             duration_ms=int((loop.time() - started) * 1000),
         )
 
-    async def write_file(self, path: PurePosixPath | str, data: bytes) -> None:
-        await self._client.write_file(str(path), data)
+    async def write_file(
+        self,
+        path: PurePosixPath | str,
+        data: bytes,
+        *,
+        identity: Identity = Identity.FRAMEWORK,
+    ) -> None:
+        await self._client.write_file(str(path), data, run_as=self._as(identity))
 
     async def read_file(self, path: PurePosixPath | str) -> bytes:
         return await self._client.read_file(str(path))
 
-    async def upload_dir(self, source: str, target: PurePosixPath | str) -> None:
+    async def upload_dir(
+        self,
+        source: str,
+        target: PurePosixPath | str,
+        *,
+        identity: Identity = Identity.FRAMEWORK,
+    ) -> None:
         """Copy a directory in over the guest protocol.
 
         There is no ``docker cp`` equivalent here, and adding a share or an SSH
@@ -137,6 +185,7 @@ class QemuSandbox(Sandbox):
         already moves files, so the directory is walked and sent through it.
         """
         root = Path(source)
+        run_as = self._as(identity)
         await self._client.mkdirs(str(target))
         for entry in sorted(root.rglob("*")):
             relative = entry.relative_to(root)
@@ -145,7 +194,11 @@ class QemuSandbox(Sandbox):
                 await self._client.mkdirs(str(destination))
             elif entry.is_file():
                 await self._client.mkdirs(str(destination.parent))
-                await self._client.write_file(str(destination), entry.read_bytes())
+                await self._client.write_file(str(destination), entry.read_bytes(), run_as=run_as)
+        if run_as:
+            # The directories were made by the guest service, which is root; without this
+            # the agent owns the files it was given and not the tree holding them.
+            await self._client.exec(["chown", "-R", run_as, str(target)])
 
     async def download_dir(self, source: PurePosixPath | str, target: str) -> None:
         Path(target).mkdir(parents=True, exist_ok=True)
@@ -178,18 +231,13 @@ class QemuSandbox(Sandbox):
         with contextlib.suppress(Exception):
             await self._client.close()
 
-        if self.process.returncode is None:
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(self.process.wait(), timeout=15)
-            except TimeoutError:
-                self.process.kill()
-                await self.process.wait()
+        with contextlib.suppress(Exception):
+            await _run("docker", "rm", "-f", self.container, timeout=60)
 
-        # The overlay is this episode's entire mutable state, so removing it is the
-        # whole cleanup — the golden image was never written to.
+        # The overlay is this episode's entire mutable state, so removing it is the whole
+        # cleanup — the golden image was never written to.
         with contextlib.suppress(OSError):
-            self.overlay.unlink()
+            shutil.rmtree(self.storage, ignore_errors=True)
 
 
 class QemuProvider(Provider):
@@ -197,16 +245,25 @@ class QemuProvider(Provider):
 
     name = "qemu"
 
-    def __init__(self, *, image: Path | None = None, work_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        image: Path | None = None,
+        work_dir: Path | None = None,
+        disk_size: str = "40G",
+    ) -> None:
         self.image = image or Path(
             os.environ.get("ALE_QEMU_IMAGE", Path.home() / ".cache/ale/images/ale-ubuntu22.qcow2")
         )
         self.work_dir = work_dir or Path.home() / ".cache/ale/qemu"
+        self.disk_size = disk_size
 
     def capabilities(self) -> Capabilities:
         return Capabilities(
             os="linux",
-            gui=True,  # the guest image carries a desktop, as the container one does
+            # Whether there is a screen is a property of the disk that was built, not of
+            # this backend; a guest with no desktop refuses the request when asked.
+            gui=True,
             gpus=0,
             # `allowlist` needs the egress proxy reachable from inside the guest, which
             # slirp gives, but the in-guest rules are not written yet — so it is refused
@@ -220,8 +277,8 @@ class QemuProvider(Provider):
         """Fail early and specifically, before anything is provisioned."""
         problems: list[str] = []
 
-        if shutil.which("qemu-system-x86_64") is None:
-            problems.append("qemu-system-x86_64 is not on PATH (apt install qemu-system-x86)")
+        if shutil.which("docker") is None:
+            problems.append("docker is not on PATH; the runner image is what holds qemu")
         if shutil.which("qemu-img") is None:
             problems.append("qemu-img is not on PATH (apt install qemu-utils)")
         if not Path("/dev/kvm").exists():
@@ -245,90 +302,229 @@ class QemuProvider(Provider):
         await self.preflight()
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
-        self.work_dir.mkdir(parents=True, exist_ok=True)
-        overlay = self.work_dir / f"{sandbox_id}.qcow2"
-        await self._make_overlay(overlay)
+        storage = self.work_dir / sandbox_id
+        storage.mkdir(parents=True, exist_ok=True)
+        await self._make_overlay(storage / "data.qcow2")
 
         host_port = _free_port()
-        process = await self._boot(request, overlay, host_port)
+        container = await self._boot(request, storage, host_port)
 
         try:
+            await self._wire_network(container, request)
             transport = TcpTransport("127.0.0.1", host_port)
             await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
             client = GuestClient(transport)
+            agent_user = await self._read_manifest(client, request)
+            if request.sudo:
+                await self._grant_sudo(client, agent_user)
         except Exception:
-            process.terminate()
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(process.wait(), timeout=10)
-            with contextlib.suppress(OSError):
-                overlay.unlink()
+                await _run("docker", "rm", "-f", container, timeout=60)
+            shutil.rmtree(storage, ignore_errors=True)
             raise
 
         return QemuSandbox(
             sandbox_id=sandbox_id,
             request=request,
-            process=process,
-            overlay=overlay,
+            container=container,
+            storage=storage,
             host_port=host_port,
             client=client,
+            agent_user=agent_user,
         )
 
     async def _make_overlay(self, overlay: Path) -> None:
-        """A copy-on-write clone of the golden image; the golden image is never written."""
+        """A copy-on-write clone of the golden image; the golden image is never written.
+
+        The backing path is the one the *runner* will see, not the one on this host, and
+        ``-u`` is what lets it be written without being opened here. Recording the host's
+        path instead is the mistake that costs a boot: qemu inside the container follows
+        it, finds nothing, and refuses the disk.
+        """
         code, _, stderr = await _run(
-            "qemu-img",
-            "create",
-            "-f",
-            "qcow2",
-            "-F",
-            "qcow2",
-            "-b",
-            str(self.image.resolve()),
+            "qemu-img", "create", "-u",
+            "-f", "qcow2",
+            "-F", "qcow2",
+            "-b", RUNNER_BASE,
             str(overlay),
+            self.disk_size,
             timeout=60,
-        )
+        )  # fmt: skip
         if code != 0:
             raise ProviderStartError(f"could not create the episode overlay: {stderr.strip()}")
 
-    async def _boot(
-        self, request: SandboxRequest, overlay: Path, host_port: int
-    ) -> asyncio.subprocess.Process:
-        forwards = f"hostfwd=tcp:127.0.0.1:{host_port}-:{GUEST_PORT}"
+    async def _boot(self, request: SandboxRequest, storage: Path, host_port: int) -> str:
+        """Start the runner, which starts the machine.
+
+        The golden image is mounted read-only beside the overlay that backs onto it, so
+        one image serves every concurrent episode and none of them can write to it.
+        """
+        name = f"ale-qemu-{uuid.uuid4().hex[:10]}"
         argv = [
-            "qemu-system-x86_64",
-            "-enable-kvm",
-            "-machine", "q35,accel=kvm",
-            "-cpu", "host",
-            "-smp", str(request.resources.cpus),
-            "-m", str(request.resources.memory_mb),
-            "-drive", f"file={overlay},if=virtio,format=qcow2",
-            "-netdev", f"user,id=net0,{forwards}",
-            "-device", "virtio-net-pci,netdev=net0",
-            "-display", "none",
-            "-serial", "null",
-            "-monitor", "none",
+            "docker", "run", "--detach", "--name", name,
+            "--device=/dev/kvm",
+            # The runner builds the guest's network itself, which needs the capability;
+            # the guest is still confined by the container's own network and by the
+            # firewall baked into the image.
+            "--cap-add", "NET_ADMIN",
+            "--shm-size", "1g",
+            "--mount",
+            f"type=bind,src={self.image.resolve()},dst={RUNNER_BASE},readonly",
+            "--mount", f"type=bind,src={storage.resolve()},dst=/storage",
+            "--publish", f"127.0.0.1:{host_port}:{GUEST_PORT}",
+            "--env", f"RAM_SIZE={request.resources.memory_mb}M",
+            "--env", f"CPU_CORES={request.resources.cpus}",
+            "--env", "CPU_MODEL=host",
+            # Hypervisor enlightenments are for Windows guests; a Linux guest boots
+            # faster without them.
+            "--env", "HV=N",
+            "--env", f"DISK_SIZE={self.disk_size}",
+            RUNNER_IMAGE,
         ]  # fmt: skip
 
-        process = await asyncio.create_subprocess_exec(
-            *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
-        )
+        code, stdout, stderr = await _run(*argv, timeout=180)
+        if code != 0:
+            raise ProviderStartError(f"could not start the qemu runner: {stderr.strip()}")
+        container = stdout.strip() and name
 
-        # A VM that dies on boot should say why now, not time out in the transport.
-        await asyncio.sleep(0.5)
-        if process.returncode is not None:
-            raw = await process.stderr.read() if process.stderr else b""
-            raise ProviderStartError(
-                f"qemu exited immediately: {raw.decode('utf-8', 'replace').strip()}"
+        # A runner that rejects the disk or the device exits at once; saying so now beats
+        # waiting out the boot timeout on a machine that never started.
+        await asyncio.sleep(1.0)
+        alive, running, _ = await _run(
+            "docker", "inspect", "-f", "{{.State.Running}}", container, timeout=30
+        )
+        if alive != 0 or running.strip() != "true":
+            _, logs, _ = await _run("docker", "logs", "--tail", "20", container, timeout=30)
+            with contextlib.suppress(Exception):
+                await _run("docker", "rm", "-f", container, timeout=60)
+            raise ProviderStartError(f"the qemu runner exited immediately: {logs.strip()}")
+        return container
+
+    async def _wire_network(self, container: str, request: SandboxRequest) -> None:
+        """Give the guest exactly one destination, and enforce it where it cannot be undone.
+
+        The guest's own firewall permits one address — the runner, at the far end of its
+        only route. That address is not the gateway, so the runner forwards that one port
+        to the host and nothing else. Two things fall out of doing it here rather than in
+        the guest: the host's address is discovered at run time instead of baked into a
+        disk, and the rule that actually confines the agent lives in a network namespace
+        the agent has no access to. The in-guest rules are defence in depth; a task may
+        declare ``sudo``, and an agent with root can flush its own tables.
+        """
+        code, route, _ = await _run(
+            "docker", "exec", container, "sh", "-c",
+            "ip route | awk '/^default/{print $3}'", timeout=60,
+        )  # fmt: skip
+        host_ip = route.strip()
+        if code != 0 or not host_ip:
+            raise ProviderStartError("could not find the host's address from inside the runner")
+
+        rules: list[str] = []
+        port = _port_of(request.gateway_url)
+        if port:
+            rules += [
+                f"iptables -t nat -A PREROUTING -i {GUEST_BRIDGE} -p tcp -d {HOST_IP} "
+                f"--dport {port} -j DNAT --to-destination {host_ip}:{port}",
+                f"iptables -t nat -A POSTROUTING -p tcp -d {host_ip} --dport {port} -j MASQUERADE",
+            ]
+        if request.network.mode is not NetworkMode.OPEN:
+            # Everything the guest sends leaves through this bridge, so one rule covers
+            # every protocol and every destination the forwarded port does not name.
+            #
+            # The second pair is the half that is easy to miss, and did leak: packets
+            # addressed to the runner itself are delivered locally and never reach FORWARD
+            # at all. The runner answers DNS on that address, so a guest confined by the
+            # rule above could still resolve names — the first probe to run here proved it.
+            # Forwarded gateway traffic is unaffected: it was readdressed in PREROUTING and
+            # is routed onward, not delivered locally.
+            #
+            # DHCP is the one exception. Without it a lease cannot be renewed, and a guest
+            # that loses its address mid-episode fails in a way that looks like anything
+            # but a firewall rule.
+            rules += [
+                f"iptables -I FORWARD -i {GUEST_BRIDGE} ! -d {host_ip} -j DROP",
+                f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -j DROP",
+                f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -p udp --dport 67 -j ACCEPT",
+            ]
+
+        for rule in rules:
+            code, _, stderr = await _run("docker", "exec", container, "sh", "-c", rule, timeout=60)
+            if code != 0:
+                raise ProviderStartError(f"could not confine the guest's network: {stderr.strip()}")
+
+    async def _read_manifest(self, client: GuestClient, request: SandboxRequest) -> str:
+        """Check the guest against the image contract, and return the agent's account.
+
+        A container image answers these questions with labels. A disk image has nowhere to
+        put one, so they are a file in the guest — read through the guest service, which is
+        the only channel into a machine that has no exec. Whether there is a desktop is a
+        property of the disk that was built, not of this backend, so a task that needs a
+        screen is refused here rather than failing later at the first screenshot.
+        """
+        result = await client.exec(["cat", MANIFEST_PATH], timeout_sec=30)
+        if result[0] != 0:
+            raise ProviderCapabilityError(
+                f"this guest image has no {MANIFEST_PATH}, so there is no way to know which "
+                "account the agent runs as; rebuild it with images/base/qemu/build.sh"
             )
-        return process
+        try:
+            manifest = json.loads(result[1])
+        except json.JSONDecodeError as exc:
+            raise ProviderCapabilityError(f"{MANIFEST_PATH} is not valid JSON: {exc}") from exc
+
+        if request.needs_gui and not manifest.get("gui"):
+            raise ProviderCapabilityError(
+                "this task needs a desktop, and this guest image declares none; build one "
+                "that does, or run the task on a container image that carries a screen"
+            )
+
+        user = str(manifest.get("user") or DEFAULT_AGENT_USER)
+        code, _, _ = await client.exec(["id", "-u", user], timeout_sec=30)
+        if code != 0:
+            raise ProviderCapabilityError(
+                f"{MANIFEST_PATH} names {user!r} as the agent account, but no such user "
+                "exists in this guest"
+            )
+        return user
+
+    async def _grant_sudo(self, client: GuestClient, agent_user: str) -> None:
+        """Elevate the agent, and prove it took.
+
+        Written and then checked, because a rule can land in a guest with no sudo binary
+        at all: the write succeeds, the run reports an elevated agent, and nothing can
+        actually elevate. Provenance would record an isolation level that never applied.
+        """
+        await client.write_file(
+            f"/etc/sudoers.d/ale-{agent_user}",
+            f"{agent_user} ALL=(ALL) NOPASSWD: ALL\n".encode(),
+            mode="0440",
+        )
+        code, _, stderr = await client.exec(
+            ["sudo", "-n", "true"], run_as=agent_user, timeout_sec=30
+        )
+        if code != 0:
+            raise ProviderCapabilityError(
+                f"elevated privileges were requested but {agent_user} still cannot "
+                f"elevate in this guest: {stderr.strip()}"
+            )
+
+
+def _port_of(url: str | None) -> str:
+    """The port a gateway URL names, or empty when a run has no gateway at all."""
+    if not url:
+        return ""
+    _, _, rest = url.partition("://")
+    host_port, _, _ = rest.partition("/")
+    _, _, port = host_port.partition(":")
+    return port
 
 
 def _free_port() -> int:
-    """Ask the OS for a port, then hand it to qemu.
+    """Ask the OS for a port, then hand it to the runner.
 
-    There is a race between closing this socket and qemu binding it, which is why the
-    port is ephemeral per episode rather than fixed: a collision costs one retry of one
-    episode instead of making concurrent runs impossible.
+    There is a race between closing this socket and the runner binding it, which is why
+    the port is ephemeral per episode rather than fixed: a collision costs one retry of
+    one episode instead of making concurrent runs impossible.
     """
     import socket
 

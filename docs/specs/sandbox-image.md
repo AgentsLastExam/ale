@@ -73,6 +73,23 @@ would otherwise have to guess.
 
 Standard `org.opencontainers.image.*` labels are welcome alongside; they do not collide.
 
+### Disk images
+
+A virtual machine boots a disk, and a disk has nowhere to hang a label. The same
+declarations are therefore a file in the guest, `/etc/ale/image.json`, read through the
+guest service once the machine is up:
+
+```json
+{"user": "user", "gui": false, "port": 7411}
+```
+
+Same fields, same meanings, same defaults. `port` is where the guest service listens,
+which a container answers instead by being exec'd into.
+
+Everything above applies unchanged, with one substitution: "a command that keeps the
+sandbox alive" is what an operating system does by existing, and the guest service is a
+service the image enables rather than a process the engine starts.
+
 ## The engine guarantees
 
 Given a conforming image, the engine will:
@@ -93,6 +110,8 @@ decide), install into the interpreter, or substitute the image's command.
 
 Derive from an official base image. `sandbox-base-cli` and `sandbox-base-gui` both satisfy
 this contract, so an image built `FROM` either inherits it and needs only its own additions.
+The disk equivalent is `images/base/qemu/build.sh`, which starts from Canonical's published
+cloud image and adds exactly what this page requires.
 
 Referencing an upstream image directly is not supported. `python:3.12-slim` has no
 unprivileged user and no long-lived command; it is a build environment, not a sandbox.

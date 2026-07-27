@@ -96,7 +96,13 @@ class TcpTransport:
         self._writer: asyncio.StreamWriter | None = None
 
     async def start(self, *, timeout_sec: float = 120, interval_sec: float = 1.0) -> None:
-        """Connect, retrying until the guest is up or the deadline passes."""
+        """Connect and exchange one message, retrying until the deadline passes.
+
+        Connecting is not evidence that anyone is listening. When the port is published by
+        a container runtime, its forwarder binds immediately and accepts long before the
+        guest inside has booted — the connection succeeds and the first read is reset.
+        Readiness is therefore a request that came back, not a socket that opened.
+        """
         deadline = asyncio.get_running_loop().time() + timeout_sec
         last: Exception | None = None
         while asyncio.get_running_loop().time() < deadline:
@@ -104,13 +110,16 @@ class TcpTransport:
                 self._reader, self._writer = await asyncio.open_connection(
                     self._host, self._port, limit=_READ_LIMIT
                 )
+                await self.send(json.dumps({"id": "ready", "op": "health", "params": {}}))
+                await asyncio.wait_for(self.recv(), timeout=interval_sec * 10)
                 return
-            except OSError as exc:
+            except (OSError, GuestUnreachableError, TimeoutError) as exc:
                 last = exc
+                await self.close()
                 await asyncio.sleep(interval_sec)
         raise ProviderStartError(
-            f"guest service at {self._host}:{self._port} did not accept connections "
-            f"within {timeout_sec:g}s ({last})"
+            f"guest service at {self._host}:{self._port} did not answer within "
+            f"{timeout_sec:g}s ({last})"
         )
 
     async def send(self, line: str) -> None:

@@ -15,7 +15,7 @@ import pytest
 from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
-from ale.run.providers.qemu import SLIRP_HOST, QemuProvider, QemuSandbox
+from ale.run.providers.qemu import HOST_IP, QemuProvider, QemuSandbox, _port_of
 
 pytestmark = pytest.mark.unit
 
@@ -64,19 +64,43 @@ class TestCapabilities:
         modes = QemuProvider().capabilities().network_modes
         assert {NetworkMode.BLOCK, NetworkMode.OPEN} <= modes
 
-    def test_a_desktop_task_is_accepted(self) -> None:
-        """The guest image carries one, exactly as the container image does."""
+    def test_a_desktop_task_passes_the_backend_check(self) -> None:
+        """A screen is a property of the disk, so the refusal belongs at the image.
+
+        This backend can host a guest that has one; whether the guest handed to it does
+        is read from its manifest once it is up, which is where the refusal happens.
+        """
         QemuProvider().accepts(request(needs_gui=True))
 
 
 class TestGatewayAddressing:
-    def test_the_host_is_rewritten_to_the_slirp_address(self) -> None:
-        """A host bind address is meaningless inside the guest; slirp fixes the host."""
+    def test_the_host_is_rewritten_to_the_runner_address(self) -> None:
+        """A host bind address is meaningless inside the guest.
+
+        What the guest can reach is the runner holding it, which forwards this one port
+        onward — so that is the address the agent's SDK must be handed.
+        """
         sandbox = QemuSandbox.__new__(QemuSandbox)
         sandbox.request = request(gateway_url="http://0.0.0.0:8931")  # type: ignore[attr-defined]
-        assert sandbox.gateway_url == f"http://{SLIRP_HOST}:8931"
+        assert sandbox.gateway_url == f"http://{HOST_IP}:8931"
 
     def test_no_gateway_stays_absent(self) -> None:
         sandbox = QemuSandbox.__new__(QemuSandbox)
         sandbox.request = request(gateway_url="")  # type: ignore[attr-defined]
         assert sandbox.gateway_url is None
+
+
+class TestGatewayPort:
+    """The port the runner forwards is parsed from the URL, not configured twice."""
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("http://127.0.0.1:8931", "8931"),
+            ("http://127.0.0.1:8931/v1", "8931"),
+            ("", ""),
+            (None, ""),
+        ],
+    )
+    def test_ports_are_read_from_the_url(self, url: str | None, expected: str) -> None:
+        assert _port_of(url) == expected

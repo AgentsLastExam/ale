@@ -92,6 +92,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen --all-groups
+      # Built once and then reused: it is a multi-gigabyte disk, and rebuilding it per
+      # run would dominate the job while testing the build script rather than the code.
+      # A runner without libguestfs simply leaves it absent, and the tests below skip.
+      - name: Build the guest image if this runner has none
+        continue-on-error: true
+        run: |
+          test -s "$HOME/.cache/ale/images/ale-ubuntu22.qcow2" || bash images/base/qemu/build.sh
       # Skips itself when no guest image is present, so a runner without one reports
       # honestly rather than failing for a reason unrelated to the change.
       - run: uv run pytest -m needs_kvm
