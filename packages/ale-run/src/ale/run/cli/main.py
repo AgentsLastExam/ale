@@ -9,6 +9,7 @@ that imports it.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -163,6 +164,52 @@ def lint(
         typer.echo(f"{len(findings)} problem(s)", err=True)
         raise typer.Exit(1)
     typer.echo("ok")
+
+
+@app.command("pull-guest")
+def pull_guest(
+    reference: Annotated[
+        str, typer.Option("--from", help="Published guest image to take the disk from")
+    ] = "",
+    dest: Annotated[Path | None, typer.Option("--to", help="Where to write the qcow2")] = None,
+) -> int:
+    """Fetch the virtual-machine guest disk that the VM backend boots.
+
+    The disk is published as the single layer of a container image, so it arrives over the
+    registry everyone is already authenticated to. Building one instead takes about forty
+    minutes and an Ubuntu ISO; this takes as long as the download.
+    """
+    from ale.run.providers.qemu import GUEST_IMAGE, QemuProvider
+
+    source = reference or GUEST_IMAGE
+    target = dest or QemuProvider().image
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    typer.echo(f"pulling {source}")
+    if subprocess.run(["docker", "pull", source]).returncode != 0:
+        typer.echo("could not pull the guest image", err=True)
+        return EXIT_BAD_REFERENCE
+
+    # Copied out of a stopped container rather than run: the image has no command and is
+    # not meant to have one — it is a disk in transit, not something to execute.
+    created = subprocess.run(["docker", "create", source], capture_output=True, text=True)
+    if created.returncode != 0:
+        typer.echo(f"could not stage the guest image: {created.stderr.strip()}", err=True)
+        return EXIT_BAD_REFERENCE
+    container = created.stdout.strip()
+    try:
+        typer.echo(f"writing {target}")
+        copied = subprocess.run(
+            ["docker", "cp", f"{container}:/disk.qcow2", str(target)], capture_output=True
+        )
+        if copied.returncode != 0:
+            typer.echo("could not copy the disk out of the image", err=True)
+            return EXIT_BAD_REFERENCE
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+
+    typer.echo(f"ok    {target}")
+    return 0
 
 
 @app.command("new-task")
@@ -463,10 +510,20 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
 def _gateway_host(settings: RunConfig) -> str:
     """Bind where a sandbox can reach us.
 
-    Containers on an isolated bridge reach the host through its gateway address, so
-    binding to all interfaces is what makes the deny-all topology usable at all.
+    Every sandbox is in a different network namespace from this process, so loopback is
+    never an address one of them can dial: a container on an isolated bridge reaches the
+    host at its gateway address, and a virtual machine reaches it through the runner
+    holding it. Binding to all interfaces is what makes the deny-all topology usable.
+
+    This used to bind loopback for anything that was not Docker, which was true when the
+    VM backend ran qemu on the host with slirp — the guest's own NAT delivered to the
+    host's loopback. It stopped being true when the VM moved inside a runner, and nothing
+    noticed, because every VM test until now used the oracle and never asked for a model.
+
+    What keeps this safe is not the bind address: a request without a live per-episode
+    bearer token is refused, and those tokens die with their episode.
     """
-    return "0.0.0.0" if settings.provider == "docker" else "127.0.0.1"
+    return "0.0.0.0"
 
 
 def _report(result) -> None:  # type: ignore[no-untyped-def]

@@ -1,42 +1,58 @@
 # The virtual-machine backend
 
-Three images, and the first two are easy to confuse:
+Two images, and they are easy to confuse:
 
 | | What it is | Built by |
 |---|---|---|
 | **the runner** | a *container* holding `qemu-system-x86_64` | `images/base/qemu-runner/Dockerfile` |
-| **the headless guest** | the *disk* it boots, no screen | `build.sh` |
-| **the desktop guest** | the same, with a real Ubuntu desktop | `build-desktop.sh` |
+| **the guest** | the *disk* it boots: Ubuntu 24.04 with a desktop | `build-desktop.sh` |
 
 The host needs Docker and `/dev/kvm`. It does not need qemu to *run* a sandbox: the runner
 has it. Building a guest does need it locally.
 
-## Which guest
+## Getting the guest
 
 ```bash
-bash images/base/qemu/build.sh          # ~5 min, ~1GB, headless
-bash images/base/qemu/build-desktop.sh  # ~40 min, several GB, real desktop
+uv run ale pull-guest                   # the published disk, download-speed
 uv run ale run <task> --provider qemu
 ```
 
-`ALE_QEMU_IMAGE` points the provider at whichever you built.
+Or build your own, which takes about forty minutes:
 
-**Headless** starts from Canonical's published `jammy-server-cloudimg-amd64.img` and adds
-the contract. It cannot grow a desktop, because Canonical publishes no desktop cloud image
-— everything under `cloud-images.ubuntu.com` is a server image.
+```bash
+bash images/base/qemu/build-desktop.sh
+```
 
-**Desktop** therefore installs one, from the official Desktop ISO, by running Canonical's
-own installer unattended. Every answer a person would click is in `autoinstall.yaml` next
+`ALE_QEMU_IMAGE` points the provider elsewhere if you put it somewhere else.
+
+The published disk travels as the single layer of a container image
+(`ghcr.io/agentslastexam/ale-guest-ubuntu-desktop`). A qcow2 is not a container image, but
+shipping it as one means it moves over the registry everyone is already authenticated to,
+with no second distribution channel and no extra tool to install. `pull-guest` copies the
+file out of a stopped container; the image has no command and is not meant to have one.
+
+**Concurrency costs almost nothing on disk.** Each episode gets a copy-on-write overlay
+over the shared read-only base, so the 11GB is paid once however many run at a time —
+measured at 0.0GB consumed across three concurrent desktop guests, which came up in 42
+seconds together.
+
+There is one guest and it has a desktop. A headless variant existed and was removed: it
+answered no question the container backend does not answer faster, and keeping two guests
+meant every change to the contract had to be made and verified twice.
+
+The desktop is installed rather than assembled, from the official Desktop ISO, by running
+Canonical's own installer unattended. It cannot come from a cloud image, because Canonical
+publishes no desktop one — everything under `cloud-images.ubuntu.com` is a server image. Every answer a person would click is in `autoinstall.yaml` next
 to the script, so the result is reproducible from this repository and nothing else. It is
 24.04 rather than 22.04 because autoinstall is supported by the Desktop installer only
 from 23.04 onward; on 22.04 the desktop installer is ubiquity, whose preseed equivalent is
 exactly the kind of build nobody can repeat.
 
-Both then run `customise.sh`, which is where the contract of `docs/specs/sandbox-image.md`
+It then runs `customise.sh`, which is where the contract of `docs/specs/sandbox-image.md`
 is applied — one system interpreter with the guest service's dependencies, the guest
 service as a unit, a default-deny firewall, and `/etc/ale/image.json` declaring the agent
-account. Sharing that step is what keeps the two guests from drifting apart in what they
-promise.
+account. It is a separate script because the contract it applies is the same one the
+container images satisfy, and it should be readable on its own.
 
 Building needs `qemu-system-x86`, `qemu-utils`, `genisoimage` and `libguestfs-tools`. The
 customise step runs under `sudo` when `/boot/vmlinuz-*` is root-readable only, which is

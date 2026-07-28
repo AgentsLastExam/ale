@@ -10,6 +10,13 @@
 #   customise.sh <image> <agent_user> <guest_port> <host_ip> <repo_root> <gui>
 set -euo pipefail
 
+# Node, pinned and checksummed, exactly as the container images install it — keep these
+# three in step. A guest needs it for the same reason a container does: no image bakes an
+# agent any more, so the harness installs the pinned one when an episode starts, and most
+# agents are npm packages.
+NODE_VERSION="${ALE_NODE_VERSION:-v22.11.0}"
+NODE_SHA256="${ALE_NODE_SHA256:-83bf07dd343002a26211cf1fcd46a9d9534219aad42ee02847816940bf610a72}"
+
 IMAGE="$1"; AGENT_USER="$2"; GUEST_PORT="$3"; HOST_IP="$4"; REPO_ROOT="$5"; GUI="${6:-false}"
 
 staging="$(mktemp -d)"
@@ -81,7 +88,7 @@ fi
 
 echo ">> baking the sandbox image contract"
 "${customize[@]}" -a "$IMAGE" \
-    --install python3,python3-pil,python3-xlib,sudo,nftables,ca-certificates,xdotool \
+    --install python3,python3-pil,python3-xlib,sudo,nftables,ca-certificates,xdotool,curl,xz-utils \
     --run-command "id -u ${AGENT_USER} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash ${AGENT_USER}" \
     --mkdir /opt/ale \
     --mkdir /etc/ale \
@@ -92,6 +99,10 @@ echo ">> baking the sandbox image contract"
     --run-command "chown -R root:root /opt/ale && chmod -R go-rwx /opt/ale" \
     --run-command "systemctl enable ale-guestd.service" \
     --run-command "systemctl enable nftables.service" \
+    --run-command "curl -fsSLo /tmp/node.tar.xz https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz" \
+    --run-command "echo '${NODE_SHA256}  /tmp/node.tar.xz' | sha256sum -c -" \
+    --run-command "tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md && rm /tmp/node.tar.xz" \
+    --run-command "PATH=/usr/local/bin:\$PATH node --version && PATH=/usr/local/bin:\$PATH npm --version" \
     --run-command "python3 -c 'import PIL, Xlib'" \
     --run-command "[ -f /etc/gdm3/custom.conf ] && grep -q WaylandEnable /etc/gdm3/custom.conf || true" \
     --run-command "cloud-init clean --logs || true"

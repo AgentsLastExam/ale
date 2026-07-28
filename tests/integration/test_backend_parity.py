@@ -33,7 +33,8 @@ from ale.run.tasksets.manifest import ManifestTaskset
 #: and boots the disk it was given.
 CONTAINER_IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
 
-IMAGE = Path(os.environ.get("ALE_QEMU_IMAGE", Path.home() / ".cache/ale/images/ale-ubuntu22.qcow2"))
+DEFAULT_IMAGE = Path.home() / ".cache/ale/images/ale-ubuntu-desktop.qcow2"
+IMAGE = Path(os.environ.get("ALE_QEMU_IMAGE", DEFAULT_IMAGE))
 
 pytestmark = [
     pytest.mark.integration,
@@ -41,7 +42,7 @@ pytestmark = [
     pytest.mark.needs_kvm,
     pytest.mark.skipif(
         not IMAGE.is_file(),
-        reason=f"no guest image at {IMAGE}; build one with images/base/qemu/build.sh",
+        reason=f"no guest image at {IMAGE}; build one with images/base/qemu/build-desktop.sh",
     ),
 ]
 

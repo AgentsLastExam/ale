@@ -98,7 +98,7 @@ jobs:
       - name: Build the guest image if this runner has none
         continue-on-error: true
         run: |
-          test -s "$HOME/.cache/ale/images/ale-ubuntu22.qcow2" || bash images/base/qemu/build.sh
+          test -s "$HOME/.cache/ale/images/ale-ubuntu-desktop.qcow2" || bash images/base/qemu/build-desktop.sh
       # Skips itself when no guest image is present, so a runner without one reports
       # honestly rather than failing for a reason unrelated to the change.
       - run: uv run pytest -m needs_kvm

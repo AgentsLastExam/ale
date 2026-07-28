@@ -23,7 +23,7 @@ pytestmark = pytest.mark.unit
 def request(**overrides: object) -> SandboxRequest:
     base: dict[str, object] = {
         "episode_id": "e1",
-        "image_ref": "ale-ubuntu22",
+        "image_ref": "ale-ubuntu-desktop",
         "resources": Resources(cpus=2, memory_mb=2048),
         "network": NetworkPolicy(),
         "gateway_url": "http://0.0.0.0:8931",
@@ -34,7 +34,7 @@ def request(**overrides: object) -> SandboxRequest:
 class TestPreflight:
     def test_a_missing_image_names_the_way_to_build_one(self, tmp_path: Path) -> None:
         provider = QemuProvider(image=tmp_path / "absent.qcow2")
-        with pytest.raises(ProviderCapabilityError, match=r"build\.sh"):
+        with pytest.raises(ProviderCapabilityError, match=r"build-desktop\.sh"):
             asyncio.run(provider.preflight())
 
     def test_problems_are_reported_together(self, tmp_path: Path) -> None:

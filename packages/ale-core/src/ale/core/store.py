@@ -2,7 +2,7 @@
 
 Two layers, deliberately separate:
 
-* the **store** (``/ale/store/<data_key>/...``) can hold many tasks' data at once, is
+* the **store** (``/opt/ale/store/<data_key>/...``) can hold many tasks' data at once, is
   addressed by a content-derived key, and may be baked into an image or cached on the
   host;
 * the **workspace** (``/ale/input``, ``/ale/output``, ...) is fixed, per-episode, and
@@ -28,7 +28,13 @@ from ale.core.ids import content_hash
 
 __all__ = ["STORE_ROOT", "AssetOrigin", "StoreEntry", "StoreManifest", "data_key"]
 
-STORE_ROOT = PurePosixPath("/ale/store")
+#: Where pre-baked data would live inside a sandbox. Under the framework's own root,
+#: which is root-owned: baked data is staged by the framework, and a task reaches it
+#: through the destination it declared rather than by naming this path.
+#:
+#: Nothing writes here yet — pre-baking (ADR 0007) is not implemented. The constant is
+#: kept because the store's *host-side* layout is, and both halves are named the same way.
+STORE_ROOT = PurePosixPath("/opt/ale/store")
 
 MANIFEST_NAME = "manifest.json"
 

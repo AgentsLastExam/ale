@@ -59,6 +59,14 @@ RUNNER_IMAGE = os.environ.get("ALE_QEMU_RUNNER", "ghcr.io/agentslastexam/ale-qem
 #: Where the runner expects the disk to boot, and the address it presents the host at.
 #: The in-guest firewall rule and the rewritten gateway URL both target the latter.
 RUNNER_DISK = "/storage/data.qcow2"
+
+#: Where the guest disk is published, and how it travels. A qcow2 is not a container
+#: image, but shipping it as the single layer of one means it moves with the same
+#: registry, the same credentials and the same `docker pull` everyone already has —
+#: no second distribution channel and no extra tool to install.
+GUEST_IMAGE = os.environ.get(
+    "ALE_QEMU_GUEST_IMAGE", "ghcr.io/agentslastexam/ale-guest-ubuntu-desktop:24.04"
+)
 RUNNER_BASE = "/images/base.qcow2"
 
 #: The interface inside the runner that the guest is attached to. Every packet the guest
@@ -294,9 +302,8 @@ class QemuProvider(Provider):
         work_dir: Path | None = None,
         disk_size: str = "40G",
     ) -> None:
-        self.image = image or Path(
-            os.environ.get("ALE_QEMU_IMAGE", Path.home() / ".cache/ale/images/ale-ubuntu22.qcow2")
-        )
+        default = Path.home() / ".cache/ale/images/ale-ubuntu-desktop.qcow2"
+        self.image = image or Path(os.environ.get("ALE_QEMU_IMAGE", default))
         self.work_dir = work_dir or Path.home() / ".cache/ale/qemu"
         self.disk_size = disk_size
 
@@ -332,8 +339,9 @@ class QemuProvider(Provider):
             problems.append("/dev/kvm is present but not writable (add yourself to the kvm group)")
         if not self.image.is_file():
             problems.append(
-                f"no guest image at {self.image}; build one with images/base/qemu/build.sh "
-                "or set ALE_QEMU_IMAGE"
+                f"no guest image at {self.image}; fetch the published one with "
+                f"`ale images pull-guest`, build your own with "
+                f"images/base/qemu/build-desktop.sh, or point ALE_QEMU_IMAGE elsewhere"
             )
 
         if problems:
@@ -534,7 +542,7 @@ class QemuProvider(Provider):
         if result[0] != 0:
             raise ProviderCapabilityError(
                 f"this guest image has no {MANIFEST_PATH}, so there is no way to know which "
-                "account the agent runs as; rebuild it with images/base/qemu/build.sh"
+                "account the agent runs as; rebuild it with images/base/qemu/build-desktop.sh"
             )
         try:
             manifest = json.loads(result[1])

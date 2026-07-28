@@ -17,14 +17,15 @@ import pytest
 from ale.core.testkit import ProviderConformance
 from ale.run.providers.qemu import QemuProvider
 
-IMAGE = Path(os.environ.get("ALE_QEMU_IMAGE", Path.home() / ".cache/ale/images/ale-ubuntu22.qcow2"))
+DEFAULT_IMAGE = Path.home() / ".cache/ale/images/ale-ubuntu-desktop.qcow2"
+IMAGE = Path(os.environ.get("ALE_QEMU_IMAGE", DEFAULT_IMAGE))
 
 pytestmark = [
     pytest.mark.conformance,
     pytest.mark.needs_kvm,
     pytest.mark.skipif(
         not IMAGE.is_file(),
-        reason=f"no guest image at {IMAGE}; build one with images/base/qemu/build.sh",
+        reason=f"no guest image at {IMAGE}; build one with images/base/qemu/build-desktop.sh",
     ),
 ]
 
@@ -33,4 +34,7 @@ class TestQemuProvider(ProviderConformance):
     """Every assertion in the shared suite, run against a virtual machine."""
 
     provider = QemuProvider(image=IMAGE)
-    image_ref = "ale-ubuntu22"
+    image_ref = "ale-ubuntu-desktop"
+    #: The same disk. There is one VM guest and it has a desktop, so the GUI half of
+    #: the shared suite runs against it rather than being skipped.
+    gui_image_ref = "ale-ubuntu-desktop"

@@ -30,9 +30,12 @@ _LEGACY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("legacy Python attribute interpolation", re.compile(r"\{self\.[A-Za-z_][A-Za-z0-9_]*\}")),
     ("legacy Windows task root", re.compile(r"[Ee]:\\+agenthle", re.IGNORECASE)),
     ("legacy Linux task root", re.compile(r"/media/user/data/agenthle")),
-    ("a store path (use the fixed workspace instead)", re.compile(r"/ale/store\b")),
     (
-        "a per-task workspace path (the workspace is the same for every task)",
+        "a store path (name the destination the task declared instead)",
+        re.compile(r"/ale/store\b|/opt/ale/store\b"),
+    ),
+    (
+        "a per-task workspace path (the workspace is the agent's home, the same every task)",
         re.compile(r"/ale/(?:tasks|task)/"),
     ),
 )

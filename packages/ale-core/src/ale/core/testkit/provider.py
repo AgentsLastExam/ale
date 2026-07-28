@@ -128,6 +128,9 @@ class ProviderConformance:
         image — an agent can act on the first and cannot tell the second from a dark
         screen.
         """
+        if self.image_ref == self.gui_image_ref:
+            pytest.skip("this backend has only one image and it carries a desktop")
+
         sandbox = await self.provider.create(self.request())  # the headless image
         try:
             with pytest.raises(Exception):  # noqa: B017 — providers raise their own types

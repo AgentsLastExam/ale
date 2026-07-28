@@ -124,7 +124,7 @@ into the interpreter, or substitute the image's command.
 
 Derive from an official base image. `sandbox-base-cli` and `sandbox-base-gui` both satisfy
 this contract, so an image built `FROM` either inherits it and needs only its own additions.
-The disk equivalent is `images/base/qemu/build.sh`, which starts from Canonical's published
+The disk equivalent is `images/base/qemu/build-desktop.sh`, which starts from Canonical's published
 cloud image and adds exactly what this page requires.
 
 Referencing an upstream image directly is not supported. `python:3.12-slim` has no
