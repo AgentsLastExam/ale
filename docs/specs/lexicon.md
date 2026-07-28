@@ -21,9 +21,13 @@ a review defect. New names must be narrow rather than broad and must not collide
 | **Verdict** | The result envelope: one status from the taxonomy, a rewards map with a primary key, and diagnostic metrics. | not a bare number |
 | **Trace** | The two-layer record of an episode: transport (every model call) and semantic (steps). | not a log file |
 | **RunLock** | The provenance record binding a result to everything that produced it. A result without a complete one is invalid. | not optional |
-| **Workspace** | The fixed in-sandbox layout `/ale/{input,software,output,work}` (plus `/ale/reference`, verification only). | not the repository, not a uv workspace |
+| **Workspace** | The agent's home directory, `/home/<user>`, derived from the account the image declares. Everything the agent touches is under it. There is no framework-wide layout: a task names its own absolute destinations. | not the repository, not a uv workspace, not a fixed set of directories |
+| **Harness log** | What a harness wrote while running an episode — a transcript, a stream of tool calls, an error log. Declared by the harness, collected to `logs/<harness>/`. | never an artifact: an artifact is what the *agent produced*, declared by the *task* |
+| **Image manifest** | How a disk image declares what a container image declares with `ale.*` labels: a file at `/etc/ale/image.json` read through the guest service. | not a task manifest |
 
-Deliberately retired names: `Workflow` (collides with a task's own business process),
+Deliberately retired names: `work_dir` (a run-level scratch directory; it was a second
+answer to a question the image already answered by declaring its agent account, and two
+answers can disagree — the workspace is the home), `Workflow` (collides with a task's own business process),
 `InstalledHarness` / `StepwiseHarness` / `ProgramHarness` (they described where an agent
 runs, which is not the distinguishing axis), `TaskData` (read as "the task's input
 files"), `trial` / `job` (imported vocabulary from other frameworks).

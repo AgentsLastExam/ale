@@ -49,14 +49,14 @@ setup:
     - repo: agents-last-exam/ale-tasks-assets
       revision: 1d0d026c…          # a commit: two runs naming it read the same bytes
       path: demo/hello/base/input
-      dest: /ale/input
+      dest: /home/user/input
   kits: [data-prep]
 verify:
   assets:
-    - { repo: …, revision: …, path: demo/hello/base/reference, dest: /ale/reference }
+    - { repo: …, revision: …, path: demo/hello/base/reference, dest: /home/user/reference }
   kits: [grader-protocol]
 
-artifacts: [/ale/output]           # absolute paths holding this task's output
+artifacts: [/home/user/output]     # absolute paths holding this task's output
 
 params: { n: 3 }
 variants:

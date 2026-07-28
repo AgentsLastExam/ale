@@ -67,13 +67,18 @@ past the wall clock and produce a negative remainder.
 `phases` covers provisioning through verification. A phase that timed out or crashed
 still contributes its duration: that is the one you most want.
 
-An episode driven by a policy harness must contain at least one `observation` and one
-`action`, or a typed failure explaining why not.
+An episode driven by a policy harness must contain at least one `action`, or a typed
+failure explaining why not.
+
+It need not contain an `observation`. The environment photographs the screen when the
+agent asks for one and at no other time, so an agent that acted without looking recorded
+exactly what it did. Requiring an observation per step would describe a capture the agent
+did not choose, which is the thing the trace exists to distinguish.
 
 ## Migrated agents
 
-An adapted third-party agent keeps its native log, stored under
-`artifacts/agent-native/`. It is evidence, not a substitute: the two layers above are
+An adapted third-party agent keeps its native log, stored under `logs/<harness>/`. It is
+evidence, not a substitute: the two layers above are
 still produced, so results stay comparable across agents.
 
 ## Reserved extension
