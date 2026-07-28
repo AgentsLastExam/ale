@@ -355,7 +355,15 @@ class QemuProvider(Provider):
             transport = TcpTransport("127.0.0.1", host_port)
             await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
             client = GuestClient(transport)
-            agent_user = await self._read_manifest(client)
+            agent_user, has_desktop = await self._read_manifest(client)
+            if has_desktop:
+                # The one thing the manifest's `gui` flag decides. A guest that installs a
+                # desktop starts an X server, a display manager and a session after the
+                # guest service is already answering, so "the sandbox replied" is not
+                # "the sandbox has a screen". No probe can tell the difference on its own:
+                # a screenshot that fails at this instant means "no desktop here" and
+                # "not yet" equally, and only the image knows which.
+                await self._await_desktop(client)
             if request.sudo:
                 await self._grant_sudo(client, agent_user)
         except Exception:
@@ -478,8 +486,29 @@ class QemuProvider(Provider):
                 raise ProviderStartError(f"could not route the gateway: {stderr.strip()}")
         return host_ip
 
-    async def _read_manifest(self, client: GuestClient) -> str:
-        """Read which account this image calls the agent's.
+    async def _await_desktop(self, client: GuestClient, timeout_sec: float = 300) -> None:
+        """Block until the screen can actually be captured.
+
+        Longer than the container backend allows, because a virtual machine is booting an
+        operating system rather than starting a process tree.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_sec
+        last: Exception | None = None
+        while loop.time() < deadline:
+            try:
+                await client.screenshot()
+                return
+            except Exception as exc:  # the session is still coming up
+                last = exc
+                await asyncio.sleep(2)
+        raise ProviderStartError(
+            f"this guest declares a desktop but none could be photographed within "
+            f"{timeout_sec:g}s ({last})"
+        )
+
+    async def _read_manifest(self, client: GuestClient) -> tuple[str, bool]:
+        """Read which account this image calls the agent's, and whether it has a screen.
 
         A container image answers with a label. A disk image has nowhere to put one, so it
         is a file in the guest — read through the guest service, which is the only channel
@@ -503,7 +532,7 @@ class QemuProvider(Provider):
                 f"{MANIFEST_PATH} names {user!r} as the agent account, but no such user "
                 "exists in this guest"
             )
-        return user
+        return user, bool(manifest.get("gui"))
 
     async def _grant_sudo(self, client: GuestClient, agent_user: str) -> None:
         """Elevate the agent, and prove it took.
