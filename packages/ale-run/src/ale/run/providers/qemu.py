@@ -299,12 +299,15 @@ class QemuProvider(Provider):
         self,
         *,
         image: Path | None = None,
-        work_dir: Path | None = None,
+        overlay_dir: Path | None = None,
         disk_size: str = "40G",
     ) -> None:
         default = Path.home() / ".cache/ale/images/ale-ubuntu-desktop.qcow2"
         self.image = image or Path(os.environ.get("ALE_QEMU_IMAGE", default))
-        self.work_dir = work_dir or Path.home() / ".cache/ale/qemu"
+        # Host-side, and named for what it holds. It was `work_dir`, which is a retired
+        # name: the workspace is the agent's home *inside* a sandbox, and reusing the word
+        # for a directory on this machine is the collision the lexicon exists to prevent.
+        self.overlay_dir = overlay_dir or Path.home() / ".cache/ale/qemu"
         self.disk_size = disk_size
 
     def capabilities(self) -> Capabilities:
@@ -352,7 +355,7 @@ class QemuProvider(Provider):
         await self.preflight()
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
-        storage = self.work_dir / sandbox_id
+        storage = self.overlay_dir / sandbox_id
         storage.mkdir(parents=True, exist_ok=True)
         await self._make_overlay(storage / "data.qcow2")
 
