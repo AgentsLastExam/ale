@@ -192,7 +192,14 @@ def pull_guest(
 
     # Copied out of a stopped container rather than run: the image has no command and is
     # not meant to have one — it is a disk in transit, not something to execute.
-    created = subprocess.run(["docker", "create", source], capture_output=True, text=True)
+    # An entrypoint has to be named even though the container is never started: the image
+    # is `FROM scratch` and declares none of its own, and `docker create` refuses without
+    # one. It is never executed — the container exists only to be copied out of.
+    created = subprocess.run(
+        ["docker", "create", "--entrypoint", "/disk.qcow2", source],
+        capture_output=True,
+        text=True,
+    )
     if created.returncode != 0:
         typer.echo(f"could not stage the guest image: {created.stderr.strip()}", err=True)
         return EXIT_BAD_REFERENCE
