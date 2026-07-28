@@ -11,6 +11,7 @@ meaningful across resolutions; they are mapped to pixels here, at the last momen
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +19,48 @@ from pathlib import Path
 from typing import Any
 
 COORDINATE_SPACE = 1000
+
+#: Where an X server advertises itself. One socket per display.
+_X_SOCKETS = Path("/tmp/.X11-unix")
+
+
+def attach_display() -> None:
+    """Find the desktop, if this process was not started with one.
+
+    A container image starts its session from the same command that starts the guest
+    service, so the service inherits ``DISPLAY`` and this does nothing. A virtual machine
+    does not: the service is a system unit that starts before anyone has logged in, so it
+    has no display at the moment it starts and a perfectly good one a few seconds later.
+    Baking a display number into the unit would be a guess — which number a session gets
+    depends on whether a greeter ran first — so it is discovered when it is first needed.
+
+    Called before capture and before input, because either can be the first thing asked
+    of a machine whose desktop came up after the service did.
+    """
+    if os.environ.get("DISPLAY"):
+        return
+    try:
+        sockets = sorted(entry.name for entry in _X_SOCKETS.iterdir() if entry.name.startswith("X"))
+    except OSError:
+        return
+    if not sockets:
+        return
+    os.environ["DISPLAY"] = f":{sockets[0][1:]}"
+
+    # The cookie belongs to whoever owns the session. Running as root, any of them can be
+    # read; running as the agent, its own is the one that works — so the search order is
+    # "mine first, then anyone's".
+    if os.environ.get("XAUTHORITY"):
+        return
+    candidates = [
+        Path(f"/run/user/{os.getuid()}/gdm/Xauthority"),
+        *sorted(Path("/run/user").glob("*/gdm/Xauthority")),
+        *sorted(Path("/home").glob("*/.Xauthority")),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            os.environ["XAUTHORITY"] = str(candidate)
+            return
 
 
 class GuiUnavailable(RuntimeError):
@@ -33,6 +76,7 @@ def _require(tool: str) -> str:
 
 def screen_size() -> tuple[int, int]:
     """Return the desktop size in pixels."""
+    attach_display()
     xdotool = _require("xdotool")
     out = subprocess.run(
         [xdotool, "getdisplaygeometry"], capture_output=True, text=True, check=True
@@ -81,6 +125,7 @@ def _capture_in_process() -> bytes:
 
 def capture_screen() -> bytes:
     """Capture the desktop as PNG bytes, fastest available way first."""
+    attach_display()
     try:
         return _capture_in_process()
     except Exception:
@@ -104,6 +149,7 @@ def capture_screen() -> bytes:
 
 def dispatch_actions(actions: list[dict[str, Any]]) -> int:
     """Perform desktop actions; returns how many were applied."""
+    attach_display()
     xdotool = _require("xdotool")
     applied = 0
     for action in actions:

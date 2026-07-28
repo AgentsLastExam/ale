@@ -27,6 +27,7 @@ import json
 import os
 import shutil
 import uuid
+import zlib
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
@@ -487,24 +488,39 @@ class QemuProvider(Provider):
         return host_ip
 
     async def _await_desktop(self, client: GuestClient, timeout_sec: float = 300) -> None:
-        """Block until the screen can actually be captured.
+        """Block until the screen can be captured *and* something has been drawn on it.
 
-        Longer than the container backend allows, because a virtual machine is booting an
-        operating system rather than starting a process tree.
+        Capturing alone is not enough here, and that is the difference from the container
+        backend. There, one command starts the X server and the session together, so a
+        screenshot succeeds only once there is a session to photograph. A virtual machine
+        boots them apart: X is listening seconds before the desktop paints, and a
+        screenshot taken in between succeeds and returns a black rectangle. The first
+        desktop guest reported "ready in 19s" and handed back exactly that.
+
+        A blank screen is an unambiguous signal *at this moment* — nothing task-specific
+        has run yet, so the only thing that could be on screen is the desktop's own
+        wallpaper. It would not be a safe test later, once a task can legitimately fill
+        the screen with one colour, which is why it lives here and not in ``screenshot``.
+
+        Longer deadline than the container backend allows, because a virtual machine is
+        booting an operating system rather than starting a process tree.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_sec
-        last: Exception | None = None
+        last = "no screenshot was taken"
         while loop.time() < deadline:
             try:
-                await client.screenshot()
-                return
-            except Exception as exc:  # the session is still coming up
-                last = exc
+                png = await client.screenshot()
+            except Exception as exc:  # X is not up yet
+                last = str(exc)
                 await asyncio.sleep(2)
+                continue
+            if not _is_blank(png):
+                return
+            last = "the screen is up but nothing has been drawn on it"
+            await asyncio.sleep(2)
         raise ProviderStartError(
-            f"this guest declares a desktop but none could be photographed within "
-            f"{timeout_sec:g}s ({last})"
+            f"this guest declares a desktop but none was ready within {timeout_sec:g}s ({last})"
         )
 
     async def _read_manifest(self, client: GuestClient) -> tuple[str, bool]:
@@ -554,6 +570,37 @@ class QemuProvider(Provider):
                 f"elevated privileges were requested but {agent_user} still cannot "
                 f"elevate in this guest: {stderr.strip()}"
             )
+
+
+def _is_blank(png: bytes) -> bool:
+    """Whether an image is a single flat colour, judged from the PNG itself.
+
+    Decoded here rather than in the guest, and without an imaging library. Asking the
+    guest meant running Python in a process that has no display — the guest service finds
+    one when *it* needs one, which does nothing for a command run beside it — so the check
+    reported "nothing drawn" forever against a desktop that had painted twenty seconds in.
+    The bytes are already on this side; nothing else was needed.
+
+    A flat image compresses to almost nothing: every scanline is one filter byte followed
+    by the same pixel repeated, so the decompressed stream holds only a couple of distinct
+    values. Anything real holds hundreds.
+    """
+    data = bytearray()
+    offset = 8  # past the signature
+    while offset + 8 <= len(png):
+        length = int.from_bytes(png[offset : offset + 4], "big")
+        kind = png[offset + 4 : offset + 8]
+        if kind == b"IDAT":
+            data += png[offset + 8 : offset + 8 + length]
+        elif kind == b"IEND":
+            break
+        offset += 12 + length
+    if not data:
+        return False  # unreadable is not "blank"; let the caller keep what it was given
+    try:
+        return len(set(zlib.decompress(bytes(data)))) <= 2
+    except zlib.error:
+        return False
 
 
 def _port_of(url: str | None) -> str:

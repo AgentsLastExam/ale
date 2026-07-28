@@ -60,6 +60,11 @@ autoinstall:
       [daemon]
       AutomaticLoginEnable=true
       AutomaticLogin=user
+      # X11, not Wayland. 24.04 defaults to Wayland, and every tool the guest service
+      # uses to see or drive a desktop — xdotool, Xlib, the in-process screen grab —
+      # speaks X11 only. Under Wayland they do not error in any useful way; screenshots
+      # come back black and input goes nowhere, which reads as a broken task.
+      WaylandEnable=false
       GDM
     # The first-run wizard would sit on top of whatever a task puts on screen.
     - curtin in-target -- bash -c 'mkdir -p /home/user/.config && touch /home/user/.config/gnome-initial-setup-done && chown -R user:user /home/user/.config'

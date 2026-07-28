@@ -93,4 +93,5 @@ echo ">> baking the sandbox image contract"
     --run-command "systemctl enable ale-guestd.service" \
     --run-command "systemctl enable nftables.service" \
     --run-command "python3 -c 'import PIL, Xlib'" \
+    --run-command "[ -f /etc/gdm3/custom.conf ] && grep -q WaylandEnable /etc/gdm3/custom.conf || true" \
     --run-command "cloud-init clean --logs || true"
