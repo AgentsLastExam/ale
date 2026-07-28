@@ -1,0 +1,69 @@
+#cloud-config
+# Unattended installation of Ubuntu Desktop, consumed by the installer on the official
+# ISO. Everything a human would click is answered here, which is the whole point: the
+# guest has to be rebuildable from this repository and nothing else.
+#
+# Autoinstall is supported by the Desktop installer from 23.04 onward. It is *not*
+# supported on 22.04 Desktop, which is why this guest is 24.04 — the alternative there
+# was a ubiquity preseed, and a build nobody can reproduce is not a build.
+autoinstall:
+  version: 1
+
+  # `ubuntu-desktop` rather than `-minimal`: this image exists so a task can meet a
+  # desktop that looks like the one a person would be using, including the applications
+  # that ship with it. The minimal set omits them and is 1.6GB lighter.
+  source:
+    id: ubuntu-desktop
+    search_drivers: false
+
+  locale: en_US.UTF-8
+  keyboard: { layout: us }
+
+  # Wipe and use the whole disk. There is nothing to preserve: this runs against a blank
+  # image every time.
+  storage:
+    layout: { name: direct }
+
+  identity:
+    hostname: ale-sandbox
+    # Must match `ale.user` in the image manifest. The agent runs as this account.
+    username: user
+    # `user`, hashed. This is not a secret: the guest is network-denied during the agent's
+    # phase and reachable only through the guest service, and a task that needs sudo
+    # declares `resources.sudo`, which the engine grants without a password.
+    password: "$6$t7FJ.IpBn9c6.Oon$jLFw0B6sxMkqy7lKn/DAncQOnFJUH6NGnyFHpTbngvd2gqdutwKhYA9DrxExaEtGhPbMcHR1o.g.Dd6//mya3/"
+
+  # No network configuration to speak of: the runner supplies DHCP, and everything else
+  # is decided by the firewall the engine installs.
+  network:
+    version: 2
+    ethernets:
+      any: { match: { name: "en*" }, dhcp4: true }
+
+  # No third-party drivers, no snap refresh during install, no telemetry prompt.
+  drivers: { install: false }
+  codecs: { install: false }
+  oem: { install: false }
+
+  packages:
+    - python3-pil
+    - python3-xlib
+    - xdotool
+    - nftables
+    - openssh-server
+
+  late-commands:
+    # Log straight into the session. A desktop nobody is logged into has no screen to
+    # photograph, and there is no human here to type a password.
+    - |
+      cat > /target/etc/gdm3/custom.conf <<'GDM'
+      [daemon]
+      AutomaticLoginEnable=true
+      AutomaticLogin=user
+      GDM
+    # The first-run wizard would sit on top of whatever a task puts on screen.
+    - curtin in-target -- bash -c 'mkdir -p /home/user/.config && touch /home/user/.config/gnome-initial-setup-done && chown -R user:user /home/user/.config'
+    # Nothing should ask to upgrade, report a crash, or check for updates mid-episode.
+    - curtin in-target -- systemctl disable unattended-upgrades apport update-notifier-download || true
+
+  shutdown: poweroff

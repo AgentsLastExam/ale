@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Build the Ubuntu guest disk for the VM backend.
+# Build a *headless* Ubuntu guest disk, from Canonical's cloud image.
+#
+# The smaller of the two guests: fast to build, ~1GB, and enough for every task that does
+# not need a screen. For one that does, see build-desktop.sh, which installs the real
+# desktop from the official ISO — Canonical publishes no desktop cloud image, so a
+# desktop cannot come from here.
 #
 # Starts from Canonical's own cloud image rather than anyone's exported disk: it is
 # published, versioned, and its contents are accountable to a build nobody here ran. What
@@ -44,121 +49,9 @@ echo ">> preparing $OUTPUT"
 cp --reflink=auto "$base" "$OUTPUT"
 qemu-img resize "$OUTPUT" "${ALE_DISK_SIZE:-20G}"
 
-# --- the guest service ------------------------------------------------------------
-staging="$(mktemp -d)"
-trap 'rm -rf "$staging"' EXIT
-mkdir -p "$staging/guestd"
-cp "$REPO_ROOT"/packages/ale-run/src/ale/run/guestd/*.py "$staging/guestd/"
-
-cat > "$staging/ale-guestd.service" <<UNIT
-[Unit]
-Description=ALE guest service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-# TCP rather than stdio: there is no exec channel into a virtual machine, so the host
-# reaches this through a forwarded port. One codebase, two transports.
-ExecStart=/usr/bin/python3 /opt/ale/guestd/main.py --tcp 0.0.0.0:${GUEST_PORT}
-Restart=always
-RestartSec=1
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-# --- a datasource that is already here --------------------------------------------
-# Cloud images do not finish booting until cloud-init finds a datasource, and by default
-# it goes looking for a metadata server on the network. In a sandbox there is no such
-# server and never will be, so the first boot hung at "waiting for cloud-init to be
-# configured" until the timeouts expired. A seed baked into the image is found instantly
-# and offline, which keeps what cloud-init is genuinely useful for here — growing the root
-# filesystem to the disk it was given, and writing the network configuration — while
-# removing the wait. Restricting the datasource list is what stops it searching at all.
-mkdir -p "$staging/seed"
-cat > "$staging/seed/meta-data" <<META
-instance-id: ale-sandbox
-local-hostname: ale-sandbox
-META
-cat > "$staging/seed/user-data" <<'USERDATA'
-#cloud-config
-# Deliberately empty: everything this guest needs is baked at build time, where it is
-# reviewable, rather than applied on each boot where it is not.
-USERDATA
-cat > "$staging/99-ale-datasource.cfg" <<'DSCFG'
-datasource_list: [ NoCloud, None ]
-DSCFG
-
-# --- default-deny egress ----------------------------------------------------------
-# The rule that actually confines a guest lives in the runner, in a network namespace the
-# agent cannot reach — a task may declare `sudo`, and an agent with root can flush the
-# tables below. This is the guest's own half: defence in depth, and the posture an image
-# keeps if it is ever booted somewhere else. The one permitted address is the runner
-# itself, which forwards a single port onward to the gateway.
-cat > "$staging/nftables.conf" <<NFT
-#!/usr/sbin/nft -f
-flush ruleset
-
-table inet ale {
-    chain output {
-        type filter hook output priority 0; policy drop;
-
-        ct state established,related accept
-        oifname "lo" accept
-
-        # The gateway is the one permitted egress.
-        ip daddr ${HOST_IP} accept
-
-        # DHCP, or the guest never gets an address to be restricted on.
-        udp dport 67 accept
-    }
-}
-NFT
-
-# --- the image contract, in a file -------------------------------------------------
-# A container image answers "which account is the agent?" with a label. A disk image has
-# nowhere to put one, so the same facts are written where the provider can read them
-# through the guest service. Same contract (docs/specs/sandbox-image.md), same fields.
-mkdir -p "$staging"
-cat > "$staging/image.json" <<MANIFEST
-{"user": "${AGENT_USER}", "gui": false, "port": ${GUEST_PORT}}
-MANIFEST
-
-# libguestfs builds a small appliance from the host's own kernel, and Debian and Ubuntu
-# ship /boot/vmlinuz-* readable only by root. Rather than loosening a system file's
-# permissions on someone's machine, the customise step runs elevated and the result is
-# handed back — the alternative advice found everywhere is `chmod 0644 /boot/vmlinuz-*`,
-# which is a lasting change to the host in exchange for one build.
-customize=(virt-customize)
-if [ ! -r "/boot/vmlinuz-$(uname -r)" ]; then
-    echo ">> /boot/vmlinuz is root-only; running the customise step with sudo"
-    customize=(sudo -E virt-customize)
-fi
-
-# The build installs packages, so it needs the archive. What must be offline is the
-# *sandbox*, not the build of its disk — a guest that had to reach the network to become
-# usable would be a guest that cannot run under a deny-all policy.
-echo ">> baking the sandbox image contract"
-"${customize[@]}" -a "$OUTPUT" \
-    --update \
-    --install python3,python3-pil,python3-xlib,sudo,nftables,ca-certificates \
-    --run-command "id -u ${AGENT_USER} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash ${AGENT_USER}" \
-    --mkdir /opt/ale \
-    --mkdir /etc/ale \
-    --copy-in "$staging/guestd:/opt/ale" \
-    --copy-in "$staging/nftables.conf:/etc" \
-    --copy-in "$staging/ale-guestd.service:/etc/systemd/system" \
-    --mkdir /var/lib/cloud/seed/nocloud \
-    --copy-in "$staging/seed/meta-data:/var/lib/cloud/seed/nocloud" \
-    --copy-in "$staging/seed/user-data:/var/lib/cloud/seed/nocloud" \
-    --copy-in "$staging/99-ale-datasource.cfg:/etc/cloud/cloud.cfg.d" \
-    --copy-in "$staging/image.json:/etc/ale" \
-    --run-command "chown -R root:root /opt/ale && chmod -R go-rwx /opt/ale" \
-    --run-command "systemctl enable ale-guestd.service" \
-    --run-command "systemctl enable nftables.service" \
-    --run-command "python3 -c 'import PIL, Xlib'" \
-    --run-command "systemctl disable snapd.seeded.service snapd.service snapd.socket || true" \
-    --run-command "cloud-init clean --logs || true"
+# --- the sandbox contract -----------------------------------------------------------
+# Shared with the desktop build, so the two guests cannot drift in what they promise.
+bash "$HERE/customise.sh" "$OUTPUT" "$AGENT_USER" "$GUEST_PORT" "$HOST_IP" "$REPO_ROOT" false
 
 # Handed back if sudo built it, so a run needs no privilege of its own.
 [ -O "$OUTPUT" ] || sudo chown "$(id -u):$(id -g)" "$OUTPUT"
