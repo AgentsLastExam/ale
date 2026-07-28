@@ -40,11 +40,20 @@ BUILD_RAM="${ALE_BUILD_RAM:-4096}"
 BUILD_CPUS="${ALE_BUILD_CPUS:-4}"
 INSTALL_TIMEOUT="${ALE_INSTALL_TIMEOUT:-5400}"
 
+# The installer must run under the same firmware the runner boots with, which is UEFI.
+# Installed under BIOS instead, the installer partitions a GPT with an EFI system
+# partition and then never populates it — it puts grub in the MBR, because that is what it
+# booted from. The disk then looks perfectly normal offline and drops the runner straight
+# into the EFI shell, which is exactly how the first build failed.
+OVMF_CODE="${ALE_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS="${ALE_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+
 need() { command -v "$1" >/dev/null || { echo "missing: $1 ($2)" >&2; exit 1; }; }
 need qemu-system-x86_64 "apt install qemu-system-x86"
 need qemu-img "apt install qemu-utils"
 need genisoimage "apt install genisoimage"
 need virt-customize "apt install libguestfs-tools"
+[ -r "$OVMF_CODE" ] || { echo "missing $OVMF_CODE (apt install ovmf)" >&2; exit 1; }
 [ -w /dev/kvm ] || { echo "/dev/kvm is not writable; the install would take hours" >&2; exit 1; }
 
 mkdir -p "$CACHE"
@@ -93,8 +102,14 @@ qemu-img create -f qcow2 "$OUTPUT.partial" "$DISK_SIZE" >/dev/null
 # `autoinstall` is what tells the installer to take its answers from the seed instead of
 # asking. `console=ttyS0` so a build that goes wrong says why on the serial log rather
 # than silently sitting on a screen nobody is looking at.
+# Writable copy: the firmware records the boot entry the installer creates, and a
+# read-only VARS file means that entry is lost the moment the machine powers off.
+cp "$OVMF_VARS" "$staging/OVMF_VARS.fd"
+
 timeout "$INSTALL_TIMEOUT" qemu-system-x86_64 \
     -enable-kvm -machine q35,accel=kvm -cpu host \
+    -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,unit=1,file=$staging/OVMF_VARS.fd" \
     -m "$BUILD_RAM" -smp "$BUILD_CPUS" \
     -drive "file=$OUTPUT.partial,format=qcow2,if=virtio" \
     -drive "file=$iso,media=cdrom,readonly=on" \
