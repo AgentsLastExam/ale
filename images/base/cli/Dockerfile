@@ -29,8 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # the answer whether or not anyone chose it. The harness installs the pinned version at
 # the start of the episode, while the sandbox still has a network — the declared network
 # policy binds the agent, not the preparation.
-ARG NODE_VERSION=v22.11.0
-ARG NODE_SHA256=83bf07dd343002a26211cf1fcd46a9d9534219aad42ee02847816940bf610a72
+ARG NODE_VERSION=v24.15.0
+ARG NODE_SHA256=472655581fb851559730c48763e0c9d3bc25975c59d518003fc0849d3e4ba0f6
 RUN set -eux; \
     curl -fsSLo /tmp/node.tar.xz \
         "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz"; \

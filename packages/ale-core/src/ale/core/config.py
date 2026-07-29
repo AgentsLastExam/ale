@@ -109,18 +109,18 @@ class AgentConfig(BaseModel):
 class GatewayConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    dialect: str = "anthropic"
+    dialect: Literal["anthropic", "openai-responses"] = "anthropic"
     limits: GatewayLimits = GatewayLimits()
     base_url: str = Field(
         default="",
-        description="Upstream endpoint. Empty means Anthropic's own.",
+        description="Upstream endpoint. Empty selects the dialect's standard endpoint.",
     )
     api_key_env: str = Field(
-        default="ANTHROPIC_API_KEY",
+        default="",
         description=(
-            "Which environment variable holds the key for that endpoint. Named rather "
-            "than passed: a value on a command line is in shell history and in every "
-            "process listing, a variable name is not."
+            "Environment variable holding the upstream key. Empty selects the dialect's "
+            "standard variable. Named rather than passed: a value on a command line is "
+            "in shell history and in every process listing, a variable name is not."
         ),
     )
 

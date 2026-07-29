@@ -392,6 +392,14 @@ class TestDialect:
         events = [b'data: {"type":"message_start","message":{"usage":{"input_tokens":50}}}\n\n']
         assert usage_from_stream(events) == (50, 0, None)
 
+    def test_stream_events_may_cross_network_chunk_boundaries(self) -> None:
+        events = [
+            b'data: {"type":"message_start","message":{"usage":{"input_',
+            b'tokens":50}}}\n\ndata: {"type":"message_delta","usage":{"output_tokens":12},',
+            b'"delta":{"stop_reason":"end_turn"}}\n\n',
+        ]
+        assert usage_from_stream(events) == (50, 12, "end_turn")
+
     def test_cost_scales_with_the_model_family(self) -> None:
         assert estimate_cost("claude-haiku-4-5", 1000, 1000) < estimate_cost(
             "claude-opus-4-8", 1000, 1000

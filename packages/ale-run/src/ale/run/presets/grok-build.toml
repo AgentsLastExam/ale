@@ -1,0 +1,23 @@
+[agent]
+name = "grok-build"
+model = "grok-4.5"
+version = "0.2.112"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+max_turns = "unlimited"
+reasoning_effort = "high"
+disabled_tools = []
+
+[gateway]
+dialect = "openai-responses"
+base_url = "https://api.x.ai"
+api_key_env = "XAI_API_KEY"
+
+[gateway.limits]
+max_model_calls = "unlimited"
+max_input_tokens = "unlimited"
+max_output_tokens = "unlimited"
+max_total_tokens = "unlimited"
+max_cost_usd = "unlimited"

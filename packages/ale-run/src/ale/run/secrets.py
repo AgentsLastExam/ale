@@ -67,11 +67,17 @@ def load_env(path: Path | None = None, *, override: bool = False) -> dict[str, s
     return loaded
 
 
-DEFAULT_KEY_VAR = "ANTHROPIC_API_KEY"
-DEFAULT_BASE_URL = "https://api.anthropic.com"
+DEFAULTS = {
+    "anthropic": ("ANTHROPIC_API_KEY", "https://api.anthropic.com"),
+    "openai-responses": ("OPENAI_API_KEY", "https://api.openai.com"),
+}
 
 
-def provider_credentials(key_var: str = DEFAULT_KEY_VAR, base_url: str = "") -> tuple[str, str]:
+def provider_credentials(
+    key_var: str = "",
+    base_url: str = "",
+    dialect: str = "anthropic",
+) -> tuple[str, str]:
     """The API key and upstream endpoint the gateway should use.
 
     A run names which variable holds its key and states the endpoint that key belongs to.
@@ -83,10 +89,12 @@ def provider_credentials(key_var: str = DEFAULT_KEY_VAR, base_url: str = "") -> 
     history and in every process listing on the machine; a variable name is not.
     """
     load_env()
+    default_key_var, default_base_url = DEFAULTS.get(dialect, DEFAULTS["anthropic"])
+    key_var = key_var or default_key_var
     key = os.environ.get(key_var, "")
     if not key:
         raise ConfigError(
             f"{key_var} is not set. Put it in the checkout's .env (copy .env.example) "
             f"or name a different variable with --api-key-env."
         )
-    return key, (base_url or DEFAULT_BASE_URL).rstrip("/")
+    return key, (base_url or default_base_url).rstrip("/")

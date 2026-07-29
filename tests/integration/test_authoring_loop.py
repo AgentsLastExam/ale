@@ -87,9 +87,9 @@ async def test_an_edit_that_breaks_the_task_is_caught_by_validation(tmp_path: Pa
     verify.write_text(verify.read_text().replace('= "hello"', '= "hellothere"'))
 
     result = await run(task, tmp_path / "runs", OracleHarness())
-    assert result.verdict.rewards == {
-        "reward": 0.0
-    }, "validation passed a task its oracle cannot solve"
+    assert result.verdict.rewards == {"reward": 0.0}, (
+        "validation passed a task its oracle cannot solve"
+    )
 
 
 @pytest.mark.asyncio

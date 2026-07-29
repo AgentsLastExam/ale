@@ -1,0 +1,22 @@
+[agent]
+name = "codex-cli"
+model = "gpt-5-mini"
+version = "0.146.0"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+reasoning_effort = "default"
+web_search = false
+
+[gateway]
+dialect = "openai-responses"
+base_url = "https://api.openai.com"
+api_key_env = "OPENAI_API_KEY"
+
+[gateway.limits]
+max_model_calls = "unlimited"
+max_input_tokens = "unlimited"
+max_output_tokens = "unlimited"
+max_total_tokens = "unlimited"
+max_cost_usd = "unlimited"

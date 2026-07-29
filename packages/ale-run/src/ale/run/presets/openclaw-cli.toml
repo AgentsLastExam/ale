@@ -1,0 +1,27 @@
+[agent]
+name = "openclaw-cli"
+model = "gpt-5-mini"
+version = "2026.7.1"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+provider = "openai"
+thinking = "default"
+timeout_seconds = "unlimited"
+tool_profile = "coding"
+tools_allow = []
+tools_deny = []
+model_params = {}
+
+[gateway]
+dialect = "openai-responses"
+base_url = "https://api.openai.com"
+api_key_env = "OPENAI_API_KEY"
+
+[gateway.limits]
+max_model_calls = "unlimited"
+max_input_tokens = "unlimited"
+max_output_tokens = "unlimited"
+max_total_tokens = "unlimited"
+max_cost_usd = "unlimited"

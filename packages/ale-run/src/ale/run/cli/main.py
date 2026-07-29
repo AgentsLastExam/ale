@@ -29,6 +29,9 @@ from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
+from ale.run.harnesses.codex_cli import CodexCliHarness
+from ale.run.harnesses.grok_build import GrokBuildHarness
+from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.kits import read_lock, scan_kits, write_lock
 from ale.run.ledger import Ledger, episode_identity
 from ale.run.lint import lint_repository
@@ -303,9 +306,25 @@ def _harness(settings: RunConfig):  # type: ignore[no-untyped-def]
                 cli_version=settings.agent.version,
                 settings=settings.agent.settings,
             )
+        case "grok-build":
+            return GrokBuildHarness(
+                cli_version=settings.agent.version,
+                settings=settings.agent.settings,
+            )
+        case "codex-cli":
+            return CodexCliHarness(
+                cli_version=settings.agent.version,
+                settings=settings.agent.settings,
+            )
+        case "openclaw-cli":
+            return OpenClawCliHarness(
+                cli_version=settings.agent.version,
+                settings=settings.agent.settings,
+            )
         case unknown:
             raise AleError(
-                f"unknown agent {unknown!r}; try claude-code, computer-use, oracle or nop"
+                f"unknown agent {unknown!r}; try claude-code, codex-cli, "
+                "computer-use, grok-build, openclaw-cli, oracle or nop"
             )
 
 
@@ -390,12 +409,19 @@ async def _run_one(
     if needs_model:
         try:
             api_key, upstream = provider_credentials(
-                settings.gateway.api_key_env, settings.gateway.base_url
+                settings.gateway.api_key_env,
+                settings.gateway.base_url,
+                settings.gateway.dialect,
             )
         except AleError as error:
             typer.echo(f"{error}", err=True)
             return EXIT_BAD_REFERENCE
-        gateway = Gateway(api_key=api_key, upstream=upstream, host=_gateway_host(settings))
+        gateway = Gateway(
+            api_key=api_key,
+            upstream=upstream,
+            dialect=settings.gateway.dialect,
+            host=_gateway_host(settings),
+        )
         gateway_url = await gateway.start()
         limits = Limits(
             **{

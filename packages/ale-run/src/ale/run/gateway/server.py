@@ -18,6 +18,7 @@ What it buys, none of which an agent can opt out of:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import uuid
@@ -30,13 +31,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 from ale.core.environment import EventSink
 from ale.core.errors import ConfigError
 from ale.core.trace import TransportCall, TransportReplay
-from ale.run.gateway.anthropic import (
-    estimate_cost,
-    extract_usage,
-    pricing_for,
-    refusal_body,
-    usage_from_stream,
-)
+from ale.run.gateway import anthropic, openai_responses
 from ale.run.gateway.session import (
     GatewayReservation,
     GatewaySession,
@@ -63,11 +58,15 @@ class Gateway:
         *,
         api_key: str,
         upstream: str = UPSTREAM_DEFAULT,
+        dialect: str = "anthropic",
         host: str = "0.0.0.0",
         port: int = 0,
     ) -> None:
         self.api_key = api_key
         self.upstream = upstream.rstrip("/")
+        if dialect not in {"anthropic", "openai-responses"}:
+            raise ConfigError(f"unsupported gateway dialect {dialect!r}")
+        self.dialect = dialect
         self.host = host
         self.port = port
         self.sessions = SessionRegistry()
@@ -106,7 +105,10 @@ class Gateway:
         self, session: GatewaySession, trace: EventSink | None = None
     ) -> GatewaySession:
         """Register an episode. Its token is valid until :meth:`close_session`."""
-        if session.limits.max_cost_usd is not None and pricing_for(session.model) is None:
+        if (
+            session.limits.max_cost_usd is not None
+            and self._dialect.pricing_for(session.model) is None
+        ):
             raise ConfigError(
                 f"finite max_cost_usd requires known pricing for model {session.model!r}"
             )
@@ -123,11 +125,11 @@ class Gateway:
     def _build_app(self) -> web.Application:
         app = web.Application(client_max_size=64 * 1024 * 1024)
         app.router.add_get("/healthz", self._healthz)
-        app.router.add_post("/v1/messages", self._messages)
+        app.router.add_post(self._request_path, self._messages)
         return app
 
     async def _healthz(self, request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, "dialects": ["anthropic"]})
+        return web.json_response({"ok": True, "dialects": [self.dialect]})
 
     async def _messages(self, request: web.Request) -> web.StreamResponse:
         session = self._authenticate(request)
@@ -180,12 +182,12 @@ class Gateway:
         input_tokens = (
             await self._count_input_tokens(payload, headers) if _needs_exact_input(session) else 0
         )
-        requested_output = int(payload.get("max_tokens") or 4096)
+        requested_output = int(payload.get(self._max_output_field) or 4096)
         try:
             reservation = await session.reserve(
                 input_tokens=input_tokens,
                 requested_output_tokens=requested_output,
-                pricing=pricing_for(session.model),
+                pricing=self._dialect.pricing_for(session.model),
             )
         except LimitReached as limit:
             self._record(
@@ -194,7 +196,9 @@ class Gateway:
                 request_digest=GatewaySession.digest(json.dumps(payload, sort_keys=True).encode()),
                 refused=limit.limit,
             )
-            raw = json.dumps(refusal_body(limit.limit, limit.value, limit.observed)).encode()
+            raw = json.dumps(
+                self._dialect.refusal_body(limit.limit, limit.value, limit.observed)
+            ).encode()
             self._retain_payload(session, call_id, payload, raw)
             cached = {
                 "status": 429,
@@ -204,14 +208,14 @@ class Gateway:
             }
             session.finish(key, cached)
             return self._replayed(cached)
-        payload = {**payload, "max_tokens": reservation.output_tokens}
+        payload = {**payload, self._max_output_field: reservation.output_tokens}
         self._retain_payload(session, call_id, payload, None)
 
         streaming = bool(payload.get("stream"))
         committed = False
         try:
             async with self._client.post(
-                f"{self.upstream}/v1/messages", json=payload, headers=headers
+                f"{self.upstream}{self._request_path}", json=payload, headers=headers
             ) as upstream:
                 if streaming:
                     response = await self._stream(
@@ -289,10 +293,17 @@ class Gateway:
         await response.prepare(request)
 
         chunks: list[bytes] = []
+        downstream_open = True
         async for chunk in _iter_chunks(upstream):
             chunks.append(chunk)
-            await response.write(chunk)
-        await response.write_eof()
+            if downstream_open:
+                try:
+                    await response.write(chunk)
+                except ConnectionResetError:
+                    downstream_open = False
+        if downstream_open:
+            with contextlib.suppress(ConnectionResetError):
+                await response.write_eof()
 
         # Measured to the end of the stream: a streamed call's cost in wall-clock time is
         # how long the agent waited for all of it, not how quickly the first byte arrived.
@@ -374,10 +385,10 @@ class Gateway:
             return
         self._retain_exact_tokens(session, call_id, payload, parsed)
         if streamed is not None:
-            input_tokens, output_tokens, stop_reason = usage_from_stream(streamed)
+            input_tokens, output_tokens, stop_reason = self._dialect.usage_from_stream(streamed)
         else:
-            input_tokens, output_tokens, stop_reason = extract_usage(parsed)
-        cost = estimate_cost(session.model, input_tokens, output_tokens)
+            input_tokens, output_tokens, stop_reason = self._dialect.extract_usage(parsed)
+        cost = self._dialect.estimate_cost(session.model, input_tokens, output_tokens)
         self._record(
             session,
             call_id=call_id,
@@ -402,8 +413,11 @@ class Gateway:
         headers = {
             name: value for name, value in request.headers.items() if name.lower() not in _STRIP
         }
-        headers["x-api-key"] = self.api_key
-        headers.setdefault("anthropic-version", "2023-06-01")
+        if self.dialect == "anthropic":
+            headers["x-api-key"] = self.api_key
+            headers.setdefault("anthropic-version", "2023-06-01")
+        else:
+            headers["authorization"] = f"Bearer {self.api_key}"
         return headers
 
     async def _count_input_tokens(
@@ -413,10 +427,12 @@ class Gateway:
     ) -> int:
         assert self._client is not None
         count_payload = {
-            key: value for key, value in payload.items() if key not in {"max_tokens", "stream"}
+            key: value
+            for key, value in payload.items()
+            if key not in {self._max_output_field, "stream"}
         }
         async with self._client.post(
-            f"{self.upstream}/v1/messages/count_tokens",
+            f"{self.upstream}{self._count_path}",
             json=count_payload,
             headers=headers,
         ) as response:
@@ -446,6 +462,26 @@ class Gateway:
                     ),
                     content_type="application/json",
                 ) from exc
+
+    @property
+    def _dialect(self):  # type: ignore[no-untyped-def]
+        return anthropic if self.dialect == "anthropic" else openai_responses
+
+    @property
+    def _request_path(self) -> str:
+        return "/v1/messages" if self.dialect == "anthropic" else "/v1/responses"
+
+    @property
+    def _count_path(self) -> str:
+        return (
+            "/v1/messages/count_tokens"
+            if self.dialect == "anthropic"
+            else "/v1/responses/input_tokens"
+        )
+
+    @property
+    def _max_output_field(self) -> str:
+        return "max_tokens" if self.dialect == "anthropic" else "max_output_tokens"
 
     def _record(
         self,
@@ -573,17 +609,19 @@ def _elapsed_ms(started: float) -> int:
 
 
 def _stream_response_id(chunks: list[bytes]) -> str | None:
-    for raw in chunks:
-        for line in raw.decode("utf-8", "ignore").splitlines():
-            if not line.startswith("data:"):
-                continue
-            try:
-                event = json.loads(line.removeprefix("data:").strip())
-            except json.JSONDecodeError:
-                continue
-            message = event.get("message")
-            if isinstance(message, dict) and isinstance(message.get("id"), str):
-                return message["id"]
+    for line in b"".join(chunks).decode("utf-8", "ignore").splitlines():
+        if not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line.removeprefix("data:").strip())
+        except json.JSONDecodeError:
+            continue
+        message = event.get("message")
+        if isinstance(message, dict) and isinstance(message.get("id"), str):
+            return message["id"]
+        response = event.get("response")
+        if isinstance(response, dict) and isinstance(response.get("id"), str):
+            return response["id"]
     return None
 
 

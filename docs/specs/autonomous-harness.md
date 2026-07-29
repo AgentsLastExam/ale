@@ -24,6 +24,27 @@ There is no central capability registry. If configured behavior is unsupported, 
 adapter must raise a typed error before provisioning. It must never ignore a field or
 resource.
 
+## Shipped Integrations
+
+ALE ships these official upstream agent programs:
+
+| Harness | Pinned package | Gateway dialect | Public settings |
+|---------|----------------|-----------------|-----------------|
+| `claude-code` | Claude Code preset pin | Anthropic Messages | `max_turns`, `max_budget_usd`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `append_system_prompt`, `effort` |
+| `grok-build` | `@xai-official/grok@0.2.112` | OpenAI Responses | `max_turns`, `reasoning_effort`, `disabled_tools` |
+| `codex-cli` | `@openai/codex@0.146.0` | OpenAI Responses | `reasoning_effort`, `web_search` |
+| `openclaw-cli` | `openclaw@2026.7.1` | OpenAI Responses | `provider`, `thinking`, `timeout_seconds`, `tool_profile`, `tools_allow`, `tools_deny`, `model_params` |
+
+The npm integrations use the official packages above. ALE does not install a fork or
+carry agent-program patches. The base images pin Node.js 24.15.0, which satisfies the
+current packages' runtime requirements.
+
+All four adapters support local Skills, canonical stdio and Streamable HTTP MCP
+servers, and same-sandbox native resume at their pinned versions. Support is determined
+from the pinned program's verified behavior, not a permanent assumption about a product
+name. In particular, `openclaw@2026.7.1` supports MCP; a future pin that changes this
+must update validation and acceptance together.
+
 ## Settings
 
 The preset lists every public setting, even when its value is a sentinel.
@@ -160,10 +181,23 @@ Do not emulate a Gateway limit in an adapter or hide a native limit under a Gate
 field. Termination records and provenance name the enforcing layer, limit, configured
 value, and observed value.
 
+The Gateway supports both the Anthropic Messages and OpenAI Responses wire dialects.
+The selected preset fixes the dialect and upstream provider endpoint. Harnesses always
+use an episode-local Gateway bearer token; provider credentials remain host-side.
+
+For finite token limits, the Gateway uses the dialect's exact input-token endpoint
+before forwarding. It accounts for every upstream call made by the agent program,
+including CLI-owned discovery or compaction calls. If the CLI disconnects from a
+streaming response early, the Gateway still drains the upstream response and commits
+usage before releasing the reservation.
+
 ## Verification
 
 A new adapter is complete only when:
 
+- its current official documentation, release, package name, runtime requirements,
+  settings, resource mechanisms, and native resume semantics have been researched;
+- the official program accepts the generated native configuration;
 - `AutonomousHarnessConformance` checks pass;
 - unknown settings and unsupported resources fail before provisioning;
 - concurrent episodes have distinct paths, config, logs, and native state;
@@ -176,6 +210,16 @@ A new adapter is complete only when:
   marked live test using the pinned agent program and a real model through the Gateway;
 - the live trajectory audit agrees across Gateway transport, ATIF trajectory, execution
   trace, native evidence when retained, artifacts, result, and RunLock.
+
+A shipped integration therefore follows this acceptance order:
+
+1. strict settings, preset, native translation, parser, and error unit tests;
+2. official CLI configuration validation;
+3. shared deterministic conformance and sandbox integration;
+4. a real Skill plus MCP task through the Gateway;
+5. direct launch plus two native resumes in the same sandbox;
+6. independent LLM audit of transport, ATIF, native evidence, artifacts, verifier, and
+   RunLock.
 
 A scripted probe, fake harness, oracle, hand-authored transcript, or agent-authored
 receipt may test plumbing but cannot complete that live gate.

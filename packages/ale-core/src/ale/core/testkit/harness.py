@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 from ale.core.harness import (
     AutonomousHarness,
     EffectiveAgentResources,
@@ -25,6 +27,10 @@ class AutonomousHarnessConformance:
         assert harness.name
         assert harness.version()
         assert harness.integrity()
+        assert len(harness.logs) == len(set(harness.logs))
+        for name in harness.logs:
+            path = PurePosixPath(name)
+            assert name and not path.is_absolute() and ".." not in path.parts
 
     @staticmethod
     def check_empty_resources(harness: AutonomousHarness) -> None:

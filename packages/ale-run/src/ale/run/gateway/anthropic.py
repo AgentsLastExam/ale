@@ -83,24 +83,23 @@ def usage_from_stream(events: list[bytes]) -> tuple[int, int, str | None]:
     """
     input_tokens = output_tokens = 0
     stop_reason: str | None = None
-    for chunk in events:
-        for line in chunk.splitlines():
-            if not line.startswith(b"data:"):
-                continue
-            try:
-                event = json.loads(line[5:].strip() or b"{}")
-            except json.JSONDecodeError:
-                continue
-            if event.get("type") == "message_start":
-                usage = (event.get("message") or {}).get("usage") or {}
-            elif event.get("type") == "message_delta":
-                usage = event.get("usage") or {}
-                stop_reason = (event.get("delta") or {}).get("stop_reason") or stop_reason
-            else:
-                continue
+    for line in b"".join(events).splitlines():
+        if not line.startswith(b"data:"):
+            continue
+        try:
+            event = json.loads(line[5:].strip() or b"{}")
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "message_start":
+            usage = (event.get("message") or {}).get("usage") or {}
+        elif event.get("type") == "message_delta":
+            usage = event.get("usage") or {}
+            stop_reason = (event.get("delta") or {}).get("stop_reason") or stop_reason
+        else:
+            continue
 
-            input_tokens = max(input_tokens, int(usage.get("input_tokens") or 0))
-            output_tokens = max(output_tokens, int(usage.get("output_tokens") or 0))
+        input_tokens = max(input_tokens, int(usage.get("input_tokens") or 0))
+        output_tokens = max(output_tokens, int(usage.get("output_tokens") or 0))
     return input_tokens, output_tokens, stop_reason
 
 

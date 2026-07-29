@@ -14,8 +14,8 @@ set -euo pipefail
 # three in step. A guest needs it for the same reason a container does: no image bakes an
 # agent any more, so the harness installs the pinned one when an episode starts, and most
 # agents are npm packages.
-NODE_VERSION="${ALE_NODE_VERSION:-v22.11.0}"
-NODE_SHA256="${ALE_NODE_SHA256:-83bf07dd343002a26211cf1fcd46a9d9534219aad42ee02847816940bf610a72}"
+NODE_VERSION="${ALE_NODE_VERSION:-v24.15.0}"
+NODE_SHA256="${ALE_NODE_SHA256:-472655581fb851559730c48763e0c9d3bc25975c59d518003fc0849d3e4ba0f6}"
 
 IMAGE="$1"; AGENT_USER="$2"; GUEST_PORT="$3"; HOST_IP="$4"; REPO_ROOT="$5"; GUI="${6:-false}"
 

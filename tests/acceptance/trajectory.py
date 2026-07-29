@@ -32,6 +32,8 @@ def run_task(
     runs_dir: Path,
     *,
     run_id: str,
+    agent: str = "claude-code",
+    model: str = MODEL,
     settings: tuple[str, ...] = (),
 ) -> Path:
     executable = Path(sys.executable).parent / "ale"
@@ -40,9 +42,9 @@ def run_task(
         "run",
         str(reference),
         "--agent",
-        "claude-code",
+        agent,
         "--model",
-        MODEL,
+        model,
         "--runs-dir",
         str(runs_dir),
         "--run-id",
@@ -71,7 +73,12 @@ def jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def audit_episode(
-    episode: Path, *, model: str = MODEL
+    episode: Path,
+    *,
+    model: str = MODEL,
+    harness: str = "claude-code",
+    version: str = "2.1.220",
+    native_log: str = "transcript.jsonl",
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -82,7 +89,7 @@ def audit_episode(
     trajectory = json.loads((episode / "trajectory.json").read_text())
     execution = jsonl(episode / "trace.execution.jsonl")
     result = json.loads((episode / "result.json").read_text())
-    native = jsonl(episode / "logs/claude-code/transcript.jsonl")
+    native = jsonl(episode / "logs" / harness / native_log)
     lock = json.loads((episode / "lock.json").read_text())
 
     calls = [record for record in transport if record["kind"] == "call"]
@@ -102,9 +109,9 @@ def audit_episode(
     assert result["rewards"] and all(value == 1.0 for value in result["rewards"].values())
     assert trajectory["schema_version"] == "ATIF-v1.7"
     assert trajectory["steps"][0]["source"] == "user"
-    assert lock["agent"]["harness"] == "claude-code"
+    assert lock["agent"]["harness"] == harness
     assert lock["agent"]["model"] == model
-    assert lock["agent"]["version"] == "2.1.220"
+    assert lock["agent"]["version"] == version
     return transport, trajectory["steps"], native, lock
 
 
@@ -144,7 +151,6 @@ def native_mcp_pairs(native: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def llm_audit_episode(episode: Path, *, requirement: str) -> dict[str, Any]:
     """Use an independent model call to judge the retained canonical evidence."""
-    api_key, upstream = provider_credentials()
     evidence = {
         "trajectory": json.loads((episode / "trajectory.json").read_text()),
         "result": json.loads((episode / "result.json").read_text()),
@@ -152,6 +158,12 @@ def llm_audit_episode(episode: Path, *, requirement: str) -> dict[str, Any]:
         "execution": jsonl(episode / "trace.execution.jsonl"),
         "requirement": requirement,
     }
+    return llm_audit_evidence(evidence, requirement=requirement)
+
+
+def llm_audit_evidence(evidence: dict[str, Any], *, requirement: str) -> dict[str, Any]:
+    """Judge a live acceptance artifact with an independent model call."""
+    api_key, upstream = provider_credentials()
     payload = json.dumps(
         {
             "model": MODEL,
@@ -165,7 +177,11 @@ def llm_audit_episode(episode: Path, *, requirement: str) -> dict[str, Any]:
                         "agent, not merely claimed in text. Return strict JSON under 800 "
                         "characters with keys valid (boolean), evidence (at most four "
                         "strings of at most 120 characters), and reason (at most 200 "
-                        "characters). " + json.dumps(evidence, ensure_ascii=False)
+                        "characters). "
+                        + json.dumps(
+                            {**evidence, "requirement": requirement},
+                            ensure_ascii=False,
+                        )
                     ),
                 }
             ],
