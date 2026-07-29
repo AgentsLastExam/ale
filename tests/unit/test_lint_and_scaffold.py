@@ -68,24 +68,23 @@ class TestLint:
         (created / "verify" / "run.sh").chmod(0o644)
         assert "chmod +x" in messages(root)
 
-    def test_missing_oracle_without_manual_validation_is_reported(self, tmp_path: Path) -> None:
+    def test_missing_oracle_is_reported(self, tmp_path: Path) -> None:
         root = repo(tmp_path)
         created = scaffold_task(root / "tasks" / "fresh")
         (created / "oracle" / "run.sh").unlink()
         assert "no oracle" in messages(root)
 
-    def test_manual_validation_excuses_a_missing_oracle(self, tmp_path: Path) -> None:
+    def test_legacy_manual_validation_does_not_bypass_the_oracle(self, tmp_path: Path) -> None:
         root = repo(tmp_path)
         created = scaffold_task(root / "tasks" / "fresh")
         (created / "oracle" / "run.sh").unlink()
         manifest = created / "task.yaml"
         manifest.write_text(
-            manifest.read_text().replace(
-                "validate: { min_reward: 1.0 }",
-                'validate: { mode: manual, reason: "judged by a human rater" }',
-            )
+            manifest.read_text() + '\nvalidate: { mode: manual, reason: "human" }\n'
         )
-        assert lint_repository(root) == []
+        report = messages(root)
+        assert "no oracle" in report
+        assert "validate" in report
 
     def test_a_branch_revision_is_reported(self, tmp_path: Path) -> None:
         """The whole premise of an asset mount is that naming it twice reads one thing."""

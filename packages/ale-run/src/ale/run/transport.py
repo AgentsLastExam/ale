@@ -15,14 +15,16 @@ import asyncio
 import base64
 import contextlib
 import json
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Protocol
 
-from ale.core.errors import GuestUnreachableError, ProviderStartError
+from ale.core.errors import GuestUnreachableError, OutputStreamError, ProviderStartError
+from ale.core.sandbox import ExecOutputSink
 
 __all__ = ["GuestClient", "StdioTransport", "TcpTransport", "Transport"]
 
 _READ_LIMIT = 16 * 1024 * 1024  # generous: file chunks arrive base64-encoded
+_OUTPUT_PREVIEW_BYTES = 64 * 1024
 
 
 class Transport(Protocol):
@@ -159,7 +161,12 @@ class GuestClient:
         self._next_id = 0
 
     async def call(
-        self, op: str, params: dict[str, Any] | None = None, *, timeout_sec: float | None = None
+        self,
+        op: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout_sec: float | None = None,
+        event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Perform one operation; returns its data and any interim events."""
         async with self._lock:
@@ -172,6 +179,7 @@ class GuestClient:
             )
             await self._transport.send(payload)
             events: list[dict[str, Any]] = []
+            callback_error: BaseException | None = None
             while True:
                 line = await asyncio.wait_for(self._transport.recv(), timeout=timeout_sec)
                 if not line:
@@ -180,9 +188,19 @@ class GuestClient:
                 if message.get("id") != req_id:
                     continue  # a stale reply from an abandoned call
                 if "event" in message:
-                    events.append(message)
+                    if event_callback is None:
+                        events.append(message)
+                    elif callback_error is None:
+                        try:
+                            await event_callback(message)
+                        except BaseException as exc:
+                            callback_error = exc
                     continue
                 if message.get("ok"):
+                    if callback_error is not None:
+                        raise OutputStreamError(
+                            f"output callback failed: {callback_error}"
+                        ) from callback_error
                     return message.get("data") or {}, events
                 error = message.get("error") or {}
                 raise GuestUnreachableError(
@@ -202,7 +220,8 @@ class GuestClient:
         env: dict[str, str] | None = None,
         timeout_sec: float | None = None,
         run_as: str | None = None,
-    ) -> tuple[int, str, str]:
+        output_sink: ExecOutputSink | None = None,
+    ) -> tuple[int | None, str, str, bool]:
         params: dict[str, Any] = {}
         if run_as:
             params["run_as"] = run_as
@@ -219,11 +238,37 @@ class GuestClient:
 
         # Allow the guest's own timeout to fire first: it can still report partial output.
         wait = timeout_sec + 30 if timeout_sec else None
-        data, events = await self.call("exec", params, timeout_sec=wait)
+        stdout = bytearray()
+        stderr = bytearray()
+
+        async def receive(message: dict[str, Any]) -> None:
+            name = message.get("event")
+            if name not in {"stdout_chunk", "stderr_chunk"}:
+                return
+            block = base64.b64decode(message["data"]["b64"])
+            preview = stdout if name == "stdout_chunk" else stderr
+            limit = None if output_sink is None else _OUTPUT_PREVIEW_BYTES
+            if limit is None:
+                preview.extend(block)
+            elif len(preview) < limit:
+                preview.extend(block[: limit - len(preview)])
+            if output_sink is not None:
+                await output_sink(
+                    "stdout" if name == "stdout_chunk" else "stderr",
+                    block,
+                )
+
+        data, _ = await self.call(
+            "exec",
+            params,
+            timeout_sec=wait,
+            event_callback=receive,
+        )
         return (
-            int(data["exit_code"]),
-            _collect(events, "stdout_chunk"),
-            _collect(events, "stderr_chunk"),
+            int(data["exit_code"]) if data.get("exit_code") is not None else None,
+            stdout.decode("utf-8", "replace"),
+            stderr.decode("utf-8", "replace"),
+            bool(data.get("timed_out")),
         )
 
     async def write_file(

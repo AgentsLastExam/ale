@@ -91,6 +91,24 @@ def _to_pixels(coordinate: list[int] | tuple[int, int]) -> tuple[int, int]:
     return round(x * width / COORDINATE_SPACE), round(y * height / COORDINATE_SPACE)
 
 
+def cursor_position() -> tuple[int, int]:
+    """Return the current cursor position in normalized coordinates."""
+    attach_display()
+    xdotool = _require("xdotool")
+    out = subprocess.run(
+        [xdotool, "getmouselocation", "--shell"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    values = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    width, height = screen_size()
+    return (
+        round(int(values["X"]) * COORDINATE_SPACE / width),
+        round(int(values["Y"]) * COORDINATE_SPACE / height),
+    )
+
+
 def _capture_in_process() -> bytes:
     """Grab the root window through Xlib and encode with Pillow.
 
@@ -154,24 +172,53 @@ def dispatch_actions(actions: list[dict[str, Any]]) -> int:
     applied = 0
     for action in actions:
         kind = action.get("type")
-        if kind in {"click", "double_click", "right_click", "move"}:
+        if kind in {
+            "click",
+            "double_click",
+            "right_click",
+            "move",
+            "mouse_down",
+            "mouse_up",
+        }:
             if coordinate := action.get("coordinate"):
                 x, y = _to_pixels(coordinate)
                 subprocess.run([xdotool, "mousemove", str(x), str(y)], check=True)
+            button = {"left": "1", "middle": "2", "right": "3"}.get(
+                str(action.get("button") or "left"), "1"
+            )
             if kind == "click":
-                subprocess.run([xdotool, "click", "1"], check=True)
+                subprocess.run(
+                    [
+                        xdotool,
+                        "click",
+                        "--repeat",
+                        str(int(action.get("clicks") or 1)),
+                        button,
+                    ],
+                    check=True,
+                )
             elif kind == "double_click":
                 subprocess.run([xdotool, "click", "--repeat", "2", "1"], check=True)
             elif kind == "right_click":
                 subprocess.run([xdotool, "click", "3"], check=True)
+            elif kind == "mouse_down":
+                subprocess.run([xdotool, "mousedown", button], check=True)
+            elif kind == "mouse_up":
+                subprocess.run([xdotool, "mouseup", button], check=True)
         elif kind == "drag":
             start, end = action.get("coordinate"), action.get("to")
-            if not start or not end:
+            if not end:
                 continue
-            sx, sy = _to_pixels(start)
             ex, ey = _to_pixels(end)
-            subprocess.run([xdotool, "mousemove", str(sx), str(sy), "mousedown", "1"], check=True)
-            subprocess.run([xdotool, "mousemove", str(ex), str(ey), "mouseup", "1"], check=True)
+            button = {"left": "1", "middle": "2", "right": "3"}.get(
+                str(action.get("button") or "left"), "1"
+            )
+            if start:
+                sx, sy = _to_pixels(start)
+                subprocess.run([xdotool, "mousemove", str(sx), str(sy)], check=True)
+            subprocess.run([xdotool, "mousedown", button], check=True)
+            subprocess.run([xdotool, "mousemove", str(ex), str(ey)], check=True)
+            subprocess.run([xdotool, "mouseup", button], check=True)
         elif kind == "scroll":
             button = {"up": "4", "down": "5", "left": "6", "right": "7"}.get(
                 str(action.get("direction", "down")), "5"
@@ -184,6 +231,10 @@ def dispatch_actions(actions: list[dict[str, Any]]) -> int:
             keys = action.get("keys") or []
             if keys:
                 subprocess.run([xdotool, "key", "+".join(keys)], check=True)
+        elif kind in {"key_down", "key_up"}:
+            command = "keydown" if kind == "key_down" else "keyup"
+            for key in action.get("keys") or []:
+                subprocess.run([xdotool, command, key], check=True)
         elif kind == "wait":
             import time
 

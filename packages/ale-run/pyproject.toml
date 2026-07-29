@@ -25,3 +25,6 @@ ale-core = { workspace = true }
 # src/ale/__init__.py in either package.
 [tool.hatch.build.targets.wheel]
 packages = ["src/ale"]
+
+[tool.hatch.build]
+artifacts = ["src/ale/run/presets/*.toml"]

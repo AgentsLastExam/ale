@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.trace import read_records
+from ale.core.trace import read_jsonl
+from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
@@ -40,7 +41,7 @@ async def test_oracle_solves_the_task(tmp_path: Path, write_repo: Callable[..., 
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.primary_reward == 1.0
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -52,7 +53,7 @@ async def test_idle_agent_scores_zero_but_completes(
     result = await run_one(task_root, tmp_path / "runs", NopHarness())
 
     assert result.verdict.status is Status.COMPLETED
-    assert result.verdict.primary_reward == 0.0
+    assert result.verdict.rewards == {"reward": 0.0}
 
 
 @pytest.mark.asyncio
@@ -67,7 +68,7 @@ async def test_broken_verifier_is_a_task_error_not_a_zero(
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
 
     assert result.verdict.status is Status.TASK_ERROR
-    assert result.verdict.primary_reward is None
+    assert result.verdict.rewards is None
 
 
 @pytest.mark.asyncio
@@ -99,8 +100,15 @@ async def test_traces_and_artifacts_are_written(
     task_root = write_repo(tmp_path / "repo")
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
 
-    semantic = result.run_dir / "trace.semantic.jsonl"
-    assert semantic.is_file()
-    kinds = {record["kind"] for record in read_records(semantic)}
-    assert {"instruction", "exec", "verifier"} <= kinds
+    trajectory = AtifTrajectory.model_validate_json(
+        (result.run_dir / "trajectory.json").read_text()
+    )
+    assert trajectory.steps[0].source == "user"
+    execution = read_jsonl(result.run_dir / "trace.execution.jsonl").records
+    assert {"phase_started", "command_started", "command_finished", "phase_finished"} <= {
+        record["kind"] for record in execution
+    }
+    assert not (result.run_dir / "trace.semantic.jsonl").exists()
+    assert not (result.run_dir / "events.jsonl").exists()
+    assert (result.run_dir / "result.json").is_file()
     assert (result.run_dir / "artifacts" / "output" / "result.txt").is_file()

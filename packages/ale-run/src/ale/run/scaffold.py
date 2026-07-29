@@ -57,7 +57,6 @@ params:
 #   - { name: base }
 #   - { name: loud, params: { greeting: HELLO } }
 
-validate: { min_reward: 1.0 }
 metadata: { tags: [] }
 """
 

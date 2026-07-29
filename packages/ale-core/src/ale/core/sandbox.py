@@ -16,7 +16,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Protocol, Self
+from typing import Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,6 +25,7 @@ from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 
 __all__ = [
     "Capabilities",
+    "ExecOutputSink",
     "ExecResult",
     "GuestTransport",
     "Identity",
@@ -41,20 +42,25 @@ class SandboxState(StrEnum):
     DESTROYED = "destroyed"
 
 
+class ExecOutputSink(Protocol):
+    async def __call__(self, stream: Literal["stdout", "stderr"], data: bytes) -> None: ...
+
+
 class ExecResult(BaseModel):
     """Outcome of one command run inside a sandbox."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    exit_code: int
+    exit_code: int | None
     stdout: str = ""
     stderr: str = ""
     duration_ms: int = 0
     truncated: bool = False
+    timed_out: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.exit_code == 0
+        return self.exit_code == 0 and not self.timed_out
 
 
 class Capabilities(BaseModel):
@@ -175,6 +181,7 @@ class Sandbox(ABC):
         env: dict[str, str] | None = None,
         timeout_sec: float | None = None,
         identity: Identity = Identity.FRAMEWORK,
+        output_sink: ExecOutputSink | None = None,
     ) -> ExecResult: ...
 
     @abstractmethod

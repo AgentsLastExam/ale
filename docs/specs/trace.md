@@ -1,88 +1,175 @@
-# Trace specification
+# Unified episode logging
 
-An episode produces two trace layers, written as JSON Lines, plus externalised blobs.
-The layers exist because we have exactly two trustworthy capture points: the gateway
-(all model traffic) and the guest service (everything that happens in the sandbox).
+An episode keeps five orthogonal canonical records. A fact has one authoritative home;
+other files may carry only stable identifiers, references, or small run-level projections.
 
-## Transport layer — `trace.transport.jsonl`
+| Artifact | Owns | Does not own |
+|---|---|---|
+| `trajectory.json` | agent-visible messages, reasoning actually exposed, tool calls/results, images, subagents | setup/verify commands, rewards, aggregate usage |
+| `trace.transport.jsonl` | Gateway model calls, retries, refusals, usage, cost, call-to-step links | full conversation messages |
+| `trace.execution.jsonl` | framework phases, task/framework commands, output, policy, cleanup failures | agent-owned tool calls, rewards |
+| `result.json` | terminal status, all named rewards, failure, phase timings | conversation, provenance |
+| `lock.json` | immutable provenance and enforced termination limits | live run state |
 
-One record per model call, written by the gateway. Nothing else may write it.
+`events.jsonl`, `trace.semantic.jsonl`, per-episode ledger databases, scalar/primary
+rewards, and unconditional `agent-output-*.txt` files do not exist.
 
-```json
-{"seq": 3, "ts": "2026-07-24T12:00:00Z", "episode_id": "…", "model": "…",
- "request_digest": "sha256:…", "response_digest": "sha256:…",
- "input_tokens": 812, "output_tokens": 96, "cost_usd": 0.0123,
- "stop_reason": "end_turn", "latency_ms": 2140, "refused": false}
-```
+## ATIF trajectory
 
-A retried request that the gateway serves from its replay cache produces exactly one
-record: retries never double-count.
-
-**Calls that did not succeed are still calls.** A provider failure carries
-`upstream_status` and no usage; a call the gateway itself refused carries `refused` with
-the `refusal_limit` that stopped it. Recording nothing for either would make a run that
-spent eleven minutes being rate-limited indistinguishable from an idle agent — the same
-evidence leading to opposite conclusions.
+`trajectory.json` is a Harbor ATIF v1.7 document, not an ALE envelope. It is validated
+before atomic replacement:
 
 ```json
-{"seq": 4, "ts": "…", "episode_id": "…", "model": "…", "request_digest": "sha256:…",
- "input_tokens": 0, "output_tokens": 0, "upstream_status": 529, "refused": false}
-{"seq": 7, "ts": "…", "episode_id": "…", "model": "…", "request_digest": "sha256:…",
- "refused": true, "refusal_limit": "max_cost_usd"}
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "native-session",
+  "trajectory_id": "trajectory-...",
+  "agent": {
+    "name": "claude-code",
+    "version": "2.1.220",
+    "model_name": "claude-opus-4-8"
+  },
+  "steps": [
+    {"step_id": 1, "source": "user", "message": "Complete instruction"}
+  ]
+}
 ```
 
-## Semantic layer — `trace.semantic.jsonl`
+Step IDs start at 1 and are contiguous. The complete instruction is the first
+agent-visible user content. Native tool-use/result events are grouped into one agent
+step; every observation `source_call_id` resolves to a tool call in that step. An empty
+result is valid, while a missing result remains absent.
 
-Typed step records describing what happened, independent of agent family.
+All ALE extensions live under `extra.ale`:
 
-```json
-{"seq": 1,  "ts": "…", "kind": "instruction", "text_digest": "sha256:…"}
-{"seq": 9,  "ts": "…", "kind": "exec", "argv_digest": "sha256:…", "exit_code": 0,
- "stdout_ref": "artifacts/exec-9.out"}
-{"seq": 14, "ts": "…", "kind": "observation", "screenshot_ref": "shots/0003.png"}
-{"seq": 15, "ts": "…", "kind": "action", "action": {"type": "click", "coordinate": [512, 340]}}
-{"seq": 22, "ts": "…", "kind": "verifier", "exit_code": 0, "rewards": {"reward": 1.0}}
-{"seq": 23, "ts": "…", "kind": "timing", "total_ms": 808, "model_ms": 0,
- "sandbox_ms": 28, "framework_ms": 780,
- "phases": [{"name": "provision", "duration_ms": 305}, {"name": "setup", "duration_ms": 48},
-            {"name": "agent", "duration_ms": 19}, {"name": "verify", "duration_ms": 20}]}
+- `native_event_ids`: observed native identities;
+- `transport_call_ids`: Gateway calls correlated after parsing;
+- `attachments`: non-image BlobRefs;
+- `mcp`: logical MCP server and tool;
+- `normalized_action`: CUA action correlated with the same MCP call;
+- `incomplete` and `incomplete_reason`: valid observed prefix after interruption.
+
+Images use ATIF image parts whose `source.path` is episode-relative. Subagents use
+embedded `subagent_trajectories` with unique `trajectory_id` values and resolvable
+`subagent_trajectory_ref` entries. Same-sandbox native resume extends the same logical
+session; `continued_trajectory_ref` is used only when a continuation is stored as a
+separate document.
+
+Optional token IDs, masks, log probabilities, sampling metadata, reasoning, and metrics
+are written only from exact observed evidence. ALE never retokenizes text or fabricates
+missing training fields.
+
+## Transport trace
+
+Only the Gateway writes `trace.transport.jsonl`. Every complete line has
+`schema_version`, monotonic `seq`, timestamp, episode ID, and one of:
+
+- `call`: stable `call_id`, model, request/response digests, provider response ID,
+  usage, cost, stop reason, latency, and `forwarded`/`failed`/`refused` disposition;
+- `replay`: the original call ID, request digest, replay reason, and `charged=false`;
+- `trajectory_link`: call ID, trajectory ID, and ATIF step ID.
+
+Retries never double-charge. Failed and refused calls remain visible. Default records
+contain digests and accounting metadata, not provider request/response bodies or a second
+copy of the conversation.
+
+## Execution trace
+
+`trace.execution.jsonl` is the chronological diagnostics channel for ALE and task
+stages. One `ale.execution` standard-library logger is bound through `contextvars` to the
+current episode, phase, and component. Task scripts do not write JSONL themselves: their
+stdout/stderr is progressively captured by the guest protocol and finalized by the
+command recorder.
+
+Event kinds:
+
+- `phase_started`, `phase_finished`;
+- `command_started`, `command_finished`;
+- `policy_applied`;
+- `log`, `failure`;
+- `partial_output_recovered`.
+
+Setup, oracle, verifier, harness preparation/launch, artifact collection, and cleanup are
+framework/task execution. Agent-owned Bash/MCP/CUA calls belong only in ATIF.
+
+Command output at or below 16 KiB stays inline. Larger output becomes a text BlobRef.
+Credentials, bearer tokens, provider keys, and configured secrets are redacted before
+text reaches disk. Timeouts kill the process group, drain both pipes, preserve received
+output with `complete=false`, and record a terminal command outcome. A host restart
+recovers deterministic `.partial` files as incomplete blobs. A torn JSONL suffix is
+reported and never silently repaired.
+
+## Blobs
+
+External payloads use:
+
+```text
+blobs/<image|audio|video|document|text|binary>/sha256-<digest>[.<safe-extension>]
 ```
 
-Kinds: `instruction`, `agent_output`, `exec`, `observation`, `action`, `verifier`,
-`timing`, `note`. Screenshots and other large payloads are written as files and
-referenced by relative path — never inlined as base64.
+The reference owns `path`, MIME type, byte size, SHA-256, and completeness. Identical
+bytes deduplicate within the episode. Extensions come from trusted MIME mappings.
+Canonical JSON never embeds base64. No blob manifest exists.
 
-## Timing
+## Result and run status
 
-A `timing` record closes every episode. One duration answers nothing useful: twenty
-minutes is a slow model, a slow sandbox or slow framework code, and each has a different
-fix.
+`result.json` is the episode's atomic terminal truth. A completed result has a non-empty,
+finite named reward map and no failure. A failed result has failure information and no
+rewards. ALE supplies no primary reward or aggregation policy.
 
-The split is **derived from records already on disk** — model time from the transport
-layer's latencies, sandbox time from `exec` durations, framework time as the remainder —
-so it cannot drift from what happened. `model_ms + sandbox_ms + framework_ms == total_ms`
-holds by construction; the shares are clamped, because concurrent calls can otherwise sum
-past the wall clock and produce a negative remainder.
+`runs/<run>/ledger.db` is a rebuildable run-level projection for queued/running/current
+phase/terminal/interrupted state. It uses WAL and stores bounded failures and final reward
+maps, never full trajectory, trace, lock, or native-log documents. Rows are inserted
+before the concurrency semaphore, marked running before episode orchestration, updated
+by explicit phase callbacks, and projected terminal only after `result.json` is durable.
+On reopen, stale queued/running rows become interrupted; retries receive new episode IDs.
 
-`phases` covers provisioning through verification. A phase that timed out or crashed
-still contributes its duration: that is the one you most want.
+## Retention
 
-An episode driven by a policy harness must contain at least one `action`, or a typed
-failure explaining why not.
+```toml
+[logging]
+native_logs = "minimal"
+transport_payloads = "digests"
+token_data = "none"
+```
 
-It need not contain an `observation`. The environment photographs the screen when the
-agent asks for one and at no other time, so an agent that acted without looking recorded
-exactly what it did. Requiring an observation per step would describe a capture the agent
-did not choose, which is the thing the trace exists to distinguish.
+- `native_logs="minimal"` deletes successfully converted native logs after ATIF
+  validation. `debug` retains byte-faithful logs under `logs/<harness>/`.
+- Conversion failure or interruption always retains available native evidence.
+- `transport_payloads="debug"` may retain provider payload evidence under
+  `logs/gateway/`; `digests` is the default.
+- `token_data="exact"` permits exact observed token evidence; `none` is the default.
 
-## Migrated agents
+Exact mode accepts only an explicit upstream `ale_token_data` object containing observed
+token IDs, completion log probabilities, sampled mask, sampling temperature, and any
+multimodal processor fields. ALE may preserve a temperature explicitly sent in the
+request, but never retokenizes text or fabricates missing fields. The temporary evidence
+is correlated by Gateway call ID, moved into the linked ATIF agent step, then deleted;
+malformed evidence fails conversion and remains under `logs/gateway/tokens/`.
 
-An adapted third-party agent keeps its native log, stored under `logs/<harness>/`. It is
-evidence, not a substitute: the two layers above are
-still produced, so results stay comparable across agents.
+TODO: extend exact-token extraction to streamed provider responses once a local
+OpenAI-compatible model endpoint exposing token IDs, log probabilities, masks, and
+multimodal processor state is available for end-to-end Prime-RL testing.
 
-## Reserved extension
+Native logs are diagnostic evidence, never canonical truth.
 
-A `training` slot is reserved for token-level data (identifiers, log-probabilities,
-sampling masks). It is absent in current output and defined only when a trainer
-integration is actually built.
+## Interoperability
+
+Harbor consumes `trajectory.json` directly and receives the complete reward map.
+Prime Verifiers conversion creates message/tool nodes, branch/subagent relationships,
+linked model calls, timings, metrics, and all named rewards. Prime-RL conversion requires
+aligned token IDs, sampled mask, log probabilities, temperatures, and multimodal
+processor data when applicable; otherwise it raises `IncompleteTrainingDataError`.
+Scalar-only destinations require an explicit caller-supplied aggregation callback.
+
+The Harbor v1.7 schema source is the adjacent
+`harbor/src/harbor/models/trajectories/` model set. Schema parity is checked by
+`tests/conformance/test_harbor_atif.py`. After reviewing a Harbor version change,
+regenerate the checked fixture from the ALE repository root:
+
+```bash
+uv run --project ../harbor python -c \
+  'import json; from pathlib import Path; from harbor.models.trajectories import Trajectory; Path("tests/fixtures/atif-v1.7.schema.json").write_text(json.dumps(Trajectory.model_json_schema(), indent=2, sort_keys=True) + "\n")'
+```
+
+Commit the fixture and the corresponding ALE model/conformance changes together.

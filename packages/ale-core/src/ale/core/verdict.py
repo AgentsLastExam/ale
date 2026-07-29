@@ -7,6 +7,7 @@ depends on `task_error` meaning the same thing everywhere.
 
 from __future__ import annotations
 
+import math
 from enum import StrEnum
 from typing import Self
 
@@ -49,7 +50,7 @@ class Status(StrEnum):
 
 
 Rewards = dict[str, float]
-"""Named scores. By convention the primary key is ``reward`` and lives in [0, 1]."""
+"""Named scores. ALE preserves the map and does not select an aggregate."""
 
 
 class FailureInfo(BaseModel):
@@ -71,31 +72,18 @@ class Verdict(BaseModel):
     rewards: Rewards | None = Field(
         default=None, description="Present exactly when verification ran to completion"
     )
-    primary: str | None = Field(
-        default=None, description="Key of the headline score within `rewards`"
-    )
     metrics: dict[str, float] = Field(
         default_factory=dict,
         description="Diagnostics (durations, turn counts). Never part of the score.",
     )
     failure: FailureInfo | None = None
 
-    @property
-    def primary_reward(self) -> float | None:
-        """The headline score, or ``None`` when the episode produced no score."""
-        if self.rewards is None:
-            return None
-        return self.rewards[self.primary or "reward"]
-
     @classmethod
-    def completed(
-        cls, rewards: Rewards, *, primary: str = "reward", metrics: dict[str, float] | None = None
-    ) -> Verdict:
+    def completed(cls, rewards: Rewards, *, metrics: dict[str, float] | None = None) -> Verdict:
         """Build a successful verdict."""
         return cls(
             status=Status.COMPLETED,
             rewards=rewards,
-            primary=primary,
             metrics=metrics or {},
         )
 
@@ -124,11 +112,10 @@ class Verdict(BaseModel):
         if self.rewards is not None:
             if not self.rewards:
                 raise ValueError("rewards must be omitted rather than empty")
-            primary = self.primary or "reward"
-            if primary not in self.rewards:
-                raise ValueError(f"primary key {primary!r} is not present in rewards")
-        elif self.primary is not None:
-            raise ValueError("primary was given without rewards")
+            if any(not key.strip() for key in self.rewards):
+                raise ValueError("reward names must be non-empty")
+            if any(not math.isfinite(value) for value in self.rewards.values()):
+                raise ValueError("reward values must be finite")
 
         if self.status is Status.COMPLETED:
             if self.rewards is None:

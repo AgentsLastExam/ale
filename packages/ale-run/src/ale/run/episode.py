@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
+from ale.core.config import LoggingPolicy
 from ale.core.environment import ArtifactSink, Budget, Environment, EpisodeContext, Phase
 from ale.core.errors import (
     AgentError,
@@ -25,15 +28,18 @@ from ale.core.errors import (
     PhaseTimeoutError,
     TaskError,
 )
-from ale.core.harness import HarnessSession
-from ale.core.lock import RunLock
+from ale.core.harness import EffectiveAgentResources, HarnessSession
+from ale.core.lock import LimitTermination, RunLock
+from ale.core.result import FailureInfo as ResultFailureInfo
+from ale.core.result import PhaseTiming, ResultRecord
 from ale.core.sandbox import Provider, Sandbox, SandboxRequest
 from ale.core.task import Task
-from ale.core.trace import PhaseSpan, TimingRecord, TraceLayer, TraceWriter, read_records
+from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import Status, Verdict
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, Limits
 from ale.run.provenance import ProvenanceInputs, build_lock
+from ale.run.recording import EpisodeRecording
 
 __all__ = ["EpisodeResult", "run_episode"]
 
@@ -65,6 +71,7 @@ class EpisodeResult:
     verdict: Verdict
     run_dir: Path
     duration_sec: float
+    record: ResultRecord
     lock: RunLock | None = None
     """Absent when the caller asked for no provenance, or the episode never provisioned."""
 
@@ -140,10 +147,10 @@ class _DiscardedArtifacts(ArtifactSink):
         return self.path(name)
 
     async def collect_file(self, sandbox: Sandbox, source: str, name: str) -> Path:
-        # Harness logs follow the same switch rather than getting one of their own. "Pull
-        # nothing back" should mean what it says, and a second setting to remember is a
-        # worse trade than the kilobytes it would save.
-        return self.run_dir / "logs" / name
+        target = self.run_dir / "logs" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(await sandbox.read_file(source))
+        return target
 
     def path(self, name: str) -> Path:
         return self.run_dir / "artifacts" / name
@@ -165,17 +172,21 @@ async def run_episode(
     gateway: Gateway | None = None,
     limits: Limits | None = None,
     allowed_hosts: frozenset[str] = frozenset(),
+    agent_resources: EffectiveAgentResources | None = None,
+    episode_id: str | None = None,
+    trajectory_id: str | None = None,
+    phase_callback: Callable[[Phase], None] | None = None,
+    logging_policy: LoggingPolicy | None = None,
 ) -> EpisodeResult:
     """Administer one task and return its verdict.
 
     Never raises for an episode that merely failed: a failure is a result with a status,
     and the caller decides what to do with it.
     """
-    episode_id = f"{task.spec.id}-{uuid.uuid4().hex[:8]}"
+    episode_id = episode_id or f"{task.spec.id}-{uuid.uuid4().hex[:8]}"
+    trajectory_id = trajectory_id or f"trajectory-{uuid.uuid4().hex}"
     episode_dir = run_dir / episode_id
-    episode_dir.mkdir(parents=True, exist_ok=True)
-
-    trace = TraceWriter(episode_dir)
+    recording = EpisodeRecording(episode_dir)
 
     # The session is opened here, not by the caller, for two reasons that only show up
     # afterwards: it can carry this episode's own identifier instead of a placeholder,
@@ -190,13 +201,24 @@ async def run_episode(
                 model=model,
                 limits=limits or Limits(),
                 allowed_hosts=allowed_hosts,
+                payload_dir=(
+                    episode_dir / "logs" / "gateway"
+                    if (logging_policy or LoggingPolicy()).transport_payloads == "debug"
+                    else None
+                ),
+                exact_token_dir=(
+                    episode_dir / "logs" / "gateway" / "tokens"
+                    if (logging_policy or LoggingPolicy()).token_data == "exact"
+                    else None
+                ),
             ),
-            trace=trace,
+            trace=recording.transport,
         )
         session_token = session.token
 
     sink = _Artifacts(episode_dir) if collect_artifacts else _DiscardedArtifacts(episode_dir)
     lease = _Lease(provider)
+    started_at = datetime.now(UTC)
     started = time.monotonic()
     ctx = EpisodeContext(
         episode_id=episode_id,
@@ -205,7 +227,6 @@ async def run_episode(
         run_dir=episode_dir,
         sandboxes=lease,
         artifacts=sink,
-        trace=trace,
         budget=Budget(deadline_sec=task.spec.timeouts.total, started_at=started),
         session=HarnessSession(
             episode_id=episode_id,
@@ -213,29 +234,128 @@ async def run_episode(
             token=session_token,
             model=model,
         ),
+        agent_resources=agent_resources or EffectiveAgentResources(),
+        trajectory_id=trajectory_id,
+        transport=recording.transport,
+        execution=recording.execution,
+        blobs=recording.blobs,
+        trajectory=recording,
+        result=recording,
         seed=seed,
         proxy_url=proxy_url,
     )
+    if phase_callback is not None:
+        ctx.extras["phase_callback"] = phase_callback
+    ctx.extras["logging_policy"] = logging_policy or LoggingPolicy()
 
     try:
         verdict = await environment.run(task, ctx)
     except Exception as exc:  # every failure becomes a typed result, not a traceback
+        if isinstance(exc, BudgetExceededError):
+            ctx.limit_termination = LimitTermination(
+                layer=exc.layer,  # type: ignore[arg-type]
+                name=exc.limit,
+                configured_value=exc.value,
+                observed_value=exc.observed_value,
+                reason=type(exc).__name__,
+            )
         verdict = Verdict.failed(status_for(exc), exc, phase=_phase_of(exc))
+        recording.execution.append(
+            ExecutionFailure(
+                episode_id=episode_id,
+                phase=_phase_of(exc),
+                component="episode",
+                level="error",
+                error_type=type(exc).__name__,
+                message=str(exc),
+            ),
+            durable=True,
+        )
     finally:
         await lease.release_all()
         if gateway is not None and session is not None:
             # Tokens die with their episode, so a leaked one is not a standing grant.
             gateway.close_session(session)
 
-    duration = time.monotonic() - started
-    _write_timing(ctx.trace, episode_dir, duration, tuple(ctx.phases))
+    finalize_started_at = datetime.now(UTC)
+    finalize_started = time.monotonic()
+    recording.execution.append(
+        PhaseStarted(
+            episode_id=episode_id,
+            phase="finalize",
+            component="episode",
+        ),
+        durable=True,
+    )
+    finalize_outcome = "succeeded"
     lock = _write_lock(ctx, task, provenance, seed=seed) if provenance else None
+    if lock is not None:
+        recording.write_lock(lock)
+    try:
+        recording.verify_blob_references()
+    except Exception as exc:
+        finalize_outcome = "failed"
+        verdict = Verdict.failed(Status.ENV_ERROR, exc, phase="finalize")
+        recording.execution.append(
+            ExecutionFailure(
+                episode_id=episode_id,
+                phase="finalize",
+                component="recording",
+                level="error",
+                error_type=type(exc).__name__,
+                message=str(exc),
+            ),
+            durable=True,
+        )
+    finished_at = datetime.now(UTC)
+    finalize_duration_ms = int((time.monotonic() - finalize_started) * 1000)
+    ctx.phases.append(
+        PhaseTiming(
+            phase="finalize",
+            started_at=finalize_started_at,
+            finished_at=finished_at,
+            duration_ms=finalize_duration_ms,
+            outcome=finalize_outcome,
+        )
+    )
+    record = ResultRecord(
+        episode_id=episode_id,
+        status=verdict.status,
+        rewards=verdict.rewards,
+        metrics=verdict.metrics,
+        failure=(
+            ResultFailureInfo(
+                error_type=verdict.failure.error_class,
+                message=verdict.failure.message,
+                phase=verdict.failure.phase,
+            )
+            if verdict.failure is not None
+            else None
+        ),
+        started_at=started_at,
+        finished_at=finished_at,
+        phases=tuple(ctx.phases),
+    )
+    recording.write_result(record)
+    recording.execution.append(
+        PhaseFinished(
+            episode_id=episode_id,
+            phase="finalize",
+            component="episode",
+            level="info" if finalize_outcome == "succeeded" else "error",
+            outcome=finalize_outcome,
+            duration_ms=finalize_duration_ms,
+        ),
+        durable=True,
+    )
+    duration = time.monotonic() - started
 
     return EpisodeResult(
         episode_id=episode_id,
         verdict=verdict,
         run_dir=episode_dir,
         duration_sec=duration,
+        record=record,
         lock=lock,
     )
 
@@ -265,54 +385,11 @@ def _write_lock(
         sandbox=ctx.sandbox_identity,
         assets=tuple(ctx.assets),
         kits=tuple(ctx.kits),
+        termination=ctx.limit_termination,
         seed=seed,
         requires_core=getattr(getattr(task, "folder", None), "requires_core", None),
     )
-    (ctx.run_dir / "lock.json").write_text(
-        lock.model_dump_json(indent=2, by_alias=True) + "\n", encoding="utf-8"
-    )
     return lock
-
-
-def _write_timing(
-    trace: TraceWriter,
-    episode_dir: Path,
-    duration_sec: float,
-    phases: tuple[PhaseSpan, ...] = (),
-) -> None:
-    """Record where the wall clock went, from evidence already on disk.
-
-    One duration says almost nothing: twenty minutes could be a slow model, a slow
-    sandbox or slow framework code, and each has a different fix. Model time comes from
-    the gateway's own records and sandbox time from executed commands, so the split
-    cannot drift from what happened; the remainder is framework time, which is the
-    honest way to report what nobody accounted for.
-    """
-    total_ms = int(duration_sec * 1000)
-    model_ms = sum(
-        int(record.get("latency_ms") or 0)
-        for record in read_records(episode_dir / "trace.transport.jsonl")
-    )
-    sandbox_ms = sum(
-        int(record.get("duration_ms") or 0)
-        for record in read_records(episode_dir / "trace.semantic.jsonl")
-        if record.get("kind") == "exec"
-    )
-    # Clamp before taking the remainder: concurrent work can otherwise sum past the wall
-    # clock and produce a negative framework share.
-    model_ms = min(model_ms, total_ms)
-    sandbox_ms = min(sandbox_ms, total_ms - model_ms)
-
-    trace.write_semantic(
-        TimingRecord(
-            seq=trace.next_seq(TraceLayer.SEMANTIC),
-            total_ms=total_ms,
-            model_ms=model_ms,
-            sandbox_ms=sandbox_ms,
-            framework_ms=total_ms - model_ms - sandbox_ms,
-            phases=phases,
-        )
-    )
 
 
 def _phase_of(error: BaseException) -> str | None:

@@ -7,6 +7,7 @@ when run by path, wastes the author's time in exactly the place we promised not 
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -60,7 +61,17 @@ async def test_a_scaffolded_task_lints_and_validates_immediately(tmp_path: Path)
 
     result = await run(task, tmp_path / "runs", OracleHarness())
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.primary_reward == 1.0
+    assert result.verdict.rewards == {"reward": 1.0}
+    episode = result.run_dir
+    assert episode is not None
+    for name in (
+        "trajectory.json",
+        "trace.transport.jsonl",
+        "trace.execution.jsonl",
+        "result.json",
+    ):
+        assert (episode / name).is_file()
+    assert json.loads((episode / "result.json").read_text())["rewards"] == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -76,7 +87,9 @@ async def test_an_edit_that_breaks_the_task_is_caught_by_validation(tmp_path: Pa
     verify.write_text(verify.read_text().replace('= "hello"', '= "hellothere"'))
 
     result = await run(task, tmp_path / "runs", OracleHarness())
-    assert result.verdict.primary_reward == 0.0, "validation passed a task its oracle cannot solve"
+    assert result.verdict.rewards == {
+        "reward": 0.0
+    }, "validation passed a task its oracle cannot solve"
 
 
 @pytest.mark.asyncio
@@ -96,22 +109,12 @@ async def test_running_by_path_matches_running_by_name(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_task_without_an_oracle_must_say_why(tmp_path: Path) -> None:
-    """Manual validation is a declaration with a reason, not a missing file."""
+async def test_a_task_without_an_oracle_cannot_bypass_validation(tmp_path: Path) -> None:
     root = new_repo(tmp_path / "repo")
     task = scaffold_on_our_image(root)
     (task / "oracle" / "run.sh").unlink()
 
     assert any("no oracle" in f.message for f in lint_repository(root))
-
-    manifest = task / "task.yaml"
-    manifest.write_text(
-        manifest.read_text().replace(
-            "validate: { min_reward: 1.0 }",
-            'validate: { mode: manual, reason: "judged by a human rater" }',
-        )
-    )
-    assert lint_repository(root) == []
 
 
 @pytest.mark.asyncio
@@ -122,4 +125,4 @@ async def test_an_idle_agent_scores_a_real_zero(tmp_path: Path) -> None:
 
     result = await run(task, tmp_path / "runs", NopHarness())
     assert result.verdict.status is Status.COMPLETED
-    assert result.verdict.primary_reward == 0.0
+    assert result.verdict.rewards == {"reward": 0.0}

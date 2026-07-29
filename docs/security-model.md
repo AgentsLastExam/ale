@@ -123,6 +123,33 @@ A run whose lock cannot back a published result says so. `--require-reportable` 
 that statement into a non-zero exit for CI. A task run from a local path is refused for
 publication, because it cannot be re-fetched.
 
+## 8. Agent resources are declared, not discovered
+
+ALE never copies ambient host agent state. `~/.claude`, `~/.codex`, host Skills, MCP
+configuration, and credentials are outside the resource model.
+
+Only the effective union declared by the Task, harness preset, Run file, and CLI is
+staged. Task paths cannot escape the task folder or enter verification/oracle material.
+Same-name resources with different digests fail before provisioning.
+
+Local stdio MCP commands execute inside the sandbox and are checked after files and
+Skills are staged. Remote MCP is limited to unauthenticated Streamable HTTP endpoints
+whose host satisfies the Task network policy. Authenticated remote MCP is deferred until
+ALE has a host-side credential relay; copying headers, tokens, OAuth state, or environment
+secrets into the sandbox is forbidden.
+
+`cua-desktop` follows the same opt-in MCP path. It is not automatically injected.
+
+## 9. Native continuation stays in one live sandbox
+
+A native continuation binds the harness, model, validated settings, effective resource
+digest, episode ID, sandbox ID, and exact native session ID. Resume sends only the new
+instruction and selects that exact session.
+
+Continuation fails when the sandbox was destroyed, the native state is absent, any bound
+input changed, or the request names another episode or sandbox. There is no "latest
+session" selector, transcript replay fallback, or configurable disk/global resume scope.
+
 ---
 
 ## What is **not** defended against

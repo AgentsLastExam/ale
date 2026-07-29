@@ -16,10 +16,12 @@ from typing import Annotated
 
 import typer
 
-from ale.core.config import RunConfig, load_run_config
+from ale.core.config import RunConfig, load_run_config, select_agent_name
 from ale.core.errors import AleError
+from ale.core.harness import EffectiveAgentResources
 from ale.core.verdict import Status
 from ale.run import __version__
+from ale.run.agent_resources import resolve_agent_resources
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.gateway.proxy import EgressProxy
@@ -48,6 +50,7 @@ app.add_typer(kit_app, name="kit")
 EXIT_SOME_FAILED = 2
 EXIT_BAD_REFERENCE = 3
 EXIT_PROVIDER = 4
+PRESET_DIR = Path(__file__).resolve().parents[1] / "presets"
 
 
 def _print_version(value: bool) -> None:
@@ -72,9 +75,9 @@ def root(
 def run(
     reference: Annotated[str, typer.Argument(help="Task path, or <domain>/<task>")],
     agent: Annotated[
-        str, typer.Option("--agent", help="claude-code, computer-use, oracle or nop")
-    ] = "claude-code",
-    model: Annotated[str, typer.Option("--model")] = "",
+        str | None, typer.Option("--agent", help="claude-code, computer-use, oracle or nop")
+    ] = None,
+    model: Annotated[str | None, typer.Option("--model")] = None,
     base_url: Annotated[
         str,
         typer.Option("--base-url", help="Model endpoint; defaults to Anthropic's"),
@@ -83,7 +86,7 @@ def run(
         str,
         typer.Option("--api-key-env", help="Which .env variable holds the key for it"),
     ] = "",
-    provider: Annotated[str, typer.Option("--provider")] = "docker",
+    provider: Annotated[str | None, typer.Option("--provider")] = None,
     config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
     overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
     runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
@@ -263,15 +266,23 @@ def _config(
     config: Path | None,
     overrides: list[str] | None,
     *,
-    agent: str,
-    model: str,
-    provider: str,
+    agent: str | None,
+    model: str | None,
+    provider: str | None,
 ) -> RunConfig:
-    flags = [f"agent.name={agent}", f"provider={provider}", *(overrides or [])]
+    flags = [*(overrides or [])]
+    if agent is not None:
+        flags.append(f"agent.name={agent}")
+    if provider is not None:
+        flags.append(f"provider={provider}")
     if model:
         flags.append(f"agent.model={model}")
+    selected = select_agent_name(run_path=config, overrides=flags)
+    preset = PRESET_DIR / f"{selected}.toml"
+    if not preset.is_file():
+        preset = None
     try:
-        return load_run_config(run_path=config, overrides=flags)
+        return load_run_config(preset_path=preset, run_path=config, overrides=flags)
     except AleError as error:
         typer.echo(f"configuration error: {error}", err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
@@ -286,9 +297,12 @@ def _harness(settings: RunConfig):  # type: ignore[no-untyped-def]
         case "computer-use":
             from ale.run.harnesses.computer_use import ComputerUseHarness
 
-            return ComputerUseHarness(model=settings.agent.model, **settings.agent.kwargs)
+            return ComputerUseHarness(model=settings.agent.model, **settings.agent.settings)
         case "claude-code":
-            return ClaudeCodeHarness(cli_version=settings.agent.version, **settings.agent.kwargs)
+            return ClaudeCodeHarness(
+                cli_version=settings.agent.version,
+                settings=settings.agent.settings,
+            )
         case unknown:
             raise AleError(
                 f"unknown agent {unknown!r}; try claude-code, computer-use, oracle or nop"
@@ -337,9 +351,23 @@ async def _run_one(
     run_id = run_id or uuid.uuid4().hex[:8]
     run_dir = runs_dir / run_id
     harness = _harness(settings)
+    agent_resources = resolve_agent_resources(
+        task=task.spec.tools,
+        agent_skills=settings.agent.skills,
+        agent_mcp_servers=settings.agent.mcp_servers,
+        task_root=resolved.task_dir,
+        task_source=resolved.source,
+        network=task.spec.network,
+    )
+    harness.validate_resources(agent_resources)
     inputs = ProvenanceInputs(
         source=resolved.source,
-        agent=agent_provenance(harness, settings.agent.model),
+        agent=agent_provenance(
+            harness,
+            settings.agent.model,
+            settings,
+            agent_resources,
+        ),
         gateway=gateway_provenance(settings),
         config_hash=settings.config_hash,
     )
@@ -349,6 +377,7 @@ async def _run_one(
         agent=f"{inputs.agent.harness}@{inputs.agent.version}",
         seed=settings.seed,
         config_hash=settings.config_hash,
+        resources_digest=agent_resources.digest,
     )
 
     gateway = None
@@ -368,7 +397,12 @@ async def _run_one(
             return EXIT_BAD_REFERENCE
         gateway = Gateway(api_key=api_key, upstream=upstream, host=_gateway_host(settings))
         gateway_url = await gateway.start()
-        limits = Limits(**settings.gateway.limits.model_dump())
+        limits = Limits(
+            **{
+                key: None if value == "unlimited" else value
+                for key, value in settings.gateway.limits.model_dump().items()
+            }
+        )
 
         if allowed:
             proxy = EgressProxy(gateway.sessions, host=_gateway_host(settings))
@@ -393,8 +427,9 @@ async def _run_one(
     # gigabytes, and four of those is a choice an operator should make deliberately.
     gate = asyncio.Semaphore(settings.concurrency)
 
-    async def one() -> Status | None:
+    async def one(episode_id: str) -> Status | None:
         async with gate:
+            ledger.mark_running(episode_id)
             result = await run_episode(
                 task,
                 StandardEnvironment(harness, max_steps=settings.agent.max_steps),
@@ -411,18 +446,12 @@ async def _run_one(
                 collect_artifacts=settings.artifacts.collect == "host",
                 provenance=inputs,
                 proxy_url=proxy_url,
+                agent_resources=agent_resources,
+                episode_id=episode_id,
+                phase_callback=lambda phase: ledger.update_phase(episode_id, phase.value),
+                logging_policy=settings.logging,
             )
-        # Outside the gate: recording is cheap, and holding a slot through it would stall
-        # the next episode behind a disk write.
-        ledger.start_episode(
-            episode_id=result.episode_id, run_id=run_id, identity=identity, spec=task.spec
-        )
-        ledger.finish_episode(
-            result.episode_id,
-            result.verdict,
-            result.lock.model_dump(mode="json") if result.lock else None,
-        )
-        ledger.event(result.episode_id, "finished", status=result.verdict.status.value)
+        ledger.finish_episode(result.episode_id, result.record)
 
         _report(result)
         reportable = _check_reportable(result)
@@ -439,7 +468,15 @@ async def _run_one(
             if index < done:
                 typer.echo(f"skip  {task.spec.label}: episode {index + 1} already complete")
                 continue
-            pending.append(one())
+            episode_id = f"{task.spec.id}-{uuid.uuid4().hex[:8]}"
+            ledger.queue_episode(
+                episode_id=episode_id,
+                run_id=run_id,
+                identity=identity,
+                spec=task.spec,
+                episode_path=episode_id,
+            )
+            pending.append(one(episode_id))
 
         # One failing episode is a result, not an abort: the others are still work someone
         # asked for, and a run that stops at the first failure reports a smaller sample
@@ -487,31 +524,73 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
         typer.echo(f"{error}", err=True)
         return EXIT_BAD_REFERENCE
 
+    run_id = f"validate-{uuid.uuid4().hex[:8]}"
+    run_dir = runs_dir / run_id
+    ledger = Ledger(run_dir)
+    ledger.open_run(run_id, settings.config_hash)
+    harness = OracleHarness()
+    resources = EffectiveAgentResources()
     failures = 0
-    for task in tasks:
-        spec = task.spec
-        if spec.validate_.mode == "manual":
-            typer.echo(f"skip  {spec.label}: manual validation ({spec.validate_.reason})")
-            continue
+    try:
+        for task in tasks:
+            spec = task.spec
+            episode_id = f"{spec.id}-{uuid.uuid4().hex[:8]}"
+            inputs = ProvenanceInputs(
+                source=resolved.source,
+                agent=agent_provenance(
+                    harness,
+                    "",
+                    settings,
+                    resources,
+                ),
+                gateway=gateway_provenance(settings),
+                config_hash=settings.config_hash,
+            )
+            identity = episode_identity(
+                spec,
+                agent=f"{harness.name}@{harness.version()}",
+                seed=settings.seed,
+                config_hash=settings.config_hash,
+            )
+            ledger.queue_episode(
+                episode_id=episode_id,
+                run_id=run_id,
+                identity=identity,
+                spec=spec,
+            )
+            ledger.mark_running(episode_id)
+            result = await run_episode(
+                task,
+                StandardEnvironment(harness),
+                _provider(settings),
+                run_dir=run_dir,
+                episode_id=episode_id,
+                provenance=inputs,
+                phase_callback=lambda phase, current=episode_id: ledger.update_phase(
+                    current, phase.value
+                ),
+                logging_policy=settings.logging,
+            )
+            ledger.finish_episode(episode_id, result.record)
+            rewards = result.verdict.rewards
+            passed = result.verdict.status is Status.COMPLETED and _is_full_reward_map(rewards)
+            failures += 0 if passed else 1
+            mark = "ok  " if passed else "FAIL"
+            if rewards:
+                non_full = {key: value for key, value in rewards.items() if value != 1.0}
+                detail = f"rewards {rewards}" if not non_full else f"non-full rewards: {non_full}"
+            else:
+                detail = str(result.verdict.status)
+            typer.echo(f"{mark}  {spec.label}: {detail}")
+    finally:
+        ledger.close()
 
-        result = await run_episode(
-            task,
-            StandardEnvironment(OracleHarness()),
-            _provider(settings),
-            run_dir=runs_dir / "validate",
-        )
-        reward = result.verdict.primary_reward
-        passed = (
-            result.verdict.status is Status.COMPLETED
-            and reward is not None
-            and reward >= spec.validate_.min_reward
-        )
-        failures += 0 if passed else 1
-        mark = "ok  " if passed else "FAIL"
-        detail = f"reward {reward}" if reward is not None else str(result.verdict.status)
-        typer.echo(f"{mark}  {spec.label}: {detail}")
-
+    typer.echo(f"validation run: {run_dir}")
     return 0 if failures == 0 else EXIT_SOME_FAILED
+
+
+def _is_full_reward_map(rewards: dict[str, float] | None) -> bool:
+    return bool(rewards) and all(value == 1.0 for value in rewards.values())
 
 
 def _gateway_host(settings: RunConfig) -> str:

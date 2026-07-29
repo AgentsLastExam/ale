@@ -13,12 +13,19 @@ from __future__ import annotations
 __all__ = [
     "AgentError",
     "AgentRefusalError",
+    "AgentResourceConflictError",
+    "AgentResourceError",
+    "AgentUnsupportedError",
     "AleError",
     "AssetError",
     "BudgetExceededError",
     "ConfigError",
     "EnvironmentError_",
     "GuestUnreachableError",
+    "HarnessLimitError",
+    "IncompleteTrainingDataError",
+    "NativeContinuationError",
+    "OutputStreamError",
     "PhaseTimeoutError",
     "ProvenanceIncompleteError",
     "ProviderCapabilityError",
@@ -26,6 +33,9 @@ __all__ = [
     "RegistryError",
     "TaskDefinitionError",
     "TaskError",
+    "TornJsonlError",
+    "TrajectoryConversionError",
+    "TrajectoryReferenceError",
     "VerifierOutputError",
 ]
 
@@ -40,6 +50,18 @@ class AleError(Exception):
 
 class ConfigError(AleError):
     """Invalid configuration: unknown key, bad value, contradictory layers."""
+
+
+class AgentResourceError(ConfigError):
+    """A declared Skill or MCP resource is invalid or cannot be resolved."""
+
+
+class AgentResourceConflictError(AgentResourceError):
+    """One logical resource name resolved to different content."""
+
+
+class AgentUnsupportedError(ConfigError):
+    """The selected harness cannot honor a configured feature."""
 
 
 class RegistryError(AleError):
@@ -84,6 +106,30 @@ class AgentRefusalError(AgentError):
     """The agent declined the task (safety refusal, policy stop)."""
 
 
+class NativeContinuationError(AgentError):
+    """A native session cannot continue under the requested conditions."""
+
+
+class TrajectoryConversionError(AgentError):
+    """Harness-native evidence could not be converted to canonical ATIF."""
+
+
+class TrajectoryReferenceError(TrajectoryConversionError):
+    """A trajectory call, result, subagent, or continuation reference is invalid."""
+
+
+class IncompleteTrainingDataError(AleError):
+    """Exact token-level evidence required for a training export is absent."""
+
+
+class TornJsonlError(AleError):
+    """A JSONL file ends with an incomplete or malformed record."""
+
+
+class OutputStreamError(EnvironmentError_):
+    """Progressive sandbox output could not be delivered or finalized."""
+
+
 # --- Task-side failures -----------------------------------------------------------
 
 
@@ -110,10 +156,24 @@ class PhaseTimeoutError(AleError):
 class BudgetExceededError(AleError):
     """A turn, token or cost ceiling was reached; the gateway refused to continue."""
 
-    def __init__(self, limit: str, value: float) -> None:
+    layer = "gateway"
+
+    def __init__(
+        self,
+        limit: str,
+        value: float,
+        observed_value: float | None = None,
+    ) -> None:
         super().__init__(f"budget limit {limit!r} reached ({value:g})")
         self.limit = limit
         self.value = value
+        self.observed_value = observed_value
+
+
+class HarnessLimitError(BudgetExceededError):
+    """A harness-native control, rather than the Gateway, stopped the agent."""
+
+    layer = "harness"
 
 
 # --- Provenance -------------------------------------------------------------------

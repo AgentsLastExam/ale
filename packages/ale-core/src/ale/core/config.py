@@ -19,38 +19,42 @@ from __future__ import annotations
 import tomllib
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from ale.core.errors import ConfigError
 from ale.core.ids import content_hash
+from ale.core.taskspec import McpSource, SkillSource
 
 __all__ = [
     "AgentConfig",
     "ArtifactPolicy",
     "GatewayLimits",
+    "LoggingPolicy",
     "RunConfig",
     "load_run_config",
     "merge_layers",
     "parse_override",
+    "select_agent_name",
 ]
 
 
 class GatewayLimits(BaseModel):
     """Ceilings enforced by refusing the next model call.
 
-    ``None`` means unlimited, which is a deliberate choice rather than a default: an
-    unbounded run is occasionally right, but it should be written down.
+    ``unlimited`` is explicit. Gateway limits never inherit native program defaults.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    max_turns: int | None = Field(default=None, gt=0)
-    max_input_tokens: int | None = Field(default=None, gt=0)
-    max_output_tokens: int | None = Field(default=None, gt=0)
-    max_total_tokens: int | None = Field(default=400_000, gt=0)
-    max_cost_usd: float | None = Field(default=5.0, gt=0)
+    max_model_calls: Annotated[int, Field(gt=0, strict=True)] | Literal["unlimited"] = "unlimited"
+    max_input_tokens: Annotated[int, Field(gt=0, strict=True)] | Literal["unlimited"] = "unlimited"
+    max_output_tokens: Annotated[int, Field(gt=0, strict=True)] | Literal["unlimited"] = "unlimited"
+    max_total_tokens: Annotated[int, Field(gt=0, strict=True)] | Literal["unlimited"] = "unlimited"
+    max_cost_usd: Annotated[float, Field(gt=0, allow_inf_nan=False)] | Literal["unlimited"] = (
+        "unlimited"
+    )
 
 
 class ArtifactPolicy(BaseModel):
@@ -65,6 +69,16 @@ class ArtifactPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     collect: Literal["host", "none"] = "host"
+
+
+class LoggingPolicy(BaseModel):
+    """Explicit retention choices; canonical evidence is never disabled."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    native_logs: Literal["minimal", "debug"] = "minimal"
+    transport_payloads: Literal["digests", "debug"] = "digests"
+    token_data: Literal["none", "exact"] = "none"
 
 
 class AgentConfig(BaseModel):
@@ -85,9 +99,11 @@ class AgentConfig(BaseModel):
             "never heard of it."
         ),
     )
-    kwargs: dict[str, Any] = Field(
+    settings: dict[str, Any] = Field(
         default_factory=dict, description="Harness-specific settings, validated by the harness"
     )
+    skills: tuple[SkillSource, ...] = ()
+    mcp_servers: tuple[McpSource, ...] = ()
 
 
 class GatewayConfig(BaseModel):
@@ -118,16 +134,27 @@ class RunConfig(BaseModel):
     artifacts: ArtifactPolicy = ArtifactPolicy()
     agent: AgentConfig = AgentConfig()
     gateway: GatewayConfig = GatewayConfig()
+    logging: LoggingPolicy = LoggingPolicy()
     episodes: int = Field(default=1, ge=1)
     seed: int = 0
     resume: bool = True
     tasks_ref: str | None = Field(default=None, description="Override the registry pin")
     concurrency: int = Field(default=1, ge=1)
+    _preset_name: str | None = PrivateAttr(default=None)
+    _preset_digest: str | None = PrivateAttr(default=None)
 
     @property
     def config_hash(self) -> str:
         """Identity of the effective settings, recorded in provenance."""
         return content_hash(self.model_dump(mode="json"))
+
+    @property
+    def preset_name(self) -> str | None:
+        return self._preset_name
+
+    @property
+    def preset_digest(self) -> str | None:
+        return self._preset_digest
 
 
 def parse_override(text: str) -> tuple[list[str], Any]:
@@ -155,21 +182,56 @@ def _assign(target: dict[str, Any], path: list[str], value: Any) -> None:
     cursor[path[-1]] = value
 
 
-def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+_ADDITIVE = {("agent", "skills"), ("agent", "mcp_servers")}
+
+
+def _deep_merge(
+    base: dict[str, Any], overlay: dict[str, Any], prefix: tuple[str, ...] = ()
+) -> dict[str, Any]:
     merged = deepcopy(base)
     for key, value in overlay.items():
         current = merged.get(key)
         if isinstance(current, dict) and isinstance(value, dict):
-            merged[key] = _deep_merge(current, value)
+            merged[key] = _deep_merge(current, value, (*prefix, key))
+        elif (*prefix, key) in _ADDITIVE and isinstance(current, list) and isinstance(value, list):
+            merged[key] = [*current, *value]
         else:
             merged[key] = value
     return merged
 
 
-def _read_toml(path: Path) -> dict[str, Any]:
+def _resolve_resource_paths(
+    data: dict[str, Any], *, base: Path, origin: Literal["preset", "run", "cli"]
+) -> dict[str, Any]:
+    resolved = deepcopy(data)
+    agent = resolved.get("agent")
+    if not isinstance(agent, dict):
+        return resolved
+    for field in ("skills", "mcp_servers"):
+        entries = agent.get(field)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            declared = entry.get("path") or entry.get("builtin")
+            if path := entry.get("path"):
+                candidate = Path(path)
+                entry["path"] = str(candidate if candidate.is_absolute() else (base / candidate))
+            entry["origin"] = origin
+            entry["declared"] = str(declared)
+    return resolved
+
+
+def _read_toml(path: Path, *, origin: Literal["preset", "run"] | None = None) -> dict[str, Any]:
     try:
         with path.open("rb") as handle:
-            return tomllib.load(handle)
+            data = tomllib.load(handle)
+            return (
+                _resolve_resource_paths(data, base=path.parent.resolve(), origin=origin)
+                if origin
+                else data
+            )
     except FileNotFoundError as exc:
         raise ConfigError(f"config file not found: {path}") from exc
     except tomllib.TOMLDecodeError as exc:
@@ -187,10 +249,28 @@ def merge_layers(
     for layer in (preset, run):
         if layer:
             merged = _deep_merge(merged, layer)
+    override_layer: dict[str, Any] = {}
     for override in overrides or []:
         path, value = parse_override(override)
-        _assign(merged, path, value)
+        _assign(override_layer, path, value)
+    if override_layer:
+        merged = _deep_merge(
+            merged,
+            _resolve_resource_paths(override_layer, base=Path.cwd(), origin="cli"),
+        )
     return merged
+
+
+def select_agent_name(*, run_path: Path | None = None, overrides: list[str] | None = None) -> str:
+    """Resolve only the selector needed to choose an autonomous preset."""
+    merged = merge_layers(
+        run=_read_toml(run_path) if run_path else None,
+        overrides=overrides,
+    )
+    agent = merged.get("agent")
+    if isinstance(agent, dict) and isinstance(agent.get("name"), str):
+        return agent["name"]
+    return str(AgentConfig.model_fields["name"].default)
 
 
 def load_run_config(
@@ -206,11 +286,15 @@ def load_run_config(
             schema does not define.
     """
     merged = merge_layers(
-        preset=_read_toml(preset_path) if preset_path else None,
-        run=_read_toml(run_path) if run_path else None,
+        preset=_read_toml(preset_path, origin="preset") if preset_path else None,
+        run=_read_toml(run_path, origin="run") if run_path else None,
         overrides=overrides,
     )
     try:
-        return RunConfig.model_validate(merged)
+        config = RunConfig.model_validate(merged)
+        if preset_path:
+            config._preset_name = preset_path.stem
+            config._preset_digest = content_hash(preset_path.read_text(encoding="utf-8"))
+        return config
     except Exception as exc:  # pydantic ValidationError, reported as a config problem
         raise ConfigError(f"invalid configuration: {exc}") from exc

@@ -13,6 +13,7 @@ Usage in a test module::
         provider = DockerProvider()
 """
 
+from ale.core.testkit.harness import AutonomousHarnessConformance
 from ale.core.testkit.provider import ProviderConformance
 
-__all__ = ["ProviderConformance"]
+__all__ = ["AutonomousHarnessConformance", "ProviderConformance"]

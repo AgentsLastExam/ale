@@ -18,27 +18,36 @@ comparable.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ale.core.blob import BlobSink
 from ale.core.env import Observation, StepResult, TaskEnv
+from ale.core.errors import AgentUnsupportedError
 from ale.core.sandbox import Sandbox
+from ale.core.taskspec import McpServer
 from ale.core.trace import DesktopAction
+from ale.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
 
 __all__ = [
     "AgentRun",
     "AutonomousHarness",
+    "EffectiveAgentResources",
     "Harness",
     "HarnessFamily",
     "HarnessSession",
+    "NativeContinuation",
     "Observation",
     "PolicyHarness",
+    "ResolvedMcpServer",
+    "ResolvedSkill",
     "ResumeSupport",
     "StepwisePolicy",
+    "TrajectoryParseContext",
 ]
 
 
@@ -73,6 +82,10 @@ class HarnessSession(BaseModel):
     gateway_url: str
     token: str = Field(description="Per-episode bearer; never a provider credential")
     model: str
+    sandbox_id: str = ""
+    resources_digest: str = (
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    )
     home: str = Field(
         default="/home/user",
         description=(
@@ -84,6 +97,63 @@ class HarnessSession(BaseModel):
     )
 
 
+class ResolvedSkill(BaseModel):
+    """One validated Skill ready to stage."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    path: Path
+    source_layers: tuple[Literal["task", "preset", "run", "cli"], ...]
+    declared_sources: tuple[str, ...]
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    source_version: str | None = None
+    reportable: bool
+    reportability_reason: str | None = None
+    executable_files: tuple[str, ...] = Field(default=(), exclude=True)
+
+
+class ResolvedMcpServer(BaseModel):
+    """One validated canonical MCP server ready for adapter translation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    server: McpServer
+    source_layers: tuple[Literal["task", "preset", "run", "cli"], ...]
+    declared_sources: tuple[str, ...]
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    source_version: str | None = None
+    reportable: bool
+    reportability_reason: str | None = None
+    staged_files: Path | None = None
+
+
+class EffectiveAgentResources(BaseModel):
+    """The deterministic union of every declared Skill and MCP server."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    skills: tuple[ResolvedSkill, ...] = ()
+    mcp_servers: tuple[ResolvedMcpServer, ...] = ()
+    digest: str = Field(
+        default="sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+
+
+class NativeContinuation(BaseModel):
+    """Exact native session state, valid only in its original live sandbox."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    harness: str
+    native_session_id: str
+    episode_id: str
+    sandbox_id: str
+    fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
 class AgentRun(BaseModel):
     """The outcome of one autonomous agent run."""
 
@@ -91,13 +161,28 @@ class AgentRun(BaseModel):
 
     exit_code: int
     final_message: str | None = None
-    artifacts_dir: Path | None = Field(
-        default=None, description="Host directory holding whatever the agent left behind"
-    )
+    continuation: NativeContinuation | None = None
 
     @property
     def ok(self) -> bool:
         return self.exit_code == 0
+
+
+@dataclass(frozen=True)
+class TrajectoryParseContext:
+    """Everything a native-log parser may use to produce canonical ATIF."""
+
+    episode_id: str
+    trajectory_id: str
+    instruction: str
+    logs_dir: Path
+    model: str
+    agent_version: str
+    blobs: BlobSink
+    session_id: str | None = None
+    final_message: str | None = None
+    incomplete: bool = False
+    incomplete_reason: str | None = None
 
 
 class Harness(ABC):
@@ -129,17 +214,53 @@ class Harness(ABC):
         """What pins that build: an image digest, package hash, or commit."""
         return "unpinned"
 
-    async def install(self, sandbox: Sandbox) -> None:
+    def validate_resources(self, resources: EffectiveAgentResources) -> None:
+        """Reject optional resources unless a concrete harness implements them."""
+        if resources.skills or resources.mcp_servers:
+            raise AgentUnsupportedError(f"{self.name} does not support agent resources")
+
+    async def install(self, sandbox: Sandbox) -> str:
         """Prepare the sandbox. Default: nothing, because the image already has it."""
+        return self.version()
+
+    async def install_resources(
+        self,
+        sandbox: Sandbox,
+        session: HarnessSession,
+        resources: EffectiveAgentResources,
+    ) -> None:
+        """Translate and stage already validated resources. Default: none supported."""
         return None
 
-    def parse_artifacts(self, artifacts_dir: Path) -> list[dict[str, Any]]:
-        """Turn agent-native output into semantic trace payloads.
+    def parse_trajectory(self, context: TrajectoryParseContext) -> AtifTrajectory:
+        """Build the minimal truthful trajectory when no richer native log exists."""
+        builder = TrajectoryBuilder(
+            trajectory_id=context.trajectory_id,
+            session_id=context.session_id,
+            agent=AtifAgent(
+                name=self.name,
+                version=context.agent_version,
+                model_name=context.model or None,
+            ),
+            extra=(
+                {
+                    "ale": {
+                        "incomplete": True,
+                        "incomplete_reason": context.incomplete_reason or "interrupted",
+                    }
+                }
+                if context.incomplete
+                else None
+            ),
+        )
+        builder.add(source="user", message=context.instruction)
+        if context.final_message is not None:
+            builder.add(source="agent", message=context.final_message)
+        return builder.build()
 
-        Pure and host-side: it reads collected files and returns records, so it can be
-        re-run over a finished episode without touching a sandbox.
-        """
-        return []
+    async def cleanup(self, sandbox: Sandbox, session: HarnessSession) -> None:
+        """Release episode-local harness state. Must be safe to call repeatedly."""
+        return None
 
 
 class AutonomousHarness(Harness):
@@ -161,14 +282,15 @@ class AutonomousHarness(Harness):
 
     async def resume(
         self,
-        messages: Sequence[dict[str, Any]],
+        instruction: str,
+        continuation: NativeContinuation,
         sandbox: Sandbox,
         session: HarnessSession,
         *,
         timeout_sec: float,
     ) -> AgentRun:
-        """Continue an exchange. Only valid when ``resume_support`` is not ``NONE``."""
-        raise NotImplementedError(f"{self.name} does not support resume")
+        """Continue an exact native session using only the new instruction."""
+        raise AgentUnsupportedError(f"{self.name} does not support native resume")
 
 
 class PolicyHarness(Harness):

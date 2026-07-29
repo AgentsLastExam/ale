@@ -13,7 +13,7 @@ Two fields deserve emphasis because they are where other frameworks leak:
 
 from __future__ import annotations
 
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -23,12 +23,15 @@ from ale.core.store import AssetOrigin
 
 __all__ = [
     "AgentProvenance",
+    "AgentResourceProvenance",
     "AssetProvenance",
     "FrameworkProvenance",
     "GatewayProvenance",
+    "HarnessPresetProvenance",
     "ImageProvenance",
     "JudgeProvenance",
     "KitProvenance",
+    "LimitTermination",
     "RunLock",
     "SandboxProvenance",
     "TaskProvenance",
@@ -94,6 +97,31 @@ class AgentProvenance(BaseModel):
         description="What pins the binary: an image digest, a package hash, or a commit"
     )
     model: str
+    preset: HarnessPresetProvenance | None = None
+    settings: dict[str, Any] = Field(default_factory=dict)
+    native_limits: dict[str, int | float | str] = Field(default_factory=dict)
+    resources: tuple[AgentResourceProvenance, ...] = ()
+    resources_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class HarnessPresetProvenance(BaseModel):
+    model_config = _FROZEN
+
+    name: str
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class AgentResourceProvenance(BaseModel):
+    model_config = _FROZEN
+
+    kind: Literal["skill", "mcp"]
+    name: str
+    source_layers: tuple[Literal["task", "preset", "run", "cli"], ...]
+    resolved_source: str
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    source_version: str | None = None
+    reportable: bool
+    reportability_reason: str | None = None
 
 
 class JudgeProvenance(BaseModel):
@@ -146,7 +174,17 @@ class GatewayProvenance(BaseModel):
     model_config = _FROZEN
 
     dialect: str
-    limits: dict[str, float] = Field(default_factory=dict)
+    limits: dict[str, int | float | str] = Field(default_factory=dict)
+
+
+class LimitTermination(BaseModel):
+    model_config = _FROZEN
+
+    layer: Literal["gateway", "harness"]
+    name: str
+    configured_value: int | float | Literal["unlimited"]
+    observed_value: int | float | None = None
+    reason: str
 
 
 class FrameworkProvenance(BaseModel):
@@ -167,12 +205,17 @@ class RunLock(BaseModel):
     agent: AgentProvenance
     framework: FrameworkProvenance
     gateway: GatewayProvenance
+    trajectory_schema: Literal["ATIF-v1.7"] = "ATIF-v1.7"
+    result_schema_version: Literal[1] = 1
+    transport_schema_version: Literal[1] = 1
+    execution_schema_version: Literal[1] = 1
     sandbox: SandboxProvenance | None = None
     config_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     seed: int
     judge: JudgeProvenance | None = None
     assets: tuple[AssetProvenance, ...] = ()
     kits: tuple[KitProvenance, ...] = ()
+    termination: LimitTermination | None = None
 
     def missing_for_report(self) -> list[str]:
         """Reasons this lock cannot back a reported result.
@@ -185,6 +228,12 @@ class RunLock(BaseModel):
             problems.append("task came from a local path and cannot be re-fetched")
         if self.framework.commit in {"", "unknown"}:
             problems.append("framework commit was not resolved")
+        for resource in self.agent.resources:
+            if not resource.reportable:
+                problems.append(
+                    f"{resource.kind} {resource.name!r} is not reportable: "
+                    f"{resource.reportability_reason or 'source is not immutable'}"
+                )
         return problems
 
     def require_reportable(self) -> None:

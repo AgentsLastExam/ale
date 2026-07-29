@@ -16,13 +16,17 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from ale.core.harness import HarnessSession
-from ale.core.lock import AssetProvenance, KitProvenance, SandboxProvenance
+from pydantic import BaseModel
+
+from ale.core.blob import BlobSink
+from ale.core.harness import EffectiveAgentResources, HarnessSession
+from ale.core.lock import AssetProvenance, KitProvenance, LimitTermination, SandboxProvenance
+from ale.core.result import PhaseTiming, ResultRecord
 from ale.core.sandbox import Sandbox, SandboxRequest
 from ale.core.taskspec import TaskSpec
-from ale.core.trace import PhaseSpan, TraceWriter
+from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Verdict
 
 if TYPE_CHECKING:
@@ -33,8 +37,11 @@ __all__ = [
     "Budget",
     "Environment",
     "EpisodeContext",
+    "EventSink",
     "Phase",
+    "ResultSink",
     "SandboxLease",
+    "TrajectorySink",
 ]
 
 
@@ -68,6 +75,18 @@ class ArtifactSink(Protocol):
     async def collect_file(self, sandbox: Sandbox, source: str, name: str) -> Path: ...
 
     def path(self, name: str) -> Path: ...
+
+
+class EventSink(Protocol):
+    def append(self, event: BaseModel | dict[str, Any], *, durable: bool = False) -> int: ...
+
+
+class TrajectorySink(Protocol):
+    def write_trajectory(self, trajectory: AtifTrajectory) -> None: ...
+
+
+class ResultSink(Protocol):
+    def write_result(self, result: ResultRecord) -> None: ...
 
 
 @dataclass
@@ -107,10 +126,17 @@ class EpisodeContext:
 
     sandboxes: SandboxLease
     artifacts: ArtifactSink
-    trace: TraceWriter
     budget: Budget
     session: HarnessSession
     """Gateway address plus this episode's bearer token — never a provider credential."""
+    agent_resources: EffectiveAgentResources = field(default_factory=EffectiveAgentResources)
+    trajectory_id: str = ""
+    transport: EventSink | None = None
+    execution: EventSink | None = None
+    blobs: BlobSink | None = None
+    trajectory: TrajectorySink | None = None
+    result: ResultSink | None = None
+    current_phase: Phase | None = None
 
     home: str = ""
     """The agent's home directory, which is also where a run does its work.
@@ -122,8 +148,8 @@ class EpisodeContext:
     """
     """Framework scratch inside the sandbox, created before setup runs."""
 
-    phases: list[PhaseSpan] = field(default_factory=list)
-    """Filled in as each phase completes; folded into the episode's timing record."""
+    phases: list[PhaseTiming] = field(default_factory=list)
+    """Filled in as each phase exits; copied into the terminal result."""
 
     proxy_url: str = ""
     """Egress proxy for allowlist tasks; empty when none was started."""
@@ -154,6 +180,7 @@ class EpisodeContext:
 
     seed: int = 0
     extras: dict[str, object] = field(default_factory=dict)
+    limit_termination: LimitTermination | None = None
 
 
 class Environment(ABC):

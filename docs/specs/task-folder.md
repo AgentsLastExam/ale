@@ -43,6 +43,11 @@ image: sandbox-base-cli
 resources: { cpus: 1, memory_mb: 1024 }
 network: { mode: block }           # block | allowlist (+ allowed_hosts) | open
 timeouts: { setup: 120, agent: 900, verify: 300 }
+tools:
+  skills:
+    - { path: skills/reviewer }
+  mcp_servers:
+    - { path: mcp/local-search.toml }
 
 setup:
   assets:                          # each mount says where the data is and where it goes
@@ -61,8 +66,7 @@ artifacts: [/home/user/output]     # absolute paths holding this task's output
 params: { n: 3 }
 variants:
   - { name: base }
-  - { name: hard, params: { n: 10 } }
-validate: { min_reward: 1.0 }
+  - { name: hard, params: { n: 10 }, tools: { skills: [{ path: skills/hard }] } }
 ```
 
 The identifier is derived from the folder path (`tasks/demo/hello` → `demo-hello`) and
@@ -146,6 +150,49 @@ framework directory for a task author to learn.
 What keeps gold answers away from an agent is **timing, not location**: a mount listed
 under `verify` is copied in during scoring, so while the agent works it is absent.
 
+## Agent resources
+
+`tools.skills` and `tools.mcp_servers` are Task-level requirements. They are added to
+resources from the selected harness preset, Run file, and CLI. A Task does not select a
+harness; a harness that cannot honor a declared resource rejects the pairing before a
+sandbox is created.
+
+Task resource paths are relative to the task folder. Absolute paths, `..` escapes,
+symlinks that escape the folder, and paths entering `task.yaml`, `verify/`, or `oracle/`
+are invalid.
+
+A Skill path names either:
+
+- one directory containing `SKILL.md`; or
+- a collection whose immediate non-hidden child directories each contain `SKILL.md`.
+
+Discovery is not recursive. Selected Skill contents are copied recursively and executable
+file modes are preserved.
+
+An MCP entry names one strict task-owned TOML descriptor:
+
+```toml
+schema_version = 1
+name = "local-search"
+transport = "stdio"
+command = "python3"
+args = ["/home/user/input/search.py"]
+cwd = "/home/user/input"
+```
+
+Remote descriptors use `transport = "streamable-http"` and an HTTP(S) `url`. Their host
+must satisfy the Task network policy. Auth headers and tokens are not accepted.
+
+Task manifests cannot select framework-owned built-ins. Configure `cua-desktop` in the
+Run-level `agent.mcp_servers` list.
+
+A variant may replace `tools` exactly as it replaces other Task fields. The selected
+variant's declaration then joins the ordinary effective resource union.
+
+Images, audio, video, and other prompt inputs remain ordinary task files or setup assets.
+Stage them into the sandbox and name their path in `instruction.md`; no separate
+multimodal prompt schema is required.
+
 ### Artifacts are not logs
 
 Two different things, with two different owners, collected into two different places:
@@ -160,5 +207,3 @@ answer different questions — an artifact says what the agent achieved, which i
 verifier scores, and a log says how it went about it, which is the only evidence for why a
 score is what it is. A run that scored 1.0 by reading a file and one that scored 1.0 by
 looking at the screen are indistinguishable from the reward alone.
-
-

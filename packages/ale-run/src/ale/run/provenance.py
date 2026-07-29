@@ -19,14 +19,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ale.core.config import RunConfig
+from ale.core.harness import EffectiveAgentResources
 from ale.core.lock import (
     AgentProvenance,
+    AgentResourceProvenance,
     AssetProvenance,
     FrameworkProvenance,
     GatewayProvenance,
+    HarnessPresetProvenance,
     ImageProvenance,
     JudgeProvenance,
     KitProvenance,
+    LimitTermination,
     RunLock,
     SandboxProvenance,
     TaskProvenance,
@@ -72,29 +76,77 @@ def framework_provenance() -> FrameworkProvenance:
 def gateway_provenance(settings: RunConfig) -> GatewayProvenance:
     """Record the ceilings that were actually in force.
 
-    ``None`` means unlimited and is omitted rather than written as a zero, which would
-    read as "nothing was allowed" — the exact opposite.
+    Every field is present, and explicit ``unlimited`` remains visible.
     """
-    limits = {
-        name: float(value)
-        for name, value in settings.gateway.limits.model_dump().items()
-        if value is not None
-    }
-    return GatewayProvenance(dialect=settings.gateway.dialect, limits=limits)
+    return GatewayProvenance(
+        dialect=settings.gateway.dialect,
+        limits=settings.gateway.limits.model_dump(),
+    )
 
 
-def agent_provenance(harness: object, model: str) -> AgentProvenance:
+def agent_provenance(
+    harness: object,
+    model: str,
+    settings: RunConfig | None = None,
+    resources: EffectiveAgentResources | None = None,
+) -> AgentProvenance:
     """Read a harness's identity off the harness itself.
 
     The family comes from the harness rather than from the task, which is the whole
     point of it living there: provenance records what actually ran.
     """
+    preset = (
+        HarnessPresetProvenance(name=settings.preset_name, digest=settings.preset_digest)
+        if settings and settings.preset_name and settings.preset_digest
+        else None
+    )
+    harness_settings = settings.agent.settings if settings else {}
+    native_limits = {
+        key: value
+        for key, value in harness_settings.items()
+        if key in {"max_turns", "max_budget_usd"}
+    }
+    resource_records = (
+        tuple(
+            AgentResourceProvenance(
+                kind="skill",
+                name=skill.name,
+                source_layers=skill.source_layers,
+                resolved_source=", ".join(skill.declared_sources),
+                digest=skill.digest,
+                source_version=skill.source_version,
+                reportable=skill.reportable,
+                reportability_reason=skill.reportability_reason,
+            )
+            for skill in resources.skills
+        )
+        + tuple(
+            AgentResourceProvenance(
+                kind="mcp",
+                name=server.name,
+                source_layers=server.source_layers,
+                resolved_source=", ".join(server.declared_sources),
+                digest=server.digest,
+                source_version=server.source_version,
+                reportable=server.reportable,
+                reportability_reason=server.reportability_reason,
+            )
+            for server in resources.mcp_servers
+        )
+        if resources
+        else ()
+    )
     return AgentProvenance(
         harness=getattr(harness, "name", type(harness).__name__),
         family=getattr(harness, "family", "autonomous"),
         version=harness.version(),  # type: ignore[attr-defined]
         integrity=harness.integrity(),  # type: ignore[attr-defined]
         model=model,
+        preset=preset,
+        settings=harness_settings,
+        native_limits=native_limits,
+        resources=resource_records,
+        resources_digest=resources.digest if resources else None,
     )
 
 
@@ -123,6 +175,7 @@ def build_lock(
     sandbox: SandboxProvenance | None = None,
     assets: tuple[AssetProvenance, ...] = (),
     kits: tuple[KitProvenance, ...] = (),
+    termination: LimitTermination | None = None,
     seed: int = 0,
     requires_core: str | None = None,
 ) -> RunLock:
@@ -146,4 +199,5 @@ def build_lock(
         judge=inputs.judge,
         assets=assets,
         kits=kits,
+        termination=termination,
     )

@@ -19,19 +19,30 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout, web
 
-from ale.core.trace import TraceLayer, TraceWriter, TransportRecord
+from ale.core.environment import EventSink
+from ale.core.errors import ConfigError
+from ale.core.trace import TransportCall, TransportReplay
 from ale.run.gateway.anthropic import (
     estimate_cost,
     extract_usage,
+    pricing_for,
     refusal_body,
     usage_from_stream,
 )
-from ale.run.gateway.session import GatewaySession, LimitReached, SessionRegistry
+from ale.run.gateway.session import (
+    GatewayReservation,
+    GatewaySession,
+    LimitReached,
+    SessionRegistry,
+)
 
 __all__ = ["Gateway"]
 
@@ -60,7 +71,7 @@ class Gateway:
         self.host = host
         self.port = port
         self.sessions = SessionRegistry()
-        self._traces: dict[str, TraceWriter] = {}
+        self._traces: dict[str, EventSink] = {}
         self._app = self._build_app()
         self._runner: web.AppRunner | None = None
         self._client: ClientSession | None = None
@@ -92,9 +103,13 @@ class Gateway:
         return f"http://{self.host}:{self.port}"
 
     def open_session(
-        self, session: GatewaySession, trace: TraceWriter | None = None
+        self, session: GatewaySession, trace: EventSink | None = None
     ) -> GatewaySession:
         """Register an episode. Its token is valid until :meth:`close_session`."""
+        if session.limits.max_cost_usd is not None and pricing_for(session.model) is None:
+            raise ConfigError(
+                f"finite max_cost_usd requires known pricing for model {session.model!r}"
+            )
         if trace is not None:
             self._traces[session.token] = trace
         return self.sessions.open(session)
@@ -118,24 +133,32 @@ class Gateway:
         session = self._authenticate(request)
         started = asyncio.get_running_loop().time()
         body = await request.read()
-
-        try:
-            session.check()
-        except LimitReached as limit:
-            self._record(session, request_digest=GatewaySession.digest(body), refused=limit.limit)
-            return web.json_response(refusal_body(limit.limit, limit.value), status=429)
-
         payload = self._authoritative(json.loads(body or b"{}"), session)
         key = GatewaySession.digest(json.dumps(payload, sort_keys=True).encode())
+        request_digest = f"sha256:{key}"
 
         if (cached := session.cached(key)) is not None:
+            self._record_replay(
+                session,
+                call_id=cached["call_id"],
+                request_digest=request_digest,
+                reason="completed-cache",
+            )
             return self._replayed(cached)  # a retry must not sample twice
         if (pending := session.inflight(key)) is not None:
-            return self._replayed(await pending)  # …nor while the first is in flight
+            cached = await pending
+            self._record_replay(
+                session,
+                call_id=cached["call_id"],
+                request_digest=request_digest,
+                reason="inflight-coalesced",
+            )
+            return self._replayed(cached)  # …nor while the first is in flight
 
         session.begin(key)
+        call_id = f"call_{uuid.uuid4().hex}"
         try:
-            response = await self._forward(request, session, payload, key, started)
+            response = await self._forward(request, session, payload, key, call_id, started)
         except Exception as exc:
             session.finish(key, None, error=exc)
             raise
@@ -149,35 +172,104 @@ class Gateway:
         session: GatewaySession,
         payload: dict[str, Any],
         key: str,
+        call_id: str,
         started: float,
     ) -> web.StreamResponse:
         assert self._client is not None
-        headers = {
-            name: value for name, value in request.headers.items() if name.lower() not in _STRIP
-        }
-        headers["x-api-key"] = self.api_key
-        headers.setdefault("anthropic-version", "2023-06-01")
+        headers = self._upstream_headers(request)
+        input_tokens = (
+            await self._count_input_tokens(payload, headers) if _needs_exact_input(session) else 0
+        )
+        requested_output = int(payload.get("max_tokens") or 4096)
+        try:
+            reservation = await session.reserve(
+                input_tokens=input_tokens,
+                requested_output_tokens=requested_output,
+                pricing=pricing_for(session.model),
+            )
+        except LimitReached as limit:
+            self._record(
+                session,
+                call_id=call_id,
+                request_digest=GatewaySession.digest(json.dumps(payload, sort_keys=True).encode()),
+                refused=limit.limit,
+            )
+            raw = json.dumps(refusal_body(limit.limit, limit.value, limit.observed)).encode()
+            self._retain_payload(session, call_id, payload, raw)
+            cached = {
+                "status": 429,
+                "body": raw,
+                "streaming": False,
+                "call_id": call_id,
+            }
+            session.finish(key, cached)
+            return self._replayed(cached)
+        payload = {**payload, "max_tokens": reservation.output_tokens}
+        self._retain_payload(session, call_id, payload, None)
 
         streaming = bool(payload.get("stream"))
-        async with self._client.post(
-            f"{self.upstream}/v1/messages", json=payload, headers=headers
-        ) as upstream:
-            if streaming:
-                return await self._stream(request, session, upstream, key, payload, started)
+        committed = False
+        try:
+            async with self._client.post(
+                f"{self.upstream}/v1/messages", json=payload, headers=headers
+            ) as upstream:
+                if streaming:
+                    response = await self._stream(
+                        request,
+                        session,
+                        upstream,
+                        key,
+                        payload,
+                        call_id,
+                        reservation,
+                        started,
+                    )
+                    committed = True
+                    return response
 
-            raw = await upstream.read()
-            parsed = json.loads(raw or b"{}") if upstream.status == 200 else {}
-            self._account(
-                session,
-                parsed,
-                payload,
-                streamed=None,
-                status=upstream.status,
-                latency_ms=_elapsed_ms(started),
-            )
-            cached = {"status": upstream.status, "body": raw, "streaming": False}
-            session.finish(key, cached)
-            return web.Response(body=raw, status=upstream.status, content_type="application/json")
+                raw = await upstream.read()
+                self._retain_payload(session, call_id, None, raw)
+                parsed = json.loads(raw or b"{}") if upstream.status == 200 else {}
+                await self._account(
+                    session,
+                    parsed,
+                    payload,
+                    call_id=call_id,
+                    reservation=reservation,
+                    streamed=None,
+                    status=upstream.status,
+                    latency_ms=_elapsed_ms(started),
+                    response_body=raw,
+                    provider_response_id=parsed.get("id")
+                    if isinstance(parsed.get("id"), str)
+                    else None,
+                )
+                committed = True
+                cached = {
+                    "status": upstream.status,
+                    "body": raw,
+                    "streaming": False,
+                    "call_id": call_id,
+                }
+                session.finish(key, cached)
+                return web.Response(
+                    body=raw,
+                    status=upstream.status,
+                    content_type="application/json",
+                )
+        except BaseException:
+            if not committed:
+                self._record(
+                    session,
+                    call_id=call_id,
+                    request_digest=GatewaySession.digest(
+                        json.dumps(payload, sort_keys=True).encode()
+                    ),
+                    disposition="failed",
+                    latency_ms=_elapsed_ms(started),
+                )
+                await session.commit(reservation)
+            raise
 
     async def _stream(
         self,
@@ -186,6 +278,8 @@ class Gateway:
         upstream: Any,
         key: str,
         payload: dict[str, Any],
+        call_id: str,
+        reservation: GatewayReservation,
         started: float,
     ) -> web.StreamResponse:
         """Pass the event stream straight through, counting usage as it goes."""
@@ -202,16 +296,27 @@ class Gateway:
 
         # Measured to the end of the stream: a streamed call's cost in wall-clock time is
         # how long the agent waited for all of it, not how quickly the first byte arrived.
-        self._account(
+        await self._account(
             session,
             {},
             payload,
+            call_id=call_id,
+            reservation=reservation,
             streamed=chunks,
             status=upstream.status,
             latency_ms=_elapsed_ms(started),
+            response_body=b"".join(chunks),
+            provider_response_id=_stream_response_id(chunks),
         )
+        self._retain_payload(session, call_id, None, b"".join(chunks), streaming=True)
         session.finish(
-            key, {"status": upstream.status, "body": b"".join(chunks), "streaming": True}
+            key,
+            {
+                "status": upstream.status,
+                "body": b"".join(chunks),
+                "streaming": True,
+                "call_id": call_id,
+            },
         )
         return response
 
@@ -236,15 +341,19 @@ class Gateway:
         """Impose the run's model rather than trusting the agent's request."""
         return {**payload, "model": session.model}
 
-    def _account(
+    async def _account(
         self,
         session: GatewaySession,
         parsed: dict[str, Any],
         payload: dict[str, Any],
         *,
+        call_id: str,
+        reservation: GatewayReservation,
         streamed: list[bytes] | None,
         status: int,
         latency_ms: int = 0,
+        response_body: bytes = b"",
+        provider_response_id: str | None = None,
     ) -> None:
         request_digest = GatewaySession.digest(json.dumps(payload, sort_keys=True).encode())
         if status != 200:
@@ -253,35 +362,103 @@ class Gateway:
             # 529s for eleven minutes" — the same evidence, opposite conclusions.
             self._record(
                 session,
+                call_id=call_id,
                 request_digest=request_digest,
+                disposition="failed",
                 upstream_status=status,
                 latency_ms=latency_ms,
+                response_digest=GatewaySession.digest(response_body) if response_body else None,
+                provider_response_id=provider_response_id,
             )
+            await session.commit(reservation)
             return
+        self._retain_exact_tokens(session, call_id, payload, parsed)
         if streamed is not None:
             input_tokens, output_tokens, stop_reason = usage_from_stream(streamed)
         else:
             input_tokens, output_tokens, stop_reason = extract_usage(parsed)
         cost = estimate_cost(session.model, input_tokens, output_tokens)
-        session.record(input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost)
         self._record(
             session,
+            call_id=call_id,
             request_digest=request_digest,
+            disposition="forwarded",
+            response_digest=GatewaySession.digest(response_body) if response_body else None,
+            provider_response_id=provider_response_id,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=cost,
             stop_reason=stop_reason,
             latency_ms=latency_ms,
         )
+        await session.commit(
+            reservation,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+        )
+
+    def _upstream_headers(self, request: web.Request) -> dict[str, str]:
+        headers = {
+            name: value for name, value in request.headers.items() if name.lower() not in _STRIP
+        }
+        headers["x-api-key"] = self.api_key
+        headers.setdefault("anthropic-version", "2023-06-01")
+        return headers
+
+    async def _count_input_tokens(
+        self,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+    ) -> int:
+        assert self._client is not None
+        count_payload = {
+            key: value for key, value in payload.items() if key not in {"max_tokens", "stream"}
+        }
+        async with self._client.post(
+            f"{self.upstream}/v1/messages/count_tokens",
+            json=count_payload,
+            headers=headers,
+        ) as response:
+            raw = await response.read()
+            if response.status != 200:
+                raise web.HTTPBadGateway(
+                    text=json.dumps(
+                        {
+                            "type": "error",
+                            "error": {
+                                "type": "ale_token_count_failed",
+                                "upstream_status": response.status,
+                            },
+                        }
+                    ),
+                    content_type="application/json",
+                )
+            try:
+                return int(json.loads(raw or b"{}")["input_tokens"])
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise web.HTTPBadGateway(
+                    text=json.dumps(
+                        {
+                            "type": "error",
+                            "error": {"type": "ale_token_count_invalid"},
+                        }
+                    ),
+                    content_type="application/json",
+                ) from exc
 
     def _record(
         self,
         session: GatewaySession,
         *,
+        call_id: str,
         request_digest: str,
+        disposition: str | None = None,
+        response_digest: str | None = None,
+        provider_response_id: str | None = None,
         input_tokens: int = 0,
         output_tokens: int = 0,
-        cost_usd: float = 0.0,
+        cost_usd: float | None = None,
         stop_reason: str | None = None,
         refused: str | None = None,
         upstream_status: int | None = None,
@@ -290,21 +467,86 @@ class Gateway:
         trace = self._traces.get(session.token)
         if trace is None:
             return
-        trace.write_transport(
-            TransportRecord(
-                seq=trace.next_seq(TraceLayer.TRANSPORT),
+        trace.append(
+            TransportCall(
                 episode_id=session.episode_id,
+                call_id=call_id,
                 model=session.model,
                 request_digest=f"sha256:{request_digest}",
+                response_digest=(f"sha256:{response_digest}" if response_digest else None),
+                provider_response_id=provider_response_id,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cost_usd=cost_usd,
                 stop_reason=stop_reason,
-                refused=refused is not None,
+                disposition=disposition or ("refused" if refused is not None else "forwarded"),  # type: ignore[arg-type]
                 refusal_limit=refused,
                 upstream_status=upstream_status,
                 latency_ms=latency_ms,
             )
+        )
+
+    def _record_replay(
+        self,
+        session: GatewaySession,
+        *,
+        call_id: str,
+        request_digest: str,
+        reason: str,
+    ) -> None:
+        trace = self._traces.get(session.token)
+        if trace is None:
+            return
+        trace.append(
+            TransportReplay(
+                episode_id=session.episode_id,
+                call_id=call_id,
+                request_digest=request_digest,
+                reason=reason,  # type: ignore[arg-type]
+            )
+        )
+
+    def _retain_payload(
+        self,
+        session: GatewaySession,
+        call_id: str,
+        request: dict[str, Any] | None,
+        response: bytes | None,
+        *,
+        streaming: bool = False,
+    ) -> None:
+        root = session.payload_dir
+        if root is None:
+            return
+        root.mkdir(parents=True, exist_ok=True)
+        if request is not None:
+            _atomic_write(
+                root / f"{call_id}.request.json",
+                json.dumps(request, ensure_ascii=False, sort_keys=True, indent=2).encode() + b"\n",
+            )
+        if response is not None:
+            suffix = "sse" if streaming else "json"
+            _atomic_write(root / f"{call_id}.response.{suffix}", response)
+
+    def _retain_exact_tokens(
+        self,
+        session: GatewaySession,
+        call_id: str,
+        request: dict[str, Any],
+        response: dict[str, Any],
+    ) -> None:
+        root = session.exact_token_dir
+        evidence = response.get("ale_token_data")
+        if root is None or not isinstance(evidence, dict):
+            return
+        retained = dict(evidence)
+        if "temperature" not in retained and isinstance(request.get("temperature"), int | float):
+            retained["temperature"] = request["temperature"]
+        root.mkdir(parents=True, exist_ok=True)
+        _atomic_write(
+            root / f"{call_id}.json",
+            json.dumps(retained, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            + b"\n",
         )
 
 
@@ -313,6 +555,42 @@ async def _iter_chunks(upstream: Any) -> AsyncIterator[bytes]:
         yield chunk
 
 
+def _needs_exact_input(session: GatewaySession) -> bool:
+    limits = session.limits
+    return any(
+        value is not None
+        for value in (
+            limits.max_input_tokens,
+            limits.max_total_tokens,
+            limits.max_cost_usd,
+        )
+    )
+
+
 def _elapsed_ms(started: float) -> int:
     """Milliseconds since ``started``, on the loop's own clock."""
     return int((asyncio.get_running_loop().time() - started) * 1000)
+
+
+def _stream_response_id(chunks: list[bytes]) -> str | None:
+    for raw in chunks:
+        for line in raw.decode("utf-8", "ignore").splitlines():
+            if not line.startswith("data:"):
+                continue
+            try:
+                event = json.loads(line.removeprefix("data:").strip())
+            except json.JSONDecodeError:
+                continue
+            message = event.get("message")
+            if isinstance(message, dict) and isinstance(message.get("id"), str):
+                return message["id"]
+    return None
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    with temporary.open("wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)

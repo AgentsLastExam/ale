@@ -19,11 +19,15 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import os
+import selectors
 import shutil
+import signal
 import socketserver
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, BinaryIO, TextIO
 
@@ -35,7 +39,6 @@ from protocol import (
     ERR_INTERNAL,
     ERR_NOT_FOUND,
     ERR_PERMISSION,
-    ERR_TIMEOUT,
     ERR_UNSUPPORTED,
     PROTOCOL_VERSION,
     ProtocolError,
@@ -92,6 +95,7 @@ class Handler:
             "env": env,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
+            "start_new_session": True,
         }
         popen_kwargs.update(_drop_to(params.get("run_as"), env))
         try:
@@ -104,22 +108,44 @@ class Handler:
         except PermissionError as exc:
             raise ProtocolError(ERR_PERMISSION, str(exc)) from exc
 
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
-            self._stream(req_id, stdout, stderr)
-            raise ProtocolError(ERR_TIMEOUT, f"command exceeded {timeout}s") from None
+        timed_out = self._stream_process(req_id, proc, timeout)
+        return ok(
+            req_id,
+            exit_code=None if timed_out else proc.returncode,
+            timed_out=timed_out,
+        )
 
-        self._stream(req_id, stdout, stderr)
-        return ok(req_id, exit_code=proc.returncode)
+    def _stream_process(
+        self, req_id: int, proc: subprocess.Popen[bytes], timeout: float | None
+    ) -> bool:
+        selector = selectors.DefaultSelector()
+        assert proc.stdout is not None and proc.stderr is not None
+        selector.register(proc.stdout, selectors.EVENT_READ, "stdout_chunk")
+        selector.register(proc.stderr, selectors.EVENT_READ, "stderr_chunk")
+        deadline = time.monotonic() + float(timeout) if timeout else None
+        timed_out = False
 
-    def _stream(self, req_id: int, stdout: bytes, stderr: bytes) -> None:
-        for name, data in (("stdout_chunk", stdout), ("stderr_chunk", stderr)):
-            for start in range(0, len(data), CHUNK_BYTES):
-                block = data[start : start + CHUNK_BYTES]
-                self._emit(event(req_id, name, b64=base64.b64encode(block).decode("ascii")))
+        while selector.get_map():
+            if deadline is not None and time.monotonic() >= deadline and proc.poll() is None:
+                timed_out = True
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            wait = 0.1 if remaining is None else min(0.1, remaining)
+            for key, _ in selector.select(wait):
+                block = os.read(key.fileobj.fileno(), CHUNK_BYTES)
+                if not block:
+                    selector.unregister(key.fileobj)
+                    continue
+                self._emit(
+                    event(
+                        req_id,
+                        key.data,
+                        b64=base64.b64encode(block).decode("ascii"),
+                    )
+                )
+        proc.wait()
+        return timed_out
 
     # --- files --------------------------------------------------------------
 

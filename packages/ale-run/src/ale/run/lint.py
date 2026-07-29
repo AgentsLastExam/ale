@@ -60,13 +60,13 @@ def lint_repository(path: Path) -> list[Finding]:
     seen: dict[str, Path] = {}
     for folder in taskset.folders():
         manifest = folder.root / TASK_MANIFEST
+        findings.extend(_check_folder(folder))
         try:
             specs = [task.spec for task in taskset.load_folder(folder)]
         except TaskDefinitionError as error:
             findings.append(Finding(manifest, str(error)))
             continue
 
-        findings.extend(_check_folder(folder))
         for spec in specs:
             findings.extend(_check_spec(spec, manifest))
             label = spec.label
@@ -94,6 +94,15 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
     elif not _is_executable(verify):
         findings.append(Finding(verify, "not executable: chmod +x it"))
 
+    if folder.stage_entry("oracle") is None:
+        findings.append(
+            Finding(
+                folder.root,
+                "no oracle/run.sh. Every task must prove that its real verifier can "
+                "award full credit through the ordinary agent path",
+            )
+        )
+
     for stage in ("setup", "oracle"):
         entry = folder.stage_entry(stage)
         if entry is not None and not _is_executable(entry):
@@ -104,16 +113,6 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
 
 def _check_spec(spec: TaskSpec, manifest: Path) -> list[Finding]:
     findings: list[Finding] = []
-
-    if spec.validate_.mode == "oracle" and not (manifest.parent / "oracle" / STAGE_ENTRY).is_file():
-        findings.append(
-            Finding(
-                manifest,
-                "no oracle, and validation is not declared manual. A task nobody can solve "
-                "is a broken task; add oracle/run.sh or declare validate: {mode: manual, "
-                'reason: "..."}',
-            )
-        )
 
     for stage_name, stage in (("setup", spec.setup), ("verify", spec.verify)):
         for mount in stage.assets:

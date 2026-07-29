@@ -36,6 +36,44 @@ tasks/my_first/
 Nothing declares these scripts. A stage's folder is copied in when that stage runs and
 its `run.sh` executes if present, so the layout on disk *is* the execution order.
 
+## Skills and MCP required by one task
+
+Declare agent resources in `task.yaml`:
+
+```yaml
+tools:
+  skills:
+    - { path: skills/reviewer }
+  mcp_servers:
+    - { path: mcp/search.toml }
+```
+
+These paths are relative to the task folder and cannot escape it or enter `verify/` or
+`oracle/`. They are added to Run-level resources, not substituted for them. Duplicate
+identical logical names collapse to one; the same name with different content is an
+error.
+
+Framework-owned built-ins are deliberately not valid Task declarations. An operator
+enables `cua-desktop` at Run level when evaluating GUI tasks.
+
+See `ale-tasks-base/tasks/demo/resource_injection` for a complete Task whose verifier
+requires the agent to read an injected Skill and call an injected Task MCP server.
+Its MCP fragment is generated at call time. The task receipt is useful to the verifier
+but is not trusted proof of tool use; live harness acceptance must match it against the
+collected native transcript and canonical MCP trajectory.
+
+For an image or other media input, stage it as a normal task file or setup asset and say
+where it is:
+
+```markdown
+Inspect /home/user/input/screenshot.png and write the answer to
+/home/user/output/result.txt.
+```
+
+The file is present in the sandbox, so the agent can use its own supported file-reading
+tools. Whether a model can interpret that media is a model choice, not a Task capability
+declaration.
+
 ## Identity comes from the path
 
 `tasks/demo/hello` in domain `demo` becomes `demo-hello`. Never write an id in the file.
@@ -61,8 +99,8 @@ setup:
 source read different bytes — which quietly makes their scores incomparable. `ale lint`
 rejects anything that is not a commit.
 
-The framework creates the destinations you declared, the artifact paths you declared, and
-a scratch directory. **Everything else your task needs, your setup script creates.** If
+The framework creates the destinations and artifact paths you declared.
+**Everything else your task needs, your setup script creates.** If
 `setup/run.sh` writes to `/ale/input` and no mount put anything there, `mkdir -p` it
 first — a directory that happens to exist in one image is not a contract.
 
@@ -129,11 +167,12 @@ what stops a broken verifier from looking like a hard task.
 
 ```bash
 ale lint tasks/           # every task in the repo
-ale validate tasks/       # every oracle must reach its min_reward
+ale validate tasks/       # every oracle must produce non-empty all-ones rewards
 ```
 
-CI runs both. A task with no oracle fails admission unless it declares
-`validate: {mode: manual, reason: "..."}` — and the reason is read by a person.
+CI runs both. Every task must have `oracle/run.sh`; there is no threshold or manual
+bypass. Validation executes the oracle and real verifier through the normal episode
+path, and every named reward must equal exactly `1.0`.
 
 ## Who runs what
 

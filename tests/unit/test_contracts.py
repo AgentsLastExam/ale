@@ -10,11 +10,16 @@ from ale.core.ids import TaskId, canonical_json, content_hash, slugify_path
 from ale.core.taskspec import (
     AssetMount,
     ImageRef,
+    McpSource,
     NetworkMode,
     NetworkPolicy,
     SetupStage,
+    SkillSource,
+    StdioMcpServer,
+    StreamableHttpMcpServer,
+    TaskMcpSource,
     TaskSpec,
-    ValidateSpec,
+    ToolProvision,
 )
 from ale.core.template import render_instruction
 from ale.core.verdict import Status, Verdict
@@ -78,7 +83,7 @@ class TestTaskSpec:
     def test_defaults_are_deny_by_default(self) -> None:
         spec = make_spec()
         assert spec.network.mode is NetworkMode.BLOCK
-        assert spec.validate_.mode == "oracle"
+        assert not hasattr(spec, "validate_")
 
     def test_rejects_unknown_fields(self) -> None:
         with pytest.raises(ValidationError):
@@ -108,10 +113,35 @@ class TestTaskSpec:
         with pytest.raises(ValidationError):
             NetworkPolicy(mode=NetworkMode.BLOCK, allowed_hosts=("example.com",))
 
-    def test_manual_validation_requires_a_reason(self) -> None:
+    def test_legacy_validation_policy_is_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            ValidateSpec(mode="manual")
-        assert ValidateSpec(mode="manual", reason="human judged").reason
+            make_spec(validate={"mode": "manual", "reason": "human judged"})
+
+    def test_agent_resource_declarations_are_strict(self) -> None:
+        assert SkillSource(path="skills/reviewer").path == "skills/reviewer"
+        assert TaskMcpSource(path="mcp/search.toml").path == "mcp/search.toml"
+        assert McpSource(builtin="cua-desktop").builtin == "cua-desktop"
+        with pytest.raises(ValidationError):
+            ToolProvision.model_validate({"mcp_servers": [{"builtin": "cua-desktop"}]})
+        with pytest.raises(ValidationError):
+            McpSource()
+        with pytest.raises(ValidationError):
+            McpSource(path="mcp.toml", builtin="cua-desktop")
+
+    def test_mcp_transports_reject_mixed_fields(self) -> None:
+        StdioMcpServer(name="local", transport="stdio", command="python3")
+        StreamableHttpMcpServer(
+            name="remote", transport="streamable-http", url="https://example.com/mcp"
+        )
+        with pytest.raises(ValidationError):
+            StdioMcpServer.model_validate(
+                {
+                    "name": "mixed",
+                    "transport": "stdio",
+                    "command": "server",
+                    "url": "https://example.com",
+                }
+            )
 
 
 class TestTemplate:
@@ -152,19 +182,20 @@ class TestVerdict:
         with pytest.raises(ValidationError):
             Verdict(status=Status.TASK_ERROR)
 
-    def test_primary_reward_resolves(self) -> None:
+    def test_preserves_all_named_rewards_without_aggregation(self) -> None:
         verdict = Verdict.completed({"reward": 0.75, "steps": 4.0})
-        assert verdict.primary_reward == 0.75
+        assert verdict.rewards == {"reward": 0.75, "steps": 4.0}
+        assert not hasattr(verdict, "primary_reward")
         assert verdict.status.is_scored
 
-    def test_primary_must_exist_in_rewards(self) -> None:
+    def test_rewards_must_be_finite(self) -> None:
         with pytest.raises(ValidationError):
-            Verdict.completed({"score": 1.0}, primary="reward")
+            Verdict.completed({"score": float("nan")})
 
     def test_failures_are_not_scored(self) -> None:
         verdict = Verdict.failed(Status.TASK_ERROR, ValueError("bad json"), phase="verify")
         assert not verdict.status.is_scored
-        assert verdict.primary_reward is None
+        assert verdict.rewards is None
         assert verdict.failure is not None
         assert verdict.failure.error_class == "ValueError"
         assert verdict.failure.phase == "verify"
@@ -173,5 +204,5 @@ class TestVerdict:
         zero = Verdict.completed({"reward": 0.0})
         broken = Verdict.failed(Status.TASK_ERROR, ValueError("no rewards file"))
         assert zero.status is Status.COMPLETED
-        assert zero.primary_reward == 0.0
-        assert broken.primary_reward is None
+        assert zero.rewards == {"reward": 0.0}
+        assert broken.rewards is None

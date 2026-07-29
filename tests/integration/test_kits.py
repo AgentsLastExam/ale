@@ -48,7 +48,6 @@ def repo_with_kit(root: Path) -> Path:
         artifacts: [/home/user/output]
         verify:
           kits: [grader-protocol]
-        validate: {{ min_reward: 1.0 }}
         """).strip()
     )
     (task / "instruction.md").write_text("Write hello to /home/user/output/r.txt\n")
@@ -85,7 +84,7 @@ async def test_a_kit_is_importable_with_no_search_path(tmp_path: Path) -> None:
     )
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.primary_reward == 1.0
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -120,4 +119,4 @@ async def test_a_setup_stage_kit_is_visible_to_the_agent(tmp_path: Path) -> None
     )
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.primary_reward == 1.0
+    assert result.verdict.rewards == {"reward": 1.0}

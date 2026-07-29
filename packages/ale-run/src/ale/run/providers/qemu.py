@@ -34,6 +34,7 @@ from pathlib import Path, PurePosixPath
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     Capabilities,
+    ExecOutputSink,
     ExecResult,
     Identity,
     Provider,
@@ -160,17 +161,24 @@ class QemuSandbox(Sandbox):
         env: dict[str, str] | None = None,
         timeout_sec: float | None = None,
         identity: Identity = Identity.FRAMEWORK,
+        output_sink: ExecOutputSink | None = None,
     ) -> ExecResult:
         loop = asyncio.get_running_loop()
         started = loop.time()
-        exit_code, stdout, stderr = await self._client.exec(
-            argv, cwd=cwd, env=env, timeout_sec=timeout_sec, run_as=self._as(identity)
+        exit_code, stdout, stderr, timed_out = await self._client.exec(
+            argv,
+            cwd=cwd,
+            env=env,
+            timeout_sec=timeout_sec,
+            run_as=self._as(identity),
+            output_sink=output_sink,
         )
         return ExecResult(
             exit_code=exit_code,
             stdout=stdout,
             stderr=stderr,
             duration_ms=int((loop.time() - started) * 1000),
+            timed_out=timed_out,
         )
 
     async def write_file(
@@ -553,7 +561,7 @@ class QemuProvider(Provider):
             raise ProviderCapabilityError(f"{MANIFEST_PATH} is not valid JSON: {exc}") from exc
 
         user = str(manifest.get("user") or DEFAULT_AGENT_USER)
-        code, _, _ = await client.exec(["id", "-u", user], timeout_sec=30)
+        code, _, _, _ = await client.exec(["id", "-u", user], timeout_sec=30)
         if code != 0:
             raise ProviderCapabilityError(
                 f"{MANIFEST_PATH} names {user!r} as the agent account, but no such user "
@@ -573,7 +581,7 @@ class QemuProvider(Provider):
             f"{agent_user} ALL=(ALL) NOPASSWD: ALL\n".encode(),
             mode="0440",
         )
-        code, _, stderr = await client.exec(
+        code, _, stderr, _ = await client.exec(
             ["sudo", "-n", "true"], run_as=agent_user, timeout_sec=30
         )
         if code != 0:

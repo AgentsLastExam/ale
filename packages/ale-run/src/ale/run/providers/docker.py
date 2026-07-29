@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     Capabilities,
+    ExecOutputSink,
     ExecResult,
     Identity,
     Provider,
@@ -123,17 +124,24 @@ class DockerSandbox(Sandbox):
         env: dict[str, str] | None = None,
         timeout_sec: float | None = None,
         identity: Identity = Identity.FRAMEWORK,
+        output_sink: ExecOutputSink | None = None,
     ) -> ExecResult:
         loop = asyncio.get_running_loop()
         started = loop.time()
-        exit_code, stdout, stderr = await self._client.exec(
-            argv, cwd=cwd, env=env, timeout_sec=timeout_sec, run_as=self._as(identity)
+        exit_code, stdout, stderr, timed_out = await self._client.exec(
+            argv,
+            cwd=cwd,
+            env=env,
+            timeout_sec=timeout_sec,
+            run_as=self._as(identity),
+            output_sink=output_sink,
         )
         return ExecResult(
             exit_code=exit_code,
             stdout=stdout,
             stderr=stderr,
             duration_ms=int((loop.time() - started) * 1000),
+            timed_out=timed_out,
         )
 
     async def write_file(

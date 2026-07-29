@@ -10,7 +10,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
-__all__ = ["USD_PER_MTOK", "estimate_cost", "extract_usage", "refusal_body", "usage_from_stream"]
+__all__ = [
+    "USD_PER_MTOK",
+    "affordable_output_tokens",
+    "estimate_cost",
+    "extract_usage",
+    "pricing_for",
+    "refusal_body",
+    "usage_from_stream",
+]
 
 #: Rough per-million-token prices, used for budget ceilings rather than billing.
 #: Being approximately right stops a runaway run; being exactly right is the invoice's
@@ -23,13 +31,30 @@ USD_PER_MTOK: dict[str, tuple[float, float]] = {
 }
 
 
+def pricing_for(model: str) -> tuple[float, float] | None:
+    """Known input/output USD-per-million rates for a model family."""
+    lowered = model.lower()
+    return next(
+        (value for key, value in USD_PER_MTOK.items() if key != "default" and key in lowered),
+        None,
+    )
+
+
+def affordable_output_tokens(
+    rates: tuple[float, float],
+    *,
+    input_tokens: int,
+    remaining_usd: float,
+) -> int:
+    """Worst-case output that fits after paying for the exact request input."""
+    input_rate, output_rate = rates
+    available = remaining_usd - input_tokens * input_rate / 1_000_000
+    return int(max(0.0, available) * 1_000_000 / output_rate)
+
+
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     """Approximate the dollar cost of one call."""
-    lowered = model.lower()
-    rates = next(
-        (value for key, value in USD_PER_MTOK.items() if key != "default" and key in lowered),
-        USD_PER_MTOK["default"],
-    )
+    rates = pricing_for(model) or USD_PER_MTOK["default"]
     return (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
 
 
@@ -79,7 +104,11 @@ def usage_from_stream(events: list[bytes]) -> tuple[int, int, str | None]:
     return input_tokens, output_tokens, stop_reason
 
 
-def refusal_body(limit: str, value: float) -> dict[str, Any]:
+def refusal_body(
+    limit: str,
+    value: float,
+    observed_value: float | None = None,
+) -> dict[str, Any]:
     """The error an agent sees when a ceiling is reached.
 
     Shaped like a provider error on purpose: harnesses already know how to stop on one,
@@ -90,6 +119,11 @@ def refusal_body(limit: str, value: float) -> dict[str, Any]:
         "error": {
             "type": "ale_limit_reached",
             "message": f"{limit} limit reached ({value:g})",
-            "ale": {"limit": limit, "value": value},
+            "ale": {
+                "layer": "gateway",
+                "limit": limit,
+                "value": value,
+                "observed_value": observed_value,
+            },
         },
     }

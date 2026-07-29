@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
 from ale.core.domain import DomainManifest
 from ale.core.environment import EpisodeContext
@@ -207,7 +208,16 @@ class ManifestTaskset(Taskset):
             overrides = {
                 key: value
                 for key, value in entry.items()
-                if key in {"image", "setup", "verify", "harness_family", "resources", "timeouts"}
+                if key
+                in {
+                    "image",
+                    "setup",
+                    "verify",
+                    "harness_family",
+                    "resources",
+                    "timeouts",
+                    "tools",
+                }
             }
             yield name, base_params | dict(entry.get("params", {}) or {}), overrides
 
@@ -233,19 +243,22 @@ class ManifestTaskset(Taskset):
         where = f"{folder.relative_path}/{INSTRUCTION}"
         instruction = render_instruction(template, params, where=where)
 
-        return TaskSpec.model_validate(
-            {
-                **payload,
-                "id": task_id,
-                "domain": self.domain.name,
-                "variant": variant,
-                "instruction": instruction,
-                "image": _parse_image(image),
-                "setup": setup,
-                "verify": verify,
-                "params": params,
-            }
-        )
+        try:
+            return TaskSpec.model_validate(
+                {
+                    **payload,
+                    "id": task_id,
+                    "domain": self.domain.name,
+                    "variant": variant,
+                    "instruction": instruction,
+                    "image": _parse_image(image),
+                    "setup": setup,
+                    "verify": verify,
+                    "params": params,
+                }
+            )
+        except ValidationError as exc:
+            raise TaskDefinitionError(f"invalid task manifest: {exc}") from exc
 
     # --- checks the loader owns ---
 

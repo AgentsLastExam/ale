@@ -22,7 +22,7 @@ Three shapes here are worth reading twice:
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -31,15 +31,20 @@ from ale.core.ids import TaskId, content_hash
 __all__ = [
     "AssetMount",
     "ImageRef",
+    "McpServer",
+    "McpSource",
     "NetworkMode",
     "NetworkPolicy",
     "PhaseTimeouts",
     "Resources",
     "SetupStage",
+    "SkillSource",
     "StageSpec",
+    "StdioMcpServer",
+    "StreamableHttpMcpServer",
+    "TaskMcpSource",
     "TaskSpec",
     "ToolProvision",
-    "ValidateSpec",
     "VerifyStage",
 ]
 
@@ -169,32 +174,85 @@ class PhaseTimeouts(BaseModel):
         return self.setup + self.agent + self.verify
 
 
-class ToolProvision(BaseModel):
-    """Extra capabilities handed to the agent for this task."""
+class SkillSource(BaseModel):
+    """One local Skill or immediate collection of Skills."""
 
     model_config = _FROZEN
 
-    skills: tuple[str, ...] = ()
-    mcp_servers: tuple[str, ...] = ()
-    """Names of MCP servers the engine wires up, e.g. the desktop bridge."""
+    path: str = Field(min_length=1)
+    origin: Literal["task", "preset", "run", "cli"] | None = Field(default=None, exclude=True)
+    declared: str | None = Field(default=None, exclude=True)
 
 
-class ValidateSpec(BaseModel):
-    """The admission gate: an oracle solution must reach ``min_reward``."""
+class McpSource(BaseModel):
+    """A Run-level local descriptor or framework-owned built-in MCP server."""
 
     model_config = _FROZEN
 
-    mode: Literal["oracle", "manual"] = "oracle"
-    min_reward: float = Field(default=1.0, ge=0.0, le=1.0)
-    reason: str | None = Field(default=None, description="Required when mode is manual")
-
-    # --- validation ---
+    path: str | None = Field(default=None, min_length=1)
+    builtin: str | None = Field(default=None, min_length=1)
+    origin: Literal["task", "preset", "run", "cli"] | None = Field(default=None, exclude=True)
+    declared: str | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
-    def _check_reason(self) -> Self:
-        if self.mode == "manual" and not self.reason:
-            raise ValueError("manual validation requires a reason")
+    def _exactly_one_source(self) -> Self:
+        if (self.path is None) == (self.builtin is None):
+            raise ValueError("an MCP source requires exactly one of path or builtin")
         return self
+
+
+class TaskMcpSource(BaseModel):
+    """One task-owned MCP descriptor, relative to the task folder."""
+
+    model_config = _FROZEN
+
+    path: str = Field(min_length=1)
+
+
+class StdioMcpServer(BaseModel):
+    """A server the agent's MCP client starts inside the sandbox."""
+
+    model_config = _FROZEN
+
+    schema_version: Literal[1] = 1
+    name: str = Field(min_length=1)
+    transport: Literal["stdio"]
+    command: str = Field(min_length=1)
+    args: tuple[str, ...] = ()
+    cwd: str | None = None
+    environment: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _absolute_cwd(self) -> Self:
+        if self.cwd is not None and not self.cwd.startswith("/"):
+            raise ValueError("stdio MCP cwd must be an absolute sandbox path")
+        return self
+
+
+class StreamableHttpMcpServer(BaseModel):
+    """An unauthenticated remote MCP endpoint."""
+
+    model_config = _FROZEN
+
+    schema_version: Literal[1] = 1
+    name: str = Field(min_length=1)
+    transport: Literal["streamable-http"]
+    url: str = Field(pattern=r"^https?://")
+
+
+McpServer = Annotated[
+    StdioMcpServer | StreamableHttpMcpServer,
+    Field(discriminator="transport"),
+]
+
+
+class ToolProvision(BaseModel):
+    """Explicit agent resources required by this task."""
+
+    model_config = _FROZEN
+
+    skills: tuple[SkillSource, ...] = ()
+    mcp_servers: tuple[TaskMcpSource, ...] = ()
 
 
 class TaskSpec(BaseModel):
@@ -228,7 +286,6 @@ class TaskSpec(BaseModel):
     params: dict[str, Any] = Field(
         default_factory=dict, description="Values substituted into the instruction"
     )
-    validate_: ValidateSpec = Field(default=ValidateSpec(), alias="validate")
     metadata: dict[str, Any] = Field(default_factory=dict)
     extras: dict[str, dict[str, Any]] = Field(
         default_factory=dict,

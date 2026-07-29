@@ -1,0 +1,14 @@
+[agent]
+name = "claude-code"
+version = "2.1.220"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+max_turns = "unlimited"
+max_budget_usd = "unlimited"
+permission_mode = "bypassPermissions"
+allowed_tools = []
+disallowed_tools = []
+append_system_prompt = "default"
+effort = "default"

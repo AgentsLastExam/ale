@@ -21,12 +21,21 @@ drags a screenshot through a context window on every turn of a task that has no 
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Sequence
 from hashlib import sha256
 
+from ale.core.blob import BlobSink
 from ale.core.env import Observation, StepResult, TaskEnv
-from ale.core.trace import ActionRecord, DesktopAction, ObservationRecord, TraceLayer, TraceWriter
+from ale.core.trace import DesktopAction
+from ale.core.trajectory import (
+    AtifContentPart,
+    AtifImageSource,
+    AtifObservation,
+    AtifObservationResult,
+    AtifStep,
+    AtifToolCall,
+    TrajectoryBuilder,
+)
 
 __all__ = ["DEFAULT_MAX_STEPS", "DEFAULT_STALL_LIMIT", "SandboxEnv"]
 
@@ -44,13 +53,15 @@ class SandboxEnv(TaskEnv):
         sandbox: object,
         *,
         instruction: str,
-        trace: TraceWriter,
+        trajectory: TrajectoryBuilder,
+        blobs: BlobSink,
         max_steps: int = DEFAULT_MAX_STEPS,
         stall_limit: int = DEFAULT_STALL_LIMIT,
     ) -> None:
         self._sandbox = sandbox
         self._instruction = instruction
-        self._trace = trace
+        self._trajectory = trajectory
+        self._blobs = blobs
         self.max_steps = max_steps
         self.stall_limit = stall_limit
 
@@ -60,6 +71,10 @@ class SandboxEnv(TaskEnv):
         self._stalled = 0
         self._closed = False
         self._last = Observation(step=0)
+
+    @property
+    def trajectory_steps(self) -> tuple[AtifStep, ...]:
+        return self._trajectory.steps
 
     async def reset(self) -> Observation:
         """The instruction, and nothing to look at yet.
@@ -95,26 +110,57 @@ class SandboxEnv(TaskEnv):
             else 0
         )
         index = 0
+        calls: list[AtifToolCall] = []
+        results: list[AtifObservationResult] = []
+        screenshot_ref = None
+        if wants_screenshot:
+            png = await self._sandbox.screenshot()  # type: ignore[attr-defined]
+            screenshot_ref = self._blobs.put(png, media_type="image/png")
         for action in actions:
+            call_id = f"policy-{self.step_index + 1}-{len(calls) + 1}"
             if action.type == "screenshot":
                 accepted, rejection = True, None
             else:
                 accepted = index < applied
                 rejection = None if accepted else "not dispatched by the guest"
                 index += 1
-            self._trace.write_semantic(
-                ActionRecord(
-                    seq=self._trace.next_seq(TraceLayer.SEMANTIC),
-                    step=self.step_index,
-                    action=action,
-                    accepted=accepted,
-                    rejection=rejection,
+            calls.append(
+                AtifToolCall(
+                    tool_call_id=call_id,
+                    function_name=f"ale__desktop__{action.type}",
+                    arguments=action.model_dump(mode="json", exclude_none=True),
+                    extra={
+                        "ale": {
+                            "normalized_action": action.model_dump(mode="json", exclude_none=True),
+                            "accepted": accepted,
+                            **({"rejection": rejection} if rejection else {}),
+                        }
+                    },
                 )
             )
+            if action.type == "screenshot" and screenshot_ref is not None:
+                content: str | list[AtifContentPart] = [
+                    AtifContentPart(
+                        type="image",
+                        source=AtifImageSource(media_type="image/png", path=screenshot_ref.path),
+                    )
+                ]
+            else:
+                content = "accepted" if accepted else rejection or "not dispatched"
+            results.append(AtifObservationResult(source_call_id=call_id, content=content))
+
+        self._trajectory.add(
+            source="agent",
+            message="",
+            tool_calls=calls,
+            observation=AtifObservation(results=results),
+        )
 
         self.step_index += 1
         observation = (
-            await self._observe() if wants_screenshot else Observation(step=self.step_index)
+            Observation(step=self.step_index, screenshot_png=png)
+            if wants_screenshot
+            else Observation(step=self.step_index)
         )
         self._last = observation
         self._note_progress(actions, observation)
@@ -163,25 +209,3 @@ class SandboxEnv(TaskEnv):
             stalled = signature == previous_actions
 
         self._stalled = self._stalled + 1 if stalled else 0
-
-    async def _observe(self, *, instruction: str | None = None) -> Observation:
-        """Capture the screen, record it, and notice whether anything changed.
-
-        The image is written beside the trace and referenced by path. Inlining
-        screenshots as base64 is how a trace becomes unreadable and unbounded, which the
-        previous framework paid for.
-        """
-        png = await self._sandbox.screenshot()  # type: ignore[attr-defined]
-
-        path = self._trace.blob_path(f"step-{self.step_index:04d}.png")
-        await asyncio.to_thread(path.write_bytes, png)
-        reference = self._trace.relative(path)
-
-        self._trace.write_semantic(
-            ObservationRecord(
-                seq=self._trace.next_seq(TraceLayer.SEMANTIC),
-                step=self.step_index,
-                screenshot_ref=reference,
-            )
-        )
-        return Observation(step=self.step_index, screenshot_png=png, instruction=instruction)

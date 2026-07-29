@@ -14,11 +14,20 @@ from pathlib import Path
 import pytest
 
 from ale.core.config import RunConfig
+from ale.core.harness import (
+    AgentRun,
+    EffectiveAgentResources,
+    HarnessSession,
+    ResolvedSkill,
+)
 from ale.core.lock import TaskSource
+from ale.core.sandbox import Identity, Sandbox
+from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.ledger import Ledger, episode_identity
 from ale.run.provenance import (
     ProvenanceInputs,
@@ -137,7 +146,7 @@ async def test_resume_skips_completed_work_and_loses_nothing(
             ledger.start_episode(
                 episode_id=result.episode_id, run_id="fixed", identity=identity, spec=task.spec
             )
-            ledger.finish_episode(result.episode_id, result.verdict)
+            ledger.finish_episode(result.episode_id, result.record)
 
         done = [row for row in ledger.episodes("fixed") if row.succeeded]
         assert len(done) == 2
@@ -154,3 +163,103 @@ async def test_resume_skips_completed_work_and_loses_nothing(
         assert other != identity
     finally:
         ledger.close()
+
+
+class EvidenceHarness(ClaudeCodeHarness):
+    async def install(self, sandbox: Sandbox) -> str:
+        return self.version()
+
+    async def launch(
+        self,
+        instruction: str,
+        sandbox: Sandbox,
+        session: HarnessSession,
+        *,
+        timeout_sec: float,
+    ) -> AgentRun:
+        transcript = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {"content": [{"type": "text", "text": "evidence"}]},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "session_id": "evidence-session",
+                        "result": "done",
+                    }
+                ),
+            ]
+        )
+        await sandbox.write_file(
+            f"{session.home}/transcript.jsonl",
+            (transcript + "\n").encode(),
+            identity=Identity.AGENT,
+        )
+        return AgentRun(exit_code=0, final_message="done")
+
+
+@pytest.mark.asyncio
+async def test_evidence_is_parsed_when_artifacts_are_disabled(
+    tmp_path: Path,
+    write_repo: Callable[..., Path],
+) -> None:
+    task_root = write_repo(tmp_path / "repo")
+    task = next(iter(ManifestTaskset(task_root).load()))
+    result = await run_episode(
+        task,
+        StandardEnvironment(EvidenceHarness()),
+        DockerProvider(),
+        run_dir=tmp_path / "runs",
+        collect_artifacts=False,
+    )
+
+    assert result.verdict.status is Status.COMPLETED
+    assert not (result.run_dir / "logs/claude-code/transcript.jsonl").exists()
+    trajectory = AtifTrajectory.model_validate_json(
+        (result.run_dir / "trajectory.json").read_text()
+    )
+    assert any(
+        step.source == "agent" and step.message in {"evidence", "done"} for step in trajectory.steps
+    )
+
+
+@pytest.mark.asyncio
+async def test_unpinned_resource_is_recorded_and_blocks_reporting(
+    tmp_path: Path,
+    write_repo: Callable[..., Path],
+) -> None:
+    task_root = write_repo(tmp_path / "repo")
+    resource_path = tmp_path / "skill"
+    resource_path.mkdir()
+    (resource_path / "SKILL.md").write_text("local")
+    resources = EffectiveAgentResources(
+        skills=(
+            ResolvedSkill(
+                name="skill",
+                path=resource_path,
+                source_layers=("run",),
+                declared_sources=(str(resource_path),),
+                digest="sha256:" + "b" * 64,
+                reportable=False,
+                reportability_reason="run local resource cannot be re-fetched",
+            ),
+        ),
+        digest="sha256:" + "c" * 64,
+    )
+    inputs = inputs_for(OracleHarness())
+    inputs.agent = agent_provenance(
+        OracleHarness(),
+        "test-model",
+        resources=resources,
+    )
+
+    result = await run_with_provenance(task_root, tmp_path / "runs", inputs)
+
+    assert result.lock is not None
+    assert result.lock.agent.resources_digest == resources.digest
+    assert result.lock.agent.resources[0].digest == "sha256:" + "b" * 64
+    assert any("not reportable" in problem for problem in result.lock.missing_for_report())

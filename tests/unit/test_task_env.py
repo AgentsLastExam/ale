@@ -15,8 +15,10 @@ import pytest
 
 from ale.core.env import Observation, StepResult
 from ale.core.harness import HarnessSession, StepwisePolicy
-from ale.core.trace import DesktopAction, TraceLayer, TraceWriter, read_records
+from ale.core.trace import DesktopAction
+from ale.core.trajectory import AtifAgent, TrajectoryBuilder
 from ale.run.envs import SandboxEnv
+from ale.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
@@ -53,7 +55,11 @@ def make_env(tmp_path: Path, sandbox: FakeSandbox, **kwargs: object) -> SandboxE
     return SandboxEnv(
         sandbox,
         instruction="do the thing",
-        trace=TraceWriter(tmp_path),
+        trajectory=TrajectoryBuilder(
+            agent=AtifAgent(name="test-policy", version="1"),
+            trajectory_id="trajectory-e",
+        ),
+        blobs=BlobStore(tmp_path),
         **kwargs,  # type: ignore[arg-type]
     )
 
@@ -227,15 +233,20 @@ class TestWitnessing:
             [DesktopAction(type="type", text="x"), DesktopAction(type="key", keys=("a",))]
         )
 
-        records = list(read_records(TraceWriter(tmp_path).path(TraceLayer.SEMANTIC)))
-        observations = [r for r in records if r["kind"] == "observation"]
-        actions = [r for r in records if r["kind"] == "action"]
+        steps = env.trajectory_steps
+        calls = [call for step in steps for call in step.tool_calls or ()]
+        results = [
+            result
+            for step in steps
+            for result in (step.observation.results if step.observation else ())
+        ]
 
-        # One observation, for the one step that asked to see. Every action is recorded
-        # either way — including the request itself, which is part of what the agent did.
-        assert len(observations) == 1
-        assert len(actions) == 4
-        assert [a["step"] for a in actions] == [0, 0, 1, 1]
+        assert len(steps) == 2
+        assert len(calls) == len(results) == 4
+        assert all(
+            result.source_call_id == call.tool_call_id
+            for call, result in zip(calls, results, strict=True)
+        )
 
     @pytest.mark.asyncio
     async def test_screenshots_are_files_not_inlined(self, tmp_path: Path) -> None:
@@ -244,13 +255,12 @@ class TestWitnessing:
         await env.reset()
         await env.step([SHOOT])
 
-        (observation,) = [
-            r
-            for r in read_records(TraceWriter(tmp_path).path(TraceLayer.SEMANTIC))
-            if r["kind"] == "observation"
-        ]
-        assert observation["screenshot_ref"].startswith("blobs/")
-        assert (tmp_path / observation["screenshot_ref"]).is_file()
+        (result,) = env.trajectory_steps[0].observation.results
+        assert isinstance(result.content, list)
+        assert result.content[0].source is not None
+        path = result.content[0].source.path
+        assert path.startswith("blobs/image/")
+        assert (tmp_path / path).is_file()
 
     @pytest.mark.asyncio
     async def test_an_undispatched_action_is_recorded_as_rejected(self, tmp_path: Path) -> None:
@@ -259,13 +269,10 @@ class TestWitnessing:
         await env.reset()
         await env.step([DesktopAction(type="click", coordinate=(1, 2)), DesktopAction(type="wait")])
 
-        actions = [
-            r
-            for r in read_records(TraceWriter(tmp_path).path(TraceLayer.SEMANTIC))
-            if r["kind"] == "action"
-        ]
-        assert [a["accepted"] for a in actions] == [True, False]
-        assert actions[1]["rejection"]
+        calls = env.trajectory_steps[0].tool_calls
+        assert calls is not None
+        assert [call.extra["ale"]["accepted"] for call in calls] == [True, False]
+        assert calls[1].extra["ale"]["rejection"]
 
 
 class TestStepwisePolicy:

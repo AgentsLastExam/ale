@@ -63,7 +63,7 @@ async def test_both_backends_reach_the_same_verdict(
 
     assert container.verdict.status is Status.COMPLETED, container.verdict.failure
     assert machine.verdict.status is Status.COMPLETED, machine.verdict.failure
-    assert container.verdict.primary_reward == machine.verdict.primary_reward == 1.0
+    assert container.verdict.rewards == machine.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio

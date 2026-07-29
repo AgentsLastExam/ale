@@ -47,7 +47,7 @@ uv run ale run demo/hello --agent nop      # does nothing; scores a real zero
 
 ```bash
 uv run ale lint tasks/            # static checks, no container
-uv run ale validate tasks/        # every oracle must reach its declared score
+uv run ale validate tasks/        # every oracle must produce non-empty all-ones rewards
 uv run ale new-task tasks/mine    # scaffold a task that already passes both
 uv run ale run <task> -n 5 --run-id sweep     # five episodes, resumable by that id
 uv run ale run <task> --require-reportable    # fail unless provenance could be published
@@ -68,8 +68,12 @@ Under `runs/<run>/<episode>/`:
 - `trace.transport.jsonl` — every model call, written by the gateway and by nothing else.
   Calls that failed upstream are recorded too, with their status: silence about a failed
   call is indistinguishable from an idle agent.
-- `trace.semantic.jsonl` — the trajectory, plus a closing record saying where the wall
-  clock went: model, sandbox, framework, and per phase.
+- `trajectory.json` — Harbor ATIF v1.7 agent-visible messages, tools, observations,
+  media references, subagents, and continuations.
+- `trace.execution.jsonl` — setup/verify/framework phases, commands, streamed output,
+  policy application, and cleanup diagnostics.
+- `result.json` — terminal status, all named rewards, failure, and phase timings.
+- `blobs/` — content-addressed large or binary payloads referenced by the records above.
 - `artifacts/` — the paths the task declared, if this run asked to keep them.
 
 Writing tasks: [docs/task-authoring.md](docs/task-authoring.md). Building images:

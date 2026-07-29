@@ -42,6 +42,7 @@ markers = [
     "integration: end-to-end tests that provision real sandboxes",
     "needs_docker: requires a working container runtime",
     "needs_gui: requires the desktop base image, which is large",
+    "needs_llm: requires provider credentials and makes real model calls",
     "needs_kvm: requires hardware virtualisation (/dev/kvm)",
     "needs_hf_gated: requires an authorised Hugging Face token for gated datasets",
 ]

@@ -10,7 +10,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from ale.core.config import GatewayLimits, RunConfig, load_run_config, merge_layers, parse_override
+from ale.core.config import (
+    GatewayLimits,
+    LoggingPolicy,
+    RunConfig,
+    load_run_config,
+    merge_layers,
+    parse_override,
+)
 from ale.core.errors import ConfigError, ProvenanceIncompleteError, ProviderCapabilityError
 from ale.core.ids import TaskId
 from ale.core.lock import (
@@ -24,16 +31,8 @@ from ale.core.lock import (
 )
 from ale.core.sandbox import Capabilities
 from ale.core.taskspec import ImageRef, NetworkMode, NetworkPolicy, Resources, TaskSpec
-from ale.core.trace import (
-    DesktopAction,
-    ExecRecord,
-    TimingRecord,
-    TraceLayer,
-    TraceWriter,
-    TransportRecord,
-    read_records,
-)
-from ale.run.episode import _DiscardedArtifacts, _write_timing
+from ale.core.trace import TransportCall
+from ale.run.episode import _DiscardedArtifacts
 
 pytestmark = pytest.mark.unit
 
@@ -114,7 +113,7 @@ class TestConfigLayering:
     @pytest.mark.parametrize(
         ("text", "expected"),
         [
-            ("agent.kwargs.max_turns=50", 50),
+            ("agent.settings.max_turns=50", 50),
             ("gateway.limits.max_cost_usd=2.5", 2.5),
             ("resume=false", False),
             ("agent.model=claude-opus-4-8", "claude-opus-4-8"),
@@ -141,9 +140,43 @@ class TestConfigLayering:
         assert one.config_hash != two.config_hash
         assert one.config_hash == RunConfig().config_hash
 
-    def test_budget_ceilings_are_on_by_default(self) -> None:
+    def test_gateway_ceilings_are_explicitly_unlimited_by_default(self) -> None:
         limits = RunConfig().gateway.limits
-        assert limits.max_total_tokens and limits.max_cost_usd
+        assert limits.model_dump() == {
+            "max_model_calls": "unlimited",
+            "max_input_tokens": "unlimited",
+            "max_output_tokens": "unlimited",
+            "max_total_tokens": "unlimited",
+            "max_cost_usd": "unlimited",
+        }
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"max_model_calls": "default"},
+            {"max_model_calls": 0},
+            {"max_input_tokens": -1},
+            {"max_output_tokens": False},
+        ],
+    )
+    def test_gateway_limits_accept_positive_or_unlimited_only(
+        self, payload: dict[str, object]
+    ) -> None:
+        with pytest.raises(ValidationError):
+            GatewayLimits.model_validate(payload)
+        assert GatewayLimits(max_model_calls="unlimited").max_model_calls == "unlimited"
+
+    def test_logging_retention_defaults_are_explicit_and_strict(self) -> None:
+        assert LoggingPolicy().model_dump() == {
+            "native_logs": "minimal",
+            "transport_payloads": "digests",
+            "token_data": "none",
+        }
+        assert LoggingPolicy(token_data="exact").token_data == "exact"
+        with pytest.raises(ValidationError):
+            LoggingPolicy.model_validate({"native_logs": "sometimes"})
+        with pytest.raises(ValidationError):
+            LoggingPolicy.model_validate({"unknown": True})
 
 
 class TestCapabilities:
@@ -157,28 +190,6 @@ class TestCapabilities:
             gui=True, network_modes=frozenset({NetworkMode.BLOCK}), max_cpus=4, max_memory_mb=8192
         )
         caps.check(Resources(cpus=2, memory_mb=2048), NetworkPolicy())
-
-
-class TestTrace:
-    def test_writes_and_reads_records(self, tmp_path: Path) -> None:
-        writer = TraceWriter(tmp_path)
-        writer.write_semantic(
-            ExecRecord(seq=writer.next_seq(TraceLayer.SEMANTIC), argv_digest=DIGEST, exit_code=0)
-        )
-        records = list(read_records(writer.path(TraceLayer.SEMANTIC)))
-        assert records[0]["kind"] == "exec"
-        assert records[0]["seq"] == 0
-
-    def test_torn_final_line_does_not_hide_earlier_records(self, tmp_path: Path) -> None:
-        path = tmp_path / "trace.semantic.jsonl"
-        path.write_text(json.dumps({"seq": 0, "kind": "note", "message": "ok"}) + '\n{"seq": 1,')
-        assert [r["seq"] for r in read_records(path)] == [0]
-
-    def test_desktop_actions_are_typed(self) -> None:
-        action = DesktopAction(type="click", coordinate=(512, 340))
-        assert action.coordinate == (512, 340)
-        with pytest.raises(ValidationError):
-            DesktopAction(type="teleport")  # type: ignore[arg-type]
 
 
 class TestGuestProtocol:
@@ -225,55 +236,6 @@ class TestGuestProtocol:
         assert reply["error"]["code"] == "not_found"  # type: ignore[index]
 
 
-class TestEpisodeTiming:
-    """Where the wall clock went — one duration cannot tell you what to fix."""
-
-    def test_shares_sum_to_the_total(self) -> None:
-        record = TimingRecord(seq=0, total_ms=1000, model_ms=700, sandbox_ms=200, framework_ms=100)
-        assert record.model_ms + record.sandbox_ms + record.framework_ms == record.total_ms
-
-    def test_split_is_computed_from_recorded_evidence(self, tmp_path: Path) -> None:
-        """Model time comes from the gateway's own records, so it cannot be asserted."""
-        trace = TraceWriter(tmp_path)
-        trace.write_transport(
-            TransportRecord(
-                seq=0,
-                episode_id="e",
-                model="m",
-                request_digest=DIGEST,
-                latency_ms=600,
-            )
-        )
-        trace.write_semantic(ExecRecord(seq=0, argv_digest=DIGEST, exit_code=0, duration_ms=150))
-
-        _write_timing(trace, tmp_path, duration_sec=1.0)
-
-        (timing,) = [
-            r for r in read_records(trace.path(TraceLayer.SEMANTIC)) if r["kind"] == "timing"
-        ]
-        assert timing["model_ms"] == 600
-        assert timing["sandbox_ms"] == 150
-        assert timing["framework_ms"] == 250
-
-    def test_concurrent_work_cannot_produce_a_negative_share(self, tmp_path: Path) -> None:
-        """Overlapping calls can sum past the wall clock; the remainder must stay real."""
-        trace = TraceWriter(tmp_path)
-        for seq in range(3):
-            trace.write_transport(
-                TransportRecord(
-                    seq=seq, episode_id="e", model="m", request_digest=DIGEST, latency_ms=900
-                )
-            )
-
-        _write_timing(trace, tmp_path, duration_sec=1.0)
-
-        (timing,) = [
-            r for r in read_records(trace.path(TraceLayer.SEMANTIC)) if r["kind"] == "timing"
-        ]
-        assert timing["model_ms"] == 1000
-        assert timing["framework_ms"] == 0
-
-
 class TestArtifactPolicy:
     """Declaring an output and keeping a copy of it are separate decisions."""
 
@@ -308,8 +270,13 @@ class TestArtifactPolicy:
 class TestFailedModelCalls:
     def test_an_upstream_failure_is_still_recorded(self) -> None:
         """Silence would read as an idle agent; it was a provider returning 529s."""
-        record = TransportRecord(
-            seq=0, episode_id="e", model="m", request_digest=DIGEST, upstream_status=529
+        record = TransportCall(
+            episode_id="e",
+            call_id="call-1",
+            model="m",
+            request_digest=DIGEST,
+            disposition="failed",
+            upstream_status=529,
         )
         assert record.upstream_status == 529
         assert record.input_tokens == 0  # a failed call bought nothing

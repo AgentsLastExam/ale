@@ -1,49 +1,52 @@
-"""Tools an agent runs with, staged into the sandbox rather than assumed present."""
+"""Framework-owned agent tools staged only when explicitly requested."""
 
 from __future__ import annotations
 
-import json
+import hashlib
 from pathlib import Path, PurePosixPath
 
+from ale.core.harness import ResolvedMcpServer
 from ale.core.sandbox import Identity, Sandbox
+from ale.core.taskspec import StdioMcpServer
 
-__all__ = ["DESKTOP_SERVER_NAME", "stage_desktop_bridge"]
+__all__ = ["CUA_DESKTOP_NAME", "resolved_cua_desktop", "stage_cua_desktop"]
 
-#: What the agent's client will call this server. Tool names reach the model as
-#: ``mcp__<server>__<tool>``, so it is short and says what it drives.
-DESKTOP_SERVER_NAME = "desktop"
-
-#: The two files that make up the bridge: the MCP server and the action layer it calls.
-#: Copied rather than imported from ``/opt/ale``, which the agent cannot read — and should
-#: not, since that is the service driving its own sandbox.
+CUA_DESKTOP_NAME = "cua-desktop"
 _SOURCES = (
-    Path(__file__).resolve().parent / "desktop_mcp.py",
+    Path(__file__).resolve().parent / "cua_desktop_mcp.py",
     Path(__file__).resolve().parents[1] / "guestd" / "gui.py",
 )
 
 
-async def stage_desktop_bridge(sandbox: Sandbox, home: str) -> str:
-    """Put the desktop bridge where the agent can run it, and return its config path.
+def resolved_cua_desktop() -> ResolvedMcpServer:
+    """Return the built-in through the same canonical contract as external servers."""
+    hasher = hashlib.sha256()
+    for source in _SOURCES:
+        hasher.update(source.name.encode())
+        hasher.update(b"\0")
+        hasher.update(source.read_bytes())
+        hasher.update(b"\0")
+    return ResolvedMcpServer(
+        name=CUA_DESKTOP_NAME,
+        server=StdioMcpServer(
+            name=CUA_DESKTOP_NAME,
+            transport="stdio",
+            command="python3",
+            args=("{home}/.ale-cua-desktop/cua_desktop_mcp.py",),
+        ),
+        source_layers=("run",),
+        declared_sources=(CUA_DESKTOP_NAME,),
+        digest=f"sha256:{hasher.hexdigest()}",
+        source_version=None,
+        reportable=True,
+        staged_files=Path(__file__).resolve().parent,
+    )
 
-    Staged as the agent because the agent's own client is what launches it: a file the
-    agent cannot execute is a server that never starts, and the failure surfaces as a
-    model that simply never uses the tools.
-    """
-    root = PurePosixPath(home) / ".ale-desktop"
+
+async def stage_cua_desktop(sandbox: Sandbox, home: str) -> str:
+    """Stage the built-in implementation and return its sandbox directory."""
+    root = PurePosixPath(home) / ".ale-cua-desktop"
     await sandbox.exec(["mkdir", "-p", str(root)], identity=Identity.AGENT)
     for source in _SOURCES:
         await sandbox.write_file(root / source.name, source.read_bytes(), identity=Identity.AGENT)
-
-    config = {
-        "mcpServers": {
-            DESKTOP_SERVER_NAME: {
-                "command": "python3",
-                "args": [str(root / "desktop_mcp.py")],
-            }
-        }
-    }
-    config_path = root / "mcp.json"
-    await sandbox.write_file(
-        config_path, json.dumps(config, indent=2).encode("utf-8"), identity=Identity.AGENT
-    )
-    return str(config_path)
+    return str(root)

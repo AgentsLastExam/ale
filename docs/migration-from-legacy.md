@@ -100,11 +100,11 @@ ale new-task tasks/<group>/<task>       # start from something that already pass
 # write oracle/run.sh — the legacy task usually had a known solution
 
 ale lint tasks/<group>/<task>
-ale validate tasks/<group>/<task>       # must reach min_reward
+ale validate tasks/<group>/<task>       # every named reward must equal 1.0
 ```
 
-If the oracle cannot reach the threshold, the rebuild is not finished. That is the point
-of the gate: a task nobody can solve is a broken task, and finding out costs one container
+If the oracle does not produce a non-empty all-ones reward map, the rebuild is not
+finished. A task nobody can solve is broken, and finding that out costs one container
 rather than one agent run.
 
 ## What does not carry over

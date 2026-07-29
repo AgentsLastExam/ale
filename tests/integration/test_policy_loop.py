@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.trace import DesktopAction, read_records
+from ale.core.trace import DesktopAction
+from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
@@ -61,21 +62,31 @@ async def test_every_step_is_witnessed_by_the_framework(
     result = await run_policy(task_root, tmp_path / "runs", harness)
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    records = list(read_records(result.run_dir / "trace.semantic.jsonl"))
-
-    observations = [r for r in records if r["kind"] == "observation"]
-    actions = [r for r in records if r["kind"] == "action"]
+    trajectory = AtifTrajectory.model_validate_json(
+        (result.run_dir / "trajectory.json").read_text()
+    )
+    agent_steps = [step for step in trajectory.steps if step.source == "agent"]
+    calls = [call for step in agent_steps for call in step.tool_calls or ()]
+    results = [
+        item
+        for step in agent_steps
+        for item in (step.observation.results if step.observation else ())
+    ]
 
     # One observation: the one step that asked to see. The other step acted without
     # looking, which is now a thing an agent can choose and the trace can show.
-    assert len(observations) == 1
-    assert len(actions) == 4
-    assert [a["step"] for a in actions] == [0, 0, 1, 1]
+    assert len(agent_steps) == 3
+    assert agent_steps[-1].message.startswith("scripted harness ran 2 step")
+    assert len(calls) == len(results) == 4
 
     # Screenshots are files referenced by path, never inlined into the trace.
-    assert all(o["screenshot_ref"].startswith("blobs/") for o in observations)
-    for observation in observations:
-        assert (result.run_dir / observation["screenshot_ref"]).is_file()
+    screenshot = next(
+        item
+        for item in results
+        if isinstance(item.content, list) and item.content[0].type == "image"
+    )
+    assert screenshot.content[0].source is not None
+    assert (result.run_dir / screenshot.content[0].source.path).is_file()
 
     # The harness saw the instruction exactly once, on the first step.
     assert harness.observations[0].instruction is not None

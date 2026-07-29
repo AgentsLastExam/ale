@@ -18,31 +18,53 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import shlex
+import logging
+import math
+import shutil
 import time
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import Literal, cast
 
 from ale.core.environment import Environment, EpisodeContext, Phase
-from ale.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
-from ale.core.harness import AutonomousHarness, PolicyHarness
-from ale.core.lock import AssetProvenance, KitProvenance, SandboxProvenance
-from ale.core.sandbox import Identity, Sandbox, SandboxRequest
-from ale.core.task import Task
-from ale.core.taskspec import AssetMount
-from ale.core.trace import (
-    ExecRecord,
-    InstructionRecord,
-    NoteRecord,
-    PhaseSpan,
-    TraceLayer,
-    VerifierRecord,
+from ale.core.errors import (
+    PhaseTimeoutError,
+    TaskError,
+    TrajectoryConversionError,
+    VerifierOutputError,
 )
+from ale.core.harness import (
+    AutonomousHarness,
+    PolicyHarness,
+    TrajectoryParseContext,
+)
+from ale.core.lock import AssetProvenance, KitProvenance, SandboxProvenance
+from ale.core.result import PhaseTiming
+from ale.core.sandbox import (
+    ExecOutputSink,
+    ExecResult,
+    Identity,
+    Sandbox,
+    SandboxRequest,
+)
+from ale.core.task import Task
+from ale.core.taskspec import AssetMount, StdioMcpServer
+from ale.core.trace import (
+    PhaseFinished,
+    PhaseStarted,
+    PolicyApplied,
+    TrajectoryLink,
+    read_jsonl,
+)
+from ale.core.trajectory import AtifAgent, AtifMetrics, AtifTrajectory, TrajectoryBuilder
 from ale.core.verdict import Verdict
 from ale.run.assets import stage_mounts
 from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
 from ale.run.harnesses.builtin import oracle_dir
 from ale.run.images import resolve_digest, resolve_ref
 from ale.run.kits import hash_kit
+from ale.run.recording import BlobStore, CommandRecorder, execution_logging
 
 __all__ = ["StandardEnvironment"]
 
@@ -76,6 +98,7 @@ class StandardEnvironment(Environment):
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
         spec = task.spec
+        self.harness.validate_resources(ctx.agent_resources)
         sandbox = await self._timed(ctx, Phase.PROVISION, self._provision(ctx))
         try:
             await self._with_deadline(
@@ -89,7 +112,7 @@ class StandardEnvironment(Environment):
             )
         finally:
             # Teardown runs on every path, including cancellation.
-            await asyncio.shield(self._teardown(ctx, sandbox))
+            await asyncio.shield(self._timed(ctx, Phase.TEARDOWN, self._teardown(ctx, sandbox)))
 
         ctx.extras["rewards"] = rewards
         return Verdict.completed(await task.score(ctx))
@@ -177,13 +200,7 @@ class StandardEnvironment(Environment):
 
     async def _agent(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         spec = ctx.spec
-        ctx.trace.write_semantic(
-            InstructionRecord(
-                seq=ctx.trace.next_seq(TraceLayer.SEMANTIC),
-                text_digest=_digest(spec.instruction),
-                chars=len(spec.instruction),
-            )
-        )
+        ctx.extras["agent_started"] = True
 
         harness = self.harness
         if isinstance(harness, PolicyHarness):
@@ -196,27 +213,37 @@ class StandardEnvironment(Environment):
         # Installed first, then sealed. Putting the agent's own CLI in place is our
         # preparation, not its work; an image that has not pre-baked one would otherwise
         # be unusable, since the only thing a sealed sandbox can reach is the gateway.
-        await harness.install(sandbox)
-        ctx.agent_version = harness.version()
-        await self._seal(ctx, sandbox)
-
         # The session the agent gets carries the sandbox's own view of the gateway.
         session = ctx.session.model_copy(
             update={
                 "gateway_url": sandbox.gateway_url or ctx.session.gateway_url,
                 "home": ctx.home,
+                "sandbox_id": sandbox.sandbox_id,
+                "resources_digest": ctx.agent_resources.digest,
             }
         )
+        ctx.agent_version = await harness.install(
+            _RecordedSandbox(ctx, sandbox, component="harness-install")
+        )
+        await harness.install_resources(
+            _RecordedSandbox(ctx, sandbox, component="harness-resources"),
+            session,
+            ctx.agent_resources,
+        )
+        await self._validate_stdio_mcp(ctx, sandbox)
+        await self._seal(ctx, sandbox)
         run = await harness.launch(
-            spec.instruction, sandbox, session, timeout_sec=spec.timeouts.agent
+            spec.instruction,
+            _RecordedSandbox(
+                ctx,
+                sandbox,
+                component="harness-launch",
+                actor="task" if harness.name == "oracle" else "framework",
+            ),
+            session,
+            timeout_sec=spec.timeouts.agent,
         )
-        ctx.trace.write_semantic(
-            NoteRecord(
-                seq=ctx.trace.next_seq(TraceLayer.SEMANTIC),
-                message="agent finished",
-                data={"exit_code": run.exit_code, "harness": harness.name},
-            )
-        )
+        ctx.extras["agent_run"] = run
 
     async def _rollout(self, harness, ctx: EpisodeContext, sandbox: Sandbox) -> None:  # type: ignore[no-untyped-def]
         """Hand the agent a stepwise view of the sandbox and let it drive.
@@ -230,26 +257,36 @@ class StandardEnvironment(Environment):
         # in this process and drives the sandbox from outside, so it reaches the gateway
         # at the host's own address; rewriting it to the sandbox's view hands a host-side
         # agent a hostname that only resolves inside a container.
-        await harness.install(sandbox)
-        ctx.agent_version = harness.version()
+        ctx.agent_version = await harness.install(
+            _RecordedSandbox(ctx, sandbox, component="harness-install")
+        )
         await self._seal(ctx, sandbox)
 
+        assert ctx.blobs is not None
+        assert ctx.trajectory is not None
+        builder = TrajectoryBuilder(
+            trajectory_id=ctx.trajectory_id,
+            session_id=ctx.episode_id,
+            agent=AtifAgent(
+                name=harness.name,
+                version=ctx.agent_version or harness.version(),
+                model_name=ctx.session.model or None,
+            ),
+        )
+        builder.add(source="user", message=ctx.spec.instruction)
         async with SandboxEnv(
             sandbox,
             instruction=ctx.spec.instruction,
-            trace=ctx.trace,
+            trajectory=builder,
+            blobs=ctx.blobs,
             max_steps=self.max_steps,
             stall_limit=self.stall_limit,
         ) as env:
             closing = await harness.rollout(env, ctx.session.model_copy(update={"home": ctx.home}))
-
-        ctx.trace.write_semantic(
-            NoteRecord(
-                seq=ctx.trace.next_seq(TraceLayer.SEMANTIC),
-                message="agent finished",
-                data={"harness": harness.name, "steps": env.step_index, "closing": closing or ""},
-            )
-        )
+        if closing:
+            builder.add(source="agent", message=closing)
+        self._persist_trajectory(ctx, builder.build())
+        ctx.extras["trajectory_written"] = True
 
     async def _seal(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         """Apply the declared policy, and record that it was applied.
@@ -259,14 +296,58 @@ class StandardEnvironment(Environment):
         the lock file would describe the one that was intended rather than the one that
         happened.
         """
-        await sandbox.close_egress()
-        ctx.trace.write_semantic(
-            NoteRecord(
-                seq=ctx.trace.next_seq(TraceLayer.SEMANTIC),
-                message="network sealed for the agent",
-                data={"mode": ctx.spec.network.mode.value},
+        assert ctx.execution is not None
+        try:
+            await sandbox.close_egress()
+        except BaseException:
+            ctx.execution.append(
+                PolicyApplied(
+                    episode_id=ctx.episode_id,
+                    phase=Phase.AGENT.value,
+                    component="network-policy",
+                    level="error",
+                    policy="sealed",
+                    requested_mode=ctx.spec.network.mode.value,
+                    succeeded=False,
+                ),
+                durable=True,
             )
-        )
+            raise
+        else:
+            ctx.execution.append(
+                PolicyApplied(
+                    episode_id=ctx.episode_id,
+                    phase=Phase.AGENT.value,
+                    component="network-policy",
+                    policy="sealed",
+                    requested_mode=ctx.spec.network.mode.value,
+                    succeeded=True,
+                ),
+                durable=True,
+            )
+
+    async def _validate_stdio_mcp(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
+        for resolved in ctx.agent_resources.mcp_servers:
+            server = resolved.server
+            if not isinstance(server, StdioMcpServer):
+                continue
+            command = server.command.replace("{home}", ctx.home)
+            if command.startswith("/"):
+                result = await sandbox.exec(["test", "-x", command], identity=Identity.AGENT)
+            else:
+                result = await sandbox.exec(
+                    ["sh", "-c", 'command -v "$1" >/dev/null', "sh", command],
+                    identity=Identity.AGENT,
+                )
+            if not result.ok:
+                raise TaskError(
+                    f"MCP server {resolved.name!r} command is not executable: {command}"
+                )
+            if server.cwd:
+                cwd = server.cwd.replace("{home}", ctx.home)
+                result = await sandbox.exec(["test", "-d", cwd], identity=Identity.AGENT)
+                if not result.ok:
+                    raise TaskError(f"MCP server {resolved.name!r} cwd is not a directory: {cwd}")
 
     async def _verify(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> dict[str, float]:
         """Score the episode using the task's own verify stage.
@@ -287,37 +368,152 @@ class StandardEnvironment(Environment):
 
         await self._install_kits(ctx, sandbox, folder, ctx.spec.verify.kits)
 
-        result = await self._run_stage(ctx, sandbox, VERIFY_DIR, Phase.VERIFY)
+        await self._run_stage(ctx, sandbox, VERIFY_DIR, Phase.VERIFY)
         rewards = await self._read_rewards(sandbox)
 
-        ctx.trace.write_semantic(
-            VerifierRecord(
-                seq=ctx.trace.next_seq(TraceLayer.SEMANTIC),
-                entry=str(VERIFY_DIR / "run.sh"),
-                exit_code=result,
-                rewards=rewards,
-            )
-        )
         return rewards
 
     async def _teardown(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         # Collection is best effort: a sandbox that died still has to be released.
+        logger = logging.getLogger("ale.execution")
         for index, path in enumerate(ctx.spec.artifacts):
             name = Path(path).name or f"artifact-{index}"
-            with contextlib.suppress(Exception):
+            try:
                 await ctx.artifacts.collect(sandbox, path, name)
+                logger.info(
+                    "artifact collected",
+                    extra={"ale_data": {"source": path, "name": name}},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "artifact collection failed",
+                    extra={
+                        "ale_data": {
+                            "source": path,
+                            "name": name,
+                            "error": str(exc),
+                        }
+                    },
+                )
 
         # The harness's own logs, in their own place. What the agent produced and how the
         # harness went about producing it are different questions with different owners:
         # the task declares the first because only it knows what its output is, and the
         # harness declares the second because only it knows what it writes.
         for name in getattr(self.harness, "logs", ()):
-            with contextlib.suppress(Exception):
+            try:
                 await ctx.artifacts.collect_file(
                     sandbox, f"{ctx.home}/{name}", f"{self.harness.name}/{name}"
                 )
+                logger.info(
+                    "native log collected",
+                    extra={"ale_data": {"harness": self.harness.name, "name": name}},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "native log collection failed",
+                    extra={
+                        "ale_data": {
+                            "harness": self.harness.name,
+                            "name": name,
+                            "error": str(exc),
+                        }
+                    },
+                )
 
+        session = ctx.session.model_copy(
+            update={
+                "gateway_url": sandbox.gateway_url or ctx.session.gateway_url,
+                "home": ctx.home,
+                "sandbox_id": sandbox.sandbox_id,
+                "resources_digest": ctx.agent_resources.digest,
+            }
+        )
+        try:
+            await self.harness.cleanup(
+                _RecordedSandbox(ctx, sandbox, component="harness-cleanup"),
+                session,
+            )
+            logger.info("harness cleanup completed")
+        except Exception as exc:
+            logger.warning(
+                "harness cleanup failed",
+                extra={"ale_data": {"error": str(exc)}},
+            )
         await ctx.sandboxes.release(sandbox)
+        logger.info("sandbox released")
+        if ctx.extras.get("agent_started") and not ctx.extras.get("trajectory_written"):
+            self._parse_harness_trajectory(ctx)
+
+    def _parse_harness_trajectory(self, ctx: EpisodeContext) -> None:
+        assert ctx.blobs is not None
+        assert ctx.trajectory is not None
+        run = ctx.extras.get("agent_run")
+        trajectory = self.harness.parse_trajectory(
+            TrajectoryParseContext(
+                episode_id=ctx.episode_id,
+                trajectory_id=ctx.trajectory_id,
+                instruction=ctx.spec.instruction,
+                logs_dir=ctx.run_dir / "logs" / self.harness.name,
+                model=ctx.session.model,
+                agent_version=ctx.agent_version or self.harness.version(),
+                blobs=ctx.blobs,
+                session_id=getattr(getattr(run, "continuation", None), "native_session_id", None),
+                final_message=getattr(run, "final_message", None),
+                incomplete=run is None,
+                incomplete_reason="agent_interrupted" if run is None else None,
+            )
+        )
+        self._persist_trajectory(ctx, trajectory)
+        ctx.extras["trajectory_written"] = True
+        policy = ctx.extras.get("logging_policy")
+        if run is not None and getattr(policy, "native_logs", "minimal") == "minimal":
+            shutil.rmtree(ctx.run_dir / "logs" / self.harness.name, ignore_errors=True)
+
+    def _persist_trajectory(self, ctx: EpisodeContext, trajectory: AtifTrajectory) -> None:
+        """Correlate only observed provider/native IDs, then persist before links."""
+        assert ctx.trajectory is not None
+        calls = {
+            record["provider_response_id"]: record["call_id"]
+            for record in read_jsonl(ctx.run_dir / "trace.transport.jsonl").records
+            if record.get("kind") == "call"
+            and record.get("provider_response_id")
+            and record.get("call_id")
+        }
+        links: list[tuple[str, int]] = []
+        steps = []
+        for step in trajectory.steps:
+            extra = dict(step.extra or {})
+            ale = dict(extra.get("ale") or {})
+            call_ids = [
+                calls[native_id]
+                for native_id in ale.get("native_event_ids", ())
+                if native_id in calls
+            ]
+            if call_ids:
+                ale["transport_call_ids"] = call_ids
+                extra["ale"] = ale
+                updates: dict[str, object] = {"extra": extra}
+                if len(call_ids) == 1:
+                    exact = _exact_token_metrics(ctx.run_dir, call_ids[0])
+                    if exact is not None:
+                        updates["metrics"] = _merge_metrics(step.metrics, exact)
+                step = step.model_copy(update=updates)
+                links.extend((call_id, step.step_id) for call_id in call_ids)
+            steps.append(step)
+        trajectory = trajectory.model_copy(update={"steps": steps})
+        ctx.trajectory.write_trajectory(trajectory)
+        if ctx.transport is not None:
+            for call_id, step_id in links:
+                ctx.transport.append(
+                    TrajectoryLink(
+                        episode_id=ctx.episode_id,
+                        call_id=call_id,
+                        trajectory_id=ctx.trajectory_id,
+                        step_id=step_id,
+                    ),
+                    durable=True,
+                )
 
     # --- helpers ---
 
@@ -334,20 +530,43 @@ class StandardEnvironment(Environment):
         await sandbox.write_file(
             directory / "params.json", json.dumps(ctx.spec.params).encode("utf-8")
         )
-        result = await sandbox.exec(
-            ["bash", str(entry)],
+        assert ctx.execution is not None
+        assert ctx.blobs is not None
+        execution_id = f"{phase.value}-{len(ctx.phases) + 1}"
+        recorder = CommandRecorder(
+            execution=ctx.execution,
+            blobs=cast(BlobStore, ctx.blobs),
+            episode_id=ctx.episode_id,
+            phase=phase.value,
+            component="task-stage",
+            execution_id=execution_id,
+            actor="task",
+            argv=["bash", str(entry)],
             cwd=str(directory),
-            env=env,
-            timeout_sec=None,
+            secrets=(ctx.session.token,),
         )
-        ctx.trace.write_semantic(
-            ExecRecord(
-                seq=ctx.trace.next_seq(TraceLayer.SEMANTIC),
-                argv_digest=_digest(shlex.join(["bash", str(entry)])),
-                exit_code=result.exit_code,
-                duration_ms=result.duration_ms,
+        started = time.monotonic()
+        timeout_sec = cast(float | None, ctx.extras.get("phase_timeout_sec"))
+        try:
+            result = await sandbox.exec(
+                ["bash", str(entry)],
+                cwd=str(directory),
+                env=env,
+                timeout_sec=timeout_sec,
+                output_sink=recorder.write,
             )
-        )
+        except asyncio.CancelledError:
+            recorder.finish(
+                ExecResult(
+                    exit_code=None,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                ),
+                outcome="cancelled",
+            )
+            raise
+        recorder.finish(result)
+        if result.timed_out:
+            raise PhaseTimeoutError(phase.value, timeout_sec or 0)
         if result.exit_code != 0 and phase is Phase.SETUP:
             raise TaskError(
                 f"setup failed with exit code {result.exit_code}: {result.stderr[-500:]}"
@@ -439,34 +658,102 @@ class StandardEnvironment(Environment):
         try:
             payload = json.loads(raw.decode("utf-8"))
             rewards = payload["rewards"]
-            return {str(key): float(value) for key, value in rewards.items()}
+            if not isinstance(rewards, dict) or not rewards:
+                raise ValueError("rewards must be a non-empty object")
+            parsed = {str(key): float(value) for key, value in rewards.items()}
+            if any(not key.strip() for key in parsed):
+                raise ValueError("reward names must be non-empty")
+            if any(not math.isfinite(value) for value in parsed.values()):
+                raise ValueError("reward values must be finite")
+            return parsed
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise VerifierOutputError(f"verify wrote malformed rewards: {exc}") from exc
 
     async def _with_deadline(self, ctx, phase: Phase, seconds: float, coro):  # type: ignore[no-untyped-def]
-        try:
-            return await self._timed(ctx, phase, asyncio.wait_for(coro, timeout=seconds))
-        except TimeoutError as exc:
-            raise PhaseTimeoutError(phase.value, seconds) from exc
+        return await self._timed(ctx, phase, coro, timeout_sec=seconds)
 
-    async def _timed(self, ctx: EpisodeContext, phase: Phase, coro):  # type: ignore[no-untyped-def]
+    async def _timed(
+        self,
+        ctx: EpisodeContext,
+        phase: Phase,
+        coro,
+        *,
+        timeout_sec: float | None = None,
+    ):  # type: ignore[no-untyped-def]
         """Record how long a phase took, whether or not it succeeded.
 
         A phase that timed out or crashed is the one you most want the duration of, so
         the span is written on the way out rather than on success.
         """
+        assert ctx.execution is not None
+        started_at = datetime.now(UTC)
         started = time.monotonic()
+        ctx.current_phase = phase
+        callback = ctx.extras.get("phase_callback")
+        if callable(callback):
+            callback(phase)
+        ctx.execution.append(
+            PhaseStarted(
+                episode_id=ctx.episode_id,
+                phase=phase.value,
+                component=self.name,
+            ),
+            durable=True,
+        )
+        outcome = "succeeded"
+        previous_timeout = ctx.extras.get("phase_timeout_sec")
+        ctx.extras["phase_timeout_sec"] = timeout_sec
         try:
-            return await coro
+            with execution_logging(
+                ctx.execution,
+                episode_id=ctx.episode_id,
+                phase=phase.value,
+                component=self.name,
+                secrets=(ctx.session.token,),
+            ):
+                if timeout_sec is None:
+                    return await coro
+                async with asyncio.timeout(timeout_sec):
+                    return await coro
+        except TimeoutError as exc:
+            outcome = "timed_out"
+            raise PhaseTimeoutError(phase.value, timeout_sec or 0) from exc
+        except PhaseTimeoutError:
+            outcome = "timed_out"
+            raise
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except BaseException:
+            outcome = "failed"
+            raise
         finally:
+            finished_at = datetime.now(UTC)
             elapsed = int((time.monotonic() - started) * 1000)
-            ctx.phases.append(PhaseSpan(name=phase.value, duration_ms=elapsed))
-
-
-def _digest(text: str) -> str:
-    from hashlib import sha256
-
-    return f"sha256:{sha256(text.encode('utf-8')).hexdigest()}"
+            timing = PhaseTiming(
+                phase=phase.value,
+                started_at=started_at,
+                finished_at=finished_at,
+                duration_ms=elapsed,
+                outcome=outcome,  # type: ignore[arg-type]
+            )
+            ctx.phases.append(timing)
+            ctx.execution.append(
+                PhaseFinished(
+                    episode_id=ctx.episode_id,
+                    phase=phase.value,
+                    component=self.name,
+                    level="info" if outcome == "succeeded" else "error",
+                    outcome=outcome,  # type: ignore[arg-type]
+                    duration_ms=elapsed,
+                ),
+                durable=True,
+            )
+            ctx.current_phase = None
+            if previous_timeout is None:
+                ctx.extras.pop("phase_timeout_sec", None)
+            else:
+                ctx.extras["phase_timeout_sec"] = previous_timeout
 
 
 def _agent_user(sandbox: Sandbox) -> str:
@@ -479,3 +766,145 @@ def _default_files_dest(ctx: EpisodeContext) -> str:
     if ctx.spec.setup.assets:
         return ctx.spec.setup.assets[0].dest
     return ctx.home
+
+
+def _exact_token_metrics(run_dir: Path, call_id: str) -> AtifMetrics | None:
+    path = run_dir / "logs" / "gateway" / "tokens" / f"{call_id}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+        if not isinstance(payload, dict):
+            raise TypeError("token evidence must be an object")
+        known = {
+            name: payload.get(name)
+            for name in (
+                "prompt_token_ids",
+                "completion_token_ids",
+                "logprobs",
+            )
+            if name in payload
+        }
+        extra = {
+            name: value
+            for name, value in payload.items()
+            if name
+            not in {
+                "prompt_token_ids",
+                "completion_token_ids",
+                "logprobs",
+            }
+        }
+        metrics = AtifMetrics(
+            **known,
+            extra={"ale": extra} if extra else None,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise TrajectoryConversionError(
+            f"invalid exact token evidence for {call_id}: {exc}"
+        ) from exc
+    path.unlink()
+    for directory in (path.parent, path.parent.parent):
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+    return metrics
+
+
+def _merge_metrics(
+    current: AtifMetrics | None,
+    exact: AtifMetrics,
+) -> AtifMetrics:
+    if current is None:
+        return exact
+    values = current.model_dump(exclude_none=True)
+    exact_values = exact.model_dump(exclude_none=True)
+    if "extra" in exact_values:
+        values["extra"] = {
+            **(values.get("extra") or {}),
+            **exact_values.pop("extra"),
+        }
+    values.update(exact_values)
+    return AtifMetrics.model_validate(values)
+
+
+class _RecordedSandbox:
+    """Record framework-issued harness commands while delegating every other operation."""
+
+    def __init__(
+        self,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        *,
+        component: str,
+        actor: Literal["framework", "task"] = "framework",
+    ) -> None:
+        self._ctx = ctx
+        self._sandbox = sandbox
+        self._component = component
+        self._actor = actor
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        return getattr(self._sandbox, name)
+
+    async def exec(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: float | None = None,
+        identity: Identity = Identity.FRAMEWORK,
+        output_sink: ExecOutputSink | None = None,
+    ) -> ExecResult:
+        assert self._ctx.execution is not None
+        assert self._ctx.blobs is not None
+        counter = int(self._ctx.extras.get("harness_execution_counter", 0)) + 1
+        self._ctx.extras["harness_execution_counter"] = counter
+        recorder = CommandRecorder(
+            execution=self._ctx.execution,
+            blobs=cast(BlobStore, self._ctx.blobs),
+            episode_id=self._ctx.episode_id,
+            phase=Phase.AGENT.value,
+            component=self._component,
+            execution_id=f"agent-harness-{counter}",
+            actor=self._actor,
+            argv=[str(part) for part in argv],
+            cwd=cwd,
+            secrets=(self._ctx.session.token,),
+        )
+
+        async def emit(stream: Literal["stdout", "stderr"], data: bytes) -> None:
+            await recorder.write(stream, data)
+            if output_sink is not None:
+                await output_sink(stream, data)
+
+        started = time.monotonic()
+        try:
+            result = await self._sandbox.exec(
+                argv,
+                cwd=cwd,
+                env=env,
+                timeout_sec=timeout_sec,
+                identity=identity,
+                output_sink=emit,
+            )
+        except asyncio.CancelledError:
+            recorder.finish(
+                ExecResult(
+                    exit_code=None,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                ),
+                outcome="cancelled",
+            )
+            raise
+        except BaseException:
+            recorder.finish(
+                ExecResult(
+                    exit_code=None,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                ),
+                outcome="failed",
+            )
+            raise
+        recorder.finish(result)
+        return result
