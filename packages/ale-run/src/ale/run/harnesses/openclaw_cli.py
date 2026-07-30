@@ -152,6 +152,14 @@ class OpenClawCliHarness(AutonomousHarness):
         model_entry: dict[str, Any] = {"agentRuntime": {"id": "openclaw"}}
         if self.settings.model_params:
             model_entry["params"] = self.settings.model_params
+        provider_model: dict[str, Any] = {
+            "id": session.model,
+            "name": session.model,
+            "input": ["text", "image"],
+            "agentRuntime": {"id": "openclaw"},
+        }
+        if self.settings.thinking != "default":
+            provider_model["reasoning"] = self.settings.thinking != "off"
         tools: dict[str, Any] = {
             "profile": self.settings.tool_profile,
             "deny": list(self.settings.tools_deny),
@@ -174,14 +182,7 @@ class OpenClawCliHarness(AutonomousHarness):
                         "baseUrl": session.gateway_url + "/v1",
                         "apiKey": "${ALE_GATEWAY_TOKEN}",
                         "api": "openai-responses",
-                        "models": [
-                            {
-                                "id": session.model,
-                                "name": session.model,
-                                "input": ["text", "image"],
-                                "agentRuntime": {"id": "openclaw"},
-                            }
-                        ],
+                        "models": [provider_model],
                     }
                 },
             },

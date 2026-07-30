@@ -48,6 +48,11 @@ UPDATES_NAME = "session_updates.jsonl"
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 _DATA_URL = re.compile(r"data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=_-]+)")
 _HEADLESS_DISABLED_TOOLS = ("ask_user_question", "enter_plan_mode", "exit_plan_mode")
+_API_BACKENDS = {
+    "anthropic": "messages",
+    "openai-chat-completions": "chat_completions",
+    "openai-responses": "responses",
+}
 
 
 class GrokBuildSettings(BaseModel):
@@ -71,15 +76,19 @@ class GrokBuildHarness(AutonomousHarness):
     name = "grok-build"
     resume_support = ResumeSupport.NATIVE
     logs = (TRANSCRIPT_NAME, STDERR_NAME, CHAT_NAME, UPDATES_NAME)
-    __slots__ = ("cli_version", "settings")
+    __slots__ = ("cli_version", "gateway_dialect", "settings")
 
     def __init__(
         self,
         *,
         cli_version: str | None = None,
+        gateway_dialect: str = "openai-responses",
         settings: GrokBuildSettings | dict[str, Any] | None = None,
     ) -> None:
         self.cli_version = cli_version
+        if gateway_dialect not in _API_BACKENDS:
+            raise ConfigError(f"grok-build does not support gateway dialect {gateway_dialect!r}")
+        self.gateway_dialect = gateway_dialect
         try:
             self.settings = (
                 settings
@@ -173,7 +182,7 @@ class GrokBuildHarness(AutonomousHarness):
             f"base_url = {_toml(session.gateway_url + '/v1')}",
             'name = "ALE Gateway"',
             'env_key = "ALE_GATEWAY_TOKEN"',
-            'api_backend = "responses"',
+            f"api_backend = {_toml(_API_BACKENDS[self.gateway_dialect])}",
             "supports_reasoning_effort = true",
             "",
             "[features]",
@@ -476,7 +485,10 @@ class GrokBuildHarness(AutonomousHarness):
         return continuation_fingerprint(
             harness=self.name,
             model=session.model,
-            settings=self.settings.model_dump(mode="json"),
+            settings={
+                **self.settings.model_dump(mode="json"),
+                "gateway_dialect": self.gateway_dialect,
+            },
             resources_digest=session.resources_digest,
         )
 

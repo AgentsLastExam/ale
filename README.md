@@ -23,8 +23,9 @@ Model access goes through the gateway, so put a key in the checkout's `.env` (co
 `.env.example`). It never enters a sandbox — the agent gets a URL and a per-episode token,
 and the gateway meters and records every call whatever the agent does.
 
-Any Anthropic-compatible endpoint works. A run names its endpoint and which variable holds
-the key, so several can be configured at once and nothing has to be edited between runs:
+The gateway supports Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses.
+A run names its endpoint and which variable holds the key, so several can be configured
+at once and nothing has to be edited between runs:
 
 ```bash
 uv run ale run demo/hello --agent claude-code \

@@ -17,7 +17,7 @@ from typing import Annotated
 import typer
 
 from ale.core.config import RunConfig, load_run_config, select_agent_name
-from ale.core.errors import AleError
+from ale.core.errors import AleError, ConfigError
 from ale.core.harness import EffectiveAgentResources
 from ale.core.verdict import Status
 from ale.run import __version__
@@ -302,6 +302,7 @@ def _harness(settings: RunConfig):  # type: ignore[no-untyped-def]
 
             return ComputerUseHarness(model=settings.agent.model, **settings.agent.settings)
         case "claude-code":
+            _require_gateway_dialect(settings, "anthropic")
             return ClaudeCodeHarness(
                 cli_version=settings.agent.version,
                 settings=settings.agent.settings,
@@ -309,14 +310,17 @@ def _harness(settings: RunConfig):  # type: ignore[no-untyped-def]
         case "grok-build":
             return GrokBuildHarness(
                 cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
                 settings=settings.agent.settings,
             )
         case "codex-cli":
+            _require_gateway_dialect(settings, "openai-responses")
             return CodexCliHarness(
                 cli_version=settings.agent.version,
                 settings=settings.agent.settings,
             )
         case "openclaw-cli":
+            _require_gateway_dialect(settings, "openai-responses")
             return OpenClawCliHarness(
                 cli_version=settings.agent.version,
                 settings=settings.agent.settings,
@@ -326,6 +330,14 @@ def _harness(settings: RunConfig):  # type: ignore[no-untyped-def]
                 f"unknown agent {unknown!r}; try claude-code, codex-cli, "
                 "computer-use, grok-build, openclaw-cli, oracle or nop"
             )
+
+
+def _require_gateway_dialect(settings: RunConfig, expected: str) -> None:
+    if settings.gateway.dialect != expected:
+        raise ConfigError(
+            f"{settings.agent.name} requires gateway.dialect={expected!r}, "
+            f"got {settings.gateway.dialect!r}"
+        )
 
 
 def _provider(settings: RunConfig):  # type: ignore[no-untyped-def]

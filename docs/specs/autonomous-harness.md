@@ -31,7 +31,7 @@ ALE ships these official upstream agent programs:
 | Harness | Pinned package | Gateway dialect | Public settings |
 |---------|----------------|-----------------|-----------------|
 | `claude-code` | Claude Code preset pin | Anthropic Messages | `max_turns`, `max_budget_usd`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `append_system_prompt`, `effort` |
-| `grok-build` | `@xai-official/grok@0.2.112` | OpenAI Responses | `max_turns`, `reasoning_effort`, `disabled_tools` |
+| `grok-build` | `@xai-official/grok@0.2.112` | OpenAI Responses by default; Messages, Chat Completions, or Responses configurable | `max_turns`, `reasoning_effort`, `disabled_tools` |
 | `codex-cli` | `@openai/codex@0.146.0` | OpenAI Responses | `reasoning_effort`, `web_search` |
 | `openclaw-cli` | `openclaw@2026.7.1` | OpenAI Responses | `provider`, `thinking`, `timeout_seconds`, `tool_profile`, `tools_allow`, `tools_deny`, `model_params` |
 
@@ -130,6 +130,10 @@ An adapter must never use a "latest session" selector, replay the transcript, re
 another sandbox, or silently start a new conversation. This release has one scope only:
 the original live sandbox.
 
+If the native program can create child sessions, collected evidence must select the
+requested root session by exact native ID. A substring match or "first/latest session"
+lookup is invalid.
+
 ### Collect and Parse
 
 Declare evidence paths in `Harness.logs`, relative to the agent home. ALE collects them
@@ -143,6 +147,11 @@ Gateway transport records.
 MCP records correlate the native tool-use ID with its tool result and retain the logical
 server, tool, request arguments, and success result or error. A selected tool with no
 matching result is not recorded as a successful call.
+
+The parser must preserve every native agent-visible call form used by the pinned program,
+including discovery, custom, web, MCP, and multi-agent calls. It may flatten a native
+orchestration wrapper into its observed child calls when the native log does not emit a
+separate wrapper result; that mapping must be deterministic and covered by acceptance.
 
 ### Cleanup
 
@@ -181,15 +190,27 @@ Do not emulate a Gateway limit in an adapter or hide a native limit under a Gate
 field. Termination records and provenance name the enforcing layer, limit, configured
 value, and observed value.
 
-The Gateway supports both the Anthropic Messages and OpenAI Responses wire dialects.
-The selected preset fixes the dialect and upstream provider endpoint. Harnesses always
-use an episode-local Gateway bearer token; provider credentials remain host-side.
+The Gateway supports Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses.
+The preset supplies the default dialect and upstream provider endpoint; a harness may
+accept a documented compatible override. Harnesses always use an episode-local Gateway
+bearer token; provider credentials remain host-side.
 
 For finite token limits, the Gateway uses the dialect's exact input-token endpoint
 before forwarding. It accounts for every upstream call made by the agent program,
 including CLI-owned discovery or compaction calls. If the CLI disconnects from a
 streaming response early, the Gateway still drains the upstream response and commits
 usage before releasing the reservation.
+
+OpenAI Chat Completions has no provider-independent exact input-token endpoint. With that
+dialect, finite input-token, total-token, and cost limits are rejected when the Gateway
+session opens. Finite model-call and output-token limits remain valid. Streaming requests
+force `stream_options.include_usage=true`, and legacy `max_tokens` is normalized to
+`max_completion_tokens` before forwarding.
+
+When an adapter exposes native reasoning or thinking settings, explicit non-default
+values must also declare any native model capability required by the pinned program.
+Unsupported model/version combinations must fail visibly; the adapter must not silently
+fall back to a different reasoning level.
 
 ## Verification
 
@@ -217,12 +238,16 @@ A shipped integration therefore follows this acceptance order:
 2. official CLI configuration validation;
 3. shared deterministic conformance and sandbox integration;
 4. a real Skill plus MCP task through the Gateway;
-5. direct launch plus two native resumes in the same sandbox;
-6. independent LLM audit of transport, ATIF, native evidence, artifacts, verifier, and
+5. a real tool-surface smoke task that exercises every safely callable visible tool and
+   records unavailable or unsafe tools honestly;
+6. direct launch plus two native resumes in the same sandbox;
+7. independent LLM audit of transport, ATIF, native evidence, artifacts, verifier, and
    RunLock.
 
 A scripted probe, fake harness, oracle, hand-authored transcript, or agent-authored
-receipt may test plumbing but cannot complete that live gate.
+receipt may test plumbing but cannot complete that live gate. The tool-surface report is
+scored from its explicit tool lists, not trusted summary counters, and every claimed pass
+must have an observed call and result in the collected evidence.
 
 For native resume, live acceptance directly calls `launch()` and then `resume()` twice
 inside one sandbox. Production multi-segment Environment or CLI orchestration is not

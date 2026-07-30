@@ -31,7 +31,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 from ale.core.environment import EventSink
 from ale.core.errors import ConfigError
 from ale.core.trace import TransportCall, TransportReplay
-from ale.run.gateway import anthropic, openai_responses
+from ale.run.gateway import anthropic, openai_chat_completions, openai_responses
 from ale.run.gateway.session import (
     GatewayReservation,
     GatewaySession,
@@ -48,6 +48,25 @@ _REQUEST_TIMEOUT = ClientTimeout(total=1800)
 _STRIP = frozenset(
     {"host", "content-length", "authorization", "x-api-key", "connection", "accept-encoding"}
 )
+_DIALECTS = {
+    "anthropic": anthropic,
+    "openai-chat-completions": openai_chat_completions,
+    "openai-responses": openai_responses,
+}
+_REQUEST_PATHS = {
+    "anthropic": "/v1/messages",
+    "openai-chat-completions": "/v1/chat/completions",
+    "openai-responses": "/v1/responses",
+}
+_COUNT_PATHS = {
+    "anthropic": "/v1/messages/count_tokens",
+    "openai-responses": "/v1/responses/input_tokens",
+}
+_MAX_OUTPUT_FIELDS = {
+    "anthropic": "max_tokens",
+    "openai-chat-completions": "max_completion_tokens",
+    "openai-responses": "max_output_tokens",
+}
 
 
 class Gateway:
@@ -64,7 +83,7 @@ class Gateway:
     ) -> None:
         self.api_key = api_key
         self.upstream = upstream.rstrip("/")
-        if dialect not in {"anthropic", "openai-responses"}:
+        if dialect not in _DIALECTS:
             raise ConfigError(f"unsupported gateway dialect {dialect!r}")
         self.dialect = dialect
         self.host = host
@@ -105,6 +124,18 @@ class Gateway:
         self, session: GatewaySession, trace: EventSink | None = None
     ) -> GatewaySession:
         """Register an episode. Its token is valid until :meth:`close_session`."""
+        if self.dialect == "openai-chat-completions" and any(
+            value is not None
+            for value in (
+                session.limits.max_input_tokens,
+                session.limits.max_total_tokens,
+                session.limits.max_cost_usd,
+            )
+        ):
+            raise ConfigError(
+                "openai-chat-completions has no provider-independent exact input-token "
+                "endpoint; finite input, total-token, and cost limits are unsupported"
+            )
         if (
             session.limits.max_cost_usd is not None
             and self._dialect.pricing_for(session.model) is None
@@ -182,7 +213,7 @@ class Gateway:
         input_tokens = (
             await self._count_input_tokens(payload, headers) if _needs_exact_input(session) else 0
         )
-        requested_output = int(payload.get(self._max_output_field) or 4096)
+        requested_output = self._requested_output(payload)
         try:
             reservation = await session.reserve(
                 input_tokens=input_tokens,
@@ -208,7 +239,7 @@ class Gateway:
             }
             session.finish(key, cached)
             return self._replayed(cached)
-        payload = {**payload, self._max_output_field: reservation.output_tokens}
+        payload = self._with_output_limit(payload, reservation.output_tokens)
         self._retain_payload(session, call_id, payload, None)
 
         streaming = bool(payload.get("stream"))
@@ -350,7 +381,13 @@ class Gateway:
 
     def _authoritative(self, payload: dict[str, Any], session: GatewaySession) -> dict[str, Any]:
         """Impose the run's model rather than trusting the agent's request."""
-        return {**payload, "model": session.model}
+        authoritative = {**payload, "model": session.model}
+        if self.dialect == "openai-chat-completions" and authoritative.get("stream"):
+            authoritative["stream_options"] = {
+                **(authoritative.get("stream_options") or {}),
+                "include_usage": True,
+            }
+        return authoritative
 
     async def _account(
         self,
@@ -465,23 +502,39 @@ class Gateway:
 
     @property
     def _dialect(self):  # type: ignore[no-untyped-def]
-        return anthropic if self.dialect == "anthropic" else openai_responses
+        return _DIALECTS[self.dialect]
 
     @property
     def _request_path(self) -> str:
-        return "/v1/messages" if self.dialect == "anthropic" else "/v1/responses"
+        return _REQUEST_PATHS[self.dialect]
 
     @property
     def _count_path(self) -> str:
-        return (
-            "/v1/messages/count_tokens"
-            if self.dialect == "anthropic"
-            else "/v1/responses/input_tokens"
-        )
+        try:
+            return _COUNT_PATHS[self.dialect]
+        except KeyError as exc:
+            raise ConfigError(f"{self.dialect} does not support exact input-token counts") from exc
 
     @property
     def _max_output_field(self) -> str:
-        return "max_tokens" if self.dialect == "anthropic" else "max_output_tokens"
+        return _MAX_OUTPUT_FIELDS[self.dialect]
+
+    def _requested_output(self, payload: dict[str, Any]) -> int:
+        value = payload.get(self._max_output_field)
+        if value is None and self.dialect == "openai-chat-completions":
+            value = payload.get("max_tokens")
+        return int(value or 4096)
+
+    def _with_output_limit(
+        self,
+        payload: dict[str, Any],
+        output_tokens: int,
+    ) -> dict[str, Any]:
+        limited = dict(payload)
+        if self.dialect == "openai-chat-completions":
+            limited.pop("max_tokens", None)
+        limited[self._max_output_field] = output_tokens
+        return limited
 
     def _record(
         self,
@@ -622,6 +675,8 @@ def _stream_response_id(chunks: list[bytes]) -> str | None:
         response = event.get("response")
         if isinstance(response, dict) and isinstance(response.get("id"), str):
             return response["id"]
+        if isinstance(event.get("id"), str):
+            return event["id"]
     return None
 
 

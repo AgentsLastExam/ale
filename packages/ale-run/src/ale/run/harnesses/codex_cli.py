@@ -191,8 +191,9 @@ class CodexCliHarness(AutonomousHarness):
                 "sh",
                 "-c",
                 f"find {shlex.quote(session.home + '/.codex-ale/sessions')} -type f "
-                f"-name '*.jsonl' -exec grep -l "
-                f"{shlex.quote(continuation.native_session_id)} {{}} + | grep -q .",
+                f"-name '*.jsonl' -exec grep -l -F "
+                f"{shlex.quote(_session_id_marker(continuation.native_session_id))} "
+                "{} + | grep -q .",
             ],
             identity=Identity.AGENT,
         )
@@ -269,8 +270,8 @@ class CodexCliHarness(AutonomousHarness):
                 "sh",
                 "-c",
                 f"file=$(find {shlex.quote(session.home + '/.codex-ale/sessions')} "
-                "-type f -name '*.jsonl' -exec grep -l -m 1 "
-                f"{shlex.quote(confirmed)} {{}} + | head -n 1); "
+                "-type f -name '*.jsonl' -exec grep -l -m 1 -F "
+                f"{shlex.quote(_session_id_marker(confirmed))} {{}} + | head -n 1); "
                 f'test -n "$file" && cp "$file" {shlex.quote(str(home / SESSION_NAME))}',
             ],
             identity=Identity.AGENT,
@@ -292,6 +293,27 @@ class CodexCliHarness(AutonomousHarness):
 
     def parse_trajectory(self, context: TrajectoryParseContext) -> AtifTrajectory:
         events, issues = _events(context.logs_dir / TRANSCRIPT_NAME)
+        session_path = context.logs_dir / SESSION_NAME
+        session_events, session_issues = (
+            _events(session_path) if session_path.is_file() else ([], [])
+        )
+        expected_session_id = context.session_id or _thread_id_from_events(events)
+        actual_session_id = _session_id_from_events(session_events)
+        if actual_session_id and expected_session_id and actual_session_id != expected_session_id:
+            session_issues.append(
+                {
+                    "reason": "session_id_mismatch",
+                    "expected": expected_session_id,
+                    "actual": actual_session_id,
+                }
+            )
+            session_events = []
+        issues.extend(
+            {"source": SESSION_NAME, **issue}
+            for issue in session_issues
+            if issue.get("reason") != "no_native_log"
+        )
+        native_calls = _session_tool_calls(session_events, events, context)
         builder = TrajectoryBuilder(
             trajectory_id=context.trajectory_id,
             session_id=context.session_id or _thread_id_from_events(events),
@@ -304,6 +326,7 @@ class CodexCliHarness(AutonomousHarness):
         )
         builder.add(source="user", message=context.instruction)
         usage: dict[str, int] = {}
+        final_message = ""
         for event in events:
             kind = event.get("type")
             if kind == "turn.completed":
@@ -322,14 +345,19 @@ class CodexCliHarness(AutonomousHarness):
             item_type = item.get("type")
             item_id = str(item.get("id") or "")
             if item_type == "agent_message":
-                builder.add(source="agent", message=str(item.get("text") or ""))
+                final_message = str(item.get("text") or "")
+                if not native_calls:
+                    builder.add(source="agent", message=final_message)
             elif item_type == "reasoning":
-                builder.add(
-                    source="agent",
-                    message="",
-                    reasoning_content=str(item.get("text") or ""),
-                )
+                if not native_calls:
+                    builder.add(
+                        source="agent",
+                        message="",
+                        reasoning_content=str(item.get("text") or ""),
+                    )
             elif item_type == "command_execution":
+                if native_calls:
+                    continue
                 call = AtifToolCall(
                     tool_call_id=item_id,
                     function_name="shell",
@@ -354,6 +382,8 @@ class CodexCliHarness(AutonomousHarness):
                     ),
                 )
             elif item_type == "mcp_tool_call":
+                if native_calls:
+                    continue
                 server = str(item.get("server") or "")
                 tool = str(item.get("tool") or "")
                 call = AtifToolCall(
@@ -385,6 +415,8 @@ class CodexCliHarness(AutonomousHarness):
                     ),
                 )
             elif item_type == "file_change":
+                if native_calls:
+                    continue
                 builder.add(
                     source="agent",
                     message="",
@@ -405,17 +437,42 @@ class CodexCliHarness(AutonomousHarness):
                     ),
                 )
             elif item_type == "web_search":
-                builder.add(
-                    source="agent",
-                    message="",
-                    tool_calls=[
-                        AtifToolCall(
-                            tool_call_id=item_id,
-                            function_name="web_search",
-                            arguments={"query": str(item.get("query") or "")},
-                        )
-                    ],
-                )
+                if not any(call.function_name == "web.run" for call, _ in native_calls):
+                    builder.add(
+                        source="agent",
+                        message="",
+                        tool_calls=[
+                            AtifToolCall(
+                                tool_call_id=item_id,
+                                function_name="web.run",
+                                arguments={"query": str(item.get("query") or "")},
+                            )
+                        ],
+                        observation=AtifObservation(
+                            results=[
+                                AtifObservationResult(
+                                    source_call_id=item_id,
+                                    content=json.dumps(
+                                        {
+                                            "status": item.get("status") or "completed",
+                                            "action": item.get("action"),
+                                        },
+                                        ensure_ascii=False,
+                                        default=str,
+                                    ),
+                                )
+                            ]
+                        ),
+                    )
+        for call, observation in native_calls:
+            builder.add(
+                source="agent",
+                message="",
+                tool_calls=[call],
+                observation=observation,
+            )
+        if native_calls and final_message:
+            builder.add(source="agent", message=final_message)
         if not any(step.source == "agent" for step in builder.steps) and context.final_message:
             builder.add(source="agent", message=context.final_message)
         cached = usage.get("cached_input_tokens") or (
@@ -497,6 +554,18 @@ def _thread_id_from_events(events: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _session_id_from_events(events: list[dict[str, Any]]) -> str | None:
+    for event in events:
+        payload = event.get("payload") or {}
+        if event.get("type") == "session_meta" and isinstance(payload.get("id"), str):
+            return payload["id"]
+    return None
+
+
+def _session_id_marker(session_id: str) -> str:
+    return f'"id":{json.dumps(session_id)}'
+
+
 def _final_message(text: str) -> str | None:
     final = None
     for line in text.splitlines():
@@ -540,6 +609,187 @@ def _result_content(value: Any, context: TrajectoryParseContext) -> str | list[A
                     source=AtifImageSource(media_type=media_type, path=blob.path),
                 )
             )
+    return parts or json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _session_tool_calls(
+    session_events: list[dict[str, Any]],
+    transcript_events: list[dict[str, Any]],
+    context: TrajectoryParseContext,
+) -> list[tuple[AtifToolCall, AtifObservation | None]]:
+    outputs: dict[str, Any] = {}
+    for event in session_events:
+        payload = event.get("payload") or {}
+        if event.get("type") != "response_item":
+            continue
+        if payload.get("type") in {"function_call_output", "custom_tool_call_output"}:
+            outputs[str(payload.get("call_id") or "")] = payload.get("output")
+        elif payload.get("type") == "tool_search_output":
+            outputs[str(payload.get("call_id") or "")] = {
+                "status": payload.get("status"),
+                "tools": payload.get("tools") or [],
+            }
+    transcript_mcp = [
+        event.get("item") or {}
+        for event in transcript_events
+        if event.get("type") == "item.completed"
+        if (event.get("item") or {}).get("type") == "mcp_tool_call"
+    ]
+    used_mcp: set[int] = set()
+    calls: list[tuple[AtifToolCall, AtifObservation | None]] = []
+    for event in session_events:
+        payload = event.get("payload") or {}
+        if event.get("type") != "response_item":
+            continue
+        if payload.get("type") == "web_search_call":
+            call_id = str(payload.get("id") or "")
+            calls.append(
+                (
+                    AtifToolCall(
+                        tool_call_id=call_id,
+                        function_name="web.run",
+                        arguments=_dict(payload.get("action")),
+                    ),
+                    AtifObservation(
+                        results=[
+                            AtifObservationResult(
+                                source_call_id=call_id,
+                                content=json.dumps(
+                                    {
+                                        "status": payload.get("status") or "completed",
+                                        "action": payload.get("action"),
+                                    },
+                                    ensure_ascii=False,
+                                    default=str,
+                                ),
+                            )
+                        ]
+                    ),
+                )
+            )
+            continue
+        if payload.get("type") == "tool_search_call":
+            call_id = str(payload.get("call_id") or payload.get("id") or "")
+            calls.append(
+                (
+                    AtifToolCall(
+                        tool_call_id=call_id,
+                        function_name="tool_search_tool",
+                        arguments=_dict(payload.get("arguments")),
+                    ),
+                    AtifObservation(
+                        results=[
+                            AtifObservationResult(
+                                source_call_id=call_id,
+                                content=_session_result_content(outputs.get(call_id), context),
+                            )
+                        ]
+                    )
+                    if call_id in outputs
+                    else None,
+                )
+            )
+            continue
+        if payload.get("type") == "custom_tool_call":
+            call_id = str(payload.get("call_id") or payload.get("id") or "")
+            calls.append(
+                (
+                    AtifToolCall(
+                        tool_call_id=call_id,
+                        function_name=str(payload.get("name") or "custom_tool"),
+                        arguments={"input": payload.get("input")},
+                    ),
+                    AtifObservation(
+                        results=[
+                            AtifObservationResult(
+                                source_call_id=call_id,
+                                content=_session_result_content(outputs.get(call_id), context),
+                            )
+                        ]
+                    )
+                    if call_id in outputs
+                    else None,
+                )
+            )
+            continue
+        if payload.get("type") != "function_call":
+            continue
+        call_id = str(payload.get("call_id") or payload.get("id") or "")
+        name = str(payload.get("name") or "")
+        namespace = str(payload.get("namespace") or "")
+        arguments = _dict(payload.get("arguments"))
+        extra = None
+        if namespace.startswith("mcp__"):
+            match = next(
+                (
+                    (index, item)
+                    for index, item in enumerate(transcript_mcp)
+                    if index not in used_mcp
+                    and item.get("tool") == name
+                    and _dict(item.get("arguments")) == arguments
+                ),
+                None,
+            )
+            if match is not None:
+                index, item = match
+                used_mcp.add(index)
+                server = str(item.get("server") or namespace.removeprefix("mcp__"))
+                result = item.get("result")
+                error = item.get("error")
+                output = result if result is not None else error
+            else:
+                server = namespace.removeprefix("mcp__")
+                error = None
+                output = outputs.get(call_id)
+            function_name = f"mcp__{server}__{name}"
+            extra = {"ale": {"mcp": {"server": server, "tool": name}}}
+        else:
+            function_name = (
+                f"multi_agent.{name}"
+                if namespace == "multi_agent_v1"
+                else f"{namespace}.{name}"
+                if namespace
+                else name
+            )
+            error = None
+            output = outputs.get(call_id)
+        observation = (
+            AtifObservation(
+                results=[
+                    AtifObservationResult(
+                        source_call_id=call_id,
+                        content=_session_result_content(output, context),
+                        extra={"ale": {"is_error": True}} if error is not None else None,
+                    )
+                ]
+            )
+            if output is not None
+            else None
+        )
+        calls.append(
+            (
+                AtifToolCall(
+                    tool_call_id=call_id,
+                    function_name=function_name,
+                    arguments=arguments,
+                    extra=extra,
+                ),
+                observation,
+            )
+        )
+    return calls
+
+
+def _session_result_content(
+    value: Any, context: TrajectoryParseContext
+) -> str | list[AtifContentPart]:
+    if not isinstance(value, list):
+        return _result_content(value, context)
+    parts = [
+        AtifContentPart(type="text", text=str(block.get("text") or ""))
+        for block in value
+        if isinstance(block, dict) and block.get("type") in {"input_text", "output_text", "text"}
+    ]
     return parts or json.dumps(value, ensure_ascii=False, default=str)
 
 

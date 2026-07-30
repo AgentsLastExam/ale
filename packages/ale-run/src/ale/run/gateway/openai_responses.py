@@ -14,6 +14,8 @@ __all__ = [
 ]
 
 USD_PER_MTOK: dict[str, tuple[float, float]] = {
+    "gpt-5.4-mini": (0.75, 4.5),
+    "gpt-5-mini": (0.25, 2.0),
     "grok-4.5": (2.0, 6.0),
 }
 

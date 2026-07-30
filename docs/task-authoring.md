@@ -62,6 +62,17 @@ Its MCP fragment is generated at call time. The task receipt is useful to the ve
 but is not trusted proof of tool use; live harness acceptance must match it against the
 collected native transcript and canonical MCP trajectory.
 
+`ale-tasks-152/tasks/demo/tool_smoke` is the complementary harness acceptance task. The
+agent inventories callable endpoints, exercises every safe bounded tool, and reports
+failed or untestable tools explicitly. Parameter modes are not separate tools: for
+example, `web.run` remains one callable whether it performs search, open, or finance.
+Tools that end or yield the current invocation are recorded as untested, and the report
+is updated after each call so a later failure cannot erase earlier evidence.
+
+The task's oracle proves only that its verifier accepts a valid report. A harness is
+accepted only after a real model run matches the report against native logs, ATIF,
+Gateway transport, execution trace, verifier result, and an independent LLM audit.
+
 For an image or other media input, stage it as a normal task file or setup asset and say
 where it is:
 

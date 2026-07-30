@@ -109,7 +109,11 @@ class AgentConfig(BaseModel):
 class GatewayConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    dialect: Literal["anthropic", "openai-responses"] = "anthropic"
+    dialect: Literal[
+        "anthropic",
+        "openai-chat-completions",
+        "openai-responses",
+    ] = "anthropic"
     limits: GatewayLimits = GatewayLimits()
     base_url: str = Field(
         default="",

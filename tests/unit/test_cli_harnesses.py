@@ -38,6 +38,9 @@ class FakeSandbox:
     async def write_file(self, path, data, **kwargs):  # type: ignore[no-untyped-def]
         self.files[str(path)] = data
 
+    async def read_file(self, path, **kwargs):  # type: ignore[no-untyped-def]
+        return self.files[str(path)]
+
     async def upload_dir(self, source, target, **kwargs):  # type: ignore[no-untyped-def]
         self.uploads.append((source, str(target)))
 
@@ -106,6 +109,35 @@ def test_presets_are_complete_and_construct_strict_harnesses(name, harness_type)
     assert config.gateway.limits.max_total_tokens == "unlimited"
 
 
+def test_grok_backend_follows_gateway_dialect() -> None:
+    config = load_run_config(
+        preset_path=PRESET_DIR / "grok-build.toml",
+        overrides=['gateway.dialect="openai-chat-completions"'],
+    )
+    harness = _harness(config)
+
+    assert isinstance(harness, GrokBuildHarness)
+    assert harness.gateway_dialect == "openai-chat-completions"
+
+
+@pytest.mark.parametrize(
+    ("preset", "dialect"),
+    [
+        ("claude-code", "openai-chat-completions"),
+        ("codex-cli", "openai-chat-completions"),
+        ("openclaw-cli", "anthropic"),
+    ],
+)
+def test_harnesses_reject_unsupported_gateway_dialects(preset: str, dialect: str) -> None:
+    config = load_run_config(
+        preset_path=PRESET_DIR / f"{preset}.toml",
+        overrides=[f'gateway.dialect="{dialect}"'],
+    )
+
+    with pytest.raises(ConfigError, match=r"requires gateway\.dialect"):
+        _harness(config)
+
+
 @pytest.mark.parametrize(
     "factory",
     [
@@ -147,6 +179,26 @@ async def test_resource_translation_uses_episode_local_native_config(tmp_path: P
         assert "resource-proof" in sandbox.uploads[0][1]
         assert "http://gateway/v1" in rendered
         assert "token" not in rendered
+
+
+async def test_grok_chat_gateway_selects_native_chat_backend(tmp_path: Path) -> None:
+    sandbox = FakeSandbox()
+    harness = GrokBuildHarness(gateway_dialect="openai-chat-completions")
+
+    await harness.install_resources(sandbox, session(), resources(tmp_path))  # type: ignore[arg-type]
+
+    rendered = sandbox.files["/home/agent/.grok-ale/config.toml"].decode()
+    assert 'api_backend = "chat_completions"' in rendered
+
+
+async def test_openclaw_declares_explicit_reasoning_support(tmp_path: Path) -> None:
+    sandbox = FakeSandbox()
+    harness = OpenClawCliHarness(settings={"thinking": "high"})
+
+    await harness.install_resources(sandbox, session(), resources(tmp_path))  # type: ignore[arg-type]
+
+    rendered = json.loads(sandbox.files["/home/agent/.openclaw-ale/openclaw.json"])
+    assert rendered["models"]["providers"]["openai"]["models"][0]["reasoning"] is True
 
 
 def context(tmp_path: Path, harness: str) -> TrajectoryParseContext:
@@ -253,6 +305,252 @@ def test_codex_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
 
 def test_codex_declares_native_session_evidence() -> None:
     assert "session.jsonl" in CodexCliHarness.logs
+
+
+async def test_codex_exports_the_exact_root_native_session() -> None:
+    sandbox = FakeSandbox()
+    sandbox.files["/home/agent/transcript.jsonl"] = (
+        b'{"type":"thread.started","thread_id":"thread-1"}\n'
+    )
+
+    await CodexCliHarness().launch(  # type: ignore[arg-type]
+        "test",
+        sandbox,
+        session(),
+        timeout_sec=60,
+    )
+
+    export_command = sandbox.commands[-1][2]
+    assert '"id":"thread-1"' in export_command
+
+
+def test_codex_parser_uses_complete_native_function_call_evidence(tmp_path: Path) -> None:
+    (tmp_path / "transcript.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "sparse-shell",
+                            "type": "command_execution",
+                            "command": "echo duplicate",
+                            "aggregated_output": "duplicate",
+                            "exit_code": 0,
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "mcp-transcript",
+                            "type": "mcp_tool_call",
+                            "server": "task-proof",
+                            "tool": "derive_fragment",
+                            "arguments": {"nonce": "abc"},
+                            "result": {"content": [{"type": "text", "text": "xyz"}]},
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {"id": "message-1", "type": "agent_message", "text": "done"},
+                    }
+                ),
+            ]
+        )
+    )
+    (tmp_path / "session.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "session"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "update_plan",
+                            "arguments": '{"plan":[]}',
+                            "call_id": "call-plan",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call-plan",
+                            "output": "Plan updated",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "namespace": "mcp__task_proof",
+                            "name": "derive_fragment",
+                            "arguments": '{"nonce":"abc"}',
+                            "call_id": "call-mcp",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call-mcp",
+                            "output": "native fallback",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "web_search_call",
+                            "id": "web-1",
+                            "status": "completed",
+                            "action": {"type": "search", "query": "example.com"},
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "tool_search_call",
+                            "id": "search-1",
+                            "call_id": "call-search",
+                            "status": "completed",
+                            "arguments": {"query": "available tools"},
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "tool_search_output",
+                            "call_id": "call-search",
+                            "status": "completed",
+                            "tools": [],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call",
+                            "id": "patch-1",
+                            "call_id": "call-patch",
+                            "name": "apply_patch",
+                            "input": "*** Begin Patch\n*** End Patch\n",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call_output",
+                            "call_id": "call-patch",
+                            "output": "Success",
+                        },
+                    }
+                ),
+            ]
+        )
+    )
+    trajectory = CodexCliHarness().parse_trajectory(context(tmp_path, "codex"))
+    calls = [call for step in trajectory.steps for call in step.tool_calls or ()]
+
+    assert [call.function_name for call in calls] == [
+        "update_plan",
+        "mcp__task-proof__derive_fragment",
+        "web.run",
+        "tool_search_tool",
+        "apply_patch",
+    ]
+    assert calls[1].extra["ale"]["mcp"] == {
+        "server": "task-proof",
+        "tool": "derive_fragment",
+    }
+    assert trajectory.steps[1].observation.results[0].content == "Plan updated"
+    assert trajectory.steps[2].observation.results[0].content[0].text == "xyz"
+    assert '"status": "completed"' in trajectory.steps[3].observation.results[0].content
+    assert '"tools": []' in trajectory.steps[4].observation.results[0].content
+    assert trajectory.steps[5].observation.results[0].content == "Success"
+    assert trajectory.steps[-1].message == "done"
+
+
+def test_codex_parser_rejects_a_subagent_session_export(tmp_path: Path) -> None:
+    (tmp_path / "transcript.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "session"}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "root-shell",
+                            "type": "command_execution",
+                            "command": "echo root",
+                            "aggregated_output": "root",
+                            "exit_code": 0,
+                        },
+                    }
+                ),
+            ]
+        )
+    )
+    (tmp_path / "session.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "child", "parent_thread_id": "session"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "exec_command",
+                            "arguments": '{"cmd":"echo child"}',
+                            "call_id": "child-call",
+                        },
+                    }
+                ),
+            ]
+        )
+    )
+    trajectory = CodexCliHarness().parse_trajectory(context(tmp_path, "codex"))
+    calls = [call for step in trajectory.steps for call in step.tool_calls or ()]
+
+    assert [call.tool_call_id for call in calls] == ["root-shell"]
+    assert trajectory.extra["ale"]["parse_issues"] == [
+        {
+            "source": "session.jsonl",
+            "reason": "session_id_mismatch",
+            "expected": "session",
+            "actual": "child",
+        }
+    ]
 
 
 def test_openclaw_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
