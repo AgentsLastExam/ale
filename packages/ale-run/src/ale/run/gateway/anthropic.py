@@ -12,7 +12,6 @@ from typing import Any
 
 __all__ = [
     "USD_PER_MTOK",
-    "affordable_output_tokens",
     "estimate_cost",
     "extract_usage",
     "pricing_for",
@@ -20,7 +19,7 @@ __all__ = [
     "usage_from_stream",
 ]
 
-#: Rough per-million-token prices, used for budget ceilings rather than billing.
+#: Rough per-million-token prices, used to stop completed runs rather than billing.
 #: Being approximately right stops a runaway run; being exactly right is the invoice's
 #: job, and pretending otherwise would mean tracking a price list we do not own.
 USD_PER_MTOK: dict[str, tuple[float, float]] = {
@@ -38,18 +37,6 @@ def pricing_for(model: str) -> tuple[float, float] | None:
         (value for key, value in USD_PER_MTOK.items() if key != "default" and key in lowered),
         None,
     )
-
-
-def affordable_output_tokens(
-    rates: tuple[float, float],
-    *,
-    input_tokens: int,
-    remaining_usd: float,
-) -> int:
-    """Worst-case output that fits after paying for the exact request input."""
-    input_rate, output_rate = rates
-    available = remaining_usd - input_tokens * input_rate / 1_000_000
-    return int(max(0.0, available) * 1_000_000 / output_rate)
 
 
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:

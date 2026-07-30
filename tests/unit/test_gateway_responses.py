@@ -60,7 +60,7 @@ class ResponsesUpstream:
         return web.json_response({"input_tokens": 6})
 
 
-async def test_responses_dialect_routes_auth_model_and_exact_limits() -> None:
+async def test_responses_dialect_routes_auth_model_and_accounts_usage() -> None:
     upstream = ResponsesUpstream()
     await upstream.start()
     gateway = Gateway(
@@ -98,8 +98,8 @@ async def test_responses_dialect_routes_auth_model_and_exact_limits() -> None:
 
     assert upstream.key == "Bearer real-key"
     assert upstream.model == "grok-4.5"
-    assert upstream.max_output_tokens == 4
-    assert upstream.count_calls == 1
+    assert upstream.max_output_tokens == 100
+    assert upstream.count_calls == 0
     assert session.usage.input_tokens == 6
     assert session.usage.output_tokens == 4
 
@@ -165,11 +165,7 @@ async def test_disconnected_downstream_does_not_cancel_upstream_accounting(
         recording.transport,
     )
     session.begin("request")
-    reservation = await session.reserve(
-        input_tokens=0,
-        requested_output_tokens=100,
-        pricing=(2.0, 6.0),
-    )
+    reservation = await session.reserve()
 
     response = await gateway._stream(
         object(),  # type: ignore[arg-type]

@@ -19,8 +19,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ale.run.gateway.anthropic import affordable_output_tokens
-
 __all__ = [
     "GatewayReservation",
     "GatewaySession",
@@ -42,7 +40,7 @@ class Limits:
 
 
 class LimitReached(Exception):
-    """A ceiling would be exceeded, so the call was refused before it was made."""
+    """A completed-usage ceiling was reached, so the next call was refused."""
 
     def __init__(self, limit: str, value: float, observed: float | None = None) -> None:
         super().__init__(f"{limit} limit reached ({value:g})")
@@ -70,11 +68,7 @@ class Usage:
 
 @dataclass(frozen=True)
 class GatewayReservation:
-    """Worst-case allowance held while one unique request is in flight."""
-
-    input_tokens: int
-    output_tokens: int
-    cost_usd: float
+    """One unique upstream request held against the model-call limit."""
 
 
 @dataclass
@@ -116,80 +110,27 @@ class GatewaySession:
     _inflight: dict[str, asyncio.Future[Any]] = field(default_factory=dict, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _reserved_calls: int = field(default=0, repr=False)
-    _reserved_input_tokens: int = field(default=0, repr=False)
-    _reserved_output_tokens: int = field(default=0, repr=False)
-    _reserved_cost_usd: float = field(default=0.0, repr=False)
 
-    async def reserve(
-        self,
-        *,
-        input_tokens: int,
-        requested_output_tokens: int,
-        pricing: tuple[float, float] | None,
-    ) -> GatewayReservation:
-        """Atomically hold enough allowance for one unique upstream request."""
+    async def reserve(self) -> GatewayReservation:
+        """Refuse reached limits, then reserve one model call."""
         async with self._lock:
             limits, usage = self.limits, self.usage
             calls = usage.model_calls + self._reserved_calls + 1
             if limits.max_model_calls is not None and calls > limits.max_model_calls:
                 raise LimitReached("max_model_calls", limits.max_model_calls, calls)
 
-            inputs = usage.input_tokens + self._reserved_input_tokens + input_tokens
-            if limits.max_input_tokens is not None and inputs > limits.max_input_tokens:
-                raise LimitReached("max_input_tokens", limits.max_input_tokens, inputs)
-
-            output_tokens = requested_output_tokens
-            limiting: tuple[str, float, float] | None = None
-            if limits.max_output_tokens is not None:
-                remaining = (
-                    limits.max_output_tokens - usage.output_tokens - self._reserved_output_tokens
-                )
-                if remaining < output_tokens:
-                    output_tokens = remaining
-                    limiting = ("max_output_tokens", limits.max_output_tokens, remaining)
-
-            if limits.max_total_tokens is not None:
-                remaining = (
-                    limits.max_total_tokens
-                    - usage.total_tokens
-                    - self._reserved_input_tokens
-                    - self._reserved_output_tokens
-                    - input_tokens
-                )
-                if remaining < output_tokens:
-                    output_tokens = remaining
-                    limiting = ("max_total_tokens", limits.max_total_tokens, remaining)
-
-            reserved_cost = 0.0
-            if limits.max_cost_usd is not None:
-                assert pricing is not None
-                input_rate, output_rate = pricing
-                remaining_cost = limits.max_cost_usd - usage.cost_usd - self._reserved_cost_usd
-                input_cost = input_tokens * input_rate / 1_000_000
-                affordable = affordable_output_tokens(
-                    pricing,
-                    input_tokens=input_tokens,
-                    remaining_usd=remaining_cost,
-                )
-                if affordable < output_tokens:
-                    output_tokens = affordable
-                    limiting = ("max_cost_usd", limits.max_cost_usd, remaining_cost)
-                reserved_cost = input_cost + output_tokens * output_rate / 1_000_000
-
-            if output_tokens < 1:
-                assert limiting is not None
-                raise LimitReached(*limiting)
-
-            reservation = GatewayReservation(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cost_usd=reserved_cost,
+            completed = (
+                ("max_input_tokens", limits.max_input_tokens, usage.input_tokens),
+                ("max_output_tokens", limits.max_output_tokens, usage.output_tokens),
+                ("max_total_tokens", limits.max_total_tokens, usage.total_tokens),
+                ("max_cost_usd", limits.max_cost_usd, usage.cost_usd),
             )
+            for name, limit, observed in completed:
+                if limit is not None and observed >= limit:
+                    raise LimitReached(name, limit, observed)
+
             self._reserved_calls += 1
-            self._reserved_input_tokens += input_tokens
-            self._reserved_output_tokens += output_tokens
-            self._reserved_cost_usd += reserved_cost
-            return reservation
+            return GatewayReservation()
 
     async def commit(
         self,
@@ -202,9 +143,6 @@ class GatewaySession:
         """Release a reservation and account for the forwarded call."""
         async with self._lock:
             self._reserved_calls -= 1
-            self._reserved_input_tokens -= reservation.input_tokens
-            self._reserved_output_tokens -= reservation.output_tokens
-            self._reserved_cost_usd -= reservation.cost_usd
             self.usage.model_calls += 1
             self.usage.input_tokens += input_tokens
             self.usage.output_tokens += output_tokens

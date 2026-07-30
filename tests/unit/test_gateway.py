@@ -191,51 +191,68 @@ class TestLimits:
 
     async def test_cost_ceiling_uses_recorded_usage(self, stack) -> None:
         gateway, _upstream, session, _ = stack
-        session.limits = Limits(max_cost_usd=0.001)
-        await call(gateway, session)
+        session.limits = Limits(max_cost_usd=0.0005)
 
+        first, _ = await call(gateway, session)
         second, body = await call(gateway, session, messages=[{"role": "user", "content": "x"}])
-        third, body = await call(gateway, session, messages=[{"role": "user", "content": "y"}])
-        assert second == 200
-        assert third == 429
+
+        assert first == 200
+        assert second == 429
         assert body["error"]["ale"]["limit"] == "max_cost_usd"
 
-    async def test_exact_input_count_refuses_before_model_forwarding(self, stack) -> None:
+    async def test_input_ceiling_stops_after_provider_usage_crosses_it(self, stack) -> None:
         gateway, upstream, session, _ = stack
         upstream.counted_input = 6
         session.limits = Limits(max_input_tokens=5)
 
-        status, body = await call(gateway, session)
+        first, _ = await call(gateway, session)
+        second, body = await call(
+            gateway,
+            session,
+            messages=[{"role": "user", "content": "different"}],
+        )
 
-        assert status == 429
+        assert first == 200
+        assert second == 429
         assert body["error"]["ale"]["limit"] == "max_input_tokens"
-        assert upstream.count_calls == 1
-        assert upstream.calls == 0
+        assert upstream.count_calls == 0
+        assert upstream.calls == 1
+
+    async def test_output_ceiling_stops_after_provider_usage_crosses_it(self, stack) -> None:
+        gateway, upstream, session, _ = stack
+        session.limits = Limits(max_output_tokens=7)
+
+        first, _ = await call(gateway, session, max_tokens=100)
+        second, body = await call(
+            gateway,
+            session,
+            messages=[{"role": "user", "content": "different"}],
+        )
+
+        assert first == 200
+        assert second == 429
+        assert body["error"]["ale"]["limit"] == "max_output_tokens"
+        assert upstream.seen_max_tokens == [100]
 
     @pytest.mark.parametrize(
-        ("limits", "counted_input", "expected"),
+        "limits",
         [
-            (Limits(max_output_tokens=7), 2, 7),
-            (Limits(max_total_tokens=10), 6, 4),
-            (Limits(max_cost_usd=0.00075), 100, 10),
+            Limits(max_total_tokens=10),
+            Limits(max_cost_usd=0.00075),
         ],
     )
-    async def test_gateway_clamps_authoritative_max_tokens(
-        self,
-        stack,
-        limits: Limits,
-        counted_input: int,
-        expected: int,
+    async def test_total_and_cost_limits_do_not_preempt_the_current_call(
+        self, stack, limits: Limits
     ) -> None:
         gateway, upstream, session, _ = stack
-        upstream.counted_input = counted_input
-        upstream.output_tokens = min(2, expected)
+        upstream.counted_input = 100
         session.limits = limits
 
         status, _ = await call(gateway, session, max_tokens=100)
 
         assert status == 200
-        assert upstream.seen_max_tokens == [expected]
+        assert upstream.seen_max_tokens == [100]
+        assert upstream.count_calls == 0
 
     async def test_failed_forwarded_call_counts_toward_model_call_limit(self, stack) -> None:
         gateway, upstream, session, _ = stack
@@ -268,22 +285,6 @@ class TestLimits:
         assert sorted(status for status, _ in results) == [200, 429]
         assert upstream.calls == 1
 
-    async def test_unused_output_reservation_is_released(self, stack) -> None:
-        gateway, upstream, session, _ = stack
-        session.limits = Limits(max_output_tokens=20)
-        upstream.output_tokens = 2
-
-        first, _ = await call(gateway, session, max_tokens=20)
-        second, _ = await call(
-            gateway,
-            session,
-            max_tokens=18,
-            messages=[{"role": "user", "content": "second"}],
-        )
-
-        assert (first, second) == (200, 200)
-        assert upstream.seen_max_tokens == [20, 18]
-
 
 class TestRetryIdempotency:
     async def test_identical_request_is_served_from_cache(self, stack) -> None:
@@ -296,7 +297,7 @@ class TestRetryIdempotency:
 
         assert first == second
         assert upstream.calls == 1
-        assert upstream.count_calls == 1
+        assert upstream.count_calls == 0
         assert session.usage.turns == 1
         records = read_jsonl(trace.path).records
         assert [record["kind"] for record in records] == ["call", "replay"]

@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientSession, web
 
-from ale.core.errors import ConfigError
 from ale.core.trace import read_jsonl
 from ale.run.gateway.openai_chat_completions import usage_from_stream
 from ale.run.gateway.server import Gateway
@@ -18,6 +17,7 @@ pytestmark = pytest.mark.unit
 
 class ChatUpstream:
     def __init__(self) -> None:
+        self.calls = 0
         self.key = ""
         self.payload: dict = {}
         self.runner: web.AppRunner | None = None
@@ -37,6 +37,7 @@ class ChatUpstream:
             await self.runner.cleanup()
 
     async def completions(self, request: web.Request) -> web.StreamResponse:
+        self.calls += 1
         self.key = request.headers.get("authorization", "")
         self.payload = await request.json()
         if not self.payload.get("stream"):
@@ -102,7 +103,7 @@ async def test_chat_dialect_routes_auth_model_and_output_limit(tmp_path: Path) -
 
     assert upstream.key == "Bearer real-key"
     assert upstream.payload["model"] == "gpt-5-mini"
-    assert upstream.payload["max_completion_tokens"] == 4
+    assert upstream.payload["max_completion_tokens"] == 100
     assert "max_tokens" not in upstream.payload
     assert session.usage.input_tokens == 6
     assert session.usage.output_tokens == 4
@@ -161,17 +162,55 @@ def test_chat_stream_usage_may_cross_network_chunk_boundaries() -> None:
 
 
 @pytest.mark.parametrize(
-    "limits",
+    ("limits", "expected_limit"),
     [
-        Limits(max_input_tokens=1),
-        Limits(max_total_tokens=1),
-        Limits(max_cost_usd=1),
+        (Limits(max_input_tokens=5), "max_input_tokens"),
+        (Limits(max_total_tokens=9), "max_total_tokens"),
+        (Limits(max_cost_usd=0.000009), "max_cost_usd"),
     ],
 )
-def test_chat_dialect_rejects_hard_limits_without_exact_input_counts(limits: Limits) -> None:
-    gateway = Gateway(api_key="key", dialect="openai-chat-completions")
+async def test_chat_usage_limits_stop_the_call_after_the_threshold(
+    tmp_path: Path,
+    limits: Limits,
+    expected_limit: str,
+) -> None:
+    upstream = ChatUpstream()
+    await upstream.start()
+    gateway = Gateway(
+        api_key="real-key",
+        upstream=upstream.url,
+        dialect="openai-chat-completions",
+        host="127.0.0.1",
+    )
+    await gateway.start()
+    session = gateway.open_session(
+        GatewaySession(episode_id="episode", model="gpt-5-mini", limits=limits)
+    )
+    try:
+        async with ClientSession() as client:
+            first = await client.post(
+                f"{gateway.base_url}/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "first"}],
+                    "max_completion_tokens": 100,
+                },
+                headers={"authorization": f"Bearer {session.token}"},
+            )
+            assert first.status == 200
+            await first.read()
+            second = await client.post(
+                f"{gateway.base_url}/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "second"}],
+                    "max_completion_tokens": 100,
+                },
+                headers={"authorization": f"Bearer {session.token}"},
+            )
+            body = json.loads(await second.text())
+            assert second.status == 429
+    finally:
+        await gateway.stop()
+        await upstream.stop()
 
-    with pytest.raises(ConfigError, match="no provider-independent exact input-token"):
-        gateway.open_session(
-            GatewaySession(episode_id="episode", model="gpt-5-mini", limits=limits)
-        )
+    assert body["error"]["ale"]["limit"] == expected_limit
+    assert upstream.calls == 1

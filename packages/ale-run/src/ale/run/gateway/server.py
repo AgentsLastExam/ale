@@ -58,10 +58,6 @@ _REQUEST_PATHS = {
     "openai-chat-completions": "/v1/chat/completions",
     "openai-responses": "/v1/responses",
 }
-_COUNT_PATHS = {
-    "anthropic": "/v1/messages/count_tokens",
-    "openai-responses": "/v1/responses/input_tokens",
-}
 _MAX_OUTPUT_FIELDS = {
     "anthropic": "max_tokens",
     "openai-chat-completions": "max_completion_tokens",
@@ -124,18 +120,6 @@ class Gateway:
         self, session: GatewaySession, trace: EventSink | None = None
     ) -> GatewaySession:
         """Register an episode. Its token is valid until :meth:`close_session`."""
-        if self.dialect == "openai-chat-completions" and any(
-            value is not None
-            for value in (
-                session.limits.max_input_tokens,
-                session.limits.max_total_tokens,
-                session.limits.max_cost_usd,
-            )
-        ):
-            raise ConfigError(
-                "openai-chat-completions has no provider-independent exact input-token "
-                "endpoint; finite input, total-token, and cost limits are unsupported"
-            )
         if (
             session.limits.max_cost_usd is not None
             and self._dialect.pricing_for(session.model) is None
@@ -210,16 +194,9 @@ class Gateway:
     ) -> web.StreamResponse:
         assert self._client is not None
         headers = self._upstream_headers(request)
-        input_tokens = (
-            await self._count_input_tokens(payload, headers) if _needs_exact_input(session) else 0
-        )
         requested_output = self._requested_output(payload)
         try:
-            reservation = await session.reserve(
-                input_tokens=input_tokens,
-                requested_output_tokens=requested_output,
-                pricing=self._dialect.pricing_for(session.model),
-            )
+            reservation = await session.reserve()
         except LimitReached as limit:
             self._record(
                 session,
@@ -239,7 +216,7 @@ class Gateway:
             }
             session.finish(key, cached)
             return self._replayed(cached)
-        payload = self._with_output_limit(payload, reservation.output_tokens)
+        payload = self._with_output_limit(payload, requested_output)
         self._retain_payload(session, call_id, payload, None)
 
         streaming = bool(payload.get("stream"))
@@ -457,49 +434,6 @@ class Gateway:
             headers["authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    async def _count_input_tokens(
-        self,
-        payload: dict[str, Any],
-        headers: dict[str, str],
-    ) -> int:
-        assert self._client is not None
-        count_payload = {
-            key: value
-            for key, value in payload.items()
-            if key not in {self._max_output_field, "stream"}
-        }
-        async with self._client.post(
-            f"{self.upstream}{self._count_path}",
-            json=count_payload,
-            headers=headers,
-        ) as response:
-            raw = await response.read()
-            if response.status != 200:
-                raise web.HTTPBadGateway(
-                    text=json.dumps(
-                        {
-                            "type": "error",
-                            "error": {
-                                "type": "ale_token_count_failed",
-                                "upstream_status": response.status,
-                            },
-                        }
-                    ),
-                    content_type="application/json",
-                )
-            try:
-                return int(json.loads(raw or b"{}")["input_tokens"])
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise web.HTTPBadGateway(
-                    text=json.dumps(
-                        {
-                            "type": "error",
-                            "error": {"type": "ale_token_count_invalid"},
-                        }
-                    ),
-                    content_type="application/json",
-                ) from exc
-
     @property
     def _dialect(self):  # type: ignore[no-untyped-def]
         return _DIALECTS[self.dialect]
@@ -507,13 +441,6 @@ class Gateway:
     @property
     def _request_path(self) -> str:
         return _REQUEST_PATHS[self.dialect]
-
-    @property
-    def _count_path(self) -> str:
-        try:
-            return _COUNT_PATHS[self.dialect]
-        except KeyError as exc:
-            raise ConfigError(f"{self.dialect} does not support exact input-token counts") from exc
 
     @property
     def _max_output_field(self) -> str:
@@ -642,18 +569,6 @@ class Gateway:
 async def _iter_chunks(upstream: Any) -> AsyncIterator[bytes]:
     async for chunk in upstream.content.iter_any():
         yield chunk
-
-
-def _needs_exact_input(session: GatewaySession) -> bool:
-    limits = session.limits
-    return any(
-        value is not None
-        for value in (
-            limits.max_input_tokens,
-            limits.max_total_tokens,
-            limits.max_cost_usd,
-        )
-    )
 
 
 def _elapsed_ms(started: float) -> int:

@@ -180,8 +180,8 @@ the MCP client contract may not.
 
 Keep ownership explicit:
 
-- Gateway limits own model calls, exact input tokens, output tokens, total tokens, and
-  provider cost.
+- Gateway limits own model calls, provider-reported input tokens, output tokens, total
+  tokens, and estimated provider cost.
 - Harness settings own native controls such as Claude `max_turns` and
   `max_budget_usd`.
 - Environment timeouts own setup, agent, and verify wall time.
@@ -195,15 +195,15 @@ The preset supplies the default dialect and upstream provider endpoint; a harnes
 accept a documented compatible override. Harnesses always use an episode-local Gateway
 bearer token; provider credentials remain host-side.
 
-For finite token limits, the Gateway uses the dialect's exact input-token endpoint
-before forwarding. It accounts for every upstream call made by the agent program,
-including CLI-owned discovery or compaction calls. If the CLI disconnects from a
-streaming response early, the Gateway still drains the upstream response and commits
-usage before releasing the reservation.
+The Gateway does not pre-count input tokens or reserve worst-case token/cost budgets.
+It completes the current request, accounts provider-reported usage, and refuses the next
+request after an input-token, output-token, total-token, or cost ceiling is reached.
+Model-call limits remain exact because they require no estimation. This policy applies
+equally to all three dialects.
 
-OpenAI Chat Completions has no provider-independent exact input-token endpoint. With that
-dialect, finite input-token, total-token, and cost limits are rejected when the Gateway
-session opens. Finite model-call and output-token limits remain valid. Streaming requests
+It accounts for every upstream call made by the agent program, including CLI-owned
+discovery or compaction calls. If the CLI disconnects from a streaming response early,
+the Gateway still drains the upstream response and commits usage. Chat streaming requests
 force `stream_options.include_usage=true`, and legacy `max_tokens` is normalized to
 `max_completion_tokens` before forwarding.
 
