@@ -1,198 +1,186 @@
 <!--
 Sync Impact Report
 ==================
-Version change: 1.0.1 → 2.0.0 (canonical trajectory and task-admission revision)
+Version change: 2.1.0 → 3.0.0
+Reason: MAJOR revision. The former constitution mixed durable principles with
+current implementation choices. This amendment redefines and consolidates the
+principles, removes implementation-specific sections, and establishes an explicit
+scope boundary for future amendments.
+
 Modified principles:
-  - I. Contracts First, Compatibility Last → Contracts First, Standards Deliberately
-  - II. Unified Data Shapes, Delegated Behavior: canonical run-artifact vocabulary
-  - IV. Structural Decoupling Over Discipline: explicit recording handles
-  - V. Sandbox Security & Result Integrity by Default: transport trace ownership
-  - VII. Naming & Language Discipline: canonical run-artifact vocabulary
-  - Development Workflow & Quality Gates: oracle plus all-ones named rewards
-Added sections: none
-Removed sections: none
-Templates requiring updates:
-  - .specify/templates/plan-template.md ✅ aligned (generic "Constitution Check" gate
-    derives from this file at plan time; no edit needed)
-  - .specify/templates/spec-template.md ✅ no constitution references; no edit needed
-  - .specify/templates/tasks-template.md ✅ no constitution references; no edit needed
+  - I. Contracts First, Standards Deliberately
+    → I. Explicit, Versioned Contracts
+  - II. Unified Data Shapes, Delegated Behavior
+    + IV. Structural Decoupling Over Discipline
+    → II. Clear Ownership and Dependency Direction
+  - III. Full Provenance, Reproducible by Construction
+    → III. Reproducible Outcomes and Honest Provenance
+  - V. Sandbox Security & Result Integrity by Default
+    → IV. Explicit Trust Boundaries and Honest Failure
+  - VI. Minimal Surface, Deliberate Extension
+    → V. Minimal Surface and Evidence-Based Generalization
+  - VII. Naming & Language Discipline
+    + project-wide parts of Development Workflow & Quality Gates
+    → VI. Verifiable Changes and Normative Documentation
+
+Added sections:
+  - Scope
+
+Removed sections:
+  - Architectural Constraints
+  - Development Workflow & Quality Gates
+
+Templates and command guidance reviewed:
+  - .specify/templates/plan-template.md ✅ no edit needed; its generic
+    Constitution Check derives gates from this file
+  - .specify/templates/spec-template.md ✅ no edit needed
+  - .specify/templates/tasks-template.md ✅ no edit needed
+  - .agents/skills/speckit-*/SKILL.md ✅ no stale implementation-specific
+    constitution rules found
+
 Propagation:
-  - .specify/memory/constitution.md ✅ synchronized
+  - .specify/memory/constitution.md ✅ updated
   - ale/docs/constitution.md ✅ synchronized
-  - ale/docs/specs/lexicon.md ✅ synchronized
-Follow-up TODOs:
-  - Design docs in /home/weichen/ale/.scratch/ (00–05) are informative background;
-    they are working notes, not normative.
+  - ale/AGENTS.md ✅ reviewed; repository operating rules remain outside the
+    constitution
+  - ale/docs/security-model.md and ale/docs/specs/ ✅ reviewed; concrete mechanisms
+    intentionally remain in their proper normative documents
+
+Follow-up TODOs: none
 -->
 
 # ALE Framework Constitution
 
-Project: `ale` — the Agents' Last Exam core orchestration framework
-(engine repo `AgentsLastExam/ale`; per-domain task repos `ale-<domain>-tasks`;
-assets on Hugging Face org `agents-last-exam`; images on GHCR org `AgentsLastExam`).
+Project: `ale` — the Agents' Last Exam orchestration and evaluation framework.
+
+## Scope
+
+This constitution governs only durable, project-wide constraints. It MUST NOT
+prescribe a concrete transport, provider, package or directory layout, model-routing
+mechanism, credential-delivery mechanism, runtime version, storage path, external
+registry, or exact validation algorithm.
+
+Concrete designs MUST live in versioned specifications or architecture decision
+records. They MAY change without a constitutional amendment when the principles below
+remain satisfied.
 
 ## Core Principles
 
-### I. Contracts First, Standards Deliberately
+### I. Explicit, Versioned Contracts
 
-All cross-boundary data shapes — `TaskSpec`, ATIF Trajectory, Transport Trace,
-Execution Trace, Episode Result, `RunLock`, task IDs, resource references — MUST be
-typed models owned by `ale-core` and serialized as canonical JSON. Contracts SHOULD be
-designed from first principles, but MAY deliberately adopt a stable published
-interchange standard when direct interoperability is an approved feature requirement.
-Such adoption requires explicit specification and constitution review, strict local
-models, namespaced ALE extensions, and conformance tests; it MUST NOT require runtime
-imports from the external framework. Formats not selected as canonical remain edge
-adapters and MUST NOT distort unrelated core contracts. `ale-core` is the single package
-that task repos and extensions may depend on.
+Data and behavior that cross a component, process, repository, or trust boundary MUST
+have an explicit owner and a documented, validated contract. Persisted or public
+contracts MUST be versioned, and breaking changes MUST include a migration or an
+explicit compatibility boundary.
 
-Rationale: contracts outlive implementations. Owning strict local types preserves ALE's
-control, while deliberate use of a mature interchange standard avoids maintaining a
-private duplicate when direct compatibility is itself the requirement.
+External standards MAY be adopted when interoperability is a real requirement. The
+adoption MUST be specified, represented by locally owned public types or adapters, and
+covered by conformance tests. An external implementation MUST NOT become an implicit
+dependency of unrelated core behavior.
 
-### II. Unified Data Shapes, Delegated Behavior
+Rationale: implementations change more often than the agreements between them.
+Explicit ownership and versioning let ALE evolve without making stored results,
+task repositories, or integrations ambiguous.
 
-What is uniform across all domains and MUST NOT be forked: task ID namespace, ATIF
-Trajectory, Transport Trace, Execution Trace, Episode Result and status taxonomy,
-`RunLock` schema, Run Status Projection, sandbox leasing, gateway routing of
-model/judge traffic, external resource pinning, and task admission gates. What is
-delegated to domains: `Environment` orchestration internals, `TaskSpec` extension
-fields, taskset/variant generation, scoring logic and judges, sandbox-side kits, and
-image contents. Host-side extensions (`Environment`/`TaskSpec` subclasses, judges)
-MUST live in the engine repo and enter only via reviewed PRs; task repos MUST contain
-zero host-side code. Domain-specific experiments start in namespaced `extras` and are
-promoted into core schemas only after demonstrated cross-domain need.
+### II. Clear Ownership and Dependency Direction
 
-Rationale: results are comparable only if the nouns are shared; innovation is safe
-only if the verbs are free. Central review of extensions is the design-quality gate.
+Every responsibility MUST have one documented owner. Orchestration, public contracts,
+task-authored behavior, reusable task libraries, and infrastructure integrations MUST
+interact through their published interfaces rather than private imports or ambient
+state.
 
-### III. Full Provenance, Reproducible by Construction
+Dependencies MUST flow toward stable public contracts. Contract layers MUST NOT depend
+on orchestration or feature implementations, and task-authored code MUST NOT acquire
+undeclared host capabilities. Boundaries with meaningful integrity impact MUST be
+enforced mechanically where practical.
 
-Every run MUST produce a complete `RunLock`: task repo URL + commit, `TaskSpec`
-content hash, image reference resolved to sha256 digest (never a bare tag), assets
-revisions, kit versions, agent harness name + version + integrity, model ID, judge
-model + prompt hash when used, config hash, seed, and framework version + commit.
-A result without full provenance is invalid and MUST NOT be reported. Resume MUST be
-idempotent, keyed by content hash — never by directory names or timestamps.
+Rationale: a boundary that exists only in a diagram decays. Clear ownership and
+one-way dependencies keep components replaceable without freezing their current
+implementation.
 
-Rationale: a benchmark number that cannot answer "exactly what produced you?" is not
-a number; for a long-lived research project this is the difference between a
-leaderboard and folklore.
+### III. Reproducible Outcomes and Honest Provenance
 
-### IV. Structural Decoupling Over Discipline
+Every reportable evaluation outcome MUST identify the immutable inputs, code, data,
+artifacts, configuration, and framework state needed to reproduce or meaningfully
+compare it. Mutable references used during execution MUST be resolved to immutable
+identities in provenance.
 
-Module boundaries are enforced by structure, not convention:
+An outcome with missing required provenance, an incomplete execution stage, or a
+failed measurement component MUST NOT be represented as a successful result. Resume,
+deduplication, and cache identity MUST use stable content or execution identities
+rather than display names, directories, or timestamps alone.
 
-- Gateway ⊥ Provider: the gateway is a standalone host-side HTTP service whose only
-  interface is a sandbox-reachable URL + bearer token; it MUST NOT import or know any
-  provider. Wiring the route is the provider's plumbing job.
-- GuestServer ⊥ Provider: all in-sandbox capabilities (exec, file transfer,
-  observation) go through `ale-guestd`, preinstalled in base images, stdlib-only; OS
-  differences are absorbed inside it. Providers only attach a transport.
-- Capability injection: `Environment` implementations receive framework handles
-  (`ctx.sandboxes`, `ctx.gateway`, `ctx.artifacts`, `ctx.budget`, `ctx.trajectory`,
-  `ctx.transport`, `ctx.execution`, `ctx.blobs`, `ctx.result`) and MUST NOT construct
-  infrastructure clients directly.
-- Dependency direction: extensions → `ale-core` only; no core → extension, no
-  extension → extension, no engine → task-repo imports. Enforced by import linting
-  in CI, not by review vigilance.
+Rationale: a score without traceable inputs is not durable evidence. Provenance must
+describe what actually ran, including failure, rather than what was intended to run.
 
-Rationale: decoupling that relies on discipline decays; decoupling that relies on
-structure compounds.
+### IV. Explicit Trust Boundaries and Honest Failure
 
-### V. Sandbox Security & Result Integrity by Default
+Each execution phase MUST document which code is trusted, which resources it may
+access, and which capabilities or secrets it receives. Evaluated code MUST NOT access
+withheld evaluation material, credentials, or privileges outside its declared
+contract. Trusted framework or verification phases MAY receive required capabilities
+and secrets, but access MUST be scoped to their purpose and lifetime and sensitive
+values MUST be excluded from published artifacts.
 
-Sandboxes default to network-blocked with the gateway as the sole egress; any wider
-access MUST be declared per task (`allowlist`/`open`). Real credentials MUST never
-enter a sandbox — agents see only the gateway URL and a per-episode bearer token.
-All model and judge traffic MUST flow through the gateway, where limits (turns,
-tokens, cost ceilings) are enforced by refusal and every call is recorded into the
-Transport Trace. Task materials invisible to agents (`task.yaml`, `verify/`, `oracle/`) MUST
-never be mounted or uploaded into the agent phase. Budget and timeout overruns MUST
-terminate episodes with typed statuses, never hang or silently truncate.
+Infrastructure, setup, verifier, judge, timeout, and contract failures MUST be
+reported explicitly and MUST NOT be converted into a valid low score or silently
+ignored. Security-sensitive paths MUST fail closed when their required guarantees
+cannot be established.
 
-Rationale: evaluation integrity is a systems property. Under future RL optimization
-pressure, every unenforced boundary becomes a reward hack.
+Rationale: evaluation integrity depends on knowing who may observe or modify what.
+Separating measurement failure from measured performance prevents corrupted results
+from looking legitimate.
 
-### VI. Minimal Surface, Deliberate Extension
+### V. Minimal Surface and Evidence-Based Generalization
 
-Prefer the core standard components — `StandardEnvironment`, `ManifestTaskset`, base
-images — before writing anything new. A minimal valid task is three files
-(`task.yaml`, `instruction.md`, `verify/`); authoring simple tasks MUST stay this
-cheap. Adding tasks is cheap (domain repo PR, CI-gated); adding extensions is
-deliberately expensive (engine repo PR, design review) — this friction gradient is
-intentional and MUST be preserved. Features for hypothetical scale (cloud providers,
-training integration, pooling) are seams to keep open, not code to write early:
-never write code for training now, and never design in a way that walls it off.
+ALE MUST keep the mandatory task-author and operator surface as small as the current
+requirements allow. Existing language, platform, and repository capabilities MUST be
+preferred over new abstractions, dependencies, configuration, or extension points.
 
-Rationale: the framework's long-term scalability is bounded by how small its
-mandatory surface stays, not by how many features it ships.
+Domain-specific behavior MUST remain local until multiple concrete uses demonstrate a
+stable shared contract. Hypothetical scale, future providers, or unrequested
+compatibility MUST NOT justify production complexity. Public compatibility guarantees
+MUST be explicit and proportional to actual consumers.
 
-### VII. Naming & Language Discipline
+Rationale: each mandatory concept becomes permanent coordination cost. Generalization
+is valuable only after repeated evidence reveals what is actually shared.
 
-Every core noun has exactly one meaning, recorded in the project lexicon: `Sandbox`
-(execution instance — never called "environment"), `Environment` (how a task becomes
-an episode — its only meaning), `TaskSpec`, `Taskset`, `Episode`, `Run`, `Harness`
-(`AutonomousHarness` / `PolicyHarness`), `GuestServer`, `Gateway`, `Kit`, ATIF
-Trajectory, Transport Trace, Execution Trace, Episode Result, Blob, Native Log, Run
-Status Projection, `RunLock`. New names MUST be narrow rather than broad, MUST be
-checked against the lexicon for collisions, and conversational shorthand MUST NOT
-enter code without vetting. All repository artifacts — code, comments, docstrings,
-docs, commit messages — MUST be standard English.
+### VI. Verifiable Changes and Normative Documentation
 
-Rationale: in a multi-domain, multi-team codebase, ambiguous names are compounding
-debt; the lexicon is the cheapest architecture document we will ever maintain.
+Changes to public contracts, trust boundaries, persisted artifacts, or cross-component
+behavior MUST update the relevant normative specification in the same change. New
+architectural decisions or reversals MUST be recorded in an ADR. Implementation details
+MUST NOT be promoted into this constitution merely to make a current design harder to
+change.
 
-## Architectural Constraints
+Behavior-changing work MUST include tests proportional to its risk, and user-facing
+workflows MUST have an executable validation path. Failed required checks MUST block
+publication or release. Exact test matrices, task-admission criteria, and release gates
+belong to their owning specifications and workflows.
 
-- Repo topology: engine monorepo (`packages/ale-core`, `packages/ale-run`, host-side
-  extension packages, `registry.toml`, base image builds) + one task repo per domain
-  (task folders, kits, `assets.lock.yaml`, domain Dockerfiles). Task consumption
-  resolves via `registry.toml` or explicit local paths; both go through the same
-  execution path.
-- Task repo and task folder layout MUST follow the task folder specification
-  (manifest-driven, ID derived from path, visibility rules, verify/oracle contract).
-- All domain images MUST build `FROM` an official base image
-  (`sandbox-base-cli` / `sandbox-base-gui`); base images preinstall `ale-guestd`.
-- Large assets live on HF (`agents-last-exam`) pinned by revision; images live on
-  GHCR (`AgentsLastExam`) pinned by digest in `RunLock`. Neither belongs in git.
-- Heavy dependencies (simulators, ML stacks) belong in images or kits, never in
-  host-side package dependencies.
+Repository artifacts MUST use standard English and the canonical terms defined in the
+project lexicon.
 
-## Development Workflow & Quality Gates
-
-- Task admission: `ale validate` MUST execute the task's oracle through the ordinary
-  agent path, execute the real verifier, and pass only when the verifier emits a
-  non-empty finite named-reward map whose every value is exactly `1.0`. Missing
-  oracles, empty or malformed rewards, thresholds, and manual bypasses are invalid.
-  `ale validate` and `ale lint` MUST pass in the task repo's CI before a task is
-  runnable by name.
-- Cross-repo pinning: task repos declare `requires_core` ranges and pin the engine
-  version in CI; the engine pins task-repo commits for its smoke suite. Pin bumps
-  are explicit, reviewed changes.
-- Extension PRs to the engine repo MUST include: the concrete need no core component
-  can express, the `extras`-stage evidence where applicable, and conformance-test
-  coverage via the `ale-core` testkit.
-- Phasing discipline: local-first (Docker + QEMU before any cloud), eval-first
-  (training seams reserved, not implemented). Each phase declares explicit
-  non-goals; scope creep across a phase boundary requires a stated decision.
-- Failure handling: all errors map to the typed status taxonomy; retry policy is
-  driven by error class, and failed episodes MUST NOT contaminate aggregates.
+Rationale: principles stay durable only when current behavior is testable and recorded
+at the correct level of authority.
 
 ## Governance
 
-- Authority: this constitution supersedes ad-hoc practice for all ALE repos (engine
-  and task repos). The central maintainer (Weichen) approves amendments and all
-  engine-repo extension PRs.
-- Amendments: proposed as a PR modifying this file, including a Sync Impact Report
-  (version bump, affected principles, propagation to templates/docs). Semantic
-  versioning: MAJOR for principle removals/redefinitions, MINOR for new or
-  materially expanded principles/sections, PATCH for clarifications.
-- Compliance: every feature plan MUST pass the Constitution Check gate against the
-  current version before implementation; violations require a written justification
-  in the plan's complexity tracking table or a constitution amendment — never a
-  silent exception. Reviews of engine-repo PRs verify Principles I–VII explicitly.
-- The design notes under `.scratch/` are informative background, not normative;
-  where they conflict with this constitution, the constitution wins.
+- Authority: this constitution supersedes ad-hoc practice across ALE engine and task
+  repositories. Normative specifications and ADRs MAY impose stronger local
+  requirements but MUST NOT weaken these principles.
+- Amendments: a constitutional amendment MUST change a durable project-wide principle,
+  the scope rule, or governance itself. Concrete implementation decisions MUST instead
+  update their owning specification or ADR. Every amendment MUST include a Sync Impact
+  Report and approval from the central maintainer.
+- Versioning: MAJOR removes or redefines a principle or governance guarantee; MINOR
+  adds a principle or materially expands governance; PATCH clarifies wording without
+  changing obligations.
+- Compliance: every feature plan MUST check the current principles before
+  implementation and again after design. A conflict requires either changing the
+  design or explicitly amending this constitution; it MUST NOT be waived silently.
+- Review: repository reviews MUST verify applicable constitutional principles and the
+  current normative specs independently. Compliance with one does not imply compliance
+  with the other.
 
-**Version**: 2.0.0 | **Ratified**: 2026-07-24 | **Last Amended**: 2026-07-29
+**Version**: 3.0.0 | **Ratified**: 2026-07-24 | **Last Amended**: 2026-07-31

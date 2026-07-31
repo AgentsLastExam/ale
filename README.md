@@ -48,7 +48,7 @@ uv run ale run demo/hello --agent nop      # does nothing; scores a real zero
 
 ```bash
 uv run ale lint tasks/            # static checks, no container
-uv run ale validate tasks/        # every oracle must produce non-empty all-ones rewards
+uv run ale validate tasks/        # untouched all-zero, then oracle all-one
 uv run ale new-task tasks/mine    # scaffold a task that already passes both
 uv run ale run <task> -n 5 --run-id sweep     # five episodes, resumable by that id
 uv run ale run <task> --require-reportable    # fail unless provenance could be published
@@ -74,6 +74,8 @@ Under `runs/<run>/<episode>/`:
 - `trace.execution.jsonl` — setup/verify/framework phases, commands, streamed output,
   policy application, and cleanup diagnostics.
 - `result.json` — terminal status, all named rewards, failure, and phase timings.
+- `verification.json` — the local derivation of rewards, including checks, aggregates,
+  and direct Judge attempts.
 - `blobs/` — content-addressed large or binary payloads referenced by the records above.
 - `artifacts/` — the paths the task declared, if this run asked to keep them.
 
@@ -92,7 +94,7 @@ guaranteed: [docs/security-model.md](docs/security-model.md).
 | **Sandbox** / **Provider** | an isolated execution instance / the backend supplying it |
 | **Harness** | binds an agent to the framework — *autonomous* (agent owns its loop) or *policy* (framework owns the observe/act loop) |
 | **GuestServer** | `ale-guestd`, the in-sandbox service every exec, file transfer and screenshot goes through |
-| **Gateway** | the sole controlled egress for model and judge traffic; enforces limits, isolates credentials, records every call |
+| **Gateway** | controlled solver model egress; enforces limits, isolates credentials, records every solver call |
 | **Episode** / **Run** | one administration of one task by one agent / a batch of episodes plus its ledger |
 | **Verdict** / **RunLock** | the result envelope / the provenance record binding a result to everything that produced it |
 
@@ -104,6 +106,7 @@ exactly one meaning across the codebase.
 ```
 packages/ale-core/    contracts, interfaces, conformance testkit
 packages/ale-run/     providers, gateway, guest service, harnesses, engine, CLI
+packages/ale-verify/  sandbox-local checks, direct Judges, records
 images/base/          sandbox base images (published to GHCR)
 docs/adr/             one-page decision records (append-only)
 docs/specs/           living normative specifications

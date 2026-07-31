@@ -255,17 +255,20 @@ def _write_task(root: Path) -> Path:
         #!/bin/bash
         set -e
         python3 - <<'PY'
-        import json, os
+        import json
         from pathlib import Path
+
+        from ale_verify import CheckResult, Verification
+
         nonce = Path("/home/user/input/nonce.txt").read_text()
         answer = Path("/home/user/output/result.txt").read_text()
         receipt = json.loads(Path("/home/user/output/mcp-call.json").read_text())
         fragment = receipt.get("fragment", "")
         ok = answer == f"SKILL-R7::{nonce}::{fragment}"
         ok = ok and receipt.get("nonce") == nonce and len(fragment) == 24
-        Path(os.environ["ALE_VERDICT_PATH"]).write_text(
-            json.dumps({"rewards": {"reward": float(ok)}})
-        )
+        verification = Verification()
+        verification.check("reward", CheckResult(float(ok)))
+        verification.write()
         PY
         """).strip()
     )

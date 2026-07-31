@@ -23,8 +23,11 @@ a review defect. New names must be narrow rather than broad and must not collide
 | **Native Continuation** | Opaque episode state that resumes one exact native agent session in its original live sandbox. | not Run ledger resume, transcript replay, or cross-sandbox restoration |
 | **Limit Termination** | The recorded layer, limit name, configured value, and cause that stopped an episode. | not an untyped process exit |
 | **GuestServer** (`ale-guestd`) | The in-sandbox service, preinstalled in every base image, through which all exec, file transfer and observation flows. Standard library only. | never provider-specific |
-| **Gateway** | The host-side service that is the sole controlled egress for model and judge traffic; enforces limits by refusal, isolates credentials, records every call. | never knows about providers |
-| **Kit** | A versioned code package injected into a sandbox, shipped with task content. | not a Python dependency of the engine |
+| **Gateway** | The host-side service through which solver Harness model traffic is controlled, metered, credentialed, and recorded. | not used by verification Judges; never knows about Providers |
+| **Kit** | A flat importable Python package at `kits/<name>/`, copied into a sandbox and hashed per episode. | not an engine dependency, manifest, alias, or lock-file entry |
+| **Framework Verification Library** (`ale_verify`) | The engine-owned, standard-library-only Python package staged into a sandbox for the verify phase; it composes checks, direct Judges, aggregates, metrics, and the final reward map. | not a task-repository Kit, Host service, Gateway client, or plugin |
+| **Judge Invocation** | One attributable LLM or agent judge execution, including its resolved configuration, attempts, usage, verdict, and evidence links. | not a task manifest declaration or reusable profile |
+| **Verification Record** | The sandbox-owned canonical `verification.json` derivation of rewards: criterion details, metrics, aggregates, Judge Invocations, diagnostics, and failure. | not the Episode Result, solver trajectory, or Agent transcript |
 | **ATIF Trajectory** | The episode's Harbor ATIF v1.7 document containing the complete agent-visible ordered interaction ALE can observe. | not framework lifecycle, setup, verification internals, or a native transcript |
 | **Transport Trace** | The append-only Gateway-owned JSONL record of model calls, refusals, replay accounting, and trajectory links. | not full conversation storage |
 | **Execution Trace** | The append-only JSONL record of framework phases, framework-owned commands, task-stage output, policies, and diagnostics. | not agent-owned tool activity |
@@ -41,6 +44,6 @@ answer to a question the image already answered by declaring its agent account, 
 answers can disagree — the workspace is the home), `Workflow` (collides with a task's own business process),
 `InstalledHarness` / `StepwiseHarness` / `ProgramHarness` (they described where an agent
 runs, which is not the distinguishing axis), bare `Trace`, `Semantic Trace`, `Verdict`,
-`primary reward`, `primary_reward`, and `events.jsonl` (replaced by the orthogonal
+`Verification Service`, `primary reward`, `primary_reward`, and `events.jsonl` (replaced by the orthogonal
 canonical run artifacts), `TaskData` (read as "the task's input files"), `trial` /
 `job` (imported vocabulary from other frameworks).

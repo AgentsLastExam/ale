@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "huggingface-hub>=0.27",
     "ale-core",
+    "ale-verify",
     "typer>=0.15",
     "aiohttp>=3.11",
     "pyyaml>=6.0",
@@ -20,6 +21,7 @@ build-backend = "hatchling.build"
 
 [tool.uv.sources]
 ale-core = { workspace = true }
+ale-verify = { workspace = true }
 
 # `ale` is a PEP 420 namespace package shared with ale-core: there is deliberately no
 # src/ale/__init__.py in either package.

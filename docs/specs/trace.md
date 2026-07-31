@@ -1,14 +1,15 @@
 # Unified episode logging
 
-An episode keeps five orthogonal canonical records. A fact has one authoritative home;
+An episode keeps six orthogonal canonical records. A fact has one authoritative home;
 other files may carry only stable identifiers, references, or small run-level projections.
 
 | Artifact | Owns | Does not own |
 |---|---|---|
 | `trajectory.json` | agent-visible messages, reasoning actually exposed, tool calls/results, images, subagents | setup/verify commands, rewards, aggregate usage |
-| `trace.transport.jsonl` | Gateway model calls, retries, refusals, usage, cost, call-to-step links | full conversation messages |
+| `trace.transport.jsonl` | solver Gateway model calls, retries, refusals, usage, cost, call-to-step links | full conversation messages or verification Judge calls |
 | `trace.execution.jsonl` | framework phases, task/framework commands, output, policy, cleanup failures | agent-owned tool calls, rewards |
 | `result.json` | terminal status, all named rewards, failure, phase timings | conversation, provenance |
+| `verification.json` | criterion diagnostics, metrics, aggregates, and Judge invocations/attempts | terminal status, solver trajectory, native Agent transcript |
 | `lock.json` | immutable provenance and enforced termination limits | live run state |
 
 `events.jsonl`, `trace.semantic.jsonl`, per-episode ledger databases, scalar/primary
@@ -152,6 +153,19 @@ OpenAI-compatible model endpoint exposing token IDs, log probabilities, masks, a
 multimodal processor state is available for end-to-end Prime-RL testing.
 
 Native logs are diagnostic evidence, never canonical truth.
+
+An Agent Judge is not a solver Harness and produces no ATIF trajectory. When invoked,
+its bounded, sanitized native JSONL transcript is retained at
+`logs/agent-judge.jsonl`; otherwise that path is absent.
+
+## Verification record
+
+`verification.json` is atomically replaced after each accepted mutation. It preserves
+completed deterministic criteria and judge attempts even when later verification fails.
+The verifier owns this file until `run.sh` exits. ALE then validates it against the
+reward envelope and copies it unchanged to the episode. No intermediate snapshot is
+sent to the Host, and Judge calls never merge into the solver's `trajectory.json` or
+Transport Trace.
 
 ## Interoperability
 

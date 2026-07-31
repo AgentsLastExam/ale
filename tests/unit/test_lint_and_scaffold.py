@@ -114,10 +114,6 @@ class TestLint:
     def test_an_unknown_kit_is_reported(self, tmp_path: Path) -> None:
         """Reported by the loader, which is also what would refuse to run it."""
         root = repo(tmp_path)
-        (root / "kits.lock.yaml").write_text(
-            "schema_version: 1\nkits:\n  - name: real-kit\n    package: real_kit\n"
-            f"    content_hash: 'sha256:{'0' * 64}'\n"
-        )
         created = scaffold_task(root / "tasks" / "fresh")
         manifest = created / "task.yaml"
         manifest.write_text(
@@ -126,7 +122,7 @@ class TestLint:
                 "verify:\n  assets: []\n  kits: [ghost]",
             )
         )
-        assert "unknown kit" in messages(root)
+        assert "must exist as kits/ghost/__init__.py" in messages(root)
 
     def test_an_undeclared_placeholder_is_reported(self, tmp_path: Path) -> None:
         """Strict rendering is a lint finding, not a surprise at run time."""

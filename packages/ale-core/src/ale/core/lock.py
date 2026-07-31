@@ -24,6 +24,7 @@ from ale.core.store import AssetOrigin
 __all__ = [
     "AgentProvenance",
     "AgentResourceProvenance",
+    "AleVerifyProvenance",
     "AssetProvenance",
     "FrameworkProvenance",
     "GatewayProvenance",
@@ -125,12 +126,36 @@ class AgentResourceProvenance(BaseModel):
 
 
 class JudgeProvenance(BaseModel):
-    """Recorded when scoring used a model judge: a judge change moves scores."""
+    """One observed judge execution; a change moves the resulting scores."""
 
     model_config = _FROZEN
 
+    invocation_id: str
+    kind: Literal["llm", "agent"]
     model: str
+    reasoning_effort: str
+    endpoint_identity: str
     prompt_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    rubric_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    adapter: Literal["codex-cli", "claude-code"] | None = None
+    adapter_version: str | None = None
+    placement: Literal["verify"] = "verify"
+    attempts: int = Field(default=0, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_shape(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "invocation_id" in value:
+            return value
+        prompt_hash = value.get("prompt_hash")
+        return {
+            **value,
+            "invocation_id": "legacy",
+            "kind": "llm",
+            "reasoning_effort": "unknown",
+            "endpoint_identity": "unknown",
+            "rubric_hash": prompt_hash,
+        }
 
 
 class AssetProvenance(BaseModel):
@@ -153,6 +178,13 @@ class KitProvenance(BaseModel):
     model_config = _FROZEN
 
     name: str
+    content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class AleVerifyProvenance(BaseModel):
+    model_config = _FROZEN
+
+    version: str
     content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
@@ -212,10 +244,22 @@ class RunLock(BaseModel):
     sandbox: SandboxProvenance | None = None
     config_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     seed: int
-    judge: JudgeProvenance | None = None
+    ale_verify: AleVerifyProvenance | None = None
+    judges: tuple[JudgeProvenance, ...] = ()
     assets: tuple[AssetProvenance, ...] = ()
     kits: tuple[KitProvenance, ...] = ()
     termination: LimitTermination | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_judge(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "judge" not in value:
+            return value
+        migrated = dict(value)
+        judge = migrated.pop("judge")
+        if judge is not None and "judges" not in migrated:
+            migrated["judges"] = [judge]
+        return migrated
 
     def missing_for_report(self) -> list[str]:
         """Reasons this lock cannot back a reported result.

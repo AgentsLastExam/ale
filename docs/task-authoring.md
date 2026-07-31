@@ -162,13 +162,102 @@ differ in `variant`, so results aggregate either way without anyone parsing a st
 
 ## Scoring
 
-`verify/run.sh` writes rewards to `$ALE_VERDICT_PATH`:
+Use a relocatable entry point:
 
 ```bash
-printf '{"rewards": {"reward": 1.0}}' > "$ALE_VERDICT_PATH"
+#!/usr/bin/env bash
+set -euo pipefail
+exec python3 "$(dirname "$0")/check.py"
 ```
 
-Also available: `$ALE_TASK_DIR`, `$ALE_PARAMS_JSON`, `$ALE_WORK_DIR`.
+ALE stages its Python 3.12+, standard-library `ale_verify` package only during
+verification. The verifier must use `python3`; it must not select a Conda environment,
+virtual environment, or another interpreter path:
+
+```python
+from ale_verify import Verification, checks
+
+verification = Verification()
+verification.check("format", checks.file_exists("/home/user/output/result.json"))
+verification.metric("checked_files", 1)
+verification.aggregate("overall")
+verification.write()
+```
+
+`check()` and `judge()` add named component rewards. `aggregate()` is explicit and uses
+stored criterion weights, which default to equal weights. `write()` writes all named
+rewards and metrics; it does not choose a hidden primary reward. The verifier must use
+`write()` so ALE can validate the local Verification Record against the reward envelope.
+
+Shared domain logic is an ordinary flat Python package:
+
+```text
+kits/verification_example/__init__.py
+```
+
+Select its exact import name in `task.yaml`:
+
+```yaml
+verify:
+  kits: [verification_example]
+```
+
+Then Task-local code, the framework package, and the Domain Kit compose normally:
+
+```python
+from ale_verify import Verification
+from verification_example import approved_record
+
+verification = Verification()
+verification.check("approved", approved_record("/home/user/output/result.json"))
+verification.aggregate("overall")
+verification.write()
+```
+
+There is no Kit manifest, alias, inventory, or lock file. ALE import-probes the selected
+package and records the hash of the actual staged bytes for each episode.
+
+LLM and agent judges are requested from the same state object with explicit scored
+rubrics. Task code supplies the prompt, rubric, and evidence paths. It never supplies a
+provider client, credential, model, Harness, or dialect:
+
+```python
+verification.judge(
+    "llm",
+    "correctness",
+    prompt="Judge correctness.",
+    rubric={
+        "no": {"score": 0.0, "description": "Incorrect."},
+        "yes": {"score": 1.0, "description": "Correct."},
+    },
+    files=["/home/user/output/result.txt"],
+)
+```
+
+The operator configures execution outside task content:
+
+```toml
+[verification.llm]
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
+base_url = "https://api.openai.com"
+api_key_env = "OPENAI_API_KEY"
+
+[verification.agent]
+adapter = "codex-cli"
+model = "gpt-5.4"
+reasoning_effort = "high"
+base_url = "https://api.openai.com"
+api_key_env = "OPENAI_API_KEY"
+```
+
+Judges run synchronously inside the completed sandbox. LLM Judges call the configured
+provider directly. Agent Judges invoke the selected image-provided CLI as root with an
+isolated native home and retain a sanitized raw transcript at
+`logs/agent-judge.jsonl`; they do not create another trajectory.
+
+Judge infrastructure errors, timeouts, refusals, and malformed responses fail the
+episode. They never become a synthetic zero reward.
 
 A verifier that exits non-zero or writes nothing is a `task_error` — a defect in *your*
 task — and is deliberately distinct from a zero score. Keep that distinction sharp: it is
@@ -178,12 +267,13 @@ what stops a broken verifier from looking like a hard task.
 
 ```bash
 ale lint tasks/           # every task in the repo
-ale validate tasks/       # every oracle must produce non-empty all-ones rewards
+ale validate tasks/       # untouched all-zero, then oracle all-one
 ```
 
 CI runs both. Every task must have `oracle/run.sh`; there is no threshold or manual
-bypass. Validation executes the oracle and real verifier through the normal episode
-path, and every named reward must equal exactly `1.0`.
+bypass. Validation runs the real verifier twice in independent sandboxes: setup directly
+to verify must emit the same non-empty reward names all at exactly `0.0`, then the oracle
+path must emit them all at exactly `1.0`. Configured judges run for both passes.
 
 ## Who runs what
 

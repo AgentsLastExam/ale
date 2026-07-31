@@ -64,6 +64,35 @@ jobs:
       - run: uv sync --frozen --all-groups
       - run: uv run pytest -m unit
 
+  verification-package:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-groups
+      - run: uv run pytest packages/ale-verify/tests
+
+  live-verification:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-groups
+      - name: Run live judge acceptance
+        if: env.OPENAI_API_KEY != '' || env.ANTHROPIC_API_KEY != ''
+        run: uv run pytest tests/acceptance/test_live_llm_judge.py tests/acceptance/test_live_agent_judge.py
+
   # Docker is preinstalled on GitHub-hosted runners, so the container backend is
   # exercised on every code change.
   container-backend:

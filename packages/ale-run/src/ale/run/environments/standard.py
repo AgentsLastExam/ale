@@ -20,6 +20,7 @@ import contextlib
 import json
 import logging
 import math
+import os
 import shutil
 import time
 from collections.abc import Sequence
@@ -32,6 +33,7 @@ from ale.core.errors import (
     PhaseTimeoutError,
     TaskError,
     TrajectoryConversionError,
+    VerificationInfrastructureError,
     VerifierOutputError,
 )
 from ale.core.harness import (
@@ -39,7 +41,7 @@ from ale.core.harness import (
     PolicyHarness,
     TrajectoryParseContext,
 )
-from ale.core.lock import AssetProvenance, KitProvenance, SandboxProvenance
+from ale.core.lock import AleVerifyProvenance, AssetProvenance, KitProvenance, SandboxProvenance
 from ale.core.result import PhaseTiming
 from ale.core.sandbox import (
     ExecOutputSink,
@@ -51,6 +53,7 @@ from ale.core.sandbox import (
 from ale.core.task import Task
 from ale.core.taskspec import AssetMount, StdioMcpServer
 from ale.core.trace import (
+    ExecutionLog,
     PhaseFinished,
     PhaseStarted,
     PolicyApplied,
@@ -63,8 +66,15 @@ from ale.run.assets import stage_mounts
 from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
 from ale.run.harnesses.builtin import oracle_dir
 from ale.run.images import resolve_digest, resolve_ref
-from ale.run.kits import hash_kit
-from ale.run.recording import BlobStore, CommandRecorder, execution_logging
+from ale.run.kits import hash_kit, installed_ale_verify, resolve_kit
+from ale.run.recording import (
+    BlobStore,
+    CommandRecorder,
+    Redactor,
+    atomic_write_json,
+    execution_logging,
+)
+from ale_verify import VerificationRecord
 
 __all__ = ["StandardEnvironment"]
 
@@ -78,6 +88,32 @@ __all__ = ["StandardEnvironment"]
 SETUP_DIR = PurePosixPath("/opt/ale/setup")
 VERIFY_DIR = PurePosixPath("/opt/ale/verify")
 VERDICT_PATH = PurePosixPath("/opt/ale/verify/rewards.json")
+VERIFICATION_PATH = PurePosixPath("/opt/ale/verify/verification.json")
+TRAJECTORY_STAGE_PATH = PurePosixPath("/opt/ale/verify/trajectory.json")
+VERIFY_CONFIG_PATH = PurePosixPath("/opt/ale/verify/config.json")
+TASK_INSTRUCTION_PATH = PurePosixPath("/opt/ale/verify/instruction.md")
+TASK_PARAMETERS_PATH = PurePosixPath("/opt/ale/verify/parameters.json")
+AGENT_JUDGE_LOG_PATH = PurePosixPath("/opt/ale/verify/agent-judge.jsonl")
+_ARTIFACT_IDENTITY_SCRIPT = """\
+import hashlib, json, os, sys
+found = []
+for declared in sys.argv[1:]:
+    paths = [declared] if os.path.isfile(declared) else (
+        [os.path.join(root, name) for root, _, names in os.walk(declared) for name in names]
+        if os.path.isdir(declared) else []
+    )
+    for path in sorted(paths):
+        if os.path.islink(path) or not os.path.isfile(path):
+            continue
+        with open(path, "rb") as handle:
+            data = handle.read()
+        found.append({
+            "path": path,
+            "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+            "size_bytes": len(data),
+        })
+print(json.dumps(found, separators=(",", ":")))
+"""
 
 
 class StandardEnvironment(Environment):
@@ -91,22 +127,27 @@ class StandardEnvironment(Environment):
         *,
         max_steps: int = DEFAULT_MAX_STEPS,
         stall_limit: int = DEFAULT_STALL_LIMIT,
+        agent_enabled: bool = True,
     ) -> None:
         self.harness = harness
         self.max_steps = max_steps
         self.stall_limit = stall_limit
+        self.agent_enabled = agent_enabled
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
         spec = task.spec
-        self.harness.validate_resources(ctx.agent_resources)
+        if self.agent_enabled:
+            self.harness.validate_resources(ctx.agent_resources)
         sandbox = await self._timed(ctx, Phase.PROVISION, self._provision(ctx))
         try:
             await self._with_deadline(
                 ctx, Phase.SETUP, spec.timeouts.setup, self._setup(task, ctx, sandbox)
             )
-            await self._with_deadline(
-                ctx, Phase.AGENT, spec.timeouts.agent, self._agent(task, ctx, sandbox)
-            )
+            if self.agent_enabled:
+                await self._with_deadline(
+                    ctx, Phase.AGENT, spec.timeouts.agent, self._agent(task, ctx, sandbox)
+                )
+            await self._capture_solver_evidence(ctx, sandbox)
             rewards = await self._with_deadline(
                 ctx, Phase.VERIFY, spec.timeouts.verify, self._verify(task, ctx, sandbox)
             )
@@ -115,7 +156,11 @@ class StandardEnvironment(Environment):
             await asyncio.shield(self._timed(ctx, Phase.TEARDOWN, self._teardown(ctx, sandbox)))
 
         ctx.extras["rewards"] = rewards
-        return Verdict.completed(await task.score(ctx))
+        metrics = ctx.extras.get("metrics")
+        return Verdict.completed(
+            await task.score(ctx),
+            metrics=metrics if isinstance(metrics, dict) else None,
+        )
 
     # --- phases ---
 
@@ -361,21 +406,153 @@ class StandardEnvironment(Environment):
             raise TaskError("task has no verify stage")
 
         await sandbox.upload_dir(str(verify_dir), str(VERIFY_DIR))
+        trajectory = ctx.run_dir / "trajectory.json"
+        if trajectory.is_file():
+            await sandbox.write_file(TRAJECTORY_STAGE_PATH, trajectory.read_bytes())
+        await sandbox.write_file(TASK_INSTRUCTION_PATH, ctx.spec.instruction.encode("utf-8"))
+        parameters = json.dumps(ctx.spec.params, ensure_ascii=False).encode("utf-8")
+        await sandbox.write_file(TASK_PARAMETERS_PATH, parameters)
+        await self._stage_verification_config(ctx, sandbox)
         await self._stage_assets(ctx, sandbox, ctx.spec.verify.assets)
         # Scoring is the framework's own work, and a verifier may need to reach something
         # the agent could not. The agent has already finished; nothing it does can follow.
         await sandbox.open_egress()
 
+        destination = await self._site_packages(sandbox)
+        framework_source, framework_version, framework_hash = installed_ale_verify()
+        await sandbox.upload_dir(
+            str(framework_source),
+            f"{destination}/ale_verify",
+        )
+        await self._probe_kit(sandbox, "ale-verify", "import ale_verify")
+        ctx.extras["ale_verify_provenance"] = AleVerifyProvenance(
+            version=framework_version,
+            content_hash=framework_hash,
+        )
         await self._install_kits(ctx, sandbox, folder, ctx.spec.verify.kits)
 
-        await self._run_stage(ctx, sandbox, VERIFY_DIR, Phase.VERIFY)
-        rewards = await self._read_rewards(sandbox)
+        exit_code = await self._run_stage(ctx, sandbox, VERIFY_DIR, Phase.VERIFY)
+        record = await self._collect_verification_record(ctx, sandbox)
+        await self._collect_agent_judge_log(ctx, sandbox, record)
+        if exit_code != 0:
+            if record is not None and (
+                (record.failure or "").startswith("judge infrastructure:")
+                or any(invocation.status == "failed" for invocation in record.judge_invocations)
+            ):
+                raise VerificationInfrastructureError(
+                    record.failure or f"Judge verification failed with exit code {exit_code}"
+                )
+            raise TaskError(
+                f"verify failed with exit code {exit_code}"
+                + (f": {record.failure}" if record is not None and record.failure else "")
+            )
+        if record is None:
+            raise VerifierOutputError(f"verify wrote no record to {VERIFICATION_PATH}")
+        if record.status != "completed":
+            raise VerifierOutputError(f"verify record is {record.status}, expected completed")
+        rewards, metrics = await self._read_verdict(sandbox)
+        if rewards != record.rewards or metrics != record.metrics:
+            raise VerifierOutputError(
+                "verify record and reward envelope contain different rewards or metrics"
+            )
+        ctx.extras["metrics"] = metrics
 
         return rewards
 
-    async def _teardown(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
-        # Collection is best effort: a sandbox that died still has to be released.
+    async def _stage_verification_config(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
+        config = ctx.extras.get("verification_config")
+        payload = (
+            config.model_dump(mode="json", exclude_none=True)
+            if hasattr(config, "model_dump")
+            else {}
+        )
+        await sandbox.write_file(
+            VERIFY_CONFIG_PATH,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        )
+        command_env: dict[str, str] = {}
+        secrets: list[str] = []
+        for section in payload.values():
+            if not isinstance(section, dict):
+                continue
+            name = section.get("api_key_env")
+            if isinstance(name, str) and (value := os.environ.get(name)):
+                command_env[name] = value
+                secrets.append(value)
+        ctx.extras["verification_command_env"] = command_env
+        ctx.extras["verification_secrets"] = tuple(secrets)
+
+    async def _collect_verification_record(
+        self, ctx: EpisodeContext, sandbox: Sandbox
+    ) -> VerificationRecord | None:
+        try:
+            raw = await sandbox.read_file(VERIFICATION_PATH)
+        except Exception:
+            return None
+        secrets = cast(tuple[str, ...], ctx.extras.get("verification_secrets", ()))
+        if any(secret.encode() in raw for secret in secrets if secret):
+            raise VerifierOutputError("verify record contains a configured credential")
+        try:
+            record = VerificationRecord.from_json(raw)
+        except ValueError as exc:
+            raise VerifierOutputError(f"verify wrote malformed verification record: {exc}") from exc
+        atomic_write_json(ctx.run_dir / "verification.json", record.to_dict(), sort_keys=False)
+        ctx.extras["verification_record"] = record
+        return record
+
+    async def _collect_agent_judge_log(
+        self,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        record: VerificationRecord | None,
+    ) -> None:
+        if record is None:
+            return
+        launched = any(
+            invocation.kind == "agent"
+            and any(attempt.request_id for attempt in invocation.attempts)
+            for invocation in record.judge_invocations
+        )
+        try:
+            raw = await sandbox.read_file(AGENT_JUDGE_LOG_PATH)
+        except Exception as exc:
+            if launched:
+                raise VerifierOutputError(
+                    "Agent Judge launched but wrote no agent-judge.jsonl transcript"
+                ) from exc
+            return
+        redactor = Redactor(cast(tuple[str, ...], ctx.extras.get("verification_secrets", ())))
+        target = ctx.run_dir / "logs" / "agent-judge.jsonl"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            redactor(raw.decode("utf-8", errors="replace")),
+            encoding="utf-8",
+        )
+
+    async def _capture_solver_evidence(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
+        if ctx.extras.get("solver_evidence_captured"):
+            return
         logger = logging.getLogger("ale.execution")
+        identities = await sandbox.exec(
+            ["python3", "-c", _ARTIFACT_IDENTITY_SCRIPT, *ctx.spec.artifacts]
+        )
+        if identities.ok:
+            try:
+                observed = json.loads(identities.stdout or "[]")
+            except json.JSONDecodeError:
+                observed = []
+            ctx.extras["artifact_identities"] = observed
+            if ctx.execution is not None:
+                ctx.execution.append(
+                    ExecutionLog(
+                        episode_id=ctx.episode_id,
+                        phase=Phase.VERIFY.value,
+                        component="solver-evidence",
+                        message="solver artifact identities finalized",
+                        data={"artifacts": observed},
+                    ),
+                    durable=True,
+                )
         for index, path in enumerate(ctx.spec.artifacts):
             name = Path(path).name or f"artifact-{index}"
             try:
@@ -421,29 +598,37 @@ class StandardEnvironment(Environment):
                     },
                 )
 
-        session = ctx.session.model_copy(
-            update={
-                "gateway_url": sandbox.gateway_url or ctx.session.gateway_url,
-                "home": ctx.home,
-                "sandbox_id": sandbox.sandbox_id,
-                "resources_digest": ctx.agent_resources.digest,
-            }
-        )
-        try:
-            await self.harness.cleanup(
-                _RecordedSandbox(ctx, sandbox, component="harness-cleanup"),
-                session,
+        if self.agent_enabled:
+            session = ctx.session.model_copy(
+                update={
+                    "gateway_url": sandbox.gateway_url or ctx.session.gateway_url,
+                    "home": ctx.home,
+                    "sandbox_id": sandbox.sandbox_id,
+                    "resources_digest": ctx.agent_resources.digest,
+                }
             )
-            logger.info("harness cleanup completed")
-        except Exception as exc:
-            logger.warning(
-                "harness cleanup failed",
-                extra={"ale_data": {"error": str(exc)}},
-            )
-        await ctx.sandboxes.release(sandbox)
-        logger.info("sandbox released")
+            try:
+                await self.harness.cleanup(
+                    _RecordedSandbox(ctx, sandbox, component="harness-cleanup"),
+                    session,
+                )
+                logger.info("harness cleanup completed")
+            except Exception as exc:
+                logger.warning(
+                    "harness cleanup failed",
+                    extra={"ale_data": {"error": str(exc)}},
+                )
         if ctx.extras.get("agent_started") and not ctx.extras.get("trajectory_written"):
             self._parse_harness_trajectory(ctx)
+        ctx.extras["solver_evidence_captured"] = True
+
+    async def _teardown(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
+        # Collection is best effort: a sandbox that died still has to be released.
+        if ctx.extras.get("agent_started") and not ctx.extras.get("solver_evidence_captured"):
+            with contextlib.suppress(Exception):
+                await self._capture_solver_evidence(ctx, sandbox)
+        await ctx.sandboxes.release(sandbox)
+        logging.getLogger("ale.execution").info("sandbox released")
 
     def _parse_harness_trajectory(self, ctx: EpisodeContext) -> None:
         assert ctx.blobs is not None
@@ -527,6 +712,23 @@ class StandardEnvironment(Environment):
             "ALE_PARAMS_JSON": str(directory / "params.json"),
             "ALE_VERDICT_PATH": str(VERDICT_PATH),
         }
+        if phase is Phase.VERIFY:
+            env.update(
+                {
+                    "ALE_EPISODE_ID": ctx.episode_id,
+                    "ALE_VERIFICATION_PATH": str(VERIFICATION_PATH),
+                    "ALE_VERIFY_CONFIG_PATH": str(VERIFY_CONFIG_PATH),
+                    "ALE_TASK_INSTRUCTION_PATH": str(TASK_INSTRUCTION_PATH),
+                    "ALE_TASK_PARAMETERS_PATH": str(TASK_PARAMETERS_PATH),
+                    "ALE_AGENT_JUDGE_LOG_PATH": str(AGENT_JUDGE_LOG_PATH),
+                    **cast(
+                        dict[str, str],
+                        ctx.extras.get("verification_command_env", {}),
+                    ),
+                }
+            )
+            if (ctx.run_dir / "trajectory.json").is_file():
+                env["ALE_TRAJECTORY_PATH"] = str(TRAJECTORY_STAGE_PATH)
         await sandbox.write_file(
             directory / "params.json", json.dumps(ctx.spec.params).encode("utf-8")
         )
@@ -541,15 +743,22 @@ class StandardEnvironment(Environment):
             component="task-stage",
             execution_id=execution_id,
             actor="task",
-            argv=["bash", str(entry)],
+            argv=["bash", entry.name],
             cwd=str(directory),
-            secrets=(ctx.session.token,),
+            secrets=tuple(
+                secret
+                for secret in (
+                    ctx.session.token,
+                    *cast(tuple[str, ...], ctx.extras.get("verification_secrets", ())),
+                )
+                if secret
+            ),
         )
         started = time.monotonic()
         timeout_sec = cast(float | None, ctx.extras.get("phase_timeout_sec"))
         try:
             result = await sandbox.exec(
-                ["bash", str(entry)],
+                ["bash", entry.name],
                 cwd=str(directory),
                 env=env,
                 timeout_sec=timeout_sec,
@@ -616,23 +825,42 @@ class StandardEnvironment(Environment):
         destination = await self._site_packages(sandbox)
 
         for name in kits:
-            source = repo_root / "kits" / name
-            if not source.is_dir():
-                raise TaskError(f"kit {name!r} is declared but not present at {source}")
+            try:
+                source = resolve_kit(repo_root, name)
+            except Exception as exc:
+                raise TaskError(str(exc)) from exc
             await sandbox.exec(["mkdir", "-p", destination])
-            await sandbox.upload_dir(str(source), destination)
+            await sandbox.upload_dir(str(source), f"{destination}/{name}")
+            await self._probe_kit(sandbox, name, f"import {name}")
             ctx.kits.append(KitProvenance(name=name, content_hash=hash_kit(source)))
+
+    async def _probe_kit(self, sandbox: Sandbox, name: str, statement: str) -> None:
+        result = await sandbox.exec(["python3", "-c", statement])
+        if not result.ok:
+            raise TaskError(
+                f"kit {name!r} is incompatible with the selected image: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
 
     async def _site_packages(self, sandbox: Sandbox) -> str:
         """Where this image's interpreter looks for installed packages."""
         result = await sandbox.exec(
-            ["python3", "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+            [
+                "python3",
+                "-c",
+                (
+                    "import sys,sysconfig;"
+                    "assert sys.version_info >= (3,12), "
+                    "f'ale_verify requires Python 3.12+, got {sys.version.split()[0]}';"
+                    "print(sysconfig.get_paths()['purelib'])"
+                ),
+            ],
         )
         path = result.stdout.strip()
         if result.exit_code != 0 or not path:
             raise TaskError(
-                "could not ask the image's interpreter where user packages go; "
-                f"kits cannot be installed: {result.stderr.strip()}"
+                "verify-stage python3 must be Python 3.12+ and expose site-packages: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
             )
         return path
 
@@ -650,7 +878,7 @@ class StandardEnvironment(Environment):
             identity=Identity.AGENT,
         )
 
-    async def _read_rewards(self, sandbox: Sandbox) -> dict[str, float]:
+    async def _read_verdict(self, sandbox: Sandbox) -> tuple[dict[str, float], dict[str, float]]:
         try:
             raw = await sandbox.read_file(VERDICT_PATH)
         except Exception as exc:
@@ -665,9 +893,21 @@ class StandardEnvironment(Environment):
                 raise ValueError("reward names must be non-empty")
             if any(not math.isfinite(value) for value in parsed.values()):
                 raise ValueError("reward values must be finite")
-            return parsed
+            metrics = payload.get("metrics", {})
+            if not isinstance(metrics, dict):
+                raise ValueError("metrics must be an object")
+            parsed_metrics = {str(key): float(value) for key, value in metrics.items()}
+            if any(not key.strip() for key in parsed_metrics):
+                raise ValueError("metric names must be non-empty")
+            if any(not math.isfinite(value) for value in parsed_metrics.values()):
+                raise ValueError("metric values must be finite")
+            return parsed, parsed_metrics
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise VerifierOutputError(f"verify wrote malformed rewards: {exc}") from exc
+
+    async def _read_rewards(self, sandbox: Sandbox) -> dict[str, float]:
+        rewards, _ = await self._read_verdict(sandbox)
+        return rewards
 
     async def _with_deadline(self, ctx, phase: Phase, seconds: float, coro):  # type: ignore[no-untyped-def]
         return await self._timed(ctx, phase, coro, timeout_sec=seconds)

@@ -31,6 +31,7 @@ from ale.core.trace import (
     TransportEvent,
 )
 from ale.core.trajectory import AtifTrajectory
+from ale_verify import VerificationRecord
 
 __all__ = [
     "INLINE_TEXT_LIMIT",
@@ -61,14 +62,19 @@ _LOG_CONTEXT: contextvars.ContextVar[tuple[EventSink, str, str | None, str, Reda
 _HANDLER_LOCK = threading.Lock()
 
 
-def atomic_write_json(path: Path, value: BaseModel | dict[str, Any]) -> None:
+def atomic_write_json(
+    path: Path,
+    value: BaseModel | dict[str, Any],
+    *,
+    sort_keys: bool = True,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = (
         value.model_dump(mode="json", exclude_none=True) if isinstance(value, BaseModel) else value
     )
     temporary = path.with_name(f".{path.name}.tmp")
     with temporary.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, sort_keys=True, indent=2)
+        json.dump(payload, handle, ensure_ascii=False, sort_keys=sort_keys, indent=2)
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
@@ -382,6 +388,10 @@ class EpisodeRecording:
         return self.directory / "result.json"
 
     @property
+    def verification_path(self) -> Path:
+        return self.directory / "verification.json"
+
+    @property
     def lock_path(self) -> Path:
         return self.directory / "lock.json"
 
@@ -391,6 +401,9 @@ class EpisodeRecording:
     def write_result(self, result: ResultRecord) -> None:
         atomic_write_json(self.result_path, result)
 
+    def write_verification(self, record: VerificationRecord) -> None:
+        atomic_write_json(self.verification_path, record.to_dict(), sort_keys=False)
+
     def write_lock(self, lock: RunLock) -> None:
         atomic_write_json(self.lock_path, lock)
 
@@ -399,6 +412,8 @@ class EpisodeRecording:
         documents: list[Any] = []
         if self.trajectory_path.is_file():
             documents.append(json.loads(self.trajectory_path.read_text()))
+        if self.verification_path.is_file():
+            documents.append(json.loads(self.verification_path.read_text()))
         for path in (self.transport.path, self.execution.path):
             if path.is_file():
                 with path.open(encoding="utf-8") as handle:

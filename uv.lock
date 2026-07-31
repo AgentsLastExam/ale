@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 members = [
     "ale-core",
     "ale-run",
+    "ale-verify",
     "ale-workspace",
 ]
 
@@ -149,6 +150,7 @@ source = { editable = "packages/ale-run" }
 dependencies = [
     { name = "aiohttp" },
     { name = "ale-core" },
+    { name = "ale-verify" },
     { name = "huggingface-hub" },
     { name = "pyyaml" },
     { name = "typer" },
@@ -158,10 +160,16 @@ dependencies = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.11" },
     { name = "ale-core", editable = "packages/ale-core" },
+    { name = "ale-verify", editable = "packages/ale-verify" },
     { name = "huggingface-hub", specifier = ">=0.27" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.15" },
 ]
+
+[[package]]
+name = "ale-verify"
+version = "0.1.0"
+source = { editable = "packages/ale-verify" }
 
 [[package]]
 name = "ale-workspace"
@@ -170,6 +178,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "ale-core" },
     { name = "ale-run" },
+    { name = "ale-verify" },
 ]
 
 [package.dev-dependencies]
@@ -185,6 +194,7 @@ dev = [
 requires-dist = [
     { name = "ale-core", editable = "packages/ale-core" },
     { name = "ale-run", editable = "packages/ale-run" },
+    { name = "ale-verify", editable = "packages/ale-verify" },
 ]
 
 [package.metadata.requires-dev]

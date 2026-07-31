@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ale.core.config import LoggingPolicy
+from ale.core.config import LoggingPolicy, VerificationConfig
 from ale.core.environment import ArtifactSink, Budget, Environment, EpisodeContext, Phase
 from ale.core.errors import (
     AgentError,
@@ -38,8 +38,9 @@ from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import Status, Verdict
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, Limits
-from ale.run.provenance import ProvenanceInputs, build_lock
+from ale.run.provenance import ProvenanceInputs, build_lock, judge_provenance
 from ale.run.recording import EpisodeRecording
+from ale_verify import VerificationRecord
 
 __all__ = ["EpisodeResult", "run_episode"]
 
@@ -177,6 +178,7 @@ async def run_episode(
     trajectory_id: str | None = None,
     phase_callback: Callable[[Phase], None] | None = None,
     logging_policy: LoggingPolicy | None = None,
+    verification_config: VerificationConfig | None = None,
 ) -> EpisodeResult:
     """Administer one task and return its verdict.
 
@@ -187,7 +189,6 @@ async def run_episode(
     trajectory_id = trajectory_id or f"trajectory-{uuid.uuid4().hex}"
     episode_dir = run_dir / episode_id
     recording = EpisodeRecording(episode_dir)
-
     # The session is opened here, not by the caller, for two reasons that only show up
     # afterwards: it can carry this episode's own identifier instead of a placeholder,
     # and it can be given the trace the gateway writes model calls into — which does not
@@ -247,6 +248,7 @@ async def run_episode(
     if phase_callback is not None:
         ctx.extras["phase_callback"] = phase_callback
     ctx.extras["logging_policy"] = logging_policy or LoggingPolicy()
+    ctx.extras["verification_config"] = verification_config or VerificationConfig()
 
     try:
         verdict = await environment.run(task, ctx)
@@ -378,6 +380,9 @@ def _write_lock(
         inputs = replace(
             inputs, agent=inputs.agent.model_copy(update={"version": ctx.agent_version})
         )
+    record = ctx.extras.get("verification_record")
+    if isinstance(record, VerificationRecord):
+        inputs = replace(inputs, judges=judge_provenance(record))
     lock = build_lock(
         inputs,
         ctx.spec,
@@ -385,6 +390,7 @@ def _write_lock(
         sandbox=ctx.sandbox_identity,
         assets=tuple(ctx.assets),
         kits=tuple(ctx.kits),
+        ale_verify=ctx.extras.get("ale_verify_provenance"),
         termination=ctx.limit_termination,
         seed=seed,
         requires_core=getattr(getattr(task, "folder", None), "requires_core", None),

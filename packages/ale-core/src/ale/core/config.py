@@ -20,8 +20,9 @@ import tomllib
 from copy import deepcopy
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from ale.core.errors import ConfigError
 from ale.core.ids import content_hash
@@ -29,10 +30,13 @@ from ale.core.taskspec import McpSource, SkillSource
 
 __all__ = [
     "AgentConfig",
+    "AgentJudgeConfig",
     "ArtifactPolicy",
     "GatewayLimits",
+    "LLMJudgeConfig",
     "LoggingPolicy",
     "RunConfig",
+    "VerificationConfig",
     "load_run_config",
     "merge_layers",
     "parse_override",
@@ -129,6 +133,41 @@ class GatewayConfig(BaseModel):
     )
 
 
+class LLMJudgeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = Field(min_length=1)
+    reasoning_effort: str = Field(min_length=1)
+    base_url: str = Field(min_length=1)
+    api_key_env: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    @field_validator("model", "reasoning_effort")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("value must not be blank")
+        return value
+
+    @field_validator("base_url")
+    @classmethod
+    def _http_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("base_url must be an absolute HTTP(S) URL")
+        return value.rstrip("/")
+
+
+class AgentJudgeConfig(LLMJudgeConfig):
+    adapter: Literal["codex-cli", "claude-code"]
+
+
+class VerificationConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    llm: LLMJudgeConfig | None = None
+    agent: AgentJudgeConfig | None = None
+
+
 class RunConfig(BaseModel):
     """Everything one invocation needs, after all layers are merged."""
 
@@ -138,6 +177,7 @@ class RunConfig(BaseModel):
     artifacts: ArtifactPolicy = ArtifactPolicy()
     agent: AgentConfig = AgentConfig()
     gateway: GatewayConfig = GatewayConfig()
+    verification: VerificationConfig = VerificationConfig()
     logging: LoggingPolicy = LoggingPolicy()
     episodes: int = Field(default=1, ge=1)
     seed: int = 0

@@ -26,13 +26,18 @@ IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
 VERIFY_DEFAULT = textwrap.dedent("""
     #!/usr/bin/env bash
     set -euo pipefail
-    expected="hello world"
-    actual="$(cat /home/user/output/result.txt 2>/dev/null || true)"
-    if [ "$actual" = "$expected" ]; then
-        printf '{"rewards": {"reward": 1.0}}' > "$ALE_VERDICT_PATH"
-    else
-        printf '{"rewards": {"reward": 0.0}}' > "$ALE_VERDICT_PATH"
-    fi
+    exec python3 "$(dirname "$0")/check.py"
+""").strip()
+
+VERIFY_CHECK = textwrap.dedent("""
+    from ale_verify import Verification, checks
+
+    verification = Verification()
+    verification.check(
+        "reward",
+        checks.text_equals("/home/user/output/result.txt", "hello world"),
+    )
+    verification.write()
 """).strip()
 
 SETUP_DEFAULT = (
@@ -64,6 +69,7 @@ def _write_repo(root: Path, *, with_oracle: bool = True, verify_body: str | None
     )
     (task / "setup" / "run.sh").write_text(SETUP_DEFAULT)
     (task / "verify" / "run.sh").write_text(verify_body or VERIFY_DEFAULT)
+    (task / "verify" / "check.py").write_text(VERIFY_CHECK + "\n")
     if with_oracle:
         (task / "oracle").mkdir()
         (task / "oracle" / "run.sh").write_text(

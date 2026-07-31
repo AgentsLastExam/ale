@@ -24,7 +24,7 @@ from ale.core.domain import DomainManifest
 from ale.core.environment import EpisodeContext
 from ale.core.errors import TaskDefinitionError
 from ale.core.ids import slugify_path
-from ale.core.kit import KitsLock
+from ale.core.kit import resolve_kit
 from ale.core.task import Task, Taskset
 from ale.core.taskspec import ImageRef, SetupStage, TaskSpec, VerifyStage
 from ale.core.template import render_instruction
@@ -35,7 +35,6 @@ __all__ = ["ManifestTask", "ManifestTaskset", "TaskFolder", "load_task_folder"]
 TASK_MANIFEST = "task.yaml"
 INSTRUCTION = "instruction.md"
 DOMAIN_MANIFEST = "domain.yaml"
-KITS_LOCK = "kits.lock.yaml"
 TASKS_DIR = "tasks"
 
 STAGE_ENTRY = "run.sh"
@@ -131,7 +130,6 @@ class ManifestTaskset(Taskset):
         self.task_filter = task_filter
         self.repo_root = _find_repo_root(self.path)
         self.domain = DomainManifest.model_validate(_read_yaml(self.repo_root / DOMAIN_MANIFEST))
-        self.kits = self._load_kits()
 
     def load(self) -> Iterator[Task]:
         for folder in self.folders():
@@ -145,10 +143,6 @@ class ManifestTaskset(Taskset):
         }
 
     # --- loading ---
-
-    def _load_kits(self) -> KitsLock:
-        path = self.repo_root / KITS_LOCK
-        return KitsLock.model_validate(_read_yaml(path)) if path.is_file() else KitsLock()
 
     def folders(self) -> Iterator[TaskFolder]:
         """Yield the task folders selected by this taskset's path."""
@@ -265,8 +259,8 @@ class ManifestTaskset(Taskset):
     def _check_kits(self, folder: TaskFolder, setup: SetupStage, verify: VerifyStage) -> None:
         for name in (*setup.kits, *verify.kits):
             try:
-                self.kits.require(name)
-            except KeyError as exc:
+                resolve_kit(self.repo_root, name)
+            except TaskDefinitionError as exc:
                 raise TaskDefinitionError(f"{folder.relative_path}: {exc}") from exc
 
 

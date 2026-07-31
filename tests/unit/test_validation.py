@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+from importlib import import_module
+from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
-from ale.core.errors import VerifierOutputError
-from ale.run.cli.main import _is_full_reward_map
+from ale.core.errors import VerificationInfrastructureError, VerifierOutputError
+from ale.core.verdict import Status, Verdict
+from ale.run.cli.main import _is_full_reward_map, _is_zero_reward_map, _validation_outcome, app
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.harnesses.builtin import NopHarness
 
@@ -43,6 +47,23 @@ def test_admission_requires_nonempty_all_ones(
     assert _is_full_reward_map(rewards) is expected
 
 
+@pytest.mark.parametrize(
+    ("rewards", "expected"),
+    [
+        ({"correctness": 0.0}, True),
+        ({"correctness": 0.0, "format": 0.0}, True),
+        ({"correctness": 1.0}, False),
+        ({"correctness": 0.5}, False),
+        ({}, False),
+        (None, False),
+    ],
+)
+def test_untouched_admission_requires_nonempty_all_zeroes(
+    rewards: dict[str, float] | None, expected: bool
+) -> None:
+    assert _is_zero_reward_map(rewards) is expected
+
+
 @pytest.mark.asyncio
 async def test_verifier_accepts_finite_named_rewards() -> None:
     rewards = await StandardEnvironment(NopHarness())._read_rewards(
@@ -72,3 +93,53 @@ async def test_verifier_rejects_missing_malformed_or_nonfinite_rewards(
         await StandardEnvironment(NopHarness())._read_rewards(
             RewardsSandbox(payload)  # type: ignore[arg-type]
         )
+
+
+def test_validate_accepts_run_level_judge_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cli = import_module("ale.run.cli.main")
+    config = tmp_path / "verification.toml"
+    config.write_text(
+        "[verification.llm]\n"
+        'model = "gpt-test"\n'
+        'reasoning_effort = "medium"\n'
+        'base_url = "https://api.openai.com"\n'
+        'api_key_env = "TEST_JUDGE_KEY"\n'
+    )
+    observed = {}
+
+    async def fake_validate(reference, settings, runs_dir):  # type: ignore[no-untyped-def]
+        observed.update(reference=reference, settings=settings, runs_dir=runs_dir)
+        return 0
+
+    monkeypatch.setattr(cli, "_validate", fake_validate)
+    result = CliRunner().invoke(
+        app,
+        [
+            "validate",
+            "task",
+            "--config",
+            str(config),
+            "--set",
+            'verification.llm.reasoning_effort="high"',
+            "--runs-dir",
+            str(tmp_path / "runs"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed["reference"] == "task"
+    assert observed["settings"].verification.llm.reasoning_effort == "high"
+    assert observed["runs_dir"] == tmp_path / "runs"
+
+
+def test_validation_failure_output_is_actionable() -> None:
+    verdict = Verdict.failed(
+        Status.ENV_ERROR,
+        VerificationInfrastructureError("JUDGE_KEY is not set"),
+        phase="verify",
+    )
+    assert _validation_outcome(verdict) == (
+        "env_error (VerificationInfrastructureError: JUDGE_KEY is not set)"
+    )

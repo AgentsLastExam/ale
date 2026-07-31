@@ -3,7 +3,7 @@ name = "ale-workspace"
 version = "0.0.0"
 description = "ALE engine workspace root (never published)"
 requires-python = ">=3.12"
-dependencies = ["ale-core", "ale-run"]
+dependencies = ["ale-core", "ale-run", "ale-verify"]
 
 [dependency-groups]
 dev = [
@@ -20,6 +20,7 @@ package = false
 [tool.uv.sources]
 ale-core = { workspace = true }
 ale-run = { workspace = true }
+ale-verify = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -27,7 +28,13 @@ members = ["packages/*"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["packages/ale-core/src", "packages/ale-run/src", "tests"]
+src = [
+    "packages/ale-core/src",
+    "packages/ale-run/src",
+    "packages/ale-verify/src",
+    "packages/ale-verify/tests",
+    "tests",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

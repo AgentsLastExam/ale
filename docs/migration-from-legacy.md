@@ -57,9 +57,10 @@ Both scripts run in the sandbox now, not on the host. A task repository contains
 host-side code at all (Constitution II), which is what lets a task repository be
 untrusted content rather than code the engine executes.
 
-Shared scoring helpers become a **kit**: a Python package under `kits/<name>/`, copied to
-`/ale/kits/<name>` and put on `PYTHONPATH`. Kits are never pip-installed — the guest
-interpreter belongs to the image, not to us.
+Shared scoring helpers become a **Kit**: a flat Python package at
+`kits/<package>/__init__.py`. A stage selects that exact import name in `kits`, and ALE
+copies it into the selected image's `python3` `site-packages`. There is no manifest,
+alias, inventory, or Kit lock file.
 
 ### 3. Placeholders get triaged
 
@@ -100,12 +101,12 @@ ale new-task tasks/<group>/<task>       # start from something that already pass
 # write oracle/run.sh — the legacy task usually had a known solution
 
 ale lint tasks/<group>/<task>
-ale validate tasks/<group>/<task>       # every named reward must equal 1.0
+ale validate tasks/<group>/<task>       # untouched all-zero, then oracle all-one
 ```
 
-If the oracle does not produce a non-empty all-ones reward map, the rebuild is not
-finished. A task nobody can solve is broken, and finding that out costs one container
-rather than one agent run.
+If untouched setup already earns reward, or the oracle does not produce the same
+non-empty all-ones reward map, the rebuild is not finished. Finding that out costs two
+containers rather than one agent run.
 
 ## What does not carry over
 

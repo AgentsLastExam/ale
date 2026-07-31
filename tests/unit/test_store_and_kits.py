@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
 
+from ale.core.errors import TaskDefinitionError
 from ale.core.ids import TaskId
-from ale.core.kit import KitManifest, KitRuntime, KitsLock, LockedKit
+from ale.core.kit import resolve_kit, validate_kit_name
 from ale.core.store import STORE_ROOT, AssetOrigin, StoreEntry, StoreManifest, data_key
 from ale.core.taskspec import (
     AssetMount,
@@ -64,51 +64,21 @@ class TestStoreManifest:
         assert AssetOrigin.BAKED != AssetOrigin.DOWNLOAD
 
 
-class TestKitManifest:
-    def test_stdlib_kit_needs_nothing_from_the_image(self) -> None:
-        kit = KitManifest(name="grader-protocol", package="grader_protocol")
-        assert kit.runtime is KitRuntime.STDLIB
-        assert kit.import_probe() == "import grader_protocol"
+class TestFlatKit:
+    def test_name_is_the_python_package_name(self) -> None:
+        assert validate_kit_name("grader_protocol") == "grader_protocol"
+        for invalid in ("grader-protocol", "class", "", "two words"):
+            with pytest.raises(TaskDefinitionError):
+                validate_kit_name(invalid)
 
-    def test_stdlib_kit_may_not_declare_requirements(self) -> None:
-        with pytest.raises(ValidationError):
-            KitManifest(name="k", package="k", requires=("numpy",))
-
-    def test_image_deps_kit_must_say_what_it_needs(self) -> None:
-        with pytest.raises(ValidationError):
-            KitManifest(name="k", package="k", runtime=KitRuntime.IMAGE_DEPS)
-
-        kit = KitManifest(
-            name="sim-tools",
-            package="sim_tools",
-            runtime=KitRuntime.IMAGE_DEPS,
-            requires=("numpy",),
-        )
-        assert kit.import_probe() == "import sim_tools, numpy"
-
-    def test_import_name_may_differ_from_kit_name(self) -> None:
-        kit = KitManifest(name="grader-protocol", package="grader_protocol")
-        assert kit.name != kit.package
-
-
-class TestKitsLock:
-    def test_resolves_by_name(self) -> None:
-        lock = KitsLock(
-            kits=(
-                LockedKit(name="grader-protocol", package="grader_protocol", content_hash=DIGEST),
-            )
-        )
-        assert lock.require("grader-protocol").content_hash == DIGEST
-
-    def test_unknown_kit_names_the_alternatives(self) -> None:
-        lock = KitsLock(kits=(LockedKit(name="a", package="a", content_hash=DIGEST),))
-        with pytest.raises(KeyError, match="a"):
-            lock.require("missing")
-
-    def test_hash_is_mandatory(self) -> None:
-        """A kit without a pinned hash cannot appear in provenance."""
-        with pytest.raises(ValidationError):
-            LockedKit(name="a", package="a", content_hash="not-a-digest")
+    def test_resolves_exact_init_package(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        package = tmp_path / "kits" / "grader_protocol"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("")
+        assert resolve_kit(tmp_path, "grader_protocol") == package
+        (package / "__init__.py").unlink()
+        with pytest.raises(TaskDefinitionError, match="__init__"):
+            resolve_kit(tmp_path, "grader_protocol")
 
 
 class TestStages:
@@ -145,11 +115,11 @@ class TestStages:
                         repo="org/assets", revision="abc", path="demo/answers", dest="/gold"
                     ),
                 ),
-                kits=("grader-protocol",),
+                kits=("grader_protocol",),
             )
         )
         assert spec.verify.assets[0].dest == "/gold"
-        assert spec.verify.kits == ("grader-protocol",)
+        assert spec.verify.kits == ("grader_protocol",)
 
     def test_a_task_chooses_where_its_data_lands(self) -> None:
         """No global layout: a simulation domain puts scenes wherever it needs them."""

@@ -19,7 +19,7 @@ import typer
 from ale.core.config import RunConfig, load_run_config, select_agent_name
 from ale.core.errors import AleError, ConfigError
 from ale.core.harness import EffectiveAgentResources
-from ale.core.verdict import Status
+from ale.core.verdict import Status, Verdict
 from ale.run import __version__
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.environments.standard import StandardEnvironment
@@ -32,7 +32,6 @@ from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
-from ale.run.kits import read_lock, scan_kits, write_lock
 from ale.run.ledger import Ledger, episode_identity
 from ale.run.lint import lint_repository
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
@@ -47,8 +46,6 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
-kit_app = typer.Typer(help="Work with the shared libraries a domain ships to its tasks.")
-app.add_typer(kit_app, name="kit")
 
 EXIT_SOME_FAILED = 2
 EXIT_BAD_REFERENCE = 3
@@ -141,15 +138,16 @@ def run(
 @app.command()
 def validate(
     reference: Annotated[str, typer.Argument(help="Task or repository path")],
-    provider: Annotated[str, typer.Option("--provider")] = "docker",
+    provider: Annotated[str | None, typer.Option("--provider")] = None,
+    config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
+    overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
     runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
 ) -> None:
-    """Run each task's oracle in place of the agent and require its declared score.
+    """Require untouched all-zero and oracle all-one rewards for every task.
 
-    This is the admission gate: a task nobody can solve is a broken task, and finding
-    that out costs one container rather than one agent run.
+    Verification uses the same run-level judge configuration as an ordinary episode.
     """
-    settings = _config(None, None, agent="oracle", model="", provider=provider)
+    settings = _config(config, overrides, agent="oracle", model="", provider=provider)
     exit_code = asyncio.run(_validate(reference, settings, runs_dir))
     raise typer.Exit(exit_code)
 
@@ -243,23 +241,6 @@ def new_task(
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
     typer.echo(f"created {created}")
     typer.echo(f"next: ale lint {created}  &&  ale validate {created}")
-
-
-@kit_app.command("lock")
-def kit_lock(
-    repo: Annotated[Path, typer.Argument(help="Task repository root")] = Path(),
-    check: Annotated[bool, typer.Option("--check", help="Fail if the lock is stale")] = False,
-) -> None:
-    """Regenerate ``kits.lock.yaml`` — or verify it still matches the kits on disk."""
-    current = scan_kits(repo)
-    if check:
-        if read_lock(repo) != current:
-            typer.echo("kits.lock.yaml is out of date; run `ale kit lock`", err=True)
-            raise typer.Exit(1)
-        typer.echo(f"{len(current.kits)} kit(s) locked and current")
-        return
-    path = write_lock(repo, current)
-    typer.echo(f"wrote {path} ({len(current.kits)} kit(s))")
 
 
 # --- internals ---
@@ -441,7 +422,6 @@ async def _run_one(
                 for key, value in settings.gateway.limits.model_dump().items()
             }
         )
-
         if allowed:
             proxy = EgressProxy(gateway.sessions, host=_gateway_host(settings))
             proxy_url = await proxy.start()
@@ -488,6 +468,7 @@ async def _run_one(
                 episode_id=episode_id,
                 phase_callback=lambda phase: ledger.update_phase(episode_id, phase.value),
                 logging_policy=settings.logging,
+                verification_config=settings.verification,
             )
         ledger.finish_episode(result.episode_id, result.record)
 
@@ -566,60 +547,77 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
     run_dir = runs_dir / run_id
     ledger = Ledger(run_dir)
     ledger.open_run(run_id, settings.config_hash)
-    harness = OracleHarness()
     resources = EffectiveAgentResources()
     failures = 0
     try:
         for task in tasks:
             spec = task.spec
-            episode_id = f"{spec.id}-{uuid.uuid4().hex[:8]}"
-            inputs = ProvenanceInputs(
-                source=resolved.source,
-                agent=agent_provenance(
-                    harness,
-                    "",
-                    settings,
-                    resources,
-                ),
-                gateway=gateway_provenance(settings),
-                config_hash=settings.config_hash,
+            results = {}
+            for pass_name, harness, agent_enabled in (
+                ("untouched", NopHarness(), False),
+                ("oracle", OracleHarness(), True),
+            ):
+                episode_id = f"{spec.id}-{pass_name}-{uuid.uuid4().hex[:8]}"
+                inputs = ProvenanceInputs(
+                    source=resolved.source,
+                    agent=agent_provenance(
+                        harness,
+                        "",
+                        settings,
+                        resources,
+                    ),
+                    gateway=gateway_provenance(settings),
+                    config_hash=settings.config_hash,
+                )
+                identity = episode_identity(
+                    spec,
+                    agent=f"validation-{pass_name}@{harness.version()}",
+                    seed=settings.seed,
+                    config_hash=settings.config_hash,
+                )
+                ledger.queue_episode(
+                    episode_id=episode_id,
+                    run_id=run_id,
+                    identity=identity,
+                    spec=spec,
+                )
+                ledger.mark_running(episode_id)
+                result = await run_episode(
+                    task,
+                    StandardEnvironment(harness, agent_enabled=agent_enabled),
+                    _provider(settings),
+                    run_dir=run_dir,
+                    episode_id=episode_id,
+                    provenance=inputs,
+                    phase_callback=lambda phase, current=episode_id: ledger.update_phase(
+                        current, phase.value
+                    ),
+                    logging_policy=settings.logging,
+                    verification_config=settings.verification,
+                )
+                ledger.finish_episode(episode_id, result.record)
+                results[pass_name] = result
+
+            zero = results["untouched"].verdict
+            one = results["oracle"].verdict
+            same_names = (
+                zero.rewards is not None
+                and one.rewards is not None
+                and set(zero.rewards) == set(one.rewards)
             )
-            identity = episode_identity(
-                spec,
-                agent=f"{harness.name}@{harness.version()}",
-                seed=settings.seed,
-                config_hash=settings.config_hash,
+            passed = (
+                zero.status is Status.COMPLETED
+                and one.status is Status.COMPLETED
+                and _is_zero_reward_map(zero.rewards)
+                and _is_full_reward_map(one.rewards)
+                and same_names
             )
-            ledger.queue_episode(
-                episode_id=episode_id,
-                run_id=run_id,
-                identity=identity,
-                spec=spec,
-            )
-            ledger.mark_running(episode_id)
-            result = await run_episode(
-                task,
-                StandardEnvironment(harness),
-                _provider(settings),
-                run_dir=run_dir,
-                episode_id=episode_id,
-                provenance=inputs,
-                phase_callback=lambda phase, current=episode_id: ledger.update_phase(
-                    current, phase.value
-                ),
-                logging_policy=settings.logging,
-            )
-            ledger.finish_episode(episode_id, result.record)
-            rewards = result.verdict.rewards
-            passed = result.verdict.status is Status.COMPLETED and _is_full_reward_map(rewards)
             failures += 0 if passed else 1
             mark = "ok  " if passed else "FAIL"
-            if rewards:
-                non_full = {key: value for key, value in rewards.items() if value != 1.0}
-                detail = f"rewards {rewards}" if not non_full else f"non-full rewards: {non_full}"
-            else:
-                detail = str(result.verdict.status)
-            typer.echo(f"{mark}  {spec.label}: {detail}")
+            typer.echo(
+                f"{mark}  {spec.label}: untouched={_validation_outcome(zero)}, "
+                f"oracle={_validation_outcome(one)}"
+            )
     finally:
         ledger.close()
 
@@ -629,6 +627,18 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
 
 def _is_full_reward_map(rewards: dict[str, float] | None) -> bool:
     return bool(rewards) and all(value == 1.0 for value in rewards.values())
+
+
+def _is_zero_reward_map(rewards: dict[str, float] | None) -> bool:
+    return bool(rewards) and all(value == 0.0 for value in rewards.values())
+
+
+def _validation_outcome(verdict: Verdict) -> object:
+    if verdict.rewards is not None:
+        return verdict.rewards
+    if verdict.failure is not None:
+        return f"{verdict.status.value} ({verdict.failure.error_class}: {verdict.failure.message})"
+    return verdict.status.value
 
 
 def _gateway_host(settings: RunConfig) -> str:

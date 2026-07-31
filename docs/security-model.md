@@ -54,14 +54,26 @@ deliberately *not* on a resolved address: a task declares `pypi.org` because tha
 it means, and pinning to whatever IP that resolved to once would break the task rather
 than tighten it.
 
-## 3. Real credentials never enter a sandbox
+## 3. Evaluated agents never receive real credentials
 
-The provider key lives in the host's gitignored `.env`. A sandbox receives a URL and a
-bearer token that is worthless anywhere else and is revoked when the episode ends —
-verified by `test_a_revoked_session_loses_its_egress`.
+For the evaluated solver, the provider key lives in the host's gitignored `.env`. The
+sandbox receives a URL and a bearer token that is worthless anywhere else and is revoked
+when the episode ends — verified by `test_a_revoked_session_loses_its_egress`.
 
 The netprobe task additionally greps its own sandbox for credential material and fails
 if it finds any.
+
+Verification is a separate trusted phase after solver exit. `[verification.llm]` and
+`[verification.agent]` name an environment variable, model, endpoint, and reasoning
+effort at run level. ALE resolves the key only for `verify/run.sh`, injects it only into
+that command environment, registers the value for output/transcript redaction, and
+removes the sandbox after verification. The key is absent from provisioning, setup, the
+solver environment, staged configuration, result, record, and RunLock.
+
+LLM and Agent Judges call their configured endpoints directly from the completed
+sandbox. There is no Verification Service, Host callback, or Judge Gateway session.
+This deliberately trusts reviewed Task verifier code with the configured Judge
+credential; a malicious Task author is outside this threat model.
 
 ## 4. The agent cannot change what it is measured under
 
@@ -113,6 +125,11 @@ because conflating them makes a broken task look like a hard one.
 Verified by `tests/integration/test_limits.py`, which asserts prompt typed termination
 and that no container outlives its episode.
 
+Judge failure follows the same rule. Missing credentials/configuration, provider
+failures, timeouts, refusals, malformed JSON, incomplete rubric coverage, and off-menu
+choices remain typed failed episodes. ALE never records scorer failure as an evaluated
+agent reward of zero.
+
 ## 7. A result carries what produced it
 
 `RunLock` records the task source and commit, spec hash, resolved image **digest**,
@@ -150,6 +167,15 @@ Continuation fails when the sandbox was destroyed, the native state is absent, a
 input changed, or the request names another episode or sandbox. There is no "latest
 session" selector, transcript replay fallback, or configurable disk/global resume scope.
 
+## 10. Root agent judges do not redefine solver output
+
+An agent judge runs as framework/root so it can inspect and test the completed sandbox.
+That privilege means it can mutate any guest byte, so the integrity boundary is on the
+host: declared solver artifacts, native logs, hashes, and canonical solver trajectory are
+finalized before verify. Deterministic criteria accepted before agent launch are
+immutable, only the active agent verdict may be added afterward, and post-judge sandbox
+bytes are never published as solver artifacts.
+
 ---
 
 ## What is **not** defended against
@@ -161,7 +187,8 @@ security claims rot.
 as root in the sandbox, and a task may declare `resources.sudo` for its agent. Tasks are
 reviewed content, not untrusted input; the identity model protects a result from its
 *agent*, not a host from its task. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are aimed at
-*broken* tasks, not hostile ones.
+*broken* tasks, not hostile ones. A malicious verifier can also read and exfiltrate a
+Judge credential injected for its direct provider call.
 
 **Container escape.** A sandbox is a Docker container with default isolation. A kernel
 exploit reaches the host. If you need to run genuinely hostile code, use the VM backend

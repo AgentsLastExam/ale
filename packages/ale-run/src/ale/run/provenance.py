@@ -23,6 +23,7 @@ from ale.core.harness import EffectiveAgentResources
 from ale.core.lock import (
     AgentProvenance,
     AgentResourceProvenance,
+    AleVerifyProvenance,
     AssetProvenance,
     FrameworkProvenance,
     GatewayProvenance,
@@ -38,6 +39,7 @@ from ale.core.lock import (
 )
 from ale.core.taskspec import TaskSpec
 from ale.run import __version__
+from ale_verify import VerificationRecord
 
 __all__ = [
     "ProvenanceInputs",
@@ -45,6 +47,7 @@ __all__ = [
     "build_lock",
     "framework_provenance",
     "gateway_provenance",
+    "judge_provenance",
 ]
 
 UNKNOWN_COMMIT = "unknown"
@@ -82,6 +85,30 @@ def gateway_provenance(settings: RunConfig) -> GatewayProvenance:
         dialect=settings.gateway.dialect,
         limits=settings.gateway.limits.model_dump(),
     )
+
+
+def judge_provenance(record: VerificationRecord) -> tuple[JudgeProvenance, ...]:
+    """Project collected sandbox observations into the stable RunLock shape."""
+    observed: list[JudgeProvenance] = []
+    for invocation in record.judge_invocations:
+        if not invocation.attempts:
+            continue
+        first = invocation.attempts[0]
+        observed.append(
+            JudgeProvenance(
+                invocation_id=invocation.id,
+                kind=invocation.kind,
+                model=first.model,
+                reasoning_effort=first.reasoning_effort,
+                endpoint_identity=first.endpoint_identity,
+                prompt_hash=first.prompt_hash,
+                rubric_hash=first.rubric_hash,
+                adapter=invocation.adapter,
+                adapter_version=invocation.adapter_version,
+                attempts=len(invocation.attempts),
+            )
+        )
+    return tuple(observed)
 
 
 def agent_provenance(
@@ -163,7 +190,7 @@ class ProvenanceInputs:
     agent: AgentProvenance
     gateway: GatewayProvenance
     config_hash: str
-    judge: JudgeProvenance | None = None
+    judges: tuple[JudgeProvenance, ...] = ()
     framework: FrameworkProvenance = field(default_factory=framework_provenance)
 
 
@@ -175,6 +202,7 @@ def build_lock(
     sandbox: SandboxProvenance | None = None,
     assets: tuple[AssetProvenance, ...] = (),
     kits: tuple[KitProvenance, ...] = (),
+    ale_verify: AleVerifyProvenance | None = None,
     termination: LimitTermination | None = None,
     seed: int = 0,
     requires_core: str | None = None,
@@ -196,7 +224,8 @@ def build_lock(
         sandbox=sandbox,
         config_hash=inputs.config_hash,
         seed=seed,
-        judge=inputs.judge,
+        ale_verify=ale_verify,
+        judges=inputs.judges,
         assets=assets,
         kits=kits,
         termination=termination,

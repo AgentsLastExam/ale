@@ -8,7 +8,7 @@ may bypass the layout, but the manifest field semantics still apply.
 ```
 <task-repo>/
 ├── domain.yaml              # one per domain namespace
-├── kits/<name>/kit.yaml     # optional sandbox-side shared code
+├── kits/<package>/          # optional flat Python package with __init__.py
 ├── images/<name>/Dockerfile # optional; MUST derive from an official base image
 └── tasks/[<group>/]<task>/  # task folders; id is derived from this path
 ```
@@ -55,11 +55,11 @@ setup:
       revision: 1d0d026c…          # a commit: two runs naming it read the same bytes
       path: demo/hello/base/input
       dest: /home/user/input
-  kits: [data-prep]
+  kits: [data_prep]
 verify:
   assets:
     - { repo: …, revision: …, path: demo/hello/base/reference, dest: /home/user/reference }
-  kits: [grader-protocol]
+  kits: [grader_protocol]
 
 artifacts: [/home/user/output]     # absolute paths holding this task's output
 
@@ -75,6 +75,8 @@ and nothing in the framework parses an identifier (ADR 0006).
 
 Scripts are not declared. A stage's folder is copied into the sandbox when that stage
 runs, and its entry point (`setup/run.sh`, `verify/run.sh`) executes if present.
+Verify entry points should invoke sibling files through `$(dirname "$0")`, not a fixed
+`/opt/ale` path, so the task remains relocatable.
 
 ## Images
 
@@ -146,6 +148,19 @@ the rewards file. It is root-owned and root-only, which is what keeps the scorer
 the agent; a sandbox therefore has exactly two roots, that one and the agent's home.
 Shared libraries go where the image's interpreter already searches, so there is no
 framework directory for a task author to learn.
+
+During verify, ALE also stages the framework-owned Python 3.12+ stdlib package
+`ale_verify` into that system interpreter path. Tasks do not declare or vendor it.
+Repository kits selected by `verify.kits` may import `ale_verify.CheckResult`,
+`Verification`, or `checks`. Each selected name is both a valid Python identifier and the
+exact package directory/import name under `kits/`; there is no `kit.toml`,
+`kits.lock.yaml`, alias, or inventory. ALE hashes the staged bytes for episode
+provenance. Kits remain task code and cannot register host plugins, credentials,
+provider clients, or Harness implementations.
+
+Task stage entrypoints use the interpreter named `python3`. They must not select another
+Python path, Conda environment, or virtual environment, because ALE probes and stages
+packages into the `python3` interpreter it will execute.
 
 What keeps gold answers away from an agent is **timing, not location**: a mount listed
 under `verify` is copied in during scoring, so while the agent works it is absent.

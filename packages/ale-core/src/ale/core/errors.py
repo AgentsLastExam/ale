@@ -36,6 +36,12 @@ __all__ = [
     "TornJsonlError",
     "TrajectoryConversionError",
     "TrajectoryReferenceError",
+    "VerificationAdapterError",
+    "VerificationConfigurationError",
+    "VerificationInfrastructureError",
+    "VerificationProviderError",
+    "VerificationRequestError",
+    "VerificationVerdictError",
     "VerifierOutputError",
 ]
 
@@ -139,6 +145,30 @@ class TaskError(AleError):
 
 class VerifierOutputError(TaskError):
     """Verification crashed, or produced missing/malformed rewards."""
+
+
+class VerificationRequestError(TaskError):
+    """Task-authored verification input is invalid."""
+
+
+class VerificationInfrastructureError(EnvironmentError_):
+    """Framework judge configuration, transport, or execution failed."""
+
+
+class VerificationConfigurationError(VerificationInfrastructureError):
+    """A requested Judge has no usable run configuration or credential."""
+
+
+class VerificationProviderError(VerificationInfrastructureError):
+    """A direct Judge provider request failed."""
+
+
+class VerificationAdapterError(VerificationInfrastructureError):
+    """A local Agent Judge adapter is unavailable or failed."""
+
+
+class VerificationVerdictError(VerificationInfrastructureError):
+    """A Judge exhausted recovery without a valid scored verdict."""
 
 
 # --- Budgets and deadlines --------------------------------------------------------

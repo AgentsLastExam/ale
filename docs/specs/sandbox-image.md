@@ -15,15 +15,14 @@ follows them needs no special handling anywhere in the engine.
 
 ## Must provide
 
-**One system interpreter**, Python 3.8 or later, on `PATH` as `python3`. The guest
+**One system interpreter**, Python 3.12 or later, on `PATH` as `python3`. The guest
 service runs on it, and so do the task's stages and the agent. Anything the guest service
 needs — currently `Pillow` and `python-xlib` for in-process screen capture — is installed
 into that interpreter **at build time**.
 
-The engine never installs into a sandbox's interpreter. That environment belongs to the
-task, and a package we added to make our own code work is a package that can collide with
-what a task depends on. A task needing something different declares a different image, or
-builds what it needs inside its own setup.
+The engine copies `ale_verify` and selected Task Kits into that interpreter's
+`site-packages` for the stages that request them; it does not run a package installer.
+A task needing a different runtime declares a different image.
 
 **An unprivileged user** with a real home directory at `/home/<user>`, declared as
 `ale.user`. The agent runs as this account, and so does the oracle that stands in for it.

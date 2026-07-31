@@ -5,6 +5,7 @@
 root_packages =
     ale.core
     ale.run
+    ale_verify
 include_external_packages = True
 
 [importlinter:contract:core-independent]
@@ -13,6 +14,16 @@ type = forbidden
 source_modules =
     ale.core
 forbidden_modules =
+    ale.run
+    ale_verify
+
+[importlinter:contract:verify-independent]
+name = ale_verify is independent of engine packages
+type = forbidden
+source_modules =
+    ale_verify
+forbidden_modules =
+    ale.core
     ale.run
 
 [importlinter:contract:gateway-provider-decoupling]

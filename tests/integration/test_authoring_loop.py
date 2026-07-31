@@ -58,10 +58,14 @@ async def test_a_scaffolded_task_lints_and_validates_immediately(tmp_path: Path)
     task = scaffold_on_our_image(root)
 
     assert lint_repository(root) == []
+    assert (task / "verify" / "run.sh").read_text() == (
+        '#!/usr/bin/env bash\nset -euo pipefail\nexec python3 "$(dirname "$0")/check.py"\n'
+    )
+    assert "from ale_verify import Verification" in (task / "verify" / "check.py").read_text()
 
     result = await run(task, tmp_path / "runs", OracleHarness())
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"reward": 1.0}
+    assert result.verdict.rewards == {"content": 1.0, "overall": 1.0}
     episode = result.run_dir
     assert episode is not None
     for name in (
@@ -71,7 +75,10 @@ async def test_a_scaffolded_task_lints_and_validates_immediately(tmp_path: Path)
         "result.json",
     ):
         assert (episode / name).is_file()
-    assert json.loads((episode / "result.json").read_text())["rewards"] == {"reward": 1.0}
+    assert json.loads((episode / "result.json").read_text())["rewards"] == {
+        "content": 1.0,
+        "overall": 1.0,
+    }
 
 
 @pytest.mark.asyncio
@@ -83,11 +90,11 @@ async def test_an_edit_that_breaks_the_task_is_caught_by_validation(tmp_path: Pa
     # The instruction now asks for something the oracle does not produce.
     instruction = task / "instruction.md"
     instruction.write_text(instruction.read_text().replace("${greeting}", "${greeting} there"))
-    verify = task / "verify" / "run.sh"
-    verify.write_text(verify.read_text().replace('= "hello"', '= "hellothere"'))
+    verify = task / "verify" / "check.py"
+    verify.write_text(verify.read_text().replace('+ "\\n"', '+ " there\\n"'))
 
     result = await run(task, tmp_path / "runs", OracleHarness())
-    assert result.verdict.rewards == {"reward": 0.0}, (
+    assert result.verdict.rewards == {"content": 0.0, "overall": 0.0}, (
         "validation passed a task its oracle cannot solve"
     )
 
@@ -125,4 +132,4 @@ async def test_an_idle_agent_scores_a_real_zero(tmp_path: Path) -> None:
 
     result = await run(task, tmp_path / "runs", NopHarness())
     assert result.verdict.status is Status.COMPLETED
-    assert result.verdict.rewards == {"reward": 0.0}
+    assert result.verdict.rewards == {"content": 0.0, "overall": 0.0}

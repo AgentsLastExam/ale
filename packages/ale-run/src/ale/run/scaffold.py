@@ -80,20 +80,27 @@ mkdir -p /home/user/output
 
 VERIFY_SH = """\
 #!/usr/bin/env bash
-# Scores the episode. Runs after the agent, with this folder and any verify-stage assets
-# now present in the sandbox.
-#
-# Write rewards to $ALE_VERDICT_PATH. Exiting non-zero, or writing nothing, is a
-# `task_error` — a defect in the task — and is deliberately distinct from a zero score.
 set -euo pipefail
+exec python3 "$(dirname "$0")/check.py"
+"""
 
-actual="$(tr -d '[:space:]' < /home/user/output/result.txt 2>/dev/null || true)"
+VERIFY_PY = """\
+import json
+import os
 
-if [ "$actual" = "hello" ]; then
-    printf '{"rewards": {"reward": 1.0}}' > "$ALE_VERDICT_PATH"
-else
-    printf '{"rewards": {"reward": 0.0}}' > "$ALE_VERDICT_PATH"
-fi
+from ale_verify import Verification, checks
+
+
+with open(os.environ["ALE_PARAMS_JSON"], encoding="utf-8") as handle:
+    expected = json.load(handle)["greeting"] + "\\n"
+
+verification = Verification()
+verification.check(
+    "content",
+    checks.text_equals("/home/user/output/result.txt", expected),
+)
+verification.aggregate("overall")
+verification.write()
 """
 
 ORACLE_SH = """\
@@ -113,6 +120,7 @@ _FILES = {
     "instruction.md": INSTRUCTION_MD,
     "setup/run.sh": SETUP_SH,
     "verify/run.sh": VERIFY_SH,
+    "verify/check.py": VERIFY_PY,
     "oracle/run.sh": ORACLE_SH,
 }
 
