@@ -85,14 +85,14 @@ class Verification:
         self._persist()
         return criterion.score
 
-    def metric(self, name: str, value: float) -> float:
+    def stat(self, name: str, value: float) -> float:
         self._assert_mutable()
         _name(name)
         if name in self._criteria or name in self._aggregates:
-            raise ValueError(f"metric name collides with a reward: {name}")
+            raise ValueError(f"stat name collides with a reward: {name}")
         number = float(value)
         if not math.isfinite(number):
-            raise ValueError("metric values must be finite")
+            raise ValueError("stat values must be finite")
         self._metrics[name] = number
         self._persist()
         return number

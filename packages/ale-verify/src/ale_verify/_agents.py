@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import _llm
-from ._io import JudgeError, digest, endpoint_identity, sanitize
+from ._io import JudgeError, digest, endpoint_identity, redact, sanitize
 from ._records import EvidenceReference, JudgeAttempt, JudgeInvocation, ScoredChoice
 
 ATTEMPTS = 4
@@ -313,6 +313,18 @@ def _command(
             config["model"],
             "-c",
             f'model_reasoning_effort="{config["reasoning_effort"]}"',
+            "-c",
+            'model_provider="ale_verify"',
+            "-c",
+            'model_providers.ale_verify.name="ALE Verify"',
+            "-c",
+            f'model_providers.ale_verify.base_url="{_responses_base_url(config["base_url"])}"',
+            "-c",
+            'model_providers.ale_verify.env_key="OPENAI_API_KEY"',
+            "-c",
+            'model_providers.ale_verify.wire_api="responses"',
+            "-c",
+            "model_providers.ale_verify.supports_websockets=false",
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
         ]
@@ -337,6 +349,13 @@ def _command(
     ]
 
 
+def _responses_base_url(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith("/responses"):
+        base = base.removesuffix("/responses")
+    return base if base.endswith("/v1") else base + "/v1"
+
+
 def _environment(
     adapter: str,
     home: Path,
@@ -350,9 +369,11 @@ def _environment(
         "NO_COLOR": "1",
     }
     if adapter == "codex-cli":
+        codex_home = home / ".codex"
+        codex_home.mkdir(mode=0o700)
         environment.update(
             {
-                "CODEX_HOME": str(home / ".codex"),
+                "CODEX_HOME": str(codex_home),
                 "OPENAI_API_KEY": secret,
                 "OPENAI_BASE_URL": config["base_url"],
             }
@@ -477,8 +498,8 @@ def _append_transcript(
     record = {
         "attempt": index,
         "argv": [Path(argv[0]).name, *argv[1:]],
-        "stdout": sanitize(stdout, secrets),
-        "stderr": sanitize(stderr, secrets),
+        "stdout": redact(stdout, secrets),
+        "stderr": redact(stderr, secrets),
     }
     with path.open("a", encoding="utf-8") as handle:
         json.dump(record, handle, ensure_ascii=False, separators=(",", ":"))

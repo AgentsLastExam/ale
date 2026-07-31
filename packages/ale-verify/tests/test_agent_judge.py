@@ -111,9 +111,23 @@ def test_transcript_is_sanitized(
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
         if "--version" in argv:
             return completed("codex 1\n")
-        return completed(event("thread-1", {"choice": "yes", "reasoning": "provider-secret works"}))
+        return completed(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "command_execution", "output": "x" * 2_100},
+                }
+            )
+            + "\n"
+            + event("thread-1", {"choice": "yes", "reasoning": "provider-secret works"})
+        )
 
     monkeypatch.setattr(_agents.subprocess, "run", execute)
     _, reasoning, _ = run()
     assert reasoning == "[REDACTED] works"
-    assert "provider-secret" not in agent_env["log"].read_text()
+    transcript = json.loads(agent_env["log"].read_text())["stdout"]
+    assert len(transcript) > 2_000
+    _, final = _agents._final_response("codex-cli", transcript)
+    assert final is not None
+    assert json.loads(final)["choice"] == "yes"
+    assert "provider-secret" not in transcript

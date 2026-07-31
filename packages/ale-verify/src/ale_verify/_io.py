@@ -181,10 +181,14 @@ def configured_secrets(config: dict[str, dict[str, str]]) -> tuple[str, ...]:
     )
 
 
-def sanitize(value: object, secrets: tuple[str, ...] = ()) -> str:
+def redact(value: object, secrets: tuple[str, ...] = ()) -> str:
     text = str(value)
     for secret in sorted((item for item in secrets if item), key=len, reverse=True):
         text = text.replace(secret, "[REDACTED]")
     text = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [REDACTED]", text)
     text = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}", "sk-[REDACTED]", text)
-    return text[:2_000]
+    return text
+
+
+def sanitize(value: object, secrets: tuple[str, ...] = ()) -> str:
+    return redact(value, secrets)[:2_000]

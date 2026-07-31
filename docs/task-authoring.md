@@ -179,7 +179,7 @@ from ale_verify import Verification, checks
 
 verification = Verification()
 verification.check("format", checks.file_exists("/home/user/output/result.json"))
-verification.metric("checked_files", 1)
+verification.stat("checked_files", 1)
 verification.aggregate("overall")
 verification.write()
 ```

@@ -59,6 +59,10 @@ def call(**overrides):  # type: ignore[no-untyped-def]
 def test_protocol_resolution_is_closed() -> None:
     assert _llm.resolve_protocol(config()) == "openai-responses"
     assert (
+        _llm.resolve_protocol(config(base_url="https://api.openai.com/v1/chat/completions"))
+        == "openai-chat-completions"
+    )
+    assert (
         _llm.resolve_protocol(config(model="claude-sonnet-4", base_url="https://api.anthropic.com"))
         == "anthropic"
     )
@@ -127,6 +131,45 @@ def test_anthropic_request_is_rendered_without_a_dialect_setting(
     assert observed["headers"]["X-api-key"] == "provider-secret"
     assert observed["payload"]["output_config"] == {"effort": "medium"}
     assert invocation.attempts[0].request_id == "message-1"
+
+
+def test_chat_completions_request_and_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JUDGE_KEY", "provider-secret")
+    observed = {}
+
+    def open_(request, timeout):  # type: ignore[no-untyped-def]
+        observed["url"] = request.full_url
+        observed["payload"] = json.loads(request.data)
+        return Response(
+            {
+                "id": "chatcmpl-1",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"choice":"yes","reasoning":"Correct."}',
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2},
+            }
+        )
+
+    monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
+    choice, reasoning, invocation = call(
+        config=config(base_url="https://api.openai.com/v1/chat/completions")
+    )
+    assert (choice, reasoning) == ("yes", "Correct.")
+    assert observed["url"] == "https://api.openai.com/v1/chat/completions"
+    assert observed["payload"]["messages"][0]["role"] == "user"
+    assert observed["payload"]["reasoning_effort"] == "medium"
+    assert observed["payload"]["response_format"] == {"type": "json_object"}
+    assert invocation.attempts[0].usage == {
+        "prompt_tokens": 4,
+        "completion_tokens": 2,
+    }
 
 
 def test_schema_repair_includes_the_concrete_error_and_exact_shape(

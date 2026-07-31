@@ -88,9 +88,21 @@ def test_agent_judge_freezes_later_checks_and_does_not_touch_solver_trajectory(
 
 
 @pytest.mark.needs_docker
+@pytest.mark.parametrize(
+    ("adapter", "binary_name", "model", "base_url"),
+    (
+        ("codex-cli", "codex", "gpt-5", "https://example.test"),
+        ("claude-code", "claude", "claude-sonnet-4", "https://example.test"),
+    ),
+)
 @pytest.mark.asyncio
 async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    adapter: str,
+    binary_name: str,
+    model: str,
+    base_url: str,
 ) -> None:
     secret = "agent-direct-secret"
     monkeypatch.setenv("JUDGE_KEY", secret)
@@ -109,28 +121,37 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         """).strip()
     )
     (task_root / "instruction.md").write_text("Write baseline to /home/user/output/result.txt\n")
-    (task_root / "setup" / "fake-codex.py").write_text(
+    (task_root / "setup" / "fake-agent.py").write_text(
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
         "from pathlib import Path\n"
         "if '--version' in sys.argv:\n"
-        "    print('codex fake 1.0')\n"
+        "    print(Path(sys.argv[0]).name + ' fake 1.0')\n"
         "    raise SystemExit\n"
         "sys.stdin.read()\n"
-        "print(json.dumps({'type':'thread.started','thread_id':'thread-1'}))\n"
-        "if 'resume' in sys.argv:\n"
+        "name = Path(sys.argv[0]).name\n"
+        "resumed = 'resume' in sys.argv or '--resume' in sys.argv\n"
+        "if resumed:\n"
         "    verdict = {'choice':'yes','reasoning':'Observed baseline.'}\n"
         "else:\n"
         "    Path('/home/user/output/post-judge.txt').write_text('mutation')\n"
         "    verdict = {'choice':'invalid','reasoning':'repair me'}\n"
-        "print(json.dumps({'type':'item.completed','item':"
+        "if name == 'codex':\n"
+        "    session = 'thread-1'\n"
+        "    print(json.dumps({'type':'thread.started','thread_id':session}))\n"
+        "    print(json.dumps({'type':'item.completed','item':"
         "{'type':'agent_message','text':json.dumps(verdict)}}))\n"
+        "else:\n"
+        "    selector = '--resume' if resumed else '--session-id'\n"
+        "    session = sys.argv[sys.argv.index(selector) + 1]\n"
+        "    print(json.dumps({'type':'result','session_id':session,"
+        "'result':json.dumps(verdict)}))\n"
     )
     (task_root / "setup" / "run.sh").write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "mkdir -p /home/user/output\n"
-        'install -m 755 "$(dirname "$0")/fake-codex.py" /usr/local/bin/codex\n'
+        f'install -m 755 "$(dirname "$0")/fake-agent.py" /usr/local/bin/{binary_name}\n'
     )
     (task_root / "oracle" / "run.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nprintf baseline > /home/user/output/result.txt\n"
@@ -162,10 +183,10 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         run_dir=tmp_path / "runs",
         verification_config=VerificationConfig(
             agent=AgentJudgeConfig(
-                adapter="codex-cli",
-                model="gpt-5",
+                adapter=adapter,  # type: ignore[arg-type]
+                model=model,
                 reasoning_effort="high",
-                base_url="https://example.test",
+                base_url=base_url,
                 api_key_env="JUDGE_KEY",
             )
         ),
@@ -178,8 +199,9 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         "invalid",
         "completed",
     ]
-    assert invocation["attempts"][0]["request_id"] == "thread-1"
-    assert invocation["attempts"][1]["request_id"] == "thread-1"
+    assert invocation["adapter"] == adapter
+    assert invocation["attempts"][0]["request_id"]
+    assert invocation["attempts"][1]["request_id"] == invocation["attempts"][0]["request_id"]
     assert (result.run_dir / "logs" / "agent-judge.jsonl").is_file()
     assert not (result.run_dir / "artifacts" / "output" / "post-judge.txt").exists()
     trajectory = json.loads((result.run_dir / "trajectory.json").read_text())

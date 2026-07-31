@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -16,10 +17,12 @@ from ale.run.harnesses.builtin import OracleHarness
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import ManifestTaskset
+from ale_verify import _agents
 
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm]
 
 TASKS = Path(__file__).resolve().parents[3] / "ale-tasks-base"
+IMAGE = os.environ.get("ALE_LIVE_AGENT_JUDGE_IMAGE")
 
 CASES = (
     (
@@ -34,7 +37,7 @@ CASES = (
         "ANTHROPIC_API_KEY",
         "https://api.anthropic.com",
         "ALE_LIVE_ANTHROPIC_MODEL",
-        "claude-sonnet-4",
+        "claude-sonnet-5",
     ),
 )
 
@@ -54,7 +57,15 @@ async def test_live_agent_judge_records_transcript_without_an_extra_trajectory(
 ) -> None:
     if not os.environ.get(key_env):
         pytest.skip(f"no {key_env}")
-    task_path = TASKS / "tasks" / "demo" / "verification_agent_judge"
+    if not IMAGE:
+        pytest.skip("ALE_LIVE_AGENT_JUDGE_IMAGE is not set")
+    repo = tmp_path / "repo"
+    task_path = repo / "tasks" / "demo" / "verification_agent_judge"
+    task_path.parent.mkdir(parents=True)
+    shutil.copytree(TASKS / "tasks" / "demo" / "verification_agent_judge", task_path)
+    shutil.copy2(TASKS / "domain.yaml", repo / "domain.yaml")
+    manifest = task_path / "task.yaml"
+    manifest.write_text(manifest.read_text().replace("image: sandbox-base-cli", f"image: {IMAGE}"))
     task = next(iter(ManifestTaskset(task_path).load()))
     verification = VerificationConfig(
         agent=AgentJudgeConfig(
@@ -81,10 +92,16 @@ async def test_live_agent_judge_records_transcript_without_an_extra_trajectory(
         verification_config=verification,
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"functional": 1.0, "overall": 1.0}
     record = json.loads((result.run_dir / "verification.json").read_text())
     assert "agent_trajectory" not in record
     assert record["judge_invocations"][0]["adapter"] == adapter
-    assert (result.run_dir / "logs" / "agent-judge.jsonl").is_file()
+    agent_log = result.run_dir / "logs" / "agent-judge.jsonl"
+    assert agent_log.is_file()
+    transcript = json.loads(agent_log.read_text())["stdout"]
+    _, final = _agents._final_response(adapter, transcript)
+    assert final is not None
+    assert json.loads(final)["choice"] == "yes"
     assert result.lock is not None
     assert len(result.lock.judges) == 1
     assert result.lock.judges[0].kind == "agent"

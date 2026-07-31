@@ -20,22 +20,58 @@ from ale.run.tasksets.manifest import ManifestTaskset
 pytestmark = [
     pytest.mark.needs_docker,
     pytest.mark.needs_llm,
-    pytest.mark.skipif(not os.environ.get("OPENAI_API_KEY"), reason="no OPENAI_API_KEY"),
 ]
 
 TASKS = Path(__file__).resolve().parents[3] / "ale-tasks-base"
 
+CASES = (
+    (
+        "responses",
+        "https://api.openai.com",
+        "OPENAI_API_KEY",
+        "ALE_LIVE_OPENAI_MODEL",
+        "gpt-5.4-mini",
+    ),
+    (
+        "chat-completions",
+        "https://api.openai.com/v1/chat/completions",
+        "OPENAI_API_KEY",
+        "ALE_LIVE_OPENAI_CHAT_MODEL",
+        "gpt-5.4-mini",
+    ),
+    (
+        "messages",
+        "https://api.anthropic.com",
+        "ANTHROPIC_API_KEY",
+        "ALE_LIVE_ANTHROPIC_MODEL",
+        "claude-sonnet-5",
+    ),
+)
 
+
+@pytest.mark.parametrize(
+    ("protocol", "base_url", "key_env", "model_env", "default_model"),
+    CASES,
+)
 @pytest.mark.asyncio
-async def test_live_llm_judge_record_and_transport(tmp_path: Path) -> None:
+async def test_live_llm_judge_record_and_transport(
+    tmp_path: Path,
+    protocol: str,
+    base_url: str,
+    key_env: str,
+    model_env: str,
+    default_model: str,
+) -> None:
+    if not os.environ.get(key_env):
+        pytest.skip(f"no {key_env}")
     task_path = TASKS / "tasks" / "demo" / "verification_llm_judge"
     task = next(iter(ManifestTaskset(task_path).load()))
     verification = VerificationConfig(
         llm=LLMJudgeConfig(
-            model=os.environ.get("ALE_LIVE_OPENAI_MODEL", "gpt-5.4-mini"),
+            model=os.environ.get(model_env, default_model),
             reasoning_effort="medium",
-            base_url="https://api.openai.com",
-            api_key_env="OPENAI_API_KEY",
+            base_url=base_url,
+            api_key_env=key_env,
         )
     )
     settings = RunConfig(verification=verification)
@@ -66,8 +102,9 @@ async def test_live_llm_judge_record_and_transport(tmp_path: Path) -> None:
     assert result.lock is not None
     assert len(result.lock.judges) == 1
     assert result.lock.judges[0].kind == "llm"
-    assert result.lock.judges[0].endpoint_identity == "https://api.openai.com"
-    secret = os.environ["OPENAI_API_KEY"]
+    assert result.lock.judges[0].endpoint_identity == base_url
+    assert protocol in {"responses", "chat-completions", "messages"}
+    secret = os.environ[key_env]
     for path in result.run_dir.rglob("*"):
         if path.is_file():
             assert secret.encode() not in path.read_bytes()

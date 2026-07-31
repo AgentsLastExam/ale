@@ -105,9 +105,19 @@ def direct_llm_task(root: Path) -> Path:
         "    def do_POST(self):\n"
         "        length = int(self.headers.get('content-length', '0'))\n"
         "        self.rfile.read(length)\n"
-        "        body = json.dumps({'id':'mock-1','output_text':"
-        '\'{"choice":"yes","reasoning":"The answer is correct."}\','
-        "'usage':{'input_tokens':2,'output_tokens':1}}).encode()\n"
+        '        verdict = \'{"choice":"yes","reasoning":"The answer is correct."}\'\n'
+        "        if self.path.endswith('/chat/completions'):\n"
+        "            payload = {'id':'mock-chat-1','choices':[{'message':"
+        "{'role':'assistant','content':verdict}}],"
+        "'usage':{'prompt_tokens':2,'completion_tokens':1}}\n"
+        "        elif self.path.endswith('/messages'):\n"
+        "            payload = {'id':'mock-message-1','content':["
+        "{'type':'text','text':verdict}],"
+        "'usage':{'input_tokens':2,'output_tokens':1}}\n"
+        "        else:\n"
+        "            payload = {'id':'mock-response-1','output_text':verdict,"
+        "'usage':{'input_tokens':2,'output_tokens':1}}\n"
+        "        body = json.dumps(payload).encode()\n"
         "        self.send_response(200)\n"
         "        self.send_header('content-type', 'application/json')\n"
         "        self.send_header('content-length', str(len(body)))\n"
@@ -151,7 +161,12 @@ def direct_llm_task(root: Path) -> Path:
     return task
 
 
-async def run_direct_llm_task(tmp_path: Path, provider) -> None:  # type: ignore[no-untyped-def]
+async def run_direct_llm_task(
+    tmp_path: Path,
+    provider,  # type: ignore[no-untyped-def]
+    *,
+    base_url: str = "http://127.0.0.1:18765",
+) -> None:
     secret = "sandbox-direct-secret"
     os.environ["JUDGE_KEY"] = secret
     task_root = direct_llm_task(tmp_path / "repo")
@@ -166,7 +181,7 @@ async def run_direct_llm_task(tmp_path: Path, provider) -> None:  # type: ignore
                 llm=LLMJudgeConfig(
                     model="gpt-5-mini",
                     reasoning_effort="medium",
-                    base_url="http://127.0.0.1:18765",
+                    base_url=base_url,
                     api_key_env="JUDGE_KEY",
                 )
             ),
@@ -182,8 +197,11 @@ async def run_direct_llm_task(tmp_path: Path, provider) -> None:  # type: ignore
     }
     record = json.loads((result.run_dir / "verification.json").read_text())
     invocation = record["judge_invocations"][0]
-    assert invocation["attempts"][0]["endpoint_identity"] == "http://127.0.0.1:18765"
-    assert invocation["attempts"][0]["usage"] == {"input_tokens": 2, "output_tokens": 1}
+    assert invocation["attempts"][0]["endpoint_identity"] == base_url
+    assert invocation["attempts"][0]["usage"] in (
+        {"input_tokens": 2, "output_tokens": 1},
+        {"prompt_tokens": 2, "completion_tokens": 1},
+    )
     assert invocation["id"] not in (result.run_dir / "trace.transport.jsonl").read_text()
     for path in result.run_dir.rglob("*"):
         if path.is_file():
@@ -194,6 +212,30 @@ async def run_direct_llm_task(tmp_path: Path, provider) -> None:  # type: ignore
 @pytest.mark.asyncio
 async def test_direct_llm_judge_runs_inside_docker_sandbox(tmp_path: Path) -> None:
     await run_direct_llm_task(tmp_path, DockerProvider())
+
+
+@pytest.mark.needs_docker
+@pytest.mark.asyncio
+async def test_direct_chat_completions_judge_runs_inside_docker_sandbox(
+    tmp_path: Path,
+) -> None:
+    await run_direct_llm_task(
+        tmp_path,
+        DockerProvider(),
+        base_url="http://127.0.0.1:18765/v1/chat/completions",
+    )
+
+
+@pytest.mark.needs_docker
+@pytest.mark.asyncio
+async def test_direct_anthropic_messages_judge_runs_inside_docker_sandbox(
+    tmp_path: Path,
+) -> None:
+    await run_direct_llm_task(
+        tmp_path,
+        DockerProvider(),
+        base_url="http://127.0.0.1:18765/v1/messages",
+    )
 
 
 @pytest.mark.needs_kvm

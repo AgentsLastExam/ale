@@ -90,8 +90,12 @@ def test_codex_command_root_home_cwd_version_and_final_response(
     assert (choice, reasoning) == ("yes", "Observed working.")
     assert argv[:3] == ["/usr/bin/codex", "exec", "--json"]
     assert f'model_reasoning_effort="{codex_config()["reasoning_effort"]}"' in argv
+    assert 'model_provider="ale_verify"' in argv
+    assert 'model_providers.ale_verify.base_url="https://api.openai.com/v1"' in argv
+    assert "model_providers.ale_verify.supports_websockets=false" in argv
     assert kwargs["cwd"] == agent_env["workspace"]
     assert kwargs["env"]["HOME"].startswith(str(agent_env["log"].parent))
+    assert Path(kwargs["env"]["CODEX_HOME"]).is_dir()
     assert kwargs["env"]["OPENAI_BASE_URL"] == "https://api.openai.com"
     assert invocation.adapter_version == "codex 1.2.3"
     assert "provider-secret" not in agent_env["log"].read_text()

@@ -89,8 +89,13 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen --all-groups
+      - name: Build Agent Judge acceptance image
+        if: env.OPENAI_API_KEY != '' || env.ANTHROPIC_API_KEY != ''
+        run: docker build -f tests/acceptance/agent-judge.Dockerfile -t ale-agent-judge-live:local .
       - name: Run live judge acceptance
         if: env.OPENAI_API_KEY != '' || env.ANTHROPIC_API_KEY != ''
+        env:
+          ALE_LIVE_AGENT_JUDGE_IMAGE: docker.io/library/ale-agent-judge-live:local
         run: uv run pytest tests/acceptance/test_live_llm_judge.py tests/acceptance/test_live_agent_judge.py
 
   # Docker is preinstalled on GitHub-hosted runners, so the container backend is

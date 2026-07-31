@@ -27,8 +27,16 @@ _EFFORTS = {"low", "medium", "high"}
 
 
 def resolve_protocol(config: Mapping[str, str]) -> str:
-    host = (urlsplit(config["base_url"]).hostname or "").lower()
+    parsed = urlsplit(config["base_url"])
+    host = (parsed.hostname or "").lower()
+    path = parsed.path.rstrip("/").lower()
     model = config["model"].lower()
+    if path.endswith("/chat/completions"):
+        return "openai-chat-completions"
+    if path.endswith("/responses"):
+        return "openai-responses"
+    if path.endswith("/messages"):
+        return "anthropic"
     if "anthropic" in host or model.startswith("claude"):
         if "openai" in host or model.startswith(("gpt-", "o1", "o3", "o4")):
             raise ValueError("cannot safely infer the LLM Judge protocol")
@@ -172,6 +180,18 @@ def _request(
             "x-api-key": secret,
             "anthropic-version": "2023-06-01",
         }
+    elif protocol == "openai-chat-completions":
+        payload = {
+            "model": config["model"],
+            "messages": [{"role": "user", "content": prompt}],
+            "reasoning_effort": config["reasoning_effort"],
+            "max_completion_tokens": 4096,
+            "response_format": {"type": "json_object"},
+        }
+        headers = {
+            "Authorization": f"Bearer {secret}",
+            "Content-Type": "application/json",
+        }
     else:
         payload = {
             "model": config["model"],
@@ -202,7 +222,11 @@ def _request(
 
 def _endpoint(base_url: str, protocol: str) -> str:
     base = base_url.rstrip("/")
-    suffix = "/v1/messages" if protocol == "anthropic" else "/v1/responses"
+    suffix = {
+        "anthropic": "/v1/messages",
+        "openai-chat-completions": "/v1/chat/completions",
+        "openai-responses": "/v1/responses",
+    }[protocol]
     if base.endswith(suffix) or base.endswith(suffix.removeprefix("/v1")):
         return base
     return base + (suffix.removeprefix("/v1") if base.endswith("/v1") else suffix)
@@ -267,6 +291,19 @@ def _response_text(protocol: str, payload: Mapping[str, Any]) -> str:
             for item in payload.get("content", ())
             if isinstance(item, dict) and item.get("type") == "text"
         )
+    elif protocol == "openai-chat-completions":
+        choices = payload.get("choices")
+        first = choices[0] if isinstance(choices, list) and choices else {}
+        message = first.get("message", {}) if isinstance(first, dict) else {}
+        if isinstance(message, dict) and message.get("refusal"):
+            raise PermissionError("provider refused the Judge request")
+        text = message.get("content", "") if isinstance(message, dict) else ""
+        if isinstance(text, list):
+            text = "".join(
+                item.get("text", "")
+                for item in text
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
     else:
         if payload.get("status") == "refused":
             raise PermissionError("provider refused the Judge request")

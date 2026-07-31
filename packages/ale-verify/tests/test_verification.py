@@ -41,7 +41,7 @@ def verify_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, P
     return record, verdict
 
 
-def test_one_state_holds_checks_metrics_judge_aggregate_and_final_write(
+def test_one_state_holds_checks_stats_judge_aggregate_and_final_write(
     monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path]
 ) -> None:
     record_path, verdict_path = verify_env
@@ -76,7 +76,7 @@ def test_one_state_holds_checks_metrics_judge_aggregate_and_final_write(
     verification = Verification()
     assert verification.check("format", CheckResult(1, "valid")) == 1
     assert verification.check("content", CheckResult(0.5), weight=2) == 0.5
-    assert verification.metric("files", 2) == 2
+    assert verification.stat("files", 2) == 2
     assert (
         verification.judge(
             "llm",
@@ -110,7 +110,7 @@ def test_duplicate_invalid_and_terminal_mutations_fail(verify_env: tuple[Path, P
         verification.aggregate("bad-weight", weights={"format": 0})
     verification.write()
     with pytest.raises(RuntimeError, match="terminal"):
-        verification.metric("late", 1)
+        verification.stat("late", 1)
 
 
 def test_agent_judge_is_the_last_mutating_operation(
