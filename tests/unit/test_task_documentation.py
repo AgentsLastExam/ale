@@ -10,13 +10,15 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 NORMATIVE = (
     ROOT / "README.md",
-    ROOT / "docs/task-authoring.md",
-    ROOT / "docs/task-design-principles.md",
+    ROOT / "docs/README.md",
+    ROOT / "docs/guides/task-authoring.md",
+    ROOT / "docs/specs/task-design.md",
     ROOT / "docs/specs/task-folder.md",
+    ROOT / "docs/specs/standard-environment.md",
     ROOT / "docs/specs/sandbox-image.md",
-    ROOT / "docs/security-model.md",
-    ROOT / "docs/development.md",
-    ROOT / "docs/migration-from-legacy.md",
+    ROOT / "docs/specs/verification.md",
+    ROOT / "docs/specs/security.md",
+    ROOT / "docs/guides/development.md",
     ROOT / "docs/specs/lexicon.md",
     ROOT.parent / "ale-tasks-base/README.md",
 )
@@ -47,7 +49,7 @@ def test_living_task_docs_do_not_recommend_removed_contracts(path: Path) -> None
 
 
 def test_authoring_contract_names_the_current_task_shape() -> None:
-    text = (ROOT / "docs/task-authoring.md").read_text(encoding="utf-8")
+    text = (ROOT / "docs/guides/task-authoring.md").read_text(encoding="utf-8")
     for required in (
         "spec_type: core/v1",
         "image.kind",

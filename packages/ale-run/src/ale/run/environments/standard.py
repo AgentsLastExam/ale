@@ -5,12 +5,10 @@ tasks need exactly this; a domain that needs something else — two isolated con
 staged protocol, a human gate — subclasses :class:`~ale.core.environment.Environment`
 instead of bending this one.
 
-Three properties are enforced here rather than trusted to task authors:
-
-* the workspace is created identically for every task, so no instruction depends on a
-  task's name or folder;
-* verification materials and the oracle never exist in the sandbox while the agent runs;
-* every phase has a deadline, and teardown happens on every path out.
+Three properties are enforced here rather than trusted to task authors: verification and
+oracle material is absent while the evaluated agent runs, every phase has a deadline,
+and teardown happens on every path out. Tasks own literal paths inside the image-declared
+agent home; ALE owns only staging time and its root-only framework directory.
 """
 
 from __future__ import annotations

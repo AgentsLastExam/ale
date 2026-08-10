@@ -1,8 +1,7 @@
 # Lexicon
 
-Normative. Every term below has exactly one meaning. Task-format entries marked
-**Feature 006** belong to the self-contained Task contract. The public
-manifest version remains `core/v1`.
+Normative. Every term below has exactly one meaning. The public Task manifest version
+remains `core/v1`.
 
 | Term | Definition | Never |
 |---|---|---|
@@ -10,7 +9,7 @@ manifest version remains `core/v1`.
 | **Provider** | A backend that creates and destroys Sandboxes and enforces requested resources. | not a model vendor or Task-selected setting |
 | **Environment** | The administration layer that turns one Task into one Episode: provision, setup, agent, verify, teardown. | never means a Sandbox or shell variables |
 | **Task folder** | The complete self-contained authored source unit: manifest, instruction, image build context, setup, verification, oracle, and optional agent resources. | not dependent on `domain.yaml`, a repository Kit, sibling Task, or shared domain image |
-| **Task source digest** | **Feature 006.** A digest of the Task folder's canonical paths, bytes, executable bits, and symlink targets, pruning only the four exact stage asset roots and generated state. | not a hash of `task.yaml` alone or of asset bytes |
+| **Task source digest** | A digest of the Task folder's canonical paths, bytes, executable bits, and symlink targets, pruning only the four exact stage asset roots and generated state. | not a hash of `task.yaml` alone or of asset bytes |
 | **TaskSpec** | The frozen, serializable effective specification of one selected Task instance after instruction rendering and variant application. | not the folder on disk |
 | **Task** | One self-contained Task folder bound to its effective TaskSpec and standard behavior. | not a collection or loader |
 | **Task collection** | A directory or source that contains several independent Task folders for selection. | not a Task and not an execution contract |
@@ -20,7 +19,7 @@ manifest version remains `core/v1`.
 | **Prepared Task image** | Immutable kind-aware output consumed by a sandbox request. | not mutable sandbox state |
 | **ALE base image** | A foundational CLI, GUI, or Ubuntu VM GUI OCI image providing the sandbox contract and guest service. | not a domain image or Task-specific dependency bundle |
 | **VM materializer** | ALE-owned versioned conversion from final VM OCI rootfs to bootable qcow2. | never Task-authored boot or partition code |
-| **Task assets** | **Feature 006.** Optional ignored files directly below a Task's `image/assets`, `setup/assets`, `verify/assets`, or `oracle/assets`, synchronized explicitly with a same-named HF dataset. | not a manifest declaration, central cache tree, content hash, or implicit runtime download |
+| **Task assets** | Optional ignored files directly below a Task's `image/assets`, `setup/assets`, `verify/assets`, or `oracle/assets`, synchronized explicitly with a same-named HF dataset. | not a manifest declaration, central cache tree, content hash, or implicit runtime download |
 | **Image assets** | Task-local `image/assets` bytes consumed through the ordinary `image/` Docker context. | not a named BuildKit context or runtime mount |
 | **Verify assets** | Task-local `verify/assets` bytes uploaded only with the verify stage and read by verifier code through ordinary relative paths. | never baked into the solver image or published during agent execution |
 | **Oracle assets** | Task-local `oracle/assets` bytes uploaded only when the oracle harness runs and read through ordinary relative paths. | never uploaded for an evaluated solver |
@@ -52,16 +51,3 @@ manifest version remains `core/v1`.
 | **Run Status Projection** | The rebuildable Run-level view of queued, running, phase, terminal, interrupted, rewards, and bounded failure state. | not an Episode evidence store |
 | **RunLock** | Schema-2 provenance binding declaration, prepared image, actual Provider observation, Task, data, agent, framework, and effective configuration to a result. | not a qcow2 byte-hash cache |
 | **Workspace** | The image-declared agent home. Tasks write their own absolute paths; ALE does not add a hidden prefix. | not a repository or fixed framework directory layout |
-
-Deliberately retired from the standard Task authoring contract:
-
-- `Taskset` as the name of a complete authored Task;
-- `domain.yaml`, domain-derived Task identity, and repository-level `requires_core`;
-- Domain Kit, repository Kit, `kits/`, `kit.toml`, and `kits.lock.yaml`;
-- Task `files/` and its implicit upload destination;
-- Image Tree, domain image, and published final Task image;
-- inferred image kind and run-wide Provider routing;
-- variants that replace image, setup, verification, network, artifacts, Skills, or MCP;
-- `work_dir`, `ALE_HOME` as a path authoring abstraction, `Workflow`, bare `Trace`,
-  `Semantic Trace`, `Verification Service`, `primary_reward`, `events.jsonl`,
-  `TaskData`, `trial`, and `job`.

@@ -8,7 +8,7 @@ Instructions carry `${param}` placeholders and nothing else. Three rules matter:
    declared parameter are errors. Converting a large legacy corpus produces both kinds
    of typo, and a silent one becomes a wrong prompt in a scored run.
 3. Legacy path templating is rejected outright. Paths are literal now (see
-   ``docs/adr/0005-workspace-and-templating.md``); a leftover ``{self.input_dir}`` in a
+   ``docs/adr/0002-self-contained-task-contract.md``); a leftover ``{self.input_dir}`` in a
    converted task is a conversion bug, not a style issue.
 """
 
@@ -59,7 +59,7 @@ def render_instruction(text: str, params: dict[str, Any], *, where: str = "instr
     if legacy:
         raise TaskDefinitionError(
             f"{where} still uses {', '.join(legacy)}; paths are literal now "
-            f"(see docs/adr/0005-workspace-and-templating.md)"
+            f"(see docs/adr/0002-self-contained-task-contract.md)"
         )
 
     used = set(_PLACEHOLDER.findall(text))

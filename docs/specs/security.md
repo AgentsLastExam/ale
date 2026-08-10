@@ -137,7 +137,7 @@ agent reward of zero.
 
 ## 7. A result carries what produced it
 
-For the feature 006 Task contract, `RunLock` records the explicit Task name, complete
+`RunLock` records the explicit Task name, complete
 Task-folder source digest, source and commit when available, exact locally built image
 content, concrete Provider, requested and effective resources, GPU allocation and sandbox
 observations, agent version and integrity, harness family, one optional Task-asset
@@ -145,9 +145,9 @@ repository/path/commit/dirty observation, verification topology and image/resour
 sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
 
 A run whose lock cannot back a reportable result says so. `--require-reportable` turns
-that statement into a non-zero exit for CI. Feature 006 does not define final Task-image
-publication; future delivery may add it without changing the self-contained Task source
-contract.
+that statement into a non-zero exit for CI. Final Task-image publication is not part of
+the current contract; future delivery may add it without changing the self-contained
+Task source contract.
 
 ## 8. Agent resources are declared, not discovered
 

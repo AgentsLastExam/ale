@@ -2,8 +2,8 @@
 
 A standard Task is one self-contained folder for the container or VM
 `setup -> agent -> verify` protocol. Read
-[task-design-principles.md](task-design-principles.md) before authoring and use
-[specs/task-folder.md](specs/task-folder.md) as the normative format reference.
+[task-design.md](../specs/task-design.md) before authoring and use
+[task-folder.md](../specs/task-folder.md) as the normative format reference.
 
 The conventional verifier program is `verify/verify.py`; `verify/run.sh` invokes it
 with a relative path from the staged verification directory.

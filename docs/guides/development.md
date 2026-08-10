@@ -42,8 +42,8 @@ is the one condition under which installs silently degrade to copies.
 | Built wheels | `~/.cache/uv` (uv default) | shared by every tree; hardlinked in |
 | Task checkouts and guest disks | `~/.cache/ale` (`ALE_CACHE_DIR`) | a new worktree can reuse operator-managed runtime artifacts |
 | Task asset sync state | each Task repository's `.ale-cache/` | generated commit/dirty marker; ignored by Git |
-| Task assets | each Task's `{image,setup,verify}/assets/` | direct development paths; explicit HF pull/push/status |
-| Secrets | `~/.config/ale/secrets.env` (`ALE_SECRETS_FILE`) | one file on the host; never copied into a tree or a sandbox |
+| Task assets | each Task's `{image,setup,verify,oracle}/assets/` | direct development paths; explicit HF pull/push/status |
+| Secrets | checkout `.env` (`ALE_ENV_FILE` overrides) | solver keys stay on the Host; configured Judge keys exist only for the verifier command |
 
 Set `ALE_REPO_PATH` to the absolute active engine checkout for engine discovery. Configure
 `ALE_ASSETS_COLLECTION` only when synchronizing Task assets. Runtime never downloads
@@ -83,7 +83,8 @@ deliberately light:
 ## Conventions
 
 - Everything in this repository is written in standard English.
-- Names come from [`docs/specs/lexicon.md`](specs/lexicon.md); each has one meaning.
-- Read `docs/specs/` and `docs/adr/` before changing a contract; record new decisions
-  as an ADR in the same change.
+- Names come from [the lexicon](../specs/lexicon.md); each has one meaning.
+- Start at [`docs/README.md`](../README.md), read the owning specification before
+  changing a contract, and update the relevant ADR when its architectural rationale
+  changes.
 - Commit per task or logical group; keep `uv.lock` committed and in sync.

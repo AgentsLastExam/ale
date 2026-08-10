@@ -1,11 +1,9 @@
 # Task design principles
 
 This document defines what makes a Task valid independent of its domain. It is intentionally
-small. The concrete file format and the current `setup -> agent -> verify` protocol live in
-[task-authoring.md](task-authoring.md).
-
-> The file-format examples in the authoring guide are the implemented Feature 006
-> contract. The semantic principles here apply throughout the standard Task protocol.
+small. The concrete file format lives in [task-folder.md](task-folder.md), the evaluation
+flow in [standard-environment.md](standard-environment.md), and the implementation
+workflow in [the authoring guide](../guides/task-authoring.md).
 
 A Task is a contract among three things:
 

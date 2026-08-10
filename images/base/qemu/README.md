@@ -76,8 +76,8 @@ somewhere else; the half that binds the agent is the one it has no access to.
 
 None of it applies outside the agent's phase. A task's network policy describes what binds
 the agent, so setup, the agent's own installation and verify all run with egress open —
-see ADR 0013 and `docs/specs/task-folder.md`.
+see ADR 0005 and `docs/specs/standard-environment.md`.
 
-Both directions are covered by `tests/integration/test_backend_parity.py`,
-`tests/integration/test_network_phases.py`, and by the `demo/netprobe` task, which probes
-the boundary as the agent rather than describing it.
+QEMU rule construction and mode transitions are covered by
+`tests/unit/test_qemu_provider.py`; live boot and sandbox behavior are covered by
+`tests/conformance/test_provider_qemu.py`.

@@ -28,12 +28,6 @@ from ale.core.ids import content_hash
 
 __all__ = ["STORE_ROOT", "AssetOrigin", "StoreEntry", "StoreManifest", "data_key"]
 
-#: Where pre-baked data would live inside a sandbox. Under the framework's own root,
-#: which is root-owned: baked data is staged by the framework, and a task reaches it
-#: through the destination it declared rather than by naming this path.
-#:
-#: Nothing writes here yet — pre-baking (ADR 0007) is not implemented. The constant is
-#: kept because the store's *host-side* layout is, and both halves are named the same way.
 STORE_ROOT = PurePosixPath("/opt/ale/store")
 
 MANIFEST_NAME = "manifest.json"

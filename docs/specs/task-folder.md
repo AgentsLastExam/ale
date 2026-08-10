@@ -134,20 +134,22 @@ Tasks. Pull has no revision selector and atomically replaces only selected roots
 refuses dirty overwrite unless `--force` is supplied. Push mirrors selected additions,
 changes, and deletions without uploading manifests, code, tools, or oracle material.
 
-`.ale-cache/assets.json` stores schema version 1 and one Task marker containing the last
-remote commit, generation timestamp, and dirty state. Public episode provenance is one
+`.ale-cache/assets.json` stores schema version 1, the last remote commit, and a cheap
+path/type/size/mtime inventory used to derive dirty state. Public episode provenance is one
 optional `{repository, task_path, commit, dirty}` observation. Normal operation does not
 hash asset bytes. No-assets Tasks have no asset requirement. Runtime performs no network
 synchronization.
 
-## Lifecycle
+## Standard protocol
 
 ```text
 local builds/ref resolution -> provision -> setup -> agent/oracle
 -> Harness cleanup -> trajectory/optional artifact capture -> verify -> teardown/final retention
 ```
 
-Setup and verify run as trusted root with open egress. Solver and oracle run as the image's
+The complete phase and trust contract lives in
+[standard-environment.md](standard-environment.md). Setup and verify run as trusted root
+with open egress. Solver and oracle run as the image's
 declared unprivileged user under Task network policy. `setup/`, `verify/`, and (only for
 validation) `oracle/` are uploaded as complete directories and execute with their own staged root as cwd.
 Assets are therefore addressed relatively. Setup is optional; no automatic output path
@@ -160,7 +162,7 @@ path, size, and content identity. With `artifacts.collect = "none"`, ALE does no
 copy, retain, or restore declared artifacts and creates no artifact spool. A separate
 verifier that needs solver outputs therefore requires host artifact collection.
 
-## Verification modes
+## Verification placement
 
 Shared is the default:
 
@@ -188,7 +190,8 @@ verifier provisioning. ALE starts the verifier image, restores declared artifact
 same absolute paths with captured modes, uploads the same `verify/`, and does not rerun
 setup. Both modes emit one canonical `verification.json` and the same reward envelope.
 All verifier/Judge/configuration/infrastructure failures remain distinct from completed
-zero rewards.
+zero rewards. The scoring API and record are specified in
+[verification.md](verification.md).
 
 Verification code reads optional stage assets with ordinary relative paths such as
 `assets/reference.json`; its cwd is the staged `verify/` root. `Verification` has no asset

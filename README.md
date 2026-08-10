@@ -29,9 +29,10 @@ Domain Kit, shared Image Tree, or Task `files/`.
 The manifest remains `core/v1`. The implemented contract is documented in
 [docs/specs/task-folder.md](docs/specs/task-folder.md).
 
-Model access goes through the gateway, so put a key in the checkout's `.env` (copy
-`.env.example`). It never enters a sandbox — the agent gets a URL and a per-episode token,
-and the gateway meters and records every call whatever the agent does.
+Solver model access goes through the Gateway, so put a key in the checkout's `.env`
+(copy `.env.example`). The evaluated agent receives only a URL and per-episode token;
+the upstream key stays on the Host. Trusted verification Judges are separate: their
+run-configured key is injected only into the verifier command environment.
 
 The gateway supports Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses.
 A run names its endpoint and which variable holds the key, so several can be configured
@@ -95,11 +96,11 @@ Under `runs/<run>/<episode>/`:
 - `blobs/` — content-addressed large or binary payloads referenced by the records above.
 - `artifacts/` — the paths the task declared, if this run asked to keep them.
 
-Task semantics: [docs/task-design-principles.md](docs/task-design-principles.md). Writing
-tasks: [docs/task-authoring.md](docs/task-authoring.md). Building images:
-[docs/specs/sandbox-image.md](docs/specs/sandbox-image.md). Porting old tasks:
-[docs/migration-from-legacy.md](docs/migration-from-legacy.md). What is and is not
-guaranteed: [docs/security-model.md](docs/security-model.md).
+Task semantics: [docs/specs/task-design.md](docs/specs/task-design.md). Writing Tasks:
+[docs/guides/task-authoring.md](docs/guides/task-authoring.md). The standard lifecycle:
+[docs/specs/standard-environment.md](docs/specs/standard-environment.md). Verification:
+[docs/specs/verification.md](docs/specs/verification.md). The complete documentation map
+starts at [docs/README.md](docs/README.md).
 
 ## Concepts
 
@@ -126,8 +127,10 @@ packages/ale-core/    contracts, interfaces, conformance testkit
 packages/ale-run/     providers, gateway, guest service, harnesses, engine, CLI
 packages/ale-verify/  sandbox-local checks, direct Judges, records
 images/base/          sandbox base images (published to GHCR)
-docs/adr/             one-page decision records (append-only)
+docs/README.md        maintained documentation entry point
+docs/adr/             current architectural decisions and rationale
 docs/specs/           living normative specifications
+docs/guides/          contributor and operator workflows
 ```
 
 ## Development
@@ -143,11 +146,10 @@ just lint             # ruff + import boundaries
 ```
 
 Always use `uv run <cmd>`; never activate a virtualenv and never `pip install`.
-See [`docs/development.md`](docs/development.md) for the reasoning, and
+See [`docs/guides/development.md`](docs/guides/development.md) for the reasoning, and
 [`CLAUDE.md`](CLAUDE.md) for the rules coding agents must follow.
 
 ## Governance
 
-Design decisions are recorded in [`docs/adr/`](docs/adr/); normative specifications in
-[`docs/specs/`](docs/specs/). Both are deliberately compact. Contributions are reviewed
-against the project constitution (`docs/constitution.md`).
+Start at [`docs/README.md`](docs/README.md). It links the current specifications, guides,
+architectural rationale, and project constitution.

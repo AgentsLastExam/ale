@@ -10,12 +10,13 @@ Needs KVM and a built guest image, so it skips rather than fails where either is
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pytest
 
-from ale.core.sandbox import Identity, ImageRef
-from ale.core.taskspec import NetworkMode
+from ale.core.sandbox import Identity, ImageRef, SandboxRequest
+from ale.core.taskspec import NetworkMode, Resources
 from ale.core.testkit import ProviderConformance
 from ale.run.providers.qemu import QemuProvider
 from ale.run.sources import cache_root
@@ -47,10 +48,24 @@ class TestQemuProvider(ProviderConformance):
     #: the shared suite runs against it rather than being skipped.
     gui_image = image
 
+    async def request(self, **overrides: object) -> SandboxRequest:
+        resources = overrides.get("resources", Resources())
+        assert isinstance(resources, Resources)
+        if resources.gpus == 0:
+            overrides["resources"] = resources.model_copy(
+                update={
+                    "cpus": max(resources.cpus, 2),
+                    "memory_mb": max(resources.memory_mb, 4096),
+                }
+            )
+        return await super().request(**overrides)
+
     @pytest.mark.asyncio
     async def test_ubuntu_gnome_session_and_fresh_overlay(self) -> None:
         assert self.provider.capabilities().network_modes == frozenset(NetworkMode)
+        started = time.monotonic()
         first = await self.provider.create(await self.request())
+        assert time.monotonic() - started < 60
         try:
             release = await first.exec(["sh", "-c", ". /etc/os-release; echo $VERSION_ID"])
             assert release.stdout.strip() == "24.04"
