@@ -16,13 +16,14 @@ from ale.run.harnesses.builtin import OracleHarness
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.tasksets.manifest import load_tasks
 from ale_verify import (
     CriterionResult,
     JudgeAttempt,
     JudgeInvocation,
     VerificationRecord,
 )
+from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -32,12 +33,7 @@ HASH1 = "sha256:" + "1" * 64
 
 
 def repository(root: Path, name: str) -> Path:
-    (root / "tasks").mkdir(parents=True)
-    (root / "domain.yaml").write_text("name: demo\nrequires_core: '>=0.1,<0.2'\n")
-    task = scaffold_task(root / "tasks" / name)
-    manifest = task / "task.yaml"
-    manifest.write_text(manifest.read_text().replace("image: sandbox-base-cli", f"image: {IMAGE}"))
-    return task
+    return scaffold_task(root / "tasks" / name)
 
 
 def provenance(task_path: Path) -> ProvenanceInputs:
@@ -56,7 +52,7 @@ async def test_record_and_envelope_mismatch_is_rejected_but_record_is_retained(
     tmp_path: Path,
 ) -> None:
     task_root = repository(tmp_path / "repo", "mismatch")
-    (task_root / "verify" / "check.py").write_text(
+    (task_root / "verify" / "verify.py").write_text(
         "import json, os\n"
         "from ale_verify import CheckResult, Verification\n"
         "v = Verification()\n"
@@ -65,12 +61,12 @@ async def test_record_and_envelope_mismatch_is_rejected_but_record_is_retained(
         "with open(os.environ['ALE_VERDICT_PATH'], 'w') as handle:\n"
         "    json.dump({'rewards': {'score': 0.0}, 'metrics': {}}, handle)\n"
     )
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
 
     result = await run_episode(
         task,
         StandardEnvironment(OracleHarness()),
-        DockerProvider(),
+        provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
     )
 
@@ -137,13 +133,13 @@ async def test_agent_transcript_and_judge_provenance_are_collected_after_exit(
         )
         """
     ).strip()
-    (task_root / "verify" / "check.py").write_text(script + "\n")
-    task = next(iter(ManifestTaskset(task_root).load()))
+    (task_root / "verify" / "verify.py").write_text(script + "\n")
+    task = load_tasks(task_root)[0]
 
     result = await run_episode(
         task,
         StandardEnvironment(OracleHarness()),
-        DockerProvider(),
+        provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         provenance=provenance(task_root),
     )

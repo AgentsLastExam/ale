@@ -29,26 +29,43 @@ import shutil
 import uuid
 import zlib
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     Capabilities,
     ExecOutputSink,
     ExecResult,
+    GpuAllocation,
+    GpuDevice,
     Identity,
+    ImageKind,
+    ImageRef,
+    PreparedTaskImage,
     Provider,
+    ResolvedImage,
+    ResourceAllocation,
     Sandbox,
     SandboxRequest,
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode
+from ale.run.gpu import GpuLease, normalize_pci_bdf, parse_nvidia_smi
+from ale.run.images import (
+    resolve_local_vm_fixture,
+    resolve_prepared_vm_image,
+    resolve_vm_image,
+)
+from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, TcpTransport
 
 __all__ = ["QemuProvider", "QemuSandbox"]
 
 #: Where the guest service listens inside the VM. Forwarded to an ephemeral host port.
 GUEST_PORT = 7411
+VM_STORAGE_OVERHEAD_MB = 1024
 
 #: The image that hosts the virtual machine (built by images/base/qemu-runner). It is
 #: inherited from the previous framework, which had already worked out the device
@@ -87,6 +104,92 @@ DEFAULT_AGENT_USER = "user"
 #: A guest boots an operating system, so this is minutes rather than the seconds a
 #: container takes.
 BOOT_TIMEOUT_SEC = 300
+_NVIDIA_QUERY = "uuid,name,pci.bus_id,driver_version"
+
+
+@dataclass(frozen=True)
+class _VfioGpu:
+    bdf: str
+    group: str
+
+
+def _index_vfio_gpus(candidates: tuple[_VfioGpu, ...]) -> dict[str, _VfioGpu]:
+    by_group: dict[str, _VfioGpu] = {}
+    for gpu in candidates:
+        if gpu.group in by_group:
+            raise ProviderCapabilityError(
+                f"configured GPUs {by_group[gpu.group].bdf} and {gpu.bdf} "
+                f"share IOMMU group {gpu.group}"
+            )
+        by_group[gpu.group] = gpu
+    return by_group
+
+
+def _verify_qemu_gpu_count(
+    requested: int, observed: tuple[GpuDevice, ...]
+) -> tuple[GpuDevice, ...]:
+    if len(observed) != requested:
+        raise ProviderCapabilityError(
+            f"QEMU GPU count mismatch: requested {requested}, observed {len(observed)}"
+        )
+    return observed
+
+
+def _driver_name(device: Path) -> str | None:
+    driver = device / "driver"
+    return driver.resolve().name if driver.exists() or driver.is_symlink() else None
+
+
+def _inspect_vfio_gpu(
+    value: str,
+    *,
+    sysfs: Path = Path("/sys"),
+    dev: Path = Path("/dev"),
+) -> _VfioGpu:
+    try:
+        bdf = normalize_pci_bdf(value)
+    except ValueError as exc:
+        raise ProviderCapabilityError(str(exc)) from exc
+    device = sysfs / "bus/pci/devices" / bdf
+    if not device.exists():
+        raise ProviderCapabilityError(f"configured PCI device {bdf} does not exist")
+    if (device / "vendor").read_text().strip().lower() != "0x10de":
+        raise ProviderCapabilityError(f"configured PCI device {bdf} is not NVIDIA")
+    if not (device / "class").read_text().strip().lower().startswith("0x03"):
+        raise ProviderCapabilityError(f"configured PCI device {bdf} is not a GPU")
+    group_link = device / "iommu_group"
+    if not group_link.exists():
+        raise ProviderCapabilityError(f"configured GPU {bdf} has no IOMMU group")
+    group = group_link.resolve().name
+    if _driver_name(device) != "vfio-pci":
+        raise ProviderCapabilityError(f"configured GPU {bdf} is not bound to vfio-pci")
+    members = group_link.resolve() / "devices"
+    for member in members.iterdir():
+        driver = _driver_name(member.resolve())
+        if driver not in {None, "vfio-pci"}:
+            raise ProviderCapabilityError(
+                f"IOMMU group {group} member {member.name} is bound to unsafe driver {driver}"
+            )
+    for node in (dev / "vfio/vfio", dev / "vfio" / group):
+        if not node.exists() or not os.access(node, os.R_OK | os.W_OK):
+            raise ProviderCapabilityError(f"VFIO node {node} is missing or inaccessible")
+    return _VfioGpu(bdf=bdf, group=group)
+
+
+def _proxy_env(request: SandboxRequest) -> dict[str, str]:
+    if not request.proxy_url:
+        return {}
+    port = _port_of(request.proxy_url)
+    proxy = f"http://{HOST_IP}:{port}"
+    if request.proxy_token:
+        proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}@", 1)
+    return {
+        "HTTP_PROXY": proxy,
+        "HTTPS_PROXY": proxy,
+        "http_proxy": proxy,
+        "https_proxy": proxy,
+        "NO_PROXY": f"{HOST_IP},localhost,127.0.0.1",
+    }
 
 
 async def _run(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
@@ -117,16 +220,26 @@ class QemuSandbox(Sandbox):
         storage: Path,
         host_port: int,
         client: GuestClient,
+        resolved_image: ResolvedImage,
+        allocation: ResourceAllocation,
+        resource_lease: GpuLease | None = None,
         agent_user: str = DEFAULT_AGENT_USER,
         host_ip: str = "",
     ) -> None:
-        super().__init__(sandbox_id=sandbox_id, request=request)
+        super().__init__(
+            sandbox_id=sandbox_id,
+            request=request,
+            resolved_image=resolved_image,
+            allocation=allocation,
+            resource_lease=resource_lease,
+        )
         self.container = container
         self.storage = storage
         self.host_port = host_port
         self.agent_user = agent_user
         self.host_ip = host_ip
         self._client = client
+        self._sealed = False
         self.state = SandboxState.READY
 
     def _as(self, identity: Identity) -> str | None:
@@ -163,6 +276,12 @@ class QemuSandbox(Sandbox):
         identity: Identity = Identity.FRAMEWORK,
         output_sink: ExecOutputSink | None = None,
     ) -> ExecResult:
+        if (
+            identity is Identity.AGENT
+            and self._sealed
+            and self.request.network.mode is NetworkMode.ALLOWLIST
+        ):
+            env = _proxy_env(self.request) | (env or {})
         loop = asyncio.get_running_loop()
         started = loop.time()
         exit_code, stdout, stderr, timed_out = await self._client.exec(
@@ -251,14 +370,13 @@ class QemuSandbox(Sandbox):
         guest forwards, and the guest's own firewall permits only the runner. They are
         applied and lifted together for the same reason they exist together.
         """
-        if self.request.network.mode is NetworkMode.OPEN:
-            return
         for rule in (
             f"iptables -D FORWARD -i {GUEST_BRIDGE} ! -d {self.host_ip} -j DROP",
             f"iptables -D INPUT -i {GUEST_BRIDGE} -j DROP",
         ):
             await _run("docker", "exec", self.container, "sh", "-c", rule, timeout=60)
         await self._client.exec(["nft", "flush", "ruleset"], timeout_sec=60)
+        self._sealed = False
 
     async def close_egress(self) -> None:
         """Put both halves back, before the agent starts."""
@@ -279,6 +397,7 @@ class QemuSandbox(Sandbox):
                 # Loud: the alternative is an agent measured with a network it was never
                 # meant to have and a lock file that says otherwise.
                 raise ProviderStartError(f"could not close egress: {stderr.strip()}")
+        self._sealed = True
 
     async def destroy(self) -> None:
         """Idempotent: teardown also runs on failure paths, sometimes twice."""
@@ -286,16 +405,16 @@ class QemuSandbox(Sandbox):
             return
         self.state = SandboxState.DESTROYED
 
-        with contextlib.suppress(Exception):
-            await self._client.close()
-
-        with contextlib.suppress(Exception):
-            await _run("docker", "rm", "-f", self.container, timeout=60)
-
-        # The overlay is this episode's entire mutable state, so removing it is the whole
-        # cleanup — the golden image was never written to.
-        with contextlib.suppress(OSError):
-            shutil.rmtree(self.storage, ignore_errors=True)
+        try:
+            with contextlib.suppress(Exception):
+                await self._client.close()
+            with contextlib.suppress(Exception):
+                await _run("docker", "rm", "-f", self.container, timeout=60)
+            # The overlay is this episode's entire mutable state.
+            with contextlib.suppress(OSError):
+                shutil.rmtree(self.storage, ignore_errors=True)
+        finally:
+            self.release_resources()
 
 
 class QemuProvider(Provider):
@@ -308,15 +427,18 @@ class QemuProvider(Provider):
         *,
         image: Path | None = None,
         overlay_dir: Path | None = None,
-        disk_size: str = "40G",
+        image_cache_dir: Path | None = None,
+        gpu_devices: tuple[str, ...] = (),
+        gpu_lock_dir: Path | None = None,
     ) -> None:
-        default = Path.home() / ".cache/ale/images/ale-ubuntu-desktop.qcow2"
-        self.image = image or Path(os.environ.get("ALE_QEMU_IMAGE", default))
+        self.fixture_image = image
         # Host-side, and named for what it holds. It was `work_dir`, which is a retired
         # name: the workspace is the agent's home *inside* a sandbox, and reusing the word
         # for a directory on this machine is the collision the lexicon exists to prevent.
         self.overlay_dir = overlay_dir or Path.home() / ".cache/ale/qemu"
-        self.disk_size = disk_size
+        self.image_cache_dir = image_cache_dir
+        self.gpu_devices = gpu_devices
+        self.gpu_lock_dir = gpu_lock_dir or cache_root() / "gpu-locks" / self.name
 
     def capabilities(self) -> Capabilities:
         return Capabilities(
@@ -324,11 +446,7 @@ class QemuProvider(Provider):
             # Whether there is a screen is a property of the disk that was built, not of
             # this backend; a guest with no desktop refuses the request when asked.
             gui=True,
-            gpus=0,
-            # `allowlist` needs the egress proxy reachable from inside the guest, which
-            # slirp gives, but the in-guest rules are not written yet — so it is refused
-            # rather than silently degraded.
-            network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.OPEN}),
+            network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.ALLOWLIST, NetworkMode.OPEN}),
             reset=False,
             snapshot=False,
         )
@@ -348,27 +466,78 @@ class QemuProvider(Provider):
             )
         elif not os.access("/dev/kvm", os.R_OK | os.W_OK):
             problems.append("/dev/kvm is present but not writable (add yourself to the kvm group)")
-        if not self.image.is_file():
+        if self.fixture_image is not None and not self.fixture_image.is_file():
             problems.append(
-                f"no guest image at {self.image}; fetch the published one with "
-                f"`ale images pull-guest`, build your own with "
-                f"images/base/qemu/build-desktop.sh, or point ALE_QEMU_IMAGE elsewhere"
+                f"no injected guest image at {self.fixture_image}; run ale prepare on a VM Task"
             )
 
         if problems:
             raise ProviderCapabilityError("; ".join(problems))
 
+    async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
+        if image.kind is not ImageKind.VM:
+            raise ProviderCapabilityError("QemuProvider requires image.kind=vm")
+        if isinstance(image, ImageRef):
+            if self.fixture_image is not None:
+                prepared = await asyncio.to_thread(
+                    resolve_local_vm_fixture,
+                    image,
+                    self.fixture_image,
+                )
+            else:
+                prepared = await resolve_vm_image(image, cache_dir=self.image_cache_dir)
+        else:
+            prepared = image
+        await resolve_prepared_vm_image(prepared)
+        return prepared
+
     async def create(self, request: SandboxRequest) -> Sandbox:
         self.accepts(request)
+        if request.image_kind is not ImageKind.VM:
+            raise ProviderCapabilityError("QemuProvider requires image.kind=vm")
         await self.preflight()
+        lease: GpuLease | None = None
+        selected: tuple[_VfioGpu, ...] = ()
+        by_group: dict[str, _VfioGpu] = {}
+        if request.resources.gpus:
+            candidates = tuple(_inspect_vfio_gpu(value) for value in self.gpu_devices)
+            if not candidates:
+                raise ProviderCapabilityError("no QEMU VFIO GPU pool is configured")
+            by_group = _index_vfio_gpus(candidates)
+        resolved_image = await resolve_prepared_vm_image(request.prepared_image)
+        base_image = Path(resolved_image.observed_ref)
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         storage = self.overlay_dir / sandbox_id
         storage.mkdir(parents=True, exist_ok=True)
-        await self._make_overlay(storage / "data.qcow2")
+        await self._make_overlay(
+            storage / "data.qcow2",
+            base_image,
+            request.resources.storage_mb,
+        )
 
         host_port = _free_port()
-        container = await self._boot(request, storage, host_port)
+        if request.resources.gpus:
+            lease = GpuLease.acquire(
+                tuple(f"vfio-group:{group}" for group in by_group),
+                request.resources.gpus,
+                self.gpu_lock_dir,
+            )
+            groups = {key.removeprefix("vfio-group:") for key in lease.device_keys}
+            selected = tuple(sorted((by_group[group] for group in groups), key=lambda gpu: gpu.bdf))
+        try:
+            container = await self._boot(
+                request,
+                storage,
+                base_image,
+                host_port,
+                selected,
+            )
+        except BaseException:
+            if lease:
+                lease.release()
+            shutil.rmtree(storage, ignore_errors=True)
+            raise
 
         try:
             host_ip = await self._wire_network(container, request)
@@ -376,6 +545,12 @@ class QemuProvider(Provider):
             await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
             client = GuestClient(transport)
             agent_user, has_desktop = await self._read_manifest(client)
+            effective_storage_mb = await self._prepare_root_storage(
+                client, request.resources.storage_mb
+            )
+            observed_gpu = await self._guest_gpus(client) if selected else ()
+            if selected:
+                _verify_qemu_gpu_count(request.resources.gpus, observed_gpu)
             if has_desktop:
                 # The one thing the manifest's `gui` flag decides. A guest that installs a
                 # desktop starts an X server, a display manager and a session after the
@@ -383,27 +558,60 @@ class QemuProvider(Provider):
                 # "the sandbox has a screen". No probe can tell the difference on its own:
                 # a screenshot that fails at this instant means "no desktop here" and
                 # "not yet" equally, and only the image knows which.
-                await self._await_desktop(client)
+                await self._await_desktop(client, agent_user)
             if request.sudo:
                 await self._grant_sudo(client, agent_user)
-        except Exception:
-            with contextlib.suppress(Exception):
-                await _run("docker", "rm", "-f", container, timeout=60)
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))
             shutil.rmtree(storage, ignore_errors=True)
+            if lease:
+                lease.release()
             raise
 
-        return QemuSandbox(
+        if lease:
+            lease.attach()
+        sandbox = QemuSandbox(
             sandbox_id=sandbox_id,
             request=request,
             container=container,
             storage=storage,
             host_port=host_port,
             client=client,
+            resolved_image=resolved_image,
+            allocation=ResourceAllocation(
+                cpus=request.resources.cpus,
+                memory_mb=request.resources.memory_mb,
+                storage_mb=effective_storage_mb,
+                gpu=(
+                    GpuAllocation(
+                        requested_count=request.resources.gpus,
+                        provider_addresses=tuple(gpu.bdf for gpu in selected),
+                        lease_keys=lease.device_keys,
+                        observed_devices=observed_gpu,
+                        runtime_identity=f"qemu-runner/{RUNNER_IMAGE}",
+                    )
+                    if lease
+                    else None
+                ),
+                sudo=request.sudo,
+                network_mode=request.network.mode,
+                provider=self.name,
+            ),
+            resource_lease=lease,
             agent_user=agent_user,
             host_ip=host_ip,
         )
+        if request.network.mode is NetworkMode.OPEN:
+            await sandbox.open_egress()
+        return sandbox
 
-    async def _make_overlay(self, overlay: Path) -> None:
+    async def _make_overlay(
+        self,
+        overlay: Path,
+        base_image: Path,
+        requested_storage_mb: int | None = None,
+    ) -> None:
         """A copy-on-write clone of the golden image; the golden image is never written.
 
         The backing path is the one the *runner* will see, not the one on this host, and
@@ -411,19 +619,44 @@ class QemuProvider(Provider):
         path instead is the mistake that costs a boot: qemu inside the container follows
         it, finds nothing, and refuses the disk.
         """
+        code, output, stderr = await _run(
+            "qemu-img", "info", "--output=json", str(base_image), timeout=60
+        )
+        try:
+            virtual_size = int(json.loads(output)["virtual-size"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ProviderStartError(
+                f"could not inspect the prepared VM size: {stderr.strip() or error}"
+            ) from error
+        if code != 0 or virtual_size <= 0:
+            raise ProviderStartError(
+                f"could not inspect the prepared VM size: {stderr.strip() or output.strip()}"
+            )
+
+        if requested_storage_mb is not None:
+            requested_size = (requested_storage_mb + VM_STORAGE_OVERHEAD_MB) * 1024 * 1024
+            virtual_size = max(virtual_size, requested_size)
+
         code, _, stderr = await _run(
             "qemu-img", "create", "-u",
             "-f", "qcow2",
             "-F", "qcow2",
             "-b", RUNNER_BASE,
             str(overlay),
-            self.disk_size,
+            str(virtual_size),
             timeout=60,
         )  # fmt: skip
         if code != 0:
             raise ProviderStartError(f"could not create the episode overlay: {stderr.strip()}")
 
-    async def _boot(self, request: SandboxRequest, storage: Path, host_port: int) -> str:
+    async def _boot(
+        self,
+        request: SandboxRequest,
+        storage: Path,
+        base_image: Path,
+        host_port: int,
+        gpus: tuple[_VfioGpu, ...] = (),
+    ) -> str:
         """Start the runner, which starts the machine.
 
         The golden image is mounted read-only beside the overlay that backs onto it, so
@@ -439,7 +672,7 @@ class QemuProvider(Provider):
             "--cap-add", "NET_ADMIN",
             "--shm-size", "1g",
             "--mount",
-            f"type=bind,src={self.image.resolve()},dst={RUNNER_BASE},readonly",
+            f"type=bind,src={base_image.resolve()},dst={RUNNER_BASE},readonly",
             "--mount", f"type=bind,src={storage.resolve()},dst=/storage",
             "--publish", f"127.0.0.1:{host_port}:{GUEST_PORT}",
             "--env", f"RAM_SIZE={request.resources.memory_mb}M",
@@ -448,27 +681,89 @@ class QemuProvider(Provider):
             # Hypervisor enlightenments are for Windows guests; a Linux guest boots
             # faster without them.
             "--env", "HV=N",
-            "--env", f"DISK_SIZE={self.disk_size}",
-            RUNNER_IMAGE,
         ]  # fmt: skip
+        if gpus:
+            argv += ["--device=/dev/vfio/vfio", "--ulimit", "memlock=-1:-1"]
+            for group in sorted({gpu.group for gpu in gpus}):
+                argv += [f"--device=/dev/vfio/{group}"]
+            argv += ["--env", f"ALE_QEMU_VFIO_DEVICES={','.join(gpu.bdf for gpu in gpus)}"]
+        argv += [RUNNER_IMAGE]
 
         code, stdout, stderr = await _run(*argv, timeout=180)
         if code != 0:
             raise ProviderStartError(f"could not start the qemu runner: {stderr.strip()}")
         container = stdout.strip() and name
 
-        # A runner that rejects the disk or the device exits at once; saying so now beats
-        # waiting out the boot timeout on a machine that never started.
-        await asyncio.sleep(1.0)
-        alive, running, _ = await _run(
-            "docker", "inspect", "-f", "{{.State.Running}}", container, timeout=30
+        try:
+            # A runner that rejects the disk or the device exits at once; saying so now
+            # beats waiting out the boot timeout on a machine that never started.
+            await asyncio.sleep(1.0)
+            alive, running, _ = await _run(
+                "docker", "inspect", "-f", "{{.State.Running}}", container, timeout=30
+            )
+            if alive != 0 or running.strip() != "true":
+                _, logs, _ = await _run("docker", "logs", "--tail", "20", container, timeout=30)
+                raise ProviderStartError(f"the qemu runner exited immediately: {logs.strip()}")
+            return container
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))
+            raise
+
+    async def _guest_gpus(self, client: GuestClient) -> tuple[GpuDevice, ...]:
+        code, stdout, stderr, _ = await client.exec(
+            [
+                "nvidia-smi",
+                f"--query-gpu={_NVIDIA_QUERY}",
+                "--format=csv,noheader,nounits",
+            ],
+            timeout_sec=30,
         )
-        if alive != 0 or running.strip() != "true":
-            _, logs, _ = await _run("docker", "logs", "--tail", "20", container, timeout=30)
-            with contextlib.suppress(Exception):
-                await _run("docker", "rm", "-f", container, timeout=60)
-            raise ProviderStartError(f"the qemu runner exited immediately: {logs.strip()}")
-        return container
+        if code != 0:
+            raise ProviderCapabilityError(
+                f"QEMU guest nvidia-smi failed before setup: {stderr.strip()}"
+            )
+        return parse_nvidia_smi(stdout)
+
+    async def _root_capacity_mb(self, client: GuestClient) -> int:
+        code, stdout, stderr, _ = await client.exec(["df", "-Pm", "/"], timeout_sec=30)
+        try:
+            capacity = int(stdout.strip().splitlines()[-1].split()[1])
+        except (IndexError, ValueError) as exc:
+            raise ProviderStartError(
+                f"could not observe VM root filesystem capacity: {stderr.strip() or stdout.strip()}"
+            ) from exc
+        if code != 0 or capacity <= 0:
+            raise ProviderStartError(
+                f"could not observe VM root filesystem capacity: {stderr.strip() or stdout.strip()}"
+            )
+        return capacity
+
+    async def _prepare_root_storage(
+        self, client: GuestClient, requested_storage_mb: int | None
+    ) -> int:
+        capacity = await self._root_capacity_mb(client)
+        if requested_storage_mb is None or capacity >= requested_storage_mb:
+            return capacity
+
+        for argv in (
+            ["systemd-repart", "--dry-run=no"],
+            ["/usr/lib/systemd/systemd-growfs", "/"],
+        ):
+            code, stdout, stderr, _ = await client.exec(argv, timeout_sec=120)
+            if code != 0:
+                raise ProviderStartError(
+                    f"could not expand VM root storage with {argv[0]}: "
+                    f"{stderr.strip() or stdout.strip()}"
+                )
+
+        capacity = await self._root_capacity_mb(client)
+        if capacity < requested_storage_mb:
+            raise ProviderCapabilityError(
+                f"VM root filesystem provides {capacity} MB after expansion, "
+                f"task requests {requested_storage_mb} MB"
+            )
+        return capacity
 
     async def _wire_network(self, container: str, request: SandboxRequest) -> str:
         """Route the gateway into the guest, and report where the host is.
@@ -492,8 +787,11 @@ class QemuProvider(Provider):
             raise ProviderStartError("could not find the host's address from inside the runner")
 
         rules: list[str] = []
-        port = _port_of(request.gateway_url)
-        if port:
+        ports = {
+            _port_of(request.gateway_url),
+            _port_of(request.proxy_url) if request.network.mode is NetworkMode.ALLOWLIST else "",
+        }
+        for port in sorted(ports - {""}):
             rules += [
                 f"iptables -t nat -A PREROUTING -i {GUEST_BRIDGE} -p tcp -d {HOST_IP} "
                 f"--dport {port} -j DNAT --to-destination {host_ip}:{port}",
@@ -506,7 +804,9 @@ class QemuProvider(Provider):
                 raise ProviderStartError(f"could not route the gateway: {stderr.strip()}")
         return host_ip
 
-    async def _await_desktop(self, client: GuestClient, timeout_sec: float = 300) -> None:
+    async def _await_desktop(
+        self, client: GuestClient, agent_user: str, timeout_sec: float = 300
+    ) -> None:
         """Block until the screen can be captured *and* something has been drawn on it.
 
         Capturing alone is not enough here, and that is the difference from the container
@@ -528,6 +828,21 @@ class QemuProvider(Provider):
         deadline = loop.time() + timeout_sec
         last = "no screenshot was taken"
         while loop.time() < deadline:
+            try:
+                display_manager = await client.exec(
+                    ["systemctl", "is-active", "gdm3"], timeout_sec=30
+                )
+                session = await client.exec(
+                    ["pgrep", "-u", agent_user, "-x", "gnome-shell"], timeout_sec=30
+                )
+            except TimeoutError as exc:
+                last = f"desktop readiness probe timed out: {exc}"
+                await asyncio.sleep(2)
+                continue
+            if display_manager[0] != 0 or session[0] != 0:
+                last = "GDM or the declared user's GNOME Shell session is not active"
+                await asyncio.sleep(2)
+                continue
             try:
                 png = await client.screenshot()
             except Exception as exc:  # X is not up yet

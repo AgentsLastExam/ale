@@ -22,6 +22,7 @@ def test_verification_sections_are_optional_and_strict() -> None:
                 },
                 "agent": {
                     "adapter": "codex-cli",
+                    "version": "1.2.3",
                     "model": "agent-model",
                     "reasoning_effort": "high",
                     "base_url": "https://example.test",
@@ -79,6 +80,7 @@ def test_agent_adapter_is_closed(adapter: str) -> None:
                 "verification": {
                     "agent": {
                         "adapter": adapter,
+                        "version": "1.2.3",
                         "model": "m",
                         "reasoning_effort": "medium",
                         "base_url": "https://example.test",
@@ -105,3 +107,31 @@ def test_legacy_verification_fields_are_forbidden(field: str) -> None:
                 }
             }
         )
+
+
+@pytest.mark.parametrize("version", [None, "latest", "1", "1.2", "^1.2.3", "1.2.x"])
+def test_agent_judge_requires_exact_numeric_semver(version: str | None) -> None:
+    agent = {
+        "adapter": "codex-cli",
+        "model": "m",
+        "reasoning_effort": "medium",
+        "base_url": "https://example.test",
+        "api_key_env": "KEY",
+    }
+    if version is not None:
+        agent["version"] = version
+    with pytest.raises(ValidationError):
+        RunConfig.model_validate({"verification": {"agent": agent}})
+
+
+def test_sandbox_retention_is_run_owned_and_defaults_to_destroy() -> None:
+    assert RunConfig().sandbox_retention.model_dump() == {
+        "solver": "destroy",
+        "verifier": "destroy",
+    }
+    configured = RunConfig.model_validate(
+        {"sandbox_retention": {"solver": "keep", "verifier": "destroy"}}
+    )
+    assert configured.sandbox_retention.solver == "keep"
+    with pytest.raises(ValidationError):
+        RunConfig.model_validate({"sandbox_retention": {"solver": "sometimes"}})

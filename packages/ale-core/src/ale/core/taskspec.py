@@ -1,135 +1,81 @@
-"""The task specification: the wire atom of ALE.
-
-A ``TaskSpec`` is frozen, fully serialisable, and self-contained: everything needed to
-provision a sandbox, brief an agent and score the result. Its hash identifies the task
-instance in provenance records and in resume decisions, so it covers the *rendered*
-instruction — what the agent actually saw — not a template.
-
-Three shapes here are worth reading twice:
-
-* ``id`` is opaque. The domain and the variant are their own fields, and nothing in the
-  framework parses the identifier.
-* ``setup`` and ``verify`` are the same shape. Scripts are not declared at all: a
-  stage's folder is copied in and its entry point runs, so the task's layout on disk is
-  its execution semantics.
-* Data placement is the task's decision. A task says where each asset lands and which
-  paths to collect afterwards; the framework guarantees *when* things appear, not where.
-  Fixing a global layout here would force every domain into one shape and buy nothing —
-  answers stay away from an agent because verify-stage assets are materialised during
-  scoring, whatever path they use.
-"""
+"""Strict public contracts for one self-contained ALE Task."""
 
 from __future__ import annotations
 
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ale.core.ids import TaskId, content_hash
 
 __all__ = [
-    "AssetMount",
-    "ImageRef",
+    "ImageKind",
+    "ImageSpec",
     "McpServer",
     "McpSource",
     "NetworkMode",
     "NetworkPolicy",
+    "PhaseTimeoutOverride",
     "PhaseTimeouts",
+    "ResourceOverride",
     "Resources",
-    "SetupStage",
     "SkillSource",
-    "StageSpec",
     "StdioMcpServer",
     "StreamableHttpMcpServer",
+    "TaskManifestV1",
     "TaskMcpSource",
     "TaskSpec",
     "ToolProvision",
-    "VerifyStage",
+    "VariantOverride",
+    "VerificationMode",
+    "VerifierResources",
+    "VerifySpec",
 ]
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
 
 
-class ImageRef(BaseModel):
-    """A sandbox image by name and tag.
-
-    The digest is deliberately absent: it is resolved at run time and recorded in the
-    provenance record, so a moved tag is detectable instead of silently comparable.
-    """
-
-    model_config = _FROZEN
-
-    name: str = Field(description="Short name (resolved against the default registry) or full ref")
-    tag: str = "latest"
-
-    def __str__(self) -> str:
-        return f"{self.name}:{self.tag}"
+class ImageKind(StrEnum):
+    CONTAINER = "container"
+    VM = "vm"
 
 
-class AssetMount(BaseModel):
-    """A directory of published data, and where this task wants it.
-
-    Everything needed to find the data is here, so a task is readable on its own and no
-    lookup table has to be kept in step with it. The revision is a commit: two runs that
-    name the same one read the same bytes.
-
-    Which stage lists a mount is what decides when it appears — gold answers listed under
-    ``verify`` are simply not in the sandbox while the agent works.
-    """
+class ImageSpec(BaseModel):
+    """Authored solver or dedicated-verifier image declaration."""
 
     model_config = _FROZEN
 
-    repo: str = Field(description="Dataset repository, e.g. agents-last-exam/ale-tasks-assets")
-    revision: str = Field(description="Commit to read; a branch name would not be reproducible")
-    path: str = Field(description="Directory within the repository")
-    dest: str = Field(description="Absolute path in the sandbox where it lands")
+    kind: ImageKind
+    ref: str | None = Field(default=None, min_length=1)
 
-
-class StageSpec(BaseModel):
-    """What a stage needs beyond its own folder."""
-
-    model_config = _FROZEN
-
-    assets: tuple[AssetMount, ...] = ()
-    kits: tuple[str, ...] = ()
-
-
-class SetupStage(StageSpec):
-    """Preparation that runs before the agent."""
-
-
-class VerifyStage(StageSpec):
-    """Scoring that runs after the agent, in a workspace the agent never saw."""
+    @field_validator("ref")
+    @classmethod
+    def _nonblank_ref(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("image ref must not be blank")
+        return value
 
 
 class Resources(BaseModel):
-    """How the sandbox must be provisioned.
-
-    Single scalars: how a backend turns a request into a reservation or a hard limit is
-    a runtime policy, not a property of the task.
-    """
-
     model_config = _FROZEN
 
     cpus: int = Field(default=1, ge=1)
     memory_mb: int = Field(default=1024, ge=128)
     storage_mb: int | None = Field(default=None, ge=256)
     gpus: int = Field(default=0, ge=0)
-    gpu_vram_gb: int | None = Field(default=None, ge=1)
+    sudo: bool = False
 
-    sudo: bool = Field(
-        default=False,
-        description=(
-            "Whether the agent may elevate. Some tasks genuinely require installing "
-            "software or changing system configuration, and the alternative to saying so "
-            "is either giving every agent root or making those tasks impossible. Recorded "
-            "in provenance, because an episode run this way was less isolated than one "
-            "without — and a backend that cannot grant it refuses rather than running "
-            "with less than was declared. Stated as a need, so one declaration serves any "
-            "operating system."
-        ),
-    )
+
+class ResourceOverride(BaseModel):
+    model_config = _FROZEN
+
+    cpus: int | None = Field(default=None, ge=1)
+    memory_mb: int | None = Field(default=None, ge=128)
+    storage_mb: int | None = Field(default=None, ge=256)
+    gpus: int | None = Field(default=None, ge=0)
+    sudo: bool | None = None
 
 
 class NetworkMode(StrEnum):
@@ -139,17 +85,10 @@ class NetworkMode(StrEnum):
 
 
 class NetworkPolicy(BaseModel):
-    """Egress policy.
-
-    The gateway is reachable in every mode, and only the gateway holds real credentials.
-    """
-
     model_config = _FROZEN
 
     mode: NetworkMode = NetworkMode.BLOCK
     allowed_hosts: tuple[str, ...] = ()
-
-    # --- validation ---
 
     @model_validator(mode="after")
     def _check_hosts(self) -> Self:
@@ -161,8 +100,6 @@ class NetworkPolicy(BaseModel):
 
 
 class PhaseTimeouts(BaseModel):
-    """Per-phase deadlines in seconds, enforced by the engine rather than the agent."""
-
     model_config = _FROZEN
 
     setup: float = Field(default=120, gt=0)
@@ -174,9 +111,15 @@ class PhaseTimeouts(BaseModel):
         return self.setup + self.agent + self.verify
 
 
-class SkillSource(BaseModel):
-    """One local Skill or immediate collection of Skills."""
+class PhaseTimeoutOverride(BaseModel):
+    model_config = _FROZEN
 
+    setup: float | None = Field(default=None, gt=0)
+    agent: float | None = Field(default=None, gt=0)
+    verify: float | None = Field(default=None, gt=0)
+
+
+class SkillSource(BaseModel):
     model_config = _FROZEN
 
     path: str = Field(min_length=1)
@@ -185,8 +128,6 @@ class SkillSource(BaseModel):
 
 
 class McpSource(BaseModel):
-    """A Run-level local descriptor or framework-owned built-in MCP server."""
-
     model_config = _FROZEN
 
     path: str | None = Field(default=None, min_length=1)
@@ -202,20 +143,16 @@ class McpSource(BaseModel):
 
 
 class TaskMcpSource(BaseModel):
-    """One task-owned MCP descriptor, relative to the task folder."""
-
     model_config = _FROZEN
 
     path: str = Field(min_length=1)
 
 
 class StdioMcpServer(BaseModel):
-    """A server the agent's MCP client starts inside the sandbox."""
-
     model_config = _FROZEN
 
     schema_version: Literal[1] = 1
-    name: str = Field(min_length=1)
+    name: str = Field(pattern=r"^[A-Za-z0-9._-]+$")
     transport: Literal["stdio"]
     command: str = Field(min_length=1)
     args: tuple[str, ...] = ()
@@ -224,18 +161,18 @@ class StdioMcpServer(BaseModel):
 
     @model_validator(mode="after")
     def _absolute_cwd(self) -> Self:
-        if self.cwd is not None and not self.cwd.startswith("/"):
+        if self.cwd is not None and not (
+            self.cwd.startswith("/") or self.cwd == "{mcp}" or self.cwd.startswith("{mcp}/")
+        ):
             raise ValueError("stdio MCP cwd must be an absolute sandbox path")
         return self
 
 
 class StreamableHttpMcpServer(BaseModel):
-    """An unauthenticated remote MCP endpoint."""
-
     model_config = _FROZEN
 
     schema_version: Literal[1] = 1
-    name: str = Field(min_length=1)
+    name: str = Field(pattern=r"^[A-Za-z0-9._-]+$")
     transport: Literal["streamable-http"]
     url: str = Field(pattern=r"^https?://")
 
@@ -247,60 +184,143 @@ McpServer = Annotated[
 
 
 class ToolProvision(BaseModel):
-    """Explicit agent resources required by this task."""
-
     model_config = _FROZEN
 
     skills: tuple[SkillSource, ...] = ()
     mcp_servers: tuple[TaskMcpSource, ...] = ()
 
 
-class TaskSpec(BaseModel):
-    """One task instance, fully specified."""
+class VerificationMode(StrEnum):
+    SHARED = "shared"
+    SEPARATE = "separate"
+
+
+class VerifierResources(BaseModel):
+    """Explicit resources for a physically separate verifier sandbox."""
 
     model_config = _FROZEN
 
-    id: TaskId
-    domain: str = Field(description="Namespace that maps to a task repository")
-    variant: str | None = Field(default=None, description="Named parameterisation, if any")
+    cpus: int = Field(ge=1)
+    memory_mb: int = Field(ge=128)
+    storage_mb: int | None = Field(ge=256)
+    gpus: int = Field(ge=0)
 
-    spec_type: str = "core/v1"
+    def as_resources(self) -> Resources:
+        return Resources(
+            cpus=self.cpus,
+            memory_mb=self.memory_mb,
+            storage_mb=self.storage_mb,
+            gpus=self.gpus,
+            sudo=False,
+        )
+
+
+class VerifySpec(BaseModel):
+    model_config = _FROZEN
+
+    environment_mode: VerificationMode = VerificationMode.SHARED
+    image: ImageSpec | None = None
+    resources: VerifierResources | None = None
+
+    @model_validator(mode="after")
+    def _valid_topology(self) -> Self:
+        if self.environment_mode is VerificationMode.SHARED:
+            if self.image is not None or self.resources is not None:
+                raise ValueError("shared verification cannot declare image or resources")
+        elif self.resources is None:
+            raise ValueError("separate verification requires explicit resources")
+        return self
+
+
+class VariantOverride(BaseModel):
+    model_config = _FROZEN
+
+    name: TaskId
+    params: dict[str, Any] = Field(default_factory=dict)
+    resources: ResourceOverride = ResourceOverride()
+    timeouts: PhaseTimeoutOverride = PhaseTimeoutOverride()
+
+    @field_validator("name")
+    @classmethod
+    def _not_base(cls, value: TaskId) -> TaskId:
+        if value == "base":
+            raise ValueError("variant name 'base' is reserved for the top-level Task")
+        return value
+
+
+class TaskManifestV1(BaseModel):
+    """The strict authored shape of ``task.yaml``."""
+
+    model_config = _FROZEN
+
+    spec_type: Literal["core/v1"]
+    name: TaskId
     environment: str = "core/standard"
-
-    instruction: str = Field(
-        description="The rendered prompt: substitution already applied, paths literal"
-    )
-    image: ImageRef
+    image: ImageSpec
     resources: Resources = Resources()
     network: NetworkPolicy = NetworkPolicy()
     timeouts: PhaseTimeouts = PhaseTimeouts()
-    setup: SetupStage = SetupStage()
-    verify: VerifyStage = VerifyStage()
-    artifacts: tuple[str, ...] = Field(
-        default=(),
-        description="Absolute sandbox paths holding this task's output. What happens to "
-        "them — kept on the host, discarded, uploaded — is a run-level decision, so it "
-        "is not written here.",
-    )
+    artifacts: tuple[str, ...] = ()
     tools: ToolProvision = ToolProvision()
-    params: dict[str, Any] = Field(
-        default_factory=dict, description="Values substituted into the instruction"
-    )
+    params: dict[str, Any] = Field(default_factory=dict)
+    verify: VerifySpec = VerifySpec()
+    variants: tuple[VariantOverride, ...] = ()
     metadata: dict[str, Any] = Field(default_factory=dict)
-    extras: dict[str, dict[str, Any]] = Field(
-        default_factory=dict,
-        description="Namespaced experiments; promoted into the schema once shared",
-    )
+    extras: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    @field_validator("artifacts")
+    @classmethod
+    def _absolute_artifacts(cls, paths: tuple[str, ...]) -> tuple[str, ...]:
+        relative = [path for path in paths if not PurePosixPath(path).is_absolute()]
+        if relative:
+            raise ValueError("artifact paths must be absolute: " + ", ".join(relative))
+        normalized = [PurePosixPath(path) for path in paths]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("artifact paths must be unique")
+        for index, path in enumerate(normalized):
+            for other in normalized[index + 1 :]:
+                if path in other.parents or other in path.parents:
+                    raise ValueError(f"artifact paths overlap: {path} and {other}")
+        return paths
+
+    @model_validator(mode="after")
+    def _valid_manifest(self) -> Self:
+        names = [variant.name for variant in self.variants]
+        if len(names) != len(set(names)):
+            raise ValueError("variant names must be unique")
+        return self
+
+
+class TaskSpec(BaseModel):
+    """One rendered base or variant instance used by the runtime."""
+
+    model_config = _FROZEN
+
+    spec_type: Literal["core/v1"] = "core/v1"
+    name: TaskId
+    variant: str = Field(default="base", min_length=1)
+    environment: str = "core/standard"
+    image: ImageSpec
+    instruction: str
+    resources: Resources = Resources()
+    network: NetworkPolicy = NetworkPolicy()
+    timeouts: PhaseTimeouts = PhaseTimeouts()
+    artifacts: tuple[str, ...] = ()
+    tools: ToolProvision = ToolProvision()
+    params: dict[str, Any] = Field(default_factory=dict)
+    verify: VerifySpec = VerifySpec()
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    extras: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    @property
+    def id(self) -> TaskId:
+        """Internal compatibility name; the authored/public field is ``name``."""
+        return self.name
 
     @property
     def spec_hash(self) -> str:
-        """``sha256:<hex>`` over the canonical form. The task instance's identity."""
-        return content_hash(self.model_dump(mode="json", by_alias=True))
+        return content_hash(self.model_dump(mode="json"))
 
     @property
     def label(self) -> str:
-        """Human-facing name: ``demo-hello`` or ``demo-hello@hard``.
-
-        Display only. Nothing parses it back.
-        """
-        return f"{self.id}@{self.variant}" if self.variant else str(self.id)
+        return str(self.name) if self.variant == "base" else f"{self.name}@{self.variant}"

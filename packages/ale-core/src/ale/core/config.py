@@ -16,6 +16,7 @@ is a boolean.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from copy import deepcopy
 from pathlib import Path
@@ -32,16 +33,57 @@ __all__ = [
     "AgentConfig",
     "AgentJudgeConfig",
     "ArtifactPolicy",
+    "AssetCollectionConfig",
     "GatewayLimits",
     "LLMJudgeConfig",
     "LoggingPolicy",
     "RunConfig",
+    "SandboxRetentionConfig",
     "VerificationConfig",
+    "ale_repo_path",
     "load_run_config",
     "merge_layers",
     "parse_override",
+    "resolve_asset_collection",
     "select_agent_name",
 ]
+
+
+class AssetCollectionConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    collection_slug: str = Field(min_length=1)
+    source: Literal["cli", "environment"]
+
+
+def ale_repo_path() -> Path:
+    raw = os.environ.get("ALE_REPO_PATH", "")
+    if not raw:
+        raise ConfigError("ALE_REPO_PATH is required")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ConfigError("ALE_REPO_PATH must be absolute")
+    resolved = path.resolve()
+    if (
+        not (resolved / "pyproject.toml").is_file()
+        or not (resolved / "packages" / "ale-run").is_dir()
+    ):
+        raise ConfigError(f"ALE_REPO_PATH is not an ALE engine checkout: {resolved}")
+    return resolved
+
+
+def resolve_asset_collection(cli_value: str | None = None) -> AssetCollectionConfig:
+    if cli_value and cli_value.strip():
+        return AssetCollectionConfig(collection_slug=cli_value.strip(), source="cli")
+    environment = os.environ.get("ALE_ASSETS_COLLECTION", "").strip()
+    if environment:
+        return AssetCollectionConfig(
+            collection_slug=environment,
+            source="environment",
+        )
+    raise ConfigError(
+        "asset collection is required; pass --collection or set ALE_ASSETS_COLLECTION"
+    )
 
 
 class GatewayLimits(BaseModel):
@@ -159,6 +201,15 @@ class LLMJudgeConfig(BaseModel):
 
 class AgentJudgeConfig(LLMJudgeConfig):
     adapter: Literal["codex-cli", "claude-code"]
+    version: str = Field(min_length=1)
+
+    @field_validator("version")
+    @classmethod
+    def _exact_version(cls, value: str) -> str:
+        parts = value.split(".")
+        if len(parts) != 3 or any(not part.isdigit() for part in parts):
+            raise ValueError("version must be an exact numeric semver such as 1.2.3")
+        return value
 
 
 class VerificationConfig(BaseModel):
@@ -168,16 +219,45 @@ class VerificationConfig(BaseModel):
     agent: AgentJudgeConfig | None = None
 
 
+class SandboxRetentionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    solver: Literal["destroy", "keep"] = "destroy"
+    verifier: Literal["destroy", "keep"] = "destroy"
+
+
+class ContainerProviderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["docker"] = "docker"
+    gpus: tuple[Annotated[int, Field(ge=0, strict=True)], ...] = ()
+
+    @field_validator("gpus")
+    @classmethod
+    def _gpu_indices(cls, values: tuple[int, ...]) -> tuple[int, ...]:
+        if len(set(values)) != len(values):
+            raise ValueError("Docker GPU indices must be unique")
+        return values
+
+
+class VmProviderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["qemu"] = "qemu"
+
+
 class RunConfig(BaseModel):
     """Everything one invocation needs, after all layers are merged."""
 
     model_config = ConfigDict(extra="forbid")
 
-    provider: str = "docker"
+    container: ContainerProviderConfig = ContainerProviderConfig()
+    vm: VmProviderConfig = VmProviderConfig()
     artifacts: ArtifactPolicy = ArtifactPolicy()
     agent: AgentConfig = AgentConfig()
     gateway: GatewayConfig = GatewayConfig()
     verification: VerificationConfig = VerificationConfig()
+    sandbox_retention: SandboxRetentionConfig = SandboxRetentionConfig()
     logging: LoggingPolicy = LoggingPolicy()
     episodes: int = Field(default=1, ge=1)
     seed: int = 0

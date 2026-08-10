@@ -1,50 +1,59 @@
-"""Loading tasks from a task repository checkout.
-
-A task folder becomes one or more :class:`TaskSpec` values here — one per variant, each
-with its own identity and its own rendered instruction. Nothing is duplicated on disk.
-
-Two invariants are enforced during loading rather than left to review:
-
-* an identifier is derived from the folder path and never read back for meaning;
-* a component whose asset lock marks it ``verify`` cannot appear in a setup stage, so
-  answer material cannot be staged before the agent by a task that asks in the wrong
-  place.
-"""
+"""Load self-contained Task folders from filesystem paths."""
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Iterator
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import ValidationError
 
-from ale.core.domain import DomainManifest
 from ale.core.environment import EpisodeContext
 from ale.core.errors import TaskDefinitionError
-from ale.core.ids import slugify_path
-from ale.core.kit import resolve_kit
-from ale.core.task import Task, Taskset
-from ale.core.taskspec import ImageRef, SetupStage, TaskSpec, VerifyStage
+from ale.core.task import Task, TaskSourceContext
+from ale.core.taskspec import (
+    PhaseTimeouts,
+    Resources,
+    TaskManifestV1,
+    TaskSpec,
+    VariantOverride,
+    VerificationMode,
+)
 from ale.core.template import render_instruction
 from ale.core.verdict import Rewards
+from ale.run.content import tree_digest
 
-__all__ = ["ManifestTask", "ManifestTaskset", "TaskFolder", "load_task_folder"]
+__all__ = [
+    "INSTRUCTION",
+    "ORACLE_DIR",
+    "SETUP_DIR",
+    "STAGE_ENTRY",
+    "TASK_MANIFEST",
+    "VERIFY_DIR",
+    "ManifestTask",
+    "TaskFolder",
+    "discover_task_folders",
+    "load_task_folder",
+    "load_tasks",
+]
 
 TASK_MANIFEST = "task.yaml"
 INSTRUCTION = "instruction.md"
-DOMAIN_MANIFEST = "domain.yaml"
-TASKS_DIR = "tasks"
-
 STAGE_ENTRY = "run.sh"
 VERIFY_DIR = "verify"
 ORACLE_DIR = "oracle"
 SETUP_DIR = "setup"
-FILES_DIR = "files"
-
-#: Never uploaded while the agent is running: manifests, scoring logic, solutions.
-AGENT_INVISIBLE = frozenset({TASK_MANIFEST, VERIFY_DIR, ORACLE_DIR})
+IMAGE_DIR = "image"
+_SOURCE_EXCLUDES = (
+    "image/assets",
+    "setup/assets",
+    "verify/assets",
+    "oracle/assets",
+    ".ale-cache",
+)
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -60,20 +69,22 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 
 class TaskFolder:
-    """The on-disk form of a task, and the paths its stages use."""
-
-    def __init__(self, root: Path, repo_root: Path | None = None) -> None:
+    def __init__(self, root: Path) -> None:
         self.root = root.resolve()
-        self.repo_root = (repo_root or _find_repo_root(self.root)).resolve()
 
     @property
-    def relative_path(self) -> str:
-        """Path under ``tasks/``, which is what the identifier mirrors."""
-        tasks_root = self.repo_root / TASKS_DIR
-        try:
-            return str(self.root.relative_to(tasks_root))
-        except ValueError:
-            return self.root.name
+    def image_dir(self) -> Path:
+        return self.root / IMAGE_DIR
+
+    @property
+    def image_dockerfile(self) -> Path | None:
+        path = self.image_dir / "Dockerfile"
+        return path if path.is_file() else None
+
+    @property
+    def verifier_dockerfile(self) -> Path | None:
+        path = self.root / VERIFY_DIR / "Dockerfile"
+        return path if path.is_file() else None
 
     def stage_dir(self, name: str) -> Path | None:
         path = self.root / name
@@ -81,205 +92,200 @@ class TaskFolder:
 
     def stage_entry(self, name: str) -> Path | None:
         directory = self.stage_dir(name)
-        if directory is None:
+        entry = directory / STAGE_ENTRY if directory else None
+        return entry if entry and entry.is_file() else None
+
+    @cached_property
+    def content_digest(self) -> str:
+        return tree_digest(self.root, exclude=_SOURCE_EXCLUDES)
+
+    @cached_property
+    def image_source_digest(self) -> str | None:
+        if self.image_dockerfile is None:
             return None
-        entry = directory / STAGE_ENTRY
-        return entry if entry.is_file() else None
+        return tree_digest(self.image_dir, exclude=("assets",))
 
-    def visible_files(self) -> Path | None:
-        """Small task files staged into the workspace before the agent runs."""
-        return self.stage_dir(FILES_DIR)
+    @cached_property
+    def verifier_image_source_digest(self) -> str | None:
+        if self.verifier_dockerfile is None:
+            return None
+        return tree_digest(self.root / VERIFY_DIR, exclude=("assets",))
 
-
-def _find_repo_root(start: Path) -> Path:
-    """Walk up to the directory holding ``domain.yaml``."""
-    for candidate in [start, *start.parents]:
-        if (candidate / DOMAIN_MANIFEST).is_file():
-            return candidate
-    raise TaskDefinitionError(
-        f"no {DOMAIN_MANIFEST} above {start}: is this inside a task repository?"
-    )
+    @cached_property
+    def source(self) -> TaskSourceContext:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return TaskSourceContext()
+        if result.returncode != 0:
+            return TaskSourceContext()
+        repository_root = Path(result.stdout.strip()).resolve()
+        try:
+            relative = self.root.relative_to(repository_root).as_posix()
+        except ValueError:
+            return TaskSourceContext()
+        return TaskSourceContext(
+            repository_root=repository_root,
+            repository_name=repository_root.name,
+            task_relative_path=relative,
+        )
 
 
 class ManifestTask(Task):
-    """A task whose behaviour comes entirely from its folder.
-
-    Scoring runs the task's own ``verify`` entry point inside the sandbox and reads the
-    rewards it wrote; the environment, not this class, decides when that happens.
-    """
-
     def __init__(self, spec: TaskSpec, folder: TaskFolder) -> None:
-        super().__init__(spec)
-        self.folder = folder
+        super().__init__(
+            spec,
+            folder=folder,
+            source=folder.source,
+            task_digest=folder.content_digest,
+            image_source_digest=folder.image_source_digest,
+            verifier_image_source_digest=folder.verifier_image_source_digest,
+        )
 
     async def score(self, ctx: EpisodeContext) -> Rewards:
-        """Rewards are produced by the verify stage; the environment records them."""
         rewards = ctx.extras.get("rewards")
         if not isinstance(rewards, dict):
             raise TaskDefinitionError(
-                "verification produced no rewards; the verify stage must write them"
+                "verification produced no rewards; verify/run.sh must write them"
             )
         return {str(key): float(value) for key, value in rewards.items()}
 
 
-class ManifestTaskset(Taskset):
-    """Loads tasks from a checkout of a task repository."""
-
-    def __init__(self, path: Path, *, task_filter: str | None = None) -> None:
-        self.path = path.resolve()
-        self.task_filter = task_filter
-        self.repo_root = _find_repo_root(self.path)
-        self.domain = DomainManifest.model_validate(_read_yaml(self.repo_root / DOMAIN_MANIFEST))
-
-    def load(self) -> Iterator[Task]:
-        for folder in self.folders():
-            yield from self.load_folder(folder)
-
-    def metadata(self) -> dict[str, Any]:
-        return {
-            "domain": self.domain.name,
-            "repo_root": str(self.repo_root),
-            "requires_core": self.domain.requires_core,
-        }
-
-    # --- loading ---
-
-    def folders(self) -> Iterator[TaskFolder]:
-        """Yield the task folders selected by this taskset's path."""
-        if (self.path / TASK_MANIFEST).is_file():
-            yield TaskFolder(self.path, self.repo_root)
-            return
-        search_root = self.path if self.path != self.repo_root else self.repo_root / TASKS_DIR
-        for manifest in sorted(search_root.rglob(TASK_MANIFEST)):
-            folder = TaskFolder(manifest.parent, self.repo_root)
-            if self.task_filter and self.task_filter not in folder.relative_path:
-                continue
-            yield folder
-
-    def load_folder(self, folder: TaskFolder) -> Iterator[ManifestTask]:
-        raw = _read_yaml(folder.root / TASK_MANIFEST)
-        instruction_path = folder.root / INSTRUCTION
-        if not instruction_path.is_file():
-            raise TaskDefinitionError(f"{folder.root} has no {INSTRUCTION}")
-        template = instruction_path.read_text(encoding="utf-8")
-
-        task_id = slugify_path(folder.relative_path)
-        base_params = dict(raw.pop("params", {}) or {})
-        variants = raw.pop("variants", None)
-
-        for variant_name, params, overrides in self._variants(base_params, variants):
-            spec = self._build_spec(
-                raw=raw | overrides,
-                folder=folder,
-                task_id=task_id,
-                variant=variant_name,
-                params=params,
-                template=template,
-            )
-            yield ManifestTask(spec, folder)
-
-    def _variants(
-        self, base_params: dict[str, Any], variants: list[dict[str, Any]] | None
-    ) -> Iterator[tuple[str | None, dict[str, Any], dict[str, Any]]]:
-        """One entry per task instance: a single unnamed one, or one per variant.
-
-        A variant may override more than parameters. Data bundles are per variant in
-        practice — each has its own inputs and its own gold answers — so a variant can
-        also name its own assets, and may declare an image when it genuinely needs a
-        different one (a GUI variant beside a file-only one).
-        """
-        if not variants:
-            yield None, base_params, {}
-            return
-        seen: set[str] = set()
-        for entry in variants:
-            name = entry.get("name")
-            if not name:
-                raise TaskDefinitionError("every variant needs a name")
-            if name in seen:
-                raise TaskDefinitionError(f"duplicate variant name: {name}")
-            seen.add(name)
-            overrides = {
-                key: value
-                for key, value in entry.items()
-                if key
-                in {
-                    "image",
-                    "setup",
-                    "verify",
-                    "harness_family",
-                    "resources",
-                    "timeouts",
-                    "tools",
-                }
-            }
-            yield name, base_params | dict(entry.get("params", {}) or {}), overrides
-
-    def _build_spec(
-        self,
-        *,
-        raw: dict[str, Any],
-        folder: TaskFolder,
-        task_id: str,
-        variant: str | None,
-        params: dict[str, Any],
-        template: str,
-    ) -> TaskSpec:
-        payload = dict(raw)
-        image = payload.pop("image", None)
-        if not image:
-            raise TaskDefinitionError(f"{folder.relative_path} declares no image")
-
-        setup = SetupStage.model_validate(payload.pop("setup", None) or {})
-        verify = VerifyStage.model_validate(payload.pop("verify", None) or {})
-        self._check_kits(folder, setup, verify)
-
-        where = f"{folder.relative_path}/{INSTRUCTION}"
-        instruction = render_instruction(template, params, where=where)
-
-        try:
-            return TaskSpec.model_validate(
-                {
-                    **payload,
-                    "id": task_id,
-                    "domain": self.domain.name,
-                    "variant": variant,
-                    "instruction": instruction,
-                    "image": _parse_image(image),
-                    "setup": setup,
-                    "verify": verify,
-                    "params": params,
-                }
-            )
-        except ValidationError as exc:
-            raise TaskDefinitionError(f"invalid task manifest: {exc}") from exc
-
-    # --- checks the loader owns ---
-
-    def _check_kits(self, folder: TaskFolder, setup: SetupStage, verify: VerifyStage) -> None:
-        for name in (*setup.kits, *verify.kits):
-            try:
-                resolve_kit(self.repo_root, name)
-            except TaskDefinitionError as exc:
-                raise TaskDefinitionError(f"{folder.relative_path}: {exc}") from exc
+def discover_task_folders(path: Path) -> tuple[TaskFolder, ...]:
+    source = path.expanduser().resolve()
+    if not source.exists():
+        raise TaskDefinitionError(f"Task path does not exist: {source}")
+    if (source / TASK_MANIFEST).is_file():
+        return (TaskFolder(source),)
+    manifests = sorted(
+        source.rglob(TASK_MANIFEST),
+        key=lambda item: item.relative_to(source).as_posix(),
+    )
+    if not manifests:
+        raise TaskDefinitionError(f"no {TASK_MANIFEST} found below {source}")
+    return tuple(TaskFolder(manifest.parent) for manifest in manifests)
 
 
-def _parse_image(value: str) -> ImageRef:
-    name, _, tag = value.partition(":")
-    return ImageRef(name=name, tag=tag or "latest")
+def load_tasks(path: Path) -> list[ManifestTask]:
+    tasks: list[ManifestTask] = []
+    seen: dict[str, Path] = {}
+    repositories: dict[str, Path] = {}
+    for folder in discover_task_folders(path):
+        source = folder.source
+        if source.repository_name and source.repository_root:
+            previous_root = repositories.get(source.repository_name)
+            if previous_root is not None and previous_root != source.repository_root:
+                raise TaskDefinitionError(
+                    f"ambiguous Task repository name {source.repository_name!r}: "
+                    f"{previous_root} and {source.repository_root}"
+                )
+            repositories[source.repository_name] = source.repository_root
+        for task in _load_folder(folder):
+            previous = seen.get(str(task.spec.name))
+            if previous is not None and previous != folder.root:
+                raise TaskDefinitionError(
+                    f"duplicate Task name {task.spec.name!r}: {previous} and {folder.root}"
+                )
+            seen[str(task.spec.name)] = folder.root
+            tasks.append(task)
+    return tasks
 
 
-def load_task_folder(path: Path) -> ManifestTask:
-    """Load exactly one task from a folder, for the single-task paths of the CLI."""
-    tasks = list(ManifestTaskset(path).load())
+def load_task_folder(path: Path, *, variant: str = "base") -> ManifestTask:
+    tasks = [task for task in load_tasks(path) if task.spec.variant == variant]
     if not tasks:
-        raise TaskDefinitionError(f"no task found at {path}")
+        raise TaskDefinitionError(f"{path} has no variant {variant!r}")
     if len(tasks) > 1:
-        names = ", ".join(task.spec.label for task in tasks)
-        raise TaskDefinitionError(f"{path} defines several variants ({names}); select one")
-    return tasks[0]  # type: ignore[return-value]
+        raise TaskDefinitionError(f"{path} selects more than one Task")
+    return tasks[0]
 
 
-def kit_source_dir(repo_root: Path, name: str) -> Path:
-    """Where a kit's package lives in a checkout."""
-    return repo_root / "kits" / name
+def _load_folder(folder: TaskFolder) -> Iterator[ManifestTask]:
+    _require_folder(folder)
+    try:
+        manifest = TaskManifestV1.model_validate(_read_yaml(folder.root / TASK_MANIFEST))
+    except ValidationError as exc:
+        raise TaskDefinitionError(
+            f"invalid task manifest {folder.root / TASK_MANIFEST}: {exc}"
+        ) from exc
+    if folder.image_dockerfile is None and manifest.image.ref is None:
+        raise TaskDefinitionError("solver requires image/Dockerfile or image.ref")
+    if folder.image_dockerfile is None and _has_files(folder.image_dir / "assets"):
+        raise TaskDefinitionError("image/assets is unused when solver uses image.ref")
+
+    verifier_dockerfile = folder.verifier_dockerfile
+    if verifier_dockerfile is not None:
+        if manifest.verify.environment_mode is VerificationMode.SHARED:
+            raise TaskDefinitionError("verify/Dockerfile requires separate verification")
+        if manifest.verify.image is None:
+            raise TaskDefinitionError("verify/Dockerfile requires verify.image.kind")
+    elif manifest.verify.image is not None and manifest.verify.image.ref is None:
+        raise TaskDefinitionError("external verifier requires verify.image.ref")
+    template = (folder.root / INSTRUCTION).read_text(encoding="utf-8")
+    yield ManifestTask(_effective_spec(manifest, template, "base", None), folder)
+    for variant in manifest.variants:
+        yield ManifestTask(_effective_spec(manifest, template, str(variant.name), variant), folder)
+
+
+def _require_folder(folder: TaskFolder) -> None:
+    required = (
+        folder.root / TASK_MANIFEST,
+        folder.root / INSTRUCTION,
+        folder.root / VERIFY_DIR / STAGE_ENTRY,
+        folder.root / ORACLE_DIR / STAGE_ENTRY,
+    )
+    missing = [path.relative_to(folder.root).as_posix() for path in required if not path.is_file()]
+    if missing:
+        raise TaskDefinitionError(
+            f"{folder.root} is missing required Task file(s): {', '.join(missing)}"
+        )
+
+
+def _effective_spec(
+    manifest: TaskManifestV1,
+    template: str,
+    variant_name: str,
+    variant: VariantOverride | None,
+) -> TaskSpec:
+    params = manifest.params | (variant.params if variant else {})
+    resources = _overlay(manifest.resources, variant.resources if variant else None)
+    timeouts = _overlay(manifest.timeouts, variant.timeouts if variant else None)
+    instruction = render_instruction(
+        template,
+        params,
+        where=f"{manifest.name}/{INSTRUCTION}",
+    )
+    return TaskSpec(
+        name=manifest.name,
+        variant=variant_name,
+        environment=manifest.environment,
+        image=manifest.image,
+        instruction=instruction,
+        resources=Resources.model_validate(resources),
+        network=manifest.network,
+        timeouts=PhaseTimeouts.model_validate(timeouts),
+        artifacts=manifest.artifacts,
+        tools=manifest.tools,
+        params=params,
+        verify=manifest.verify,
+        metadata=manifest.metadata,
+        extras=manifest.extras,
+    )
+
+
+def _overlay(base: object, override: object | None) -> dict[str, Any]:
+    values = base.model_dump(mode="python")  # type: ignore[attr-defined]
+    if override is None:
+        return values
+    updates = override.model_dump(mode="python", exclude_none=True)  # type: ignore[attr-defined]
+    return values | updates
+
+
+def _has_files(path: Path) -> bool:
+    return path.is_dir() and any(item.is_file() for item in path.rglob("*"))

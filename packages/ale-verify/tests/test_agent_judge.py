@@ -69,7 +69,7 @@ def test_invalid_verdict_repairs_in_the_same_session_with_concrete_error(
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
         if "--version" in argv:
-            return completed("codex 1\n")
+            return completed("codex 1.2.3\n")
         calls.append((argv, kwargs))
         return completed(next(outputs))
 
@@ -91,7 +91,7 @@ def test_three_repairs_are_the_limit_and_no_fresh_session_is_started(
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
         if "--version" in argv:
-            return completed("codex 1\n")
+            return completed("codex 1.2.3\n")
         calls.append(argv)
         return completed(event("thread-1", {"choice": "invalid", "reasoning": "No."}))
 
@@ -110,7 +110,7 @@ def test_transcript_is_sanitized(
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
         if "--version" in argv:
-            return completed("codex 1\n")
+            return completed("codex 1.2.3\n")
         return completed(
             json.dumps(
                 {

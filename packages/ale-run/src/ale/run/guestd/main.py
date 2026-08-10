@@ -317,7 +317,7 @@ def serve_stream(reader: TextIO | BinaryIO, writer: TextIO) -> None:
         writer.flush()
 
     handler = Handler(emit)
-    for raw in reader:  # type: ignore[union-attr]
+    while raw := reader.readline():
         line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
         line = line.strip()
         if not line:
@@ -337,6 +337,8 @@ def serve_stream(reader: TextIO | BinaryIO, writer: TextIO) -> None:
 
 
 class _TCPHandler(socketserver.StreamRequestHandler):
+    rbufsize = 0
+
     def handle(self) -> None:
         writer = self.wfile
 

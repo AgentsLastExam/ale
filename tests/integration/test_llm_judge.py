@@ -15,19 +15,11 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.providers.docker import DockerProvider
-from ale.run.providers.qemu import QemuProvider
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.tasksets.manifest import load_tasks
 from ale_verify import ScoredChoice, _llm
+from tests.support import provider_registry
 
 pytestmark = pytest.mark.integration
-
-IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
-QEMU_IMAGE = Path(
-    os.environ.get(
-        "ALE_QEMU_IMAGE",
-        Path.home() / ".cache/ale/images/ale-ubuntu-desktop.qcow2",
-    )
-)
 
 
 @pytest.mark.asyncio
@@ -85,20 +77,21 @@ async def test_direct_llm_call_uses_provider_without_gateway(
 
 def direct_llm_task(root: Path) -> Path:
     task = root / "tasks" / "direct-llm"
-    for stage in ("setup", "verify", "oracle"):
+    for stage in ("image", "setup", "verify", "oracle"):
         (task / stage).mkdir(parents=True)
-    (root / "domain.yaml").write_text("name: demo\nrequires_core: '>=0.1,<0.2'\n")
     (task / "task.yaml").write_text(
-        textwrap.dedent(f"""
-        image: {IMAGE}
-        resources: {{ cpus: 1, memory_mb: 512 }}
-        network: {{ mode: block }}
-        timeouts: {{ setup: 60, agent: 60, verify: 120 }}
+        textwrap.dedent("""
+        spec_type: core/v1
+        name: direct-llm
+        image: {kind: container}
+        resources: {cpus: 1, memory_mb: 512}
+        network: {mode: block}
+        timeouts: {setup: 60, agent: 60, verify: 120}
         artifacts: [/home/user/output]
         """).strip()
     )
     (task / "instruction.md").write_text("Write blue to /home/user/output/answer.txt\n")
-    (task / "setup" / "server.py").write_text(
+    (task / "image" / "server.py").write_text(
         "import json\n"
         "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
         "class Handler(BaseHTTPRequestHandler):\n"
@@ -126,22 +119,27 @@ def direct_llm_task(root: Path) -> Path:
         "    def log_message(self, *_args): pass\n"
         "HTTPServer(('127.0.0.1', 18765), Handler).handle_request()\n"
     )
+    (task / "image" / "Dockerfile").write_text(
+        "FROM ghcr.io/agentslastexam/sandbox-base-cli:latest\n"
+        "COPY server.py /opt/task/server.py\n"
+        "RUN mkdir -p /home/user/output && chown -R user:user /home/user/output\n"
+    )
     (task / "setup" / "run.sh").write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "mkdir -p /home/user/output\n"
         'test -z "${JUDGE_KEY-}"\n'
         "printf absent > /home/user/output/setup-key\n"
-        'nohup python3 "$(dirname "$0")/server.py" >/tmp/mock-llm.log 2>&1 &\n'
+        "nohup python3 /opt/task/server.py >/tmp/mock-llm.log 2>&1 &\n"
         "sleep 1\n"
     )
     (task / "oracle" / "run.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nprintf blue > /home/user/output/answer.txt\n"
     )
     (task / "verify" / "run.sh").write_text(
-        '#!/usr/bin/env bash\nset -euo pipefail\nexec python3 "$(dirname "$0")/check.py"\n'
+        "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 verify.py\n"
     )
-    (task / "verify" / "check.py").write_text(
+    (task / "verify" / "verify.py").write_text(
         "from ale_verify import Verification, checks\n"
         "v = Verification()\n"
         "v.check('credential_scope', checks.text_equals('/home/user/output/setup-key', 'absent'))\n"
@@ -170,12 +168,12 @@ async def run_direct_llm_task(
     secret = "sandbox-direct-secret"
     os.environ["JUDGE_KEY"] = secret
     task_root = direct_llm_task(tmp_path / "repo")
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
     try:
         result = await run_episode(
             task,
             StandardEnvironment(OracleHarness()),
-            provider,
+            provider_registry(provider),
             run_dir=tmp_path / "runs",
             verification_config=VerificationConfig(
                 llm=LLMJudgeConfig(
@@ -236,10 +234,3 @@ async def test_direct_anthropic_messages_judge_runs_inside_docker_sandbox(
         DockerProvider(),
         base_url="http://127.0.0.1:18765/v1/messages",
     )
-
-
-@pytest.mark.needs_kvm
-@pytest.mark.skipif(not QEMU_IMAGE.is_file(), reason=f"no QEMU image at {QEMU_IMAGE}")
-@pytest.mark.asyncio
-async def test_direct_llm_judge_runs_inside_qemu_sandbox(tmp_path: Path) -> None:
-    await run_direct_llm_task(tmp_path, QemuProvider(image=QEMU_IMAGE))

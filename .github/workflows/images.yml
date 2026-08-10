@@ -19,7 +19,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        image: [cli, gui]
+        image: [cli, gui, vm-gui, vm-materializer]
     steps:
       - uses: actions/checkout@v4
 
@@ -40,14 +40,35 @@ jobs:
                  | sha256sum | cut -c1-12)
           echo "content=$hash" >> "$GITHUB_OUTPUT"
 
+      - name: Select image repository
+        id: image
+        run: |
+          case "${{ matrix.image }}" in
+            vm-materializer)
+              echo "repository=ale-vm-materializer" >> "$GITHUB_OUTPUT"
+              echo "version=0.1.0" >> "$GITHUB_OUTPUT"
+              echo "context=images/base/vm-materializer" >> "$GITHUB_OUTPUT"
+              ;;
+            vm-gui)
+              echo "repository=sandbox-base-vm-gui" >> "$GITHUB_OUTPUT"
+              echo "version=0.1.0" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "repository=sandbox-base-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+              echo "version=latest" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
       - uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ steps.image.outputs.context }}
           file: images/base/${{ matrix.image }}/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
-            ${{ env.REGISTRY }}/agentslastexam/sandbox-base-${{ matrix.image }}:latest
-            ${{ env.REGISTRY }}/agentslastexam/sandbox-base-${{ matrix.image }}:${{ steps.tag.outputs.content }}
+            ${{ env.REGISTRY }}/agentslastexam/${{ steps.image.outputs.repository }}:${{ steps.image.outputs.version }}
+            ${{ env.REGISTRY }}/agentslastexam/${{ steps.image.outputs.repository }}:${{ steps.tag.outputs.content }}
           labels: ale.content_hash=${{ steps.tag.outputs.content }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

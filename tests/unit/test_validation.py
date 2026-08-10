@@ -10,10 +10,19 @@ import pytest
 from typer.testing import CliRunner
 
 from ale.core.errors import VerificationInfrastructureError, VerifierOutputError
+from ale.core.sandbox import PreparedTaskImage
+from ale.core.taskspec import ImageKind
 from ale.core.verdict import Status, Verdict
-from ale.run.cli.main import _is_full_reward_map, _is_zero_reward_map, _validation_outcome, app
+from ale.run.cli.main import (
+    _is_full_reward_map,
+    _is_zero_reward_map,
+    _validation_notices,
+    _validation_outcome,
+    app,
+)
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.harnesses.builtin import NopHarness
+from ale.run.task_images import ImagePreparationResult, ImagePreparationStep
 
 pytestmark = pytest.mark.unit
 
@@ -41,9 +50,7 @@ class RewardsSandbox:
         (None, False),
     ],
 )
-def test_admission_requires_nonempty_all_ones(
-    rewards: dict[str, float] | None, expected: bool
-) -> None:
+def test_full_oracle_detection(rewards: dict[str, float] | None, expected: bool) -> None:
     assert _is_full_reward_map(rewards) is expected
 
 
@@ -134,6 +141,59 @@ def test_validate_accepts_run_level_judge_config(
     assert observed["runs_dir"] == tmp_path / "runs"
 
 
+def test_prepare_uses_selection_and_starts_no_runtime_services(
+    monkeypatch: pytest.MonkeyPatch,
+    write_task_repo,  # type: ignore[no-untyped-def]
+) -> None:
+    repository = write_task_repo("ale-tasks-prepare", tasks=("b", "a"))
+    cli = import_module("ale.run.cli.main")
+    observed: list[str] = []
+    digest = "sha256:" + "a" * 64
+
+    async def fake_prepare(tasks, _providers):  # type: ignore[no-untyped-def]
+        observed.extend(str(task.spec.name) for task in tasks)
+        image = PreparedTaskImage(
+            kind=ImageKind.CONTAINER,
+            source="solver-local",
+            input_identity=digest,
+            image_source_identity=digest,
+            runtime_ref="ale-task:fixture",
+            prepared_identity=digest,
+        )
+        return tuple(
+            ImagePreparationResult(
+                task=f"{task.spec.name}@{task.spec.variant}",
+                role="solver",
+                image=image,
+                steps=(ImagePreparationStep("oci-build", "executed", digest),),
+            )
+            for task in tasks
+        )
+
+    def forbidden(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("prepare started a runtime service")
+
+    monkeypatch.setattr(cli, "_prepare_images", fake_prepare)
+    for name in ("Gateway", "Ledger", "StandardEnvironment"):
+        monkeypatch.setattr(cli, name, forbidden)
+
+    result = CliRunner().invoke(app, ["prepare", str(repository)])
+
+    assert result.exit_code == 0, result.output
+    assert observed == ["a", "b"]
+    assert "a@base solver kind=container source=local" in result.output
+    assert "oci-build" in result.output
+
+
+def test_prepare_accepts_only_config_and_set_options() -> None:
+    result = CliRunner().invoke(app, ["prepare", "--help"])
+    assert result.exit_code == 0
+    assert "--config" in result.output
+    assert "--set" in result.output
+    for forbidden in ("--runs-dir", "--agent", "--model", "--episodes", "--build"):
+        assert forbidden not in result.output
+
+
 def test_validation_failure_output_is_actionable() -> None:
     verdict = Verdict.failed(
         Status.ENV_ERROR,
@@ -143,3 +203,32 @@ def test_validation_failure_output_is_actionable() -> None:
     assert _validation_outcome(verdict) == (
         "env_error (VerificationInfrastructureError: JUDGE_KEY is not set)"
     )
+
+
+def test_partial_oracle_is_a_warning_not_a_failure() -> None:
+    names, warnings, failures = _validation_notices(
+        Verdict.completed({"correctness": 0.0}),
+        Verdict.completed({"correctness": 0.5}),
+    )
+    assert names == ("correctness",)
+    assert [notice.code for notice in warnings] == ["partial_oracle"]
+    assert failures == ()
+
+
+def test_nonzero_untouched_and_name_mismatch_are_hard_failures() -> None:
+    _, _, failures = _validation_notices(
+        Verdict.completed({"correctness": 0.1}),
+        Verdict.completed({"other": 1.0}),
+    )
+    assert {notice.code for notice in failures} == {
+        "untouched_nonzero",
+        "reward_name_mismatch",
+    }
+
+
+def test_infrastructure_failure_remains_a_hard_failure() -> None:
+    _, _, failures = _validation_notices(
+        Verdict.failed(Status.ENV_ERROR, RuntimeError("no sandbox"), phase="provision"),
+        Verdict.completed({"reward": 1.0}),
+    )
+    assert [notice.code for notice in failures] == ["untouched_not_completed"]

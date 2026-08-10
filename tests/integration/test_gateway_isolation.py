@@ -16,6 +16,7 @@ from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.providers.docker import DockerProvider
+from tests.support import prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -46,9 +47,10 @@ async def test_sandbox_reaches_the_gateway_and_nothing_else() -> None:
     session = gateway.open_session(GatewaySession(episode_id="iso", model="claude-opus-4-8"))
 
     provider = DockerProvider()
+    prepared = await prepare_reference(provider, IMAGE)
     request = SandboxRequest(
         episode_id="iso",
-        image_ref=IMAGE,
+        prepared_image=prepared,
         resources=Resources(cpus=1, memory_mb=512),
         network=NetworkPolicy(mode=NetworkMode.BLOCK),
         gateway_url=gateway.base_url,

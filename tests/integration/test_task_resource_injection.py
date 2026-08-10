@@ -25,7 +25,8 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.tasksets.manifest import load_tasks
+from tests.support import provider_registry
 
 from .conftest import IMAGE
 
@@ -165,30 +166,35 @@ answer = template.replace("<nonce>", nonce).replace("<fragment>", fragment)
 
 def _write_task(root: Path) -> Path:
     root.mkdir()
-    (root / "domain.yaml").write_text("name: demo\nrequires_core: '>=0.1,<0.2'\n")
     task = root / "tasks" / "resource_injection"
     for directory in (
-        task / "files",
-        task / "mcp",
-        task / "skills" / "resource-proof",
+        task / "image",
+        task / "tools" / "mcp",
+        task / "tools" / "skills" / "resource-proof",
         task / "setup",
         task / "verify",
+        task / "oracle",
     ):
         directory.mkdir(parents=True, exist_ok=True)
     (task / "task.yaml").write_text(
-        textwrap.dedent(f"""
-        image: {IMAGE}
+        textwrap.dedent("""
+        spec_type: core/v1
+        name: resource-injection
+        image: {{ kind: container }}
         resources: {{ cpus: 1, memory_mb: 512 }}
         network: {{ mode: block }}
         timeouts: {{ setup: 60, agent: 60, verify: 60 }}
         tools:
-          skills: [{{ path: skills/resource-proof }}]
-          mcp_servers: [{{ path: mcp/task-proof.toml }}]
+          skills: [{{ path: tools/skills/resource-proof }}]
+          mcp_servers: [{{ path: tools/mcp/task-proof.toml }}]
         artifacts: [/home/user/output]
-        """).strip()
+        """)
+        .strip()
+        .replace("{{", "{")
+        .replace("}}", "}")
     )
     (task / "instruction.md").write_text("Use the injected Skill and MCP to complete the proof.")
-    (task / "skills" / "resource-proof" / "SKILL.md").write_text(
+    (task / "tools" / "skills" / "resource-proof" / "SKILL.md").write_text(
         textwrap.dedent("""
         ---
         name: resource-proof
@@ -198,17 +204,16 @@ def _write_task(root: Path) -> Path:
         Write exactly `SKILL-R7::<nonce>::<fragment>` to the requested output.
         """).strip()
     )
-    (task / "mcp" / "task-proof.toml").write_text(
+    (task / "tools" / "mcp" / "task-proof.toml").write_text(
         textwrap.dedent("""
         schema_version = 1
         name = "task-proof"
         transport = "stdio"
         command = "python3"
-        args = ["/home/user/task_proof_mcp.py"]
-        cwd = "/home/user"
+        args = ["{mcp}/task_proof_mcp.py"]
         """).strip()
     )
-    (task / "files" / "task_proof_mcp.py").write_text(
+    (task / "tools" / "mcp" / "task_proof_mcp.py").write_text(
         textwrap.dedent("""
         import json, secrets, sys
         from pathlib import Path
@@ -246,6 +251,12 @@ def _write_task(root: Path) -> Path:
                   flush=True)
         """).strip()
     )
+    (task / "image" / "Dockerfile").write_text(
+        f"FROM {IMAGE}\n"
+        "RUN mkdir -p /home/user/input /home/user/output "
+        "&& chown -R user:user /home/user/input /home/user/output "
+        "\n"
+    )
     (task / "setup" / "run.sh").write_text(
         "#!/bin/bash\nset -e\nmkdir -p /home/user/input /home/user/output\n"
         "printf 'A1B2C3D4' > /home/user/input/nonce.txt\n"
@@ -272,13 +283,21 @@ def _write_task(root: Path) -> Path:
         PY
         """).strip()
     )
+    (task / "oracle" / "run.sh").write_text("#!/bin/bash\nexit 0\n")
+    entries = (
+        task / "setup" / "run.sh",
+        task / "verify" / "run.sh",
+        task / "oracle" / "run.sh",
+    )
+    for entry in entries:
+        entry.chmod(0o755)
     return task
 
 
 @pytest.mark.asyncio
 async def test_autonomous_agent_uses_task_skill_and_mcp_to_pass(tmp_path: Path) -> None:
     task_root = _write_task(tmp_path / "repo")
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
     resources = resolve_agent_resources(
         task=task.spec.tools,
         task_root=task_root,
@@ -289,7 +308,7 @@ async def test_autonomous_agent_uses_task_skill_and_mcp_to_pass(tmp_path: Path) 
     result = await run_episode(
         task,
         StandardEnvironment(ResourceProbeHarness()),
-        DockerProvider(),
+        provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         agent_resources=resources,
     )

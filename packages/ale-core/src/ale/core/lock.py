@@ -19,7 +19,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ale.core.errors import ProvenanceIncompleteError
 from ale.core.ids import TaskId
-from ale.core.store import AssetOrigin
+from ale.core.result import SandboxOutcome
+from ale.core.sandbox import ResourceAllocation
+from ale.core.taskspec import ImageKind, ImageSpec, Resources, VerificationMode
 
 __all__ = [
     "AgentProvenance",
@@ -31,17 +33,18 @@ __all__ = [
     "HarnessPresetProvenance",
     "ImageProvenance",
     "JudgeProvenance",
-    "KitProvenance",
     "LimitTermination",
+    "ResourceProvenance",
     "RunLock",
     "SandboxProvenance",
     "TaskProvenance",
     "TaskSource",
+    "VerificationProvenance",
 ]
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class TaskSource(BaseModel):
@@ -73,19 +76,50 @@ class TaskSource(BaseModel):
 class TaskProvenance(BaseModel):
     model_config = _FROZEN
 
-    id: TaskId
-    domain: str
-    variant: str | None = None
+    name: TaskId
+    variant: str
     spec_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    content_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     source: TaskSource
-    requires_core: str | None = None
 
 
 class ImageProvenance(BaseModel):
     model_config = _FROZEN
 
-    ref: str = Field(description="name:tag as declared by the task")
-    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$", description="Resolved at run time")
+    declaration: ImageSpec
+    source: Literal["local", "ref"]
+    input_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    image_source_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    prepared_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    runtime_ref: str = Field(min_length=1)
+    oci_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    base_materials: tuple[str, ...] = ()
+    resolved_reference: str | None = None
+    materializer_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    provider: str
+    observed_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    observed_ref: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_source_shape(self) -> Self:
+        local = self.source == "local"
+        if local != (self.image_source_identity is not None):
+            raise ValueError("local image provenance requires image_source_identity")
+        if local == (self.resolved_reference is not None):
+            raise ValueError("ref image provenance requires resolved_reference")
+        if self.declaration.kind is ImageKind.VM and local:
+            if self.oci_identity is None or self.materializer_identity is None:
+                raise ValueError("local VM provenance requires OCI and materializer identities")
+        elif self.oci_identity is not None or self.materializer_identity is not None:
+            raise ValueError("only local VM provenance has OCI and materializer identities")
+        return self
+
+
+class ResourceProvenance(BaseModel):
+    model_config = _FROZEN
+
+    requested: Resources
+    effective: ResourceAllocation
 
 
 class AgentProvenance(BaseModel):
@@ -159,26 +193,20 @@ class JudgeProvenance(BaseModel):
 
 
 class AssetProvenance(BaseModel):
-    """One asset component as it was actually materialised.
-
-    ``origin`` matters: a run served from a pre-baked image must stay as explainable as
-    one that downloaded everything, and ``data_key`` is what makes the two comparable.
-    """
-
     model_config = _FROZEN
 
-    component: str
-    repo: str
-    revision: str
-    data_key: str
-    origin: AssetOrigin
+    repository: str
+    task_path: str
+    commit: str | None = None
+    dirty: bool
 
 
-class KitProvenance(BaseModel):
+class VerificationProvenance(BaseModel):
     model_config = _FROZEN
 
-    name: str
-    content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    mode: VerificationMode = VerificationMode.SHARED
+    image: ImageProvenance | None = None
+    resources: ResourceProvenance | None = None
 
 
 class AleVerifyProvenance(BaseModel):
@@ -224,7 +252,7 @@ class FrameworkProvenance(BaseModel):
 
     version: str
     commit: str = Field(description="Engine git commit; 'unknown' is not acceptable in a report")
-    schema_version: int = SCHEMA_VERSION
+    schema_version: Literal[2] = SCHEMA_VERSION
 
 
 class RunLock(BaseModel):
@@ -234,11 +262,12 @@ class RunLock(BaseModel):
 
     task: TaskProvenance
     image: ImageProvenance
+    resources: ResourceProvenance | None = None
     agent: AgentProvenance
     framework: FrameworkProvenance
     gateway: GatewayProvenance
     trajectory_schema: Literal["ATIF-v1.7"] = "ATIF-v1.7"
-    result_schema_version: Literal[1] = 1
+    result_schema_version: Literal[2] = 2
     transport_schema_version: Literal[1] = 1
     execution_schema_version: Literal[1] = 1
     sandbox: SandboxProvenance | None = None
@@ -246,19 +275,33 @@ class RunLock(BaseModel):
     seed: int
     ale_verify: AleVerifyProvenance | None = None
     judges: tuple[JudgeProvenance, ...] = ()
-    assets: tuple[AssetProvenance, ...] = ()
-    kits: tuple[KitProvenance, ...] = ()
+    asset: AssetProvenance | None = None
+    verification: VerificationProvenance = VerificationProvenance()
+    sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
     termination: LimitTermination | None = None
 
     @model_validator(mode="before")
     @classmethod
     def _legacy_judge(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or "judge" not in value:
+        if not isinstance(value, dict):
             return value
         migrated = dict(value)
-        judge = migrated.pop("judge")
-        if judge is not None and "judges" not in migrated:
-            migrated["judges"] = [judge]
+        if "judge" in migrated:
+            judge = migrated.pop("judge")
+            if judge is not None and not migrated.get("judges"):
+                migrated["judges"] = [judge]
+        if "assets" in migrated:
+            legacy = migrated.pop("assets") or []
+            if legacy and not migrated.get("asset"):
+                first = legacy[0]
+                migrated["asset"] = {
+                    "repository": first.get("repository", ""),
+                    "task_path": first.get("task_path", ""),
+                    "commit": first.get("commit"),
+                    "dirty": any(item.get("state") != "clean" for item in legacy),
+                }
+        migrated.setdefault("verification", {"mode": "shared"})
+        migrated.setdefault("sandbox_outcomes", [])
         return migrated
 
     def missing_for_report(self) -> list[str]:
@@ -272,6 +315,10 @@ class RunLock(BaseModel):
             problems.append("task came from a local path and cannot be re-fetched")
         if self.framework.commit in {"", "unknown"}:
             problems.append("framework commit was not resolved")
+        if self.resources is None:
+            problems.append("effective resource allocation was not recorded")
+        if self.asset is not None and (self.asset.dirty or self.asset.commit is None):
+            problems.append("Task assets are dirty or have no synchronized commit")
         for resource in self.agent.resources:
             if not resource.reportable:
                 problems.append(

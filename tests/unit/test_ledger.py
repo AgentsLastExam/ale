@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.ids import TaskId
+from ale.core.lock import AssetProvenance
 from ale.core.result import FailureInfo, ResultRecord
-from ale.core.taskspec import ImageRef, TaskSpec
+from ale.core.taskspec import TaskSpec
 from ale.core.verdict import Status
 from ale.run.ledger import Ledger, episode_identity
 
@@ -21,16 +21,17 @@ pytestmark = pytest.mark.unit
 
 def spec(**overrides: object) -> TaskSpec:
     base: dict[str, object] = {
-        "id": TaskId("demo-hello"),
-        "domain": "demo",
+        "name": "demo-hello",
         "instruction": "write hello",
-        "image": ImageRef(name="sandbox-base-cli"),
+        "image": {"kind": "container"},
     }
     return TaskSpec(**(base | overrides))  # type: ignore[arg-type]
 
 
 def identity(task: TaskSpec, **overrides: object) -> str:
     args: dict[str, object] = {
+        "task_digest": "sha256:" + "1" * 64,
+        "image_digest": "sha256:" + "2" * 64,
         "agent": "claude-code@2.1",
         "seed": 0,
         "config_hash": "sha256:aa",
@@ -66,6 +67,12 @@ class TestEpisodeIdentity:
     def test_a_different_task_is_different_work(self) -> None:
         assert identity(spec()) != identity(spec(instruction="write goodbye"))
 
+    def test_a_whole_task_edit_is_different_work(self) -> None:
+        assert identity(spec()) != identity(spec(), task_digest="sha256:" + "3" * 64)
+
+    def test_a_different_prepared_image_is_different_work(self) -> None:
+        assert identity(spec()) != identity(spec(), image_digest="sha256:" + "3" * 64)
+
     def test_a_different_variant_is_different_work(self) -> None:
         base = spec(variant="base", params={"n": 3})
         hard = spec(variant="hard", params={"n": 10})
@@ -84,6 +91,20 @@ class TestEpisodeIdentity:
         assert identity(spec(), resources_digest="sha256:aa") != identity(
             spec(), resources_digest="sha256:bb"
         )
+
+
+@pytest.mark.parametrize(("commit", "dirty"), [("a" * 40, False), ("a" * 40, True), (None, True)])
+def test_consumed_asset_provenance_records_one_task_observation(
+    commit: str | None, dirty: bool
+) -> None:
+    record = AssetProvenance(
+        repository="ale-tasks-base",
+        task_path="tasks/demo/external_assets",
+        commit=commit,
+        dirty=dirty,
+    )
+    assert record.repository == "ale-tasks-base"
+    assert "owner/" not in record.repository
 
 
 class TestLedger:

@@ -15,6 +15,7 @@ one token, one episode, one allowlist.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 
 from ale.run.gateway.session import GatewaySession, SessionRegistry
@@ -105,7 +106,17 @@ class EgressProxy:
         for line in lines[1:]:
             name, _, value = line.partition(":")
             if name.strip().lower() in {"proxy-authorization", "authorization"}:
-                token = value.strip().removeprefix("Bearer ").strip()
+                authorization = value.strip()
+                if authorization.lower().startswith("basic "):
+                    try:
+                        credentials = base64.b64decode(
+                            authorization.split(None, 1)[1], validate=True
+                        ).decode()
+                    except (ValueError, UnicodeDecodeError):
+                        return None
+                    token = credentials.partition(":")[0]
+                else:
+                    token = authorization.removeprefix("Bearer ").strip()
                 return self.sessions.resolve(token)
         return None
 

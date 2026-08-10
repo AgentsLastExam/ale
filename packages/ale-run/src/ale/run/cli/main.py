@@ -9,7 +9,8 @@ that imports it.
 from __future__ import annotations
 
 import asyncio
-import subprocess
+import hashlib
+import shutil
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -17,13 +18,24 @@ from typing import Annotated
 import typer
 
 from ale.core.config import RunConfig, load_run_config, select_agent_name
-from ale.core.errors import AleError, ConfigError
+from ale.core.errors import AleError, ConfigError, TaskDefinitionError
 from ale.core.harness import EffectiveAgentResources
+from ale.core.ids import content_hash
+from ale.core.sandbox import ImageKind, PreparedTaskImage
+from ale.core.taskspec import VerificationMode
+from ale.core.validation import (
+    TaskValidationObservation,
+    ValidationAttempt,
+    ValidationEngine,
+    ValidationNotice,
+    ValidationObservation,
+)
 from ale.core.verdict import Status, Verdict
 from ale.run import __version__
 from ale.run.agent_resources import resolve_agent_resources
+from ale.run.assets import asset_status, observe_task_assets, pull_assets, push_assets
 from ale.run.environments.standard import StandardEnvironment
-from ale.run.episode import run_episode
+from ale.run.episode import EpisodeResult, run_episode
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
@@ -34,11 +46,25 @@ from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.ledger import Ledger, episode_identity
 from ale.run.lint import lint_repository
-from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from ale.run.provenance import (
+    ProvenanceInputs,
+    agent_provenance,
+    framework_provenance,
+    gateway_provenance,
+)
+from ale.run.providers import ProviderRegistry
+from ale.run.providers.docker import destroy_retained, list_retained
+from ale.run.recording import atomic_write_json
 from ale.run.scaffold import scaffold_task
 from ale.run.secrets import provider_credentials
-from ale.run.sources import Registry, resolve
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.sources import parse_task_reference, resolve, select_tasks
+from ale.run.task_images import (
+    ImagePreparationResult,
+    ImagePreparationStep,
+    prepare_task_image_result,
+    prepare_verifier_image_result,
+)
+from ale.run.tasksets.manifest import load_tasks
 
 app = typer.Typer(
     name="ale",
@@ -46,6 +72,10 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+assets_app = typer.Typer(help="Synchronize canonical Task assets.", no_args_is_help=True)
+app.add_typer(assets_app, name="assets")
+sandbox_app = typer.Typer(help="Inspect and remove retained sandboxes.", no_args_is_help=True)
+app.add_typer(sandbox_app, name="sandbox")
 
 EXIT_SOME_FAILED = 2
 EXIT_BAD_REFERENCE = 3
@@ -73,7 +103,7 @@ def root(
 
 @app.command()
 def run(
-    reference: Annotated[str, typer.Argument(help="Task path, or <domain>/<task>")],
+    reference: Annotated[str, typer.Argument(help="Task or collection filesystem path")],
     agent: Annotated[
         str | None, typer.Option("--agent", help="claude-code, computer-use, oracle or nop")
     ] = None,
@@ -86,13 +116,9 @@ def run(
         str,
         typer.Option("--api-key-env", help="Which .env variable holds the key for it"),
     ] = "",
-    provider: Annotated[str | None, typer.Option("--provider")] = None,
     config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
     overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
     runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
-    tasks_ref: Annotated[
-        str | None, typer.Option("--tasks-ref", help="Override the registry pin")
-    ] = None,
     episodes: Annotated[int, typer.Option("-n", "--episodes", min=1)] = 1,
     concurrency: Annotated[
         int,
@@ -128,28 +154,36 @@ def run(
         flags.append(f"gateway.base_url={base_url}")
     if api_key_env:
         flags.append(f"gateway.api_key_env={api_key_env}")
-    settings = _config(config, flags, agent=agent, model=model, provider=provider)
-    exit_code = asyncio.run(
-        _run_one(reference, settings, runs_dir, tasks_ref, run_id, require_reportable)
-    )
+    settings = _config(config, flags, agent=agent, model=model)
+    exit_code = asyncio.run(_run_one(reference, settings, runs_dir, run_id, require_reportable))
     raise typer.Exit(exit_code)
 
 
 @app.command()
 def validate(
-    reference: Annotated[str, typer.Argument(help="Task or repository path")],
-    provider: Annotated[str | None, typer.Option("--provider")] = None,
+    reference: Annotated[str, typer.Argument(help="Task or Task collection path")],
     config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
     overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
     runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
 ) -> None:
-    """Require untouched all-zero and oracle all-one rewards for every task.
+    """Require untouched all-zero and record oracle quality for every task.
 
     Verification uses the same run-level judge configuration as an ordinary episode.
     """
-    settings = _config(config, overrides, agent="oracle", model="", provider=provider)
+    settings = _config(config, overrides, agent="oracle", model="")
     exit_code = asyncio.run(_validate(reference, settings, runs_dir))
     raise typer.Exit(exit_code)
+
+
+@app.command()
+def prepare(
+    reference: Annotated[str, typer.Argument(help="Task or Task collection path")],
+    config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
+    overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
+) -> None:
+    """Build or acquire Task images without starting an episode."""
+    settings = _config(config, overrides, agent="oracle", model="")
+    raise typer.Exit(asyncio.run(_prepare_only(reference, settings)))
 
 
 @app.command()
@@ -183,42 +217,23 @@ def pull_guest(
     registry everyone is already authenticated to. Building one instead takes about forty
     minutes and an Ubuntu ISO; this takes as long as the download.
     """
-    from ale.run.providers.qemu import GUEST_IMAGE, QemuProvider
+    from ale.core.sandbox import ImageRef
+    from ale.run.images import resolve_vm_image
+    from ale.run.providers.qemu import GUEST_IMAGE
 
     source = reference or GUEST_IMAGE
-    target = dest or QemuProvider().image
-    target.parent.mkdir(parents=True, exist_ok=True)
-
     typer.echo(f"pulling {source}")
-    if subprocess.run(["docker", "pull", source]).returncode != 0:
-        typer.echo("could not pull the guest image", err=True)
-        return EXIT_BAD_REFERENCE
-
-    # Copied out of a stopped container rather than run: the image has no command and is
-    # not meant to have one — it is a disk in transit, not something to execute.
-    # An entrypoint has to be named even though the container is never started: the image
-    # is `FROM scratch` and declares none of its own, and `docker create` refuses without
-    # one. It is never executed — the container exists only to be copied out of.
-    created = subprocess.run(
-        ["docker", "create", "--entrypoint", "/disk.qcow2", source],
-        capture_output=True,
-        text=True,
-    )
-    if created.returncode != 0:
-        typer.echo(f"could not stage the guest image: {created.stderr.strip()}", err=True)
-        return EXIT_BAD_REFERENCE
-    container = created.stdout.strip()
     try:
-        typer.echo(f"writing {target}")
-        copied = subprocess.run(
-            ["docker", "cp", f"{container}:/disk.qcow2", str(target)], capture_output=True
-        )
-        if copied.returncode != 0:
-            typer.echo("could not copy the disk out of the image", err=True)
-            return EXIT_BAD_REFERENCE
-    finally:
-        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+        prepared = asyncio.run(resolve_vm_image(ImageRef(kind="vm", reference=source)))
+    except AleError as error:
+        typer.echo(str(error), err=True)
+        return EXIT_BAD_REFERENCE
 
+    cached = Path(prepared.runtime_ref)
+    target = dest or cached
+    if target != cached:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cached, target)
     typer.echo(f"ok    {target}")
     return 0
 
@@ -243,6 +258,106 @@ def new_task(
     typer.echo(f"next: ale lint {created}  &&  ale validate {created}")
 
 
+@assets_app.command("status")
+def assets_status(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(help="One or more Task or Task collection paths"),
+    ],
+) -> None:
+    """Inspect Task-local assets without reading their file contents."""
+    try:
+        statuses = asset_status(paths)
+    except AleError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
+    for item in statuses:
+        typer.echo(
+            f"{'dirty' if item.dirty else 'clean':6} "
+            f"{item.repository}/{item.task_path} commit={item.commit or 'none'}"
+        )
+
+
+@assets_app.command("pull")
+def assets_pull(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(help="One or more Task or Task collection paths"),
+    ],
+    collection: Annotated[
+        str | None,
+        typer.Option("--collection", help="Hugging Face collection slug"),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Replace locally dirty selected asset roots"),
+    ] = False,
+) -> None:
+    """Pull selected asset roots directly into their Task folders."""
+    try:
+        results = pull_assets(paths, collection=collection, force=force)
+    except AleError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
+    _print_asset_sync(results)
+
+
+@assets_app.command("push")
+def assets_push(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(help="One or more Task or Task collection paths"),
+    ],
+    collection: Annotated[
+        str | None,
+        typer.Option("--collection", help="Hugging Face collection slug"),
+    ] = None,
+) -> None:
+    """Push selected Task-local stage asset roots exactly."""
+    try:
+        results = push_assets(paths, collection=collection)
+    except AleError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
+    _print_asset_sync(results)
+
+
+def _print_asset_sync(results: object) -> None:
+    for result in results:  # type: ignore[union-attr]
+        typer.echo(
+            f"ok {result.repository} dataset={result.remote_repo_id} "
+            f"collection={result.collection_slug} commit={result.commit}"
+        )
+        for task in result.tasks:
+            typer.echo(f"  {task.task_path} {'dirty' if task.dirty else 'clean'}")
+
+
+@sandbox_app.command("list")
+def sandbox_list() -> None:
+    """List ALE-managed Docker sandboxes requested for retention."""
+    try:
+        records = asyncio.run(list_retained())
+    except AleError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(EXIT_PROVIDER) from error
+    for record in records:
+        typer.echo(
+            f"{record['handle']} episode={record['episode']} role={record['role']} "
+            f"gpus={','.join(record['gpus']) or '-'} cleanup={record['cleanup_command']}"
+        )
+
+
+@sandbox_app.command("destroy")
+def sandbox_destroy(handle: Annotated[str, typer.Argument(help="Retained Docker handle")]) -> None:
+    """Destroy one ALE-retained Docker sandbox and its owned network."""
+    try:
+        asyncio.run(destroy_retained(handle))
+    except AleError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(EXIT_PROVIDER) from error
+    typer.echo(f"destroyed {handle}")
+
+
 # --- internals ---
 
 
@@ -252,13 +367,10 @@ def _config(
     *,
     agent: str | None,
     model: str | None,
-    provider: str | None,
 ) -> RunConfig:
     flags = [*(overrides or [])]
     if agent is not None:
         flags.append(f"agent.name={agent}")
-    if provider is not None:
-        flags.append(f"provider={provider}")
     if model:
         flags.append(f"agent.model={model}")
     selected = select_agent_name(run_path=config, overrides=flags)
@@ -321,41 +433,22 @@ def _require_gateway_dialect(settings: RunConfig, expected: str) -> None:
         )
 
 
-def _provider(settings: RunConfig):  # type: ignore[no-untyped-def]
-    # Imported on demand: each provider pulls in its own tooling assumptions, and a
-    # docker run should not fail because qemu is missing.
-    match settings.provider:
-        case "docker":
-            from ale.run.providers.docker import DockerProvider
-
-            return DockerProvider()
-        case "qemu":
-            from ale.run.providers.qemu import QemuProvider
-
-            return QemuProvider()
-        case unknown:
-            raise AleError(f"unknown provider {unknown!r}; try docker or qemu")
-
-
-def _registry() -> Registry | None:
-    engine_root = Path(__file__).resolve().parents[5]
-    for candidate in (Path("registry.toml"), engine_root / "registry.toml"):
-        if candidate.is_file():
-            return Registry.load(candidate)
-    return None
-
-
 async def _run_one(
     reference: str,
     settings: RunConfig,
     runs_dir: Path,
-    tasks_ref: str | None,
     run_id: str | None = None,
     require_reportable: bool = False,
 ) -> int:
+    providers = ProviderRegistry(settings)
     try:
-        resolved = resolve(reference, registry=_registry(), ref=tasks_ref)
-        task = next(iter(ManifestTaskset(resolved.task_dir).load()))
+        task_reference = parse_task_reference(reference)
+        resolved = resolve(task_reference.source)
+        tasks = select_tasks(
+            list(load_tasks(resolved.task_dir)),
+            task_reference.variants,
+        )
+        await _prepare_images(tasks, providers)
     except AleError as error:
         typer.echo(f"{error}", err=True)
         return EXIT_BAD_REFERENCE
@@ -363,41 +456,11 @@ async def _run_one(
     run_id = run_id or uuid.uuid4().hex[:8]
     run_dir = runs_dir / run_id
     harness = _harness(settings)
-    agent_resources = resolve_agent_resources(
-        task=task.spec.tools,
-        agent_skills=settings.agent.skills,
-        agent_mcp_servers=settings.agent.mcp_servers,
-        task_root=resolved.task_dir,
-        task_source=resolved.source,
-        network=task.spec.network,
-    )
-    harness.validate_resources(agent_resources)
-    inputs = ProvenanceInputs(
-        source=resolved.source,
-        agent=agent_provenance(
-            harness,
-            settings.agent.model,
-            settings,
-            agent_resources,
-        ),
-        gateway=gateway_provenance(settings),
-        config_hash=settings.config_hash,
-    )
-
-    identity = episode_identity(
-        task.spec,
-        agent=f"{inputs.agent.harness}@{inputs.agent.version}",
-        seed=settings.seed,
-        config_hash=settings.config_hash,
-        resources_digest=agent_resources.digest,
-    )
-
     gateway = None
     proxy = None
     limits = None
     gateway_url, proxy_url = "", ""
     needs_model = settings.agent.name not in {"oracle", "nop"}
-    allowed = frozenset(task.spec.network.allowed_hosts)
 
     if needs_model:
         try:
@@ -422,22 +485,14 @@ async def _run_one(
                 for key, value in settings.gateway.limits.model_dump().items()
             }
         )
-        if allowed:
+        if any(task.spec.network.allowed_hosts for task in tasks):  # type: ignore[attr-defined]
             proxy = EgressProxy(gateway.sessions, host=_gateway_host(settings))
             proxy_url = await proxy.start()
 
     ledger = Ledger(run_dir)
     ledger.open_run(run_id, settings.config_hash)
-    # Resume compares what an episode *is*, so a rerun with a different seed or a
-    # different agent is correctly new work rather than something to skip. Repeats of
-    # one identity are counted, not merely detected: asking for five episodes after
-    # three finished must run two more, and a set could only ever say "yes, some".
-    done = (
-        sum(1 for row in ledger.episodes(run_id) if row.identity == identity and row.succeeded)
-        if settings.resume
-        else 0
-    )
     failures = 0
+    total = len(tasks) * settings.episodes
 
     # Episodes of one task are independent by construction — separate sandbox, separate
     # gateway session, separate run directory — so the only thing bounding them is what
@@ -445,13 +500,19 @@ async def _run_one(
     # gigabytes, and four of those is a choice an operator should make deliberately.
     gate = asyncio.Semaphore(settings.concurrency)
 
-    async def one(episode_id: str) -> Status | None:
+    async def one(
+        task,  # type: ignore[no-untyped-def]
+        episode_id: str,
+        inputs: ProvenanceInputs,
+        agent_resources: EffectiveAgentResources,
+    ) -> Status | None:
+        allowed = frozenset(task.spec.network.allowed_hosts)
         async with gate:
             ledger.mark_running(episode_id)
             result = await run_episode(
                 task,
                 StandardEnvironment(harness, max_steps=settings.agent.max_steps),
-                _provider(settings),
+                providers,
                 run_dir=run_dir,
                 gateway_url=gateway_url,
                 model=settings.agent.model,
@@ -469,6 +530,7 @@ async def _run_one(
                 phase_callback=lambda phase: ledger.update_phase(episode_id, phase.value),
                 logging_policy=settings.logging,
                 verification_config=settings.verification,
+                sandbox_retention=settings.sandbox_retention,
             )
         ledger.finish_episode(result.episode_id, result.record)
 
@@ -483,26 +545,72 @@ async def _run_one(
 
     try:
         pending = []
-        for index in range(settings.episodes):
-            if index < done:
-                typer.echo(f"skip  {task.spec.label}: episode {index + 1} already complete")
-                continue
-            episode_id = f"{task.spec.id}-{uuid.uuid4().hex[:8]}"
-            ledger.queue_episode(
-                episode_id=episode_id,
-                run_id=run_id,
-                identity=identity,
-                spec=task.spec,
-                episode_path=episode_id,
+        for task in tasks:
+            agent_resources = resolve_agent_resources(
+                task=task.spec.tools,
+                agent_skills=settings.agent.skills,
+                agent_mcp_servers=settings.agent.mcp_servers,
+                task_root=getattr(task, "folder", None).root,
+                task_source=resolved.source,
+                network=task.spec.network,
             )
-            pending.append(one(episode_id))
+            harness.validate_resources(agent_resources)
+            inputs = ProvenanceInputs(
+                source=resolved.source,
+                agent=agent_provenance(
+                    harness,
+                    settings.agent.model,
+                    settings,
+                    agent_resources,
+                ),
+                gateway=gateway_provenance(settings),
+                config_hash=settings.config_hash,
+            )
+            identity = episode_identity(
+                task.spec,
+                task_digest=task.task_digest,
+                image_digest=task.prepared_image.prepared_identity,
+                agent=f"{inputs.agent.harness}@{inputs.agent.version}",
+                seed=settings.seed,
+                config_hash=settings.config_hash,
+                resources_digest=agent_resources.digest,
+            )
+            done = (
+                sum(
+                    1
+                    for row in ledger.episodes(run_id)
+                    if row.identity == identity and row.succeeded
+                )
+                if settings.resume
+                and (
+                    task.asset_observation is None
+                    or (
+                        not task.asset_observation.dirty
+                        and task.asset_observation.commit is not None
+                    )
+                )
+                else 0
+            )
+            for index in range(settings.episodes):
+                if index < done:
+                    typer.echo(f"skip  {task.spec.label}: episode {index + 1} already complete")
+                    continue
+                episode_id = f"{task.spec.id}-{uuid.uuid4().hex[:8]}"
+                ledger.queue_episode(
+                    episode_id=episode_id,
+                    run_id=run_id,
+                    identity=identity,
+                    spec=task.spec,
+                    episode_path=episode_id,
+                )
+                pending.append(one(task, episode_id, inputs, agent_resources))
 
         # One failing episode is a result, not an abort: the others are still work someone
         # asked for, and a run that stops at the first failure reports a smaller sample
         # than it took.
         for outcome in await asyncio.gather(*pending, return_exceptions=True):
             if isinstance(outcome, BaseException):
-                typer.echo(f"error {task.spec.label}: {outcome}")
+                typer.echo(f"error: {outcome}")
                 failures += 1
             elif outcome is not None:
                 failures += 1
@@ -513,7 +621,7 @@ async def _run_one(
         if gateway is not None:
             await gateway.stop()
 
-    typer.echo(f"run {run_id}: {settings.episodes - failures}/{settings.episodes} completed")
+    typer.echo(f"run {run_id}: {total - failures}/{total} completed")
     return 0 if failures == 0 else EXIT_SOME_FAILED
 
 
@@ -536,9 +644,15 @@ def _check_reportable(result) -> bool:  # type: ignore[no-untyped-def]
 
 
 async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
+    providers = ProviderRegistry(settings)
     try:
-        resolved = resolve(reference, registry=_registry())
-        tasks = list(ManifestTaskset(resolved.task_dir).load())
+        task_reference = parse_task_reference(reference)
+        resolved = resolve(task_reference.source)
+        tasks = select_tasks(
+            list(load_tasks(resolved.task_dir)),
+            task_reference.variants,
+        )
+        await _prepare_images(tasks, providers)
     except AleError as error:
         typer.echo(f"{error}", err=True)
         return EXIT_BAD_REFERENCE
@@ -549,6 +663,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
     ledger.open_run(run_id, settings.config_hash)
     resources = EffectiveAgentResources()
     failures = 0
+    observations: list[TaskValidationObservation] = []
     try:
         for task in tasks:
             spec = task.spec
@@ -571,6 +686,8 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                 )
                 identity = episode_identity(
                     spec,
+                    task_digest=task.task_digest,
+                    image_digest=task.prepared_image.prepared_identity,
                     agent=f"validation-{pass_name}@{harness.version()}",
                     seed=settings.seed,
                     config_hash=settings.config_hash,
@@ -585,7 +702,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                 result = await run_episode(
                     task,
                     StandardEnvironment(harness, agent_enabled=agent_enabled),
-                    _provider(settings),
+                    providers,
                     run_dir=run_dir,
                     episode_id=episode_id,
                     provenance=inputs,
@@ -594,35 +711,162 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                     ),
                     logging_policy=settings.logging,
                     verification_config=settings.verification,
+                    sandbox_retention=settings.sandbox_retention,
                 )
                 ledger.finish_episode(episode_id, result.record)
                 results[pass_name] = result
 
-            zero = results["untouched"].verdict
-            one = results["oracle"].verdict
-            same_names = (
-                zero.rewards is not None
-                and one.rewards is not None
-                and set(zero.rewards) == set(one.rewards)
+            zero_result = results["untouched"]
+            one_result = results["oracle"]
+            reward_names, warnings, task_failures = _validation_notices(
+                zero_result.verdict,
+                one_result.verdict,
             )
-            passed = (
-                zero.status is Status.COMPLETED
-                and one.status is Status.COMPLETED
-                and _is_zero_reward_map(zero.rewards)
-                and _is_full_reward_map(one.rewards)
-                and same_names
+            passed = not task_failures
+            observations.append(
+                TaskValidationObservation(
+                    name=str(spec.name),
+                    variant=spec.variant,
+                    spec_hash=spec.spec_hash,
+                    untouched=_validation_attempt(zero_result, run_dir),
+                    oracle=_validation_attempt(one_result, run_dir),
+                    reward_names=reward_names,
+                    warnings=warnings,
+                    failures=task_failures,
+                    passed=passed,
+                )
             )
             failures += 0 if passed else 1
-            mark = "ok  " if passed else "FAIL"
+            mark = "WARN" if warnings else ("ok  " if passed else "FAIL")
             typer.echo(
-                f"{mark}  {spec.label}: untouched={_validation_outcome(zero)}, "
-                f"oracle={_validation_outcome(one)}"
+                f"{mark}  {spec.label}: untouched={_validation_outcome(zero_result.verdict)}, "
+                f"oracle={_validation_outcome(one_result.verdict)}"
             )
     finally:
         ledger.close()
 
+    framework = framework_provenance()
+    observation = ValidationObservation(
+        run_id=run_id,
+        engine=ValidationEngine(version=framework.version, commit=framework.commit),
+        tasks=tuple(observations),
+    )
+    atomic_write_json(run_dir / "validation.json", observation.model_dump(mode="json"))
     typer.echo(f"validation run: {run_dir}")
     return 0 if failures == 0 else EXIT_SOME_FAILED
+
+
+async def _prepare_only(reference: str, settings: RunConfig) -> int:
+    try:
+        task_reference = parse_task_reference(reference)
+        resolved = resolve(task_reference.source)
+        tasks = select_tasks(
+            list(load_tasks(resolved.task_dir)),
+            task_reference.variants,
+        )
+        for root in {task.folder.root for task in tasks}:  # type: ignore[attr-defined]
+            if findings := lint_repository(root):
+                raise TaskDefinitionError(
+                    "lint: " + "; ".join(str(item) for item in findings)[:2000]
+                )
+        results = await _prepare_images(tasks, ProviderRegistry(settings))
+    except AleError as error:
+        typer.echo(str(error), err=True)
+        return EXIT_BAD_REFERENCE
+
+    for result in results:
+        image = result.image
+        source = "ref" if image.source == "external-ref" else "local"
+        typer.echo(
+            f"{result.task} {result.role} kind={image.kind} source={source} "
+            f"prepared={image.prepared_identity}"
+        )
+        for step in result.steps:
+            suffix = " ".join(value for value in (step.identity, step.detail) if value is not None)
+            typer.echo(f"  {step.name:<20} {step.outcome:<8} {suffix}".rstrip())
+    return 0
+
+
+async def _prepare_images(
+    tasks: list[object], providers: ProviderRegistry
+) -> tuple[ImagePreparationResult, ...]:
+    by_source: dict[str, PreparedTaskImage] = {}
+    by_identity: dict[tuple[ImageKind, str], PreparedTaskImage] = {}
+    results: list[ImagePreparationResult] = []
+    for task in tasks:
+        task.asset_observation = observe_task_assets(task)  # type: ignore[attr-defined]
+        spec = task.spec.image  # type: ignore[attr-defined]
+        key = content_hash(
+            {
+                "role": "solver",
+                "kind": spec.kind,
+                "local": task.image_source_digest,  # type: ignore[attr-defined]
+                "ref": spec.ref,
+            }
+        )
+        image = by_source.get(key)
+        if image is None:
+            prepared = await prepare_task_image_result(task, providers)
+            image = prepared.image
+            image = by_identity.setdefault((image.kind, image.prepared_identity), image)
+            by_source[key] = image
+            if image is not prepared.image:
+                prepared = _reused_result(task, "solver", image)
+        else:
+            prepared = _reused_result(task, "solver", image)
+        results.append(prepared)
+        task.prepared_image = image  # type: ignore[attr-defined]
+        verify = task.spec.verify  # type: ignore[attr-defined]
+        if verify.environment_mode is VerificationMode.SHARED:
+            task.prepared_verifier_image = None  # type: ignore[attr-defined]
+            continue
+        if task.folder.verifier_dockerfile is None and verify.image is None:  # type: ignore[attr-defined]
+            task.prepared_verifier_image = image  # type: ignore[attr-defined]
+            reused = await prepare_verifier_image_result(task, providers)
+            if reused is not None:
+                results.append(reused)
+            continue
+        verifier_key = content_hash(
+            {
+                "role": "verifier",
+                "kind": verify.image.kind,
+                "local": task.verifier_image_source_digest,  # type: ignore[attr-defined]
+                "ref": verify.image.ref,
+            }
+        )
+        verifier = by_source.get(verifier_key)
+        if verifier is None:
+            prepared_verifier = await prepare_verifier_image_result(task, providers)
+            if prepared_verifier is None:
+                raise TaskDefinitionError("dedicated verifier produced no prepared image")
+            verifier = prepared_verifier.image
+            verifier = by_identity.setdefault((verifier.kind, verifier.prepared_identity), verifier)
+            by_source[verifier_key] = verifier
+            if verifier is not prepared_verifier.image:
+                prepared_verifier = _reused_result(task, "verifier", verifier)
+        else:
+            prepared_verifier = _reused_result(task, "verifier", verifier)
+        results.append(prepared_verifier)
+        task.prepared_verifier_image = verifier  # type: ignore[attr-defined]
+    return tuple(results)
+
+
+def _reused_result(task: object, role: str, image: PreparedTaskImage) -> ImagePreparationResult:
+    spec = task.spec  # type: ignore[attr-defined]
+    return ImagePreparationResult(
+        task=f"{spec.name}@{spec.variant}",
+        role=role,
+        image=image,
+        steps=(
+            ImagePreparationStep("lint", "executed"),
+            ImagePreparationStep(
+                "artifact-check",
+                "reused",
+                image.prepared_identity,
+                image.runtime_ref,
+            ),
+        ),
+    )
 
 
 def _is_full_reward_map(rewards: dict[str, float] | None) -> bool:
@@ -631,6 +875,81 @@ def _is_full_reward_map(rewards: dict[str, float] | None) -> bool:
 
 def _is_zero_reward_map(rewards: dict[str, float] | None) -> bool:
     return bool(rewards) and all(value == 0.0 for value in rewards.values())
+
+
+def _validation_notices(
+    untouched: Verdict,
+    oracle: Verdict,
+) -> tuple[
+    tuple[str, ...],
+    tuple[ValidationNotice, ...],
+    tuple[ValidationNotice, ...],
+]:
+    failures: list[ValidationNotice] = []
+    if untouched.status is not Status.COMPLETED:
+        failures.append(
+            ValidationNotice(
+                code="untouched_not_completed",
+                message=f"untouched episode ended with {untouched.status.value}",
+            )
+        )
+    elif not _is_zero_reward_map(untouched.rewards):
+        failures.append(
+            ValidationNotice(
+                code="untouched_nonzero",
+                message=f"untouched rewards must all be zero, got {untouched.rewards}",
+            )
+        )
+
+    if oracle.status is not Status.COMPLETED:
+        failures.append(
+            ValidationNotice(
+                code="oracle_not_completed",
+                message=f"oracle episode ended with {oracle.status.value}",
+            )
+        )
+
+    untouched_names = tuple((untouched.rewards or {}).keys())
+    oracle_names = tuple((oracle.rewards or {}).keys())
+    if (
+        untouched.status is Status.COMPLETED
+        and oracle.status is Status.COMPLETED
+        and set(untouched_names) != set(oracle_names)
+    ):
+        failures.append(
+            ValidationNotice(
+                code="reward_name_mismatch",
+                message=(
+                    f"untouched rewards {untouched_names} and oracle rewards "
+                    f"{oracle_names} do not match"
+                ),
+            )
+        )
+
+    warnings: tuple[ValidationNotice, ...] = ()
+    if not failures and oracle.rewards and not _is_full_reward_map(oracle.rewards):
+        warnings = (
+            ValidationNotice(
+                code="partial_oracle",
+                message=f"oracle rewards are not all 1.0: {oracle.rewards}",
+            ),
+        )
+    return untouched_names or oracle_names, warnings, tuple(failures)
+
+
+def _validation_attempt(result: EpisodeResult, run_dir: Path) -> ValidationAttempt:
+    result_path = result.run_dir / "result.json"
+    lock_path = result.run_dir / "lock.json" if result.lock is not None else None
+    return ValidationAttempt(
+        episode_id=result.episode_id,
+        status=result.verdict.status,
+        rewards=result.verdict.rewards,
+        lock_path=lock_path.relative_to(run_dir).as_posix() if lock_path else None,
+        lock_digest=(
+            f"sha256:{hashlib.sha256(lock_path.read_bytes()).hexdigest()}" if lock_path else None
+        ),
+        result_path=result_path.relative_to(run_dir).as_posix(),
+    )
 
 
 def _validation_outcome(verdict: Verdict) -> object:

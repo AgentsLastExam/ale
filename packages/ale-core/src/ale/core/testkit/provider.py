@@ -13,7 +13,7 @@ from pathlib import PurePosixPath
 import pytest
 
 from ale.core.errors import ProviderCapabilityError
-from ale.core.sandbox import Provider, SandboxRequest
+from ale.core.sandbox import Identity, ImageRef, Provider, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 
 __all__ = ["ProviderConformance"]
@@ -23,9 +23,12 @@ class ProviderConformance:
     """Assertions every :class:`~ale.core.sandbox.Provider` must satisfy."""
 
     provider: Provider
-    image_ref: str = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
+    image = ImageRef(
+        kind="container",
+        reference="ghcr.io/agentslastexam/sandbox-base-cli:latest",
+    )
 
-    gui_image_ref: str = ""
+    gui_image: ImageRef | None = None
     """An image that starts a desktop, if this backend has one to test with.
 
     A desktop is a property of the *image*, not of the backend: a provider that can host
@@ -33,10 +36,12 @@ class ProviderConformance:
     what it was built from. So the GUI assertions need an image that claims a desktop,
     and skip rather than fail where none is configured."""
 
-    def request(self, **overrides: object) -> SandboxRequest:
+    async def request(self, **overrides: object) -> SandboxRequest:
+        image = overrides.pop("image", self.image)
+        assert isinstance(image, ImageRef)
         base: dict[str, object] = {
             "episode_id": f"conformance-{uuid.uuid4().hex[:8]}",
-            "image_ref": self.image_ref,
+            "prepared_image": await self.provider.prepare_image(image),
             "resources": Resources(cpus=1, memory_mb=512),
             "network": NetworkPolicy(mode=NetworkMode.BLOCK),
         }
@@ -55,7 +60,7 @@ class ProviderConformance:
 
     @pytest.mark.asyncio
     async def test_exec_reports_exit_codes_and_streams(self) -> None:
-        async with await self.provider.create(self.request()) as sandbox:
+        async with await self.provider.create(await self.request()) as sandbox:
             result = await sandbox.exec(["echo", "conformance"])
             assert result.ok
             assert "conformance" in result.stdout
@@ -65,27 +70,65 @@ class ProviderConformance:
 
     @pytest.mark.asyncio
     async def test_file_round_trip(self) -> None:
-        async with await self.provider.create(self.request()) as sandbox:
+        async with await self.provider.create(await self.request()) as sandbox:
             path = PurePosixPath("/tmp/conformance.bin")
             payload = b"\x00binary\xffdata"
             await sandbox.write_file(path, payload)
             assert await sandbox.read_file(path) == payload
 
     @pytest.mark.asyncio
+    async def test_ready_sandbox_reports_observed_image_and_resources(self) -> None:
+        request = await self.request()
+        async with await self.provider.create(request) as sandbox:
+            assert sandbox.resolved_image.kind is request.prepared_image.kind
+            assert sandbox.resolved_image.prepared_identity == (
+                request.prepared_image.prepared_identity
+            )
+            assert sandbox.resolved_image.observed_identity.startswith("sha256:")
+            assert sandbox.resolved_image.observed_ref
+            assert sandbox.allocation.cpus == request.resources.cpus
+            assert sandbox.allocation.memory_mb == request.resources.memory_mb
+            assert sandbox.allocation.network_mode is request.network.mode
+            assert sandbox.allocation.provider == self.provider.name
+
+    @pytest.mark.asyncio
+    async def test_storage_and_sudo_are_enforced_or_rejected(self) -> None:
+        resources = Resources(cpus=1, memory_mb=512, storage_mb=512, sudo=True)
+        try:
+            sandbox = await self.provider.create(await self.request(resources=resources, sudo=True))
+        except ProviderCapabilityError:
+            return
+        try:
+            assert sandbox.allocation.storage_mb is not None
+            assert sandbox.allocation.storage_mb >= 512
+            assert sandbox.allocation.sudo is True
+            elevated = await sandbox.exec(["sudo", "-n", "true"], identity=Identity.AGENT)
+            assert elevated.ok
+        finally:
+            await sandbox.destroy()
+
+    @pytest.mark.asyncio
     async def test_destroy_is_idempotent(self) -> None:
         """Teardown runs on failure paths too, sometimes more than once."""
-        sandbox = await self.provider.create(self.request())
+        sandbox = await self.provider.create(await self.request())
         await sandbox.destroy()
         await sandbox.destroy()
 
     @pytest.mark.asyncio
     async def test_rejects_a_request_it_cannot_serve(self) -> None:
-        caps = self.provider.capabilities()
-        if caps.gpus > 0:
-            pytest.skip("provider offers GPUs; nothing to reject here")
-
-        with pytest.raises(ProviderCapabilityError):
-            self.provider.accepts(self.request(resources=Resources(gpus=1)))
+        try:
+            sandbox = await self.provider.create(await self.request(resources=Resources(gpus=1)))
+        except ProviderCapabilityError:
+            return
+        try:
+            allocation = sandbox.allocation.gpu
+            assert allocation is not None
+            assert allocation.requested_count == 1
+            assert len(allocation.provider_addresses) == 1
+            assert len(allocation.lease_keys) == 1
+            assert len(allocation.observed_devices) == 1
+        finally:
+            await sandbox.destroy()
 
     @pytest.mark.asyncio
     async def test_a_declared_desktop_can_actually_be_used(self) -> None:
@@ -98,10 +141,10 @@ class ProviderConformance:
 
         Skipped where the provider does not claim a desktop — that is an honest answer.
         """
-        if not (self.provider.capabilities().gui and self.gui_image_ref):
+        if not (self.provider.capabilities().gui and self.gui_image):
             pytest.skip("no desktop image configured for this backend")
 
-        request = self.request(image_ref=self.gui_image_ref)
+        request = await self.request(image=self.gui_image)
         async with await self.provider.create(request) as sandbox:
             png = await sandbox.screenshot()
             assert png.startswith(b"\x89PNG"), "a desktop was declared but produced no image"
@@ -110,10 +153,10 @@ class ProviderConformance:
     @pytest.mark.asyncio
     async def test_a_declared_desktop_accepts_input(self) -> None:
         """The other half of a desktop: an agent can act on it, not only look at it."""
-        if not (self.provider.capabilities().gui and self.gui_image_ref):
+        if not (self.provider.capabilities().gui and self.gui_image):
             pytest.skip("no desktop image configured for this backend")
 
-        request = self.request(image_ref=self.gui_image_ref)
+        request = await self.request(image=self.gui_image)
         async with await self.provider.create(request) as sandbox:
             applied = await sandbox.inject_input([{"type": "move", "coordinate": [500, 500]}])
             assert applied == 1, "the desktop accepted no input"
@@ -128,10 +171,10 @@ class ProviderConformance:
         image — an agent can act on the first and cannot tell the second from a dark
         screen.
         """
-        if self.image_ref == self.gui_image_ref:
+        if self.image == self.gui_image:
             pytest.skip("this backend has only one image and it carries a desktop")
 
-        sandbox = await self.provider.create(self.request())  # the headless image
+        sandbox = await self.provider.create(await self.request())  # the headless image
         try:
             with pytest.raises(Exception):  # noqa: B017 — providers raise their own types
                 await sandbox.screenshot()

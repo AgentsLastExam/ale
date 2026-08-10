@@ -1,143 +1,162 @@
-"""The cheap half of task admission.
-
-Every case here is a mistake a real task author makes, and each asserts the *specific*
-message rather than merely that something failed — a linter that says "invalid manifest"
-sends someone to read a schema, which is the failure this module exists to avoid.
-"""
-
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from typer.testing import CliRunner
 
 from ale.core.errors import TaskDefinitionError
+from ale.run.cli.main import app
 from ale.run.lint import lint_repository
 from ale.run.scaffold import scaffold_task
 
 pytestmark = pytest.mark.unit
 
 
-def repo(tmp_path: Path) -> Path:
-    root = tmp_path / "repo"
-    (root / "tasks").mkdir(parents=True)
-    (root / "domain.yaml").write_text("name: demo\nrequires_core: '>=0.1,<0.2'\n")
-    return root
+def messages(path: Path) -> str:
+    return "\n".join(finding.message for finding in lint_repository(path))
 
 
-def messages(root: Path) -> str:
-    return "\n".join(finding.message for finding in lint_repository(root))
+def test_new_task_is_standalone_and_lints_clean(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    assert lint_repository(task) == []
+    assert (task / "image" / "Dockerfile").is_file()
+    assert not (task / "setup").exists()
+    assert "spec_type: core/v1" in (task / "task.yaml").read_text()
+    assert "name: fresh" in (task / "task.yaml").read_text()
+    assert "image:" in (task / "task.yaml").read_text()
+    assert "kind: container" in (task / "task.yaml").read_text()
 
 
-class TestScaffold:
-    def test_a_new_task_passes_lint_immediately(self, tmp_path: Path) -> None:
-        root = repo(tmp_path)
-        scaffold_task(root / "tasks" / "fresh")
-        assert lint_repository(root) == []
+def test_stage_entries_are_executable(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    for stage in ("verify", "oracle"):
+        assert (task / stage / "run.sh").stat().st_mode & 0o111
 
-    def test_stage_entries_are_executable(self, tmp_path: Path) -> None:
-        """A verifier the sandbox cannot run is the same as no verifier."""
-        created = scaffold_task(repo(tmp_path) / "tasks" / "fresh")
-        for stage in ("setup", "verify", "oracle"):
-            assert (created / stage / "run.sh").stat().st_mode & 0o111
 
-    def test_refuses_to_clobber_without_force(self, tmp_path: Path) -> None:
-        target = repo(tmp_path) / "tasks" / "fresh"
+def test_refuses_to_clobber_without_force(tmp_path: Path) -> None:
+    target = tmp_path / "fresh"
+    scaffold_task(target)
+    with pytest.raises(TaskDefinitionError, match="already exists"):
         scaffold_task(target)
-        with pytest.raises(TaskDefinitionError, match="already exists"):
-            scaffold_task(target)
-        assert scaffold_task(target, force=True) == target
+    assert scaffold_task(target, force=True) == target
 
 
-class TestLint:
-    def test_missing_instruction_is_reported(self, tmp_path: Path) -> None:
-        root = repo(tmp_path)
-        created = scaffold_task(root / "tasks" / "fresh")
-        (created / "instruction.md").unlink()
-        assert "no instruction.md" in messages(root)
+@pytest.mark.parametrize(
+    ("relative", "message"),
+    [
+        ("instruction.md", "instruction.md"),
+        ("image/Dockerfile", "image/Dockerfile"),
+        ("verify/run.sh", "verify/run.sh"),
+        ("oracle/run.sh", "oracle/run.sh"),
+    ],
+)
+def test_missing_required_file_is_reported(tmp_path: Path, relative: str, message: str) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    (task / relative).unlink()
+    assert message in messages(task)
 
-    def test_missing_verifier_is_reported(self, tmp_path: Path) -> None:
-        root = repo(tmp_path)
-        created = scaffold_task(root / "tasks" / "fresh")
-        (created / "verify" / "run.sh").unlink()
-        assert "nothing would score this task" in messages(root)
 
-    def test_non_executable_entry_is_reported(self, tmp_path: Path) -> None:
-        root = repo(tmp_path)
-        created = scaffold_task(root / "tasks" / "fresh")
-        (created / "verify" / "run.sh").chmod(0o644)
-        assert "chmod +x" in messages(root)
+def test_removed_repository_concepts_are_reported(tmp_path: Path) -> None:
+    collection = tmp_path / "collection"
+    task = scaffold_task(collection / "tasks" / "fresh")
+    (collection / "domain.yaml").write_text("name: old\n")
+    (collection / "kits").mkdir()
+    (task / "files").mkdir()
+    report = messages(collection)
+    assert "stable name" in report
+    assert "helpers below the owning Task" in report
+    assert "top-level files/" in report
 
-    def test_missing_oracle_is_reported(self, tmp_path: Path) -> None:
-        root = repo(tmp_path)
-        created = scaffold_task(root / "tasks" / "fresh")
-        (created / "oracle" / "run.sh").unlink()
-        assert "no oracle" in messages(root)
 
-    def test_legacy_manual_validation_does_not_bypass_the_oracle(self, tmp_path: Path) -> None:
-        root = repo(tmp_path)
-        created = scaffold_task(root / "tasks" / "fresh")
-        (created / "oracle" / "run.sh").unlink()
-        manifest = created / "task.yaml"
-        manifest.write_text(
-            manifest.read_text() + '\nvalidate: { mode: manual, reason: "human" }\n'
+@pytest.mark.parametrize("field", ["image", "setup", "verify"])
+def test_removed_manifest_asset_fields_have_migration_guidance(tmp_path: Path, field: str) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    manifest = task / "task.yaml"
+    manifest.write_text(manifest.read_text() + f"\n{field}:\n  assets: []\n")
+    report = messages(task)
+    assert "asset declarations are removed" in report
+    assert f"{field}/assets" in report
+
+
+def test_fixed_installation_in_setup_is_reported(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    (task / "setup").mkdir()
+    entry = task / "setup" / "run.sh"
+    entry.write_text("#!/bin/sh\napt-get install -y jq\n")
+    entry.chmod(0o755)
+    assert "belongs in image/Dockerfile" in messages(task)
+
+
+def test_final_stage_must_be_ale_base(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    (task / "image" / "Dockerfile").write_text("FROM python:3.12\n")
+    assert "final stage" in messages(task)
+
+
+def test_vm_final_stage_matches_kind_and_owns_no_boot_contract(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    manifest = task / "task.yaml"
+    manifest.write_text(manifest.read_text().replace("kind: container", "kind: vm"))
+    dockerfile = task / "image" / "Dockerfile"
+    dockerfile.write_text('FROM ghcr.io/agentslastexam/sandbox-base-vm-gui:24.04\nCMD ["bash"]\n')
+    assert "CMD" in messages(task)
+    dockerfile.write_text("FROM ghcr.io/agentslastexam/sandbox-base-cli:latest\n")
+    assert "declared vm" in messages(task)
+
+
+def test_ref_only_assets_are_rejected(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    (task / "image" / "Dockerfile").unlink()
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text().replace("kind: container", "kind: vm\n  ref: ghcr.io/acme/task-vm:v1")
+    )
+    assets = task / "image" / "assets"
+    assets.mkdir()
+    (assets / "unused.bin").write_bytes(b"unused")
+    assert "image/assets" in messages(task)
+
+
+def test_assets_cli_accepts_multiple_paths_collection_and_force(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def pull(paths, *, collection, force):  # type: ignore[no-untyped-def]
+        seen.update(paths=paths, collection=collection, force=force)
+        return (
+            SimpleNamespace(
+                repository="repo",
+                remote_repo_id="owner/repo",
+                collection_slug="owner/assets-1",
+                commit="a" * 40,
+                tasks=(),
+            ),
         )
-        report = messages(root)
-        assert "no oracle" in report
-        assert "validate" in report
 
-    def test_a_branch_revision_is_reported(self, tmp_path: Path) -> None:
-        """The whole premise of an asset mount is that naming it twice reads one thing."""
-        root = repo(tmp_path)
-        created = scaffold_task(root / "tasks" / "fresh")
-        manifest = created / "task.yaml"
-        manifest.write_text(
-            manifest.read_text().replace(
-                "setup:\n  assets: []",
-                "setup:\n  assets: [{ repo: o/d, revision: main, path: p, dest: /d }]",
-            )
-        )
-        assert "not a commit" in messages(root)
-
-    def test_a_relative_destination_is_reported(self, tmp_path: Path) -> None:
-        root = repo(tmp_path)
-        created = scaffold_task(root / "tasks" / "fresh")
-        manifest = created / "task.yaml"
-        manifest.write_text(
-            manifest.read_text().replace(
-                "setup:\n  assets: []",
-                "setup:\n  assets: [{ repo: o/d, revision: abc1234, path: p, dest: rel }]",
-            )
-        )
-        assert "must be absolute" in messages(root)
-
-    def test_an_unknown_kit_is_reported(self, tmp_path: Path) -> None:
-        """Reported by the loader, which is also what would refuse to run it."""
-        root = repo(tmp_path)
-        created = scaffold_task(root / "tasks" / "fresh")
-        manifest = created / "task.yaml"
-        manifest.write_text(
-            manifest.read_text().replace(
-                "verify:\n  assets: []\n  kits: []",
-                "verify:\n  assets: []\n  kits: [ghost]",
-            )
-        )
-        assert "must exist as kits/ghost/__init__.py" in messages(root)
-
-    def test_an_undeclared_placeholder_is_reported(self, tmp_path: Path) -> None:
-        """Strict rendering is a lint finding, not a surprise at run time."""
-        root = repo(tmp_path)
-        created = scaffold_task(root / "tasks" / "fresh")
-        (created / "instruction.md").write_text("Write ${greeting} and ${nowhere}\n")
-        assert "undeclared" in messages(root)
-
-    def test_legacy_path_templating_is_reported(self, tmp_path: Path) -> None:
-        root = repo(tmp_path)
-        created = scaffold_task(root / "tasks" / "fresh")
-        (created / "instruction.md").write_text("Write ${greeting} into {self.output_dir}\n")
-        assert "legacy" in messages(root)
-
-    def test_a_repository_without_a_domain_manifest_is_reported(self, tmp_path: Path) -> None:
-        stray = tmp_path / "not-a-repo"
-        stray.mkdir()
-        assert "domain.yaml" in messages(stray)
+    cli = importlib.import_module("ale.run.cli.main")
+    monkeypatch.setattr(cli, "pull_assets", pull)
+    first = tmp_path / "one"
+    second = tmp_path / "two"
+    result = CliRunner().invoke(
+        app,
+        [
+            "assets",
+            "pull",
+            str(first),
+            str(second),
+            "--collection",
+            "owner/assets-1",
+            "--force",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen == {
+        "paths": [first, second],
+        "collection": "owner/assets-1",
+        "force": True,
+    }

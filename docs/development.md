@@ -40,11 +40,14 @@ is the one condition under which installs silently degrade to copies.
 | What | Where | Note |
 |---|---|---|
 | Built wheels | `~/.cache/uv` (uv default) | shared by every tree; hardlinked in |
-| Task checkouts, guest disks, HF assets | `~/.cache/ale` (`ALE_CACHE_DIR`) | a new worktree never re-downloads multi-GB artifacts |
+| Task checkouts and guest disks | `~/.cache/ale` (`ALE_CACHE_DIR`) | a new worktree can reuse operator-managed runtime artifacts |
+| Task asset sync state | each Task repository's `.ale-cache/` | generated commit/dirty marker; ignored by Git |
+| Task assets | each Task's `{image,setup,verify}/assets/` | direct development paths; explicit HF pull/push/status |
 | Secrets | `~/.config/ale/secrets.env` (`ALE_SECRETS_FILE`) | one file on the host; never copied into a tree or a sandbox |
 
-All three are defaults, not required environment variables — a plain `git clone` behaves
-identically to a worktree.
+Set `ALE_REPO_PATH` to the absolute active engine checkout for engine discovery. Configure
+`ALE_ASSETS_COLLECTION` only when synchronizing Task assets. Runtime never downloads
+assets, and Tasks without stage-local asset directories require no collection or token.
 
 ## When something looks wrong
 

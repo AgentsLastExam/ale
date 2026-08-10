@@ -66,6 +66,15 @@ def test_protocol_resolution_is_closed() -> None:
         _llm.resolve_protocol(config(model="claude-sonnet-4", base_url="https://api.anthropic.com"))
         == "anthropic"
     )
+    assert (
+        _llm.resolve_protocol(
+            config(
+                model="qwen-compatible",
+                base_url="https://dashscope.aliyuncs.com/apps/anthropic",
+            )
+        )
+        == "anthropic"
+    )
     with pytest.raises(ValueError, match="infer"):
         _llm.resolve_protocol(config(model="unknown", base_url="https://example.test"))
 

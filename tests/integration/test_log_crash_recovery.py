@@ -8,8 +8,7 @@ import textwrap
 
 import pytest
 
-from ale.core.ids import TaskId
-from ale.core.taskspec import ImageRef, TaskSpec
+from ale.core.taskspec import ImageSpec, TaskSpec
 from ale.run.ledger import Ledger
 
 pytestmark = pytest.mark.integration
@@ -17,10 +16,9 @@ pytestmark = pytest.mark.integration
 
 def task() -> TaskSpec:
     return TaskSpec(
-        id=TaskId("demo-crash"),
-        domain="demo",
+        name="demo-crash",
         instruction="work",
-        image=ImageRef(name="sandbox-base-cli"),
+        image=ImageSpec(kind="container", ref="ghcr.io/example/fixture:1"),
     )
 
 
@@ -30,15 +28,13 @@ def test_reopen_marks_stale_attempt_interrupted_and_preserves_retry(tmp_path) ->
         f"""
         import os
         from pathlib import Path
-        from ale.core.ids import TaskId
-        from ale.core.taskspec import ImageRef, TaskSpec
+        from ale.core.taskspec import ImageSpec, TaskSpec
         from ale.run.ledger import Ledger
 
         task = TaskSpec(
-            id=TaskId("demo-crash"),
-            domain="demo",
+            name="demo-crash",
             instruction="work",
-            image=ImageRef(name="sandbox-base-cli"),
+            image=ImageSpec(kind="container", ref="ghcr.io/example/fixture:1"),
         )
         ledger = Ledger(Path({str(root)!r}))
         ledger.open_run("run", "sha256:cfg")

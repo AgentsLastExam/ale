@@ -18,6 +18,7 @@ from ale.core.sandbox import Identity, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.run.providers.docker import DockerProvider
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from tests.support import prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
 
@@ -28,10 +29,11 @@ WORK_DIR = "/home/user/work"
 @pytest.fixture
 async def desktop():  # type: ignore[no-untyped-def]
     provider = DockerProvider()
+    prepared = await prepare_reference(provider, GUI_IMAGE)
     sandbox = await provider.create(
         SandboxRequest(
             episode_id="mcp",
-            image_ref=GUI_IMAGE,
+            prepared_image=prepared,
             resources=Resources(cpus=2, memory_mb=2048),
             network=NetworkPolicy(mode=NetworkMode.BLOCK),
         )

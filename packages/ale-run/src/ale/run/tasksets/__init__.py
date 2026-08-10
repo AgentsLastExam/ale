@@ -1,6 +1,17 @@
-"""Task loaders.
+"""Filesystem Task discovery and loading."""
 
-``ManifestTaskset`` reads a task repository checkout (domain manifest plus task
-folders), renders instructions, expands named variants, and yields one task per
-variant.
-"""
+from ale.run.tasksets.manifest import (
+    ManifestTask,
+    TaskFolder,
+    discover_task_folders,
+    load_task_folder,
+    load_tasks,
+)
+
+__all__ = [
+    "ManifestTask",
+    "TaskFolder",
+    "discover_task_folders",
+    "load_task_folder",
+    "load_tasks",
+]

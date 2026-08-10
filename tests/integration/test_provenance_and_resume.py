@@ -36,7 +36,9 @@ from ale.run.provenance import (
     gateway_provenance,
 )
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.task_images import prepare_task_image
+from ale.run.tasksets.manifest import load_tasks
+from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -57,11 +59,11 @@ def inputs_for(harness: object, *, kind: str = "registry") -> ProvenanceInputs:
 
 
 async def run_with_provenance(task_root: Path, run_dir: Path, inputs: ProvenanceInputs):  # type: ignore[no-untyped-def]
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
     return await run_episode(
         task,
         StandardEnvironment(OracleHarness()),
-        DockerProvider(),
+        provider_registry(DockerProvider()),
         run_dir=run_dir,
         provenance=inputs,
     )
@@ -79,10 +81,17 @@ async def test_every_provenance_field_is_populated(
     lock = result.lock
     assert lock is not None
 
-    # The digest is the point: a tag alone would let two different images look comparable.
-    assert lock.image.digest.startswith("sha256:")
-    assert lock.image.digest != lock.image.ref
+    assert lock.framework.schema_version == 2
+    assert lock.image.declaration.kind == "container"
+    assert lock.image.source == "local"
+    assert lock.image.input_identity.startswith("sha256:")
+    assert lock.image.prepared_identity.startswith("sha256:")
+    assert lock.image.observed_identity == lock.image.prepared_identity
+    assert lock.image.runtime_ref.startswith("ale-solver-local:")
+    assert lock.image.observed_ref
+    assert lock.task.name == task_root.name
     assert lock.task.spec_hash.startswith("sha256:")
+    assert lock.task.content_digest.startswith("sha256:")
     assert lock.config_hash.startswith("sha256:")
     assert lock.agent.family == "autonomous"
     assert lock.framework.version
@@ -130,9 +139,12 @@ async def test_resume_skips_completed_work_and_loses_nothing(
     task_root = write_repo(tmp_path / "repo")
     run_dir = tmp_path / "runs" / "fixed"
     inputs = inputs_for(OracleHarness())
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
+    task.prepared_image = await prepare_task_image(task, provider_registry(DockerProvider()))
     identity = episode_identity(
         task.spec,
+        task_digest=task.task_digest,
+        image_digest=task.prepared_image.prepared_identity,
         agent=f"{inputs.agent.harness}@{inputs.agent.version}",
         seed=0,
         config_hash=inputs.config_hash,
@@ -156,6 +168,8 @@ async def test_resume_skips_completed_work_and_loses_nothing(
         # A different seed is different work and must not be skipped.
         other = episode_identity(
             task.spec,
+            task_digest=task.task_digest,
+            image_digest=task.prepared_image.prepared_identity,
             agent=f"{inputs.agent.harness}@{inputs.agent.version}",
             seed=99,
             config_hash=inputs.config_hash,
@@ -208,16 +222,18 @@ async def test_evidence_is_parsed_when_artifacts_are_disabled(
     write_repo: Callable[..., Path],
 ) -> None:
     task_root = write_repo(tmp_path / "repo")
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
     result = await run_episode(
         task,
         StandardEnvironment(EvidenceHarness()),
-        DockerProvider(),
+        provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         collect_artifacts=False,
     )
 
     assert result.verdict.status is Status.COMPLETED
+    assert not (result.run_dir / "artifacts").exists()
+    assert not (result.run_dir / ".artifact-spool").exists()
     assert not (result.run_dir / "logs/claude-code/transcript.jsonl").exists()
     trajectory = AtifTrajectory.model_validate_json(
         (result.run_dir / "trajectory.json").read_text()

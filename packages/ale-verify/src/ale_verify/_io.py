@@ -86,7 +86,7 @@ def load_config() -> dict[str, dict[str, str]]:
             continue
         required = {"model", "reasoning_effort", "base_url", "api_key_env"}
         if kind == "agent":
-            required.add("adapter")
+            required.update({"adapter", "version"})
         if not isinstance(section, dict) or set(section) != required:
             raise ConfigurationError(f"verification {kind} config fields are invalid")
         if any(not isinstance(value, str) or not value.strip() for value in section.values()):
@@ -98,6 +98,8 @@ def load_config() -> dict[str, dict[str, str]]:
             raise ConfigurationError(f"verification {kind} api_key_env is invalid")
         if kind == "agent" and section["adapter"] not in {"codex-cli", "claude-code"}:
             raise ConfigurationError("verification agent adapter is unsupported")
+        if kind == "agent" and not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", section["version"]):
+            raise ConfigurationError("verification agent version must be an exact semver")
         normalized[kind] = {str(key): str(value) for key, value in section.items()}
     return normalized
 

@@ -19,6 +19,7 @@ import pytest
 from ale.core.sandbox import Identity, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.run.providers.docker import DockerProvider
+from tests.support import prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -27,10 +28,12 @@ PROBE = ["timeout", "10", "curl", "-sS", "-o", "/dev/null", "https://registry.np
 
 
 async def _sandbox(mode: NetworkMode, *, gateway: str = ""):  # type: ignore[no-untyped-def]
-    return await DockerProvider().create(
+    provider = DockerProvider()
+    prepared = await prepare_reference(provider, IMAGE)
+    return await provider.create(
         SandboxRequest(
             episode_id="net-phases",
-            image_ref=IMAGE,
+            prepared_image=prepared,
             resources=Resources(cpus=1, memory_mb=1024),
             network=NetworkPolicy(mode=mode),
             gateway_url=gateway,

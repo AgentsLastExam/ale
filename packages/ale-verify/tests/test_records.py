@@ -107,7 +107,7 @@ def test_serialized_shape_matches_published_schema_top_level() -> None:
         (
             Path(__file__).resolve().parents[4]
             / "specs"
-            / "004-verification-kits"
+            / "004-sandbox-local-verification"
             / "contracts"
             / "verification-record.schema.json"
         ).read_text()

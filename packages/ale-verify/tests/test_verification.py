@@ -95,8 +95,13 @@ def test_one_state_holds_checks_stats_judge_aggregate_and_final_write(
     record = VerificationRecord.from_json(record_path.read_bytes())
     envelope = json.loads(verdict_path.read_text())
     assert record.status == "completed"
+    assert record.aggregates[0].method == "weighted_mean"
     assert envelope == {"rewards": record.rewards, "metrics": record.metrics}
     assert not list(record_path.parent.glob("*.tmp"))
+
+
+def test_verification_has_no_stage_asset_resolver() -> None:
+    assert not hasattr(Verification, "asset_path")
 
 
 def test_duplicate_invalid_and_terminal_mutations_fail(verify_env: tuple[Path, Path]) -> None:
@@ -122,6 +127,7 @@ def test_agent_judge_is_the_last_mutating_operation(
             {
                 "agent": {
                     "adapter": "codex-cli",
+                    "version": "1.2.3",
                     "model": "judge-model",
                     "reasoning_effort": "high",
                     "base_url": "https://example.test",

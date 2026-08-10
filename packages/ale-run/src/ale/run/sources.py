@@ -1,32 +1,74 @@
-"""Where task content comes from.
-
-Two sources, one execution path. A local checkout is what an author iterates against; a
-registry reference is what everyone else runs. They differ only in how the folder gets
-onto disk and in what provenance records — never in how the task is loaded or run, so
-"works on my machine" and "works in the run" cannot come apart.
-
-Fetched content is cached by resolved commit, so a repository is cloned once per version
-no matter how many episodes use it.
-"""
+"""Filesystem Task references and ordered variant selection."""
 
 from __future__ import annotations
 
 import os
-import subprocess
-import tomllib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from ale.core.errors import RegistryError
+from ale.core.errors import RegistryError, TaskDefinitionError
 from ale.core.lock import TaskSource
 
-__all__ = ["Registry", "ResolvedSource", "cache_root", "resolve"]
+__all__ = [
+    "ResolvedSource",
+    "TaskReference",
+    "cache_root",
+    "parse_task_reference",
+    "resolve",
+    "select_tasks",
+]
 
-REGISTRY_FILE = "registry.toml"
+_VARIANT = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+@dataclass(frozen=True)
+class TaskReference:
+    source: str
+    variants: tuple[str, ...] = ("base",)
+
+
+def parse_task_reference(reference: str) -> TaskReference:
+    candidate = Path(reference).expanduser()
+    if candidate.exists():
+        return TaskReference(reference)
+    source, separator, selector = reference.rpartition("@")
+    if not separator:
+        return TaskReference(reference)
+    names = (
+        tuple(selector[1:-1].split(","))
+        if selector.startswith("{") and selector.endswith("}")
+        else (selector,)
+    )
+    if not source or not names or any(not _VARIANT.fullmatch(name) for name in names):
+        raise RegistryError(f"malformed Task variant selector in {reference!r}")
+    if len(set(names)) != len(names):
+        raise RegistryError(f"duplicate Task variant in {reference!r}")
+    return TaskReference(source=source, variants=names)
+
+
+def select_tasks(tasks: list[object], variants: tuple[str, ...]) -> list[object]:
+    families: dict[object, dict[str, object]] = {}
+    order: list[object] = []
+    for task in tasks:
+        spec = task.spec  # type: ignore[attr-defined]
+        if spec.name not in families:
+            families[spec.name] = {}
+            order.append(spec.name)
+        families[spec.name][spec.variant] = task
+    selected: list[object] = []
+    for name in order:
+        available = families[name]
+        missing = [variant for variant in variants if variant not in available]
+        if missing:
+            choices = ", ".join(available)
+            raise TaskDefinitionError(f"{name} has no variant {missing[0]!r}; available: {choices}")
+        selected.extend(available[variant] for variant in variants)
+    return selected
 
 
 def cache_root() -> Path:
-    """Shared across worktrees so a second checkout re-downloads nothing."""
+    """Operator cache retained for non-Task assets such as VM disks and GPU locks."""
     base = os.environ.get("ALE_CACHE_DIR") or (
         Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ale"
     )
@@ -34,115 +76,20 @@ def cache_root() -> Path:
 
 
 @dataclass(frozen=True)
-class DomainEntry:
-    """One registry line: where a domain's tasks live."""
-
-    repo: str
-    path: str = "tasks"
-    default_ref: str = "main"
-
-
-class Registry:
-    """Domain name to repository. Several domains may share one repository."""
-
-    def __init__(self, entries: dict[str, DomainEntry]) -> None:
-        self.entries = entries
-
-    @classmethod
-    def load(cls, path: Path) -> Registry:
-        if not path.is_file():
-            raise RegistryError(f"no {REGISTRY_FILE} at {path}")
-        with path.open("rb") as handle:
-            raw = tomllib.load(handle)
-        domains = raw.get("domains") or {}
-        return cls({name: DomainEntry(**entry) for name, entry in domains.items()})
-
-    def entry(self, domain: str) -> DomainEntry:
-        if domain not in self.entries:
-            known = ", ".join(sorted(self.entries)) or "none"
-            raise RegistryError(f"unknown domain {domain!r}; registered: {known}")
-        return self.entries[domain]
-
-
-@dataclass(frozen=True)
 class ResolvedSource:
-    """A task folder on disk, and the provenance that describes it."""
-
     task_dir: Path
     source: TaskSource
 
 
-def resolve(
-    reference: str, *, registry: Registry | None = None, ref: str | None = None
-) -> ResolvedSource:
-    """Resolve a task reference to a folder on disk.
-
-    A path is used as it stands; anything else is ``<domain>/<task-path>`` and is
-    fetched at a pinned commit.
-    """
+def resolve(reference: str) -> ResolvedSource:
     candidate = Path(reference).expanduser()
-    if candidate.exists():
-        return ResolvedSource(
-            task_dir=candidate.resolve(),
-            source=TaskSource(kind="local", path=str(candidate.resolve())),
+    if not candidate.exists():
+        raise RegistryError(
+            f"{reference!r} is not a filesystem Task or collection path; "
+            "remote Task registries are not part of the standard contract"
         )
-
-    if registry is None:
-        raise RegistryError(f"{reference} is not a path, and no registry was provided")
-
-    domain, _, task_path = reference.partition("/")
-    if not task_path:
-        raise RegistryError(f"expected <domain>/<task>, got {reference!r}")
-
-    entry = registry.entry(domain)
-    checkout, commit = _fetch(entry.repo, ref or entry.default_ref)
-    task_dir = checkout / entry.path / task_path
-    if not task_dir.is_dir():
-        raise RegistryError(f"{reference} not found in {entry.repo} at {commit[:12]}")
-
+    resolved = candidate.resolve()
     return ResolvedSource(
-        task_dir=task_dir,
-        source=TaskSource(
-            kind="registry",
-            repo=entry.repo,
-            commit=commit,
-            path=f"{entry.path}/{task_path}",
-        ),
+        task_dir=resolved,
+        source=TaskSource(kind="local", path=str(resolved)),
     )
-
-
-def _fetch(repo: str, ref: str) -> tuple[Path, str]:
-    """Clone or update ``repo`` at ``ref``, returning the checkout and its commit.
-
-    Keyed by resolved commit rather than by ref, so a branch that moves produces a new
-    checkout instead of quietly changing what an old result meant.
-    """
-    commit = _resolve_commit(repo, ref)
-    target = cache_root() / "tasks" / _slug(repo) / commit
-    if (target / ".git").is_dir():
-        return target, commit
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    _git("clone", "--quiet", "--filter=blob:none", "--no-checkout", repo, str(target))
-    _git("-C", str(target), "checkout", "--quiet", commit)
-    return target, commit
-
-
-def _resolve_commit(repo: str, ref: str) -> str:
-    if len(ref) == 40 and all(char in "0123456789abcdef" for char in ref):
-        return ref
-    out = _git("ls-remote", repo, ref)
-    if not out.strip():
-        raise RegistryError(f"{repo} has no ref {ref!r}")
-    return out.split()[0]
-
-
-def _git(*argv: str) -> str:
-    result = subprocess.run(["git", *argv], capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise RegistryError(f"git {' '.join(argv[:2])} failed: {result.stderr.strip()}")
-    return result.stdout
-
-
-def _slug(repo: str) -> str:
-    return repo.rstrip("/").removesuffix(".git").replace("://", "-").replace("/", "-")

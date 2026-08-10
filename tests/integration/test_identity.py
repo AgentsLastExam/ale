@@ -26,7 +26,8 @@ from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DEFAULT_AGENT_USER, DockerProvider
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.tasksets.manifest import load_tasks
+from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -37,9 +38,13 @@ ELEVATION_PROBE = """
 
 
 async def run_one(task_root: Path, run_dir: Path, **kwargs):  # type: ignore[no-untyped-def]
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
     return await run_episode(
-        task, StandardEnvironment(OracleHarness()), DockerProvider(), run_dir=run_dir, **kwargs
+        task,
+        StandardEnvironment(OracleHarness()),
+        provider_registry(DockerProvider()),
+        run_dir=run_dir,
+        **kwargs,
     )
 
 
@@ -54,8 +59,8 @@ def declare_sudo(task_root: Path) -> None:
     manifest = task_root / "task.yaml"
     manifest.write_text(
         manifest.read_text().replace(
-            "resources: { cpus: 1, memory_mb: 512 }",
-            "resources: { cpus: 1, memory_mb: 512, sudo: true }",
+            "resources: {cpus: 1, memory_mb: 512}",
+            "resources: {cpus: 1, memory_mb: 512, sudo: true}",
         )
     )
 
@@ -88,6 +93,7 @@ class TestWhoRunsWhat:
     ) -> None:
         """A task's stages are engine machinery, run on the task's behalf."""
         task_root = write_repo(tmp_path / "repo")
+        (task_root / "setup").mkdir()
         (task_root / "setup" / "run.sh").write_text(
             "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/input /home/user/output\n"
             "printf 'world' > /home/user/input/word.txt\nid -un > /home/user/output/setup_who\n"

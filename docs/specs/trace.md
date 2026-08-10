@@ -148,9 +148,7 @@ request, but never retokenizes text or fabricates missing fields. The temporary 
 is correlated by Gateway call ID, moved into the linked ATIF agent step, then deleted;
 malformed evidence fails conversion and remains under `logs/gateway/tokens/`.
 
-TODO: extend exact-token extraction to streamed provider responses once a local
-OpenAI-compatible model endpoint exposing token IDs, log probabilities, masks, and
-multimodal processor state is available for end-to-end Prime-RL testing.
+Streamed responses that do not supply this explicit object record no exact token data.
 
 Native logs are diagnostic evidence, never canonical truth.
 

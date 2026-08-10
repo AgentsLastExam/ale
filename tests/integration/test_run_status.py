@@ -7,9 +7,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from ale.core.ids import TaskId
 from ale.core.result import ResultRecord
-from ale.core.taskspec import ImageRef, TaskSpec
+from ale.core.taskspec import ImageSpec, TaskSpec
 from ale.core.verdict import Status
 from ale.run.ledger import Ledger
 
@@ -18,10 +17,9 @@ pytestmark = pytest.mark.integration
 
 def task() -> TaskSpec:
     return TaskSpec(
-        id=TaskId("demo-live"),
-        domain="demo",
+        name="demo-live",
         instruction="work",
-        image=ImageRef(name="sandbox-base-cli"),
+        image=ImageSpec(kind="container", ref="ghcr.io/example/fixture:1"),
     )
 
 

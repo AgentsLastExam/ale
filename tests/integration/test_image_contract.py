@@ -15,8 +15,7 @@ from __future__ import annotations
 import pytest
 
 from ale.core.errors import ProviderCapabilityError
-from ale.core.sandbox import SandboxRequest
-from ale.core.taskspec import NetworkPolicy, Resources
+from ale.core.sandbox import ImageRef
 from ale.run.providers.docker import DEFAULT_AGENT_USER, DockerProvider
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -45,15 +44,8 @@ async def test_an_upstream_image_is_refused_by_name() -> None:
 @pytest.mark.asyncio
 async def test_a_non_conforming_image_never_reaches_provisioning() -> None:
     """Refused before a container exists, not diagnosed from its corpse."""
-    request = SandboxRequest(
-        episode_id="contract",
-        image_ref=UPSTREAM,
-        resources=Resources(cpus=1, memory_mb=512),
-        network=NetworkPolicy(),
-    )
-
     with pytest.raises(ProviderCapabilityError, match=r"sandbox-image\.md"):
-        await DockerProvider().create(request)
+        await DockerProvider().prepare_image(ImageRef(kind="container", reference=UPSTREAM))
 
 
 @pytest.mark.asyncio

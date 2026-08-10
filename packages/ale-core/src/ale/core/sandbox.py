@@ -18,28 +18,112 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Literal, Protocol, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ale.core.errors import ProviderCapabilityError
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, Resources
 
 __all__ = [
     "Capabilities",
     "ExecOutputSink",
     "ExecResult",
+    "GpuAllocation",
+    "GpuDevice",
     "GuestTransport",
     "Identity",
+    "ImageKind",
+    "ImageRef",
+    "PreparedTaskImage",
     "Provider",
+    "ResolvedImage",
+    "ResourceAllocation",
+    "RetainedSandbox",
     "Sandbox",
     "SandboxRequest",
+    "SandboxRole",
     "SandboxState",
 ]
+
+
+class ImageRef(BaseModel):
+    """Engine-owned image reference used only at the Provider boundary."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: ImageKind
+    reference: str = Field(min_length=1)
+
+    def __str__(self) -> str:
+        return self.reference
+
+    @field_validator("reference")
+    @classmethod
+    def _nonblank_reference(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("image reference must not be blank")
+        return value
+
+
+class PreparedTaskImage(BaseModel):
+    """Validated immutable image passed from preparation to provisioning."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: ImageKind
+    source: Literal["solver-local", "verifier-local", "external-ref"]
+    input_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    image_source_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    runtime_ref: str = Field(min_length=1)
+    prepared_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    base_materials: tuple[str, ...] = ()
+    resolved_reference: str | None = None
+    oci_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    materializer_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+
+    @field_validator("runtime_ref", "resolved_reference")
+    @classmethod
+    def _nonblank_refs(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("image references must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def _valid_shape(self) -> Self:
+        local = self.source != "external-ref"
+        if local and self.image_source_identity is None:
+            raise ValueError("local prepared images require image_source_identity")
+        if not local and self.resolved_reference is None:
+            raise ValueError("external prepared images require resolved_reference")
+        if local and self.resolved_reference is not None:
+            raise ValueError("local prepared images cannot declare resolved_reference")
+        if not local and self.image_source_identity is not None:
+            raise ValueError("external prepared images cannot declare image_source_identity")
+
+        if self.kind is ImageKind.CONTAINER:
+            if self.oci_identity is not None or self.materializer_identity is not None:
+                raise ValueError("container images cannot declare VM materialization identities")
+        elif local:
+            if self.oci_identity is None or self.materializer_identity is None:
+                raise ValueError("local VM images require OCI and materializer identities")
+        elif self.oci_identity is not None or self.materializer_identity is not None:
+            raise ValueError("referenced VM images cannot declare local materialization identities")
+        return self
+
+
+class ResourceLease(Protocol):
+    def release(self) -> None: ...
 
 
 class SandboxState(StrEnum):
     CREATED = "created"
     READY = "ready"
     DESTROYED = "destroyed"
+
+
+class SandboxRole(StrEnum):
+    SOLVER = "solver"
+    VERIFIER = "verifier"
+    SHARED = "shared"
 
 
 class ExecOutputSink(Protocol):
@@ -74,7 +158,6 @@ class Capabilities(BaseModel):
 
     os: str = "linux"
     gui: bool = False
-    gpus: int = 0
     network_modes: frozenset[NetworkMode] = frozenset({NetworkMode.OPEN})
     max_cpus: int | None = None
     max_memory_mb: int | None = None
@@ -89,8 +172,6 @@ class Capabilities(BaseModel):
         asks for a screenshot in a sandbox without one is told so by the screenshot.
         """
         problems: list[str] = []
-        if resources.gpus > self.gpus:
-            problems.append(f"task needs {resources.gpus} gpu(s), provider offers {self.gpus}")
         if network.mode not in self.network_modes:
             offered = ", ".join(sorted(self.network_modes))
             problems.append(f"network mode {network.mode} unsupported (offers: {offered})")
@@ -132,7 +213,9 @@ class SandboxRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     episode_id: str
-    image_ref: str
+    role: SandboxRole = SandboxRole.SOLVER
+    retention: Literal["destroy", "keep"] = "destroy"
+    prepared_image: PreparedTaskImage
     resources: Resources
     network: NetworkPolicy
     gateway_url: str | None = Field(
@@ -143,9 +226,78 @@ class SandboxRequest(BaseModel):
     )
     proxy_url: str = ""
     """Egress proxy for ``allowlist`` mode; empty when the task declared no hosts."""
+    proxy_token: str = Field(default="", repr=False)
+    """Episode credential used only for the authenticated allowlist proxy."""
 
     sudo: bool = False
     """Whether the agent user may elevate. Declared by the task, recorded in provenance."""
+
+    @property
+    def image_kind(self) -> ImageKind:
+        return self.prepared_image.kind
+
+
+class ResolvedImage(BaseModel):
+    """Immutable image identity observed by the Provider."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: ImageKind
+    prepared_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    observed_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    observed_ref: str = Field(min_length=1)
+
+
+class GpuDevice(BaseModel):
+    """One physical NVIDIA GPU observed inside the ready sandbox."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str = Field(min_length=1)
+    vendor: Literal["nvidia"] = "nvidia"
+    model: str = Field(min_length=1)
+    pci_address: str | None = None
+    driver_version: str = Field(min_length=1)
+
+
+class GpuAllocation(BaseModel):
+    """Provider allocation addresses and sandbox observations."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    requested_count: int = Field(ge=1)
+    provider_addresses: tuple[str, ...]
+    lease_keys: tuple[str, ...]
+    observed_devices: tuple[GpuDevice, ...]
+    runtime_identity: str | None = None
+
+
+class ResourceAllocation(BaseModel):
+    """Effective resources attached to a ready sandbox."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    cpus: int = Field(ge=1)
+    memory_mb: int = Field(ge=128)
+    storage_mb: int | None = Field(default=None, ge=256)
+    gpu: GpuAllocation | None = None
+    sudo: bool
+    network_mode: NetworkMode
+    provider: str = Field(min_length=1)
+
+
+class RetainedSandbox(BaseModel):
+    """Durable operator handle returned only after successful sanitation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: str
+    handle: str
+    episode_id: str
+    roles: tuple[Literal["solver", "verifier"], ...]
+    reason: str
+    cleanup_command: str
+    gpu_devices: tuple[str, ...] = ()
 
 
 class GuestTransport(Protocol):
@@ -163,10 +315,27 @@ class GuestTransport(Protocol):
 class Sandbox(ABC):
     """One isolated execution instance."""
 
-    def __init__(self, *, sandbox_id: str, request: SandboxRequest) -> None:
+    def __init__(
+        self,
+        *,
+        sandbox_id: str,
+        request: SandboxRequest,
+        resolved_image: ResolvedImage,
+        allocation: ResourceAllocation,
+        resource_lease: ResourceLease | None = None,
+    ) -> None:
         self.sandbox_id = sandbox_id
         self.request = request
+        self.resolved_image = resolved_image
+        self.allocation = allocation
+        self._resource_lease = resource_lease
         self.state = SandboxState.CREATED
+
+    def release_resources(self) -> None:
+        """Release Provider allocations after the underlying sandbox has stopped."""
+        if self._resource_lease is not None:
+            self._resource_lease.release()
+            self._resource_lease = None
 
     @property
     def gateway_url(self) -> str | None:
@@ -224,6 +393,11 @@ class Sandbox(ABC):
     async def destroy(self) -> None:
         """Release every resource. Must be idempotent and safe during cancellation."""
 
+    async def retain(
+        self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
+    ) -> RetainedSandbox:
+        raise ProviderCapabilityError(f"{type(self).__name__} does not support retention")
+
     async def screenshot(self) -> bytes:
         """Capture the guest desktop. Only meaningful on GUI-capable sandboxes."""
         raise ProviderCapabilityError(f"{type(self).__name__} has no desktop to capture")
@@ -250,6 +424,9 @@ class Provider(ABC):
     @abstractmethod
     async def preflight(self) -> None:
         """Fail loudly if this provider cannot run here (missing daemon, no KVM)."""
+
+    @abstractmethod
+    async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage: ...
 
     @abstractmethod
     async def create(self, request: SandboxRequest) -> Sandbox: ...

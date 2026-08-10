@@ -15,7 +15,8 @@ from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.tasksets.manifest import load_tasks
+from tests.support import provider_registry
 
 pytestmark = [
     pytest.mark.needs_docker,
@@ -64,8 +65,10 @@ async def test_live_llm_judge_record_and_transport(
 ) -> None:
     if not os.environ.get(key_env):
         pytest.skip(f"no {key_env}")
+    if protocol == "messages":
+        base_url = os.environ.get("ALE_LIVE_ANTHROPIC_BASE_URL", base_url)
     task_path = TASKS / "tasks" / "demo" / "verification_llm_judge"
-    task = next(iter(ManifestTaskset(task_path).load()))
+    task = load_tasks(task_path)[0]
     verification = VerificationConfig(
         llm=LLMJudgeConfig(
             model=os.environ.get(model_env, default_model),
@@ -79,7 +82,7 @@ async def test_live_llm_judge_record_and_transport(
     result = await run_episode(
         task,
         StandardEnvironment(harness),
-        DockerProvider(),
+        provider_registry(DockerProvider()),
         run_dir=tmp_path,
         provenance=ProvenanceInputs(
             source=TaskSource(kind="local", path=str(task_path)),

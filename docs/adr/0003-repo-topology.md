@@ -1,6 +1,9 @@
 # 0003 — Engine and task content live in separate repositories
 
-**Status**: accepted (2026-07-24)
+**Status**: accepted (2026-07-24); partly superseded by
+[0017](0017-self-contained-docker-tasks.md) (2026-08-03) — engine and Task content remain
+separate, but standard Tasks no longer depend on a domain manifest, repository Kit, domain
+image, registry mapping, or repository-level version declaration.
 
 ## Context
 

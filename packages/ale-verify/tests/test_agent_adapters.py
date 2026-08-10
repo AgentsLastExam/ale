@@ -47,6 +47,7 @@ def run(config: dict[str, str]):  # type: ignore[no-untyped-def]
 def codex_config() -> dict[str, str]:
     return {
         "adapter": "codex-cli",
+        "version": "1.2.3",
         "model": "gpt-5",
         "reasoning_effort": "high",
         "base_url": "https://api.openai.com",
@@ -57,6 +58,7 @@ def codex_config() -> dict[str, str]:
 def claude_config() -> dict[str, str]:
     return {
         "adapter": "claude-code",
+        "version": "2.1.0",
         "model": "claude-sonnet-4",
         "reasoning_effort": "high",
         "base_url": "https://api.anthropic.com",
@@ -97,7 +99,7 @@ def test_codex_command_root_home_cwd_version_and_final_response(
     assert kwargs["env"]["HOME"].startswith(str(agent_env["log"].parent))
     assert Path(kwargs["env"]["CODEX_HOME"]).is_dir()
     assert kwargs["env"]["OPENAI_BASE_URL"] == "https://api.openai.com"
-    assert invocation.adapter_version == "codex 1.2.3"
+    assert invocation.adapter_version == "1.2.3"
     assert "provider-secret" not in agent_env["log"].read_text()
 
 
@@ -138,7 +140,7 @@ def test_missing_cli_and_non_root_fail_before_launch(
     monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
 ) -> None:
     monkeypatch.setattr(_agents.shutil, "which", lambda _name: None)
-    with pytest.raises(JudgeError, match="not installed"):
+    with pytest.raises(JudgeError, match="unavailable"):
         run(codex_config())
     monkeypatch.setattr(_agents.os, "geteuid", lambda: 1000)
     with pytest.raises(JudgeError, match="root"):
@@ -168,7 +170,7 @@ def test_stale_transcript_is_replaced(
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
         if "--version" in argv:
-            return completed("codex 1\n")
+            return completed("codex 1.2.3\n")
         return completed(
             '{"type":"thread.started","thread_id":"thread-1"}\n'
             '{"type":"item.completed","item":{"type":"agent_message",'
@@ -178,3 +180,65 @@ def test_stale_transcript_is_replaced(
     monkeypatch.setattr(_agents.subprocess, "run", execute)
     run(codex_config())
     assert '"stale"' not in agent_env["log"].read_text()
+
+
+def test_missing_or_different_cli_is_installed_at_the_exact_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        _agents.shutil,
+        "which",
+        lambda name: "/usr/bin/npm" if name == "npm" else "/usr/bin/codex",
+    )
+    calls = []
+
+    def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(argv)
+        if argv == ["/usr/bin/codex", "--version"]:
+            return completed("codex 9.9.9\n")
+        if argv[1] == "install":
+            root = Path(argv[argv.index("--prefix") + 1])
+            installed = root / "node_modules/.bin/codex"
+            installed.parent.mkdir(parents=True)
+            installed.write_text("")
+            return completed("")
+        return completed("codex 1.2.3\n")
+
+    monkeypatch.setattr(_agents.subprocess, "run", execute)
+    binary, version = _agents._ensure_binary("codex-cli", "1.2.3", tmp_path)
+    assert version == "1.2.3"
+    assert binary.endswith("agent-tools/codex-cli-1.2.3/node_modules/.bin/codex")
+    assert any("@openai/codex@1.2.3" in argv for argv in calls)
+
+
+def test_invocation_local_mcp_supports_stdio_and_http_without_solver_inheritance(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "agent"
+    home.mkdir()
+    servers = [
+        {
+            "name": "local",
+            "transport": "stdio",
+            "command": "python3",
+            "args": ["server.py"],
+            "cwd": "/workspace",
+        },
+        {"name": "remote", "transport": "streamable-http", "url": "https://mcp.test"},
+    ]
+    claude = _agents._write_mcp_config("claude-code", home, servers)
+    assert claude is not None
+    payload = json.loads(claude.read_text())
+    assert set(payload["mcpServers"]) == {"local", "remote"}
+
+    assert _agents._write_mcp_config("codex-cli", home, servers) is None
+    codex = (home / ".codex/config.toml").read_text()
+    assert "[mcp_servers.local]" in codex
+    assert 'url = "https://mcp.test"' in codex
+
+    with pytest.raises(JudgeError, match="unsupported transport"):
+        _agents._write_mcp_config(
+            "codex-cli",
+            home,
+            [{"name": "legacy", "transport": "sse", "url": "https://mcp.test"}],
+        )

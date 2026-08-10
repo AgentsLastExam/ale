@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import uuid
@@ -29,6 +30,7 @@ def run(
     reference: str | None,
     trajectory: str | None,
     config: Mapping[str, str],
+    mcp_servers: Sequence[Mapping[str, object]] = (),
 ) -> tuple[str, str, JudgeInvocation]:
     del reference, trajectory
     adapter = config["adapter"]
@@ -48,17 +50,6 @@ def run(
             prompt_hash,
             rubric_hash,
             "Agent Judge must run as root",
-        )
-    binary = shutil.which(binary_name)
-    if binary is None:
-        _preflight_failure(
-            invocation_id,
-            name,
-            config,
-            endpoint,
-            prompt_hash,
-            rubric_hash,
-            f"{binary_name} is not installed in the selected image",
         )
     if not secret:
         _preflight_failure(
@@ -91,7 +82,8 @@ def run(
     log_path.unlink(missing_ok=True)
 
     try:
-        version = _version(binary)
+        binary, version = _ensure_binary(adapter, config["version"], stage)
+        mcp_config = _write_mcp_config(adapter, home, mcp_servers)
     except JudgeError as exc:
         _preflight_failure(
             invocation_id,
@@ -116,6 +108,7 @@ def run(
             config,
             session_id=session_id,
             resume=index > 1,
+            mcp_config=mcp_config,
         )
         started = _now()
         try:
@@ -303,6 +296,7 @@ def _command(
     *,
     session_id: str | None,
     resume: bool,
+    mcp_config: Path | None,
 ) -> list[str]:
     if adapter == "codex-cli":
         argv = [
@@ -335,7 +329,7 @@ def _command(
         argv.append("-")
         return argv
     selector = ["--resume", session_id] if resume else ["--session-id", session_id]
-    return [
+    argv = [
         binary,
         "--verbose",
         "--output-format=stream-json",
@@ -345,8 +339,11 @@ def _command(
         config["reasoning_effort"],
         "--dangerously-skip-permissions",
         *[str(value) for value in selector],
-        "--print",
     ]
+    if mcp_config is not None:
+        argv.extend(["--mcp-config", str(mcp_config), "--strict-mcp-config"])
+    argv.append("--print")
+    return argv
 
 
 def _responses_base_url(base_url: str) -> str:
@@ -370,7 +367,7 @@ def _environment(
     }
     if adapter == "codex-cli":
         codex_home = home / ".codex"
-        codex_home.mkdir(mode=0o700)
+        codex_home.mkdir(mode=0o700, exist_ok=True)
         environment.update(
             {
                 "CODEX_HOME": str(codex_home),
@@ -422,7 +419,7 @@ def _prompt(
         for _, reference in evidence
     )
     return (
-        "You are a verification agent running as root in the completed solver sandbox.\n"
+        "You are a verification agent running as root with the completed solver artifacts.\n"
         "Inspect files and execute commands needed to reach an empirical verdict.\n\n"
         f"Task instruction:\n{instruction}\n\n"
         f"Criterion {name}: {prompt}\n\n"
@@ -480,10 +477,130 @@ def _version(binary: str) -> str:
     )
     if result.returncode != 0:
         raise JudgeError(f"could not query {Path(binary).name} version")
-    version = (result.stdout or result.stderr).strip()
-    if not version:
+    output = (result.stdout or result.stderr).strip()
+    match = re.search(r"(?<![0-9])([0-9]+\.[0-9]+\.[0-9]+)(?![0-9])", output)
+    if match is None:
         raise JudgeError(f"{Path(binary).name} reported no version")
-    return version[:200]
+    return match.group(1)
+
+
+def _ensure_binary(adapter: str, expected: str, stage: Path) -> tuple[str, str]:
+    binary_name = "codex" if adapter == "codex-cli" else "claude"
+    binary = shutil.which(binary_name)
+    if binary is not None:
+        try:
+            if _version(binary) == expected:
+                return binary, expected
+        except JudgeError:
+            pass
+    npm = shutil.which("npm")
+    if npm is None:
+        raise JudgeError(
+            f"{binary_name} {expected} is unavailable and npm is not installed "
+            "for exact installation"
+        )
+    root = stage / "agent-tools" / f"{adapter}-{expected}"
+    package = "@openai/codex" if adapter == "codex-cli" else "@anthropic-ai/claude-code"
+    completed = subprocess.run(
+        [npm, "install", "--prefix", str(root), "--no-audit", "--no-fund", f"{package}@{expected}"],
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT_SECONDS,
+        check=False,
+    )
+    installed = root / "node_modules" / ".bin" / binary_name
+    if completed.returncode != 0 or not installed.is_file():
+        raise JudgeError(
+            f"could not install exact Agent Judge {adapter} {expected}: "
+            f"{(completed.stderr or completed.stdout)[-500:]}"
+        )
+    observed = _version(str(installed))
+    if observed != expected:
+        raise JudgeError(f"installed Agent Judge version {observed}, expected {expected}")
+    return str(installed), observed
+
+
+def _write_mcp_config(
+    adapter: str,
+    home: Path,
+    servers: Sequence[Mapping[str, object]],
+) -> Path | None:
+    if not servers:
+        return None
+    normalized: dict[str, dict[str, object]] = {}
+    for server in servers:
+        name = server.get("name")
+        transport = server.get("transport")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            raise JudgeError("Agent Judge MCP name is invalid")
+        if name in normalized:
+            raise JudgeError(f"duplicate Agent Judge MCP name: {name}")
+        if transport == "stdio":
+            command = server.get("command")
+            args = server.get("args", ())
+            cwd = server.get("cwd")
+            environment = server.get("environment", {})
+            if not isinstance(command, str) or not command:
+                raise JudgeError(f"stdio MCP {name} requires command")
+            if not isinstance(args, (list, tuple)) or not all(isinstance(v, str) for v in args):
+                raise JudgeError(f"stdio MCP {name} args must be strings")
+            if cwd is not None and (not isinstance(cwd, str) or not Path(cwd).is_absolute()):
+                raise JudgeError(f"stdio MCP {name} cwd must be absolute")
+            if not isinstance(environment, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in environment.items()
+            ):
+                raise JudgeError(f"stdio MCP {name} environment must contain strings")
+            normalized[name] = {
+                "transport": "stdio",
+                "command": command,
+                "args": list(args),
+                "cwd": cwd,
+                "environment": environment,
+            }
+        elif transport == "streamable-http":
+            url = server.get("url")
+            if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+                raise JudgeError(f"HTTP MCP {name} requires an absolute URL")
+            normalized[name] = {"transport": "streamable-http", "url": url}
+        else:
+            raise JudgeError(f"Agent Judge MCP {name!r} uses unsupported transport {transport!r}")
+
+    if adapter == "claude-code":
+        path = home / "mcp.json"
+        payload = {"mcpServers": {}}
+        for name, server in normalized.items():
+            if server["transport"] == "stdio":
+                payload["mcpServers"][name] = {  # type: ignore[index]
+                    key: value
+                    for key, value in server.items()
+                    if key in {"command", "args", "cwd", "environment"} and value is not None
+                }
+            else:
+                payload["mcpServers"][name] = {"type": "http", "url": server["url"]}  # type: ignore[index]
+        path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+        return path
+
+    codex_home = home / ".codex"
+    codex_home.mkdir(exist_ok=True)
+    lines: list[str] = []
+    for name, server in normalized.items():
+        lines.append(f"[mcp_servers.{name}]")
+        if server["transport"] == "stdio":
+            lines.append(f"command = {json.dumps(server['command'])}")
+            lines.append(f"args = {json.dumps(server['args'])}")
+            if server["cwd"] is not None:
+                lines.append(f"cwd = {json.dumps(server['cwd'])}")
+            environment = server["environment"]
+            if environment:
+                pairs = ", ".join(
+                    f"{json.dumps(key)} = {json.dumps(value)}"
+                    for key, value in sorted(environment.items())  # type: ignore[union-attr]
+                )
+                lines.append(f"env = {{{pairs}}}")
+        else:
+            lines.append(f"url = {json.dumps(server['url'])}")
+    (codex_home / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return None
 
 
 def _append_transcript(

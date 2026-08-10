@@ -1,11 +1,15 @@
 # The virtual-machine backend
 
+> Superseded authoring path: `build-desktop.sh` is retained only for existing local
+> guests. New Task VM images use `images/base/vm-gui` plus the versioned
+> `vm-materializer`; the standard base release workflow no longer builds from an ISO.
+
 Two images, and they are easy to confuse:
 
 | | What it is | Built by |
 |---|---|---|
 | **the runner** | a *container* holding `qemu-system-x86_64` | `images/base/qemu-runner/Dockerfile` |
-| **the guest** | the *disk* it boots: Ubuntu 24.04 with a desktop | `build-desktop.sh` |
+| **legacy guest** | an older locally installed Ubuntu desktop disk | `build-desktop.sh` |
 
 The host needs Docker and `/dev/kvm`. It does not need qemu to *run* a sandbox: the runner
 has it. Building a guest does need it locally.

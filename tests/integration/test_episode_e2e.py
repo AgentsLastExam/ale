@@ -19,17 +19,18 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.tasksets.manifest import load_tasks
+from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 
 async def run_one(task_root: Path, run_dir: Path, harness: object):  # type: ignore[no-untyped-def]
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
     return await run_episode(
         task,
         StandardEnvironment(harness),  # type: ignore[arg-type]
-        DockerProvider(),
+        provider_registry(DockerProvider()),
         run_dir=run_dir,
     )
 
@@ -80,6 +81,7 @@ async def test_agent_never_sees_verification_material(
     (task_root / "verify" / "answer.txt").write_text("hello world")
 
     probe = task_root / "setup" / "run.sh"
+    probe.parent.mkdir()
     probe.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/input /home/user/output\n"
         "printf 'world' > /home/user/input/word.txt\n"

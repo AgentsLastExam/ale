@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ale.core.verdict import Status
 
-__all__ = ["FailureInfo", "PhaseTiming", "ResultRecord"]
+__all__ = ["FailureInfo", "PhaseTiming", "ResultRecord", "SandboxOutcome"]
 
 _STRICT = ConfigDict(frozen=True, extra="forbid")
 
@@ -40,10 +40,23 @@ class PhaseTiming(BaseModel):
         return self
 
 
+class SandboxOutcome(BaseModel):
+    model_config = _STRICT
+
+    roles: tuple[Literal["solver", "verifier"], ...]
+    requested: Literal["destroy", "keep"]
+    outcome: Literal["destroyed", "retained", "retention-failed"]
+    provider: str
+    handle: str | None = None
+    reason: str | None = None
+    cleanup_command: str | None = None
+    gpu_devices: tuple[str, ...] = ()
+
+
 class ResultRecord(BaseModel):
     model_config = _STRICT
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     episode_id: str
     status: Status
     rewards: dict[str, float] | None = None
@@ -52,6 +65,14 @@ class ResultRecord(BaseModel):
     started_at: datetime
     finished_at: datetime
     phases: tuple[PhaseTiming, ...] = ()
+    sandboxes: tuple[SandboxOutcome, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_v1(cls, value: Any) -> Any:
+        if isinstance(value, dict) and value.get("schema_version", 1) == 1:
+            return {**value, "schema_version": 2, "sandboxes": value.get("sandboxes", ())}
+        return value
 
     @field_validator("rewards")
     @classmethod

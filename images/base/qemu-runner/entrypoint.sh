@@ -33,8 +33,25 @@ fi
 # supplies a pre-baked disk, so there is nothing to install for any guest OS.
 touch "$storage_dir/windows.boot"
 
+if [[ -n "${ALE_QEMU_VFIO_DEVICES:-}" ]]; then
+  IFS=',' read -r -a vfio_devices <<<"$ALE_QEMU_VFIO_DEVICES"
+  vfio_arguments=""
+  for bdf in "${vfio_devices[@]}"; do
+    if [[ ! "$bdf" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; then
+      echo "invalid ALE_QEMU_VFIO_DEVICES entry: $bdf" >&2
+      exit 64
+    fi
+    vfio_arguments+=" -device vfio-pci,host=$bdf"
+  done
+  export ARGUMENTS="${ARGUMENTS:-}${vfio_arguments}"
+fi
+
 echo "starting the ALE guest from $disk_path"
 echo "the screen is on container port 8006; the guest service is expected on ${guest_port}"
+
+# Docker publishes the runner's port from another subnet. Present those connections to
+# the guest as its gateway so replies follow the same bridge back to the host.
+iptables -t nat -A POSTROUTING -p tcp -d 172.30.0.2 --dport "$guest_port" -j MASQUERADE
 
 # tini becomes PID 1 and forwards signals, so the container dies with the machine rather
 # than outliving it — an episode that leaks a running VM leaks its memory and its disk.

@@ -1,103 +1,406 @@
-"""Fetching and staging task data.
-
-Two hops, and the split is what makes pre-baking possible later (ADR 0007):
-
-1. **fetch** — a directory of published data lands in the host store under a key derived
-   from where it came from, never from any task's name. A renamed task still finds it,
-   and two tasks naming the same data share one copy.
-2. **stage** — it is copied into a sandbox at the path the task asked for.
-
-Which stage lists a mount decides when it appears. Gold answers listed under ``verify``
-are copied in during scoring only, so while the agent works they are not hidden — they
-are absent.
-"""
+"""Synchronize Task-local stage assets with same-named Hugging Face datasets."""
 
 from __future__ import annotations
 
-import asyncio
+import fcntl
+import json
+import os
 import shutil
+import tempfile
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
+from ale.core.config import resolve_asset_collection
 from ale.core.errors import AssetError
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.store import AssetOrigin, data_key
-from ale.core.taskspec import AssetMount
-from ale.run.sources import cache_root
+from ale.run.tasksets.manifest import load_tasks
 
-__all__ = ["MaterialisedAsset", "fetch_mount", "stage_mounts"]
+Stage = Literal["image", "setup", "verify", "oracle"]
+STAGES: tuple[Stage, ...] = ("image", "setup", "verify", "oracle")
+
+__all__ = [
+    "AssetObservation",
+    "AssetRepositorySelection",
+    "AssetSyncResult",
+    "asset_status",
+    "observe_task_assets",
+    "pull_assets",
+    "push_assets",
+    "select_asset_repositories",
+]
 
 
 @dataclass(frozen=True)
-class MaterialisedAsset:
-    """One mount, and how it got here — both go into provenance."""
-
-    mount: AssetMount
-    key: str
-    origin: AssetOrigin
-    path: Path
+class AssetObservation:
+    repository: str
+    task_path: str
+    commit: str | None
+    dirty: bool
 
 
-def _store_dir() -> Path:
-    return cache_root() / "store"
+@dataclass(frozen=True)
+class AssetRepositorySelection:
+    repository_name: str
+    repository_root: Path
+    tasks: tuple[object, ...]
 
 
-async def fetch_mount(mount: AssetMount) -> MaterialisedAsset:
-    """Bring a mount's data into the host store, if it is not already there."""
-    key = data_key(mount.repo, mount.revision, mount.path)
-    target = _store_dir() / key
-
-    if (target / ".complete").is_file():
-        return MaterialisedAsset(mount, key, AssetOrigin.CACHE, target)
-
-    await _download(mount, target)
-    (target / ".complete").write_text(key, encoding="utf-8")
-    return MaterialisedAsset(mount, key, AssetOrigin.DOWNLOAD, target)
+@dataclass(frozen=True)
+class AssetSyncResult:
+    repository: str
+    remote_repo_id: str
+    collection_slug: str
+    commit: str
+    tasks: tuple[AssetObservation, ...]
 
 
-async def _download(mount: AssetMount, target: Path) -> None:
-    """Fetch one directory of a dataset at a pinned commit."""
-    subpath = mount.path.strip("/")
-    staging = target.with_suffix(".partial")
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True, exist_ok=True)
+def _asset_roots(task: object) -> tuple[Path, ...]:
+    folder = getattr(task, "folder", None)
+    root = getattr(folder, "root", None)
+    if not isinstance(root, Path):
+        return ()
+    return tuple(path for stage in STAGES if (path := root / stage / "assets").is_dir())
 
-    def _snapshot() -> str:
-        from huggingface_hub import snapshot_download
 
-        return snapshot_download(
-            repo_id=mount.repo,
-            repo_type="dataset",
-            revision=mount.revision or None,
-            allow_patterns=[f"{subpath}/**"],
-            local_dir=str(staging),
+def observe_task_assets(task: object) -> AssetObservation | None:
+    roots = _asset_roots(task)
+    source = task.source  # type: ignore[attr-defined]
+    if not source.repository_root or not source.repository_name or not source.task_relative_path:
+        return (
+            AssetObservation("", str(task.folder.root), None, True)  # type: ignore[attr-defined]
+            if roots
+            else None
+        )
+    with _repository_lock(source.repository_root, exclusive=True):
+        state = _read_state(source.repository_root, source.repository_name)
+        markers = state["tasks"]
+        assert isinstance(markers, dict)
+        marker = markers.get(source.task_relative_path)
+        if not roots and not isinstance(marker, dict):
+            return None
+        inventory = _asset_inventory(task)
+        dirty = not isinstance(marker, dict) or marker.get("inventory") != inventory
+        commit = marker.get("commit") if isinstance(marker, dict) else None
+        observation = AssetObservation(
+            source.repository_name,
+            source.task_relative_path,
+            commit if isinstance(commit, str) else None,
+            dirty,
+        )
+        if isinstance(marker, dict) and marker.get("dirty") != dirty:
+            marker["dirty"] = dirty
+            _write_state(source.repository_root, state)
+        return observation
+
+
+def asset_status(paths: Sequence[Path]) -> tuple[AssetObservation, ...]:
+    return tuple(
+        observation
+        for selection in select_asset_repositories(paths)
+        for task in selection.tasks
+        if (observation := observe_task_assets(task)) is not None
+    )
+
+
+def select_asset_repositories(paths: Sequence[Path]) -> tuple[AssetRepositorySelection, ...]:
+    tasks_by_root: dict[Path, object] = {}
+    for path in paths:
+        for task in load_tasks(path.expanduser().resolve()):
+            if task.spec.variant == "base":  # type: ignore[attr-defined]
+                tasks_by_root[task.folder.root] = task  # type: ignore[attr-defined]
+
+    repositories: dict[Path, list[object]] = {}
+    names: dict[str, Path] = {}
+    for task in tasks_by_root.values():
+        source = task.source  # type: ignore[attr-defined]
+        if not source.repository_root or not source.repository_name:
+            raise AssetError("asset commands require Tasks inside a Git repository")
+        previous = names.get(source.repository_name)
+        if previous is not None and previous != source.repository_root:
+            raise AssetError(f"ambiguous Task repository name {source.repository_name!r}")
+        names[source.repository_name] = source.repository_root
+        repositories.setdefault(source.repository_root, []).append(task)
+    return tuple(
+        AssetRepositorySelection(
+            root.name,
+            root,
+            tuple(sorted(items, key=lambda task: task.source.task_relative_path)),  # type: ignore[attr-defined]
+        )
+        for root, items in sorted(repositories.items(), key=lambda item: str(item[0]))
+    )
+
+
+def pull_assets(
+    paths: Sequence[Path], *, collection: str | None = None, force: bool = False
+) -> tuple[AssetSyncResult, ...]:
+    from huggingface_hub import HfApi, snapshot_download
+
+    config = resolve_asset_collection(collection)
+    api = HfApi()
+    remote_collection = api.get_collection(config.collection_slug)
+    results: list[AssetSyncResult] = []
+    for selection in select_asset_repositories(paths):
+        remote_repo_id = _collection_dataset(remote_collection, selection.repository_name)
+        commit = api.repo_info(remote_repo_id, repo_type="dataset").sha
+        if not commit:
+            raise AssetError(f"dataset {remote_repo_id} has no resolved commit")
+        dirty = [
+            item
+            for item in asset_status([task.folder.root for task in selection.tasks])
+            if item.dirty
+        ]  # type: ignore[attr-defined]
+        if dirty and not force:
+            names = ", ".join(item.task_path for item in dirty)
+            raise AssetError(f"local assets are dirty for {names}; pass --force to replace them")
+
+        with tempfile.TemporaryDirectory(prefix="ale-assets-pull-") as temporary:
+            downloaded = Path(temporary)
+            try:
+                snapshot_download(
+                    repo_id=remote_repo_id,
+                    repo_type="dataset",
+                    revision=commit,
+                    allow_patterns=[
+                        f"{task.source.task_relative_path}/*/assets/**"  # type: ignore[attr-defined]
+                        for task in selection.tasks
+                    ],
+                    local_dir=downloaded,
+                )
+                with _repository_lock(selection.repository_root, exclusive=True):
+                    _replace_selected_assets(selection.tasks, downloaded)
+                    observations = _mark_clean(selection, commit)
+            except AssetError:
+                raise
+            except Exception as exc:
+                raise AssetError(
+                    f"could not pull assets for {selection.repository_name}: {exc}"
+                ) from exc
+        results.append(
+            AssetSyncResult(
+                selection.repository_name,
+                remote_repo_id,
+                config.collection_slug,
+                commit,
+                observations,
+            )
+        )
+    return tuple(results)
+
+
+def push_assets(
+    paths: Sequence[Path], *, collection: str | None = None
+) -> tuple[AssetSyncResult, ...]:
+    from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
+
+    api = HfApi()
+    try:
+        username = str(api.whoami()["name"])
+    except Exception as exc:
+        raise AssetError(f"Hugging Face authentication is required for push: {exc}") from exc
+    if collection:
+        collection_slug = resolve_asset_collection(collection).collection_slug
+        api.get_collection(collection_slug)
+    else:
+        environment = os.environ.get("ALE_ASSETS_COLLECTION", "").strip()
+        collection_slug = (
+            resolve_asset_collection().collection_slug
+            if environment
+            else api.create_collection("assets", namespace=username, exists_ok=True).slug
         )
 
+    results: list[AssetSyncResult] = []
+    for selection in select_asset_repositories(paths):
+        remote_repo_id = f"{username}/{selection.repository_name}"
+        api.create_repo(remote_repo_id, repo_type="dataset", private=False, exist_ok=True)
+        api.add_collection_item(collection_slug, remote_repo_id, "dataset", exists_ok=True)
+        parent = api.repo_info(remote_repo_id, repo_type="dataset").sha or None
+        remote_files = set(api.list_repo_files(remote_repo_id, repo_type="dataset"))
+        operations: list[object] = []
+        selected_prefixes: list[str] = []
+        for task in selection.tasks:
+            task_path = task.source.task_relative_path  # type: ignore[attr-defined]
+            assert task_path is not None
+            prefixes = [f"{task_path}/{stage}/assets/" for stage in STAGES]
+            selected_prefixes.extend(prefixes)
+            local_files: dict[str, Path] = {}
+            for root in _asset_roots(task):
+                for file in _regular_files(root):
+                    remote = f"{task_path}/{file.relative_to(task.folder.root).as_posix()}"  # type: ignore[attr-defined]
+                    local_files[remote] = file
+                    operations.append(CommitOperationAdd(path_in_repo=remote, path_or_fileobj=file))
+            for remote in sorted(remote_files):
+                if (
+                    any(remote.startswith(prefix) for prefix in prefixes)
+                    and remote not in local_files
+                ):
+                    operations.append(CommitOperationDelete(path_in_repo=remote))
+        if operations:
+            commit = api.create_commit(
+                remote_repo_id,
+                operations,
+                commit_message="Synchronize ALE Task assets",
+                repo_type="dataset",
+                parent_commit=parent,
+            ).oid
+        elif parent:
+            commit = parent
+        else:
+            raise AssetError(f"{selection.repository_name} has no local assets to push")
+        with _repository_lock(selection.repository_root, exclusive=True):
+            observations = _mark_clean(selection, commit)
+        results.append(
+            AssetSyncResult(
+                selection.repository_name,
+                remote_repo_id,
+                collection_slug,
+                commit,
+                observations,
+            )
+        )
+    return tuple(results)
+
+
+def _replace_selected_assets(tasks: Sequence[object], downloaded: Path) -> None:
+    entries: list[tuple[Path, Path, Path]] = []
+    for task in tasks:
+        task_path = task.source.task_relative_path  # type: ignore[attr-defined]
+        assert task_path is not None
+        for stage in STAGES:
+            source = downloaded / task_path / stage / "assets"
+            destination = task.folder.root / stage / "assets"  # type: ignore[attr-defined]
+            backup = destination.with_name(f".{destination.name}.ale-backup")
+            if source.is_dir():
+                list(_regular_files(source))
+            entries.append((source, destination, backup))
+
+    for _, _, backup in entries:
+        shutil.rmtree(backup, ignore_errors=True)
     try:
-        await asyncio.to_thread(_snapshot)
-    except Exception as exc:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise AssetError(f"could not fetch {mount.repo}:{subpath}: {exc}") from exc
+        for _, destination, backup in entries:
+            if destination.exists():
+                destination.rename(backup)
+        for source, destination, _ in entries:
+            if source.is_dir():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(source, destination)
+    except Exception:
+        for _, destination, backup in entries:
+            shutil.rmtree(destination, ignore_errors=True)
+            if backup.exists():
+                backup.rename(destination)
+        raise
+    for _, _, backup in entries:
+        shutil.rmtree(backup, ignore_errors=True)
 
-    # The snapshot mirrors the repository layout; keep only the directory asked for, and
-    # rename last so an interrupted download never looks complete.
-    fetched = staging / subpath
-    if not fetched.is_dir():
-        shutil.rmtree(staging, ignore_errors=True)
-        raise AssetError(f"{subpath} is not present in {mount.repo}@{mount.revision}")
-    shutil.rmtree(target, ignore_errors=True)
-    fetched.rename(target)
-    shutil.rmtree(staging, ignore_errors=True)
+
+def _mark_clean(selection: AssetRepositorySelection, commit: str) -> tuple[AssetObservation, ...]:
+    state = _read_state(selection.repository_root, selection.repository_name)
+    markers = state["tasks"]
+    assert isinstance(markers, dict)
+    observations: list[AssetObservation] = []
+    for task in selection.tasks:
+        task_path = task.source.task_relative_path  # type: ignore[attr-defined]
+        assert task_path is not None
+        if _asset_roots(task):
+            markers[task_path] = {
+                "commit": commit,
+                "dirty": False,
+                "inventory": _asset_inventory(task),
+            }
+            observations.append(
+                AssetObservation(selection.repository_name, task_path, commit, False)
+            )
+        else:
+            markers.pop(task_path, None)
+    _write_state(selection.repository_root, state)
+    return tuple(observations)
 
 
-async def stage_mounts(sandbox: Sandbox, mounts: tuple[AssetMount, ...]) -> list[MaterialisedAsset]:
-    """Copy each mount into the sandbox at the destination the task asked for."""
-    materialised: list[MaterialisedAsset] = []
-    for mount in mounts:
-        asset = await fetch_mount(mount)
-        await sandbox.exec(["mkdir", "-p", mount.dest])
-        # Staged as the agent: a task's data is the agent's to read and often to change,
-        # and ownership set on arrival is one less thing anyone has to remember.
-        await sandbox.upload_dir(str(asset.path), mount.dest, identity=Identity.AGENT)
-        materialised.append(asset)
-    return materialised
+def _asset_inventory(task: object) -> list[dict[str, int | str]]:
+    task_root = task.folder.root  # type: ignore[attr-defined]
+    inventory: list[dict[str, int | str]] = []
+    for root in _asset_roots(task):
+        for path in (root, *sorted(root.rglob("*"))):
+            if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                raise AssetError(f"Task assets support only regular files and directories: {path}")
+            stat = path.stat()
+            inventory.append(
+                {
+                    "path": path.relative_to(task_root).as_posix(),
+                    "type": "file" if path.is_file() else "directory",
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                }
+            )
+    return inventory
+
+
+def _regular_files(root: Path) -> Iterator[Path]:
+    if not root.is_dir():
+        return
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or (path.exists() and not path.is_file() and not path.is_dir()):
+            raise AssetError(f"Task assets support only regular files and directories: {path}")
+        if path.is_file():
+            yield path
+
+
+def _state_path(repository_root: Path) -> Path:
+    return repository_root / ".ale-cache" / "assets.json"
+
+
+def _read_state(repository_root: Path, repository: str) -> dict[str, object]:
+    path = _state_path(repository_root)
+    if not path.is_file():
+        return {"schema_version": 1, "repository": repository, "tasks": {}}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AssetError(f"invalid asset state {path}: {exc}") from exc
+    if value.get("schema_version") != 1 or value.get("repository") != repository:
+        raise AssetError(f"incompatible asset state {path}")
+    if not isinstance(value.setdefault("tasks", {}), dict):
+        raise AssetError(f"invalid asset state {path}: tasks must be an object")
+    return value
+
+
+def _write_state(repository_root: Path, state: dict[str, object]) -> None:
+    path = _state_path(repository_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+@contextmanager
+def _repository_lock(repository_root: Path, *, exclusive: bool) -> Iterator[None]:
+    lock = repository_root / ".ale-cache" / "assets.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _collection_dataset(collection: object, repository_name: str) -> str:
+    matches = [
+        item_id
+        for item in getattr(collection, "items", ())
+        if getattr(item, "item_type", getattr(item, "type", None)) == "dataset"
+        and isinstance((item_id := getattr(item, "item_id", getattr(item, "id", None))), str)
+        and item_id.rsplit("/", 1)[-1] == repository_name
+    ]
+    if len(matches) != 1:
+        raise AssetError(
+            f"collection must contain exactly one dataset named {repository_name!r}; "
+            f"found {len(matches)}"
+        )
+    return matches[0]

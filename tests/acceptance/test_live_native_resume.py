@@ -7,15 +7,15 @@ import pytest
 
 from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
 from ale.core.sandbox import SandboxRequest
-from ale.core.taskspec import ImageRef, NetworkPolicy, Resources
+from ale.core.taskspec import NetworkPolicy, Resources
 from ale.core.trace import read_jsonl
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.images import resolve_ref
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
 from ale.run.secrets import provider_credentials
+from tests.support import prepare_reference
 
 from .trajectory import LIVE, MODEL
 
@@ -35,10 +35,12 @@ async def test_real_claude_launch_and_two_resumes_share_one_native_session(tmp_p
             GatewaySession(episode_id="live-native-resume", model=MODEL),
             recording.transport,
         )
-        sandbox = await DockerProvider().create(
+        provider = DockerProvider()
+        prepared = await prepare_reference(provider, "sandbox-base-cli:latest")
+        sandbox = await provider.create(
             SandboxRequest(
                 episode_id="live-native-resume",
-                image_ref=resolve_ref(ImageRef(name="sandbox-base-cli")),
+                prepared_image=prepared,
                 resources=Resources(cpus=1, memory_mb=1024),
                 network=NetworkPolicy(),
                 gateway_url=gateway.base_url,

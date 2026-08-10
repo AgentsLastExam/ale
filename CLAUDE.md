@@ -30,8 +30,8 @@ Read this before touching the repository. It is short on purpose.
   - the gateway never imports a provider (its only interface is a URL plus a token)
   - `ale.run.guestd` imports the standard library only
   - harnesses reach sandboxes through the contract, not through a provider
-- Before implementing a component, read the reference implementation listed for it in
-  `specs/001-phase0-demo-e2e/tasks.md`. Borrow what is proven; say in the commit
+- Before implementing a component, read its living contract in `docs/specs/` and the
+  relevant feature specification in `../specs/`. Borrow what is proven; say in the commit
   message what you deliberately changed.
 - Commit straight to `main`; no pull request ceremony is required here. Run
   `just lint && just test` first — that is the whole checklist.
@@ -44,9 +44,11 @@ Read this before touching the repository. It is short on purpose.
   the decision is new.
 - Every result must carry a complete `RunLock`. Never report a run whose provenance is
   incomplete.
-- Sandboxes are network-denied by default with the gateway as the only egress, real
-  credentials never enter a sandbox, and task materials marked invisible never appear
-  during the agent phase.
+- During the evaluated solver phase, sandboxes are network-denied by default with the
+  Gateway as the only egress and real provider credentials never enter the solver
+  environment. Trusted verification may receive only its run-configured Judge credential
+  for the verifier process lifetime. Task materials marked invisible never appear during
+  the agent phase.
 
 ## Tests
 

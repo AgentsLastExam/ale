@@ -20,7 +20,8 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import ScriptedPolicyHarness
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.tasksets.manifest import load_tasks
+from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
 
@@ -28,20 +29,25 @@ GUI_IMAGE = "ghcr.io/agentslastexam/sandbox-base-gui:latest"
 CLI_IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
 
 
+class PolicyEnvironment(StandardEnvironment):
+    async def _verify(self, task, ctx, sandbox):  # type: ignore[no-untyped-def]
+        return {"reward": 0.0}
+
+
 def gui_repo(write_repo: Callable[..., Path], root: Path) -> Path:
     """The standard fixture task, moved onto the desktop image."""
     task_root = write_repo(root)
-    manifest = task_root / "task.yaml"
-    manifest.write_text(manifest.read_text().replace(f"image: {CLI_IMAGE}", f"image: {GUI_IMAGE}"))
+    dockerfile = task_root / "image" / "Dockerfile"
+    dockerfile.write_text(dockerfile.read_text().replace(f"FROM {CLI_IMAGE}", f"FROM {GUI_IMAGE}"))
     return task_root
 
 
 async def run_policy(task_root: Path, run_dir: Path, harness: ScriptedPolicyHarness, **kwargs):  # type: ignore[no-untyped-def]
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
     return await run_episode(
         task,
-        StandardEnvironment(harness, **kwargs),
-        DockerProvider(),
+        PolicyEnvironment(harness, **kwargs),
+        provider_registry(DockerProvider()),
         run_dir=run_dir,
     )
 

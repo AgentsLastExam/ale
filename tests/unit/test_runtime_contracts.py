@@ -11,28 +11,37 @@ import pytest
 from pydantic import ValidationError
 
 from ale.core.config import (
+    AssetCollectionConfig,
     GatewayLimits,
     LoggingPolicy,
     RunConfig,
+    ale_repo_path,
     load_run_config,
     merge_layers,
     parse_override,
+    resolve_asset_collection,
 )
 from ale.core.errors import ConfigError, ProvenanceIncompleteError, ProviderCapabilityError
-from ale.core.ids import TaskId
 from ale.core.lock import (
     AgentProvenance,
     FrameworkProvenance,
     GatewayProvenance,
     ImageProvenance,
+    ResourceProvenance,
     RunLock,
     TaskProvenance,
     TaskSource,
 )
-from ale.core.sandbox import Capabilities
-from ale.core.taskspec import ImageRef, NetworkMode, NetworkPolicy, Resources, TaskSpec
+from ale.core.sandbox import Capabilities, ImageRef, ResourceAllocation
+from ale.core.taskspec import (
+    ImageKind,
+    ImageSpec,
+    NetworkMode,
+    NetworkPolicy,
+    Resources,
+    TaskSpec,
+)
 from ale.core.trace import TransportCall
-from ale.run.episode import _DiscardedArtifacts
 
 pytestmark = pytest.mark.unit
 
@@ -44,9 +53,10 @@ GUESTD = Path(__file__).resolve().parents[2] / "packages/ale-run/src/ale/run/gue
 def make_lock(**overrides: object) -> RunLock:
     base: dict[str, object] = {
         "task": TaskProvenance(
-            id=TaskId("demo-hello"),
-            domain="demo",
+            name="demo-hello",
+            variant="base",
             spec_hash=DIGEST,
+            content_digest=DIGEST,
             source=TaskSource(
                 kind="registry",
                 repo="https://example.invalid/x.git",
@@ -54,7 +64,27 @@ def make_lock(**overrides: object) -> RunLock:
                 path="tasks/demo/hello",
             ),
         ),
-        "image": ImageProvenance(ref="sandbox-base-cli:0.1.0", digest=DIGEST),
+        "image": ImageProvenance(
+            declaration=ImageSpec(kind="container"),
+            source="local",
+            input_identity=DIGEST,
+            image_source_identity=DIGEST,
+            prepared_identity=DIGEST,
+            runtime_ref="ale-task:fixture",
+            provider="docker",
+            observed_identity=DIGEST,
+            observed_ref="ale-task:fixture",
+        ),
+        "resources": ResourceProvenance(
+            requested=Resources(),
+            effective=ResourceAllocation(
+                cpus=1,
+                memory_mb=1024,
+                sudo=False,
+                network_mode="block",
+                provider="docker",
+            ),
+        ),
         "agent": AgentProvenance(
             harness="claude-code",
             family="autonomous",
@@ -76,7 +106,17 @@ class TestRunLock:
 
     def test_rejects_a_tag_where_a_digest_belongs(self) -> None:
         with pytest.raises(ValidationError):
-            ImageProvenance(ref="x:latest", digest="latest")
+            ImageProvenance(
+                declaration=ImageSpec(kind="container"),
+                source="local",
+                input_identity="latest",
+                image_source_identity=DIGEST,
+                prepared_identity=DIGEST,
+                runtime_ref="x:latest",
+                provider="docker",
+                observed_identity=DIGEST,
+                observed_ref="x:latest",
+            )
 
     def test_registry_source_requires_a_resolved_commit(self) -> None:
         with pytest.raises(ValidationError):
@@ -85,9 +125,10 @@ class TestRunLock:
     def test_local_source_is_not_reportable(self) -> None:
         lock = make_lock(
             task=TaskProvenance(
-                id=TaskId("demo-hello"),
-                domain="demo",
+                name="demo-hello",
+                variant="base",
                 spec_hash=DIGEST,
+                content_digest=DIGEST,
                 source=TaskSource(kind="local", path="/home/dev/tasks/hello"),
             )
         )
@@ -99,8 +140,34 @@ class TestRunLock:
         with pytest.raises(ProvenanceIncompleteError, match="commit"):
             lock.require_reportable()
 
+    def test_pre_release_schema_version_does_not_change(self) -> None:
+        assert make_lock().framework.schema_version == 2
+
 
 class TestConfigLayering:
+    def test_ale_repo_path_is_absolute(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        checkout = tmp_path / "ale"
+        (checkout / "packages" / "ale-run").mkdir(parents=True)
+        (checkout / "pyproject.toml").write_text("[project]\nname='ale'\n")
+        monkeypatch.setenv("ALE_REPO_PATH", str(checkout))
+        assert ale_repo_path() == checkout
+        monkeypatch.setenv("ALE_REPO_PATH", "relative")
+        with pytest.raises(ConfigError, match="absolute"):
+            ale_repo_path()
+
+    def test_asset_collection_cli_overrides_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ALE_ASSETS_COLLECTION", "user/assets-env")
+        assert resolve_asset_collection().collection_slug == "user/assets-env"
+        resolved = resolve_asset_collection("user/assets-cli")
+        assert resolved == AssetCollectionConfig(
+            collection_slug="user/assets-cli",
+            source="cli",
+        )
+
     def test_precedence_is_cli_over_run_over_preset(self) -> None:
         merged = merge_layers(
             preset={"agent": {"model": "preset-model", "name": "claude-code"}},
@@ -241,13 +308,14 @@ class TestArtifactPolicy:
 
     def test_a_task_declares_paths_not_dispositions(self) -> None:
         spec = TaskSpec(
-            id=TaskId("demo-hello"),
-            domain="demo",
+            name="demo-hello",
             instruction="write",
-            image=ImageRef(name="sandbox-base-cli"),
+            image={"kind": "container"},
             artifacts=("/home/user/output",),
         )
         assert spec.artifacts == ("/home/user/output",)
+        assert spec.image.kind is ImageKind.CONTAINER
+        assert ImageRef(kind="container", reference="local:build").kind == "container"
 
     def test_the_run_decides_whether_to_keep_them(self) -> None:
         assert RunConfig().artifacts.collect == "host"
@@ -259,12 +327,6 @@ class TestArtifactPolicy:
         kept = RunConfig()
         dropped = RunConfig.model_validate({"artifacts": {"collect": "none"}})
         assert kept.config_hash != dropped.config_hash
-
-    @pytest.mark.asyncio
-    async def test_discarding_still_satisfies_the_sink(self) -> None:
-        """Environments collect unconditionally; the sink is where the policy lives."""
-        sink = _DiscardedArtifacts(Path("/nowhere"))
-        assert await sink.collect(None, "/home/user/output", "output") == sink.path("output")
 
 
 class TestFailedModelCalls:

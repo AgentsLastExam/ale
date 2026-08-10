@@ -14,10 +14,18 @@ from pathlib import Path
 
 import pytest
 
+from ale.core.sandbox import Identity, ImageRef
+from ale.core.taskspec import NetworkMode
 from ale.core.testkit import ProviderConformance
 from ale.run.providers.qemu import QemuProvider
+from ale.run.sources import cache_root
 
-DEFAULT_IMAGE = Path.home() / ".cache/ale/images/ale-ubuntu-desktop.qcow2"
+LEGACY_IMAGE = Path.home() / ".cache/ale/images/ale-ubuntu-desktop.qcow2"
+DEFAULT_IMAGE = max(
+    (cache_root() / "vm-builds").glob("*.qcow2"),
+    key=lambda path: path.stat().st_mtime_ns,
+    default=LEGACY_IMAGE,
+)
 IMAGE = Path(os.environ.get("ALE_QEMU_IMAGE", DEFAULT_IMAGE))
 
 pytestmark = [
@@ -25,7 +33,7 @@ pytestmark = [
     pytest.mark.needs_kvm,
     pytest.mark.skipif(
         not IMAGE.is_file(),
-        reason=f"no guest image at {IMAGE}; build one with images/base/qemu/build-desktop.sh",
+        reason=f"no prepared VM disk at {IMAGE}; run ale prepare on a VM Task",
     ),
 ]
 
@@ -34,7 +42,25 @@ class TestQemuProvider(ProviderConformance):
     """Every assertion in the shared suite, run against a virtual machine."""
 
     provider = QemuProvider(image=IMAGE)
-    image_ref = "ale-ubuntu-desktop"
+    image = ImageRef(kind="vm", reference="ale-guest-ubuntu-desktop:24.04")
     #: The same disk. There is one VM guest and it has a desktop, so the GUI half of
     #: the shared suite runs against it rather than being skipped.
-    gui_image_ref = "ale-ubuntu-desktop"
+    gui_image = image
+
+    @pytest.mark.asyncio
+    async def test_ubuntu_gnome_session_and_fresh_overlay(self) -> None:
+        assert self.provider.capabilities().network_modes == frozenset(NetworkMode)
+        first = await self.provider.create(await self.request())
+        try:
+            release = await first.exec(["sh", "-c", ". /etc/os-release; echo $VERSION_ID"])
+            assert release.stdout.strip() == "24.04"
+            assert (await first.exec(["systemctl", "is-active", "ale-guestd"])).ok
+            assert (await first.exec(["systemctl", "is-active", "gdm3"])).ok
+            assert (await first.exec(["pgrep", "-x", "gnome-shell"], identity=Identity.AGENT)).ok
+            assert (await first.screenshot()).startswith(b"\x89PNG")
+            await first.write_file("/home/user/overlay-marker", b"first")
+        finally:
+            await first.destroy()
+
+        async with await self.provider.create(await self.request()) as fresh:
+            assert not (await fresh.exec(["test", "-e", "/home/user/overlay-marker"])).ok

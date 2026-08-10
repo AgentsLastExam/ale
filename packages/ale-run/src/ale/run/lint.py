@@ -1,13 +1,4 @@
-"""Static checks on a task repository.
-
-Everything here is answerable without starting a container, which is the whole point:
-a task author iterating on a manifest should learn about a typo in under a second, not
-after an image pull. ``ale validate`` is the other half — it runs the oracle and costs a
-container — and the two are deliberately separate so the cheap one can run on every save.
-
-A finding names the file it is about and says what to do. "invalid manifest" sends
-someone reading a schema; "revision must be a commit, not a branch" does not.
-"""
+"""Fast static checks for self-contained Task folders."""
 
 from __future__ import annotations
 
@@ -15,27 +6,33 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 from ale.core.errors import TaskDefinitionError
-from ale.core.taskspec import TaskSpec
 from ale.run.tasksets.manifest import (
-    DOMAIN_MANIFEST,
     INSTRUCTION,
     STAGE_ENTRY,
     TASK_MANIFEST,
-    ManifestTaskset,
     TaskFolder,
+    discover_task_folders,
+    load_tasks,
 )
 
 __all__ = ["Finding", "lint_repository"]
 
-#: A branch or tag moves; a run that recorded one cannot be reproduced from it.
-_COMMIT = re.compile(r"^[0-9a-f]{7,40}$")
+_FIXED_SETUP = re.compile(r"\b(apt-get|apt |dnf |yum |pip3? install|curl |wget )")
+_CONTAINER_BASE = re.compile(r"^ghcr\.io/agentslastexam/sandbox-base-(cli|gui):[^ ]+$")
+_VM_BASE = re.compile(r"^ghcr\.io/agentslastexam/sandbox-base-vm-gui:(?!latest$)[^ ]+$")
+_VM_RESERVED_NAMES = {
+    "ale-guestd.service",
+    "autoinstall.yaml",
+    "loader.conf",
+    "mkosi.conf",
+}
 
 
 @dataclass(frozen=True)
 class Finding:
-    """One problem, where it is, and what to do about it."""
-
     path: Path
     message: str
 
@@ -44,98 +41,172 @@ class Finding:
 
 
 def lint_repository(path: Path) -> list[Finding]:
-    """Check every task the given path selects.
-
-    Loading is itself most of the check: the manifest schema, strict instruction
-    rendering and legacy-path rejection all raise during load, so they are reported
-    here rather than reimplemented.
-    """
     findings: list[Finding] = []
+    source = path.expanduser().resolve()
+    if not (source / TASK_MANIFEST).is_file():
+        for removed, replacement in (
+            ("domain.yaml", "put the stable name in each Task's task.yaml"),
+            ("kits", "move Task-specific helpers below the owning Task"),
+            ("images", "put each Dockerfile below its Task image/ directory"),
+            ("files", "put content below the Task stage that owns it"),
+            ("skills", "move Task Skills below tools/skills/"),
+            ("mcp", "move Task MCP below tools/mcp/"),
+        ):
+            candidate = source / removed
+            if candidate.exists():
+                findings.append(Finding(candidate, f"removed concept; {replacement}"))
 
     try:
-        taskset = ManifestTaskset(path)
+        folders = discover_task_folders(source)
     except TaskDefinitionError as error:
-        return [Finding(path / DOMAIN_MANIFEST, str(error))]
+        return [*findings, Finding(source, str(error))]
 
-    seen: dict[str, Path] = {}
-    for folder in taskset.folders():
-        manifest = folder.root / TASK_MANIFEST
+    for folder in folders:
         findings.extend(_check_folder(folder))
-        try:
-            specs = [task.spec for task in taskset.load_folder(folder)]
-        except TaskDefinitionError as error:
-            findings.append(Finding(manifest, str(error)))
-            continue
-
-        for spec in specs:
-            findings.extend(_check_spec(spec, manifest))
-            label = spec.label
-            if label in seen:
-                findings.append(
-                    Finding(manifest, f"duplicate task {label}, already defined by {seen[label]}")
-                )
-            seen[label] = manifest
-
+    try:
+        load_tasks(source)
+    except TaskDefinitionError as error:
+        findings.append(Finding(source / TASK_MANIFEST, str(error)))
     return findings
 
 
 def _check_folder(folder: TaskFolder) -> list[Finding]:
-    """The files a runnable task cannot do without."""
     findings: list[Finding] = []
+    required = {
+        INSTRUCTION: folder.root / INSTRUCTION,
+        "verify/run.sh": folder.root / "verify" / STAGE_ENTRY,
+        "oracle/run.sh": folder.root / "oracle" / STAGE_ENTRY,
+    }
+    for label, file in required.items():
+        if not file.is_file():
+            findings.append(Finding(folder.root, f"no {label}"))
 
-    if not (folder.root / INSTRUCTION).is_file():
-        findings.append(Finding(folder.root, f"no {INSTRUCTION}: the agent would get no prompt"))
-
-    verify = folder.stage_entry("verify")
-    if verify is None:
-        findings.append(
-            Finding(folder.root, f"no verify/{STAGE_ENTRY}: nothing would score this task")
-        )
-    elif not _is_executable(verify):
-        findings.append(Finding(verify, "not executable: chmod +x it"))
-
-    if folder.stage_entry("oracle") is None:
-        findings.append(
-            Finding(
-                folder.root,
-                "no oracle/run.sh. Every task must prove that its real verifier can "
-                "award full credit through the ordinary agent path",
+    for removed in ("files", "kits", "skills", "mcp"):
+        candidate = folder.root / removed
+        if candidate.exists():
+            findings.append(
+                Finding(
+                    candidate,
+                    f"top-level {removed}/ is removed; place content in its owning Task stage",
+                )
             )
-        )
 
-    for stage in ("setup", "oracle"):
+    allowed = {
+        "task.yaml",
+        "instruction.md",
+        "image",
+        "setup",
+        "verify",
+        "oracle",
+        "tools",
+        ".ale-cache",
+    }
+    for entry in folder.root.iterdir():
+        if entry.name not in allowed:
+            findings.append(
+                Finding(entry, "unsupported top-level Task entry; move it into its owning stage")
+            )
+
+    manifest: dict[str, object] = {}
+    manifest_path = folder.root / TASK_MANIFEST
+    if manifest_path.is_file():
+        try:
+            loaded = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError:
+            loaded = {}
+        manifest = loaded if isinstance(loaded, dict) else {}
+        if isinstance(manifest, dict):
+            for field in ("image", "setup", "verify"):
+                section = manifest.get(field)
+                if isinstance(section, dict) and "assets" in section:
+                    findings.append(
+                        Finding(
+                            manifest_path,
+                            f"{field}.assets asset declarations are removed; "
+                            "place canonical bytes below "
+                            f"{field}/assets/",
+                        )
+                    )
+
+    for stage in ("setup", "verify", "oracle"):
         entry = folder.stage_entry(stage)
         if entry is not None and not _is_executable(entry):
             findings.append(Finding(entry, "not executable: chmod +x it"))
 
-    return findings
-
-
-def _check_spec(spec: TaskSpec, manifest: Path) -> list[Finding]:
-    findings: list[Finding] = []
-
-    for stage_name, stage in (("setup", spec.setup), ("verify", spec.verify)):
-        for mount in stage.assets:
-            if not _COMMIT.match(mount.revision):
-                findings.append(
-                    Finding(
-                        manifest,
-                        f"{stage_name} asset {mount.path!r} pins revision {mount.revision!r}, "
-                        "which is not a commit. A branch moves, so two runs naming it would "
-                        "not read the same bytes",
+    dockerfile = folder.image_dir / "Dockerfile"
+    image = manifest.get("image")
+    kind = image.get("kind") if isinstance(image, dict) else None
+    ref = image.get("ref") if isinstance(image, dict) else None
+    if dockerfile.is_file():
+        final = _final_from(dockerfile)
+        expected = _VM_BASE if kind == "vm" else _CONTAINER_BASE
+        if final is None or not expected.fullmatch(final):
+            label = (
+                "sandbox-base-vm-gui" if kind == "vm" else "sandbox-base-cli or sandbox-base-gui"
+            )
+            findings.append(
+                Finding(
+                    dockerfile,
+                    f"final stage for declared {kind or 'unknown'} kind must derive directly "
+                    f"from an ALE {label} image",
+                )
+            )
+        if kind == "vm" and _vm_boot_override(dockerfile):
+            findings.append(
+                Finding(dockerfile, "VM final stage must not declare CMD or ENTRYPOINT")
+            )
+        if kind == "vm":
+            for entry in folder.image_dir.rglob("*"):
+                if entry.is_file() and (
+                    entry.name in _VM_RESERVED_NAMES or entry.suffix in {".qcow2", ".raw"}
+                ):
+                    findings.append(
+                        Finding(entry, "VM boot and disk materialization files are ALE-owned")
                     )
-                )
-            if not mount.dest.startswith("/"):
-                findings.append(
-                    Finding(manifest, f"{stage_name} asset dest {mount.dest!r} must be absolute")
-                )
+    elif ref is None:
+        findings.append(Finding(folder.root, "no image/Dockerfile and no image.ref"))
+    elif _has_files(folder.image_dir / "assets"):
+        findings.append(
+            Finding(folder.image_dir / "assets", "image/assets is unused for ref-only images")
+        )
 
-    for artifact in spec.artifacts:
-        if not artifact.startswith("/"):
-            findings.append(Finding(manifest, f"artifact path {artifact!r} must be absolute"))
+    verify = folder.root / "verify"
+    if (verify / "check.py").exists() and not (verify / "verify.py").exists():
+        findings.append(Finding(verify / "check.py", "rename the default verifier to verify.py"))
 
+    setup = folder.stage_entry("setup")
+    if setup and _FIXED_SETUP.search(setup.read_text(encoding="utf-8", errors="replace")):
+        findings.append(
+            Finding(
+                setup,
+                "fixed installation or download belongs in image/Dockerfile; "
+                "setup is for episode-dynamic initialization",
+            )
+        )
     return findings
+
+
+def _final_from(path: Path) -> str | None:
+    images: list[str] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = re.match(r"^\s*FROM\s+([^\s]+)", line, flags=re.IGNORECASE)
+        if match:
+            images.append(match.group(1))
+    return images[-1] if images else None
+
+
+def _vm_boot_override(path: Path) -> bool:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    final_from = max(
+        (index for index, line in enumerate(lines) if re.match(r"^\s*FROM\s+", line, re.I)),
+        default=-1,
+    )
+    return any(re.match(r"^\s*(CMD|ENTRYPOINT)\b", line, re.I) for line in lines[final_from + 1 :])
+
+
+def _has_files(path: Path) -> bool:
+    return path.is_dir() and any(item.is_file() for item in path.rglob("*"))
 
 
 def _is_executable(path: Path) -> bool:
-    return path.stat().st_mode & 0o111 != 0
+    return bool(path.stat().st_mode & 0o111)

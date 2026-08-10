@@ -19,13 +19,12 @@ from ale.core.taskspec import (
     NetworkMode,
     NetworkPolicy,
     SkillSource,
+    StdioMcpServer,
     StreamableHttpMcpServer,
     ToolProvision,
 )
 
 __all__ = ["continuation_fingerprint", "resolve_agent_resources"]
-
-_INVISIBLE = {"task.yaml", "verify", "oracle"}
 
 
 def continuation_fingerprint(
@@ -114,8 +113,8 @@ def _resolve_skill_source(
         path = (root / path).resolve()
         _inside(path, root, f"Task Skill {declared!r}")
         relative = path.relative_to(root)
-        if relative.parts and relative.parts[0] in _INVISIBLE:
-            raise AgentResourceError(f"Task Skill {declared!r} enters agent-invisible material")
+        if relative.parts[:2] != ("tools", "skills"):
+            raise AgentResourceError(f"Task Skill {declared!r} must be below tools/skills/")
     else:
         path = path.resolve()
 
@@ -264,8 +263,8 @@ def _resolve_mcp_source(
         path = (root / path).resolve()
         _inside(path, root, f"Task MCP {declared!r}")
         relative = path.relative_to(root)
-        if relative.parts and relative.parts[0] in _INVISIBLE:
-            raise AgentResourceError(f"Task MCP {declared!r} enters agent-invisible material")
+        if relative.parts[:2] != ("tools", "mcp"):
+            raise AgentResourceError(f"Task MCP {declared!r} must be below tools/mcp/")
     else:
         path = path.resolve()
     if not path.is_file():
@@ -279,6 +278,10 @@ def _resolve_mcp_source(
         raise AgentResourceError(f"invalid MCP descriptor {declared!r}: {exc}") from exc
     _check_network(server, network)
 
+    staged_files = None
+    if isinstance(server, StdioMcpServer):
+        staged_files = path.parent
+
     external = isinstance(server, StreamableHttpMcpServer)
     reportable = origin == "task" and task_source.kind == "registry" and not external
     version = task_source.commit if reportable else None
@@ -289,15 +292,17 @@ def _resolve_mcp_source(
         if reportable
         else _reportability_reason(origin, task_source)
     )
+    files_digest = _directory_digest(staged_files, staged_files)[0] if staged_files else None
     return ResolvedMcpServer(
         name=server.name,
         server=server,
         source_layers=(origin,),  # type: ignore[arg-type]
         declared_sources=(declared,),
-        digest=content_hash(server.model_dump(mode="json")),
+        digest=content_hash({"server": server.model_dump(mode="json"), "files": files_digest}),
         source_version=version,
         reportable=reportable,
         reportability_reason=reason,
+        staged_files=staged_files,
     )
 
 

@@ -9,32 +9,58 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from ale.core.errors import ProviderCapabilityError
-from ale.core.sandbox import SandboxRequest
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
-from ale.run.providers.qemu import HOST_IP, QemuProvider, QemuSandbox, _port_of
+from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.core.sandbox import (
+    Identity,
+    ImageRef,
+    PreparedTaskImage,
+    ResolvedImage,
+    SandboxRequest,
+)
+from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, Resources
+from ale.run.providers.qemu import (
+    HOST_IP,
+    VM_STORAGE_OVERHEAD_MB,
+    QemuProvider,
+    QemuSandbox,
+    _index_vfio_gpus,
+    _inspect_vfio_gpu,
+    _port_of,
+    _verify_qemu_gpu_count,
+    _VfioGpu,
+)
 
 pytestmark = pytest.mark.unit
 
 
 def request(**overrides: object) -> SandboxRequest:
+    digest = "sha256:" + "0" * 64
     base: dict[str, object] = {
         "episode_id": "e1",
-        "image_ref": "ale-ubuntu-desktop",
+        "prepared_image": PreparedTaskImage(
+            kind="vm",
+            source="external-ref",
+            input_identity=digest,
+            runtime_ref="/tmp/ale-ubuntu-desktop.qcow2",
+            prepared_identity=digest,
+            resolved_reference="local:///tmp/ale-ubuntu-desktop.qcow2",
+        ),
         "resources": Resources(cpus=2, memory_mb=2048),
         "network": NetworkPolicy(),
         "gateway_url": "http://0.0.0.0:8931",
+        "proxy_token": "episode-token",
     }
     return SandboxRequest(**(base | overrides))  # type: ignore[arg-type]
 
 
 class TestPreflight:
-    def test_a_missing_image_names_the_way_to_build_one(self, tmp_path: Path) -> None:
+    def test_a_missing_image_names_the_way_to_prepare_one(self, tmp_path: Path) -> None:
         provider = QemuProvider(image=tmp_path / "absent.qcow2")
-        with pytest.raises(ProviderCapabilityError, match=r"build-desktop\.sh"):
+        with pytest.raises(ProviderCapabilityError, match=r"ale prepare"):
             asyncio.run(provider.preflight())
 
     def test_problems_are_reported_together(self, tmp_path: Path) -> None:
@@ -46,19 +72,214 @@ class TestPreflight:
             assert "guest image" in str(error)
 
 
-class TestCapabilities:
-    def test_allowlist_is_refused_rather_than_degraded(self) -> None:
-        """The in-guest rules are not written, so claiming the mode would be a lie."""
-        provider = QemuProvider()
-        assert NetworkMode.ALLOWLIST not in provider.capabilities().network_modes
-        with pytest.raises(ProviderCapabilityError, match="allowlist"):
-            provider.accepts(
-                request(
-                    network=NetworkPolicy(
-                        mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)
-                    )
-                )
+def test_cancelled_boot_removes_the_started_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        commands.append(argv)
+        return (0, "container-id\n", "") if argv[:2] == ("docker", "run") else (0, "", "")
+
+    async def cancel_sleep(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.asyncio.sleep", cancel_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            QemuProvider()._boot(
+                request(),
+                tmp_path,
+                tmp_path / "base.qcow2",
+                7411,
             )
+        )
+
+    assert commands[-1][:3] == ("docker", "rm", "-f")
+    assert commands[-1][3].startswith("ale-qemu-")
+
+
+def test_overlay_uses_the_prepared_disks_virtual_size(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        commands.append(argv)
+        if argv[:2] == ("qemu-img", "info"):
+            return 0, '{"virtual-size":42949672960}', ""
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    asyncio.run(QemuProvider()._make_overlay(tmp_path / "overlay.qcow2", tmp_path / "base.qcow2"))
+    assert commands[-1][-1] == "42949672960"
+
+
+def test_overlay_size_is_driven_by_requested_storage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        commands.append(argv)
+        if argv[:2] == ("qemu-img", "info"):
+            return 0, '{"virtual-size":7516192768}', ""
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    asyncio.run(
+        QemuProvider()._make_overlay(
+            tmp_path / "overlay.qcow2",
+            tmp_path / "base.qcow2",
+            requested_storage_mb=8192,
+        )
+    )
+    assert commands[-1][-1] == str((8192 + VM_STORAGE_OVERHEAD_MB) * 1024 * 1024)
+
+
+def test_vm_storage_uses_observed_root_filesystem_capacity() -> None:
+    class Client:
+        async def exec(self, *_args: object, **_kwargs: object) -> tuple[int, str, str, bool]:
+            return (
+                0,
+                "Filesystem 1048576-blocks Used Available Capacity Mounted on\n"
+                "root 40123 1 40122 1% /\n",
+                "",
+                False,
+            )
+
+    assert asyncio.run(QemuProvider()._root_capacity_mb(Client())) == 40123  # type: ignore[arg-type]
+
+
+def test_invalid_vm_root_capacity_is_rejected() -> None:
+    class Client:
+        async def exec(self, *_args: object, **_kwargs: object) -> tuple[int, str, str, bool]:
+            return 1, "", "df failed", False
+
+    with pytest.raises(ProviderStartError, match="df failed"):
+        asyncio.run(QemuProvider()._root_capacity_mb(Client()))  # type: ignore[arg-type]
+
+
+def test_vm_root_storage_expands_to_the_request() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.capacities = iter((6433, 8677))
+            self.commands: list[tuple[str, ...]] = []
+
+        async def exec(self, argv: list[str], **_kwargs: object) -> tuple[int, str, str, bool]:
+            self.commands.append(tuple(argv))
+            if argv[0] == "df":
+                capacity = next(self.capacities)
+                return (
+                    0,
+                    "Filesystem 1048576-blocks Used Available Capacity Mounted on\n"
+                    f"root {capacity} 1 {capacity - 1} 1% /\n",
+                    "",
+                    False,
+                )
+            return 0, "", "", False
+
+    client = Client()
+    assert asyncio.run(QemuProvider()._prepare_root_storage(client, 8192)) == 8677  # type: ignore[arg-type]
+    assert client.commands == [
+        ("df", "-Pm", "/"),
+        ("systemd-repart", "--dry-run=no"),
+        ("/usr/lib/systemd/systemd-growfs", "/"),
+        ("df", "-Pm", "/"),
+    ]
+
+
+def test_desktop_readiness_retries_a_transient_probe_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def exec(self, *_args: object, **_kwargs: object) -> tuple[int, str, str, bool]:
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError
+            return 0, "", "", False
+
+        async def screenshot(self) -> bytes:
+            return b"non-flat-png"
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("ale.run.providers.qemu.asyncio.sleep", no_sleep)
+    client = Client()
+    asyncio.run(QemuProvider()._await_desktop(client, "user", timeout_sec=1))  # type: ignore[arg-type]
+    assert client.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_prepared_vm_is_checked_without_runtime_reference_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = request().prepared_image
+    seen: list[PreparedTaskImage] = []
+
+    async def check(image: PreparedTaskImage) -> ResolvedImage:
+        seen.append(image)
+        return ResolvedImage(
+            kind="vm",
+            prepared_identity=image.prepared_identity,
+            observed_identity=image.prepared_identity,
+            observed_ref=image.runtime_ref,
+        )
+
+    async def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a prepared VM must not be pulled again")
+
+    monkeypatch.setattr("ale.run.providers.qemu.resolve_prepared_vm_image", check)
+    monkeypatch.setattr("ale.run.providers.qemu.resolve_vm_image", forbidden)
+    assert await QemuProvider().prepare_image(prepared) is prepared
+    assert seen == [prepared]
+
+
+@pytest.mark.asyncio
+async def test_vm_reference_uses_provider_acquisition_and_wrong_kind_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = request().prepared_image
+
+    async def acquire(image: ImageRef, **_kwargs: object) -> PreparedTaskImage:
+        assert image == ImageRef(kind="vm", reference="ghcr.io/acme/vm:v1")
+        return prepared
+
+    async def check(image: PreparedTaskImage) -> ResolvedImage:
+        return ResolvedImage(
+            kind="vm",
+            prepared_identity=image.prepared_identity,
+            observed_identity=image.prepared_identity,
+            observed_ref=image.runtime_ref,
+        )
+
+    monkeypatch.setattr("ale.run.providers.qemu.resolve_vm_image", acquire)
+    monkeypatch.setattr("ale.run.providers.qemu.resolve_prepared_vm_image", check)
+    assert (
+        await QemuProvider().prepare_image(ImageRef(kind="vm", reference="ghcr.io/acme/vm:v1"))
+        == prepared
+    )
+    with pytest.raises(ProviderCapabilityError, match="kind=vm"):
+        await QemuProvider().prepare_image(
+            ImageRef(kind=ImageKind.CONTAINER, reference="ghcr.io/acme/container:v1")
+        )
+
+
+class TestCapabilities:
+    def test_allowlist_is_offered(self) -> None:
+        provider = QemuProvider()
+        assert NetworkMode.ALLOWLIST in provider.capabilities().network_modes
+        provider.accepts(
+            request(
+                network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",))
+            )
+        )
 
     def test_block_and_open_are_offered(self) -> None:
         modes = QemuProvider().capabilities().network_modes
@@ -104,3 +325,172 @@ class TestGatewayPort:
     )
     def test_ports_are_read_from_the_url(self, url: str | None, expected: str) -> None:
         assert _port_of(url) == expected
+
+
+class TestVfioGpu:
+    def test_validates_a_prebound_nvidia_device(self, tmp_path: Path) -> None:
+        sysfs = tmp_path / "sys"
+        device = sysfs / "bus/pci/devices/0000:65:00.0"
+        group = sysfs / "kernel/iommu_groups/17"
+        member = group / "devices/0000:65:00.0"
+        device.mkdir(parents=True)
+        member.mkdir(parents=True)
+        (device / "vendor").write_text("0x10de\n")
+        (device / "class").write_text("0x030000\n")
+        (device / "iommu_group").symlink_to(group)
+        (device / "driver").symlink_to(sysfs / "bus/pci/drivers/vfio-pci")
+        vfio = tmp_path / "dev/vfio"
+        vfio.mkdir(parents=True)
+        (vfio / "vfio").touch()
+        (vfio / "17").touch()
+
+        gpu = _inspect_vfio_gpu("0000:65:00.0", sysfs=sysfs, dev=tmp_path / "dev")
+        assert gpu.bdf == "0000:65:00.0"
+        assert gpu.group == "17"
+
+    @pytest.mark.parametrize(
+        ("vendor", "klass", "driver", "message"),
+        [
+            ("0x1234", "0x030000", "vfio-pci", "NVIDIA"),
+            ("0x10de", "0x020000", "vfio-pci", "GPU"),
+            ("0x10de", "0x030000", "nvidia", "vfio-pci"),
+        ],
+    )
+    def test_rejects_unsafe_devices(
+        self,
+        tmp_path: Path,
+        vendor: str,
+        klass: str,
+        driver: str,
+        message: str,
+    ) -> None:
+        sysfs = tmp_path / "sys"
+        device = sysfs / "bus/pci/devices/0000:65:00.0"
+        group = sysfs / "kernel/iommu_groups/17"
+        (group / "devices/0000:65:00.0").mkdir(parents=True)
+        device.mkdir(parents=True, exist_ok=True)
+        (device / "vendor").write_text(vendor)
+        (device / "class").write_text(klass)
+        (device / "iommu_group").symlink_to(group)
+        (device / "driver").symlink_to(sysfs / f"bus/pci/drivers/{driver}")
+        with pytest.raises(ProviderCapabilityError, match=message):
+            _inspect_vfio_gpu("0000:65:00.0", sysfs=sysfs, dev=tmp_path / "dev")
+
+    def test_rejects_two_gpu_candidates_in_one_iommu_group(self) -> None:
+        with pytest.raises(ProviderCapabilityError, match="share IOMMU group 17"):
+            _index_vfio_gpus(
+                (
+                    _VfioGpu("0000:65:00.0", "17"),
+                    _VfioGpu("0000:66:00.0", "17"),
+                )
+            )
+
+    def test_guest_must_observe_the_requested_count(self) -> None:
+        with pytest.raises(ProviderCapabilityError, match="count mismatch"):
+            _verify_qemu_gpu_count(1, ())
+
+
+class _ExecClient:
+    def __init__(self) -> None:
+        self.env: dict[str, str] | None = None
+        self.argv: object = None
+
+    async def exec(self, argv: object, **kwargs: Any) -> tuple[int, str, str, bool]:
+        self.argv = argv
+        self.env = kwargs.get("env")
+        return 0, "", "", False
+
+
+def test_open_mode_flushes_the_guest_firewall(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_run(*_argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    sandbox = QemuSandbox.__new__(QemuSandbox)
+    sandbox.request = request(network=NetworkPolicy(mode=NetworkMode.OPEN))  # type: ignore[attr-defined]
+    sandbox.container = "runner"  # type: ignore[attr-defined]
+    sandbox.host_ip = "172.17.0.1"  # type: ignore[attr-defined]
+    sandbox._client = _ExecClient()  # type: ignore[attr-defined]
+    sandbox._sealed = True  # type: ignore[attr-defined]
+
+    asyncio.run(sandbox.open_egress())
+
+    assert sandbox._client.argv == ["nft", "flush", "ruleset"]  # type: ignore[attr-defined]
+    assert sandbox._sealed is False  # type: ignore[attr-defined]
+
+
+def test_allowlist_proxy_is_injected_only_for_sealed_agent_commands() -> None:
+    sandbox = QemuSandbox.__new__(QemuSandbox)
+    sandbox.request = request(  # type: ignore[attr-defined]
+        network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
+        proxy_url="http://0.0.0.0:9443",
+    )
+    sandbox.agent_user = "user"  # type: ignore[attr-defined]
+    sandbox._client = _ExecClient()  # type: ignore[attr-defined]
+    sandbox._sealed = False  # type: ignore[attr-defined]
+
+    asyncio.run(sandbox.exec(["true"], identity=Identity.AGENT))
+    assert sandbox._client.env is None  # type: ignore[attr-defined]
+
+    sandbox._sealed = True  # type: ignore[attr-defined]
+    asyncio.run(sandbox.exec(["true"], identity=Identity.AGENT))
+    assert sandbox._client.env == {  # type: ignore[attr-defined]
+        "HTTP_PROXY": "http://episode-token@172.30.0.1:9443",
+        "HTTPS_PROXY": "http://episode-token@172.30.0.1:9443",
+        "http_proxy": "http://episode-token@172.30.0.1:9443",
+        "https_proxy": "http://episode-token@172.30.0.1:9443",
+        "NO_PROXY": "172.30.0.1,localhost,127.0.0.1",
+    }
+
+
+def test_allowlist_forwards_gateway_and_proxy_ports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        command = argv[-1]
+        if "ip route" in command:
+            return 0, "172.17.0.1\n", ""
+        commands.append(command)
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    provider = QemuProvider()
+    host = asyncio.run(
+        provider._wire_network(
+            "runner",
+            request(
+                network=NetworkPolicy(
+                    mode=NetworkMode.ALLOWLIST,
+                    allowed_hosts=("example.com",),
+                ),
+                proxy_url="http://0.0.0.0:9443",
+            ),
+        )
+    )
+    assert host == "172.17.0.1"
+    assert any("--dport 8931" in command for command in commands)
+    assert any("--dport 9443" in command for command in commands)
+
+
+def test_allowlist_direct_bypass_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    rules: list[str] = []
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        rules.append(argv[-1])
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    sandbox = QemuSandbox.__new__(QemuSandbox)
+    sandbox.request = request(  # type: ignore[attr-defined]
+        network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",))
+    )
+    sandbox.container = "runner"  # type: ignore[attr-defined]
+    sandbox.host_ip = "172.17.0.1"  # type: ignore[attr-defined]
+    sandbox._client = _ExecClient()  # type: ignore[attr-defined]
+    sandbox._sealed = False  # type: ignore[attr-defined]
+
+    asyncio.run(sandbox.close_egress())
+    assert any("FORWARD -i docker ! -d 172.17.0.1 -j DROP" in rule for rule in rules)
+    assert sandbox._sealed is True  # type: ignore[attr-defined]

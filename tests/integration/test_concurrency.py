@@ -12,6 +12,7 @@ by two episodes at once. This is the test those would fail.
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -21,12 +22,14 @@ from ale.core.harness import HarnessSession
 from ale.core.sandbox import SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.verdict import Status
+from ale.run.assets import _repository_lock
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.tasksets.manifest import load_tasks
+from tests.support import prepare_reference, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -41,14 +44,15 @@ async def test_four_episodes_at_once_each_score_and_stay_separate(
     tmp_path: Path, write_repo: Callable[..., Path]
 ) -> None:
     task_root = write_repo(tmp_path / "repo")
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
     provider = DockerProvider()
+    providers = provider_registry(provider)
 
     async def one(index: int):  # type: ignore[no-untyped-def]
         return await run_episode(
             task,
             StandardEnvironment(OracleHarness()),
-            provider,
+            providers,
             run_dir=tmp_path / "runs",
         )
 
@@ -77,9 +81,10 @@ async def test_each_sandbox_gets_the_resources_its_task_declared() -> None:
     engine passed and the runtime ignored would otherwise look identical to one that took.
     """
     provider = DockerProvider()
+    prepared = await prepare_reference(provider, IMAGE)
     request = SandboxRequest(
         episode_id="limits",
-        image_ref=IMAGE,
+        prepared_image=prepared,
         resources=Resources(cpus=1, memory_mb=512),
         network=NetworkPolicy(mode=NetworkMode.BLOCK),
     )
@@ -115,3 +120,25 @@ def test_one_claude_definition_has_no_episode_mutable_paths_or_versions() -> Non
     assert not hasattr(harness, "_resolved_version")
     assert not hasattr(harness, "_prefix")
     assert not hasattr(harness, "_path")
+
+
+def test_asset_status_shared_lock_blocks_repository_replacement(write_task_repo) -> None:  # type: ignore[no-untyped-def]
+    repository = write_task_repo("ale-tasks-lock", tasks=("one",))
+    asset = repository / "tasks/one/image/assets/data.txt"
+    asset.parent.mkdir(parents=True)
+    asset.write_text("stable")
+    attempted = threading.Event()
+    acquired = threading.Event()
+
+    def writer() -> None:
+        attempted.set()
+        with _repository_lock(repository, exclusive=True):
+            acquired.set()
+
+    with _repository_lock(repository, exclusive=False):
+        thread = threading.Thread(target=writer)
+        thread.start()
+        assert attempted.wait(1)
+        assert not acquired.wait(0.1)
+    assert acquired.wait(1)
+    thread.join()

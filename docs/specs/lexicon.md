@@ -1,49 +1,67 @@
 # Lexicon
 
-Normative. Every term below has exactly one meaning in this codebase; ambiguous use is
-a review defect. New names must be narrow rather than broad and must not collide here.
+Normative. Every term below has exactly one meaning. Task-format entries marked
+**Feature 006** belong to the self-contained Task contract. The public
+manifest version remains `core/v1`.
 
 | Term | Definition | Never |
 |---|---|---|
-| **Sandbox** | An isolated execution instance (container or virtual machine) that the framework provisions for an episode. | never called an "environment" |
-| **Provider** | The local backend that supplies sandboxes (`docker`, `qemu`). | not a cloud account, not a model vendor |
-| **Environment** | The administration layer: how one task becomes one episode (provision → agent → verify → verdict). The main extension point for a domain. | never means a sandbox, never means shell variables |
-| **TaskSpec** | The complete, frozen, serializable specification of one task instance. | not the folder on disk |
-| **Task** | A `TaskSpec` bound to behaviour (setup, score, validate). | — |
-| **Taskset** | A loader that yields tasks; named variants expand here. | — |
-| **Variant** | A named parameterisation of one task, expanded by the taskset into its own task with its own identity. | not a separate task folder |
-| **Episode** | One complete administration of one task instance by one agent; owns canonical trajectory, transport, execution, result, provenance, and referenced payload artifacts as applicable. | not a "trial", not a "job" |
-| **Run** | One batch invocation of episodes, plus its Run Status Projection. | — |
-| **Harness** | The adapter binding an agent to the framework. Two families by loop ownership: **AutonomousHarness** (the agent owns its loop; prompt in, result out; it may run inside the sandbox or outside against exposed interfaces) and **PolicyHarness** (the framework owns the observe/act loop and asks the harness for each step's decision). | not an "agent"; the family is never named after where the agent runs |
-| **Harness Preset** | The complete version-controlled TOML configuration automatically selected for one autonomous harness. | not an implicit constructor default |
-| **Skill Source** | An explicitly declared local directory containing one `SKILL.md` Skill or an immediate collection of Skills. | never ambient host agent state |
-| **MCP Server** | A strictly validated vendor-neutral stdio or Streamable HTTP server definition made available to an agent. | not a vendor-native config file |
-| **Effective Agent Resources** | The deduplicated union of Task-, preset-, Run-, and CLI-declared Skills and MCP servers for one episode. | never a winner-takes-all config layer |
-| **CUA Desktop MCP** (`cua-desktop`) | ALE's built-in screen-control MCP server, selected at Run level and recorded through the ordinary MCP resource path. | not selectable by Task manifests or automatically injected by a harness or GUI image |
-| **Native Continuation** | Opaque episode state that resumes one exact native agent session in its original live sandbox. | not Run ledger resume, transcript replay, or cross-sandbox restoration |
-| **Limit Termination** | The recorded layer, limit name, configured value, and cause that stopped an episode. | not an untyped process exit |
-| **GuestServer** (`ale-guestd`) | The in-sandbox service, preinstalled in every base image, through which all exec, file transfer and observation flows. Standard library only. | never provider-specific |
-| **Gateway** | The host-side service through which solver Harness model traffic is controlled, metered, credentialed, and recorded. | not used by verification Judges; never knows about Providers |
-| **Kit** | A flat importable Python package at `kits/<name>/`, copied into a sandbox and hashed per episode. | not an engine dependency, manifest, alias, or lock-file entry |
-| **Framework Verification Library** (`ale_verify`) | The engine-owned, standard-library-only Python package staged into a sandbox for the verify phase; it composes checks, direct Judges, aggregates, metrics, and the final reward map. | not a task-repository Kit, Host service, Gateway client, or plugin |
-| **Judge Invocation** | One attributable LLM or agent judge execution, including its resolved configuration, attempts, usage, verdict, and evidence links. | not a task manifest declaration or reusable profile |
-| **Verification Record** | The sandbox-owned canonical `verification.json` derivation of rewards: criterion details, metrics, aggregates, Judge Invocations, diagnostics, and failure. | not the Episode Result, solver trajectory, or Agent transcript |
-| **ATIF Trajectory** | The episode's Harbor ATIF v1.7 document containing the complete agent-visible ordered interaction ALE can observe. | not framework lifecycle, setup, verification internals, or a native transcript |
-| **Transport Trace** | The append-only Gateway-owned JSONL record of model calls, refusals, replay accounting, and trajectory links. | not full conversation storage |
-| **Execution Trace** | The append-only JSONL record of framework phases, framework-owned commands, task-stage output, policies, and diagnostics. | not agent-owned tool activity |
-| **Episode Result** | The sole terminal outcome: status, complete named rewards when verified, diagnostic metrics, bounded failure, phase timing, and timestamps. | not a scalar or aggregated reward |
-| **Blob** | An immutable episode-local content-addressed payload under `blobs/<media-class>/`, referenced with path, media type, byte size, and digest. | not ordinary short inline text, not a task artifact |
-| **Native Log** | Optional harness-native evidence retained under `logs/<harness>/` according to retention policy and used to construct the canonical trajectory. | not canonical while unparsed; not a task artifact |
-| **Run Status Projection** | The run-level `ledger.db` view of queued, running, phase, terminal, interrupted, reward-map, and bounded-failure state. It is rebuildable from episode artifacts. | not an episode evidence store or source of full payloads |
-| **RunLock** | The provenance record binding a result to everything that produced it. A result without a complete one is invalid. | not optional |
-| **Workspace** | The agent's home directory, `/home/<user>`, derived from the account the image declares. Everything the agent touches is under it. There is no framework-wide layout: a task names its own absolute destinations. | not the repository, not a uv workspace, not a fixed set of directories |
-| **Image manifest** | How a disk image declares what a container image declares with `ale.*` labels: a file at `/etc/ale/image.json` read through the guest service. | not a task manifest |
+| **Sandbox** | An isolated execution instance supplied for one episode. | never called an Environment |
+| **Provider** | A backend that creates and destroys Sandboxes and enforces requested resources. | not a model vendor or Task-selected setting |
+| **Environment** | The administration layer that turns one Task into one Episode: provision, setup, agent, verify, teardown. | never means a Sandbox or shell variables |
+| **Task folder** | The complete self-contained authored source unit: manifest, instruction, image build context, setup, verification, oracle, and optional agent resources. | not dependent on `domain.yaml`, a repository Kit, sibling Task, or shared domain image |
+| **Task source digest** | **Feature 006.** A digest of the Task folder's canonical paths, bytes, executable bits, and symlink targets, pruning only the four exact stage asset roots and generated state. | not a hash of `task.yaml` alone or of asset bytes |
+| **TaskSpec** | The frozen, serializable effective specification of one selected Task instance after instruction rendering and variant application. | not the folder on disk |
+| **Task** | One self-contained Task folder bound to its effective TaskSpec and standard behavior. | not a collection or loader |
+| **Task collection** | A directory or source that contains several independent Task folders for selection. | not a Task and not an execution contract |
+| **Variant** | An additional named parameter/resource/timeout instance of one Task. The top-level Task is always `base`. | not allowed to change image, setup, verification, network, artifacts, Skills, or MCP |
+| **Image declaration** | Required `image.kind: container|vm` plus optional `image.ref` for a solver or dedicated verifier. | not a Provider selection or build flag |
+| **Task image** | The final container or VM image prepared from one fixed local Dockerfile or matching-kind ref. | not a shared Image Tree node |
+| **Prepared Task image** | Immutable kind-aware output consumed by a sandbox request. | not mutable sandbox state |
+| **ALE base image** | A foundational CLI, GUI, or Ubuntu VM GUI OCI image providing the sandbox contract and guest service. | not a domain image or Task-specific dependency bundle |
+| **VM materializer** | ALE-owned versioned conversion from final VM OCI rootfs to bootable qcow2. | never Task-authored boot or partition code |
+| **Task assets** | **Feature 006.** Optional ignored files directly below a Task's `image/assets`, `setup/assets`, `verify/assets`, or `oracle/assets`, synchronized explicitly with a same-named HF dataset. | not a manifest declaration, central cache tree, content hash, or implicit runtime download |
+| **Image assets** | Task-local `image/assets` bytes consumed through the ordinary `image/` Docker context. | not a named BuildKit context or runtime mount |
+| **Verify assets** | Task-local `verify/assets` bytes uploaded only with the verify stage and read by verifier code through ordinary relative paths. | never baked into the solver image or published during agent execution |
+| **Oracle assets** | Task-local `oracle/assets` bytes uploaded only when the oracle harness runs and read through ordinary relative paths. | never uploaded for an evaluated solver |
+| **Setup** | Trusted root work that creates irreducibly per-episode state after the Task image starts. | not package installation, fixed compilation, or fixed input download |
+| **Framework Verification Library** (`ale_verify`) | The engine-owned Python package staged for verify; it composes checks, direct Judges, aggregates, stats, and the final reward map. | not a repository Kit, Host verification service, Gateway client, or plugin |
+| **Judge Invocation** | One attributable LLM or agent Judge execution with its resolved configuration, attempts, usage, verdict, and evidence links. | not a Task manifest declaration or reusable profile |
+| **Verification Record** | The sandbox-owned `verification.json` derivation of rewards: criteria, stats, aggregates, Judge invocations, diagnostics, and failure. | not the Episode Result or solver trajectory |
+| **Artifact snapshot** | Immutable regular-file/directory solver evidence captured after Harness cleanup and before verification, with exact source path, type, mode, and content identity. | not post-verifier bytes or an implicit workspace copy |
+| **Separate verifier** | A fresh verifier sandbox using reused solver content, a Task-local verifier build, or a resolved external image, with independently requested resources and exact artifact restoration. | not a second setup run or a copy of the whole solver filesystem |
+| **Retained sandbox** | An ALE-managed, sanitized debug sandbox returned with a durable Provider handle and cleanup command when run policy requests `keep`. | not Task-controlled or an unmanaged leaked container |
+| **Episode** | One complete administration of one selected Task instance by one agent. | not a trial or job |
+| **Run** | One batch invocation of Episodes plus its Run Status Projection. | — |
+| **Harness** | The adapter binding an agent program to ALE. An Autonomous Harness owns its loop; a Policy Harness drives a framework-owned Task environment. | not an agent identity or Task setting |
+| **Harness Preset** | Complete version-controlled configuration automatically selected for one Harness. | not an implicit constructor default |
+| **Skill Source** | An explicitly declared local directory containing one Skill or immediate Skill collection. | never ambient host agent state |
+| **MCP Server** | A validated stdio or Streamable HTTP server definition made available to an agent. | not a vendor-native config file |
+| **Effective Agent Resources** | The deduplicated union of Task-, preset-, Run-, and CLI-declared Skills and MCP servers. | never winner-takes-all configuration |
+| **CUA Desktop MCP** (`cua-desktop`) | ALE's built-in screen-control MCP server selected at Run level. | not selected by a Task or automatically injected by an image |
+| **Native Continuation** | Opaque state that resumes one exact native agent session in its original live Sandbox. | not Run resume, transcript replay, or cross-Sandbox restoration |
+| **Limit Termination** | The recorded layer, limit, configured value, and cause that stopped an Episode. | not an untyped process exit |
+| **GuestServer** (`ale-guestd`) | The in-sandbox service through which execution, file transfer, and observation flow. | never Provider-specific |
+| **Gateway** | The host-side service through which solver Harness model traffic is controlled, metered, credentialed, and recorded. | not used by verification Judges |
+| **ATIF Trajectory** | The Harbor ATIF v1.7 document containing the complete ordered agent-visible interaction ALE can observe. | not setup, verification internals, or a native transcript |
+| **Transport Trace** | The append-only Gateway record of solver model calls, refusals, accounting, and trajectory links. | not full conversation storage |
+| **Execution Trace** | The append-only record of framework phases, commands, Task-stage output, policies, and diagnostics. | not agent-owned tool activity |
+| **Episode Result** | The sole terminal outcome: status, complete named rewards when verified, stats, bounded failure, phase timing, and timestamps. | not a scalar reward |
+| **Blob** | An immutable episode-local content-addressed payload referenced by path, media type, size, and digest. | not ordinary short inline text or a Task artifact |
+| **Native Log** | Optional Harness-native evidence retained according to Run policy and used to construct canonical trajectory. | not canonical while unparsed and not a Task artifact |
+| **Run Status Projection** | The rebuildable Run-level view of queued, running, phase, terminal, interrupted, rewards, and bounded failure state. | not an Episode evidence store |
+| **RunLock** | Schema-2 provenance binding declaration, prepared image, actual Provider observation, Task, data, agent, framework, and effective configuration to a result. | not a qcow2 byte-hash cache |
+| **Workspace** | The image-declared agent home. Tasks write their own absolute paths; ALE does not add a hidden prefix. | not a repository or fixed framework directory layout |
 
-Deliberately retired names: `work_dir` (a run-level scratch directory; it was a second
-answer to a question the image already answered by declaring its agent account, and two
-answers can disagree — the workspace is the home), `Workflow` (collides with a task's own business process),
-`InstalledHarness` / `StepwiseHarness` / `ProgramHarness` (they described where an agent
-runs, which is not the distinguishing axis), bare `Trace`, `Semantic Trace`, `Verdict`,
-`Verification Service`, `primary reward`, `primary_reward`, and `events.jsonl` (replaced by the orthogonal
-canonical run artifacts), `TaskData` (read as "the task's input files"), `trial` /
-`job` (imported vocabulary from other frameworks).
+Deliberately retired from the standard Task authoring contract:
+
+- `Taskset` as the name of a complete authored Task;
+- `domain.yaml`, domain-derived Task identity, and repository-level `requires_core`;
+- Domain Kit, repository Kit, `kits/`, `kit.toml`, and `kits.lock.yaml`;
+- Task `files/` and its implicit upload destination;
+- Image Tree, domain image, and published final Task image;
+- inferred image kind and run-wide Provider routing;
+- variants that replace image, setup, verification, network, artifacts, Skills, or MCP;
+- `work_dir`, `ALE_HOME` as a path authoring abstraction, `Workflow`, bare `Trace`,
+  `Semantic Trace`, `Verification Service`, `primary_reward`, `events.jsonl`,
+  `TaskData`, `trial`, and `job`.

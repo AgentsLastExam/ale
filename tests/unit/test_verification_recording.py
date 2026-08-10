@@ -5,7 +5,7 @@ import json
 import pytest
 from test_runtime_contracts import make_lock
 
-from ale.core.lock import AleVerifyProvenance, JudgeProvenance, KitProvenance
+from ale.core.lock import AleVerifyProvenance, JudgeProvenance
 from ale.run.provenance import judge_provenance
 from ale_verify import (
     CriterionResult,
@@ -43,7 +43,7 @@ def invocation() -> JudgeInvocation:
     )
 
 
-def test_run_lock_separates_verify_runtime_domain_kits_and_direct_judges() -> None:
+def test_run_lock_separates_verify_runtime_and_direct_judges() -> None:
     judge = JudgeProvenance(
         invocation_id="judge-1",
         kind="llm",
@@ -57,12 +57,10 @@ def test_run_lock_separates_verify_runtime_domain_kits_and_direct_judges() -> No
     lock = make_lock(
         ale_verify=AleVerifyProvenance(version="0.1.0", content_hash=HASH0),
         judges=(judge,),
-        kits=(KitProvenance(name="verification_example", content_hash=HASH1),),
     )
     dumped = lock.model_dump(mode="json")
     assert dumped["ale_verify"]["version"] == "0.1.0"
-    assert dumped["kits"] == [{"name": "verification_example", "content_hash": HASH1}]
-    assert "owner" not in dumped["kits"][0]
+    assert "kits" not in dumped
     assert "dialect" not in dumped["judges"][0]
     assert "transport_call_ids" not in dumped["judges"][0]
 

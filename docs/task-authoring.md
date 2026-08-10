@@ -1,346 +1,334 @@
-# Writing a task
+# Writing a standard Task
 
-A task is a folder. Four files make a complete one, and the scaffold gives you all four
-already working, so your first move is to change something rather than to fill in blanks.
+A standard Task is one self-contained folder for the container or VM
+`setup -> agent -> verify` protocol. Read
+[task-design-principles.md](task-design-principles.md) before authoring and use
+[specs/task-folder.md](specs/task-folder.md) as the normative format reference.
 
-## Start
+The conventional verifier program is `verify/verify.py`; `verify/run.sh` invokes it
+with a relative path from the staged verification directory.
+
+## Start from one folder
+
+Run authoring commands from the ALE engine checkout. A Task repository does not install
+its own copy of `ale-run`.
 
 ```bash
-git clone https://github.com/AgentsLastExam/ale-tasks-base ale-tasks-<domain>
-cd ale-tasks-<domain> && git remote rename origin upstream
-# edit domain.yaml: set `name`
-
-ale new-task tasks/my_first
-ale lint tasks/my_first        # passes now
-ale validate tasks/my_first    # scores 1.0 now
+uv run ale new-task ../ale-tasks-cli/tasks/my_first
+uv run ale lint ../ale-tasks-cli/tasks/my_first
+uv run ale prepare ../ale-tasks-cli/tasks/my_first
+uv run ale validate ../ale-tasks-cli/tasks/my_first
 ```
 
-Clone rather than fork: GitHub allows one fork per organisation, and several domains
-usually live in the same one. The result behaves identically.
-
-The scaffold's oracle writes exactly what its verifier expects, so you begin from a green
-run. Change one thing, re-run `ale validate`, and you always know which change broke it.
-
-## The four files
-
-```
+```text
 tasks/my_first/
-├── task.yaml        # what to provision, what data, what to keep
-├── instruction.md   # the prompt — the only file the agent sees
-├── verify/run.sh    # scores the result; copied in after the agent is gone
-└── oracle/run.sh    # your own solution; run in place of the agent by `ale validate`
+├── task.yaml
+├── instruction.md
+├── image/
+│   ├── Dockerfile
+│   └── assets/                 # optional, ignored by Git
+├── setup/                      # optional
+│   ├── run.sh
+│   └── assets/                 # optional, ignored by Git
+├── verify/
+│   ├── run.sh
+│   ├── verify.py
+│   ├── Dockerfile              # optional separate-verifier image
+│   └── assets/                 # optional, ignored by Git
+├── oracle/
+│   ├── run.sh
+│   └── assets/                 # optional, ignored by Git
+└── tools/                      # optional
+    ├── skills/<name>/SKILL.md
+    └── mcp/<server>.toml
 ```
 
-`setup/run.sh` is optional and runs in the sandbox before the agent.
+Required files are `task.yaml`, `instruction.md`, `verify/run.sh`, and `oracle/run.sh`.
+Use either `image/Dockerfile` or `image.ref`. Do not create `domain.yaml`, repository `kits/`,
+repository images, Task `files/`, or top-level `skills/` and `mcp/`.
 
-Nothing declares these scripts. A stage's folder is copied in when that stage runs and
-its `run.sh` executes if present, so the layout on disk *is* the execution order.
-
-## Skills and MCP required by one task
-
-Declare agent resources in `task.yaml`:
+## Manifest
 
 ```yaml
+spec_type: core/v1
+name: my-first
+environment: core/standard
+image: {kind: container}
+
+resources:
+  cpus: 1
+  memory_mb: 1024
+  storage_mb: null
+  gpus: 0
+  sudo: false
+
+network: {mode: block}
+timeouts: {setup: 120, agent: 900, verify: 300}
+
+artifacts:
+  - /home/user/output
+
 tools:
   skills:
-    - { path: skills/reviewer }
+    - {path: tools/skills/reviewer}
   mcp_servers:
-    - { path: mcp/search.toml }
+    - {path: tools/mcp/local-search.toml}
+
+params: {count: 3}
+metadata: {tags: [cli]}
+extras: {}
+
+variants:
+  - name: hard
+    params: {count: 10}
+    resources: {cpus: 2, memory_mb: 4096}
+    timeouts: {agent: 1800}
 ```
 
-These paths are relative to the task folder and cannot escape it or enter `verify/` or
-`oracle/`. They are added to Run-level resources, not substituted for them. Duplicate
-identical logical names collapse to one; the same name with different content is an
-error.
+`spec_type`, `name`, and `image.kind` are required. `name` is stable and independent of the folder
+path. Unknown fields fail. The top level always defines `base`; variants can contain
+only `name`, `params`, `resources`, and `timeouts`. A change to image, setup,
+verification, artifacts, network, tools, metadata, or expected outcome is another Task.
 
-Framework-owned built-ins are deliberately not valid Task declarations. An operator
-enables `cua-desktop` at Run level when evaluating GUI tasks.
+Selectors are explicit:
 
-See `ale-tasks-base/tasks/demo/resource_injection` for a complete Task whose verifier
-requires the agent to read an injected Skill and call an injected Task MCP server.
-Its MCP fragment is generated at call time. The task receipt is useful to the verifier
-but is not trusted proof of tool use; live harness acceptance must match it against the
-collected native transcript and canonical MCP trajectory.
-
-`ale-tasks-152/tasks/demo/tool_smoke` is the complementary harness acceptance task. The
-agent inventories callable endpoints, exercises every safe bounded tool, and reports
-failed or untestable tools explicitly. Parameter modes are not separate tools: for
-example, `web.run` remains one callable whether it performs search, open, or finance.
-Tools that end or yield the current invocation are recorded as untested, and the report
-is updated after each call so a later failure cannot erase earlier evidence.
-
-The task's oracle proves only that its verifier accepts a valid report. A harness is
-accepted only after a real model run matches the report against native logs, ATIF,
-Gateway transport, execution trace, verifier result, and an independent LLM audit.
-
-For an image or other media input, stage it as a normal task file or setup asset and say
-where it is:
-
-```markdown
-Inspect /home/user/input/screenshot.png and write the answer to
-/home/user/output/result.txt.
+```bash
+uv run ale run ../tasks/my_first                 # base only
+uv run ale run ../tasks/my_first@hard            # hard only
+uv run ale run '../tasks/my_first@{base,hard}'    # ordered selection
 ```
 
-The file is present in the sandbox, so the agent can use its own supported file-reading
-tools. Whether a model can interpret that media is a model choice, not a Task capability
-declaration.
+The same selection rules apply to `validate`.
 
-## Identity comes from the path
+## Choose and prepare the image
 
-`tasks/demo/hello` in domain `demo` becomes `demo-hello`. Never write an id in the file.
-
-It is opaque: nothing in the framework parses it back into parts, so you can reorganise
-folders without touching data, prompts or stored results.
-
-## Where your data goes is your decision
-
-There is no framework layout to conform to. A mount says where its data comes from and
-where it lands; both are yours to choose:
+Use `image: {kind: container}` or `image: {kind: vm}`. If `image/Dockerfile` exists it
+always wins and a build failure never falls back. Without it, declare a registry ref:
 
 ```yaml
-setup:
-  assets:
-    - repo: agents-last-exam/ale-tasks-assets
-      revision: 1d0d026c7a21226f619b74f3912e23573c7105ab
-      path: mydomain/my_first/input
-      dest: /ale/input
+image: {kind: container, ref: ghcr.io/example/task:1}
 ```
 
-**Pin a commit, not a branch.** A branch moves, and then two runs that named the same
-source read different bytes — which quietly makes their scores incomparable. `ale lint`
-rejects anything that is not a commit.
+`ale prepare` reports the selected source and immutable build/ref/materialization stages
+without constructing an Environment, agent, verifier, or sandbox.
 
-The framework creates the destinations and artifact paths you declared.
-**Everything else your task needs, your setup script creates.** If
-`setup/run.sh` writes to `/ale/input` and no mount put anything there, `mkdir -p` it
-first — a directory that happens to exist in one image is not a contract.
+`image/` is the sole Docker build context. The final stage starts directly from an ALE
+CLI, GUI, or VM GUI base matching the declared kind and installs all stable Task-specific software and state.
 
-## Keeping answers away from the agent
+```dockerfile
+FROM ghcr.io/agentslastexam/sandbox-base-cli:latest
 
-Put them in the verify stage:
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY assets/corpus.json /home/user/input/corpus.json
+RUN mkdir -p /home/user/output \
+    && chown -R user:user /home/user/input /home/user/output
+```
+
+ALE first builds a final OCI image. For `vm`, the engine materializes that OCI rootfs into
+a bootable qcow2; Tasks still author only a normal Dockerfile ending in
+`sandbox-base-vm-gui`. There is no Image Tree or generated BuildKit context. Ordinary `COPY` sees only `image/`, so
+it cannot include setup, oracle, or verification material. Multi-stage Docker builds
+are allowed; the final runtime stage still starts from an ALE base.
+
+## Stage-local assets
+
+Large files live at the exact path where Task code uses them:
+
+```text
+image/assets/...
+setup/assets/...
+verify/assets/...
+oracle/assets/...
+```
+
+These directories are ignored by Git. Every Task repository maps to a same-named
+Hugging Face dataset in the configured collection. Synchronization is explicit and may
+select one Task, a repository, overlapping paths, or multiple repositories:
+
+```bash
+export ALE_ASSETS_COLLECTION='<owner>/<collection>'
+uv run ale assets pull ../ale-tasks-cli
+uv run ale assets pull --force ../ale-tasks-cli/tasks/a ../ale-tasks-extra
+uv run ale assets status ../ale-tasks-cli
+uv run ale assets push ../ale-tasks-cli/tasks/my_first
+```
+
+Pull restores those four roots directly into Task folders. Push uploads only their
+contents and mirrors deletions below selected roots. Runtime never pulls assets. Local
+state is one repository-local `.ale-cache/assets.json` marker; public provenance is only
+repository name, Task path, remote commit, and `dirty`. No asset bytes are hashed during
+normal status or execution. A dirty or never-synchronized Task may run for debugging but
+cannot resume, deduplicate, or back a reportable result.
+
+Image code uses normal Docker paths:
+
+```dockerfile
+COPY assets/corpus.json /home/user/input/corpus.json
+```
+
+Setup, verify, and oracle receive their entire stage directories. Prefer relative access:
+
+```bash
+python3 helper.py assets/seed.json
+```
+
+`ALE_STAGE_DIR` remains available when a subprocess truly needs an absolute stage path.
+Verifier and oracle code use ordinary relative paths such as `assets/expected.json`.
+ALE does not create an `assets/` directory for a Task that has none.
+
+## Keep setup dynamic
+
+`setup/` is optional. It is uploaded once, runs as trusted root from the staged setup
+directory, and has open egress. Use it only for work that cannot be frozen:
+
+- reset or seed mutable episode state;
+- generate per-episode values;
+- initialize writable copies from baked data;
+- start or reset a service after dynamic state exists;
+- wait for real readiness.
+
+Package installation, compilation, fixed downloads, service installation, static
+configuration, and stable permissions belong in the Dockerfile.
+
+## Write literal sandbox paths
+
+The Task owns its filesystem. Put exact absolute paths in the instruction and artifact
+declarations; ALE does not add a workspace prefix.
+
+```markdown
+Read `/home/user/input/orders.json` and write `/home/user/output/report.json`.
+```
+
+Use `${name}` only for declared parameters. Undeclared placeholders and unused params
+are errors. Setup-created values should be written to a documented file for the solver.
+
+Artifact paths must be absolute, unique, and non-overlapping. ALE does not pre-create
+them. After Harness cleanup it captures each declared regular file or directory as
+immutable solver evidence; missing paths, symlinks, special files, and transfer failures
+are explicit errors.
+
+## Resources and network
+
+`resources` requests enforced CPU, memory, optional writable storage, NVIDIA GPU count,
+and solver sudo. Tasks never choose physical GPU indices. A Provider either admits the
+whole request or fails explicitly.
+
+`network.mode` is `block`, `allowlist`, or `open`; `allowed_hosts` is required only for
+`allowlist`. It governs solver/oracle traffic. Setup and verification are trusted phases
+with open egress. The image kind routes each physical sandbox to the matching configured
+Provider. Tasks do not name a Provider implementation.
+
+## Skills and MCP
+
+Task-owned agent resources live only below `tools/` and are declared relative to the
+Task root. Run/preset resources may still be layered by the operator.
+
+```toml
+schema_version = 1
+name = "local-search"
+transport = "stdio"
+command = "python3"
+args = ["{mcp}/server.py"]
+```
+
+The descriptor and adjacent server code are staged together under the agent home;
+`{mcp}` resolves to that server's staged directory. Streamable HTTP MCP is also supported
+when its host satisfies Task network policy. Task resources do not select a Harness and
+never inherit ambient host Skills, MCP, or credentials.
+
+## Verification topology
+
+Shared verification is the default and needs no manifest block. It runs in the completed
+solver sandbox after Harness cleanup and evidence capture.
 
 ```yaml
 verify:
-  assets:
-    - { repo: …, revision: …, path: mydomain/my_first/reference, dest: /ale/reference }
+  environment_mode: separate
+  resources:
+    cpus: 1
+    memory_mb: 1024
+    storage_mb: null
+    gpus: 0
 ```
 
-The guarantee is **timing**, not a flag. A verify-stage mount is materialised during
-scoring, so while the agent works it is not hidden — it is absent. Same for `verify/` and
-`oracle/` themselves.
-
-Anything the agent must not see goes here. There is no way to mark a file secret and
-leave it in the setup stage, because that would be a promise the framework could not keep.
-
-## Instructions are rendered once, strictly
-
-```markdown
-Solve ${n} cases and write the answers to /ale/output/result.txt
-```
-
-`${param}` comes from `params`, merged with the variant's. Strict both ways: an
-undeclared placeholder and an unused parameter are both errors. Write paths **literally** —
-your task chose them and the image is fixed, so there is nothing to compute.
-
-Legacy patterns (`{self.input_dir}`, `E:\agenthle`, `${output_dir}`) are rejected.
-
-For a value that only exists at run time — a generated secret, a URL for a service your
-setup started — do not template it. Have setup write a file and tell the agent to read it.
-That keeps the instruction static, hashable, and free of the answer.
-
-## Variants
-
-```yaml
-params: { n: 3 }
-variants:
-  - { name: base }
-  - { name: hard, params: { n: 10 } }
-```
-
-One task instance each, own rendered instruction, own identity. They share an `id` and
-differ in `variant`, so results aggregate either way without anyone parsing a string.
-
-## Scoring
-
-Use a relocatable entry point:
+Separate verification starts an independent sandbox, does not rerun setup, and restores
+only declared artifacts to their exact absolute paths. Its resources are mandatory and
+independent. If `verify/Dockerfile` exists, declare `verify.image.kind`; ALE builds it with
+`verify/` as context. Without a verifier Dockerfile or image, it reuses the solver image.
+A dedicated VM ref uses `verify.image: {kind: vm, ref: ghcr.io/example/verifier-vm:1}`.
+Container uses the same shape with `kind: container`. Local Dockerfile wins
+over a simultaneously authored ref. The
+same `verify/run.sh` and `verify.py` work in both modes.
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-exec python3 "$(dirname "$0")/check.py"
+exec python3 verify.py
 ```
-
-ALE stages its Python 3.12+, standard-library `ale_verify` package only during
-verification. The verifier must use `python3`; it must not select a Conda environment,
-virtual environment, or another interpreter path:
 
 ```python
 from ale_verify import Verification, checks
 
 verification = Verification()
-verification.check("format", checks.file_exists("/home/user/output/result.json"))
-verification.stat("checked_files", 1)
+verification.check("format", checks.file_exists("/home/user/output/report.json"))
+verification.stat("files_checked", 1)
 verification.aggregate("overall")
 verification.write()
 ```
 
-`check()` and `judge()` add named component rewards. `aggregate()` is explicit and uses
-stored criterion weights, which default to equal weights. `write()` writes all named
-rewards and metrics; it does not choose a hidden primary reward. The verifier must use
-`write()` so ALE can validate the local Verification Record against the reward envelope.
+`check()` and `judge()` add reward criteria, `stat()` adds diagnostics,
+`aggregate()` defaults to the weighted mean of stored criteria, and `write()` finalizes
+one canonical `verification.json` plus the reward envelope. LLM and Agent Judges call
+their configured endpoints directly from the verification sandbox. Task code owns prompt,
+rubric, evidence, and invocation-local MCP; run TOML owns model, endpoint, credential
+environment name, reasoning effort, Agent adapter, and exact CLI version. Judge failures
+are infrastructure failures, never zero rewards.
 
-Shared domain logic is an ordinary flat Python package:
+## Oracle and validation
 
-```text
-kits/verification_example/__init__.py
-```
+The oracle performs the requested work as the same unprivileged identity as a solver.
+`ale validate` runs independent untouched and oracle episodes:
 
-Select its exact import name in `task.yaml`:
+- untouched must complete with a non-empty all-zero reward map;
+- oracle must complete with the same reward names;
+- arbitrary oracle values are recorded; non-one values are warnings, not fabricated full
+  credit;
+- any image, setup, artifact, verifier, Judge, timeout, or infrastructure failure remains
+  a failure.
 
-```yaml
-verify:
-  kits: [verification_example]
-```
+After validation, run a real agent and use its trajectory to discover ambiguity, missing
+context, and verifier blind spots. Never fit reward to that agent's particular path.
 
-Then Task-local code, the framework package, and the Domain Kit compose normally:
+## Debug retention
 
-```python
-from ale_verify import Verification
-from verification_example import approved_record
-
-verification = Verification()
-verification.check("approved", approved_record("/home/user/output/result.json"))
-verification.aggregate("overall")
-verification.write()
-```
-
-There is no Kit manifest, alias, inventory, or lock file. ALE import-probes the selected
-package and records the hash of the actual staged bytes for each episode.
-
-LLM and agent judges are requested from the same state object with explicit scored
-rubrics. Task code supplies the prompt, rubric, and evidence paths. It never supplies a
-provider client, credential, model, Harness, or dialect:
-
-```python
-verification.judge(
-    "llm",
-    "correctness",
-    prompt="Judge correctness.",
-    rubric={
-        "no": {"score": 0.0, "description": "Incorrect."},
-        "yes": {"score": 1.0, "description": "Correct."},
-    },
-    files=["/home/user/output/result.txt"],
-)
-```
-
-The operator configures execution outside task content:
+Sandbox retention is operator-owned run configuration, never a Task or variant field:
 
 ```toml
-[verification.llm]
-model = "gpt-5.4-mini"
-reasoning_effort = "medium"
-base_url = "https://api.openai.com"
-api_key_env = "OPENAI_API_KEY"
-
-[verification.agent]
-adapter = "codex-cli"
-model = "gpt-5.4"
-reasoning_effort = "high"
-base_url = "https://api.openai.com"
-api_key_env = "OPENAI_API_KEY"
+[sandbox_retention]
+solver = "keep"
+verifier = "destroy"
 ```
 
-Judges run synchronously inside the completed sandbox. LLM Judges call the configured
-provider directly. Agent Judges invoke the selected image-provided CLI as root with an
-isolated native home and retain a sanitized raw transcript at
-`logs/agent-judge.jsonl`; they do not create another trajectory.
-
-Judge infrastructure errors, timeouts, refusals, and malformed responses fail the
-episode. They never become a synthetic zero reward.
-
-A verifier that exits non-zero or writes nothing is a `task_error` — a defect in *your*
-task — and is deliberately distinct from a zero score. Keep that distinction sharp: it is
-what stops a broken verifier from looking like a hard task.
-
-## Before you submit
+Both default to `destroy`. Shared mode has one physical sandbox and keeps it if either
+role requests keep. Separate mode applies policies independently. Retained Docker
+sandboxes are sanitized, recorded with actionable handles, and managed with:
 
 ```bash
-ale lint tasks/           # every task in the repo
-ale validate tasks/       # untouched all-zero, then oracle all-one
+uv run ale sandbox list
+uv run ale sandbox destroy HANDLE
 ```
 
-CI runs both. Every task must have `oracle/run.sh`; there is no threshold or manual
-bypass. Validation runs the real verifier twice in independent sandboxes: setup directly
-to verify must emit the same non-empty reward names all at exactly `0.0`, then the oracle
-path must emit them all at exactly `1.0`. Configured judges run for both passes.
+## Submission checklist
 
-## Who runs what
-
-Your `setup/run.sh` and `verify/run.sh` run as **root**. They are framework machinery,
-executed on your task's behalf.
-
-The **agent runs as an unprivileged user** — and so does your **oracle**, because it
-stands in for the agent. That is deliberate: it means `ale validate` meets the same limits
-a real run will, so a task that leaves the agent unable to write something fails the gate
-instead of failing an evaluation later.
-
-**You decide what the agent can touch.** The framework creates what you declared — asset
-destinations, artifact paths, the workspace — and hands those to the agent. Anything your
-setup then produces is yours to open up:
-
-```bash
-# setup/run.sh — runs as root
-printf 'seed\n' > /ale/input/state.txt
-chown user /ale/input/state.txt      # the agent has to be able to rewrite this
-```
-
-Forget it and your own `ale validate` will tell you, because the oracle hits the same wall.
-
-If your task genuinely needs to install software or change system configuration, say so:
-
-```yaml
-resources: { cpus: 2, memory_mb: 4096, sudo: true }
-```
-
-The sandbox is configured for it and the grant is recorded in the run's provenance —
-an episode with elevation was less isolated, and results should not be compared across
-that line without it being visible.
-
-## GUI tasks
-
-A graphical program cannot talk to somebody else's session, so setup — which is root —
-drops to the desktop user:
-
-```bash
-setsid --fork runuser -u user -- eog --fullscreen /ale/input/code.png </dev/null &
-```
-
-The session's environment is supplied for you; you do not need to know where its bus is.
-
-Wait for what you actually need rather than sleeping. The first screenshot is taken the
-moment setup returns, and a window that exists is not yet a window that fills the screen.
-
-## Traps that have already cost time
-
-Each of these produced a task that looked like it worked:
-
-- **`set -e` with `pipefail` and a command substitution.** `x="$(cmd | tail -1)"` aborts
-  the whole script when `cmd` fails — which it does on the first loop iteration, before
-  the thing you are waiting for exists. Re-running by hand then passes, because by then it
-  does exist. Add `|| true`.
-- **A backgrounded process with a bare `&`.** Everything in the exec session's process
-  group dies when setup returns, so your viewer is killed the moment setup finishes. By
-  hand the shell stays alive and it survives. Use `setsid --fork`.
-- **Painting the X root window.** GNOME draws its own background over it; nothing appears.
-- **Setting the wallpaper with `gsettings` as root.** dconf cannot commit without the
-  session bus, so the value changes and the screen never repaints.
-
-## Two things people get wrong
-
-**Assuming a directory exists.** The framework builds only what you declared. Create the
-rest yourself.
-
-**Reaching for an upstream image.** `python:3.12-slim` is a build environment, not a
-sandbox: no unprivileged user, no command that keeps it alive. Build on one of ours, or
-build a curated image `FROM` one — see `docs/specs/sandbox-image.md`.
+- The folder is independently lintable and has no repository runtime dependency.
+- Stable software and solver-visible state are in `image/`; setup is dynamic only.
+- Large data lives only in the stage's ignored `assets/` directory.
+- Verification material is absent until Harness cleanup.
+- Prompt, context, artifacts, and reward describe the same result.
+- Verification judges final state rather than one completion path.
+- Variants change only params, resources, and timeouts.
+- Untouched validation is all-zero and oracle validation completes with matching names.
+- Every failure remains an explicit failure rather than a synthetic zero.

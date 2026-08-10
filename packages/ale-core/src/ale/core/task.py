@@ -1,67 +1,72 @@
-"""Tasks and task loaders.
-
-A :class:`Task` binds a specification to behaviour; a :class:`Taskset` produces tasks.
-Variants are expanded here rather than duplicated on disk: one folder with a variant
-table yields several tasks, each with its own identity and its own rendered prompt.
-"""
+"""Runtime binding for one rendered Task instance."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ale.core.sandbox import PreparedTaskImage
 from ale.core.taskspec import TaskSpec
 from ale.core.verdict import Rewards
 
 if TYPE_CHECKING:
     from ale.core.environment import EpisodeContext
 
-__all__ = ["Task", "Taskset"]
+__all__ = ["Task", "TaskSourceContext"]
+
+
+@dataclass(frozen=True)
+class TaskSourceContext:
+    repository_root: Path | None = None
+    repository_name: str | None = None
+    task_relative_path: str | None = None
+
+    def __post_init__(self) -> None:
+        values = (
+            self.repository_root,
+            self.repository_name,
+            self.task_relative_path,
+        )
+        if any(value is None for value in values) and any(value is not None for value in values):
+            raise ValueError("Task source context fields must be present or absent together")
 
 
 class Task(ABC):
-    """One task instance, ready to run."""
-
-    def __init__(self, spec: TaskSpec) -> None:
+    def __init__(
+        self,
+        spec: TaskSpec,
+        *,
+        folder: Any,
+        source: TaskSourceContext | None = None,
+        task_digest: str,
+        image_source_digest: str | None,
+        verifier_image_source_digest: str | None = None,
+    ) -> None:
         self.spec = spec
+        self.folder = folder
+        self.source = source or TaskSourceContext()
+        self.task_digest = task_digest
+        self.image_source_digest = image_source_digest
+        self.verifier_image_source_digest = verifier_image_source_digest
+        self.prepared_image: PreparedTaskImage | None = None
+        self.prepared_verifier_image: PreparedTaskImage | None = None
+        self.asset_observation: Any | None = None
 
     @property
     def id(self) -> str:
-        return self.spec.id
+        return str(self.spec.name)
 
     async def setup(self, ctx: EpisodeContext) -> None:
-        """Prepare the sandbox beyond the declared setup steps. Usually nothing."""
         return None
 
     @abstractmethod
     async def score(self, ctx: EpisodeContext) -> Rewards:
-        """Produce the rewards for a finished episode."""
+        """Produce rewards for a finished episode."""
 
     async def cleanup(self, ctx: EpisodeContext) -> None:
-        """Undo task-specific side effects. The sandbox itself is not yours to destroy."""
         return None
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.spec.id})"
-
-
-class Taskset(ABC):
-    """Produces tasks. Variant expansion happens here, not on disk."""
-
-    infinite: bool = False
-    """Set by generators that can emit unboundedly many tasks."""
-
-    @abstractmethod
-    def load(self) -> Iterable[Task]:
-        """Yield tasks. May be a generator."""
-
-    def select(self, ids: set[str] | None = None) -> Iterator[Task]:
-        """Yield tasks, optionally filtered by identifier or family."""
-        for task in self.load():
-            if ids is None or task.spec.id in ids or task.spec.family in ids:
-                yield task
-
-    def metadata(self) -> dict[str, Any]:
-        """Anything worth recording about this loader."""
-        return {}
+        return f"{type(self).__name__}({self.spec.label})"

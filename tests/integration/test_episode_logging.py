@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from ale.core.environment import Environment, EpisodeContext
-from ale.core.ids import TaskId
 from ale.core.lock import (
     AgentProvenance,
     FrameworkProvenance,
@@ -18,9 +17,19 @@ from ale.core.lock import (
     TaskSource,
 )
 from ale.core.result import PhaseTiming, ResultRecord
-from ale.core.sandbox import Capabilities, ExecResult, Provider, SandboxRequest
+from ale.core.sandbox import (
+    Capabilities,
+    ExecResult,
+    ImageKind,
+    ImageRef,
+    PreparedTaskImage,
+    Provider,
+    ResolvedImage,
+    ResourceAllocation,
+    SandboxRequest,
+)
 from ale.core.task import Task
-from ale.core.taskspec import ImageRef, TaskSpec
+from ale.core.taskspec import TaskSpec
 from ale.core.trace import (
     PhaseFinished,
     PhaseStarted,
@@ -43,6 +52,7 @@ from ale.run.episode import run_episode
 from ale.run.ledger import Ledger, episode_identity
 from ale.run.provenance import ProvenanceInputs
 from ale.run.recording import CommandRecorder
+from tests.support import provider_registry
 
 pytestmark = pytest.mark.integration
 
@@ -63,6 +73,10 @@ class NoSandboxProvider(Provider):
     async def preflight(self) -> None:
         return None
 
+    async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
+        assert isinstance(image, PreparedTaskImage)
+        return image
+
     async def create(self, request: SandboxRequest):  # type: ignore[no-untyped-def]
         raise AssertionError("this environment does not provision")
 
@@ -76,6 +90,20 @@ class LoggedEnvironment(Environment):
         assert ctx.trajectory is not None
         assert ctx.blobs is not None
         ctx.image_digest = DIGEST
+        ctx.resolved_image = ResolvedImage(
+            kind=ImageKind.CONTAINER,
+            prepared_identity=DIGEST,
+            observed_identity=DIGEST,
+            observed_ref="ale-task:fixture",
+        )
+        ctx.resource_allocation = ResourceAllocation(
+            cpus=task.spec.resources.cpus,
+            memory_mb=task.spec.resources.memory_mb,
+            storage_mb=None,
+            sudo=False,
+            network_mode=task.spec.network.mode,
+            provider="none",
+        )
         ctx.agent_version = "1"
         now = datetime.now(UTC)
         ctx.execution.append(
@@ -203,16 +231,26 @@ async def test_complete_episode_has_one_authoritative_home_per_fact(
 ) -> None:
     task = DemoTask(
         TaskSpec(
-            id=TaskId("demo-logging"),
-            domain="demo",
+            name="demo-logging",
             instruction="Use the task tool and inspect the image.",
-            image=ImageRef(name="sandbox-base-cli"),
-        )
+            image={"kind": "container"},
+        ),
+        folder=None,
+        task_digest=DIGEST,
+        image_source_digest=DIGEST,
+    )
+    task.prepared_image = PreparedTaskImage(
+        kind="container",
+        source="solver-local",
+        input_identity=DIGEST,
+        image_source_identity=DIGEST,
+        runtime_ref="ale-task:fixture",
+        prepared_identity=DIGEST,
     )
     episode = await run_episode(
         task,
         LoggedEnvironment(),
-        NoSandboxProvider(),
+        provider_registry(NoSandboxProvider()),
         run_dir=tmp_path,
         provenance=provenance(),
         episode_id="episode",
@@ -251,6 +289,8 @@ async def test_complete_episode_has_one_authoritative_home_per_fact(
         run_id="run",
         identity=episode_identity(
             task.spec,
+            task_digest=task.task_digest,
+            image_digest=DIGEST,
             agent="fake-autonomous@1",
             seed=0,
             config_hash=DIGEST,

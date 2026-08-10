@@ -17,6 +17,7 @@ import pytest
 from ale.core.sandbox import SandboxRequest
 from ale.core.taskspec import NetworkPolicy, Resources
 from ale.run.providers.docker import DockerProvider
+from tests.support import prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
 
@@ -42,9 +43,10 @@ else:
 async def test_the_in_process_path_is_the_one_taken() -> None:
     """The image installs Pillow and python-xlib, so nothing should shell out."""
     provider = DockerProvider()
+    prepared = await prepare_reference(provider, GUI_IMAGE)
     request = SandboxRequest(
         episode_id="shotpath",
-        image_ref=GUI_IMAGE,
+        prepared_image=prepared,
         resources=Resources(cpus=2, memory_mb=2048),
         network=NetworkPolicy(),
     )
@@ -63,9 +65,10 @@ async def test_the_in_process_path_is_the_one_taken() -> None:
 async def test_a_screenshot_through_the_guest_service_is_a_png() -> None:
     """The route an agent actually uses, end to end."""
     provider = DockerProvider()
+    prepared = await prepare_reference(provider, GUI_IMAGE)
     request = SandboxRequest(
         episode_id="shotwire",
-        image_ref=GUI_IMAGE,
+        prepared_image=prepared,
         resources=Resources(cpus=2, memory_mb=2048),
         network=NetworkPolicy(),
     )

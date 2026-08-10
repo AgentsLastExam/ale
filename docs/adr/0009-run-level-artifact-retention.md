@@ -24,9 +24,9 @@ nothing more.
 Retention is `artifacts.collect` in the run configuration (`host` | `none`), covered by
 `config_hash` so provenance records what a run actually kept.
 
-The mechanism is the sink, not a branch. `run_episode` builds either the collecting sink
-or one that discards, and environments collect unconditionally — so no phase, and no
-future environment, needs to know the policy exists.
+`host` enables the artifact sink and `none` disables collection entirely. Disabled
+collection does not inspect paths, copy bytes, create a temporary spool, or restore data
+into a separate verifier.
 
 Remote destinations (object storage, a results service) extend this field. They were the
 reason a disposition looked attractive on the task in the first place, and they belong

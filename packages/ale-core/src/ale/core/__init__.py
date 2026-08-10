@@ -9,6 +9,24 @@ nothing here may depend on a third-party evaluation framework (Constitution I:
 contracts first).
 """
 
-__all__ = ["__version__"]
+from ale.core.taskspec import ImageKind, ImageSpec
+from ale.core.validation import (
+    TaskValidationObservation,
+    ValidationAttempt,
+    ValidationEngine,
+    ValidationNotice,
+    ValidationObservation,
+)
+
+__all__ = [
+    "ImageKind",
+    "ImageSpec",
+    "TaskValidationObservation",
+    "ValidationAttempt",
+    "ValidationEngine",
+    "ValidationNotice",
+    "ValidationObservation",
+    "__version__",
+]
 
 __version__ = "0.1.0"

@@ -3,21 +3,31 @@
 Evaluation orchestrator for Agents' Last Exam: run agents against sandboxed tasks,
 score them, and record exactly what produced every result.
 
-One engine repository, many task repositories. This repo contains no task content.
+One engine repository, many independent Task folders. This repo contains framework code
+and foundational sandbox images, not benchmark Task content.
 
 ## Quickstart
 
-Three commands from a clean machine to a scored result:
+Bootstrap the engine from a clean machine:
 
 ```bash
 git clone git@github.com:AgentsLastExam/ale.git && cd ale
 just bootstrap                                    # or: uv sync --frozen
-uv run ale run demo/hello --agent claude-code
+uv run ale --help
 ```
 
-Task content is fetched from the domain's task repository (pinned in
-[`registry.toml`](registry.toml)) and cached; the sandbox image is pulled on first use.
 `just doctor` explains anything missing.
+
+### Task format
+
+A standard Task is a self-contained folder with an explicit name and its own
+`image/Dockerfile` or a matching-kind `image.ref`. Every Task explicitly declares
+`image.kind: container|vm`; ALE builds locally when the fixed Dockerfile exists and
+otherwise asks the matching Provider to acquire the ref. There is no `domain.yaml`,
+Domain Kit, shared Image Tree, or Task `files/`.
+
+The manifest remains `core/v1`. The implemented contract is documented in
+[docs/specs/task-folder.md](docs/specs/task-folder.md).
 
 Model access goes through the gateway, so put a key in the checkout's `.env` (copy
 `.env.example`). It never enters a sandbox — the agent gets a URL and a per-episode token,
@@ -28,8 +38,8 @@ A run names its endpoint and which variable holds the key, so several can be con
 at once and nothing has to be edited between runs:
 
 ```bash
-uv run ale run demo/hello --agent claude-code \
-  --model qwen-latest-series-invite-beta-v92 \
+uv run ale run /path/to/task --agent claude-code \
+  --model qwen3.7-max \
   --base-url https://dashscope.aliyuncs.com/apps/anthropic \
   --api-key-env QWEN_API_KEY
 ```
@@ -40,16 +50,21 @@ every process listing on the machine.
 To try the pipeline with no key and no model at all:
 
 ```bash
-uv run ale run demo/hello --agent oracle   # runs the task's own solution
-uv run ale run demo/hello --agent nop      # does nothing; scores a real zero
+uv run ale run /path/to/task --agent oracle   # runs the task's own solution
+uv run ale run /path/to/task --agent nop      # does nothing; scores a real zero
 ```
 
 ### The rest of the surface
 
 ```bash
-uv run ale lint tasks/            # static checks, no container
-uv run ale validate tasks/        # untouched all-zero, then oracle all-one
-uv run ale new-task tasks/mine    # scaffold a task that already passes both
+uv run ale lint /path/to/task          # static checks
+uv run ale validate /path/to/task      # untouched zero, then record oracle result
+uv run ale new-task /path/to/task      # self-contained scaffold
+uv run ale assets status /path/to/task-repo
+uv run ale assets pull /path/to/task-repo
+uv run ale assets push /path/to/task-repo
+uv run ale sandbox list                     # retained debug sandboxes
+uv run ale sandbox destroy HANDLE
 uv run ale run <task> -n 5 --run-id sweep     # five episodes, resumable by that id
 uv run ale run <task> --require-reportable    # fail unless provenance could be published
 ```
@@ -62,10 +77,10 @@ repeating it.
 
 Under `runs/<run>/<episode>/`:
 
-- `lock.json` — everything that produced the result: task source and commit, resolved
-  image digest, agent version and identity, every asset revision, the sandbox's user and
-  whether it could elevate, configuration hash, seed, engine commit. A run whose lock
-  cannot back a published number says so.
+- `lock.json` — everything that produced the result: Task source, prepared solver and
+  prepared solver/verifier images, actual Providers, agent identity, one optional asset commit/dirty observation, requested
+  and observed resources, sandbox lifecycle outcomes, configuration, seed, and engine
+  commit. A run whose lock cannot back a published number says so.
 - `trace.transport.jsonl` — every model call, written by the gateway and by nothing else.
   Calls that failed upstream are recorded too, with their status: silence about a failed
   call is indistinguishable from an idle agent.
@@ -73,13 +88,15 @@ Under `runs/<run>/<episode>/`:
   media references, subagents, and continuations.
 - `trace.execution.jsonl` — setup/verify/framework phases, commands, streamed output,
   policy application, and cleanup diagnostics.
-- `result.json` — terminal status, all named rewards, failure, and phase timings.
+- `result.json` — terminal status, all named rewards, failure, phase timings, and
+  destroyed/retained sandbox outcomes.
 - `verification.json` — the local derivation of rewards, including checks, aggregates,
   and direct Judge attempts.
 - `blobs/` — content-addressed large or binary payloads referenced by the records above.
 - `artifacts/` — the paths the task declared, if this run asked to keep them.
 
-Writing tasks: [docs/task-authoring.md](docs/task-authoring.md). Building images:
+Task semantics: [docs/task-design-principles.md](docs/task-design-principles.md). Writing
+tasks: [docs/task-authoring.md](docs/task-authoring.md). Building images:
 [docs/specs/sandbox-image.md](docs/specs/sandbox-image.md). Porting old tasks:
 [docs/migration-from-legacy.md](docs/migration-from-legacy.md). What is and is not
 guaranteed: [docs/security-model.md](docs/security-model.md).
@@ -88,8 +105,9 @@ guaranteed: [docs/security-model.md](docs/security-model.md).
 
 | Term | Meaning |
 |---|---|
-| **TaskSpec** | the complete, serializable specification of one task instance |
-| **Taskset** | loads task instances; named variants expand here |
+| **Task folder** | the complete self-contained authored source unit |
+| **TaskSpec** | the effective serializable specification of one selected Task instance |
+| **Task collection** | a directory or source containing independent Task folders |
 | **Environment** | how one task becomes one episode (provision → agent → verify) |
 | **Sandbox** / **Provider** | an isolated execution instance / the backend supplying it |
 | **Harness** | binds an agent to the framework — *autonomous* (agent owns its loop) or *policy* (framework owns the observe/act loop) |
@@ -110,7 +128,6 @@ packages/ale-verify/  sandbox-local checks, direct Judges, records
 images/base/          sandbox base images (published to GHCR)
 docs/adr/             one-page decision records (append-only)
 docs/specs/           living normative specifications
-registry.toml         domain → task repository mapping
 ```
 
 ## Development

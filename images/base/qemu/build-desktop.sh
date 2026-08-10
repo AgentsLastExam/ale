@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Superseded: retained for existing local workflows. New ALE VM Task images are built
+# from images/base/vm-gui and images/base/vm-materializer through `ale prepare`.
 # Build the Ubuntu Desktop guest disk, from Canonical's own installer.
 #
 # The guest is installed the way a person would install it — the official Desktop ISO,

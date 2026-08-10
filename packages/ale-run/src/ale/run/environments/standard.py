@@ -30,6 +30,7 @@ from typing import Literal, cast
 
 from ale.core.environment import Environment, EpisodeContext, Phase
 from ale.core.errors import (
+    AgentError,
     PhaseTimeoutError,
     TaskError,
     TrajectoryConversionError,
@@ -38,10 +39,11 @@ from ale.core.errors import (
 )
 from ale.core.harness import (
     AutonomousHarness,
+    EffectiveAgentResources,
     PolicyHarness,
     TrajectoryParseContext,
 )
-from ale.core.lock import AleVerifyProvenance, AssetProvenance, KitProvenance, SandboxProvenance
+from ale.core.lock import AleVerifyProvenance, SandboxProvenance
 from ale.core.result import PhaseTiming
 from ale.core.sandbox import (
     ExecOutputSink,
@@ -49,11 +51,11 @@ from ale.core.sandbox import (
     Identity,
     Sandbox,
     SandboxRequest,
+    SandboxRole,
 )
 from ale.core.task import Task
-from ale.core.taskspec import AssetMount, StdioMcpServer
+from ale.core.taskspec import NetworkMode, NetworkPolicy, StdioMcpServer, VerificationMode
 from ale.core.trace import (
-    ExecutionLog,
     PhaseFinished,
     PhaseStarted,
     PolicyApplied,
@@ -62,11 +64,8 @@ from ale.core.trace import (
 )
 from ale.core.trajectory import AtifAgent, AtifMetrics, AtifTrajectory, TrajectoryBuilder
 from ale.core.verdict import Verdict
-from ale.run.assets import stage_mounts
 from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
 from ale.run.harnesses.builtin import oracle_dir
-from ale.run.images import resolve_digest, resolve_ref
-from ale.run.kits import hash_kit, installed_ale_verify, resolve_kit
 from ale.run.recording import (
     BlobStore,
     CommandRecorder,
@@ -74,6 +73,7 @@ from ale.run.recording import (
     atomic_write_json,
     execution_logging,
 )
+from ale.run.verification import installed_ale_verify
 from ale_verify import VerificationRecord
 
 __all__ = ["StandardEnvironment"]
@@ -94,26 +94,6 @@ VERIFY_CONFIG_PATH = PurePosixPath("/opt/ale/verify/config.json")
 TASK_INSTRUCTION_PATH = PurePosixPath("/opt/ale/verify/instruction.md")
 TASK_PARAMETERS_PATH = PurePosixPath("/opt/ale/verify/parameters.json")
 AGENT_JUDGE_LOG_PATH = PurePosixPath("/opt/ale/verify/agent-judge.jsonl")
-_ARTIFACT_IDENTITY_SCRIPT = """\
-import hashlib, json, os, sys
-found = []
-for declared in sys.argv[1:]:
-    paths = [declared] if os.path.isfile(declared) else (
-        [os.path.join(root, name) for root, _, names in os.walk(declared) for name in names]
-        if os.path.isdir(declared) else []
-    )
-    for path in sorted(paths):
-        if os.path.islink(path) or not os.path.isfile(path):
-            continue
-        with open(path, "rb") as handle:
-            data = handle.read()
-        found.append({
-            "path": path,
-            "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
-            "size_bytes": len(data),
-        })
-print(json.dumps(found, separators=(",", ":")))
-"""
 
 
 class StandardEnvironment(Environment):
@@ -147,10 +127,26 @@ class StandardEnvironment(Environment):
                 await self._with_deadline(
                     ctx, Phase.AGENT, spec.timeouts.agent, self._agent(task, ctx, sandbox)
                 )
-            await self._capture_solver_evidence(ctx, sandbox)
-            rewards = await self._with_deadline(
-                ctx, Phase.VERIFY, spec.timeouts.verify, self._verify(task, ctx, sandbox)
-            )
+            try:
+                await self._capture_solver_evidence(ctx, sandbox)
+            except BaseException:
+                ctx.extras["failure_phase"] = Phase.AGENT.value
+                raise
+
+            async def verify() -> dict[str, float]:
+                if spec.verify.environment_mode is VerificationMode.SHARED:
+                    return await self._verify(task, ctx, sandbox)
+                await self._sanitize_for_retention(ctx, sandbox)
+                await ctx.sandboxes.release(sandbox)
+                verifier = await self._provision_verifier(ctx)
+                try:
+                    await ctx.artifacts.restore(verifier)
+                    return await self._verify(task, ctx, verifier)
+                finally:
+                    await self._sanitize_for_retention(ctx, verifier)
+                    await ctx.sandboxes.release(verifier)
+
+            rewards = await self._with_deadline(ctx, Phase.VERIFY, spec.timeouts.verify, verify())
         finally:
             # Teardown runs on every path, including cancellation.
             await asyncio.shield(self._timed(ctx, Phase.TEARDOWN, self._teardown(ctx, sandbox)))
@@ -166,22 +162,25 @@ class StandardEnvironment(Environment):
 
     async def _provision(self, ctx: EpisodeContext) -> Sandbox:
         spec = ctx.spec
-        reference = resolve_ref(spec.image)
         request = SandboxRequest(
             episode_id=ctx.episode_id,
-            image_ref=reference,
+            role=(
+                SandboxRole.SHARED
+                if spec.verify.environment_mode is VerificationMode.SHARED
+                else SandboxRole.SOLVER
+            ),
+            prepared_image=ctx.prepared_image,
             resources=spec.resources,
             network=spec.network,
             gateway_url=ctx.session.gateway_url or None,
             proxy_url=ctx.proxy_url,
+            proxy_token=ctx.session.token,
             env={"ALE_EPISODE_ID": ctx.episode_id},
             sudo=spec.resources.sudo,
         )
         sandbox = await ctx.sandboxes.acquire(request)
-        # After acquisition: the image is present locally by now, whether it was already
-        # there or had to be pulled.
-        with contextlib.suppress(Exception):
-            ctx.image_digest = await resolve_digest(reference)
+        ctx.resolved_image = sandbox.resolved_image
+        ctx.resource_allocation = sandbox.allocation
         # Derived from the account the image declared, not configured anywhere. A run
         # that could choose its own working directory was a second answer to a question
         # the image had already answered, and two answers can disagree.
@@ -189,6 +188,24 @@ class StandardEnvironment(Environment):
         ctx.sandbox_identity = SandboxProvenance(
             user=_agent_user(sandbox), sudo=spec.resources.sudo
         )
+        return sandbox
+
+    async def _provision_verifier(self, ctx: EpisodeContext) -> Sandbox:
+        resources = ctx.spec.verify.resources
+        if resources is None or ctx.prepared_verifier_image is None:
+            raise TaskError("separate verification image/resources were not prepared")
+        request = SandboxRequest(
+            episode_id=ctx.episode_id,
+            role=SandboxRole.VERIFIER,
+            prepared_image=ctx.prepared_verifier_image,
+            resources=resources.as_resources(),
+            network=NetworkPolicy(mode=NetworkMode.OPEN),
+            env={"ALE_EPISODE_ID": ctx.episode_id},
+            sudo=False,
+        )
+        sandbox = await ctx.sandboxes.acquire(request)
+        ctx.extras["verifier_resolved_image"] = sandbox.resolved_image
+        ctx.extras["verifier_resource_allocation"] = sandbox.allocation
         return sandbox
 
     async def _setup(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
@@ -205,38 +222,9 @@ class StandardEnvironment(Environment):
         # so it may reach the network. What the declared policy binds is the agent.
         await sandbox.open_egress()
 
-        # Created *as the agent*, not created as root and handed over. One step instead
-        # of two, and the framework never touches anyone's ownership — which is what was
-        # decided and had drifted. It also turns the convention into a mechanism: a task
-        # that declares a path the agent cannot create fails here, immediately, instead of
-        # being quietly chowned into working and then surprising somebody on an image
-        # whose agent account is named differently.
-        declared = [
-            *(mount.dest for mount in ctx.spec.setup.assets),
-            *ctx.spec.artifacts,
-        ]
-        if declared:
-            result = await sandbox.exec(["mkdir", "-p", *declared], identity=Identity.AGENT)
-            if not result.ok:
-                raise TaskError(
-                    f"the agent cannot create the paths this task declared: "
-                    f"{result.stderr.strip()}. Declared destinations belong under the "
-                    f"agent's home ({ctx.home})."
-                )
-
         folder = getattr(task, "folder", None)
         if folder is None:
             return
-
-        if files := folder.visible_files():
-            # A task's own small files land beside its first declared asset, or in the
-            # first path it asked to have collected — whichever it declared.
-            destination = _default_files_dest(ctx)
-            await sandbox.exec(["mkdir", "-p", destination])
-            await sandbox.upload_dir(str(files), destination, identity=Identity.AGENT)
-
-        await self._stage_assets(ctx, sandbox, ctx.spec.setup.assets)
-        await self._install_kits(ctx, sandbox, folder, ctx.spec.setup.kits)
 
         if setup_dir := folder.stage_dir("setup"):
             await sandbox.upload_dir(str(setup_dir), str(SETUP_DIR))
@@ -270,6 +258,7 @@ class StandardEnvironment(Environment):
         ctx.agent_version = await harness.install(
             _RecordedSandbox(ctx, sandbox, component="harness-install")
         )
+        ctx.agent_resources = await self._stage_mcp_files(ctx, sandbox)
         await harness.install_resources(
             _RecordedSandbox(ctx, sandbox, component="harness-resources"),
             session,
@@ -289,6 +278,37 @@ class StandardEnvironment(Environment):
             timeout_sec=spec.timeouts.agent,
         )
         ctx.extras["agent_run"] = run
+        if run.exit_code != 0:
+            detail = run.final_message or "no diagnostic output"
+            raise AgentError(f"{harness.name} exited {run.exit_code}: {detail}")
+
+    async def _stage_mcp_files(
+        self, ctx: EpisodeContext, sandbox: Sandbox
+    ) -> EffectiveAgentResources:
+        resolved = []
+        for item in ctx.agent_resources.mcp_servers:
+            server = item.server
+            if item.staged_files is not None and isinstance(server, StdioMcpServer):
+                target = f"{ctx.home}/.ale-mcp/{item.name}"
+                await sandbox.upload_dir(
+                    str(item.staged_files),
+                    target,
+                    identity=Identity.AGENT,
+                )
+                server = server.model_copy(
+                    update={
+                        "command": server.command.replace("{mcp}", target),
+                        "args": tuple(arg.replace("{mcp}", target) for arg in server.args),
+                        "cwd": server.cwd.replace("{mcp}", target) if server.cwd else None,
+                        "environment": {
+                            key: value.replace("{mcp}", target)
+                            for key, value in server.environment.items()
+                        },
+                    }
+                )
+                item = item.model_copy(update={"server": server})
+            resolved.append(item)
+        return ctx.agent_resources.model_copy(update={"mcp_servers": tuple(resolved)})
 
     async def _rollout(self, harness, ctx: EpisodeContext, sandbox: Sandbox) -> None:  # type: ignore[no-untyped-def]
         """Hand the agent a stepwise view of the sandbox and let it drive.
@@ -413,7 +433,6 @@ class StandardEnvironment(Environment):
         parameters = json.dumps(ctx.spec.params, ensure_ascii=False).encode("utf-8")
         await sandbox.write_file(TASK_PARAMETERS_PATH, parameters)
         await self._stage_verification_config(ctx, sandbox)
-        await self._stage_assets(ctx, sandbox, ctx.spec.verify.assets)
         # Scoring is the framework's own work, and a verifier may need to reach something
         # the agent could not. The agent has already finished; nothing it does can follow.
         await sandbox.open_egress()
@@ -424,13 +443,11 @@ class StandardEnvironment(Environment):
             str(framework_source),
             f"{destination}/ale_verify",
         )
-        await self._probe_kit(sandbox, "ale-verify", "import ale_verify")
+        await self._probe_package(sandbox, "ale-verify", "import ale_verify")
         ctx.extras["ale_verify_provenance"] = AleVerifyProvenance(
             version=framework_version,
             content_hash=framework_hash,
         )
-        await self._install_kits(ctx, sandbox, folder, ctx.spec.verify.kits)
-
         exit_code = await self._run_stage(ctx, sandbox, VERIFY_DIR, Phase.VERIFY)
         record = await self._collect_verification_record(ctx, sandbox)
         await self._collect_agent_judge_log(ctx, sandbox, record)
@@ -533,46 +550,20 @@ class StandardEnvironment(Environment):
         if ctx.extras.get("solver_evidence_captured"):
             return
         logger = logging.getLogger("ale.execution")
-        identities = await sandbox.exec(
-            ["python3", "-c", _ARTIFACT_IDENTITY_SCRIPT, *ctx.spec.artifacts]
-        )
-        if identities.ok:
-            try:
-                observed = json.loads(identities.stdout or "[]")
-            except json.JSONDecodeError:
-                observed = []
-            ctx.extras["artifact_identities"] = observed
-            if ctx.execution is not None:
-                ctx.execution.append(
-                    ExecutionLog(
-                        episode_id=ctx.episode_id,
-                        phase=Phase.VERIFY.value,
-                        component="solver-evidence",
-                        message="solver artifact identities finalized",
-                        data={"artifacts": observed},
-                    ),
-                    durable=True,
-                )
-        for index, path in enumerate(ctx.spec.artifacts):
-            name = Path(path).name or f"artifact-{index}"
-            try:
-                await ctx.artifacts.collect(sandbox, path, name)
-                logger.info(
-                    "artifact collected",
-                    extra={"ale_data": {"source": path, "name": name}},
-                )
-            except Exception as exc:
-                logger.warning(
-                    "artifact collection failed",
-                    extra={
-                        "ale_data": {
-                            "source": path,
-                            "name": name,
-                            "error": str(exc),
-                        }
-                    },
-                )
-
+        if self.agent_enabled:
+            session = ctx.session.model_copy(
+                update={
+                    "gateway_url": sandbox.gateway_url or ctx.session.gateway_url,
+                    "home": ctx.home,
+                    "sandbox_id": sandbox.sandbox_id,
+                    "resources_digest": ctx.agent_resources.digest,
+                }
+            )
+            await self.harness.cleanup(
+                _RecordedSandbox(ctx, sandbox, component="harness-cleanup"),
+                session,
+            )
+            logger.info("harness cleanup completed")
         # The harness's own logs, in their own place. What the agent produced and how the
         # harness went about producing it are different questions with different owners:
         # the task declares the first because only it knows what its output is, and the
@@ -598,37 +589,46 @@ class StandardEnvironment(Environment):
                     },
                 )
 
-        if self.agent_enabled:
-            session = ctx.session.model_copy(
-                update={
-                    "gateway_url": sandbox.gateway_url or ctx.session.gateway_url,
-                    "home": ctx.home,
-                    "sandbox_id": sandbox.sandbox_id,
-                    "resources_digest": ctx.agent_resources.digest,
-                }
-            )
-            try:
-                await self.harness.cleanup(
-                    _RecordedSandbox(ctx, sandbox, component="harness-cleanup"),
-                    session,
-                )
-                logger.info("harness cleanup completed")
-            except Exception as exc:
-                logger.warning(
-                    "harness cleanup failed",
-                    extra={"ale_data": {"error": str(exc)}},
-                )
         if ctx.extras.get("agent_started") and not ctx.extras.get("trajectory_written"):
             self._parse_harness_trajectory(ctx)
+
+        if ctx.artifacts.enabled:
+            for index, path in enumerate(ctx.spec.artifacts):
+                name = Path(path).name or f"artifact-{index}"
+                await ctx.artifacts.collect(sandbox, path, name)
+                logger.info(
+                    "artifact collected",
+                    extra={"ale_data": {"source": path, "name": name}},
+                )
+
         ctx.extras["solver_evidence_captured"] = True
 
     async def _teardown(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
-        # Collection is best effort: a sandbox that died still has to be released.
+        # Best-effort interrupted evidence does not replace the primary failure.
         if ctx.extras.get("agent_started") and not ctx.extras.get("solver_evidence_captured"):
             with contextlib.suppress(Exception):
                 await self._capture_solver_evidence(ctx, sandbox)
+        await self._sanitize_for_retention(ctx, sandbox)
         await ctx.sandboxes.release(sandbox)
         logging.getLogger("ale.execution").info("sandbox released")
+
+    async def _sanitize_for_retention(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
+        if sandbox.request.retention == "destroy":
+            ctx.sandboxes.mark_sanitized(sandbox, succeeded=True)
+            return
+        paths = [
+            str(VERIFY_CONFIG_PATH),
+            str(VERIFY_DIR / "agent"),
+            str(VERIFY_DIR / "agent-tools"),
+            f"{ctx.home}/.codex/auth.json",
+            f"{ctx.home}/.claude/.credentials.json",
+        ]
+        result = await sandbox.exec(["rm", "-rf", "--", *paths])
+        ctx.sandboxes.mark_sanitized(
+            sandbox,
+            succeeded=result.ok,
+            reason=None if result.ok else result.stderr.strip() or "credential sanitation failed",
+        )
 
     def _parse_harness_trajectory(self, ctx: EpisodeContext) -> None:
         assert ctx.blobs is not None
@@ -782,63 +782,11 @@ class StandardEnvironment(Environment):
             )
         return result.exit_code
 
-    async def _stage_assets(
-        self, ctx: EpisodeContext, sandbox: Sandbox, mounts: tuple[AssetMount, ...]
-    ) -> None:
-        """Copy this stage's declared data into the sandbox.
-
-        Keys and origins are kept for provenance: a run served from cache has to be as
-        explainable as one that downloaded everything.
-        """
-        if not mounts:
-            return
-        for asset in await stage_mounts(sandbox, mounts):
-            ctx.assets.append(
-                AssetProvenance(
-                    component=asset.mount.path,
-                    repo=asset.mount.repo,
-                    revision=asset.mount.revision,
-                    data_key=asset.key,
-                    origin=asset.origin,
-                )
-            )
-
-    async def _install_kits(
-        self, ctx: EpisodeContext, sandbox: Sandbox, folder: object, kits: tuple[str, ...]
-    ) -> None:
-        """Put a domain's shared libraries where the interpreter already searches.
-
-        Not a framework directory plus a search path we set: that is a rule every task
-        author has to learn, and ours was quietly wrong — it set a literal glob, which
-        the variable does not expand, so one of its two implementations never worked.
-
-        The destination is asked of the interpreter rather than assumed, since it depends
-        on the image's Python version. It is the *system* location, not one account's:
-        a kit is shared machinery that setup, verify and the agent all import, and those
-        run as different users — installing into any one of their private locations would
-        make it importable for that one and missing for the rest.
-        """
-        if not kits:
-            return
-
-        repo_root: Path = folder.repo_root  # type: ignore[attr-defined]
-        destination = await self._site_packages(sandbox)
-
-        for name in kits:
-            try:
-                source = resolve_kit(repo_root, name)
-            except Exception as exc:
-                raise TaskError(str(exc)) from exc
-            await sandbox.exec(["mkdir", "-p", destination])
-            await sandbox.upload_dir(str(source), f"{destination}/{name}")
-            await self._probe_kit(sandbox, name, f"import {name}")
-            ctx.kits.append(KitProvenance(name=name, content_hash=hash_kit(source)))
-
-    async def _probe_kit(self, sandbox: Sandbox, name: str, statement: str) -> None:
+    async def _probe_package(self, sandbox: Sandbox, name: str, statement: str) -> None:
         result = await sandbox.exec(["python3", "-c", statement])
         if not result.ok:
             raise TaskError(
-                f"kit {name!r} is incompatible with the selected image: "
+                f"package {name!r} is incompatible with the selected image: "
                 f"{result.stderr.strip() or result.stdout.strip()}"
             )
 
@@ -957,15 +905,18 @@ class StandardEnvironment(Environment):
                     return await coro
         except TimeoutError as exc:
             outcome = "timed_out"
+            ctx.extras["failure_phase"] = phase.value
             raise PhaseTimeoutError(phase.value, timeout_sec or 0) from exc
         except PhaseTimeoutError:
             outcome = "timed_out"
+            ctx.extras["failure_phase"] = phase.value
             raise
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise
         except BaseException:
             outcome = "failed"
+            ctx.extras["failure_phase"] = phase.value
             raise
         finally:
             finished_at = datetime.now(UTC)
@@ -999,13 +950,6 @@ class StandardEnvironment(Environment):
 def _agent_user(sandbox: Sandbox) -> str:
     """The account this sandbox calls the agent, for a plain `chown`."""
     return getattr(sandbox, "agent_user", "user")
-
-
-def _default_files_dest(ctx: EpisodeContext) -> str:
-    """Where a task's own ``files/`` directory goes when it declared no home for it."""
-    if ctx.spec.setup.assets:
-        return ctx.spec.setup.assets[0].dest
-    return ctx.home
 
 
 def _exact_token_metrics(run_dir: Path, call_id: str) -> AtifMetrics | None:

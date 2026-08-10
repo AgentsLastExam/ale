@@ -7,7 +7,7 @@ import math
 import pytest
 from pydantic import ValidationError
 
-from ale.core.result import FailureInfo, PhaseTiming, ResultRecord
+from ale.core.result import FailureInfo, PhaseTiming, ResultRecord, SandboxOutcome
 from ale.core.verdict import Status, Verdict
 
 pytestmark = pytest.mark.unit
@@ -72,3 +72,24 @@ def test_phase_timing_is_consistent_with_terminal_time() -> None:
     assert completed(phases=[phase]).phases == (phase,)
     with pytest.raises(ValidationError):
         completed(finished_at="2026-07-29T11:59:59Z")
+
+
+def test_v1_result_migrates_deterministically_to_v2() -> None:
+    legacy = completed().model_dump(mode="json", exclude={"schema_version", "sandboxes"})
+    migrated = ResultRecord.model_validate(legacy)
+    assert migrated.schema_version == 2
+    assert migrated.sandboxes == ()
+    assert ResultRecord.model_validate_json(migrated.model_dump_json()) == migrated
+
+
+def test_v2_result_round_trips_retained_sandbox_handle() -> None:
+    outcome = SandboxOutcome(
+        roles=("solver", "verifier"),
+        requested="keep",
+        outcome="retained",
+        provider="docker",
+        handle="ale-demo",
+        cleanup_command="ale sandbox destroy ale-demo",
+    )
+    result = completed(sandboxes=(outcome,))
+    assert ResultRecord.model_validate_json(result.model_dump_json()).sandboxes == (outcome,)

@@ -1,8 +1,10 @@
 # 0005 — A fixed workspace replaces path templating; variants stay parameters
 
-**Status**: accepted (2026-07-24); partly superseded by [0008](0008-task-owned-paths.md) (2026-07-25) — the
-fixed workspace is gone; a task declares its own absolute paths. The placeholder triage
-and strict rendering below still stand.
+**Status**: accepted (2026-07-24); partly superseded by
+[0008](0008-task-owned-paths.md) (2026-07-25) and
+[0017](0017-self-contained-docker-tasks.md) (2026-08-03) — fixed workspace and
+path-derived Task identity are gone. Literal paths, strict `${param}` rendering, and
+parameter variants remain.
 
 ## Context
 

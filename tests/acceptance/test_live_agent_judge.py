@@ -16,17 +16,17 @@ from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.tasksets.manifest import load_tasks
 from ale_verify import _agents
+from tests.support import provider_registry
 
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm]
 
 TASKS = Path(__file__).resolve().parents[3] / "ale-tasks-base"
-IMAGE = os.environ.get("ALE_LIVE_AGENT_JUDGE_IMAGE")
-
 CASES = (
     (
         "codex-cli",
+        "ALE_LIVE_CODEX_CLI_VERSION",
         "OPENAI_API_KEY",
         "https://api.openai.com",
         "ALE_LIVE_OPENAI_MODEL",
@@ -34,6 +34,7 @@ CASES = (
     ),
     (
         "claude-code",
+        "ALE_LIVE_CLAUDE_CODE_VERSION",
         "ANTHROPIC_API_KEY",
         "https://api.anthropic.com",
         "ALE_LIVE_ANTHROPIC_MODEL",
@@ -43,13 +44,14 @@ CASES = (
 
 
 @pytest.mark.parametrize(
-    ("adapter", "key_env", "base_url", "model_env", "default_model"),
+    ("adapter", "version_env", "key_env", "base_url", "model_env", "default_model"),
     CASES,
 )
 @pytest.mark.asyncio
 async def test_live_agent_judge_records_transcript_without_an_extra_trajectory(
     tmp_path: Path,
     adapter: str,
+    version_env: str,
     key_env: str,
     base_url: str,
     model_env: str,
@@ -57,19 +59,20 @@ async def test_live_agent_judge_records_transcript_without_an_extra_trajectory(
 ) -> None:
     if not os.environ.get(key_env):
         pytest.skip(f"no {key_env}")
-    if not IMAGE:
-        pytest.skip("ALE_LIVE_AGENT_JUDGE_IMAGE is not set")
+    version = os.environ.get(version_env)
+    if not version:
+        pytest.skip(f"no exact Agent Judge CLI version in {version_env}")
+    if adapter == "claude-code":
+        base_url = os.environ.get("ALE_LIVE_ANTHROPIC_BASE_URL", base_url)
     repo = tmp_path / "repo"
     task_path = repo / "tasks" / "demo" / "verification_agent_judge"
     task_path.parent.mkdir(parents=True)
     shutil.copytree(TASKS / "tasks" / "demo" / "verification_agent_judge", task_path)
-    shutil.copy2(TASKS / "domain.yaml", repo / "domain.yaml")
-    manifest = task_path / "task.yaml"
-    manifest.write_text(manifest.read_text().replace("image: sandbox-base-cli", f"image: {IMAGE}"))
-    task = next(iter(ManifestTaskset(task_path).load()))
+    task = load_tasks(task_path)[0]
     verification = VerificationConfig(
         agent=AgentJudgeConfig(
             adapter=adapter,  # type: ignore[arg-type]
+            version=version,
             model=os.environ.get(model_env, default_model),
             reasoning_effort="high",
             base_url=base_url,
@@ -81,7 +84,7 @@ async def test_live_agent_judge_records_transcript_without_an_extra_trajectory(
     result = await run_episode(
         task,
         StandardEnvironment(harness),
-        DockerProvider(),
+        provider_registry(DockerProvider()),
         run_dir=tmp_path,
         provenance=ProvenanceInputs(
             source=TaskSource(kind="local", path=str(task_path)),

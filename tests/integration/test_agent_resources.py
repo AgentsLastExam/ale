@@ -18,6 +18,7 @@ from ale.core.taskspec import (
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.providers.docker import DockerProvider
+from tests.support import prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -38,13 +39,13 @@ async def test_task_and_run_skills_stage_once_without_ambient_host_state(
     tmp_path: Path,
 ) -> None:
     task_root = tmp_path / "task"
-    write_skill(task_root / "task-skill", "task", executable=True)
+    write_skill(task_root / "tools/skills/task-skill", "task", executable=True)
     run_skill = tmp_path / "run-skill"
     write_skill(run_skill, "run")
     write_skill(tmp_path / ".claude" / "skills" / "ambient", "ambient")
 
     resources = resolve_agent_resources(
-        task=ToolProvision(skills=(SkillSource(path="task-skill"),)),
+        task=ToolProvision(skills=(SkillSource(path="tools/skills/task-skill"),)),
         agent_skills=(SkillSource(path=str(run_skill), origin="run", declared=str(run_skill)),),
         task_root=task_root,
         task_source=TaskSource(
@@ -59,9 +60,10 @@ async def test_task_and_run_skills_stage_once_without_ambient_host_state(
 
     provider = DockerProvider()
     await provider.preflight()
+    prepared = await prepare_reference(provider, IMAGE)
     request = SandboxRequest(
         episode_id="agent-resources",
-        image_ref=IMAGE,
+        prepared_image=prepared,
         resources=Resources(cpus=1, memory_mb=512),
         network=NetworkPolicy(),
     )

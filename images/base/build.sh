@@ -20,15 +20,23 @@ for image in ${images[@]}; do
     dockerfile="images/base/${image}/Dockerfile"
     [ -f "$dockerfile" ] || { echo "ERROR: no such image: $image" >&2; exit 1; }
 
-    content=$(git ls-files -s "images/base/${image}" packages/ale-run/src/ale/run/guestd \
-              | sha256sum | cut -c1-12)
+    content=$(find "images/base/${image}" packages/ale-run/src/ale/run/guestd \
+              -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)
     name="ghcr.io/agentslastexam/sandbox-base-${image}"
+    tags=(--tag "${name}:latest" --tag "${name}:${content}")
+    context="."
+    if [ "$image" = vm-materializer ]; then
+        name="ghcr.io/agentslastexam/ale-vm-materializer"
+        tags=(--tag "${name}:0.1.0" --tag "${name}:${content}")
+        context="images/base/vm-materializer"
+    elif [ "$image" = vm-gui ]; then
+        tags=(--tag "${name}:0.1.0" --tag "${name}:${content}")
+    fi
 
     echo ">> building ${name}:${content}"
     "$runtime" build \
         --file "$dockerfile" \
-        --tag "${name}:latest" \
-        --tag "${name}:${content}" \
+        "${tags[@]}" \
         --label "ale.content_hash=${content}" \
-        .
+        "$context"
 done

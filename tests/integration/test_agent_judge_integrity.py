@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -12,12 +11,12 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.scaffold import scaffold_task
+from ale.run.tasksets.manifest import load_tasks
 from ale_verify import CheckResult, JudgeAttempt, JudgeInvocation, Verification
+from tests.support import provider_registry
 
 pytestmark = pytest.mark.integration
-
-IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
 
 
 def test_agent_judge_freezes_later_checks_and_does_not_touch_solver_trajectory(
@@ -30,7 +29,8 @@ def test_agent_judge_freezes_later_checks_and_does_not_touch_solver_trajectory(
     trajectory.write_text('{"schema_version":"ATIF-v1.7","steps":[]}')
     before = trajectory.read_bytes()
     config.write_text(
-        '{"agent":{"adapter":"codex-cli","model":"m","reasoning_effort":"high",'
+        '{"agent":{"adapter":"codex-cli","version":"1.0.0","model":"m",'
+        '"reasoning_effort":"high",'
         '"base_url":"https://example.test","api_key_env":"KEY"}}'
     )
     for key, value in {
@@ -106,27 +106,22 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
 ) -> None:
     secret = "agent-direct-secret"
     monkeypatch.setenv("JUDGE_KEY", secret)
-    root = tmp_path / "repo"
-    task_root = root / "tasks" / "agent-integrity"
-    for stage in ("setup", "verify", "oracle"):
-        (task_root / stage).mkdir(parents=True)
-    (root / "domain.yaml").write_text("name: demo\nrequires_core: '>=0.1,<0.2'\n")
+    task_root = scaffold_task(tmp_path / "agent-integrity")
     (task_root / "task.yaml").write_text(
-        textwrap.dedent(f"""
-        image: {IMAGE}
-        resources: {{ cpus: 1, memory_mb: 512 }}
-        network: {{ mode: block }}
-        timeouts: {{ setup: 60, agent: 60, verify: 120 }}
-        artifacts: [/home/user/output]
-        """).strip()
+        (task_root / "task.yaml")
+        .read_text()
+        .replace("memory_mb: 1024", "memory_mb: 512")
+        .replace("verify: 120", "verify: 120")
     )
-    (task_root / "instruction.md").write_text("Write baseline to /home/user/output/result.txt\n")
-    (task_root / "setup" / "fake-agent.py").write_text(
+    (task_root / "instruction.md").write_text(
+        "${greeting}. Write baseline to /home/user/output/result.txt\n"
+    )
+    (task_root / "image" / "fake-agent.py").write_text(
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
         "from pathlib import Path\n"
         "if '--version' in sys.argv:\n"
-        "    print(Path(sys.argv[0]).name + ' fake 1.0')\n"
+        "    print(Path(sys.argv[0]).name + ' fake 1.0.0')\n"
         "    raise SystemExit\n"
         "sys.stdin.read()\n"
         "name = Path(sys.argv[0]).name\n"
@@ -147,19 +142,19 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         "    print(json.dumps({'type':'result','session_id':session,"
         "'result':json.dumps(verdict)}))\n"
     )
-    (task_root / "setup" / "run.sh").write_text(
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        "mkdir -p /home/user/output\n"
-        f'install -m 755 "$(dirname "$0")/fake-agent.py" /usr/local/bin/{binary_name}\n'
+    (task_root / "image" / "Dockerfile").write_text(
+        "FROM ghcr.io/agentslastexam/sandbox-base-cli:latest\n"
+        f"COPY fake-agent.py /usr/local/bin/{binary_name}\n"
+        f"RUN chmod 755 /usr/local/bin/{binary_name} "
+        "&& mkdir -p /home/user/output && chown -R user:user /home/user/output\n"
     )
     (task_root / "oracle" / "run.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nprintf baseline > /home/user/output/result.txt\n"
     )
     (task_root / "verify" / "run.sh").write_text(
-        '#!/usr/bin/env bash\nset -euo pipefail\nexec python3 "$(dirname "$0")/check.py"\n'
+        "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 verify.py\n"
     )
-    (task_root / "verify" / "check.py").write_text(
+    (task_root / "verify" / "verify.py").write_text(
         "from ale_verify import Verification\n"
         "v = Verification()\n"
         "v.judge(\n"
@@ -172,18 +167,17 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         "v.aggregate('overall')\n"
         "v.write()\n"
     )
-    for script in task_root.glob("*/run.sh"):
-        script.chmod(0o755)
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
 
     result = await run_episode(
         task,
         StandardEnvironment(OracleHarness()),
-        DockerProvider(),
+        provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         verification_config=VerificationConfig(
             agent=AgentJudgeConfig(
                 adapter=adapter,  # type: ignore[arg-type]
+                version="1.0.0",
                 model=model,
                 reasoning_effort="high",
                 base_url=base_url,

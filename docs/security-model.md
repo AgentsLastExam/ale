@@ -13,16 +13,18 @@ silently stops measuring what it says it measures.
 
 ## 1. A sandbox has exactly one way out
 
-Default is `network.mode: block`. Each episode gets its own Docker bridge created
-`--internal`, which has no route off the host. The only thing on it besides the sandbox
-is the host itself, reached at that bridge's own gateway address.
+Default is `network.mode: block`. Docker uses a per-episode `--internal` bridge with no
+route off the host. QEMU uses guest and runner deny-all rules, forwarding only the
+episode's framework-owned service ports.
 
 This is why the address is read from the network rather than assumed: Docker's
 `host-gateway` alias does not work on an internal bridge, and a wrong assumption here
 would look like a broken run rather than a broken guarantee.
 
-`allowlist` uses the **same routeless bridge**. What changes is what the host will
-forward on the sandbox's behalf — see §2 — never what the sandbox can dial.
+`allowlist` preserves that deny-all topology. Docker reaches the host proxy over its
+internal bridge. QEMU DNATs the episode Gateway and proxy ports through the runner.
+Agent and oracle commands receive authenticated proxy variables only after the sandbox
+is sealed; direct traffic that ignores them remains blocked.
 
 `open` is a deliberate escape hatch: an ordinary bridge with normal egress. A task must
 declare it, and the declaration is recorded in provenance.
@@ -41,8 +43,9 @@ Two host-side services, one token:
 - **The egress proxy** serves `CONNECT` for hosts a task declared, and refuses
   everything else with a 403 naming what was declared.
 
-Both authenticate the same per-episode bearer token and share one session registry, so
-an episode has one identity and one allowlist.
+Both authenticate the same per-episode token and share one session registry. The Gateway
+uses bearer authentication; standard proxy clients send the same token through Basic
+proxy authentication.
 
 Allowlisting is enforced here rather than with `iptables` on the host or a filtering tool
 inside the image, for two reasons: it needs no privilege we would otherwise not require,
@@ -70,8 +73,9 @@ that command environment, registers the value for output/transcript redaction, a
 removes the sandbox after verification. The key is absent from provisioning, setup, the
 solver environment, staged configuration, result, record, and RunLock.
 
-LLM and Agent Judges call their configured endpoints directly from the completed
-sandbox. There is no Verification Service, Host callback, or Judge Gateway session.
+LLM and Agent Judges call their configured endpoints directly from the active
+verification sandbox, whether shared with the solver or separate. There is no
+Verification Service, Host callback, or Judge Gateway session.
 This deliberately trusts reviewed Task verifier code with the configured Judge
 credential; a malicious Task author is outside this threat model.
 
@@ -101,9 +105,10 @@ cannot write system paths, and cannot elevate unless its task asked.
 
 ## 5. Answers are absent, not hidden
 
-`verify/`, `oracle/`, and any asset a task listed under its `verify` stage are copied
-into the sandbox **during scoring**. While the agent works they are not access-controlled
-— they are not there.
+`verify/` and `oracle/`, including their optional `assets/` directories, are copied into a sandbox
+only for their own phases. While the evaluated agent works they are not access-controlled
+— they are not there. In separate mode only the immutable declared artifact snapshot is
+restored; the solver filesystem is not transferred wholesale.
 
 This is why there is no "secret" flag on an asset. A flag is a promise about behaviour
 that some future code path could forget to check; a file that was never uploaded cannot
@@ -132,13 +137,17 @@ agent reward of zero.
 
 ## 7. A result carries what produced it
 
-`RunLock` records the task source and commit, spec hash, resolved image **digest**,
-agent version and integrity, harness family, every asset revision and origin, kit
-hashes, config hash, seed, and the engine's own commit.
+For the feature 006 Task contract, `RunLock` records the explicit Task name, complete
+Task-folder source digest, source and commit when available, exact locally built image
+content, concrete Provider, requested and effective resources, GPU allocation and sandbox
+observations, agent version and integrity, harness family, one optional Task-asset
+repository/path/commit/dirty observation, verification topology and image/resources,
+sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
 
-A run whose lock cannot back a published result says so. `--require-reportable` turns
-that statement into a non-zero exit for CI. A task run from a local path is refused for
-publication, because it cannot be re-fetched.
+A run whose lock cannot back a reportable result says so. `--require-reportable` turns
+that statement into a non-zero exit for CI. Feature 006 does not define final Task-image
+publication; future delivery may add it without changing the self-contained Task source
+contract.
 
 ## 8. Agent resources are declared, not discovered
 
@@ -146,8 +155,9 @@ ALE never copies ambient host agent state. `~/.claude`, `~/.codex`, host Skills,
 configuration, and credentials are outside the resource model.
 
 Only the effective union declared by the Task, harness preset, Run file, and CLI is
-staged. Task paths cannot escape the task folder or enter verification/oracle material.
-Same-name resources with different digests fail before provisioning.
+staged. Task paths cannot escape `tools/skills/` or `tools/mcp/`. Same-name resources
+with different digests fail before provisioning. Task stdio MCP descriptors and adjacent
+code are staged below the agent home; `{mcp}` resolves to that private resource directory.
 
 Local stdio MCP commands execute inside the sandbox and are checked after files and
 Skills are staged. Remote MCP is limited to unauthenticated Streamable HTTP endpoints
@@ -176,6 +186,20 @@ finalized before verify. Deterministic criteria accepted before agent launch are
 immutable, only the active agent verdict may be added afterward, and post-judge sandbox
 bytes are never published as solver artifacts.
 
+## 11. Debug retention is explicit and sanitized
+
+Run configuration, not Task content, decides whether solver and verifier sandboxes are
+destroyed or retained. Default is destroy. Before a kept sandbox receives a durable
+handle, Harness cleanup and required evidence capture finish, known verification
+credential/native homes are removed, and the episode Gateway token is revoked. If ALE
+cannot establish sanitation, it destroys the sandbox and records `retention-failed`.
+
+Every Docker sandbox is labeled with ALE ownership, episode, role, requested retention,
+and allocated GPU UUIDs. Retained resources remain discoverable through
+`ale sandbox list` and removable only through a validated ALE-managed handle. Live labels
+also prevent a retained GPU from being assigned to another ALE sandbox. Retention does
+not change rewards or verification records.
+
 ---
 
 ## What is **not** defended against
@@ -183,16 +207,16 @@ bytes are never published as solver artifacts.
 Stating these plainly is part of the model. Treating an unlisted gap as covered is how
 security claims rot.
 
-**A malicious task author.** A task repository's `setup/run.sh` and `verify/run.sh` run
-as root in the sandbox, and a task may declare `resources.sudo` for its agent. Tasks are
-reviewed content, not untrusted input; the identity model protects a result from its
-*agent*, not a host from its task. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are aimed at
-*broken* tasks, not hostile ones. A malicious verifier can also read and exfiltrate a
-Judge credential injected for its direct provider call.
+**A malicious task author.** A Task folder's `setup/run.sh` and `verify/run.sh` run as root
+in the sandbox, and a Task may declare `resources.sudo` for its agent. Tasks are reviewed
+content, not untrusted input; the identity model protects a result from its *agent*, not a
+host from its Task. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are
+aimed at *broken* Tasks, not hostile ones. A malicious verifier can also read and
+exfiltrate a Judge credential injected for its direct provider call.
 
-**Container escape.** A sandbox is a Docker container with default isolation. A kernel
-exploit reaches the host. If you need to run genuinely hostile code, use the VM backend
-when it lands, and do not put anything on that host you would mind losing.
+**Container escape.** A container sandbox uses Docker's default isolation. A kernel
+exploit reaches the host. Use the VM backend for stronger isolation, and still do not put
+anything on that host you would mind losing.
 
 **Traffic analysis, or what is said over an allowlisted tunnel.** Once `CONNECT`
 succeeds the tunnel is opaque by design — the point is to reach a declared host, not to
@@ -201,11 +225,14 @@ inspect the conversation. An allowlisted host is a trusted host.
 **Exfiltration through the model gateway.** An agent can put anything it likes in a
 prompt. The gateway records calls; it does not police their content.
 
-**A compromised base image.** Images are pinned by digest in provenance, so a change is
-*detectable*. Nothing verifies that the contents were benign to begin with.
+**A compromised image.** The exact locally built Task-image content is recorded in
+provenance, so a change is *detectable*. Nothing verifies that its base or authored
+Dockerfile was benign to begin with.
 
-**Resource exhaustion by a co-tenant.** CPU and memory are capped per sandbox; disk and
-network bandwidth are not. Concurrent episodes on one host can starve each other.
+**Resource exhaustion by a co-tenant.** CPU, memory, writable storage, and ALE-managed
+physical GPUs are admitted per sandbox or rejected. Network bandwidth and resources
+consumed by processes outside ALE are not reserved; concurrent workloads can still starve
+each other.
 
 **Side channels between concurrent episodes.** Sandboxes are separate containers on
 separate bridges, but they share a kernel, a page cache and a clock.

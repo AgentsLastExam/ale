@@ -30,14 +30,17 @@ from ale.core.lock import (
     HarnessPresetProvenance,
     ImageProvenance,
     JudgeProvenance,
-    KitProvenance,
     LimitTermination,
+    ResourceProvenance,
     RunLock,
     SandboxProvenance,
     TaskProvenance,
     TaskSource,
+    VerificationProvenance,
 )
-from ale.core.taskspec import TaskSpec
+from ale.core.result import SandboxOutcome
+from ale.core.sandbox import PreparedTaskImage, ResolvedImage, ResourceAllocation
+from ale.core.taskspec import ImageSpec, TaskSpec
 from ale.run import __version__
 from ale_verify import VerificationRecord
 
@@ -181,8 +184,7 @@ def agent_provenance(
 class ProvenanceInputs:
     """What the run layer knows before an episode starts.
 
-    Everything an episode discovers for itself — the image digest it resolved, the
-    assets it materialised, the kits it staged — is filled in by ``build_lock`` from the
+    Everything an episode discovers for itself is filled in by ``build_lock`` from the
     episode's own record, so a caller cannot assert what it did not observe.
     """
 
@@ -198,26 +200,31 @@ def build_lock(
     inputs: ProvenanceInputs,
     spec: TaskSpec,
     *,
-    image_digest: str,
+    resolved_image: ResolvedImage,
+    allocation: ResourceAllocation,
+    task_digest: str,
+    prepared_image: PreparedTaskImage | None,
     sandbox: SandboxProvenance | None = None,
-    assets: tuple[AssetProvenance, ...] = (),
-    kits: tuple[KitProvenance, ...] = (),
+    asset: AssetProvenance | None = None,
+    verifier_resolved_image: ResolvedImage | None = None,
+    verifier_allocation: ResourceAllocation | None = None,
+    prepared_verifier_image: PreparedTaskImage | None = None,
     ale_verify: AleVerifyProvenance | None = None,
     termination: LimitTermination | None = None,
+    sandbox_outcomes: tuple[SandboxOutcome, ...] = (),
     seed: int = 0,
-    requires_core: str | None = None,
 ) -> RunLock:
     """Bind one episode's result to everything that produced it."""
     return RunLock(
         task=TaskProvenance(
-            id=spec.id,
-            domain=spec.domain,
+            name=spec.name,
             variant=spec.variant,
             spec_hash=spec.spec_hash,
+            content_digest=task_digest,
             source=inputs.source,
-            requires_core=requires_core,
         ),
-        image=ImageProvenance(ref=f"{spec.image.name}:{spec.image.tag}", digest=image_digest),
+        image=_image_provenance(spec.image, resolved_image, allocation, prepared_image),
+        resources=ResourceProvenance(requested=spec.resources, effective=allocation),
         agent=inputs.agent,
         framework=inputs.framework,
         gateway=inputs.gateway,
@@ -226,7 +233,53 @@ def build_lock(
         seed=seed,
         ale_verify=ale_verify,
         judges=inputs.judges,
-        assets=assets,
-        kits=kits,
+        asset=asset,
+        verification=VerificationProvenance(
+            mode=spec.verify.environment_mode,
+            image=(
+                _image_provenance(
+                    spec.verify.image or spec.image,
+                    verifier_resolved_image,
+                    verifier_allocation,
+                    prepared_verifier_image,
+                )
+                if verifier_resolved_image is not None and verifier_allocation is not None
+                else None
+            ),
+            resources=(
+                ResourceProvenance(
+                    requested=spec.verify.resources.as_resources(),
+                    effective=verifier_allocation,
+                )
+                if spec.verify.resources is not None and verifier_allocation is not None
+                else None
+            ),
+        ),
         termination=termination,
+        sandbox_outcomes=sandbox_outcomes,
+    )
+
+
+def _image_provenance(
+    declaration: ImageSpec,
+    resolved: ResolvedImage,
+    allocation: ResourceAllocation,
+    prepared: PreparedTaskImage | None,
+) -> ImageProvenance:
+    if prepared is None:
+        raise ValueError("image provenance requires the prepared image")
+    return ImageProvenance(
+        declaration=declaration,
+        source="ref" if prepared.source == "external-ref" else "local",
+        input_identity=prepared.input_identity,
+        image_source_identity=prepared.image_source_identity,
+        prepared_identity=prepared.prepared_identity,
+        runtime_ref=prepared.runtime_ref,
+        oci_identity=prepared.oci_identity,
+        base_materials=prepared.base_materials,
+        resolved_reference=prepared.resolved_reference,
+        materializer_identity=prepared.materializer_identity,
+        provider=allocation.provider,
+        observed_identity=resolved.observed_identity,
+        observed_ref=resolved.observed_ref,
     )

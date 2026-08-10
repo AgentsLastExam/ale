@@ -22,9 +22,16 @@ from pydantic import BaseModel
 
 from ale.core.blob import BlobSink
 from ale.core.harness import EffectiveAgentResources, HarnessSession
-from ale.core.lock import AssetProvenance, KitProvenance, LimitTermination, SandboxProvenance
+from ale.core.lock import LimitTermination, SandboxProvenance
 from ale.core.result import PhaseTiming, ResultRecord
-from ale.core.sandbox import Sandbox, SandboxRequest
+from ale.core.sandbox import (
+    PreparedTaskImage,
+    ResolvedImage,
+    ResourceAllocation,
+    Sandbox,
+    SandboxRequest,
+)
+from ale.core.task import TaskSourceContext
 from ale.core.taskspec import TaskSpec
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Verdict
@@ -66,13 +73,23 @@ class SandboxLease(Protocol):
 
     async def release(self, sandbox: Sandbox) -> None: ...
 
+    def mark_sanitized(
+        self, sandbox: Sandbox, *, succeeded: bool, reason: str | None = None
+    ) -> None: ...
+
 
 class ArtifactSink(Protocol):
     """Collects files out of a sandbox into the episode's run directory."""
 
+    enabled: bool
+
     async def collect(self, sandbox: Sandbox, source: str, name: str) -> Path: ...
 
     async def collect_file(self, sandbox: Sandbox, source: str, name: str) -> Path: ...
+
+    async def restore(self, sandbox: Sandbox) -> None: ...
+
+    def cleanup(self) -> None: ...
 
     def path(self, name: str) -> Path: ...
 
@@ -130,6 +147,7 @@ class EpisodeContext:
     session: HarnessSession
     """Gateway address plus this episode's bearer token — never a provider credential."""
     agent_resources: EffectiveAgentResources = field(default_factory=EffectiveAgentResources)
+    task_source: TaskSourceContext = field(default_factory=TaskSourceContext)
     trajectory_id: str = ""
     transport: EventSink | None = None
     execution: EventSink | None = None
@@ -137,6 +155,10 @@ class EpisodeContext:
     trajectory: TrajectorySink | None = None
     result: ResultSink | None = None
     current_phase: Phase | None = None
+    prepared_image: PreparedTaskImage | None = None
+    """Validated solver image selected before provisioning."""
+    prepared_verifier_image: PreparedTaskImage | None = None
+    """Prepared dedicated verifier image; None for shared verification."""
 
     home: str = ""
     """The agent's home directory, which is also where a run does its work.
@@ -158,7 +180,8 @@ class EpisodeContext:
     """Observed at provisioning: which account the agent ran as, and whether it could
     elevate. Recorded rather than asserted, like the image digest beside it."""
 
-    image_digest: str | None = None
+    resolved_image: ResolvedImage | None = None
+    resource_allocation: ResourceAllocation | None = None
 
     agent_version: str | None = None
     """What the agent turned out to be, once it was installed.
@@ -169,14 +192,6 @@ class EpisodeContext:
     "unknown" on every run.
     """
     """Resolved when the sandbox is provisioned — the tag alone proves nothing."""
-
-    assets: list[AssetProvenance] = field(default_factory=list)
-    kits: list[KitProvenance] = field(default_factory=list)
-    """What this episode actually materialised, recorded as it happens.
-
-    An episode observes these; a caller cannot assert them in advance, which is why they
-    accumulate here rather than being passed in.
-    """
 
     seed: int = 0
     extras: dict[str, object] = field(default_factory=dict)

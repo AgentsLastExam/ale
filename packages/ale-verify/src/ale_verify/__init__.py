@@ -107,12 +107,15 @@ class Verification:
         files: Sequence[str] = (),
         reference: str | None = None,
         trajectory: bool = False,
+        mcp_servers: Sequence[Mapping[str, object]] = (),
         weight: float = 1.0,
     ) -> float:
         self._assert_mutable()
         self._new_name(name)
         if kind not in {"llm", "agent"}:
             raise ValueError("Judge kind must be 'llm' or 'agent'")
+        if kind == "llm" and mcp_servers:
+            raise ValueError("mcp_servers is supported only by Agent Judge")
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("Judge prompt must be non-empty")
         choices = _rubric(rubric)
@@ -143,7 +146,7 @@ class Verification:
             if config is None:
                 raise ConfigurationError(f"verification {kind} configuration is missing")
             runner = _llm.run if kind == "llm" else _agents.run
-            choice, reasoning, invocation = runner(
+            arguments: dict[str, object] = dict(
                 invocation_id=invocation_id,
                 name=name,
                 prompt=prompt,
@@ -153,6 +156,9 @@ class Verification:
                 trajectory=trajectory_text[0] if trajectory_text else None,
                 config=config,
             )
+            if kind == "agent":
+                arguments["mcp_servers"] = tuple(mcp_servers)
+            choice, reasoning, invocation = runner(**arguments)
             if not isinstance(invocation, JudgeInvocation):
                 raise RuntimeError("Judge returned a malformed invocation")
             selected = choices.get(choice)
@@ -223,7 +229,11 @@ class Verification:
         score = sum(values[key] * stored_weights[key] for key in values) / total
         aggregate = AggregateResult(
             name=name,
-            method="weighted_mean" if weights is not None else "mean",
+            method=(
+                "weighted_mean"
+                if weights is not None or len(set(stored_weights.values())) > 1
+                else "mean"
+            ),
             inputs=dict(values),
             weights=dict(stored_weights),
             score=score,

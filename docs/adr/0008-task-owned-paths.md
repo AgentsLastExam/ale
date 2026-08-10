@@ -1,6 +1,9 @@
 # 0008 — A task owns its paths; the framework owns the timing
 
-**Status**: accepted (2026-07-25)
+**Status**: accepted (2026-07-25); partly superseded by
+[0017](0017-self-contained-docker-tasks.md) (2026-08-03) — Tasks still own literal absolute
+paths and withholding still depends on timing, but fixed solver input is baked into the
+Task image rather than staged as a setup asset.
 
 **Supersedes**: the fixed-workspace decision in [0005](0005-workspace-and-templating.md)
 and the workspace half of [0007](0007-store-and-workspace.md). The rest of both stands:

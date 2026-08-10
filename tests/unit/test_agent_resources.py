@@ -41,7 +41,9 @@ def skill(path: Path, text: str = "name") -> Path:
 
 def resolve(task_root: Path, *paths: str, kind: str = "registry"):
     return resolve_agent_resources(
-        task=ToolProvision(skills=tuple(SkillSource(path=path) for path in paths)),
+        task=ToolProvision(
+            skills=tuple(SkillSource(path=f"tools/skills/{path}") for path in paths)
+        ),
         task_root=task_root,
         task_source=source(kind),
     )
@@ -49,8 +51,8 @@ def resolve(task_root: Path, *paths: str, kind: str = "registry"):
 
 def test_single_skill_and_immediate_collection_resolve(tmp_path: Path) -> None:
     task = tmp_path / "task"
-    skill(task / "one")
-    collection = task / "collection"
+    skill(task / "tools/skills/one")
+    collection = task / "tools/skills/collection"
     skill(collection / "two")
     skill(collection / "three")
     skill(collection / ".hidden")
@@ -67,7 +69,8 @@ def test_single_skill_and_immediate_collection_resolve(tmp_path: Path) -> None:
 def test_invalid_skill_layouts_fail(tmp_path: Path, layout: str) -> None:
     task = tmp_path / "task"
     task.mkdir()
-    path = task / layout
+    path = task / "tools/skills" / layout
+    path.parent.mkdir(parents=True)
     if layout == "file":
         path.write_text("no")
     elif layout == "empty":
@@ -88,20 +91,29 @@ def test_task_path_and_symlink_cannot_escape_or_enter_invisible_content(
     task = tmp_path / "task"
     task.mkdir()
     outside = skill(tmp_path / "outside")
-    (task / "escape").symlink_to(outside, target_is_directory=True)
+    (task / "tools/skills").mkdir(parents=True)
+    (task / "tools/skills/escape").symlink_to(outside, target_is_directory=True)
     skill(task / "verify" / "secret")
 
     with pytest.raises(AgentResourceError, match="escapes"):
         resolve(task, "escape")
-    with pytest.raises(AgentResourceError, match="invisible"):
-        resolve(task, "verify/secret")
+    with pytest.raises(AgentResourceError, match="tools/skills"):
+        resolve_agent_resources(
+            task=ToolProvision(skills=(SkillSource(path="verify/secret"),)),
+            task_root=task,
+            task_source=source(),
+        )
     with pytest.raises(AgentResourceError, match="relative"):
-        resolve(task, str(outside))
+        resolve_agent_resources(
+            task=ToolProvision(skills=(SkillSource(path=str(outside)),)),
+            task_root=task,
+            task_source=source(),
+        )
 
 
 def test_digest_and_executable_metadata_track_file_mode(tmp_path: Path) -> None:
     task = tmp_path / "task"
-    directory = skill(task / "tool")
+    directory = skill(task / "tools/skills/tool")
     script = directory / "run.sh"
     script.write_text("#!/bin/sh\n")
     before = resolve(task, "tool").skills[0]
@@ -115,13 +127,13 @@ def test_digest_and_executable_metadata_track_file_mode(tmp_path: Path) -> None:
 
 def test_identical_names_deduplicate_and_different_content_conflicts(tmp_path: Path) -> None:
     task = tmp_path / "task"
-    task_skill = skill(task / "same", "same")
+    task_skill = skill(task / "tools/skills/same", "same")
     run = tmp_path / "run" / "same"
     skill(run, "same")
     os.chmod(run / "SKILL.md", (task_skill / "SKILL.md").stat().st_mode)
 
     resources = resolve_agent_resources(
-        task=ToolProvision(skills=(SkillSource(path="same"),)),
+        task=ToolProvision(skills=(SkillSource(path="tools/skills/same"),)),
         agent_skills=(
             SkillSource(
                 path=str(run),
@@ -139,7 +151,7 @@ def test_identical_names_deduplicate_and_different_content_conflicts(tmp_path: P
     (run / "SKILL.md").write_text("different")
     with pytest.raises(AgentResourceConflictError):
         resolve_agent_resources(
-            task=ToolProvision(skills=(SkillSource(path="same"),)),
+            task=ToolProvision(skills=(SkillSource(path="tools/skills/same"),)),
             agent_skills=(SkillSource(path=str(run), origin="run"),),
             task_root=task,
             task_source=source(),
@@ -148,13 +160,14 @@ def test_identical_names_deduplicate_and_different_content_conflicts(tmp_path: P
 
 def test_local_task_skill_is_visible_but_not_reportable(tmp_path: Path) -> None:
     task = tmp_path / "task"
-    skill(task / "local")
+    skill(task / "tools/skills/local")
     resolved = resolve(task, "local", kind="local").skills[0]
     assert not resolved.reportable
     assert "local task path" in (resolved.reportability_reason or "")
 
 
 def mcp(path: Path, body: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
     return path
 
@@ -176,20 +189,20 @@ def test_strict_stdio_and_streamable_http_descriptors(tmp_path: Path) -> None:
     task = tmp_path / "task"
     task.mkdir()
     mcp(
-        task / "stdio.toml",
+        task / "tools/mcp/stdio.toml",
         """
 schema_version = 1
 name = "files"
 transport = "stdio"
 command = "python3"
-args = ["server.py"]
-cwd = "/workspace"
+args = ["{mcp}/server.py"]
+cwd = "{mcp}"
 [environment]
 MODE = "read-only"
 """,
     )
     mcp(
-        task / "http.toml",
+        task / "tools/mcp/http.toml",
         """
 schema_version = 1
 name = "remote"
@@ -200,13 +213,16 @@ url = "https://mcp.example.com/api"
 
     resources = resolve_mcp(
         task,
-        TaskMcpSource(path="stdio.toml"),
-        TaskMcpSource(path="http.toml"),
+        TaskMcpSource(path="tools/mcp/stdio.toml"),
+        TaskMcpSource(path="tools/mcp/http.toml"),
         network=NetworkPolicy(mode=NetworkMode.OPEN),
     )
 
     assert [server.name for server in resources.mcp_servers] == ["files", "remote"]
     assert resources.mcp_servers[0].server.transport == "stdio"
+    assert resources.mcp_servers[0].server.args == ("{mcp}/server.py",)
+    assert resources.mcp_servers[0].server.cwd == "{mcp}"
+    assert resources.mcp_servers[0].staged_files == task / "tools/mcp"
     assert resources.mcp_servers[1].server.transport == "streamable-http"
 
 
@@ -244,12 +260,13 @@ command = "python3"
 def test_invalid_transport_auth_and_unknown_fields_fail(tmp_path: Path, body: str) -> None:
     task = tmp_path / "task"
     task.mkdir()
-    mcp(task / "bad.toml", body)
+    (task / "tools/mcp").mkdir(parents=True)
+    mcp(task / "tools/mcp/bad.toml", body)
 
     with pytest.raises(AgentResourceError, match="invalid MCP descriptor"):
         resolve_mcp(
             task,
-            TaskMcpSource(path="bad.toml"),
+            TaskMcpSource(path="tools/mcp/bad.toml"),
             network=NetworkPolicy(mode=NetworkMode.OPEN),
         )
 
@@ -258,7 +275,7 @@ def test_remote_mcp_obeys_network_policy(tmp_path: Path) -> None:
     task = tmp_path / "task"
     task.mkdir()
     mcp(
-        task / "remote.toml",
+        task / "tools/mcp/remote.toml",
         """
 schema_version = 1
 name = "remote"
@@ -266,7 +283,7 @@ transport = "streamable-http"
 url = "https://mcp.example.com/api"
 """,
     )
-    declaration = TaskMcpSource(path="remote.toml")
+    declaration = TaskMcpSource(path="tools/mcp/remote.toml")
 
     with pytest.raises(AgentResourceError, match="blocked"):
         resolve_mcp(task, declaration)
@@ -326,8 +343,8 @@ def test_builtin_cua_desktop_is_opt_in_and_deduplicates(tmp_path: Path) -> None:
 def test_same_name_different_mcp_definitions_conflict(tmp_path: Path) -> None:
     task = tmp_path / "task"
     task.mkdir()
-    first = mcp(
-        task / "first.toml",
+    mcp(
+        task / "tools/mcp/first.toml",
         """
 schema_version = 1
 name = "duplicate"
@@ -347,7 +364,7 @@ command = "two"
 
     with pytest.raises(AgentResourceConflictError, match="duplicate"):
         resolve_agent_resources(
-            task=ToolProvision(mcp_servers=(TaskMcpSource(path=first.name),)),
+            task=ToolProvision(mcp_servers=(TaskMcpSource(path="tools/mcp/first.toml"),)),
             agent_mcp_servers=(McpSource(path=str(second), origin="run"),),
             task_root=task,
             task_source=source(),

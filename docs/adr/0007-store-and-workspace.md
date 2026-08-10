@@ -1,8 +1,10 @@
 # 0007 — Separate the data store from the workspace
 
-**Status**: accepted (2026-07-25); partly superseded by [0008](0008-task-owned-paths.md) (2026-07-25) — the
-workspace half is gone and `setup.prebakeable` is deleted. The content-derived store key
-below still stands, and is what still makes pre-baking possible.
+**Status**: accepted (2026-07-25); partly superseded by
+[0008](0008-task-owned-paths.md) (2026-07-25) and
+[0017](0017-self-contained-docker-tasks.md) (2026-08-03) — the shared pre-baked image and
+workspace design is retired. Content-derived host caching remains; fixed solver input is
+now injected into each Task's local Docker build.
 
 ## Context
 

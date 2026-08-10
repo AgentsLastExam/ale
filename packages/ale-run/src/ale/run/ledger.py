@@ -67,6 +67,8 @@ ON episodes (run_id, identity, status);
 def episode_identity(
     spec: TaskSpec,
     *,
+    task_digest: str,
+    image_digest: str,
     agent: str,
     seed: int,
     config_hash: str,
@@ -75,6 +77,8 @@ def episode_identity(
     return content_hash(
         {
             "spec": spec.spec_hash,
+            "task": task_digest,
+            "image": image_digest,
             "agent": agent,
             "seed": seed,
             "config": config_hash,

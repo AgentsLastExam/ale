@@ -17,6 +17,7 @@ __all__ = [
     "AgentResourceError",
     "AgentUnsupportedError",
     "AleError",
+    "ArtifactTransferError",
     "AssetError",
     "BudgetExceededError",
     "ConfigError",
@@ -31,6 +32,7 @@ __all__ = [
     "ProviderCapabilityError",
     "ProviderStartError",
     "RegistryError",
+    "RetentionFinalizationError",
     "TaskDefinitionError",
     "TaskError",
     "TornJsonlError",
@@ -89,6 +91,10 @@ class EnvironmentError_(AleError):
     """The sandbox side failed for reasons unrelated to the agent or the task."""
 
 
+class RetentionFinalizationError(EnvironmentError_):
+    """A requested debug sandbox could not be sanitized and retained."""
+
+
 class ProviderCapabilityError(EnvironmentError_):
     """The task requires a capability the selected provider does not offer."""
 
@@ -141,6 +147,10 @@ class OutputStreamError(EnvironmentError_):
 
 class TaskError(AleError):
     """The task's own machinery failed — a task defect, not an agent result."""
+
+
+class ArtifactTransferError(TaskError):
+    """Declared solver evidence could not be captured or restored exactly."""
 
 
 class VerifierOutputError(TaskError):

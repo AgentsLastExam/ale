@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import socket
 import sys
 import threading
 import time
@@ -12,10 +13,25 @@ from typing import Any
 import pytest
 
 from ale.core.errors import OutputStreamError
-from ale.run.guestd.main import Handler
+from ale.run.guestd.main import Handler, _Server, _TCPHandler
 from ale.run.transport import GuestClient
 
 pytestmark = pytest.mark.unit
+
+
+def test_tcp_guest_replies_without_client_eof() -> None:
+    with _Server(("127.0.0.1", 0), _TCPHandler) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            with socket.create_connection(server.server_address, timeout=2) as client:
+                client.settimeout(2)
+                client.sendall(b'{"id":1,"op":"health","params":{}}\n')
+                response = client.makefile("rb").readline()
+                assert json.loads(response)["ok"] is True
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
 
 
 def test_guest_emits_output_before_the_process_finishes() -> None:

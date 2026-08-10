@@ -28,7 +28,8 @@ from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import ManifestTaskset
+from ale.run.tasksets.manifest import load_tasks
+from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -37,11 +38,11 @@ GRACE_SEC = 60
 
 
 async def run_one(task_root: Path, run_dir: Path, harness: object):  # type: ignore[no-untyped-def]
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
     return await run_episode(
         task,
         StandardEnvironment(harness),  # type: ignore[arg-type]
-        DockerProvider(),
+        provider_registry(DockerProvider()),
         run_dir=run_dir,
     )
 
@@ -57,6 +58,7 @@ def set_timeout(task_root: Path, phase: str, seconds: int) -> None:
 async def test_a_hanging_setup_times_out(tmp_path: Path, write_repo: Callable[..., Path]) -> None:
     """A task that never finishes preparing is a task defect, reported as a timeout."""
     task_root = write_repo(tmp_path / "repo")
+    (task_root / "setup").mkdir()
     (task_root / "setup" / "run.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
     set_timeout(task_root, "setup", 5)
 
@@ -114,6 +116,7 @@ async def test_a_timed_out_episode_leaves_no_container_behind(
 ) -> None:
     """Teardown is shielded, so the deadline reclaims the sandbox rather than leaking it."""
     task_root = write_repo(tmp_path / "repo")
+    (task_root / "setup").mkdir()
     (task_root / "setup" / "run.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
     set_timeout(task_root, "setup", 5)
 
@@ -139,6 +142,7 @@ async def test_a_crashing_setup_is_a_task_error_not_a_zero(
 ) -> None:
     """Distinguishing a broken task from a hard one is the point of the taxonomy."""
     task_root = write_repo(tmp_path / "repo")
+    (task_root / "setup").mkdir()
     (task_root / "setup" / "run.sh").write_text(
         textwrap.dedent("""
             #!/usr/bin/env bash
@@ -236,7 +240,7 @@ async def test_native_limit_records_layer_and_preserves_partial_evidence(
     trajectory = AtifTrajectory.model_validate_json(
         (result.run_dir / "trajectory.json").read_text()
     )
-    expected = next(iter(ManifestTaskset(task_root).load())).spec.instruction
+    expected = load_tasks(task_root)[0].spec.instruction
     assert trajectory.steps[0].message == expected
     assert result.verdict.failure is not None
     assert "max_turns" in result.verdict.failure.message
@@ -248,7 +252,7 @@ async def test_gateway_limit_records_gateway_layer(
     write_repo: Callable[..., Path],
 ) -> None:
     task_root = write_repo(tmp_path / "repo")
-    task = next(iter(ManifestTaskset(task_root).load()))
+    task = load_tasks(task_root)[0]
     runner, upstream = await _upstream()
     gateway = Gateway(api_key="host-secret", upstream=upstream, host="0.0.0.0")
     gateway_url = await gateway.start()
@@ -256,7 +260,7 @@ async def test_gateway_limit_records_gateway_layer(
         result = await run_episode(
             task,
             StandardEnvironment(GatewayLimitedHarness()),
-            DockerProvider(),
+            provider_registry(DockerProvider()),
             run_dir=tmp_path / "runs",
             gateway=gateway,
             gateway_url=gateway_url,

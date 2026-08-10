@@ -9,6 +9,7 @@ dependencies = ["ale-core", "ale-run", "ale-verify"]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "jsonschema>=4.23",
     "ruff>=0.8",
     "import-linter>=2.1",
     "pre-commit>=4.0",
@@ -51,7 +52,10 @@ markers = [
     "needs_gui: requires the desktop base image, which is large",
     "needs_llm: requires provider credentials and makes real model calls",
     "needs_kvm: requires hardware virtualisation (/dev/kvm)",
+    "needs_gpu: requires a qualified physical GPU execution path",
     "needs_hf_gated: requires an authorised Hugging Face token for gated datasets",
+    "needs_hf_write: requires authenticated Hugging Face dataset and collection writes",
+    "needs_hf_public: requires public Hugging Face network reads",
 ]
 
 [tool.pytest]

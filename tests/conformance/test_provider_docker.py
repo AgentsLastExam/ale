@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import pytest
 
+from ale.core.config import RunConfig
+from ale.core.sandbox import ImageRef, SandboxRequest
+from ale.core.taskspec import NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
+from ale.run.providers import ProviderRegistry
 from ale.run.providers.docker import DockerProvider
+from ale.run.scaffold import scaffold_task
+from ale.run.task_images import prepare_task_image
+from ale.run.tasksets.manifest import load_tasks
 
 pytestmark = [pytest.mark.conformance, pytest.mark.needs_docker]
 
@@ -18,8 +25,14 @@ class TestDockerProvider(ProviderConformance):
     """
 
     provider = DockerProvider()
-    image_ref = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
-    gui_image_ref = "ghcr.io/agentslastexam/sandbox-base-gui:latest"
+    image = ImageRef(
+        kind="container",
+        reference="ghcr.io/agentslastexam/sandbox-base-cli:latest",
+    )
+    gui_image = ImageRef(
+        kind="container",
+        reference="ghcr.io/agentslastexam/sandbox-base-gui:latest",
+    )
 
 
 @pytest.mark.asyncio
@@ -29,9 +42,15 @@ async def test_blocked_network_has_no_route_off_the_host() -> None:
     from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 
     provider = DockerProvider()
+    prepared = await provider.prepare_image(
+        ImageRef(
+            kind="container",
+            reference="ghcr.io/agentslastexam/sandbox-base-cli:latest",
+        )
+    )
     request = SandboxRequest(
         episode_id="netprobe",
-        image_ref="ghcr.io/agentslastexam/sandbox-base-cli:latest",
+        prepared_image=prepared,
         resources=Resources(cpus=1, memory_mb=512),
         network=NetworkPolicy(mode=NetworkMode.BLOCK),
     )
@@ -46,3 +65,28 @@ async def test_blocked_network_has_no_route_off_the_host() -> None:
             timeout_sec=30,
         )
         assert result.exit_code != 0, "sandbox reached the internet on a blocked network"
+
+
+@pytest.mark.asyncio
+async def test_prepared_task_image_starts_without_remote_resolution(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = load_tasks(scaffold_task(tmp_path / "task"))[0]
+    prepared = await prepare_task_image(task, ProviderRegistry(RunConfig()))
+
+    async def remote_resolution_is_forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("prepared Task images must not use remote resolution")
+
+    monkeypatch.setattr(
+        "ale.run.providers.docker.resolve_container_image",
+        remote_resolution_is_forbidden,
+    )
+    provider = DockerProvider()
+    request = SandboxRequest(
+        episode_id="prepared",
+        prepared_image=prepared,
+        resources=Resources(memory_mb=512),
+        network=NetworkPolicy(),
+    )
+    async with await provider.create(request) as sandbox:
+        assert sandbox.resolved_image.prepared_identity == prepared.prepared_identity

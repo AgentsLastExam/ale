@@ -1,6 +1,8 @@
 # 0006 — Opaque task identifiers, symmetric stages, kits
 
-**Status**: accepted (2026-07-25)
+**Status**: superseded by [0017](0017-self-contained-docker-tasks.md) (2026-08-03), except
+for the surviving rule that verification material is withheld by staging it only after the
+solver exits.
 
 ## Context
 

@@ -37,7 +37,7 @@ def resolve_protocol(config: Mapping[str, str]) -> str:
         return "openai-responses"
     if path.endswith("/messages"):
         return "anthropic"
-    if "anthropic" in host or model.startswith("claude"):
+    if "anthropic" in host or "anthropic" in path or model.startswith("claude"):
         if "openai" in host or model.startswith(("gpt-", "o1", "o3", "o4")):
             raise ValueError("cannot safely infer the LLM Judge protocol")
         return "anthropic"

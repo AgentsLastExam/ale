@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "os": "ubuntu",
+  "release": "24.04",
+  "user": "user",
+  "gui": true,
+  "port": 7411,
+  "guest_contract": "ale-guest/v1",
+  "base_release": "0.1.0"
+}
