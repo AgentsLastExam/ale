@@ -313,13 +313,15 @@ verifier = "destroy"
 ```
 
 Both default to `destroy`. Shared mode has one physical sandbox and keeps it if either
-role requests keep. Separate mode applies policies independently. Retained Docker
-sandboxes are sanitized, recorded with actionable handles, and managed with:
+role requests keep. Separate mode applies policies independently. Retained container and
+QEMU VM sandboxes are sanitized, recorded with actionable handles, and managed with:
 
 ```bash
 uv run ale sandbox list
 uv run ale sandbox destroy HANDLE
 ```
+
+`HANDLE` is emitted as `docker:<runtime-id>` or `qemu:<runtime-id>`.
 
 ## Submission checklist
 

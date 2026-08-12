@@ -108,13 +108,13 @@ async def test_retained_listing_includes_stale_state_and_cleanup_command(
     assert await list_retained() == [
         {
             "provider": "docker",
-            "handle": "ale-episode-solver",
+            "handle": "docker:ale-episode-solver",
             "episode": "episode",
             "role": "solver",
             "image": "sha256:image",
             "gpus": (UUID,),
             "running": False,
-            "cleanup_command": "ale sandbox destroy ale-episode-solver",
+            "cleanup_command": "ale sandbox destroy docker:ale-episode-solver",
         }
     ]
 
@@ -126,4 +126,4 @@ async def test_destroy_rejects_non_ale_container(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr("ale.run.providers.docker._docker", docker)
     with pytest.raises(ProviderCapabilityError, match="not an ALE-retained"):
-        await destroy_retained("someone-elses-container")
+        await destroy_retained("docker:someone-elses-container")

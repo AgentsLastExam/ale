@@ -44,11 +44,12 @@ Read this before touching the repository. It is short on purpose.
   the decision is new.
 - Every result must carry a complete `RunLock`. Never report a run whose provenance is
   incomplete.
-- During the evaluated solver phase, sandboxes are network-denied by default with the
-  Gateway as the only egress and real provider credentials never enter the solver
-  environment. Trusted verification may receive only its run-configured Judge credential
-  for the verifier process lifetime. `verify/` and `oracle/` never appear during the
-  evaluated agent phase.
+- During the evaluated solver phase, network and credential access follow the selected
+  Harness authentication contract. API-key mode keeps provider credentials on the Host;
+  a declared subscription mode may stage native provider credentials into the solver
+  Sandbox and grant only the provider endpoints it needs. Trusted verification may
+  receive only its run-configured Judge credential for the verifier process lifetime.
+  `verify/` and `oracle/` never appear during the evaluated agent phase.
 
 ## Tests
 

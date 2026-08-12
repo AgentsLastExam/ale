@@ -68,6 +68,30 @@ async def test_blocked_network_has_no_route_off_the_host() -> None:
 
 
 @pytest.mark.asyncio
+async def test_proxy_only_sandbox_can_resolve_the_host_proxy() -> None:
+    provider = DockerProvider()
+    prepared = await provider.prepare_image(
+        ImageRef(
+            kind="container",
+            reference="ghcr.io/agentslastexam/sandbox-base-cli:latest",
+        )
+    )
+    request = SandboxRequest(
+        episode_id="proxy-only",
+        prepared_image=prepared,
+        resources=Resources(cpus=1, memory_mb=512),
+        network=NetworkPolicy(mode="allowlist", allowed_hosts=("example.com",)),
+        proxy_url="http://0.0.0.0:9443",
+    )
+    async with await provider.create(request) as sandbox:
+        result = await sandbox.exec(
+            ["python3", "-c", "import socket; print(socket.gethostbyname('ale-gateway.internal'))"],
+            timeout_sec=30,
+        )
+    assert result.ok, result.stderr
+
+
+@pytest.mark.asyncio
 async def test_prepared_task_image_starts_without_remote_resolution(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

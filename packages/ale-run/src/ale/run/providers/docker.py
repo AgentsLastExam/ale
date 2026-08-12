@@ -66,6 +66,7 @@ MANAGED_LABEL = "ale.managed"
 ROLE_LABEL = "ale.role"
 RETENTION_LABEL = "ale.retention"
 GPU_LABEL = "ale.gpus"
+HANDLE_PREFIX = "docker:"
 
 #: The name a sandbox uses for its gateway. It is mapped to the host's address *on the
 #: container's own bridge* rather than to docker's usual host-gateway: an ``--internal``
@@ -116,7 +117,8 @@ async def list_retained() -> list[dict[str, object]]:
     for record in records:
         labels = record.get("Config", {}).get("Labels", {}) or {}
         gpu = tuple(filter(None, labels.get(GPU_LABEL, "").split(",")))
-        handle = record.get("Name", "").removeprefix("/")
+        container = record.get("Name", "").removeprefix("/")
+        handle = f"{HANDLE_PREFIX}{container}"
         found.append(
             {
                 "provider": "docker",
@@ -133,7 +135,10 @@ async def list_retained() -> list[dict[str, object]]:
 
 
 async def destroy_retained(handle: str) -> None:
-    code, raw, stderr = await _docker("inspect", handle, timeout=30)
+    if not handle.startswith(HANDLE_PREFIX):
+        raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
+    container = handle.removeprefix(HANDLE_PREFIX)
+    code, raw, stderr = await _docker("inspect", container, timeout=30)
     if code != 0:
         raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
     record = json.loads(raw)[0]
@@ -145,7 +150,7 @@ async def destroy_retained(handle: str) -> None:
         for name in (record.get("NetworkSettings", {}).get("Networks", {}) or {})
         if name.startswith("ale-net-")
     )
-    code, _, stderr = await _docker("rm", "-f", "-v", handle, timeout=60)
+    code, _, stderr = await _docker("rm", "-f", "-v", container, timeout=60)
     if code != 0:
         raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
     for network in networks:
@@ -233,7 +238,7 @@ def _proxy_env(request: SandboxRequest) -> dict[str, str]:
         return {}
     proxy = _reachable(request.proxy_url) or ""
     if request.proxy_token:
-        proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}@", 1)
+        proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}:@", 1)
     return {
         "HTTP_PROXY": proxy,
         "HTTPS_PROXY": proxy,
@@ -429,13 +434,14 @@ class DockerSandbox(Sandbox):
         gpu_devices = (
             self.allocation.gpu.provider_addresses if self.allocation.gpu is not None else ()
         )
+        handle = f"{HANDLE_PREFIX}{self.container}"
         return RetainedSandbox(
             provider="docker",
-            handle=self.container,
+            handle=handle,
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {self.container}",
+            cleanup_command=f"ale sandbox destroy {handle}",
             gpu_devices=gpu_devices,
         )
 
@@ -528,11 +534,15 @@ class DockerProvider(Provider):
             argv += ["--network", network]
         for key, value in request.env.items():
             argv += ["-e", f"{key}={value}"]
-        if request.gateway_url:
+        if request.gateway_url or request.proxy_url:
             host_ip = await self._bridge_host_ip(network)
-            reachable = _reachable(request.gateway_url)
             argv += ["--add-host", f"{HOST_ALIAS}:{host_ip}"]
-            argv += ["-e", f"ALE_GATEWAY_URL={reachable}"]
+            if request.gateway_url:
+                argv += ["-e", f"ALE_GATEWAY_URL={_reachable(request.gateway_url)}"]
+            if request.proxy_url:
+                request = request.model_copy(
+                    update={"proxy_url": _reachable(request.proxy_url, host=host_ip)}
+                )
         if request.resources.storage_mb is not None:
             argv += _storage_run_args(request.resources.storage_mb)
         if request.resources.gpus:
@@ -884,11 +894,11 @@ class DockerProvider(Provider):
         return client
 
 
-def _reachable(url: str | None) -> str | None:
+def _reachable(url: str | None, *, host: str = HOST_ALIAS) -> str | None:
     """Rewrite a host-side gateway URL into one a container can dial."""
     if not url:
         return url
     for bound in ("0.0.0.0", "127.0.0.1", "localhost", "[::]"):
         if f"//{bound}:" in url:
-            return url.replace(f"//{bound}:", f"//{HOST_ALIAS}:", 1)
+            return url.replace(f"//{bound}:", f"//{host}:", 1)
     return url

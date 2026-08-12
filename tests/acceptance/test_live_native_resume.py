@@ -55,7 +55,7 @@ async def test_real_claude_launch_and_two_resumes_share_one_native_session(tmp_p
         )
 
         await sandbox.open_egress()
-        assert await harness.install(sandbox) == "2.1.220"
+        assert await harness.install(sandbox) == "2.1.227"
         session = HarnessSession(
             episode_id="live-native-resume",
             gateway_url=sandbox.gateway_url or gateway.base_url,

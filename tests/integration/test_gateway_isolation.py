@@ -11,10 +11,11 @@ from __future__ import annotations
 import pytest
 from aiohttp import web
 
-from ale.core.sandbox import SandboxRequest
+from ale.core.sandbox import Identity, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession
+from ale.run.gateway.session import GatewaySession, SessionRegistry
 from ale.run.providers.docker import DockerProvider
 from tests.support import prepare_reference
 
@@ -94,3 +95,51 @@ async def test_sandbox_reaches_the_gateway_and_nothing_else() -> None:
     finally:
         await gateway.stop()
         await upstream_runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_reaches_https_through_the_episode_proxy() -> None:
+    registry = SessionRegistry()
+    proxy = EgressProxy(registry, host="0.0.0.0")
+    proxy_url = await proxy.start()
+    session = registry.open(
+        GatewaySession(
+            episode_id="proxy",
+            model="test",
+            allowed_hosts=frozenset({"api.anthropic.com"}),
+        )
+    )
+    provider = DockerProvider()
+    prepared = await prepare_reference(provider, IMAGE)
+    request = SandboxRequest(
+        episode_id="proxy",
+        prepared_image=prepared,
+        resources=Resources(cpus=1, memory_mb=512),
+        network=NetworkPolicy(
+            mode=NetworkMode.ALLOWLIST,
+            allowed_hosts=("api.anthropic.com",),
+        ),
+        proxy_url=proxy_url,
+        proxy_token=session.token,
+    )
+
+    try:
+        async with await provider.create(request) as sandbox:
+            await sandbox.close_egress()
+            result = await sandbox.exec(
+                [
+                    "curl",
+                    "-sS",
+                    "-o",
+                    "/dev/null",
+                    "-w",
+                    "%{http_code}",
+                    "https://api.anthropic.com",
+                ],
+                identity=Identity.AGENT,
+                timeout_sec=30,
+            )
+        assert result.ok, result.stderr
+        assert result.stdout.strip().isdigit()
+    finally:
+        await proxy.stop()

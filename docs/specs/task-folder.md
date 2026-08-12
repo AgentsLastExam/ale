@@ -212,12 +212,13 @@ Retention is not a manifest or variant field. Run TOML owns independent
 defaulting to destroy. Shared mode has one physical sandbox and keeps it if either logical
 role requests keep. Separate mode applies policies independently.
 
-Before exposure, ALE completes Harness cleanup/evidence capture, removes known temporary
-credential/native homes, and revokes the Gateway session. A failed sanitation triggers
-safe destruction and `retention-failed` without altering a completed evaluation. Result
-v2 and RunLock schema 2 record roles, requested policy, outcome, Provider, handle, reason,
-cleanup command, and GPU devices. Docker retained sandboxes are discoverable and removable
-with `ale sandbox list` and `ale sandbox destroy HANDLE`.
+Before exposure, ALE completes Harness cleanup/evidence capture, removes known
+verification credentials and temporary native homes, and revokes episode capabilities.
+Subscription-profile cleanup is best effort and a failure is warned and recorded rather
+than forcing destruction. Result v2 and RunLock schema 2 record roles, requested policy,
+outcome, Provider, handle, reason, cleanup command, and GPU devices. Retained container
+and QEMU VM sandboxes are discoverable and removable with `ale sandbox list` and
+`ale sandbox destroy HANDLE`.
 
 ## Validation
 

@@ -33,6 +33,8 @@ def continuation_fingerprint(
     model: str,
     settings: object,
     resources_digest: str,
+    authentication: str = "api-key",
+    profile_slot_id: str | None = None,
 ) -> str:
     """Bind native state to every definition value that can change its behavior."""
     return content_hash(
@@ -41,6 +43,8 @@ def continuation_fingerprint(
             "model": model,
             "settings": settings,
             "resources_digest": resources_digest,
+            "authentication": authentication,
+            "profile_slot_id": profile_slot_id,
         }
     )
 

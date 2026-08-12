@@ -41,9 +41,9 @@ remains `core/v1`.
 | **Native Continuation** | Opaque state that resumes one exact native agent session in its original live Sandbox. | not Run resume, transcript replay, or cross-Sandbox restoration |
 | **Limit Termination** | The recorded layer, limit, configured value, and cause that stopped an Episode. | not an untyped process exit |
 | **GuestServer** (`ale-guestd`) | The in-sandbox service through which execution, file transfer, and observation flow. | never Provider-specific |
-| **Gateway** | The host-side service through which solver Harness model traffic is controlled, metered, credentialed, and recorded. | not used by verification Judges |
+| **Gateway** | The host-side service through which API-key-mode solver traffic is controlled, metered, credentialed, and recorded; it also relays Claude subscription traffic without retaining a Transport Trace or provider billing claim. | not used by Codex/Grok native subscription traffic or verification Judges |
 | **ATIF Trajectory** | The Harbor ATIF v1.7 document containing the complete ordered agent-visible interaction ALE can observe. | not setup, verification internals, or a native transcript |
-| **Transport Trace** | The append-only Gateway record of solver model calls, refusals, accounting, and trajectory links. | not full conversation storage |
+| **Transport Trace** | The append-only Gateway record of API-key-mode solver model calls, refusals, accounting, and trajectory links. | not native subscription traffic or full conversation storage |
 | **Execution Trace** | The append-only record of framework phases, commands, Task-stage output, policies, and diagnostics. | not agent-owned tool activity |
 | **Episode Result** | The sole terminal outcome: status, complete named rewards when verified, stats, bounded failure, phase timing, and timestamps. | not a scalar reward |
 | **Blob** | An immutable episode-local content-addressed payload referenced by path, media type, size, and digest. | not ordinary short inline text or a Task artifact |

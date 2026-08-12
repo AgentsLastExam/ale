@@ -33,6 +33,12 @@ __all__ = [
     "ProviderStartError",
     "RegistryError",
     "RetentionFinalizationError",
+    "SubscriptionAuthenticationError",
+    "SubscriptionCompatibilityError",
+    "SubscriptionEntitlementError",
+    "SubscriptionProfileError",
+    "SubscriptionProviderLimitError",
+    "SubscriptionUnavailableError",
     "TaskDefinitionError",
     "TaskError",
     "TornJsonlError",
@@ -72,6 +78,14 @@ class AgentUnsupportedError(ConfigError):
     """The selected harness cannot honor a configured feature."""
 
 
+class SubscriptionUnavailableError(ConfigError):
+    """The requested Harness has no isolated ALE subscription credential."""
+
+
+class SubscriptionCompatibilityError(ConfigError):
+    """The pinned native CLI cannot honor the subscription contract."""
+
+
 class RegistryError(AleError):
     """A task reference could not be resolved to content."""
 
@@ -105,6 +119,22 @@ class ProviderStartError(EnvironmentError_):
 
 class GuestUnreachableError(EnvironmentError_):
     """The guest service stopped answering mid-episode."""
+
+
+class SubscriptionProfileError(EnvironmentError_):
+    """A mutable native subscription profile could not be staged or persisted."""
+
+
+class SubscriptionAuthenticationError(EnvironmentError_):
+    """The native provider rejected or could not refresh the subscription login."""
+
+
+class SubscriptionEntitlementError(EnvironmentError_):
+    """The subscription account cannot use the requested model or capability."""
+
+
+class SubscriptionProviderLimitError(EnvironmentError_):
+    """The native provider refused work because of an account-owned limit."""
 
 
 # --- Agent ------------------------------------------------------------------------

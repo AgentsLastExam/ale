@@ -71,6 +71,7 @@ from ale.run.recording import (
     atomic_write_json,
     execution_logging,
 )
+from ale.run.subscription import ProfileLease
 from ale.run.verification import installed_ale_verify
 from ale_verify import VerificationRecord
 
@@ -160,6 +161,12 @@ class StandardEnvironment(Environment):
 
     async def _provision(self, ctx: EpisodeContext) -> Sandbox:
         spec = ctx.spec
+        network = spec.network
+        if ctx.proxy_url and ctx.allowed_hosts and spec.network.mode is not NetworkMode.OPEN:
+            network = NetworkPolicy(
+                mode=NetworkMode.ALLOWLIST,
+                allowed_hosts=tuple(sorted(ctx.allowed_hosts)),
+            )
         request = SandboxRequest(
             episode_id=ctx.episode_id,
             role=(
@@ -169,7 +176,7 @@ class StandardEnvironment(Environment):
             ),
             prepared_image=ctx.prepared_image,
             resources=spec.resources,
-            network=spec.network,
+            network=network,
             gateway_url=ctx.session.gateway_url or None,
             proxy_url=ctx.proxy_url,
             proxy_token=ctx.session.token,
@@ -256,6 +263,12 @@ class StandardEnvironment(Environment):
         ctx.agent_version = await harness.install(
             _RecordedSandbox(ctx, sandbox, component="harness-install")
         )
+        subscription = ctx.extras.get("subscription_lease")
+        if isinstance(subscription, ProfileLease):
+            await subscription.stage(
+                _RecordedSandbox(ctx, sandbox, component="subscription-stage"),
+                ctx.home,
+            )
         ctx.agent_resources = await self._stage_mcp_files(ctx, sandbox)
         await harness.install_resources(
             _RecordedSandbox(ctx, sandbox, component="harness-resources"),
@@ -557,10 +570,37 @@ class StandardEnvironment(Environment):
                     "resources_digest": ctx.agent_resources.digest,
                 }
             )
-            await self.harness.cleanup(
-                _RecordedSandbox(ctx, sandbox, component="harness-cleanup"),
-                session,
-            )
+            cleanup_error: Exception | None = None
+            try:
+                await self.harness.cleanup(
+                    _RecordedSandbox(ctx, sandbox, component="harness-cleanup"),
+                    session,
+                )
+            except Exception as exc:
+                cleanup_error = exc
+            subscription = ctx.extras.get("subscription_lease")
+            if isinstance(subscription, ProfileLease) and not ctx.extras.get(
+                "subscription_finalized"
+            ):
+                try:
+                    ctx.extras["subscription_persistence"] = await subscription.persist(
+                        _RecordedSandbox(ctx, sandbox, component="subscription-persist"),
+                        ctx.home,
+                    )
+                finally:
+                    try:
+                        cleaned = await subscription.cleanup(
+                            _RecordedSandbox(ctx, sandbox, component="subscription-cleanup"),
+                            ctx.home,
+                        )
+                    except Exception:
+                        cleaned = False
+                    ctx.extras["subscription_cleanup"] = "succeeded" if cleaned else "failed"
+                    ctx.extras["subscription_finalized"] = True
+                    if not cleaned:
+                        logger.warning("staged subscription credential cleanup failed")
+            if cleanup_error is not None:
+                raise cleanup_error
             logger.info("harness cleanup completed")
         # The harness's own logs, in their own place. What the agent produced and how the
         # harness went about producing it are different questions with different owners:
@@ -604,8 +644,13 @@ class StandardEnvironment(Environment):
     async def _teardown(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         # Best-effort interrupted evidence does not replace the primary failure.
         if ctx.extras.get("agent_started") and not ctx.extras.get("solver_evidence_captured"):
-            with contextlib.suppress(Exception):
+            try:
                 await self._capture_solver_evidence(ctx, sandbox)
+            except Exception as exc:
+                logging.getLogger("ale.execution").warning(
+                    "interrupted solver evidence cleanup failed",
+                    extra={"ale_data": {"error": str(exc)}},
+                )
         await self._sanitize_for_retention(ctx, sandbox)
         await ctx.sandboxes.release(sandbox)
         logging.getLogger("ale.execution").info("sandbox released")
@@ -614,6 +659,15 @@ class StandardEnvironment(Environment):
         if sandbox.request.retention == "destroy":
             ctx.sandboxes.mark_sanitized(sandbox, succeeded=True)
             return
+        credential_paths = [
+            f"{ctx.home}/.codex-ale/auth.json",
+            f"{ctx.home}/.grok-ale/auth.json",
+        ]
+        credential_cleanup = await sandbox.exec(["rm", "-f", "--", *credential_paths])
+        if not credential_cleanup.ok:
+            logging.getLogger("ale.execution").warning(
+                "retained sandbox subscription credential cleanup failed"
+            )
         paths = [
             str(VERIFY_CONFIG_PATH),
             str(VERIFY_DIR / "agent"),

@@ -471,6 +471,8 @@ class OpenClawCliHarness(AutonomousHarness):
             model=session.model,
             settings=self.settings.model_dump(mode="json"),
             resources_digest=session.resources_digest,
+            authentication=session.authentication,
+            profile_slot_id=session.profile_slot_id,
         )
 
     def _check_continuation(

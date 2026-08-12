@@ -5,8 +5,9 @@ way every reference implementation does it. Two worktrees can then point at diff
 providers without fighting over a shared file, and "what credentials did this run use?"
 is answered by looking at the tree the run came from.
 
-Nothing here ever reaches a sandbox. Values loaded into the host process are what the
-gateway holds; an agent only ever sees a per-episode token.
+API keys loaded here remain Host-side behind the Gateway. A Harness contract may instead
+select a named native subscription token from the same checkout and deliberately pass it
+to that Harness process inside the Sandbox.
 """
 
 from __future__ import annotations

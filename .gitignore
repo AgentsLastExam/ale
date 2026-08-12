@@ -14,6 +14,7 @@ dist/
 # ALE runtime output (never committed)
 runs/
 .cache/
+.ale/
 .ale-cache/
 *.qcow2
 task-data/

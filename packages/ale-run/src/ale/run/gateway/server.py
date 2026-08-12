@@ -74,6 +74,7 @@ class Gateway:
         api_key: str,
         upstream: str = UPSTREAM_DEFAULT,
         dialect: str = "anthropic",
+        bearer_auth: bool = False,
         host: str = "0.0.0.0",
         port: int = 0,
     ) -> None:
@@ -82,6 +83,7 @@ class Gateway:
         if dialect not in _DIALECTS:
             raise ConfigError(f"unsupported gateway dialect {dialect!r}")
         self.dialect = dialect
+        self.bearer_auth = bearer_auth
         self.host = host
         self.port = port
         self.sessions = SessionRegistry()
@@ -427,7 +429,7 @@ class Gateway:
         headers = {
             name: value for name, value in request.headers.items() if name.lower() not in _STRIP
         }
-        if self.dialect == "anthropic":
+        if self.dialect == "anthropic" and not self.bearer_auth:
             headers["x-api-key"] = self.api_key
             headers.setdefault("anthropic-version", "2023-06-01")
         else:

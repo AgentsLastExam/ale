@@ -31,6 +31,7 @@ import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Literal
 from urllib.parse import quote
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
@@ -47,6 +48,7 @@ from ale.core.sandbox import (
     Provider,
     ResolvedImage,
     ResourceAllocation,
+    RetainedSandbox,
     Sandbox,
     SandboxRequest,
     SandboxState,
@@ -61,7 +63,7 @@ from ale.run.images import (
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, TcpTransport
 
-__all__ = ["QemuProvider", "QemuSandbox"]
+__all__ = ["QemuProvider", "QemuSandbox", "destroy_retained", "list_retained"]
 
 #: Where the guest service listens inside the VM. Forwarded to an ephemeral host port.
 GUEST_PORT = 7411
@@ -106,11 +108,105 @@ DEFAULT_AGENT_USER = "user"
 BOOT_TIMEOUT_SEC = 300
 _NVIDIA_QUERY = "uuid,name,pci.bus_id,driver_version"
 
+MANAGED_LABEL = "ale.qemu.managed"
+EPISODE_LABEL = "ale.qemu.episode"
+ROLE_LABEL = "ale.qemu.role"
+RETENTION_LABEL = "ale.qemu.retention"
+GPU_LABEL = "ale.qemu.gpus"
+STORAGE_LABEL = "ale.qemu.storage"
+HANDLE_PREFIX = "qemu:"
+
 
 @dataclass(frozen=True)
 class _VfioGpu:
     bdf: str
     group: str
+
+
+async def _managed_gpu_ids() -> set[str]:
+    code, output, _ = await _run(
+        "docker",
+        "ps",
+        "--filter",
+        f"label={MANAGED_LABEL}=true",
+        "--format",
+        f'{{{{.Label "{GPU_LABEL}"}}}}',
+        timeout=30,
+    )
+    if code != 0:
+        return set()
+    return {device for line in output.splitlines() for device in line.split(",") if device}
+
+
+async def list_retained() -> list[dict[str, object]]:
+    code, output, stderr = await _run(
+        "docker",
+        "ps",
+        "-a",
+        "-q",
+        "--filter",
+        f"label={MANAGED_LABEL}=true",
+        "--filter",
+        f"label={RETENTION_LABEL}=keep",
+        timeout=30,
+    )
+    if code != 0:
+        raise ProviderStartError(f"could not list retained QEMU sandboxes: {stderr.strip()}")
+    containers = output.split()
+    if not containers:
+        return []
+    code, raw, stderr = await _run("docker", "inspect", *containers, timeout=30)
+    if code != 0:
+        raise ProviderStartError(f"could not inspect retained QEMU sandboxes: {stderr.strip()}")
+    found: list[dict[str, object]] = []
+    for record in json.loads(raw):
+        labels = record.get("Config", {}).get("Labels", {}) or {}
+        container = record.get("Name", "").removeprefix("/")
+        found.append(
+            {
+                "provider": "qemu",
+                "handle": f"{HANDLE_PREFIX}{container}",
+                "episode": labels.get(EPISODE_LABEL, ""),
+                "role": labels.get(ROLE_LABEL, ""),
+                "image": record.get("Image", ""),
+                "gpus": tuple(filter(None, labels.get(GPU_LABEL, "").split(","))),
+                "running": bool(record.get("State", {}).get("Running")),
+                "cleanup_command": f"ale sandbox destroy {HANDLE_PREFIX}{container}",
+            }
+        )
+    return sorted(found, key=lambda item: str(item["handle"]))
+
+
+async def destroy_retained(handle: str) -> None:
+    if not handle.startswith(HANDLE_PREFIX):
+        raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
+    container = handle.removeprefix(HANDLE_PREFIX)
+    code, raw, stderr = await _run("docker", "inspect", container, timeout=30)
+    if code != 0:
+        raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
+    record = json.loads(raw)[0]
+    labels = record.get("Config", {}).get("Labels", {}) or {}
+    if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "keep":
+        raise ProviderCapabilityError(f"{handle!r} is not an ALE-retained QEMU sandbox")
+    storage = labels.get(STORAGE_LABEL, "")
+    mounted_storage = {
+        mount.get("Source", "")
+        for mount in record.get("Mounts", ())
+        if mount.get("Type") == "bind" and mount.get("Destination") == "/storage"
+    }
+    if not storage or storage not in mounted_storage:
+        raise ProviderCapabilityError(f"{handle!r} has no valid ALE-owned QEMU overlay")
+    code, _, stderr = await _run("docker", "rm", "-f", container, timeout=60)
+    if code != 0:
+        raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
+    try:
+        shutil.rmtree(storage)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise ProviderStartError(
+            f"destroyed {handle} but could not remove its overlay {storage}: {exc}"
+        ) from exc
 
 
 def _index_vfio_gpus(candidates: tuple[_VfioGpu, ...]) -> dict[str, _VfioGpu]:
@@ -182,7 +278,7 @@ def _proxy_env(request: SandboxRequest) -> dict[str, str]:
     port = _port_of(request.proxy_url)
     proxy = f"http://{HOST_IP}:{port}"
     if request.proxy_token:
-        proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}@", 1)
+        proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}:@", 1)
     return {
         "HTTP_PROXY": proxy,
         "HTTPS_PROXY": proxy,
@@ -416,6 +512,24 @@ class QemuSandbox(Sandbox):
         finally:
             self.release_resources()
 
+    async def retain(
+        self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
+    ) -> RetainedSandbox:
+        await self._client.close()
+        gpu_devices = (
+            self.allocation.gpu.provider_addresses if self.allocation.gpu is not None else ()
+        )
+        handle = f"{HANDLE_PREFIX}{self.container}"
+        return RetainedSandbox(
+            provider="qemu",
+            handle=handle,
+            episode_id=self.request.episode_id,
+            roles=roles,
+            reason=reason,
+            cleanup_command=f"ale sandbox destroy {handle}",
+            gpu_devices=gpu_devices,
+        )
+
 
 class QemuProvider(Provider):
     """Supplies virtual-machine sandboxes from a golden qcow2."""
@@ -504,6 +618,8 @@ class QemuProvider(Provider):
             if not candidates:
                 raise ProviderCapabilityError("no QEMU VFIO GPU pool is configured")
             by_group = _index_vfio_gpus(candidates)
+            used = await _managed_gpu_ids()
+            by_group = {group: gpu for group, gpu in by_group.items() if gpu.bdf not in used}
         resolved_image = await resolve_prepared_vm_image(request.prepared_image)
         base_image = Path(resolved_image.observed_ref)
 
@@ -665,6 +781,11 @@ class QemuProvider(Provider):
         name = f"ale-qemu-{uuid.uuid4().hex[:10]}"
         argv = [
             "docker", "run", "--detach", "--name", name,
+            "--label", f"{MANAGED_LABEL}=true",
+            "--label", f"{EPISODE_LABEL}={request.episode_id}",
+            "--label", f"{ROLE_LABEL}={request.role.value}",
+            "--label", f"{RETENTION_LABEL}={request.retention}",
+            "--label", f"{STORAGE_LABEL}={storage.resolve()}",
             "--device=/dev/kvm",
             # The runner builds the guest's network itself, which needs the capability;
             # the guest is still confined by the container's own network and by the
@@ -683,6 +804,7 @@ class QemuProvider(Provider):
             "--env", "HV=N",
         ]  # fmt: skip
         if gpus:
+            argv += ["--label", f"{GPU_LABEL}={','.join(gpu.bdf for gpu in gpus)}"]
             argv += ["--device=/dev/vfio/vfio", "--ulimit", "memlock=-1:-1"]
             for group in sorted({gpu.group for gpu in gpus}):
                 argv += [f"--device=/dev/vfio/{group}"]

@@ -77,7 +77,7 @@ def audit_episode(
     *,
     model: str = MODEL,
     harness: str = "claude-code",
-    version: str = "2.1.220",
+    version: str = "2.1.227",
     native_log: str = "transcript.jsonl",
 ) -> tuple[
     list[dict[str, Any]],

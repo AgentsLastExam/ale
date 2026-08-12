@@ -119,6 +119,14 @@ Given a conforming image, the Docker Provider:
   identity;
 - destroys by default or returns a retained handle after framework sanitation.
 
+The QEMU Provider applies the same retention contract to its runner container and the
+episode qcow2 overlay mounted into it. `keep` leaves both alive and discoverable;
+`ale sandbox destroy HANDLE` removes both. Provider-qualified QEMU handles prevent the
+runner from being mistaken for a container sandbox.
+
+Retained handles are always provider-qualified: `docker:<runtime-id>` for containers and
+`qemu:<runtime-id>` for VMs. Unqualified handles are rejected.
+
 GPU workload libraries such as CUDA, PyTorch, and simulators remain Task Dockerfile
 responsibility. Tasks request a count only; Provider configuration selects eligible host
 indices and ALE records actual UUIDs. QEMU GPU passthrough remains a Provider capability,

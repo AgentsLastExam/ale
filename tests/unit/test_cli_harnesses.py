@@ -30,9 +30,11 @@ class FakeSandbox:
         self.files: dict[str, bytes] = {}
         self.uploads: list[tuple[str, str]] = []
         self.commands: list[list[str]] = []
+        self.environments: list[dict[str, str]] = []
 
     async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
         self.commands.append([str(part) for part in argv])
+        self.environments.append(kwargs.get("env") or {})
         return ExecResult(exit_code=0)
 
     async def write_file(self, path, data, **kwargs):  # type: ignore[no-untyped-def]
@@ -45,16 +47,18 @@ class FakeSandbox:
         self.uploads.append((source, str(target)))
 
 
-def session() -> HarnessSession:
-    return HarnessSession(
-        episode_id="episode",
-        gateway_url="http://gateway",
-        token="token",
-        model="test-model",
-        sandbox_id="sandbox",
-        resources_digest="sha256:" + "a" * 64,
-        home="/home/agent",
-    )
+def session(**updates: object) -> HarnessSession:
+    values = {
+        "episode_id": "episode",
+        "gateway_url": "http://gateway",
+        "token": "token",
+        "model": "test-model",
+        "sandbox_id": "sandbox",
+        "resources_digest": "sha256:" + "a" * 64,
+        "home": "/home/agent",
+    }
+    values.update(updates)
+    return HarnessSession(**values)
 
 
 def resources(tmp_path: Path) -> EffectiveAgentResources:
@@ -107,6 +111,12 @@ def test_presets_are_complete_and_construct_strict_harnesses(name, harness_type)
     assert isinstance(harness, harness_type)
     assert config.gateway.dialect == "openai-responses"
     assert config.gateway.limits.max_total_tokens == "unlimited"
+
+
+def test_codex_preset_uses_current_default_model() -> None:
+    config = load_run_config(preset_path=PRESET_DIR / "codex-cli.toml")
+
+    assert config.agent.model == "gpt-5.6-luna"
 
 
 def test_grok_backend_follows_gateway_dialect() -> None:
@@ -189,6 +199,74 @@ async def test_grok_chat_gateway_selects_native_chat_backend(tmp_path: Path) -> 
 
     rendered = sandbox.files["/home/agent/.grok-ale/config.toml"].decode()
     assert 'api_backend = "chat_completions"' in rendered
+
+
+@pytest.mark.parametrize(
+    ("harness", "config_path"),
+    [
+        (CodexCliHarness(), "/home/agent/.codex-ale/config.toml"),
+        (GrokBuildHarness(), "/home/agent/.grok-ale/config.toml"),
+    ],
+)
+async def test_subscription_config_uses_native_provider(
+    tmp_path: Path, harness: object, config_path: str
+) -> None:
+    sandbox = FakeSandbox()
+    current = session(authentication="subscription", subscription_credential=b"credential")
+
+    await harness.install_resources(sandbox, current, resources(tmp_path))  # type: ignore[attr-defined, arg-type]
+
+    rendered = sandbox.files[config_path].decode()
+    assert "http://gateway" not in rendered
+    assert "ALE_GATEWAY_TOKEN" not in rendered
+    assert "task-proof" in rendered
+    if isinstance(harness, CodexCliHarness):
+        assert 'forced_login_method = "chatgpt"' in rendered
+        assert 'cli_auth_credentials_store = "file"' in rendered
+    else:
+        assert "[models]" not in rendered
+
+
+async def test_codex_subscription_launch_drops_api_credentials() -> None:
+    sandbox = FakeSandbox()
+    sandbox.files["/home/agent/transcript.jsonl"] = (
+        b'{"type":"thread.started","thread_id":"thread-1"}\n'
+    )
+
+    await CodexCliHarness().launch(  # type: ignore[arg-type]
+        "test",
+        sandbox,
+        session(authentication="subscription", subscription_credential=b"credential"),
+        timeout_sec=60,
+    )
+
+    assert "ALE_GATEWAY_TOKEN" not in sandbox.environments[0]
+    assert (
+        "unset OPENAI_API_KEY OPENAI_BASE_URL CODEX_ACCESS_TOKEN ALE_GATEWAY_TOKEN"
+        in (sandbox.commands[0][2])
+    )
+
+
+async def test_grok_subscription_launch_uses_native_model_and_drops_api_credentials() -> None:
+    sandbox = FakeSandbox()
+    sandbox.files["/home/agent/.grok-ale/segment.jsonl"] = (
+        b'{"type":"end","sessionId":"session-1"}\n'
+    )
+
+    await GrokBuildHarness()._run(  # type: ignore[arg-type]
+        "test",
+        sandbox,
+        session(authentication="subscription", subscription_credential=b"credential"),
+        native_session_id="session-1",
+        resume=False,
+        timeout_sec=60,
+    )
+
+    command = sandbox.commands[0][2]
+    assert "--model test-model" in command
+    assert "unset XAI_API_KEY GROK_CLI_CHAT_PROXY_BASE_URL ALE_GATEWAY_TOKEN" in command
+    assert "ALE_GATEWAY_TOKEN" not in sandbox.environments[0]
+    assert sandbox.environments[0]["GROK_WORKSPACE_DATA_COLLECTION_DISABLED"] == "1"
 
 
 async def test_openclaw_declares_explicit_reasoning_support(tmp_path: Path) -> None:

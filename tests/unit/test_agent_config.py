@@ -19,7 +19,7 @@ def test_selecting_claude_loads_the_complete_preset() -> None:
     settings = load_run_config(preset_path=PRESET_DIR / "claude-code.toml")
 
     assert settings.agent.name == "claude-code"
-    assert settings.agent.version == "2.1.220"
+    assert settings.agent.version == "2.1.227"
     assert settings.agent.settings == {
         "max_turns": "unlimited",
         "max_budget_usd": "unlimited",

@@ -1,6 +1,7 @@
 [agent]
 name = "claude-code"
-version = "2.1.220"
+authentication = "auto"
+version = "2.1.227"
 skills = []
 mcp_servers = []
 

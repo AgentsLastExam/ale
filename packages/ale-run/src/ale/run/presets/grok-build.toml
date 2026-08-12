@@ -1,5 +1,6 @@
 [agent]
 name = "grok-build"
+authentication = "auto"
 model = "grok-4.5"
 version = "0.2.112"
 skills = []

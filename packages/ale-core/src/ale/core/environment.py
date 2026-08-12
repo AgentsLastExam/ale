@@ -175,6 +175,8 @@ class EpisodeContext:
 
     proxy_url: str = ""
     """Egress proxy for allowlist tasks; empty when none was started."""
+    allowed_hosts: frozenset[str] = field(default_factory=frozenset)
+    """Effective task plus harness allowlist enforced by the egress proxy."""
 
     sandbox_identity: SandboxProvenance | None = None
     """Observed at provisioning: which account the agent ran as, and whether it could

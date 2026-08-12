@@ -57,6 +57,7 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.run.agent_resources import continuation_fingerprint
+from ale.run.subscription import classify_subscription_error
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 __all__ = ["ClaudeCodeHarness", "ClaudeCodeSettings"]
@@ -71,7 +72,7 @@ TRANSCRIPT_NAME = "transcript.jsonl"
 #: an unpinned agent makes two runs incomparable for a reason that never appears in the
 #: result. Bumping this is a deliberate, reviewable change; images need not be rebuilt for
 #: it, since a mismatch installs the pinned build at the start of the episode.
-DEFAULT_CLI_VERSION = "2.1.220"
+DEFAULT_CLI_VERSION = "2.1.227"
 
 #: Where a version this image did not bake gets installed, relative to the agent's home —
 #: the account that runs it owns it, so no privilege is needed and none is granted.
@@ -395,8 +396,18 @@ class ClaudeCodeHarness(AutonomousHarness):
             else f"--session-id {shlex.quote(native_session_id)}"
         )
         redirect = ">>" if resume else ">"
+        clear_api_auth = ""
+        if session.authentication == "subscription":
+            names = "ANTHROPIC_API_KEY "
+            if not session.gateway_url:
+                names += "ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL "
+            clear_api_auth = (
+                f"unset {names}"
+                "CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY; "
+            )
         command = (
             f'prompt="${{{prompt_var}}}"; unset {prompt_var}; '
+            f"{clear_api_auth}"
             f'printf "%s" "$prompt" | '
             f"claude --verbose --output-format=stream-json {self._flags()} "
             f"{mcp_flags} {selector} --print "
@@ -415,6 +426,10 @@ class ClaudeCodeHarness(AutonomousHarness):
 
         transcript = await self._read_text(sandbox, transcript_path)
         if result.exit_code != 0:
+            if session.authentication == "subscription":
+                raise classify_subscription_error(
+                    self.name, transcript or result.stderr or "Claude failed"
+                )
             raise self._classify(transcript or result.stderr, result.exit_code)
         confirmed = _native_session_id(transcript)
         if confirmed != native_session_id:
@@ -785,9 +800,6 @@ class ClaudeCodeHarness(AutonomousHarness):
         """
         config_dir = PurePosixPath(session.home) / ".claude-config"
         env = {
-            "ANTHROPIC_BASE_URL": session.gateway_url,
-            "ANTHROPIC_API_KEY": session.token,
-            "ANTHROPIC_AUTH_TOKEN": session.token,
             "ANTHROPIC_MODEL": session.model,
             # Telemetry has nowhere to go under a deny-all policy, and an agent retrying a
             # blocked request is an agent spending its budget on nothing.
@@ -805,6 +817,31 @@ class ClaudeCodeHarness(AutonomousHarness):
                 f"{PurePosixPath(session.home) / CLI_PREFIX}/bin:/usr/local/bin:/usr/bin:/bin"
             ),
         }
+        if session.authentication == "subscription":
+            env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+            if session.gateway_url:
+                env.update(
+                    {
+                        "ANTHROPIC_AUTH_TOKEN": session.token,
+                        "ANTHROPIC_BASE_URL": session.gateway_url,
+                    }
+                )
+            else:
+                env.update(
+                    {
+                        "CLAUDE_CODE_OAUTH_TOKEN": session.subscription_credential.decode(),
+                        "CLAUDE_CODE_PROXY_RESOLVES_HOSTS": "1",
+                        "NODE_USE_ENV_PROXY": "1",
+                    }
+                )
+        else:
+            env.update(
+                {
+                    "ANTHROPIC_BASE_URL": session.gateway_url,
+                    "ANTHROPIC_API_KEY": session.token,
+                    "ANTHROPIC_AUTH_TOKEN": session.token,
+                }
+            )
         for alias in (
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -820,6 +857,8 @@ class ClaudeCodeHarness(AutonomousHarness):
             model=session.model,
             settings=self.settings.model_dump(mode="json"),
             resources_digest=session.resources_digest,
+            authentication=session.authentication,
+            profile_slot_id=session.profile_slot_id,
         )
 
     def _flags(self) -> str:

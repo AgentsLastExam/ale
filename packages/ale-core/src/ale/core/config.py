@@ -132,6 +132,7 @@ class AgentConfig(BaseModel):
 
     name: str = "claude-code"
     model: str = "claude-opus-4-8"
+    authentication: Literal["auto", "api-key", "subscription"] = "auto"
     version: str | None = Field(
         default=None, description="Pin the agent build; None uses the image"
     )
@@ -266,6 +267,9 @@ class RunConfig(BaseModel):
     concurrency: int = Field(default=1, ge=1)
     _preset_name: str | None = PrivateAttr(default=None)
     _preset_digest: str | None = PrivateAttr(default=None)
+    _authentication_source: Literal["cli", "run", "preset", "default"] = PrivateAttr(
+        default="default"
+    )
 
     @property
     def config_hash(self) -> str:
@@ -279,6 +283,10 @@ class RunConfig(BaseModel):
     @property
     def preset_digest(self) -> str | None:
         return self._preset_digest
+
+    @property
+    def authentication_source(self) -> Literal["cli", "run", "preset", "default"]:
+        return self._authentication_source
 
 
 def parse_override(text: str) -> tuple[list[str], Any]:
@@ -409,16 +417,22 @@ def load_run_config(
         ConfigError: on a missing file, malformed TOML, a bad override, or any key the
             schema does not define.
     """
-    merged = merge_layers(
-        preset=_read_toml(preset_path, origin="preset") if preset_path else None,
-        run=_read_toml(run_path, origin="run") if run_path else None,
-        overrides=overrides,
-    )
+    preset_data = _read_toml(preset_path, origin="preset") if preset_path else None
+    run_data = _read_toml(run_path, origin="run") if run_path else None
+    merged = merge_layers(preset=preset_data, run=run_data, overrides=overrides)
     try:
         config = RunConfig.model_validate(merged)
         if preset_path:
             config._preset_name = preset_path.stem
             config._preset_digest = content_hash(preset_path.read_text(encoding="utf-8"))
+        for source, data in (("preset", preset_data), ("run", run_data)):
+            agent = data.get("agent") if data else None
+            if isinstance(agent, dict) and "authentication" in agent:
+                config._authentication_source = source  # type: ignore[assignment]
+        for override in overrides or ():
+            path, _ = parse_override(override)
+            if path == ["agent", "authentication"]:
+                config._authentication_source = "cli"
         return config
     except Exception as exc:  # pydantic ValidationError, reported as a config problem
         raise ConfigError(f"invalid configuration: {exc}") from exc

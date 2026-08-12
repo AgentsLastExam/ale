@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +11,7 @@ from ale.core.config import RunConfig, SandboxRetentionConfig
 from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import ImageKind, PreparedTaskImage, SandboxRequest
 from ale.core.taskspec import NetworkPolicy, Resources
-from ale.run.cli.main import app
+from ale.run.cli.main import _destroy_retained_sandbox, _list_retained_sandboxes, app
 from ale.run.episode import _Lease
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.docker import DockerProvider
@@ -115,3 +116,43 @@ async def test_missing_provider_fails_at_request_admission() -> None:
     lease = _Lease(Registry(), SandboxRetentionConfig())  # type: ignore[arg-type]
     with pytest.raises(ProviderCapabilityError, match="no provider for vm"):
         await lease.acquire(_request(ImageKind.VM))
+
+
+@pytest.mark.asyncio
+async def test_retained_sandbox_commands_route_provider_qualified_qemu_handles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = importlib.import_module("ale.run.cli.main")
+    destroyed: list[tuple[str, str]] = []
+
+    async def docker_list() -> list[dict[str, object]]:
+        return [{"handle": "docker:z"}, {"handle": "docker:a"}]
+
+    async def qemu_list() -> list[dict[str, object]]:
+        return [{"handle": "qemu:z"}, {"handle": "qemu:a"}]
+
+    async def docker_destroy(handle: str) -> None:
+        destroyed.append(("docker", handle))
+
+    async def qemu_destroy(handle: str) -> None:
+        destroyed.append(("qemu", handle))
+
+    monkeypatch.setattr(cli, "list_retained_docker", docker_list)
+    monkeypatch.setattr(cli, "list_retained_qemu", qemu_list)
+    monkeypatch.setattr(cli, "destroy_retained_docker", docker_destroy)
+    monkeypatch.setattr(cli, "destroy_retained_qemu", qemu_destroy)
+
+    assert [item["handle"] for item in await _list_retained_sandboxes()] == [
+        "docker:a",
+        "docker:z",
+        "qemu:a",
+        "qemu:z",
+    ]
+    await _destroy_retained_sandbox("docker:ale-docker")
+    await _destroy_retained_sandbox("qemu:ale-qemu")
+    assert destroyed == [
+        ("docker", "docker:ale-docker"),
+        ("qemu", "qemu:ale-qemu"),
+    ]
+    with pytest.raises(ProviderCapabilityError, match="must start"):
+        await _destroy_retained_sandbox("ale-ambiguous")

@@ -18,7 +18,7 @@ from typing import Annotated
 import typer
 
 from ale.core.config import RunConfig, load_run_config, select_agent_name
-from ale.core.errors import AleError, ConfigError, TaskDefinitionError
+from ale.core.errors import AleError, ConfigError, ProviderCapabilityError, TaskDefinitionError
 from ale.core.harness import EffectiveAgentResources
 from ale.core.ids import content_hash
 from ale.core.sandbox import ImageKind, PreparedTaskImage
@@ -38,7 +38,7 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import EpisodeResult, run_episode
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import Limits
+from ale.run.gateway.session import Limits, SessionRegistry
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
@@ -53,11 +53,29 @@ from ale.run.provenance import (
     gateway_provenance,
 )
 from ale.run.providers import ProviderRegistry
-from ale.run.providers.docker import destroy_retained, list_retained
+from ale.run.providers.docker import (
+    HANDLE_PREFIX as DOCKER_HANDLE_PREFIX,
+)
+from ale.run.providers.docker import (
+    destroy_retained as destroy_retained_docker,
+)
+from ale.run.providers.docker import (
+    list_retained as list_retained_docker,
+)
+from ale.run.providers.qemu import (
+    HANDLE_PREFIX as QEMU_HANDLE_PREFIX,
+)
+from ale.run.providers.qemu import (
+    destroy_retained as destroy_retained_qemu,
+)
+from ale.run.providers.qemu import (
+    list_retained as list_retained_qemu,
+)
 from ale.run.recording import atomic_write_json
 from ale.run.scaffold import scaffold_task
 from ale.run.secrets import provider_credentials
 from ale.run.sources import parse_task_reference, resolve, select_tasks
+from ale.run.subscription import ProfileLease, resolve_authentication
 from ale.run.task_images import (
     ImagePreparationResult,
     ImagePreparationStep,
@@ -105,9 +123,17 @@ def root(
 def run(
     reference: Annotated[str, typer.Argument(help="Task or collection filesystem path")],
     agent: Annotated[
-        str | None, typer.Option("--agent", help="claude-code, computer-use, oracle or nop")
+        str | None,
+        typer.Option(
+            "--agent",
+            help="claude-code, codex-cli, grok-build, openclaw-cli, computer-use, oracle or nop",
+        ),
     ] = None,
     model: Annotated[str | None, typer.Option("--model")] = None,
+    auth: Annotated[
+        str | None,
+        typer.Option("--auth", help="auto, api-key or subscription"),
+    ] = None,
     base_url: Annotated[
         str,
         typer.Option("--base-url", help="Model endpoint; defaults to Anthropic's"),
@@ -150,6 +176,8 @@ def run(
     flags = [*(overrides or []), f"episodes={episodes}", f"concurrency={concurrency}"]
     if no_resume:
         flags.append("resume=false")
+    if auth:
+        flags.append(f"agent.authentication={auth}")
     if base_url:
         flags.append(f"gateway.base_url={base_url}")
     if api_key_env:
@@ -334,9 +362,9 @@ def _print_asset_sync(results: object) -> None:
 
 @sandbox_app.command("list")
 def sandbox_list() -> None:
-    """List ALE-managed Docker sandboxes requested for retention."""
+    """List ALE-managed sandboxes requested for retention."""
     try:
-        records = asyncio.run(list_retained())
+        records = asyncio.run(_list_retained_sandboxes())
     except AleError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_PROVIDER) from error
@@ -348,14 +376,32 @@ def sandbox_list() -> None:
 
 
 @sandbox_app.command("destroy")
-def sandbox_destroy(handle: Annotated[str, typer.Argument(help="Retained Docker handle")]) -> None:
-    """Destroy one ALE-retained Docker sandbox and its owned network."""
+def sandbox_destroy(handle: Annotated[str, typer.Argument(help="Retained sandbox handle")]) -> None:
+    """Destroy one ALE-retained sandbox and its owned resources."""
     try:
-        asyncio.run(destroy_retained(handle))
+        asyncio.run(_destroy_retained_sandbox(handle))
     except AleError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_PROVIDER) from error
     typer.echo(f"destroyed {handle}")
+
+
+async def _list_retained_sandboxes() -> list[dict[str, object]]:
+    return sorted(
+        [*await list_retained_docker(), *await list_retained_qemu()],
+        key=lambda item: str(item["handle"]),
+    )
+
+
+async def _destroy_retained_sandbox(handle: str) -> None:
+    if handle.startswith(QEMU_HANDLE_PREFIX):
+        await destroy_retained_qemu(handle)
+    elif handle.startswith(DOCKER_HANDLE_PREFIX):
+        await destroy_retained_docker(handle)
+    else:
+        raise ProviderCapabilityError(
+            "retained sandbox handle must start with 'docker:' or 'qemu:'"
+        )
 
 
 # --- internals ---
@@ -384,7 +430,10 @@ def _config(
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
 
 
-def _harness(settings: RunConfig):  # type: ignore[no-untyped-def]
+def _harness(
+    settings: RunConfig,
+    authentication: str = "api-key",
+):  # type: ignore[no-untyped-def]
     match settings.agent.name:
         case "oracle":
             return OracleHarness()
@@ -395,7 +444,8 @@ def _harness(settings: RunConfig):  # type: ignore[no-untyped-def]
 
             return ComputerUseHarness(model=settings.agent.model, **settings.agent.settings)
         case "claude-code":
-            _require_gateway_dialect(settings, "anthropic")
+            if authentication == "api-key":
+                _require_gateway_dialect(settings, "anthropic")
             return ClaudeCodeHarness(
                 cli_version=settings.agent.version,
                 settings=settings.agent.settings,
@@ -407,7 +457,8 @@ def _harness(settings: RunConfig):  # type: ignore[no-untyped-def]
                 settings=settings.agent.settings,
             )
         case "codex-cli":
-            _require_gateway_dialect(settings, "openai-responses")
+            if authentication == "api-key":
+                _require_gateway_dialect(settings, "openai-responses")
             return CodexCliHarness(
                 cli_version=settings.agent.version,
                 settings=settings.agent.settings,
@@ -440,6 +491,14 @@ async def _run_one(
     run_id: str | None = None,
     require_reportable: bool = False,
 ) -> int:
+    try:
+        authentication = resolve_authentication(settings.agent)
+        harness = _harness(settings, authentication.mode)
+        if authentication.mode == "subscription":
+            ProfileLease(authentication).preflight()
+    except AleError as error:
+        typer.echo(f"{error}", err=True)
+        return EXIT_BAD_REFERENCE
     providers = ProviderRegistry(settings)
     try:
         task_reference = parse_task_reference(reference)
@@ -455,14 +514,29 @@ async def _run_one(
 
     run_id = run_id or uuid.uuid4().hex[:8]
     run_dir = runs_dir / run_id
-    harness = _harness(settings)
     gateway = None
     proxy = None
+    session_registry = None
     limits = None
     gateway_url, proxy_url = "", ""
     needs_model = settings.agent.name not in {"oracle", "nop"}
 
-    if needs_model:
+    if (
+        needs_model
+        and authentication.mode == "subscription"
+        and settings.agent.name == "claude-code"
+    ):
+        gateway = Gateway(
+            api_key=authentication.token,
+            bearer_auth=True,
+            host=_gateway_host(settings),
+        )
+        gateway_url = await gateway.start()
+        limits = Limits()
+        if any(task.spec.network.allowed_hosts for task in tasks):  # type: ignore[attr-defined]
+            proxy = EgressProxy(gateway.sessions, host=_gateway_host(settings))
+            proxy_url = await proxy.start()
+    elif needs_model and authentication.mode == "api-key":
         try:
             api_key, upstream = provider_credentials(
                 settings.gateway.api_key_env,
@@ -488,6 +562,17 @@ async def _run_one(
         if any(task.spec.network.allowed_hosts for task in tasks):  # type: ignore[attr-defined]
             proxy = EgressProxy(gateway.sessions, host=_gateway_host(settings))
             proxy_url = await proxy.start()
+    elif needs_model:
+        session_registry = SessionRegistry()
+        proxy = EgressProxy(session_registry, host=_gateway_host(settings))
+        proxy_url = await proxy.start()
+
+    profile = authentication.profile_slot_id or "none"
+    typer.echo(
+        f"auth  harness={settings.agent.name} provider={authentication.provider or 'none'} "
+        f"requested={authentication.requested} effective={authentication.mode} "
+        f"source={settings.authentication_source} model={settings.agent.model} profile={profile}"
+    )
 
     ledger = Ledger(run_dir)
     ledger.open_run(run_id, settings.config_hash)
@@ -506,10 +591,10 @@ async def _run_one(
         inputs: ProvenanceInputs,
         agent_resources: EffectiveAgentResources,
     ) -> Status | None:
-        allowed = frozenset(task.spec.network.allowed_hosts)
-        async with gate:
-            ledger.mark_running(episode_id)
-            result = await run_episode(
+        allowed = frozenset(task.spec.network.allowed_hosts) | authentication.provider_hosts
+
+        async def execute(profile_lease: ProfileLease | None = None):  # type: ignore[no-untyped-def]
+            return await run_episode(
                 task,
                 StandardEnvironment(harness, max_steps=settings.agent.max_steps),
                 providers,
@@ -517,9 +602,10 @@ async def _run_one(
                 gateway_url=gateway_url,
                 model=settings.agent.model,
                 gateway=gateway,
+                session_registry=session_registry,
                 limits=limits,
-                # What the task declared, and nothing it did not: the proxy refuses the
-                # rest, so an agent cannot widen its own reach by asking.
+                # What the Task and selected Harness declared, and nothing else: the
+                # proxy refuses the rest, so the agent cannot widen its own reach.
                 allowed_hosts=allowed,
                 seed=settings.seed,
                 collect_artifacts=settings.artifacts.collect == "host",
@@ -531,7 +617,21 @@ async def _run_one(
                 logging_policy=settings.logging,
                 verification_config=settings.verification,
                 sandbox_retention=settings.sandbox_retention,
+                authentication=authentication.mode,
+                profile_slot_id=authentication.profile_slot_id,
+                subscription_credential=(
+                    profile_lease.credential if profile_lease is not None else b""
+                ),
+                subscription_lease=profile_lease,
             )
+
+        async with gate:
+            ledger.mark_running(episode_id)
+            if authentication.mode == "subscription":
+                async with ProfileLease(authentication) as profile_lease:
+                    result = await execute(profile_lease)
+            else:
+                result = await execute()
         ledger.finish_episode(result.episode_id, result.record)
 
         _report(result)
@@ -562,8 +662,15 @@ async def _run_one(
                     settings.agent.model,
                     settings,
                     agent_resources,
+                    authentication=authentication.provenance(
+                        source=settings.authentication_source,
+                        cli_version=harness.version(),
+                    ),
                 ),
-                gateway=gateway_provenance(settings),
+                gateway=gateway_provenance(
+                    settings,
+                    observable=authentication.mode == "api-key",
+                ),
                 config_hash=settings.config_hash,
             )
             identity = episode_identity(

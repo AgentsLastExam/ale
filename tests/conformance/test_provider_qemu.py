@@ -9,16 +9,22 @@ Needs KVM and a built guest image, so it skips rather than fails where either is
 
 from __future__ import annotations
 
+import contextlib
 import os
+import subprocess
+import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
 
-from ale.core.sandbox import Identity, ImageRef, SandboxRequest
-from ale.core.taskspec import NetworkMode, Resources
+from ale.core.sandbox import Identity, ImageRef, Sandbox, SandboxRequest
+from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
-from ale.run.providers.qemu import QemuProvider
+from ale.run.providers.docker import DockerProvider
+from ale.run.providers.docker import destroy_retained as destroy_retained_docker
+from ale.run.providers.qemu import QemuProvider, destroy_retained, list_retained
 from ale.run.sources import cache_root
 
 LEGACY_IMAGE = Path.home() / ".cache/ale/images/ale-ubuntu-desktop.qcow2"
@@ -79,3 +85,108 @@ class TestQemuProvider(ProviderConformance):
 
         async with await self.provider.create(await self.request()) as fresh:
             assert not (await fresh.exec(["test", "-e", "/home/user/overlay-marker"])).ok
+
+    @pytest.mark.asyncio
+    async def test_retained_vm_stays_running_until_explicit_destroy(self) -> None:
+        sandbox = await self.provider.create(await self.request(retention="keep"))
+        retained = await sandbox.retain(roles=("solver",), reason="conformance")
+        sandbox.release_resources()
+        try:
+            records = await list_retained()
+            record = next(item for item in records if item["handle"] == retained.handle)
+            assert record["provider"] == "qemu"
+            assert record["running"] is True
+            assert Path(sandbox.storage).is_dir()  # type: ignore[attr-defined]
+        finally:
+            await destroy_retained(retained.handle)
+        assert not Path(sandbox.storage).exists()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_cli_manages_multiple_mixed_retained_sandboxes() -> None:
+    docker = DockerProvider()
+    qemu = QemuProvider(image=IMAGE)
+    docker_image = await docker.prepare_image(
+        ImageRef(kind="container", reference="ghcr.io/agentslastexam/sandbox-base-cli:latest")
+    )
+    qemu_image = await qemu.prepare_image(
+        ImageRef(kind="vm", reference="ale-guest-ubuntu-desktop:24.04")
+    )
+    active: list[Sandbox] = []
+    retained: set[str] = set()
+    qemu_storage: Path | None = None
+
+    def cli(*args: str) -> str:
+        result = subprocess.run(
+            [str(Path(sys.executable).parent / "ale"), "sandbox", *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    async def keep(provider: DockerProvider | QemuProvider, request: SandboxRequest) -> Sandbox:
+        sandbox = await provider.create(request)
+        active.append(sandbox)
+        kept = await sandbox.retain(roles=("solver",), reason="mixed conformance")
+        sandbox.release_resources()
+        active.remove(sandbox)
+        retained.add(kept.handle)
+        return sandbox
+
+    try:
+        for index in range(2):
+            await keep(
+                docker,
+                SandboxRequest(
+                    episode_id=f"mixed-docker-{index}-{uuid.uuid4().hex[:6]}",
+                    retention="keep",
+                    prepared_image=docker_image,
+                    resources=Resources(cpus=1, memory_mb=512),
+                    network=NetworkPolicy(),
+                ),
+            )
+        vm = await keep(
+            qemu,
+            SandboxRequest(
+                episode_id=f"mixed-qemu-{uuid.uuid4().hex[:6]}",
+                retention="keep",
+                prepared_image=qemu_image,
+                resources=Resources(cpus=2, memory_mb=4096),
+                network=NetworkPolicy(),
+            ),
+        )
+        qemu_storage = Path(vm.storage)  # type: ignore[attr-defined]
+
+        listing = cli("list")
+        assert all(handle in listing for handle in retained)
+
+        qemu_handle = next(handle for handle in retained if handle.startswith("qemu:"))
+        cli("destroy", qemu_handle)
+        retained.remove(qemu_handle)
+        assert qemu_storage is not None and not qemu_storage.exists()
+        listing = cli("list")
+        assert qemu_handle not in listing
+        assert all(handle in listing for handle in retained)
+
+        first_docker = sorted(retained)[0]
+        cli("destroy", first_docker)
+        retained.remove(first_docker)
+        listing = cli("list")
+        assert first_docker not in listing
+        assert all(handle in listing for handle in retained)
+
+        last = retained.pop()
+        cli("destroy", last)
+        assert last not in cli("list")
+    finally:
+        for sandbox in active:
+            with contextlib.suppress(Exception):
+                await sandbox.destroy()
+        for handle in retained:
+            with contextlib.suppress(Exception):
+                if handle.startswith("qemu:"):
+                    await destroy_retained(handle)
+                else:
+                    await destroy_retained_docker(handle)

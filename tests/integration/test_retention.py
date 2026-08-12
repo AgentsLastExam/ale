@@ -224,13 +224,14 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
     assert outcome.roles == ("solver", "verifier")
     assert outcome.outcome == "retained"
     assert outcome.handle and outcome.cleanup_command
+    container = outcome.handle.removeprefix("docker:")
     try:
         retained = await list_retained()
         assert any(item["handle"] == outcome.handle for item in retained)
         probe = await asyncio.create_subprocess_exec(
             "docker",
             "exec",
-            outcome.handle,
+            container,
             "test",
             "!",
             "-e",
@@ -240,7 +241,7 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
         credentials = await asyncio.create_subprocess_exec(
             "docker",
             "exec",
-            outcome.handle,
+            container,
             "sh",
             "-c",
             "test ! -e /home/user/.codex/auth.json && "

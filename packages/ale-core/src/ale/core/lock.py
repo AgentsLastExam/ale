@@ -28,6 +28,7 @@ __all__ = [
     "AgentResourceProvenance",
     "AleVerifyProvenance",
     "AssetProvenance",
+    "AuthenticationProvenance",
     "FrameworkProvenance",
     "GatewayProvenance",
     "HarnessPresetProvenance",
@@ -122,6 +123,20 @@ class ResourceProvenance(BaseModel):
     effective: ResourceAllocation
 
 
+class AuthenticationProvenance(BaseModel):
+    model_config = _FROZEN
+
+    requested: Literal["auto", "api-key", "subscription"] = "api-key"
+    effective: Literal["api-key", "subscription"] = "api-key"
+    selection_source: Literal["cli", "run", "preset", "default"] = "default"
+    provider: Literal["anthropic", "openai", "xai"] | None = None
+    profile_slot_id: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    transport: Literal["gateway", "native-proxy", "subscription-relay"] = "gateway"
+    credential_exposed_to_agent: bool = False
+    gateway_observability: Literal["available", "unavailable"] = "available"
+    validated_cli_version: str = ""
+
+
 class AgentProvenance(BaseModel):
     model_config = _FROZEN
 
@@ -137,6 +152,7 @@ class AgentProvenance(BaseModel):
     native_limits: dict[str, int | float | str] = Field(default_factory=dict)
     resources: tuple[AgentResourceProvenance, ...] = ()
     resources_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    authentication: AuthenticationProvenance = AuthenticationProvenance()
 
 
 class HarnessPresetProvenance(BaseModel):
@@ -235,6 +251,7 @@ class GatewayProvenance(BaseModel):
 
     dialect: str
     limits: dict[str, int | float | str] = Field(default_factory=dict)
+    observability: Literal["available", "unavailable"] = "available"
 
 
 class LimitTermination(BaseModel):

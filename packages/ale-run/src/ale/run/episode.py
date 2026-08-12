@@ -43,10 +43,11 @@ from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import Status, Verdict
 from ale.run.assets import observe_task_assets
 from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession, Limits
+from ale.run.gateway.session import GatewaySession, Limits, SessionRegistry
 from ale.run.provenance import ProvenanceInputs, build_lock, judge_provenance
 from ale.run.providers import ProviderRegistry
 from ale.run.recording import EpisodeRecording
+from ale.run.subscription import ProfileLease
 from ale.run.task_images import prepare_task_image, prepare_verifier_image
 from ale_verify import VerificationRecord
 
@@ -374,6 +375,7 @@ async def run_episode(
     provenance: ProvenanceInputs | None = None,
     proxy_url: str = "",
     gateway: Gateway | None = None,
+    session_registry: SessionRegistry | None = None,
     limits: Limits | None = None,
     allowed_hosts: frozenset[str] = frozenset(),
     agent_resources: EffectiveAgentResources | None = None,
@@ -383,6 +385,10 @@ async def run_episode(
     logging_policy: LoggingPolicy | None = None,
     verification_config: VerificationConfig | None = None,
     sandbox_retention: SandboxRetentionConfig | None = None,
+    authentication: Literal["api-key", "subscription"] = "api-key",
+    profile_slot_id: str | None = None,
+    subscription_credential: bytes = b"",
+    subscription_lease: ProfileLease | None = None,
 ) -> EpisodeResult:
     """Administer one task and return its verdict.
 
@@ -404,25 +410,30 @@ async def run_episode(
     # exist until the episode has a directory. Opened earlier, every transport record was
     # simply never written.
     session_token, session = token, None
-    if gateway is not None:
-        session = gateway.open_session(
-            GatewaySession(
-                episode_id=episode_id,
-                model=model,
-                limits=limits or Limits(),
-                allowed_hosts=allowed_hosts,
-                payload_dir=(
-                    episode_dir / "logs" / "gateway"
-                    if (logging_policy or LoggingPolicy()).transport_payloads == "debug"
-                    else None
-                ),
-                exact_token_dir=(
-                    episode_dir / "logs" / "gateway" / "tokens"
-                    if (logging_policy or LoggingPolicy()).token_data == "exact"
-                    else None
-                ),
+    if gateway is not None or session_registry is not None:
+        candidate = GatewaySession(
+            episode_id=episode_id,
+            model=model,
+            limits=limits or Limits(),
+            allowed_hosts=allowed_hosts,
+            payload_dir=(
+                episode_dir / "logs" / "gateway"
+                if (logging_policy or LoggingPolicy()).transport_payloads == "debug"
+                else None
             ),
-            trace=recording.transport,
+            exact_token_dir=(
+                episode_dir / "logs" / "gateway" / "tokens"
+                if (logging_policy or LoggingPolicy()).token_data == "exact"
+                else None
+            ),
+        )
+        session = (
+            gateway.open_session(
+                candidate,
+                trace=recording.transport if authentication == "api-key" else None,
+            )
+            if gateway is not None
+            else session_registry.open(candidate)  # type: ignore[union-attr]
         )
         session_token = session.token
 
@@ -443,6 +454,9 @@ async def run_episode(
             gateway_url=gateway_url,
             token=session_token,
             model=model,
+            authentication=authentication,
+            profile_slot_id=profile_slot_id,
+            subscription_credential=subscription_credential,
         ),
         agent_resources=agent_resources or EffectiveAgentResources(),
         task_source=task.source,
@@ -454,6 +468,7 @@ async def run_episode(
         result=recording,
         seed=seed,
         proxy_url=proxy_url,
+        allowed_hosts=allowed_hosts,
         prepared_image=task.prepared_image,
         prepared_verifier_image=task.prepared_verifier_image,
     )
@@ -461,6 +476,8 @@ async def run_episode(
         ctx.extras["phase_callback"] = phase_callback
     ctx.extras["logging_policy"] = logging_policy or LoggingPolicy()
     ctx.extras["verification_config"] = verification_config or VerificationConfig()
+    if subscription_lease is not None:
+        ctx.extras["subscription_lease"] = subscription_lease
 
     try:
         verdict = await environment.run(task, ctx)
@@ -490,6 +507,8 @@ async def run_episode(
         if gateway is not None and session is not None:
             # Tokens die with their episode, so a leaked one is not a standing grant.
             gateway.close_session(session)
+        elif session_registry is not None and session is not None:
+            session_registry.close(session)
         finalization_error: RetentionFinalizationError | None = None
         try:
             await lease.finalize()
@@ -577,6 +596,12 @@ async def run_episode(
         durable=True,
     )
     duration = time.monotonic() - started
+    if (
+        authentication == "subscription"
+        and recording.transport.path.is_file()
+        and recording.transport.path.stat().st_size == 0
+    ):
+        recording.transport.path.unlink()
 
     return EpisodeResult(
         episode_id=episode_id,

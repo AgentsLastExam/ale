@@ -6,7 +6,7 @@ other files may carry only stable identifiers, references, or small run-level pr
 | Artifact | Owns | Does not own |
 |---|---|---|
 | `trajectory.json` | agent-visible messages, reasoning actually exposed, tool calls/results, images, subagents | setup/verify commands, rewards, aggregate usage |
-| `trace.transport.jsonl` | solver Gateway model calls, retries, refusals, usage, cost, call-to-step links | full conversation messages or verification Judge calls |
+| `trace.transport.jsonl` | API-key-mode solver Gateway calls, retries, refusals, usage, cost, call-to-step links | native subscription traffic, full conversation messages, or verification Judge calls |
 | `trace.execution.jsonl` | framework phases, task/framework commands, output, policy, cleanup failures | agent-owned tool calls, rewards |
 | `result.json` | terminal status, all named rewards, failure, phase timings | conversation, provenance |
 | `verification.json` | criterion diagnostics, metrics, aggregates, and Judge invocations/attempts | terminal status, solver trajectory, native Agent transcript |
@@ -27,7 +27,7 @@ before atomic replacement:
   "trajectory_id": "trajectory-...",
   "agent": {
     "name": "claude-code",
-    "version": "2.1.220",
+    "version": "2.1.227",
     "model_name": "claude-opus-4-8"
   },
   "steps": [
@@ -73,6 +73,12 @@ Only the Gateway writes `trace.transport.jsonl`. Every complete line has
 Retries never double-charge. Failed and refused calls remain visible. Default records
 contain digests and accounting metadata, not provider request/response bodies or a second
 copy of the conversation.
+
+Subscription traffic is not recorded here. Codex/Grok use the native CONNECT proxy;
+Claude uses the Gateway without attaching this retained trace. In either case this
+artifact is absent and RunLock records that retained transport visibility, provider
+billing usage, and provider cost are unavailable. Absence never means zero model calls;
+the ATIF trajectory and native logs remain the available solver evidence.
 
 ## Execution trace
 

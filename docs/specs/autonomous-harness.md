@@ -1,9 +1,9 @@
 # Autonomous Harness Integration
 
 This is the implementation contract for adding an agent program that owns its own
-interaction loop. ALE supplies one instruction, a live sandbox, an episode Gateway
-session, validated settings, and resolved resources. The harness launches the program
-and returns a typed result.
+interaction loop. ALE supplies one instruction, a live Sandbox, a resolved authentication
+mode, validated settings, and resolved resources. The Harness launches the program in
+that Sandbox and returns a typed result.
 
 ## Required Files
 
@@ -30,7 +30,7 @@ ALE ships these official upstream agent programs:
 
 | Harness | Pinned package | Gateway dialect | Public settings |
 |---------|----------------|-----------------|-----------------|
-| `claude-code` | Claude Code preset pin | Anthropic Messages | `max_turns`, `max_budget_usd`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `append_system_prompt`, `effort` |
+| `claude-code` | `@anthropic-ai/claude-code@2.1.227` | Anthropic Messages | `max_turns`, `max_budget_usd`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `append_system_prompt`, `effort` |
 | `grok-build` | `@xai-official/grok@0.2.112` | OpenAI Responses by default; Messages, Chat Completions, or Responses configurable | `max_turns`, `reasoning_effort`, `disabled_tools` |
 | `codex-cli` | `@openai/codex@0.146.0` | OpenAI Responses | `reasoning_effort`, `web_search` |
 | `openclaw-cli` | `openclaw@2026.7.1` | OpenAI Responses | `provider`, `thinking`, `timeout_seconds`, `tool_profile`, `tools_allow`, `tools_deny`, `model_params` |
@@ -44,6 +44,13 @@ servers, and same-sandbox native resume at their pinned versions. Support is det
 from the pinned program's verified behavior, not a permanent assumption about a product
 name. In particular, `openclaw@2026.7.1` supports MCP; a future pin that changes this
 must update validation and acceptance together.
+
+Claude Code, Codex CLI, and Grok Build support `agent.authentication = "auto" |
+"api-key" | "subscription"`. Subscription state is isolated from ordinary Host agent
+homes: Claude reads `CLAUDE_CODE_OAUTH_TOKEN` from the ALE checkout's `.env`; Codex and
+Grok use `<checkout>/.ale/auth/<harness>/auth.json`. Only that
+selected token/file is staged. OpenClaw and policy Harnesses reject explicit subscription
+authentication.
 
 ## Settings
 
@@ -100,8 +107,9 @@ Use only the provider-independent `Sandbox` API. Run measured and staged agent-o
 content as `Identity.AGENT`. Native config, Skills, MCP files, and temporary state must
 live under the episode's `HarnessSession.home`.
 
-Never copy ambient `~/.claude`, `~/.codex`, credentials, undeclared Skills, or undeclared
-MCP configuration.
+Never copy ambient agent homes, undeclared Skills, or undeclared MCP configuration. A
+subscription run may copy only the selected Harness's resolved native auth profile into
+the episode home; API-key mode copies no provider credential.
 
 ### Launch
 
@@ -109,15 +117,21 @@ MCP configuration.
 the agent deadline. It must:
 
 - run the measured program as the agent identity;
-- route every model call to `session.gateway_url`;
-- authenticate only with the episode bearer `session.token`;
+- in API-key mode, route every model call to `session.gateway_url` and authenticate only
+  with the episode bearer `session.token`;
+- in Codex/Grok subscription mode, use only the staged native profile and the
+  Harness-declared provider hosts;
+- in Claude subscription mode, use only the episode token and Host Gateway relay;
 - use `session.model` as the authoritative model;
 - emit declared evidence logs under the episode home;
 - return `AgentRun`;
 - classify known refusals and native limits with typed errors.
 
-The harness does not create, destroy, or reopen egress on a sandbox. It does not bypass
-the Gateway or add resources after sealing.
+The Harness does not create, destroy, or reopen egress on a Sandbox or add resources
+after sealing. API-key mode uses the metered Gateway. Codex/Grok subscription mode uses
+only native provider egress resolved before sealing; Claude subscription mode uses the
+Host Gateway as an OAuth relay without a retained Transport Trace or provider billing
+claim. The relay still imposes the Run model and coalesces identical retries.
 
 ### Resume
 
@@ -180,8 +194,8 @@ the MCP client contract may not.
 
 Keep ownership explicit:
 
-- Gateway limits own model calls, provider-reported input tokens, output tokens, total
-  tokens, and estimated provider cost.
+- Gateway limits own API-key-mode model calls, provider-reported input tokens, output
+  tokens, total tokens, and estimated provider cost.
 - Harness settings own native controls such as Claude `max_turns` and
   `max_budget_usd`.
 - Environment timeouts own setup, agent, and verify wall time.
@@ -190,10 +204,14 @@ Do not emulate a Gateway limit in an adapter or hide a native limit under a Gate
 field. Termination records and provenance name the enforcing layer, limit, configured
 value, and observed value.
 
-The Gateway supports Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses.
-The preset supplies the default dialect and upstream provider endpoint; a harness may
-accept a documented compatible override. Harnesses always use an episode-local Gateway
-bearer token; provider credentials remain host-side.
+The Gateway supports Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses
+for API-key mode. The preset supplies the default dialect and upstream provider endpoint;
+a Harness may accept a documented compatible override. Subscription mode instead uses
+the official CLI's native provider service. Codex and Grok use a staged provider profile
+and opaque provider egress, so Gateway limits and accounting do not apply. Claude uses the
+Gateway as a Bearer relay: the Run model remains authoritative and identical retries may
+be coalesced, while finite cost/token limits, provider billing, and retained Transport
+Trace remain unavailable.
 
 The Gateway does not pre-count input tokens or reserve worst-case token/cost budgets.
 It completes the current request, accounts provider-reported usage, and refuses the next
@@ -222,27 +240,29 @@ A new adapter is complete only when:
 - `AutonomousHarnessConformance` checks pass;
 - unknown settings and unsupported resources fail before provisioning;
 - concurrent episodes have distinct paths, config, logs, and native state;
-- every model request uses the Gateway session;
+- every API-key request uses the Gateway session, while every subscription request uses
+  only the declared native provider egress;
 - cleanup is idempotent;
 - the evidence parser is deterministic;
 - preset, settings, resources, versions, limits, and termination are present in
   provenance;
 - every behavior that depends on model discovery or tool choice passes a separately
-  marked live test using the pinned agent program and a real model through the Gateway;
-- the live trajectory audit agrees across Gateway transport, ATIF trajectory, execution
-  trace, native evidence when retained, artifacts, result, and RunLock.
+  marked live test using the pinned agent program, a real model, and the selected
+  authentication path;
+- the live trajectory audit agrees across available transport evidence, ATIF trajectory,
+  execution trace, native evidence when retained, artifacts, result, and RunLock.
 
 A shipped integration therefore follows this acceptance order:
 
 1. strict settings, preset, native translation, parser, and error unit tests;
 2. official CLI configuration validation;
 3. shared deterministic conformance and sandbox integration;
-4. a real Skill plus MCP task through the Gateway;
+4. a real Skill plus MCP task through the selected authentication path;
 5. a real tool-surface smoke task that exercises every safely callable visible tool and
    records unavailable or unsafe tools honestly;
 6. direct launch plus two native resumes in the same sandbox;
-7. independent LLM audit of transport, ATIF, native evidence, artifacts, verifier, and
-   RunLock.
+7. independent LLM audit of available transport evidence, ATIF, native evidence,
+   artifacts, verifier, and RunLock.
 
 A scripted probe, fake harness, oracle, hand-authored transcript, or agent-authored
 receipt may test plumbing but cannot complete that live gate. The tool-surface report is

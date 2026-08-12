@@ -37,6 +37,7 @@ class Upstream:
         self.delay = 0.0
         self.token_data: dict[str, object] | None = None
         self.seen_keys: list[str] = []
+        self.seen_authorizations: list[str] = []
         self.seen_models: list[str] = []
         self.seen_max_tokens: list[int] = []
         self.runner: web.AppRunner | None = None
@@ -63,6 +64,7 @@ class Upstream:
         if self.delay:
             await asyncio.sleep(self.delay)
         self.seen_keys.append(request.headers.get("x-api-key", ""))
+        self.seen_authorizations.append(request.headers.get("authorization", ""))
         payload = await request.json()
         self.seen_models.append(payload.get("model", ""))
         self.seen_max_tokens.append(payload.get("max_tokens", 0))
@@ -129,6 +131,26 @@ class TestCredentialIsolation:
         assert status == 200
         assert upstream.seen_keys == [REAL_KEY]
         assert REAL_KEY not in session.token
+
+    async def test_anthropic_subscription_uses_bearer_upstream(self) -> None:
+        upstream = Upstream()
+        await upstream.start()
+        gateway = Gateway(
+            api_key="oauth-token",
+            upstream=upstream.url,
+            bearer_auth=True,
+            host="127.0.0.1",
+        )
+        await gateway.start()
+        session = gateway.open_session(GatewaySession(episode_id="oauth", model="claude-opus-4-8"))
+        try:
+            status, _ = await call(gateway, session)
+            assert status == 200
+            assert upstream.seen_authorizations == ["Bearer oauth-token"]
+            assert upstream.seen_keys == [""]
+        finally:
+            await gateway.stop()
+            await upstream.stop()
 
     async def test_unknown_token_is_rejected(self, stack) -> None:
         gateway, upstream, _session, _ = stack

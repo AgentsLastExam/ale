@@ -8,7 +8,9 @@ anything is provisioned — because a provider that fails late fails expensively
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,7 +25,14 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, Resources
 from ale.run.providers.qemu import (
+    EPISODE_LABEL,
+    GPU_LABEL,
+    HANDLE_PREFIX,
     HOST_IP,
+    MANAGED_LABEL,
+    RETENTION_LABEL,
+    ROLE_LABEL,
+    STORAGE_LABEL,
     VM_STORAGE_OVERHEAD_MB,
     QemuProvider,
     QemuSandbox,
@@ -32,6 +41,8 @@ from ale.run.providers.qemu import (
     _port_of,
     _verify_qemu_gpu_count,
     _VfioGpu,
+    destroy_retained,
+    list_retained,
 )
 
 pytestmark = pytest.mark.unit
@@ -90,7 +101,7 @@ def test_cancelled_boot_removes_the_started_runner(
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(
             QemuProvider()._boot(
-                request(),
+                request(retention="keep"),
                 tmp_path,
                 tmp_path / "base.qcow2",
                 7411,
@@ -99,6 +110,91 @@ def test_cancelled_boot_removes_the_started_runner(
 
     assert commands[-1][:3] == ("docker", "rm", "-f")
     assert commands[-1][3].startswith("ale-qemu-")
+    started = commands[0]
+    for label in (
+        f"{MANAGED_LABEL}=true",
+        f"{EPISODE_LABEL}=e1",
+        f"{ROLE_LABEL}=solver",
+        f"{RETENTION_LABEL}=keep",
+        f"{STORAGE_LABEL}={tmp_path.resolve()}",
+    ):
+        assert label in started
+
+
+@pytest.mark.asyncio
+async def test_qemu_retain_returns_a_provider_qualified_handle() -> None:
+    class Client:
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    client = Client()
+    sandbox = QemuSandbox.__new__(QemuSandbox)
+    sandbox._client = client  # type: ignore[attr-defined]
+    sandbox.container = "ale-qemu-test"  # type: ignore[attr-defined]
+    sandbox.request = request(retention="keep")  # type: ignore[attr-defined]
+    sandbox.allocation = SimpleNamespace(gpu=None)  # type: ignore[attr-defined]
+
+    retained = await sandbox.retain(roles=("solver",), reason="debug")
+
+    assert client.closed
+    assert retained.provider == "qemu"
+    assert retained.handle == f"{HANDLE_PREFIX}ale-qemu-test"
+    assert retained.cleanup_command == "ale sandbox destroy qemu:ale-qemu-test"
+
+
+@pytest.mark.asyncio
+async def test_qemu_retained_listing_and_destroy_remove_the_overlay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    storage = tmp_path / "episode"
+    storage.mkdir()
+    (storage / "data.qcow2").touch()
+    labels = {
+        MANAGED_LABEL: "true",
+        RETENTION_LABEL: "keep",
+        EPISODE_LABEL: "episode",
+        ROLE_LABEL: "solver",
+        GPU_LABEL: "0000:65:00.0",
+        STORAGE_LABEL: str(storage),
+    }
+    record = {
+        "Name": "/ale-qemu-test",
+        "Image": "sha256:runner",
+        "Config": {"Labels": labels},
+        "State": {"Running": True},
+        "Mounts": [{"Type": "bind", "Source": str(storage), "Destination": "/storage"}],
+    }
+    removed: list[str] = []
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        if argv[:4] == ("docker", "ps", "-a", "-q"):
+            return 0, "container-id\n", ""
+        if argv[:2] == ("docker", "inspect"):
+            return 0, json.dumps([record]), ""
+        if argv[:3] == ("docker", "rm", "-f"):
+            removed.append(argv[3])
+            return 0, "", ""
+        raise AssertionError(argv)
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+
+    assert await list_retained() == [
+        {
+            "provider": "qemu",
+            "handle": "qemu:ale-qemu-test",
+            "episode": "episode",
+            "role": "solver",
+            "image": "sha256:runner",
+            "gpus": ("0000:65:00.0",),
+            "running": True,
+            "cleanup_command": "ale sandbox destroy qemu:ale-qemu-test",
+        }
+    ]
+    await destroy_retained("qemu:ale-qemu-test")
+    assert removed == ["ale-qemu-test"]
+    assert not storage.exists()
 
 
 def test_overlay_uses_the_prepared_disks_virtual_size(
@@ -435,10 +531,10 @@ def test_allowlist_proxy_is_injected_only_for_sealed_agent_commands() -> None:
     sandbox._sealed = True  # type: ignore[attr-defined]
     asyncio.run(sandbox.exec(["true"], identity=Identity.AGENT))
     assert sandbox._client.env == {  # type: ignore[attr-defined]
-        "HTTP_PROXY": "http://episode-token@172.30.0.1:9443",
-        "HTTPS_PROXY": "http://episode-token@172.30.0.1:9443",
-        "http_proxy": "http://episode-token@172.30.0.1:9443",
-        "https_proxy": "http://episode-token@172.30.0.1:9443",
+        "HTTP_PROXY": "http://episode-token:@172.30.0.1:9443",
+        "HTTPS_PROXY": "http://episode-token:@172.30.0.1:9443",
+        "http_proxy": "http://episode-token:@172.30.0.1:9443",
+        "https_proxy": "http://episode-token:@172.30.0.1:9443",
         "NO_PROXY": "172.30.0.1,localhost,127.0.0.1",
     }
 

@@ -11,8 +11,8 @@ Before the Environment starts, the engine has already:
 - loaded and rendered one base or selected variant into `TaskSpec`;
 - linted the Task and prepared the solver image and any dedicated verifier image;
 - resolved the Harness and the effective Skill/MCP resources;
-- created the episode Gateway session, evidence sinks, Provider registry, run policy,
-  and RunLock inputs.
+- resolved the Harness authentication path, created its episode capabilities and
+  evidence sinks, and prepared the Provider registry, run policy, and RunLock inputs.
 
 Image acquisition and building are preparation, not an Environment phase. `ale prepare`
 stops at that boundary and creates no sandbox.
@@ -86,9 +86,11 @@ same reward envelope and `verification.json` contract.
 ### Teardown and retention
 
 Solver and verifier retention are independent run policies and default to `destroy`.
-Before a requested keep, ALE removes known temporary credentials and Judge state. Failed
-sanitation forces destruction. Result and RunLock record the requested policy, actual
-Provider outcome, retained handle, cleanup command, and any reason.
+Before a requested keep, ALE removes known verification credentials, Judge state, and
+temporary native homes. Failure to remove a staged subscription credential is warned and
+recorded but is not itself a reason to destroy a Sandbox; failure of other required
+sanitation still forces destruction. Result and RunLock record the requested policy,
+actual Provider outcome, retained handle, cleanup command, and any reason.
 
 ## Validation
 

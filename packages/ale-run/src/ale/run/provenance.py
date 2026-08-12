@@ -25,6 +25,7 @@ from ale.core.lock import (
     AgentResourceProvenance,
     AleVerifyProvenance,
     AssetProvenance,
+    AuthenticationProvenance,
     FrameworkProvenance,
     GatewayProvenance,
     HarnessPresetProvenance,
@@ -79,14 +80,15 @@ def framework_provenance() -> FrameworkProvenance:
     return FrameworkProvenance(version=__version__, commit=_git_commit())
 
 
-def gateway_provenance(settings: RunConfig) -> GatewayProvenance:
+def gateway_provenance(settings: RunConfig, *, observable: bool = True) -> GatewayProvenance:
     """Record the ceilings that were actually in force.
 
     Every field is present, and explicit ``unlimited`` remains visible.
     """
     return GatewayProvenance(
         dialect=settings.gateway.dialect,
-        limits=settings.gateway.limits.model_dump(),
+        limits=settings.gateway.limits.model_dump() if observable else {},
+        observability="available" if observable else "unavailable",
     )
 
 
@@ -119,6 +121,7 @@ def agent_provenance(
     model: str,
     settings: RunConfig | None = None,
     resources: EffectiveAgentResources | None = None,
+    authentication: AuthenticationProvenance | None = None,
 ) -> AgentProvenance:
     """Read a harness's identity off the harness itself.
 
@@ -177,6 +180,7 @@ def agent_provenance(
         native_limits=native_limits,
         resources=resource_records,
         resources_digest=resources.digest if resources else None,
+        authentication=authentication or AuthenticationProvenance(),
     )
 
 

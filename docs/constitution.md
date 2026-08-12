@@ -65,20 +65,22 @@ describe what actually ran, including failure, rather than what was intended to 
 ### IV. Explicit Trust Boundaries and Honest Failure
 
 Each execution phase MUST document which code is trusted, which resources it may
-access, and which capabilities or secrets it receives. Evaluated code MUST NOT access
-withheld evaluation material, credentials, or privileges outside its declared
-contract. Trusted framework or verification phases MAY receive required capabilities
-and secrets, but access MUST be scoped to their purpose and lifetime and sensitive
-values MUST be excluded from published artifacts.
+access, and which capabilities, credentials, or privileges it receives. Evaluated code
+MUST NOT access withheld evaluation material or undeclared host capabilities. A
+versioned feature contract MAY deliberately provide evaluated code with credentials or
+privileges when it states their scope, exposure, lifecycle, cleanup, and provenance
+behavior. Credential confidentiality from evaluated code is not a constitutional
+guarantee. Framework-authored metadata MUST exclude raw sensitive values; Task- and
+agent-authored output is not guaranteed to be secret-free.
 
 Infrastructure, setup, verifier, judge, timeout, and contract failures MUST be
 reported explicitly and MUST NOT be converted into a valid low score or silently
 ignored. Security-sensitive paths MUST fail closed when their required guarantees
 cannot be established.
 
-Rationale: evaluation integrity depends on knowing who may observe or modify what.
-Separating measurement failure from measured performance prevents corrupted results
-from looking legitimate.
+Rationale: evaluation integrity depends on describing the actual boundary, not imposing
+one credential-delivery design on every Harness. Separating measurement failure from
+measured performance prevents corrupted results from looking legitimate.
 
 ### V. Minimal Surface and Evidence-Based Generalization
 
@@ -132,4 +134,4 @@ at the correct level of authority.
   current normative specs independently. Compliance with one does not imply compliance
   with the other.
 
-**Version**: 3.0.0 | **Ratified**: 2026-07-24 | **Last Amended**: 2026-07-31
+**Version**: 4.0.0 | **Ratified**: 2026-07-24 | **Last Amended**: 2026-08-11
