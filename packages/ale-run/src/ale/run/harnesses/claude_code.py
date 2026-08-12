@@ -819,29 +819,14 @@ class ClaudeCodeHarness(AutonomousHarness):
         }
         if session.authentication == "subscription":
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
-            if session.gateway_url:
-                env.update(
-                    {
-                        "ANTHROPIC_AUTH_TOKEN": session.token,
-                        "ANTHROPIC_BASE_URL": session.gateway_url,
-                    }
-                )
-            else:
-                env.update(
-                    {
-                        "CLAUDE_CODE_OAUTH_TOKEN": session.subscription_credential.decode(),
-                        "CLAUDE_CODE_PROXY_RESOLVES_HOSTS": "1",
-                        "NODE_USE_ENV_PROXY": "1",
-                    }
-                )
-        else:
-            env.update(
-                {
-                    "ANTHROPIC_BASE_URL": session.gateway_url,
-                    "ANTHROPIC_API_KEY": session.token,
-                    "ANTHROPIC_AUTH_TOKEN": session.token,
-                }
-            )
+        env.update(
+            {
+                "ANTHROPIC_BASE_URL": session.gateway_url,
+                "ANTHROPIC_AUTH_TOKEN": session.token,
+            }
+        )
+        if session.authentication == "api-key":
+            env["ANTHROPIC_API_KEY"] = session.token
         for alias in (
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",

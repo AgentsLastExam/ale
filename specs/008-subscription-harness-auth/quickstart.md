@@ -1,180 +1,86 @@
-# Quickstart: Sandbox-Native Subscription Runs
+# Quickstart: Subscription-Authenticated Harnesses
 
-This is the post-implementation operator and acceptance path. Run ALE commands from
-`/home/weichen/ale/ale`. The official agent always executes inside the Task Sandbox.
+All state stays inside the ALE checkout and is ignored by Git. These commands do not
+reuse or modify the ordinary Host profiles under `~`.
 
-## 1. Log in once with the provider CLI
+## 1. Log in once
 
-### Claude Code
-
-Generate the official long-lived automation token:
+Claude uses a setup token in the checkout `.env`:
 
 ```bash
-mkdir -p "$PWD/.ale/auth/claude-code"
 CLAUDE_CONFIG_DIR="$PWD/.ale/auth/claude-code" claude setup-token
+# Store the returned value as CLAUDE_CODE_OAUTH_TOKEN in .env.
 ```
 
-Store the printed value as `CLAUDE_CODE_OAUTH_TOKEN` in the ALE checkout's gitignored
-`.env`. ALE loads it only into its own process, so it does not change the authentication
-used by an ordinary Host Claude process. Do not put the token on an `ale` command line.
-
-### Codex CLI
-
-Create ALE's dedicated profile without touching the ordinary Host Codex profile:
+Codex and Grok use isolated file profiles:
 
 ```bash
-ALE_AUTH_ROOT="$PWD/.ale/auth"
-mkdir -p "$ALE_AUTH_ROOT/codex-cli"
-CODEX_HOME="$ALE_AUTH_ROOT/codex-cli" \
-  codex login --device-auth -c 'cli_auth_credentials_store="file"'
+mkdir -p .ale/auth/codex-cli .ale/auth/grok-build
+CODEX_HOME="$PWD/.ale/auth/codex-cli" codex login
+GROK_HOME="$PWD/.ale/auth/grok-build" grok login
+chmod 0600 .ale/auth/codex-cli/auth.json .ale/auth/grok-build/auth.json
 ```
 
-Do not export `CODEX_HOME`; ALE derives the same checkout-local path itself. Your normal
-Codex CLI continues to use its ordinary profile. Codex owns and refreshes the isolated
-`auth.json`.
+ALE may refresh these two checkout-local files. Do not copy an ordinary Host profile
+into this directory while a Run is active.
 
-### Grok Build
-
-Create the separate Grok profile:
+## 2. Run
 
 ```bash
-ALE_AUTH_ROOT="$PWD/.ale/auth"
-mkdir -p "$ALE_AUTH_ROOT/grok-build"
-GROK_HOME="$ALE_AUTH_ROOT/grok-build" grok login --device-auth
+uv run ale run TASK --agent claude-code --auth subscription
+uv run ale run TASK --agent codex-cli --auth subscription
+uv run ale run TASK --agent grok-build --auth subscription
 ```
 
-Do not export `GROK_HOME`; ordinary Host Grok use stays on its own profile. Do not point
-another native process at ALE's isolated mutable profile while an ALE Run is active.
+`auto` is the preset default: it selects subscription when that Harness's checkout-local
+source exists, otherwise API key. Force API billing with `--auth api-key`.
 
-## 2. Run explicitly in subscription mode
+The model is always the real model name and can be overridden normally:
 
 ```bash
-uv run ale run demo-hello --agent claude-code --auth subscription
-uv run ale run demo-hello --agent codex-cli --auth subscription
-uv run ale run demo-hello --agent grok-build --auth subscription
+uv run ale run TASK --agent codex-cli --auth subscription --model gpt-5.6-luna
+uv run ale run TASK --agent grok-build --auth subscription --model grok-4.5
 ```
 
-Before provisioning, ALE prints the Harness, provider, requested/effective mode, model,
-and non-secret profile-slot ID. Codex/Grok report `native-proxy`; Claude reports
-`subscription-relay` and receives an episode Gateway URL/token rather than the provider
-OAuth token.
+ALE internally generates the CLI provider configuration. There is no user-facing
+`model.ale` setting and no subscription-specific Sandbox configuration.
 
-Run another Task later without logging in again:
+## 3. Run concurrently
 
 ```bash
-uv run ale run demo-netprobe --agent codex-cli --auth subscription
+uv run ale run TASK --agent codex-cli --auth subscription -n 2 --concurrency 2
+uv run ale run TASK --agent grok-build --auth subscription -n 2 --concurrency 2
 ```
 
-Expected: the saved native login is reused and the official `codex exec` process runs in
-the new Sandbox.
+Normal requests share the current access token without a profile lock. Only a token
+refresh is serialized. Provider quota, RPS, and concurrency policies may still cap
+throughput; ALE retries one transient subscription 429 and then reports a sustained
+limit explicitly.
 
-## 3. Verify `auto` and explicit precedence
+## 4. Inspect evidence
 
-With the Harness-native source present:
+The startup line shows requested/effective auth, Harness, provider, model, and a
+non-secret profile-slot digest. `lock.json` records the same selection. Subscription
+Runs now retain `trace.transport.jsonl` just like API-key Runs because all model calls
+use the Gateway.
 
-```bash
-uv run ale run demo-hello --agent codex-cli
-```
+The trace contains request/response digests, provider response ID, usage, status,
+latency, and estimated cost where pricing is known. It contains no raw provider token or
+refresh token. Provider billing and subscription quota records remain provider-owned.
 
-Expected: `requested=auto`, `effective=subscription`.
+## 5. Recover
 
-Explicit API-key mode ignores the native profile and keeps current Gateway behavior:
+If explicit subscription mode reports missing/revoked auth, repeat only the relevant
+checkout-local login command from section 1. `auto` falls back to API key only when the
+source is absent during initial selection; a failure after subscription selection never
+changes billing mode or model.
 
-```bash
-uv run ale run demo-hello --agent codex-cli --auth api-key
-```
+## Current limitations
 
-Expected: `transport=gateway` and a normal `trace.transport.jsonl`.
-
-An explicit subscription Run with a stale API endpoint or API key still uses the native
-subscription path. If native auth fails, it does not retry and incur API-key billing.
-
-## 4. Confirm the declared Sandbox credential behavior
-
-Run the subscription credential probe integration test:
-
-```bash
-uv run pytest tests/integration/test_subscription_auth.py -k agent_can_read_staged_credential
-```
-
-The probe is expected to find Codex/Grok `auth.json` in the episode home. Claude should
-find only its episode token and Gateway base URL; the long-lived OAuth token remains on
-the Host. The declared Codex/Grok access does not invalidate the result.
-
-Framework-authored `result.json`, `lock.json`, execution diagnostics, and exceptions
-must not intentionally contain the raw credential. Agent-authored trajectory output or
-Task artifacts may contain anything the agent copied.
-
-## 5. Inspect network and provenance
-
-For a blocked-network Codex/Grok Run, the native CLI can reach only its pinned provider
-hosts plus Task-declared hosts through ALE's authenticated proxy. Claude reaches the
-episode-authenticated Host Gateway relay. Direct traffic that ignores these paths remains
-blocked.
-
-The RunLock authentication section resembles:
-
-```json
-{
-  "requested": "subscription",
-  "effective": "subscription",
-  "selection_source": "cli",
-  "provider": "openai",
-  "profile_slot_id": "sha256:...",
-  "transport": "native-proxy",
-  "credential_exposed_to_agent": true,
-  "gateway_observability": "unavailable",
-  "validated_cli_version": "0.146.0"
-}
-```
-
-There is no `trace.transport.jsonl` for the subscription model traffic. Its absence means
-unavailable Gateway visibility, not zero calls or zero cost. `trajectory.json` and native
-evidence remain available.
-
-## 6. Validate refresh and serialization
-
-For Codex and Grok, run two episodes against the same profile:
-
-```bash
-uv run ale run demo-hello --agent codex-cli --auth subscription -n 2 --concurrency 2
-```
-
-Expected: one waits for the other because version 1 holds one profile lock across native
-execution and copyback. After both terminate, the host `auth.json` remains valid and mode
-`0600`. Repeat with a credential near refresh time in the opt-in live suite.
-
-Claude uses an immutable setup token, so it does not take this mutable-profile lock.
-
-## 7. Exercise failures
-
-For each Harness, test missing, malformed, expired/revoked, wrong-model, quota/rate, and
-provider-host drift cases. Expected behavior:
-
-- no Task reward and no aggregate-score entry;
-- no API-key or model fallback;
-- provider-native recovery command shown;
-- last valid Codex/Grok host profile preserved after missing/corrupt guest state.
-
-Native logout remains provider-owned:
-
-```bash
-CODEX_HOME="$PWD/.ale/auth/codex-cli" codex logout
-GROK_HOME="$PWD/.ale/auth/grok-build" grok logout
-```
-
-After logout, explicit subscription mode fails before provisioning. For Claude, remove or
-replace `CLAUDE_CODE_OAUTH_TOKEN` and run `claude setup-token` again when required.
-
-## 8. Full verification
-
-```bash
-just lint
-just test
-uv run pytest -m needs_llm tests/acceptance/subscription
-```
-
-The live suite uses operator-owned accounts and is opt-in. A provider pin is enabled only
-after login reuse, precedence, in-Sandbox execution, Skills/MCP, native continuation,
-agent credential access, framework metadata checks, refresh/copyback, proxy allowlists,
-failure typing, and API-key regression all pass.
+- Linux file-backed Codex/Grok profiles only; macOS Keychain and Windows Credential
+  Manager are TODO T025.
+- Provider auth JSON and private subscription endpoint compatibility is pinned and may
+  require an ALE/CLI update after provider changes.
+- ChatGPT Codex rejects `max_output_tokens`; ALE records completed usage and refuses
+  later calls after a ceiling, but cannot hard-cap the current subscription response
+  with that field.

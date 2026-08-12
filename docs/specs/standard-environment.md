@@ -86,11 +86,11 @@ same reward envelope and `verification.json` contract.
 ### Teardown and retention
 
 Solver and verifier retention are independent run policies and default to `destroy`.
-Before a requested keep, ALE removes known verification credentials, Judge state, and
-temporary native homes. Failure to remove a staged subscription credential is warned and
-recorded but is not itself a reason to destroy a Sandbox; failure of other required
-sanitation still forces destruction. Result and RunLock record the requested policy,
-actual Provider outcome, retained handle, cleanup command, and any reason.
+Before a requested keep, ALE removes known verification credentials and Judge state.
+Subscription credentials never enter the Sandbox, so retention does not add a provider
+credential cleanup step. Failure of other required sanitation still forces destruction.
+Result and RunLock record the requested policy, actual Provider outcome, retained handle,
+cleanup command, and any reason.
 
 ## Validation
 

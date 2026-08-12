@@ -1,5 +1,9 @@
 # Tasks: Subscription-Authenticated Harness Runs
 
+> Phases 1-6 record the implementation checkpoint in commit `fe00cd0`. Phase 7 records
+> the validated simplification that supersedes guest credential staging, native CONNECT
+> routing, copyback, and complete-episode profile locks.
+
 **Input**: Design documents from `/specs/008-subscription-harness-auth/`
 
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/
@@ -125,6 +129,22 @@ operator's real accounts.
 
 ---
 
+## Phase 7: Unified Gateway Simplification
+
+**Purpose**: Make authentication a Host-only routing choice, restore concurrency and
+Gateway evidence, and remove the provider-specific Sandbox branches introduced by the
+first implementation.
+
+- [X] T026 Checkpoint the first complete implementation as commit `fe00cd0` for replay
+- [X] T027 Replace Codex/Grok guest auth staging, copyback, native CONNECT routing, and episode-wide `ProfileLease` with checkout-local Host `SubscriptionCredential` refresh in `/home/weichen/ale/ale/packages/ale-run/src/ale/run/subscription.py`
+- [X] T028 Route Claude, Codex, and Grok subscription model traffic through the existing Gateway, including provider headers, Codex's `/responses` path, one 401 refresh retry, and one bounded 429 retry in `/home/weichen/ale/ale/packages/ale-run/src/ale/run/{cli/main.py,gateway/server.py}`
+- [X] T029 Make Codex and Grok generate the same Gateway configuration in API-key and subscription modes, use the real requested model name, and remove native-auth launch branches in `/home/weichen/ale/ale/packages/ale-run/src/ale/run/harnesses/{codex_cli.py,grok_build.py}`
+- [X] T030 Remove `subscription_credential`, guest lifecycle hooks, subscription-only SessionRegistry flow, and unavailable-trace handling from `/home/weichen/ale/ale/packages/{ale-core/src/ale/core/harness.py,ale-run/src/ale/run/episode.py,ale-run/src/ale/run/environments/standard.py}`
+- [X] T031 Replace staging/serialization tests with Host-header, refresh-only locking, unified config, Gateway 401/429, Codex field compatibility, and no-guest-auth tests in `/home/weichen/ale/ale/tests/{unit,integration}`
+- [X] T032 Live-test Codex and Grok sequentially and at concurrency two with checkout-local profiles; record ADR 0008 and synchronize feature/normative documentation
+
+---
+
 ## Dependencies and Execution Order
 
 - Phase 1 precedes all code because dedicated ALE-owned profiles replace discovery of
@@ -133,17 +153,17 @@ operator's real accounts.
 - US1 supplies the working provider paths; US2 completes their selection/diagnostics;
   US3 completes persistence and truthful records.
 - T021 is the only task that requires operator credentials or interactive action.
+- Phase 7 supersedes the Phase 2-6 transport/lifecycle implementation while preserving
+  their authentication-selection and checkout-isolation outcomes.
 
 ## Parallel Opportunities
 
-The implementation deliberately stays mostly sequential because the three Harnesses
-share `HarnessSession`, orchestration, and lifecycle contracts. After T009 establishes
-common expectations, T010, T011, and T012 touch separate provider files and may be
-implemented independently.
+After Phase 7, episodes sharing one profile run concurrently. Only refresh-token
+rotation is serialized; provider account limits remain independent throughput ceilings.
 
 ## Implementation Strategy
 
-1. Finish isolated profile state and deterministic offline tests.
-2. Deliver the three existing Sandbox-side Harness branches without new dependencies.
-3. Complete provenance and documentation.
-4. Ask the operator to log in only after all offline checks pass.
+1. Keep login state checkout-local.
+2. Keep one Sandbox-side Gateway configuration per Harness.
+3. Vary only Host upstream authentication.
+4. Validate sequential and concurrent real Tasks before release.

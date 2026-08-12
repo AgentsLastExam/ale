@@ -1,4 +1,4 @@
-"""Provider-independent subscription profile lifecycle inside a real Task Sandbox."""
+"""Subscription credentials stay host-side while the agent runs in a real sandbox."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from ale.run.episode import run_episode
 from ale.run.gateway.session import SessionRegistry
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
-from ale.run.subscription import ProfileLease, resolve_authentication
+from ale.run.subscription import resolve_authentication
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
 
@@ -47,14 +47,10 @@ import json
 from pathlib import Path
 
 home = Path(__import__('os').environ['ALE_HOME'])
-proxy = __import__('os').environ['HTTPS_PROXY']
-assert proxy.startswith('http://') and ':@' in proxy
-assert 'ale-gateway.internal' not in proxy
+for name in ('OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'XAI_API_KEY'):
+    assert name not in __import__('os').environ
 auth = home / '.codex-ale/auth.json'
-payload = json.loads(auth.read_text())
-assert payload['tokens']['refresh_token'] == 'old'
-payload['tokens']['refresh_token'] = 'new'
-auth.write_text(json.dumps(payload))
+assert not auth.exists()
 (home / 'output/result.txt').write_text('hello world')
 raise SystemExit({self.exit_code})
 """
@@ -72,7 +68,7 @@ raise SystemExit({self.exit_code})
     [(0, Status.COMPLETED), (17, Status.AGENT_ERROR)],
 )
 @pytest.mark.asyncio
-async def test_isolated_profile_round_trips_through_task_sandbox(
+async def test_subscription_profile_stays_host_side(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     write_repo: Callable[..., Path],
@@ -112,34 +108,29 @@ async def test_isolated_profile_round_trips_through_task_sandbox(
             resources,
             authentication=authentication.provenance(source="cli", cli_version="1"),
         ),
-        gateway=gateway_provenance(settings, observable=False),
+        gateway=gateway_provenance(settings),
         config_hash=settings.config_hash,
     )
 
-    async with ProfileLease(authentication) as lease:
-        result = await run_episode(
-            task,
-            StandardEnvironment(harness),
-            provider_registry(DockerProvider()),
-            run_dir=tmp_path / "runs",
-            model=settings.agent.model,
-            provenance=provenance,
-            authentication="subscription",
-            profile_slot_id=authentication.profile_slot_id,
-            subscription_credential=lease.credential,
-            subscription_lease=lease,
-            proxy_url="http://0.0.0.0:9443",
-            session_registry=SessionRegistry(),
-            allowed_hosts=frozenset({"chatgpt.com"}),
-        )
+    result = await run_episode(
+        task,
+        StandardEnvironment(harness),
+        provider_registry(DockerProvider()),
+        run_dir=tmp_path / "runs",
+        model=settings.agent.model,
+        provenance=provenance,
+        authentication="subscription",
+        profile_slot_id=authentication.profile_slot_id,
+        proxy_url="http://0.0.0.0:9443",
+        session_registry=SessionRegistry(),
+    )
 
     assert result.verdict.status is expected_status, result.verdict.failure
-    assert json.loads(profile.read_text())["tokens"]["refresh_token"] == "new"
+    assert json.loads(profile.read_text())["tokens"]["refresh_token"] == "old"
     assert json.loads(ordinary.read_text()) == {"ordinary": True}
-    assert not (result.run_dir / "trace.transport.jsonl").exists()
+    assert (result.run_dir / "trace.transport.jsonl").exists()
     assert result.lock is not None
     assert result.lock.agent.authentication.effective == "subscription"
-    assert result.lock.agent.authentication.credential_exposed_to_agent is True
-    assert result.lock.gateway.observability == "unavailable"
-    assert result.lock.gateway.limits == {}
+    assert result.lock.agent.authentication.credential_exposed_to_agent is False
+    assert result.lock.gateway.observability == "available"
     assert "refresh_token" not in result.lock.model_dump_json()

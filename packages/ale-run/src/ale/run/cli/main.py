@@ -38,7 +38,7 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import EpisodeResult, run_episode
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import Limits, SessionRegistry
+from ale.run.gateway.session import Limits
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
@@ -75,7 +75,7 @@ from ale.run.recording import atomic_write_json
 from ale.run.scaffold import scaffold_task
 from ale.run.secrets import provider_credentials
 from ale.run.sources import parse_task_reference, resolve, select_tasks
-from ale.run.subscription import ProfileLease, resolve_authentication
+from ale.run.subscription import SubscriptionCredential, resolve_authentication
 from ale.run.task_images import (
     ImagePreparationResult,
     ImagePreparationStep,
@@ -430,10 +430,7 @@ def _config(
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
 
 
-def _harness(
-    settings: RunConfig,
-    authentication: str = "api-key",
-):  # type: ignore[no-untyped-def]
+def _harness(settings: RunConfig):  # type: ignore[no-untyped-def]
     match settings.agent.name:
         case "oracle":
             return OracleHarness()
@@ -444,8 +441,7 @@ def _harness(
 
             return ComputerUseHarness(model=settings.agent.model, **settings.agent.settings)
         case "claude-code":
-            if authentication == "api-key":
-                _require_gateway_dialect(settings, "anthropic")
+            _require_gateway_dialect(settings, "anthropic")
             return ClaudeCodeHarness(
                 cli_version=settings.agent.version,
                 settings=settings.agent.settings,
@@ -457,8 +453,7 @@ def _harness(
                 settings=settings.agent.settings,
             )
         case "codex-cli":
-            if authentication == "api-key":
-                _require_gateway_dialect(settings, "openai-responses")
+            _require_gateway_dialect(settings, "openai-responses")
             return CodexCliHarness(
                 cli_version=settings.agent.version,
                 settings=settings.agent.settings,
@@ -493,9 +488,15 @@ async def _run_one(
 ) -> int:
     try:
         authentication = resolve_authentication(settings.agent)
-        harness = _harness(settings, authentication.mode)
+        harness = _harness(settings)
+        subscription = None
         if authentication.mode == "subscription":
-            ProfileLease(authentication).preflight()
+            subscription = SubscriptionCredential(
+                authentication,
+                cli_version=harness.version(),
+                dialect=settings.gateway.dialect,
+            )
+            await subscription.preflight()
     except AleError as error:
         typer.echo(f"{error}", err=True)
         return EXIT_BAD_REFERENCE
@@ -516,42 +517,30 @@ async def _run_one(
     run_dir = runs_dir / run_id
     gateway = None
     proxy = None
-    session_registry = None
     limits = None
     gateway_url, proxy_url = "", ""
     needs_model = settings.agent.name not in {"oracle", "nop"}
 
-    if (
-        needs_model
-        and authentication.mode == "subscription"
-        and settings.agent.name == "claude-code"
-    ):
-        gateway = Gateway(
-            api_key=authentication.token,
-            bearer_auth=True,
-            host=_gateway_host(settings),
-        )
-        gateway_url = await gateway.start()
-        limits = Limits()
-        if any(task.spec.network.allowed_hosts for task in tasks):  # type: ignore[attr-defined]
-            proxy = EgressProxy(gateway.sessions, host=_gateway_host(settings))
-            proxy_url = await proxy.start()
-    elif needs_model and authentication.mode == "api-key":
-        try:
-            api_key, upstream = provider_credentials(
-                settings.gateway.api_key_env,
-                settings.gateway.base_url,
-                settings.gateway.dialect,
+    if needs_model:
+        if authentication.mode == "subscription":
+            assert subscription is not None
+            gateway = Gateway(subscription=subscription, host=_gateway_host(settings))
+        else:
+            try:
+                api_key, upstream = provider_credentials(
+                    settings.gateway.api_key_env,
+                    settings.gateway.base_url,
+                    settings.gateway.dialect,
+                )
+            except AleError as error:
+                typer.echo(f"{error}", err=True)
+                return EXIT_BAD_REFERENCE
+            gateway = Gateway(
+                api_key=api_key,
+                upstream=upstream,
+                dialect=settings.gateway.dialect,
+                host=_gateway_host(settings),
             )
-        except AleError as error:
-            typer.echo(f"{error}", err=True)
-            return EXIT_BAD_REFERENCE
-        gateway = Gateway(
-            api_key=api_key,
-            upstream=upstream,
-            dialect=settings.gateway.dialect,
-            host=_gateway_host(settings),
-        )
         gateway_url = await gateway.start()
         limits = Limits(
             **{
@@ -562,10 +551,6 @@ async def _run_one(
         if any(task.spec.network.allowed_hosts for task in tasks):  # type: ignore[attr-defined]
             proxy = EgressProxy(gateway.sessions, host=_gateway_host(settings))
             proxy_url = await proxy.start()
-    elif needs_model:
-        session_registry = SessionRegistry()
-        proxy = EgressProxy(session_registry, host=_gateway_host(settings))
-        proxy_url = await proxy.start()
 
     profile = authentication.profile_slot_id or "none"
     typer.echo(
@@ -591,9 +576,9 @@ async def _run_one(
         inputs: ProvenanceInputs,
         agent_resources: EffectiveAgentResources,
     ) -> Status | None:
-        allowed = frozenset(task.spec.network.allowed_hosts) | authentication.provider_hosts
+        allowed = frozenset(task.spec.network.allowed_hosts)
 
-        async def execute(profile_lease: ProfileLease | None = None):  # type: ignore[no-untyped-def]
+        async def execute():  # type: ignore[no-untyped-def]
             return await run_episode(
                 task,
                 StandardEnvironment(harness, max_steps=settings.agent.max_steps),
@@ -602,7 +587,6 @@ async def _run_one(
                 gateway_url=gateway_url,
                 model=settings.agent.model,
                 gateway=gateway,
-                session_registry=session_registry,
                 limits=limits,
                 # What the Task and selected Harness declared, and nothing else: the
                 # proxy refuses the rest, so the agent cannot widen its own reach.
@@ -619,19 +603,11 @@ async def _run_one(
                 sandbox_retention=settings.sandbox_retention,
                 authentication=authentication.mode,
                 profile_slot_id=authentication.profile_slot_id,
-                subscription_credential=(
-                    profile_lease.credential if profile_lease is not None else b""
-                ),
-                subscription_lease=profile_lease,
             )
 
         async with gate:
             ledger.mark_running(episode_id)
-            if authentication.mode == "subscription":
-                async with ProfileLease(authentication) as profile_lease:
-                    result = await execute(profile_lease)
-            else:
-                result = await execute()
+            result = await execute()
         ledger.finish_episode(result.episode_id, result.record)
 
         _report(result)
@@ -667,10 +643,7 @@ async def _run_one(
                         cli_version=harness.version(),
                     ),
                 ),
-                gateway=gateway_provenance(
-                    settings,
-                    observable=authentication.mode == "api-key",
-                ),
+                gateway=gateway_provenance(settings),
                 config_hash=settings.config_hash,
             )
             identity = episode_identity(

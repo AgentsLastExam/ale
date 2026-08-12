@@ -123,6 +123,22 @@ def test_responses_stream_accounts_incomplete_terminal_events() -> None:
     assert usage_from_stream([event]) == (6, 4, "max_output_tokens")
 
 
+def test_chatgpt_backend_omits_unsupported_public_output_limit() -> None:
+    class Authentication:
+        harness = "codex-cli"
+
+    class Credential:
+        authentication = Authentication()
+        upstream = "https://chatgpt.com/backend-api/codex"
+        upstream_path = "/responses"
+        dialect = "openai-responses"
+        supports_output_limit = False
+
+    gateway = Gateway(subscription=Credential())  # type: ignore[arg-type]
+
+    assert gateway._with_output_limit({"model": "gpt-5.6-luna"}, 4096) == {"model": "gpt-5.6-luna"}
+
+
 async def test_disconnected_downstream_does_not_cancel_upstream_accounting(
     tmp_path: Path, monkeypatch
 ) -> None:

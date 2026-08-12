@@ -40,6 +40,8 @@ class Upstream:
         self.seen_authorizations: list[str] = []
         self.seen_models: list[str] = []
         self.seen_max_tokens: list[int] = []
+        self.required_authorization = ""
+        self.statuses: list[int] = []
         self.runner: web.AppRunner | None = None
         self.url = ""
 
@@ -68,8 +70,14 @@ class Upstream:
         payload = await request.json()
         self.seen_models.append(payload.get("model", ""))
         self.seen_max_tokens.append(payload.get("max_tokens", 0))
-        if self.status != 200:
-            return web.json_response({"type": "error"}, status=self.status)
+        if (
+            self.required_authorization
+            and self.seen_authorizations[-1] != self.required_authorization
+        ):
+            return web.json_response({"type": "error"}, status=401)
+        status = self.statuses.pop(0) if self.statuses else self.status
+        if status != 200:
+            return web.json_response({"type": "error"}, status=status, headers={"retry-after": "0"})
         body = {
             "type": "message",
             "content": [{"type": "text", "text": "ok"}],
@@ -148,6 +156,75 @@ class TestCredentialIsolation:
             assert status == 200
             assert upstream.seen_authorizations == ["Bearer oauth-token"]
             assert upstream.seen_keys == [""]
+        finally:
+            await gateway.stop()
+            await upstream.stop()
+
+    async def test_subscription_refreshes_once_after_unauthorized(self) -> None:
+        upstream = Upstream()
+        await upstream.start()
+        upstream.required_authorization = "Bearer fresh"
+
+        class Credential:
+            upstream_path = "/v1/messages"
+            dialect = "anthropic"
+            supports_output_limit = True
+            token = "stale"
+            refreshes = 0
+
+            def __init__(self, url: str) -> None:
+                self.upstream = url
+
+            async def headers(self) -> dict[str, str]:
+                return {"authorization": f"Bearer {self.token}"}
+
+            async def refresh(self) -> bool:
+                self.refreshes += 1
+                self.token = "fresh"
+                return True
+
+        credential = Credential(upstream.url)
+        gateway = Gateway(subscription=credential, host="127.0.0.1")  # type: ignore[arg-type]
+        await gateway.start()
+        session = gateway.open_session(GatewaySession(episode_id="oauth", model="claude-opus-4-8"))
+        try:
+            status, _ = await call(gateway, session)
+            assert status == 200
+            assert credential.refreshes == 1
+            assert upstream.seen_authorizations == ["Bearer stale", "Bearer fresh"]
+        finally:
+            await gateway.stop()
+            await upstream.stop()
+
+    async def test_subscription_retries_one_transient_rate_limit(self) -> None:
+        upstream = Upstream()
+        await upstream.start()
+        upstream.statuses = [429, 200]
+
+        class Credential:
+            upstream_path = "/v1/messages"
+            dialect = "anthropic"
+            supports_output_limit = True
+
+            def __init__(self, url: str) -> None:
+                self.upstream = url
+
+            async def headers(self) -> dict[str, str]:
+                return {"authorization": "Bearer subscription"}
+
+            async def refresh(self) -> bool:
+                return False
+
+        gateway = Gateway(
+            subscription=Credential(upstream.url),  # type: ignore[arg-type]
+            host="127.0.0.1",
+        )
+        await gateway.start()
+        session = gateway.open_session(GatewaySession(episode_id="oauth", model="claude-opus-4-8"))
+        try:
+            status, _ = await call(gateway, session)
+            assert status == 200
+            assert upstream.calls == 2
         finally:
             await gateway.stop()
             await upstream.stop()

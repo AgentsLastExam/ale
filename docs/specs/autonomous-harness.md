@@ -48,9 +48,9 @@ must update validation and acceptance together.
 Claude Code, Codex CLI, and Grok Build support `agent.authentication = "auto" |
 "api-key" | "subscription"`. Subscription state is isolated from ordinary Host agent
 homes: Claude reads `CLAUDE_CODE_OAUTH_TOKEN` from the ALE checkout's `.env`; Codex and
-Grok use `<checkout>/.ale/auth/<harness>/auth.json`. Only that
-selected token/file is staged. OpenClaw and policy Harnesses reject explicit subscription
-authentication.
+Grok use `<checkout>/.ale/auth/<harness>/auth.json`. Credentials remain on the Host;
+every Sandbox receives only its episode Gateway token. OpenClaw and policy Harnesses
+reject explicit subscription authentication.
 
 ## Settings
 
@@ -107,9 +107,8 @@ Use only the provider-independent `Sandbox` API. Run measured and staged agent-o
 content as `Identity.AGENT`. Native config, Skills, MCP files, and temporary state must
 live under the episode's `HarnessSession.home`.
 
-Never copy ambient agent homes, undeclared Skills, or undeclared MCP configuration. A
-subscription run may copy only the selected Harness's resolved native auth profile into
-the episode home; API-key mode copies no provider credential.
+Never copy ambient agent homes, undeclared Skills, undeclared MCP configuration, or a
+provider subscription profile into the episode home.
 
 ### Launch
 
@@ -117,21 +116,17 @@ the episode home; API-key mode copies no provider credential.
 the agent deadline. It must:
 
 - run the measured program as the agent identity;
-- in API-key mode, route every model call to `session.gateway_url` and authenticate only
-  with the episode bearer `session.token`;
-- in Codex/Grok subscription mode, use only the staged native profile and the
-  Harness-declared provider hosts;
-- in Claude subscription mode, use only the episode token and Host Gateway relay;
+- in every authentication mode, route every model call to `session.gateway_url` and
+  authenticate only with the episode bearer `session.token`;
 - use `session.model` as the authoritative model;
 - emit declared evidence logs under the episode home;
 - return `AgentRun`;
 - classify known refusals and native limits with typed errors.
 
 The Harness does not create, destroy, or reopen egress on a Sandbox or add resources
-after sealing. API-key mode uses the metered Gateway. Codex/Grok subscription mode uses
-only native provider egress resolved before sealing; Claude subscription mode uses the
-Host Gateway as an OAuth relay without a retained Transport Trace or provider billing
-claim. The relay still imposes the Run model and coalesces identical retries.
+after sealing. API-key and subscription modes use the same metered Gateway path. The
+Host selects API-key or subscription upstream authentication, while model authority,
+limits, retry coalescing, and Transport Trace stay common.
 
 ### Resume
 
@@ -240,8 +235,7 @@ A new adapter is complete only when:
 - `AutonomousHarnessConformance` checks pass;
 - unknown settings and unsupported resources fail before provisioning;
 - concurrent episodes have distinct paths, config, logs, and native state;
-- every API-key request uses the Gateway session, while every subscription request uses
-  only the declared native provider egress;
+- every API-key and subscription model request uses the Gateway session;
 - cleanup is idempotent;
 - the evidence parser is deterministic;
 - preset, settings, resources, versions, limits, and termination are present in

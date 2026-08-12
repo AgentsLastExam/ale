@@ -47,7 +47,6 @@ from ale.run.gateway.session import GatewaySession, Limits, SessionRegistry
 from ale.run.provenance import ProvenanceInputs, build_lock, judge_provenance
 from ale.run.providers import ProviderRegistry
 from ale.run.recording import EpisodeRecording
-from ale.run.subscription import ProfileLease
 from ale.run.task_images import prepare_task_image, prepare_verifier_image
 from ale_verify import VerificationRecord
 
@@ -387,8 +386,6 @@ async def run_episode(
     sandbox_retention: SandboxRetentionConfig | None = None,
     authentication: Literal["api-key", "subscription"] = "api-key",
     profile_slot_id: str | None = None,
-    subscription_credential: bytes = b"",
-    subscription_lease: ProfileLease | None = None,
 ) -> EpisodeResult:
     """Administer one task and return its verdict.
 
@@ -430,7 +427,7 @@ async def run_episode(
         session = (
             gateway.open_session(
                 candidate,
-                trace=recording.transport if authentication == "api-key" else None,
+                trace=recording.transport,
             )
             if gateway is not None
             else session_registry.open(candidate)  # type: ignore[union-attr]
@@ -456,7 +453,6 @@ async def run_episode(
             model=model,
             authentication=authentication,
             profile_slot_id=profile_slot_id,
-            subscription_credential=subscription_credential,
         ),
         agent_resources=agent_resources or EffectiveAgentResources(),
         task_source=task.source,
@@ -476,9 +472,6 @@ async def run_episode(
         ctx.extras["phase_callback"] = phase_callback
     ctx.extras["logging_policy"] = logging_policy or LoggingPolicy()
     ctx.extras["verification_config"] = verification_config or VerificationConfig()
-    if subscription_lease is not None:
-        ctx.extras["subscription_lease"] = subscription_lease
-
     try:
         verdict = await environment.run(task, ctx)
     except Exception as exc:  # every failure becomes a typed result, not a traceback
@@ -596,13 +589,6 @@ async def run_episode(
         durable=True,
     )
     duration = time.monotonic() - started
-    if (
-        authentication == "subscription"
-        and recording.transport.path.is_file()
-        and recording.transport.path.stat().st_size == 0
-    ):
-        recording.transport.path.unlink()
-
     return EpisodeResult(
         episode_id=episode_id,
         verdict=verdict,

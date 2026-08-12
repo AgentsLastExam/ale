@@ -2,6 +2,37 @@
 
 **Research snapshot**: 2026-08-11
 
+## 2026-08-11 Validated Revision
+
+The first implementation below was checkpointed as commit `fe00cd0`, then superseded
+after deeper source inspection and live tests proved a simpler topology:
+
+- Codex ChatGPT requests use the Responses body at
+  `chatgpt.com/backend-api/codex/responses` with a Bearer access token and
+  `ChatGPT-Account-ID`.
+- Grok subscription requests use the selected cli-chat-proxy dialect with a Bearer
+  access token and fixed official CLI identity headers.
+- Both request shapes can pass through the existing ALE Gateway while the official
+  agent CLI and tool loop remain inside the Task Sandbox.
+- xAI's current source refreshes standard OIDC state from the issuer discovery document
+  and atomically updates the saved access/refresh token. Codex's current source refreshes
+  at `auth.openai.com/oauth/token` and persists rotated fields. ALE implements only these
+  two bounded checkout-local refresh exchanges; it does not install another Host CLI.
+- Normal requests need no profile lock. A lock is required only during refresh-token
+  rotation, and another process's fresh file is reused after the lock is acquired.
+
+Live evidence on the pinned versions:
+
+| Harness | Sequential Task | Two episodes, concurrency two |
+|---|---:|---:|
+| Codex CLI `0.146.0`, `gpt-5.6-luna` | pass, reward 1.0 | 2/2 pass |
+| Grok Build `0.2.112`, `grok-4.5` | pass, reward 1.0 | 2/2 pass after one bounded transient-429 retry |
+
+This changes the final decision from native credential staging to the unified Gateway
+specified by ADR 0008. The remainder of this document is retained as the Phase-0
+rationale for the checkpoint and is historical wherever it conflicts with this section,
+[spec.md](spec.md), or [plan.md](plan.md).
+
 ## Executive Decision
 
 The requested topology is feasible: all three official agents can run non-interactively

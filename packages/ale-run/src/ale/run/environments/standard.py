@@ -71,7 +71,6 @@ from ale.run.recording import (
     atomic_write_json,
     execution_logging,
 )
-from ale.run.subscription import ProfileLease
 from ale.run.verification import installed_ale_verify
 from ale_verify import VerificationRecord
 
@@ -263,12 +262,6 @@ class StandardEnvironment(Environment):
         ctx.agent_version = await harness.install(
             _RecordedSandbox(ctx, sandbox, component="harness-install")
         )
-        subscription = ctx.extras.get("subscription_lease")
-        if isinstance(subscription, ProfileLease):
-            await subscription.stage(
-                _RecordedSandbox(ctx, sandbox, component="subscription-stage"),
-                ctx.home,
-            )
         ctx.agent_resources = await self._stage_mcp_files(ctx, sandbox)
         await harness.install_resources(
             _RecordedSandbox(ctx, sandbox, component="harness-resources"),
@@ -578,27 +571,6 @@ class StandardEnvironment(Environment):
                 )
             except Exception as exc:
                 cleanup_error = exc
-            subscription = ctx.extras.get("subscription_lease")
-            if isinstance(subscription, ProfileLease) and not ctx.extras.get(
-                "subscription_finalized"
-            ):
-                try:
-                    ctx.extras["subscription_persistence"] = await subscription.persist(
-                        _RecordedSandbox(ctx, sandbox, component="subscription-persist"),
-                        ctx.home,
-                    )
-                finally:
-                    try:
-                        cleaned = await subscription.cleanup(
-                            _RecordedSandbox(ctx, sandbox, component="subscription-cleanup"),
-                            ctx.home,
-                        )
-                    except Exception:
-                        cleaned = False
-                    ctx.extras["subscription_cleanup"] = "succeeded" if cleaned else "failed"
-                    ctx.extras["subscription_finalized"] = True
-                    if not cleaned:
-                        logger.warning("staged subscription credential cleanup failed")
             if cleanup_error is not None:
                 raise cleanup_error
             logger.info("harness cleanup completed")
@@ -659,15 +631,6 @@ class StandardEnvironment(Environment):
         if sandbox.request.retention == "destroy":
             ctx.sandboxes.mark_sanitized(sandbox, succeeded=True)
             return
-        credential_paths = [
-            f"{ctx.home}/.codex-ale/auth.json",
-            f"{ctx.home}/.grok-ale/auth.json",
-        ]
-        credential_cleanup = await sandbox.exec(["rm", "-f", "--", *credential_paths])
-        if not credential_cleanup.ok:
-            logging.getLogger("ale.execution").warning(
-                "retained sandbox subscription credential cleanup failed"
-            )
         paths = [
             str(VERIFY_CONFIG_PATH),
             str(VERIFY_DIR / "agent"),

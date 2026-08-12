@@ -208,23 +208,23 @@ async def test_grok_chat_gateway_selects_native_chat_backend(tmp_path: Path) -> 
         (GrokBuildHarness(), "/home/agent/.grok-ale/config.toml"),
     ],
 )
-async def test_subscription_config_uses_native_provider(
+async def test_subscription_config_uses_the_same_gateway_provider(
     tmp_path: Path, harness: object, config_path: str
 ) -> None:
     sandbox = FakeSandbox()
-    current = session(authentication="subscription", subscription_credential=b"credential")
+    current = session(authentication="subscription")
 
     await harness.install_resources(sandbox, current, resources(tmp_path))  # type: ignore[attr-defined, arg-type]
 
     rendered = sandbox.files[config_path].decode()
-    assert "http://gateway" not in rendered
-    assert "ALE_GATEWAY_TOKEN" not in rendered
+    assert "http://gateway/v1" in rendered
+    assert "ALE_GATEWAY_TOKEN" in rendered
     assert "task-proof" in rendered
     if isinstance(harness, CodexCliHarness):
-        assert 'forced_login_method = "chatgpt"' in rendered
-        assert 'cli_auth_credentials_store = "file"' in rendered
+        assert 'model = "test-model"' in rendered
+        assert 'model_provider = "ale"' in rendered
     else:
-        assert "[models]" not in rendered
+        assert '[model."test-model"]' in rendered
 
 
 async def test_codex_subscription_launch_drops_api_credentials() -> None:
@@ -236,18 +236,15 @@ async def test_codex_subscription_launch_drops_api_credentials() -> None:
     await CodexCliHarness().launch(  # type: ignore[arg-type]
         "test",
         sandbox,
-        session(authentication="subscription", subscription_credential=b"credential"),
+        session(authentication="subscription"),
         timeout_sec=60,
     )
 
-    assert "ALE_GATEWAY_TOKEN" not in sandbox.environments[0]
-    assert (
-        "unset OPENAI_API_KEY OPENAI_BASE_URL CODEX_ACCESS_TOKEN ALE_GATEWAY_TOKEN"
-        in (sandbox.commands[0][2])
-    )
+    assert sandbox.environments[0]["ALE_GATEWAY_TOKEN"] == "token"
+    assert "unset OPENAI_API_KEY OPENAI_BASE_URL CODEX_ACCESS_TOKEN" in sandbox.commands[0][2]
 
 
-async def test_grok_subscription_launch_uses_native_model_and_drops_api_credentials() -> None:
+async def test_grok_subscription_launch_uses_gateway_and_requested_model() -> None:
     sandbox = FakeSandbox()
     sandbox.files["/home/agent/.grok-ale/segment.jsonl"] = (
         b'{"type":"end","sessionId":"session-1"}\n'
@@ -256,7 +253,7 @@ async def test_grok_subscription_launch_uses_native_model_and_drops_api_credenti
     await GrokBuildHarness()._run(  # type: ignore[arg-type]
         "test",
         sandbox,
-        session(authentication="subscription", subscription_credential=b"credential"),
+        session(authentication="subscription"),
         native_session_id="session-1",
         resume=False,
         timeout_sec=60,
@@ -264,8 +261,8 @@ async def test_grok_subscription_launch_uses_native_model_and_drops_api_credenti
 
     command = sandbox.commands[0][2]
     assert "--model test-model" in command
-    assert "unset XAI_API_KEY GROK_CLI_CHAT_PROXY_BASE_URL ALE_GATEWAY_TOKEN" in command
-    assert "ALE_GATEWAY_TOKEN" not in sandbox.environments[0]
+    assert "unset XAI_API_KEY GROK_CLI_CHAT_PROXY_BASE_URL" in command
+    assert sandbox.environments[0]["ALE_GATEWAY_TOKEN"] == "token"
     assert sandbox.environments[0]["GROK_WORKSPACE_DATA_COLLECTION_DISABLED"] == "1"
 
 

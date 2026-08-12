@@ -84,7 +84,6 @@ class HarnessSession(BaseModel):
     model: str
     authentication: Literal["api-key", "subscription"] = "api-key"
     profile_slot_id: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
-    subscription_credential: bytes = Field(default=b"", exclude=True, repr=False)
     sandbox_id: str = ""
     resources_digest: str = (
         "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

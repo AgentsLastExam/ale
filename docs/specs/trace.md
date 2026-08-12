@@ -6,7 +6,7 @@ other files may carry only stable identifiers, references, or small run-level pr
 | Artifact | Owns | Does not own |
 |---|---|---|
 | `trajectory.json` | agent-visible messages, reasoning actually exposed, tool calls/results, images, subagents | setup/verify commands, rewards, aggregate usage |
-| `trace.transport.jsonl` | API-key-mode solver Gateway calls, retries, refusals, usage, cost, call-to-step links | native subscription traffic, full conversation messages, or verification Judge calls |
+| `trace.transport.jsonl` | solver Gateway calls in API-key and subscription modes, retries, refusals, usage, cost when price is known, call-to-step links | full conversation messages or verification Judge calls |
 | `trace.execution.jsonl` | framework phases, task/framework commands, output, policy, cleanup failures | agent-owned tool calls, rewards |
 | `result.json` | terminal status, all named rewards, failure, phase timings | conversation, provenance |
 | `verification.json` | criterion diagnostics, metrics, aggregates, and Judge invocations/attempts | terminal status, solver trajectory, native Agent transcript |

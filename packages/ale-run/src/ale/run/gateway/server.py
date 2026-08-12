@@ -38,6 +38,7 @@ from ale.run.gateway.session import (
     LimitReached,
     SessionRegistry,
 )
+from ale.run.subscription import SubscriptionCredential
 
 __all__ = ["Gateway"]
 
@@ -71,19 +72,25 @@ class Gateway:
     def __init__(
         self,
         *,
-        api_key: str,
+        api_key: str = "",
         upstream: str = UPSTREAM_DEFAULT,
         dialect: str = "anthropic",
         bearer_auth: bool = False,
+        subscription: SubscriptionCredential | None = None,
         host: str = "0.0.0.0",
         port: int = 0,
     ) -> None:
+        if subscription is not None:
+            upstream = subscription.upstream
+            dialect = subscription.dialect
         self.api_key = api_key
         self.upstream = upstream.rstrip("/")
         if dialect not in _DIALECTS:
             raise ConfigError(f"unsupported gateway dialect {dialect!r}")
         self.dialect = dialect
         self.bearer_auth = bearer_auth
+        self.subscription = subscription
+        self.upstream_path = subscription.upstream_path if subscription is not None else None
         self.host = host
         self.port = port
         self.sessions = SessionRegistry()
@@ -195,7 +202,6 @@ class Gateway:
         started: float,
     ) -> web.StreamResponse:
         assert self._client is not None
-        headers = self._upstream_headers(request)
         requested_output = self._requested_output(payload)
         try:
             reservation = await session.reserve()
@@ -224,9 +230,8 @@ class Gateway:
         streaming = bool(payload.get("stream"))
         committed = False
         try:
-            async with self._client.post(
-                f"{self.upstream}{self._request_path}", json=payload, headers=headers
-            ) as upstream:
+            upstream = await self._post(request, payload)
+            try:
                 if streaming:
                     response = await self._stream(
                         request,
@@ -271,6 +276,8 @@ class Gateway:
                     status=upstream.status,
                     content_type="application/json",
                 )
+            finally:
+                upstream.release()
         except BaseException:
             if not committed:
                 self._record(
@@ -425,11 +432,38 @@ class Gateway:
             cost_usd=cost,
         )
 
-    def _upstream_headers(self, request: web.Request) -> dict[str, str]:
+    async def _post(self, request: web.Request, payload: dict[str, Any]):  # type: ignore[no-untyped-def]
+        assert self._client is not None
+        for attempt in range(2):
+            upstream = await self._client.post(
+                f"{self.upstream}{self.upstream_path or self._request_path}",
+                json=payload,
+                headers=await self._upstream_headers(request),
+            )
+            if attempt or self.subscription is None:
+                return upstream
+            delay = 0.0
+            retry = upstream.status == 401 and await self.subscription.refresh()
+            if upstream.status == 429:
+                try:
+                    delay = max(0.0, min(float(upstream.headers.get("retry-after", "1")), 5.0))
+                except ValueError:
+                    delay = 1.0
+                retry = True
+            if not retry:
+                return upstream
+            upstream.release()
+            if delay:
+                await asyncio.sleep(delay)
+        raise AssertionError("subscription retry loop did not return")
+
+    async def _upstream_headers(self, request: web.Request) -> dict[str, str]:
         headers = {
             name: value for name, value in request.headers.items() if name.lower() not in _STRIP
         }
-        if self.dialect == "anthropic" and not self.bearer_auth:
+        if self.subscription is not None:
+            headers.update(await self.subscription.headers())
+        elif self.dialect == "anthropic" and not self.bearer_auth:
             headers["x-api-key"] = self.api_key
             headers.setdefault("anthropic-version", "2023-06-01")
         else:
@@ -460,6 +494,10 @@ class Gateway:
         output_tokens: int,
     ) -> dict[str, Any]:
         limited = dict(payload)
+        if self.subscription is not None and not self.subscription.supports_output_limit:
+            # The ChatGPT Codex backend rejects the public Responses API field.
+            limited.pop("max_output_tokens", None)
+            return limited
         if self.dialect == "openai-chat-completions":
             limited.pop("max_tokens", None)
         limited[self._max_output_field] = output_tokens

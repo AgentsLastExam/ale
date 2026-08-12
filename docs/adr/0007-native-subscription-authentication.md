@@ -1,6 +1,6 @@
 # 0007 - Native subscriptions use isolated ALE profiles inside the Sandbox
 
-**Status:** Accepted
+**Status:** Superseded by ADR 0008
 
 ## Context
 

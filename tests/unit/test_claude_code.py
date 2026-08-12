@@ -139,37 +139,9 @@ def native_session(**updates: object) -> HarnessSession:
 
 
 @pytest.mark.asyncio
-async def test_subscription_launch_uses_oauth_and_drops_api_credentials() -> None:
-    harness = ClaudeCodeHarness()
-    sandbox = FakeSandbox()
-    current = native_session(
-        authentication="subscription",
-        subscription_credential=b"oauth-token",
-        gateway_url="",
-    )
-
-    await harness.launch("test", sandbox, current, timeout_sec=10)  # type: ignore[arg-type]
-
-    launch_env = sandbox.environments[-1]
-    assert launch_env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token"
-    assert launch_env["CLAUDE_CODE_PROXY_RESOLVES_HOSTS"] == "1"
-    assert launch_env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
-    assert launch_env["NODE_USE_ENV_PROXY"] == "1"
-    assert "ANTHROPIC_BASE_URL" not in launch_env
-    assert "ANTHROPIC_API_KEY" not in launch_env
-    assert "ANTHROPIC_AUTH_TOKEN" not in launch_env
-    for name in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
-        assert name in sandbox.commands[-1]
-    assert "--bare" not in sandbox.commands[-1]
-
-
-@pytest.mark.asyncio
 async def test_subscription_relay_uses_episode_token() -> None:
     sandbox = FakeSandbox()
-    current = native_session(
-        authentication="subscription",
-        subscription_credential=b"oauth-token",
-    )
+    current = native_session(authentication="subscription")
 
     await ClaudeCodeHarness().launch(  # type: ignore[arg-type]
         "test", sandbox, current, timeout_sec=10

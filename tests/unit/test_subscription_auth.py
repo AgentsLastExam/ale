@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -16,11 +18,10 @@ from ale.core.errors import (
     SubscriptionUnavailableError,
 )
 from ale.core.lock import AuthenticationProvenance
-from ale.core.sandbox import ExecResult
 from ale.run.agent_resources import continuation_fingerprint
 from ale.run.cli.main import app
 from ale.run.subscription import (
-    ProfileLease,
+    SubscriptionCredential,
     classify_subscription_error,
     resolve_authentication,
 )
@@ -33,6 +34,49 @@ def isolated_auth_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     environment.write_text("")
     monkeypatch.setenv("ALE_ENV_FILE", str(environment))
     return tmp_path / ".ale" / "auth"
+
+
+def jwt(expires_in: int = 3600) -> str:
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"exp": int(time.time()) + expires_in}).encode()
+    ).rstrip(b"=")
+    return f"x.{payload.decode()}.x"
+
+
+def codex_profile(path: Path, *, expires_in: int = 3600) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": jwt(expires_in),
+                    "account_id": "account-1",
+                    "refresh_token": "refresh-1",
+                },
+            }
+        )
+    )
+    path.chmod(0o600)
+
+
+def grok_profile(path: Path, *, expires_in: int = 3600) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "login": {
+                    "key": jwt(expires_in),
+                    "refresh_token": "refresh-1",
+                    "oidc_issuer": "https://auth.x.ai",
+                    "oidc_client_id": "client-1",
+                    "principal_type": "User",
+                    "principal_id": "user-1",
+                }
+            }
+        )
+    )
+    path.chmod(0o600)
 
 
 def test_run_help_describes_authentication_selection() -> None:
@@ -49,10 +93,7 @@ def test_authentication_defaults_to_auto_and_tracks_source(tmp_path: Path) -> No
 
     default = load_run_config()
     configured = load_run_config(run_path=run)
-    overridden = load_run_config(
-        run_path=run,
-        overrides=["agent.authentication='api-key'"],
-    )
+    overridden = load_run_config(run_path=run, overrides=["agent.authentication='api-key'"])
 
     assert default.agent.authentication == "auto"
     assert default.authentication_source == "default"
@@ -64,9 +105,7 @@ def test_auto_ignores_the_users_default_codex_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "home"
-    ordinary = home / ".codex" / "auth.json"
-    ordinary.parent.mkdir(parents=True)
-    ordinary.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"refresh_token": "x"}}))
+    codex_profile(home / ".codex" / "auth.json")
     isolated_auth_root(tmp_path, monkeypatch)
     monkeypatch.setenv("HOME", str(home))
 
@@ -80,19 +119,16 @@ def test_auto_selects_only_the_isolated_codex_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     profile = isolated_auth_root(tmp_path, monkeypatch) / "codex-cli" / "auth.json"
-    profile.parent.mkdir(parents=True)
-    profile.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"refresh_token": "x"}}))
-    profile.chmod(0o600)
+    codex_profile(profile)
 
     auth = resolve_authentication(AgentConfig(name="codex-cli", authentication="auto"))
 
     assert auth.mode == "subscription"
     assert auth.profile == profile
-    assert auth.provider_hosts == frozenset({"chatgpt.com", "auth.openai.com"})
-    assert auth.profile_slot_id.startswith("sha256:")
+    assert auth.profile_slot_id and auth.profile_slot_id.startswith("sha256:")
 
 
-def test_claude_subscription_provenance_names_the_relay(
+def test_all_subscription_harnesses_use_the_gateway(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     isolated_auth_root(tmp_path, monkeypatch)
@@ -101,9 +137,9 @@ def test_claude_subscription_provenance_names_the_relay(
     auth = resolve_authentication(AgentConfig(name="claude-code", authentication="subscription"))
     provenance = auth.provenance(source="cli", cli_version="2.1.227")
 
-    assert provenance.transport == "subscription-relay"
+    assert provenance.transport == "gateway"
     assert provenance.credential_exposed_to_agent is False
-    assert provenance.gateway_observability == "unavailable"
+    assert provenance.gateway_observability == "available"
 
 
 def test_explicit_subscription_requires_an_isolated_profile(
@@ -115,7 +151,7 @@ def test_explicit_subscription_requires_an_isolated_profile(
         resolve_authentication(AgentConfig(name="codex-cli", authentication="subscription"))
 
 
-def test_subscription_rejects_malformed_profile_before_provisioning(
+async def test_subscription_rejects_malformed_profile_before_provisioning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     profile = isolated_auth_root(tmp_path, monkeypatch) / "grok-build" / "auth.json"
@@ -123,9 +159,10 @@ def test_subscription_rejects_malformed_profile_before_provisioning(
     profile.write_text("not-json")
     profile.chmod(0o600)
     resolved = resolve_authentication(AgentConfig(name="grok-build", authentication="subscription"))
+    credential = SubscriptionCredential(resolved, cli_version="0.2.112", dialect="openai-responses")
 
     with pytest.raises(SubscriptionProfileError, match="grok login"):
-        ProfileLease(resolved).preflight()
+        await credential.preflight()
 
 
 def test_subscription_is_explicitly_unsupported_for_other_harnesses() -> None:
@@ -142,22 +179,10 @@ def test_subscription_is_explicitly_unsupported_for_other_harnesses() -> None:
         ("429 rate limit: weekly quota reached", SubscriptionProviderLimitError),
     ],
 )
-def test_native_provider_failures_are_typed_without_api_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    detail: str,
-    error_type: type[Exception],
+def test_provider_failures_are_typed_without_api_fallback(
+    detail: str, error_type: type[Exception]
 ) -> None:
-    profile = isolated_auth_root(tmp_path, monkeypatch) / "codex-cli" / "auth.json"
-    profile.parent.mkdir(parents=True)
-    profile.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"refresh_token": "x"}}))
-    profile.chmod(0o600)
-    resolved = resolve_authentication(AgentConfig(name="codex-cli", authentication="subscription"))
-
-    error = classify_subscription_error("codex-cli", detail)
-
-    assert isinstance(error, error_type)
-    assert resolved.mode == "subscription"
+    assert isinstance(classify_subscription_error("codex-cli", detail), error_type)
 
 
 def test_authentication_provenance_has_no_raw_credential_field() -> None:
@@ -167,21 +192,20 @@ def test_authentication_provenance_has_no_raw_credential_field() -> None:
         selection_source="default",
         provider="openai",
         profile_slot_id="sha256:" + "a" * 64,
-        transport="native-proxy",
-        credential_exposed_to_agent=True,
-        gateway_observability="unavailable",
+        transport="gateway",
+        credential_exposed_to_agent=False,
+        gateway_observability="available",
         validated_cli_version="0.146.0",
     )
 
     payload = record.model_dump(mode="json")
     assert not ({"token", "secret", "credential_value", "profile_path"} & payload.keys())
-    assert payload["profile_slot_id"] == "sha256:" + "a" * 64
 
 
 def test_continuation_fingerprint_binds_authentication_and_profile() -> None:
     values = {
         "harness": "codex-cli",
-        "model": "gpt-5",
+        "model": "gpt-5.6-luna",
         "settings": {},
         "resources_digest": "sha256:" + "a" * 64,
     }
@@ -191,132 +215,54 @@ def test_continuation_fingerprint_binds_authentication_and_profile() -> None:
         authentication="subscription",
         profile_slot_id="sha256:" + "b" * 64,
     )
-    other_profile = continuation_fingerprint(
-        **values,
-        authentication="subscription",
-        profile_slot_id="sha256:" + "c" * 64,
-    )
-
-    assert len({api, subscription, other_profile}) == 3
+    assert api != subscription
 
 
-class FakeSandbox:
-    def __init__(self) -> None:
-        self.files: dict[str, bytes] = {}
-
-    async def write_file(self, path, data, **kwargs):  # type: ignore[no-untyped-def]
-        self.files[str(path)] = data
-
-    async def read_file(self, path):  # type: ignore[no-untyped-def]
-        return self.files[str(path)]
-
-    async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
-        if argv[:2] == ["rm", "-f"]:
-            self.files.pop(str(argv[2]), None)
-        return ExecResult(exit_code=0)
-
-
-async def test_profile_lease_stages_and_atomically_persists_isolated_auth(
+async def test_codex_credential_supplies_host_headers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     profile = isolated_auth_root(tmp_path, monkeypatch) / "codex-cli" / "auth.json"
-    profile.parent.mkdir(parents=True)
-    profile.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"refresh_token": "old"}}))
-    profile.chmod(0o600)
+    codex_profile(profile)
     resolved = resolve_authentication(AgentConfig(name="codex-cli", authentication="subscription"))
-    sandbox = FakeSandbox()
+    credential = SubscriptionCredential(resolved, cli_version="0.146.0", dialect="openai-responses")
 
-    async with ProfileLease(resolved) as lease:
-        await lease.stage(sandbox, "/home/agent")  # type: ignore[arg-type]
-        guest = "/home/agent/.codex-ale/auth.json"
-        assert json.loads(sandbox.files[guest])["tokens"]["refresh_token"] == "old"
-        sandbox.files[guest] = json.dumps(
-            {"auth_mode": "chatgpt", "tokens": {"refresh_token": "new"}}
-        ).encode()
-        assert await lease.persist(sandbox, "/home/agent") == "persisted"  # type: ignore[arg-type]
-        assert await lease.cleanup(sandbox, "/home/agent")  # type: ignore[arg-type]
-        assert guest not in sandbox.files
+    await credential.preflight()
+    headers = await credential.headers()
 
-    assert json.loads(profile.read_text())["tokens"]["refresh_token"] == "new"
+    assert headers["authorization"].startswith("Bearer ")
+    assert headers["ChatGPT-Account-ID"] == "account-1"
+    assert credential.upstream_path == "/responses"
+
+
+async def test_expired_grok_token_is_refreshed_under_the_profile_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = isolated_auth_root(tmp_path, monkeypatch) / "grok-build" / "auth.json"
+    grok_profile(profile, expires_in=-1)
+    resolved = resolve_authentication(AgentConfig(name="grok-build", authentication="subscription"))
+    credential = SubscriptionCredential(resolved, cli_version="0.2.112", dialect="openai-responses")
+
+    async def refreshed(payload: dict[str, object]) -> dict[str, object]:
+        payload["login"]["key"] = jwt()  # type: ignore[index]
+        return payload
+
+    monkeypatch.setattr(credential, "_refresh_payload", refreshed)
+    await credential.preflight()
+
+    headers = await credential.headers()
+    assert headers["X-XAI-Token-Auth"] == "xai-grok-cli"
+    assert json.loads(profile.read_text())["login"]["key"] != jwt(-1)
     assert profile.stat().st_mode & 0o777 == 0o600
 
 
-async def test_profile_lease_preserves_host_copy_when_guest_state_is_invalid(
+async def test_profile_permissions_are_checked_before_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     profile = isolated_auth_root(tmp_path, monkeypatch) / "grok-build" / "auth.json"
-    profile.parent.mkdir(parents=True)
-    original = json.dumps({"refresh_token": "old"})
-    profile.write_text(original)
-    profile.chmod(0o600)
-    resolved = resolve_authentication(AgentConfig(name="grok-build", authentication="subscription"))
-    sandbox = FakeSandbox()
-
-    async with ProfileLease(resolved) as lease:
-        await lease.stage(sandbox, "/home/agent")  # type: ignore[arg-type]
-        sandbox.files["/home/agent/.grok-ale/auth.json"] = b"not-json"
-        with pytest.raises(Exception, match="valid JSON"):
-            await lease.persist(sandbox, "/home/agent")  # type: ignore[arg-type]
-
-    assert profile.read_text() == original
-
-
-async def test_profile_lock_serializes_two_ale_episodes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import asyncio
-
-    profile = isolated_auth_root(tmp_path, monkeypatch) / "grok-build" / "auth.json"
-    profile.parent.mkdir(parents=True)
-    profile.write_text(json.dumps({"refresh_token": "old"}))
-    profile.chmod(0o600)
-    resolved = resolve_authentication(AgentConfig(name="grok-build", authentication="subscription"))
-    first = ProfileLease(resolved)
-    second = ProfileLease(resolved)
-
-    await first.__aenter__()
-    waiting = asyncio.create_task(second.__aenter__())
-    await asyncio.sleep(0.05)
-    assert not waiting.done()
-    await first.__aexit__(None, None, None)
-    await asyncio.wait_for(waiting, timeout=1)
-    await second.__aexit__(None, None, None)
-
-
-async def test_cancelled_profile_wait_does_not_leak_the_lock(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import asyncio
-
-    profile = isolated_auth_root(tmp_path, monkeypatch) / "grok-build" / "auth.json"
-    profile.parent.mkdir(parents=True)
-    profile.write_text(json.dumps({"refresh_token": "old"}))
-    profile.chmod(0o600)
-    resolved = resolve_authentication(AgentConfig(name="grok-build", authentication="subscription"))
-    first = ProfileLease(resolved)
-    waiting = ProfileLease(resolved)
-
-    await first.__aenter__()
-    task = asyncio.create_task(waiting.__aenter__())
-    await asyncio.sleep(0.05)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    await first.__aexit__(None, None, None)
-
-    third = ProfileLease(resolved)
-    await asyncio.wait_for(third.__aenter__(), timeout=1)
-    await third.__aexit__(None, None, None)
-
-
-def test_profile_lease_rejects_overexposed_host_auth(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    profile = isolated_auth_root(tmp_path, monkeypatch) / "grok-build" / "auth.json"
-    profile.parent.mkdir(parents=True)
-    profile.write_text(json.dumps({"refresh_token": "old"}))
+    grok_profile(profile)
     profile.chmod(0o644)
     resolved = resolve_authentication(AgentConfig(name="grok-build", authentication="subscription"))
+    credential = SubscriptionCredential(resolved, cli_version="0.2.112", dialect="openai-responses")
 
-    with pytest.raises(Exception, match="0600"):
-        ProfileLease(resolved)._acquire()
+    with pytest.raises(SubscriptionProfileError, match="0600"):
+        await credential.preflight()

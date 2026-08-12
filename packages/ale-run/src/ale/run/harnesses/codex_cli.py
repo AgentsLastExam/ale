@@ -114,34 +114,26 @@ class CodexCliHarness(AutonomousHarness):
                     identity=Identity.AGENT,
                 )
 
-        lines = [f"model = {json.dumps(session.model)}"]
-        if session.authentication == "subscription":
-            lines.extend(
-                [
-                    'forced_login_method = "chatgpt"',
-                    'cli_auth_credentials_store = "file"',
-                    "check_for_update_on_startup = false",
-                ]
-            )
-        else:
-            lines.insert(0, 'model_provider = "ale"')
-        lines.extend(['approval_policy = "never"', 'sandbox_mode = "danger-full-access"'])
+        lines = [
+            'model_provider = "ale"',
+            f"model = {json.dumps(session.model)}",
+            "check_for_update_on_startup = false",
+            'approval_policy = "never"',
+            'sandbox_mode = "danger-full-access"',
+        ]
         if self.settings.reasoning_effort != "default":
             lines.append(f"model_reasoning_effort = {json.dumps(self.settings.reasoning_effort)}")
-        if session.authentication == "subscription":
-            lines.append("")
-        else:
-            lines.extend(
-                [
-                    "",
-                    "[model_providers.ale]",
-                    'name = "ALE Gateway"',
-                    f"base_url = {json.dumps(session.gateway_url + '/v1')}",
-                    'env_key = "ALE_GATEWAY_TOKEN"',
-                    'wire_api = "responses"',
-                    "",
-                ]
-            )
+        lines.extend(
+            [
+                "",
+                "[model_providers.ale]",
+                'name = "ALE Gateway"',
+                f"base_url = {json.dumps(session.gateway_url + '/v1')}",
+                'env_key = "ALE_GATEWAY_TOKEN"',
+                'wire_api = "responses"',
+                "",
+            ]
+        )
         for resolved in resources.mcp_servers:
             server = resolved.server
             if resolved.name == CUA_DESKTOP_NAME:
@@ -245,14 +237,9 @@ class CodexCliHarness(AutonomousHarness):
             argv.extend(["resume", native_session_id])
         argv.append("-")
         redirect = ">>" if native_session_id is not None else ">"
-        clear_api_auth = ""
-        if session.authentication == "subscription":
-            clear_api_auth = (
-                "unset OPENAI_API_KEY OPENAI_BASE_URL CODEX_ACCESS_TOKEN ALE_GATEWAY_TOKEN; "
-            )
         command = (
             f'prompt="${{{prompt_var}}}"; unset {prompt_var}; '
-            f"{clear_api_auth}"
+            "unset OPENAI_API_KEY OPENAI_BASE_URL CODEX_ACCESS_TOKEN; "
             f'printf "%s" "$prompt" | {" ".join(shlex.quote(part) for part in argv)} '
             f"{redirect} {shlex.quote(str(home / TRANSCRIPT_NAME))} "
             f"2>> {shlex.quote(str(home / STDERR_NAME))}"
@@ -261,10 +248,9 @@ class CodexCliHarness(AutonomousHarness):
             **npm_env(session.home),
             "CODEX_HOME": str(home / ".codex-ale"),
             "NO_COLOR": "1",
+            "ALE_GATEWAY_TOKEN": session.token,
             prompt_var: instruction,
         }
-        if session.authentication == "api-key":
-            env["ALE_GATEWAY_TOKEN"] = session.token
         result = await sandbox.exec(
             ["bash", "-lc", command],
             cwd=session.home,

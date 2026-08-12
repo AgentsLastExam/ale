@@ -174,25 +174,22 @@ class GrokBuildHarness(AutonomousHarness):
                     identity=Identity.AGENT,
                 )
 
-        lines = []
-        if session.authentication == "api-key":
-            lines.extend(
-                [
-                    "[models]",
-                    'default = "ale"',
-                    "",
-                    '[model."ale"]',
-                    f"model = {_toml(session.model)}",
-                    f"base_url = {_toml(session.gateway_url + '/v1')}",
-                    'name = "ALE Gateway"',
-                    'env_key = "ALE_GATEWAY_TOKEN"',
-                    f"api_backend = {_toml(_API_BACKENDS[self.gateway_dialect])}",
-                    "supports_reasoning_effort = true",
-                    "",
-                ]
-            )
-        else:
-            lines.extend(["[harness]", "disable_codebase_upload = true", ""])
+        lines = [
+            "[models]",
+            f"default = {_toml(session.model)}",
+            "",
+            f"[model.{_toml(session.model)}]",
+            f"model = {_toml(session.model)}",
+            f"base_url = {_toml(session.gateway_url + '/v1')}",
+            'name = "ALE Gateway"',
+            'env_key = "ALE_GATEWAY_TOKEN"',
+            f"api_backend = {_toml(_API_BACKENDS[self.gateway_dialect])}",
+            "supports_reasoning_effort = true",
+            "",
+            "[harness]",
+            "disable_codebase_upload = true",
+            "",
+        ]
         lines.extend(
             [
                 "[features]",
@@ -321,7 +318,7 @@ class GrokBuildHarness(AutonomousHarness):
             "--cwd",
             session.home,
             "--model",
-            session.model if session.authentication == "subscription" else "ale",
+            session.model,
             "--output-format",
             "streaming-json",
             "--sandbox",
@@ -339,11 +336,8 @@ class GrokBuildHarness(AutonomousHarness):
         binary = home / ".grok-build-install" / "bin" / "grok"
         segment = grok_home / "segment.jsonl"
         transcript = home / TRANSCRIPT_NAME
-        clear_api_auth = ""
-        if session.authentication == "subscription":
-            clear_api_auth = "unset XAI_API_KEY GROK_CLI_CHAT_PROXY_BASE_URL ALE_GATEWAY_TOKEN; "
         command = (
-            f"{clear_api_auth}"
+            "unset XAI_API_KEY GROK_CLI_CHAT_PROXY_BASE_URL; "
             f"{shlex.quote(str(binary))} {' '.join(shlex.quote(part) for part in flags)} "
             f"{selector} > {shlex.quote(str(segment))} "
             f"2>> {shlex.quote(str(home / STDERR_NAME))}; "
@@ -367,11 +361,9 @@ class GrokBuildHarness(AutonomousHarness):
             "GROK_CLAUDE_AGENTS_ENABLED": "0",
             "GROK_CLAUDE_MCPS_ENABLED": "0",
             "GROK_CLAUDE_HOOKS_ENABLED": "0",
+            "GROK_WORKSPACE_DATA_COLLECTION_DISABLED": "1",
+            "ALE_GATEWAY_TOKEN": session.token,
         }
-        if session.authentication == "subscription":
-            env["GROK_WORKSPACE_DATA_COLLECTION_DISABLED"] = "1"
-        else:
-            env["ALE_GATEWAY_TOKEN"] = session.token
         result = await sandbox.exec(
             ["bash", "-lc", command],
             cwd=session.home,
