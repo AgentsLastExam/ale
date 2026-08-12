@@ -1,6 +1,8 @@
 # Working rules for coding agents
 
-Read this before touching the repository. It is short on purpose.
+Read this before touching the repository. Then read the nearest nested `AGENTS.md` for
+the area being changed; nested rules add local ownership and checks without repeating
+this file. `AGENTS.md` is a symlink to this file so every coding agent sees one source.
 
 ## Environment
 
@@ -9,55 +11,61 @@ Read this before touching the repository. It is short on purpose.
 - **Never** share a `.venv` between worktrees or symlink one into place. Each tree owns
   its own; it is created by `just bootstrap` in seconds from the shared uv cache.
 - Worktrees belong in `../ale-worktrees/<name>` and are created with `just wt <name>`.
-- If anything about the environment looks wrong, run `just doctor` **before**
-  investigating by hand. It prints the fix for every failure.
+- If anything about the environment looks wrong, run `just doctor` before investigating.
 - Keep `uv.lock` committed and in sync (`uv lock --check`).
 
 ## Code
 
-- Everything in this repository is standard English: code, comments, docstrings, docs,
-  commit messages.
-- Use the names in `docs/specs/lexicon.md`. Each term has exactly one meaning; a
-  sandbox is never called an "environment", and `Environment` only ever means the
-  administration layer that turns one task into one episode.
-- Lay a model class out in this order: **fields → properties and methods → validators**,
-  with the validators last under a `# --- validation ---` marker. Pydantic does not care
-  about order, so this is free readability: the top of a class says what the thing *is*,
-  and correctness checks stay in the model without interrupting that.
-- Respect the import boundaries in `.importlinter` — they are the mechanical form of
-  the architecture:
-  - `ale.core` never imports `ale.run`
-  - the gateway never imports a provider (its only interface is a URL plus a token)
-  - `ale.run.guestd` imports the standard library only
-  - harnesses reach sandboxes through the contract, not through a provider
-- Before implementing a component, start at `docs/README.md` and read its owning living
-  specification. Top-level feature specs are temporary plans, not the lasting contract.
-  Borrow what is proven; say in the commit message what you deliberately changed.
-- Commit straight to `main`; no pull request ceremony is required here. Run
-  `just lint && just test` first — that is the whole checklist.
+- Everything in this repository is standard English: code, comments, docstrings, docs
+  and commit messages.
+- Use the names in `docs/specs/lexicon.md`. A Sandbox is never an Environment.
+- Lay a model class out as fields, properties/methods, then validators under a
+  `# --- validation ---` marker.
+- Respect `.importlinter`: `ale.core` and `ale_verify` are independent; the Gateway never
+  imports a Provider; `guestd` is standard-library only; Harnesses use the Sandbox
+  contract instead of concrete Providers.
+- Put a responsibility in the narrowest existing owner. Do not add a package, registry,
+  interface, flag or compatibility layer until more than one concrete use needs it.
+- Keep CLI modules as composition, `ale.core` as contracts, and Provider/Harness code as
+  edge adapters. Cross boundaries through public types, not `Any`, ambient state or
+  private imports.
+- Start at `docs/README.md` and read the owning living specification before changing a
+  contract. Top-level feature specs are temporary plans, not lasting documentation.
+- Use a dedicated worktree for non-trivial changes. Review and run the checks below
+  before merging the tested branch into `main`.
 
 ## Contracts and decisions
 
 - Normative specifications live in `docs/specs/`; current architectural rationale lives
   in `docs/adr/`. Guides do not override either.
-- Changing a contract means updating its spec in the same change, and adding an ADR if
-  the decision is new.
-- Every result must carry a complete `RunLock`. Never report a run whose provenance is
-  incomplete.
-- During the evaluated solver phase, network and credential access follow the selected
-  Harness authentication contract. API-key mode keeps provider credentials on the Host;
-  a declared subscription mode may stage native provider credentials into the solver
-  Sandbox and grant only the provider endpoints it needs. Trusted verification may
-  receive only its run-configured Judge credential for the verifier process lifetime.
-  `verify/` and `oracle/` never appear during the evaluated agent phase.
+- Changing a contract updates its spec in the same change and adds an ADR only for a new
+  cross-module decision.
+- Every reportable result carries a complete `RunLock`.
+- During the evaluated solver phase, API-key and shipped subscription credentials remain
+  on the Host Gateway. Trusted verification may receive only its configured Judge
+  credential for that verifier process. `verify/` and `oracle/` never appear during the
+  evaluated agent phase.
 
-## Tests
+## Local guides
+
+- `packages/ale-core/AGENTS.md` — public contracts and persisted schemas
+- `packages/ale-run/AGENTS.md` — runtime ownership and the episode path
+- `packages/ale-run/src/ale/run/harnesses/AGENTS.md` — native agent adapters
+- `packages/ale-run/src/ale/run/gateway/AGENTS.md` — model transport and credentials
+- `packages/ale-run/src/ale/run/providers/AGENTS.md` — Docker and QEMU backends
+- `packages/ale-verify/AGENTS.md` — sandbox-local public verification API
+- `tests/AGENTS.md` — test taxonomy and infrastructure markers
+- `docs/AGENTS.md` — specifications, ADRs and guides
+- `images/base/AGENTS.md` — foundational image contract
+
+## Checks
 
 ```bash
-just test        # unit
-just test-int    # conformance + integration (needs a container runtime)
-just lint        # ruff + import boundaries
+just test
+uv run pytest packages/ale-verify/tests
+just test-int
+just lint
 ```
 
-Mark tests that need infrastructure with `needs_docker`, `needs_kvm` or
-`needs_hf_gated` so they can be selected and skipped deliberately.
+Mark infrastructure tests with `needs_docker`, `needs_kvm`, `needs_gui`, `needs_llm` or
+the appropriate Hugging Face marker so they can be selected deliberately.

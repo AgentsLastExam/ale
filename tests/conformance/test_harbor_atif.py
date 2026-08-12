@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.support import sibling_checkout
 
 from ale.core.trajectory import (
     AtifAgent,
@@ -22,7 +23,7 @@ from ale.core.trajectory import (
 
 pytestmark = pytest.mark.integration
 
-HARBOR = Path(__file__).resolve().parents[3] / "harbor"
+HARBOR = sibling_checkout("harbor")
 SCHEMA_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/atif-v1.7.schema.json"
 
 

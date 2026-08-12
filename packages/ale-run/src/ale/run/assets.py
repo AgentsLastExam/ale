@@ -15,7 +15,8 @@ from typing import Literal
 
 from ale.core.config import resolve_asset_collection
 from ale.core.errors import AssetError
-from ale.run.tasksets.manifest import load_tasks
+from ale.core.task import Task, TaskAssetObservation
+from ale.run.tasksets.manifest import ManifestTask, load_tasks
 
 Stage = Literal["image", "setup", "verify", "oracle"]
 STAGES: tuple[Stage, ...] = ("image", "setup", "verify", "oracle")
@@ -32,19 +33,14 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True)
-class AssetObservation:
-    repository: str
-    task_path: str
-    commit: str | None
-    dirty: bool
+AssetObservation = TaskAssetObservation
 
 
 @dataclass(frozen=True)
 class AssetRepositorySelection:
     repository_name: str
     repository_root: Path
-    tasks: tuple[object, ...]
+    tasks: tuple[ManifestTask, ...]
 
 
 @dataclass(frozen=True)
@@ -56,23 +52,25 @@ class AssetSyncResult:
     tasks: tuple[AssetObservation, ...]
 
 
-def _asset_roots(task: object) -> tuple[Path, ...]:
-    folder = getattr(task, "folder", None)
-    root = getattr(folder, "root", None)
-    if not isinstance(root, Path):
+def _asset_roots(task: Task) -> tuple[Path, ...]:
+    if task.folder is None:
         return ()
-    return tuple(path for stage in STAGES if (path := root / stage / "assets").is_dir())
+    return tuple(path for stage in STAGES if (path := task.folder.root / stage / "assets").is_dir())
 
 
-def observe_task_assets(task: object) -> AssetObservation | None:
+def _task_path(task: ManifestTask) -> str:
+    if task.source.task_relative_path is None:
+        raise AssetError("asset commands require Tasks inside a Git repository")
+    return task.source.task_relative_path
+
+
+def observe_task_assets(task: Task) -> AssetObservation | None:
+    if task.folder is None:
+        return None
     roots = _asset_roots(task)
-    source = task.source  # type: ignore[attr-defined]
+    source = task.source
     if not source.repository_root or not source.repository_name or not source.task_relative_path:
-        return (
-            AssetObservation("", str(task.folder.root), None, True)  # type: ignore[attr-defined]
-            if roots
-            else None
-        )
+        return AssetObservation("", str(task.folder.root), None, True) if roots else None
     with _repository_lock(source.repository_root, exclusive=True):
         state = _read_state(source.repository_root, source.repository_name)
         markers = state["tasks"]
@@ -105,16 +103,16 @@ def asset_status(paths: Sequence[Path]) -> tuple[AssetObservation, ...]:
 
 
 def select_asset_repositories(paths: Sequence[Path]) -> tuple[AssetRepositorySelection, ...]:
-    tasks_by_root: dict[Path, object] = {}
+    tasks_by_root: dict[Path, ManifestTask] = {}
     for path in paths:
         for task in load_tasks(path.expanduser().resolve()):
-            if task.spec.variant == "base":  # type: ignore[attr-defined]
-                tasks_by_root[task.folder.root] = task  # type: ignore[attr-defined]
+            if task.spec.variant == "base":
+                tasks_by_root[task.folder.root] = task
 
-    repositories: dict[Path, list[object]] = {}
+    repositories: dict[Path, list[ManifestTask]] = {}
     names: dict[str, Path] = {}
     for task in tasks_by_root.values():
-        source = task.source  # type: ignore[attr-defined]
+        source = task.source
         if not source.repository_root or not source.repository_name:
             raise AssetError("asset commands require Tasks inside a Git repository")
         previous = names.get(source.repository_name)
@@ -126,7 +124,7 @@ def select_asset_repositories(paths: Sequence[Path]) -> tuple[AssetRepositorySel
         AssetRepositorySelection(
             root.name,
             root,
-            tuple(sorted(items, key=lambda task: task.source.task_relative_path)),  # type: ignore[attr-defined]
+            tuple(sorted(items, key=_task_path)),
         )
         for root, items in sorted(repositories.items(), key=lambda item: str(item[0]))
     )
@@ -150,7 +148,7 @@ def pull_assets(
             item
             for item in asset_status([task.folder.root for task in selection.tasks])
             if item.dirty
-        ]  # type: ignore[attr-defined]
+        ]
         if dirty and not force:
             names = ", ".join(item.task_path for item in dirty)
             raise AssetError(f"local assets are dirty for {names}; pass --force to replace them")
@@ -162,10 +160,7 @@ def pull_assets(
                     repo_id=remote_repo_id,
                     repo_type="dataset",
                     revision=commit,
-                    allow_patterns=[
-                        f"{task.source.task_relative_path}/*/assets/**"  # type: ignore[attr-defined]
-                        for task in selection.tasks
-                    ],
+                    allow_patterns=[f"{_task_path(task)}/*/assets/**" for task in selection.tasks],
                     local_dir=downloaded,
                 )
                 with _repository_lock(selection.repository_root, exclusive=True):
@@ -217,17 +212,14 @@ def push_assets(
         api.add_collection_item(collection_slug, remote_repo_id, "dataset", exists_ok=True)
         parent = api.repo_info(remote_repo_id, repo_type="dataset").sha or None
         remote_files = set(api.list_repo_files(remote_repo_id, repo_type="dataset"))
-        operations: list[object] = []
-        selected_prefixes: list[str] = []
+        operations: list[CommitOperationAdd | CommitOperationDelete] = []
         for task in selection.tasks:
-            task_path = task.source.task_relative_path  # type: ignore[attr-defined]
-            assert task_path is not None
+            task_path = _task_path(task)
             prefixes = [f"{task_path}/{stage}/assets/" for stage in STAGES]
-            selected_prefixes.extend(prefixes)
             local_files: dict[str, Path] = {}
             for root in _asset_roots(task):
                 for file in _regular_files(root):
-                    remote = f"{task_path}/{file.relative_to(task.folder.root).as_posix()}"  # type: ignore[attr-defined]
+                    remote = f"{task_path}/{file.relative_to(task.folder.root).as_posix()}"
                     local_files[remote] = file
                     operations.append(CommitOperationAdd(path_in_repo=remote, path_or_fileobj=file))
             for remote in sorted(remote_files):
@@ -262,14 +254,13 @@ def push_assets(
     return tuple(results)
 
 
-def _replace_selected_assets(tasks: Sequence[object], downloaded: Path) -> None:
+def _replace_selected_assets(tasks: Sequence[ManifestTask], downloaded: Path) -> None:
     entries: list[tuple[Path, Path, Path]] = []
     for task in tasks:
-        task_path = task.source.task_relative_path  # type: ignore[attr-defined]
-        assert task_path is not None
+        task_path = _task_path(task)
         for stage in STAGES:
             source = downloaded / task_path / stage / "assets"
-            destination = task.folder.root / stage / "assets"  # type: ignore[attr-defined]
+            destination = task.folder.root / stage / "assets"
             backup = destination.with_name(f".{destination.name}.ale-backup")
             if source.is_dir():
                 list(_regular_files(source))
@@ -301,8 +292,7 @@ def _mark_clean(selection: AssetRepositorySelection, commit: str) -> tuple[Asset
     assert isinstance(markers, dict)
     observations: list[AssetObservation] = []
     for task in selection.tasks:
-        task_path = task.source.task_relative_path  # type: ignore[attr-defined]
-        assert task_path is not None
+        task_path = _task_path(task)
         if _asset_roots(task):
             markers[task_path] = {
                 "commit": commit,
@@ -318,8 +308,10 @@ def _mark_clean(selection: AssetRepositorySelection, commit: str) -> tuple[Asset
     return tuple(observations)
 
 
-def _asset_inventory(task: object) -> list[dict[str, int | str]]:
-    task_root = task.folder.root  # type: ignore[attr-defined]
+def _asset_inventory(task: Task) -> list[dict[str, int | str]]:
+    if task.folder is None:
+        return []
+    task_root = task.folder.root
     inventory: list[dict[str, int | str]] = []
     for root in _asset_roots(task):
         for path in (root, *sorted(root.rglob("*"))):

@@ -16,7 +16,7 @@ from ale.core.harness import (
 )
 from ale.core.sandbox import ExecResult
 from ale.core.taskspec import StdioMcpServer
-from ale.run.cli.main import PRESET_DIR, _harness
+from ale.run.cli.tasks import PRESET_DIR, _harness
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness, _supported_node

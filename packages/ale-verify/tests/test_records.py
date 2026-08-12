@@ -105,11 +105,7 @@ def test_record_rejects_collisions_unknown_judge_links_and_bad_terminal_state() 
 def test_serialized_shape_matches_published_schema_top_level() -> None:
     schema = json.loads(
         (
-            Path(__file__).resolve().parents[4]
-            / "specs"
-            / "004-sandbox-local-verification"
-            / "contracts"
-            / "verification-record.schema.json"
+            Path(__file__).resolve().parents[3] / "docs/specs/schemas/verification-record-v1.json"
         ).read_text()
     )
     assert set(VerificationRecord().to_dict()) == set(schema["required"])

@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      docs: ${{ steps.filter.outputs.docs }}
       images: ${{ steps.filter.outputs.images }}
     steps:
       - uses: actions/checkout@v4
@@ -31,16 +32,28 @@ jobs:
           filters: |
             code:
               - 'packages/**'
+              - 'scripts/**'
               - 'tests/**'
+              - '.github/workflows/**'
+              - 'Justfile'
               - 'pyproject.toml'
               - 'uv.lock'
               - '.importlinter'
+            docs:
+              - 'docs/**'
+              - 'images/**/AGENTS.md'
+              - 'images/**/README.md'
+              - 'README.md'
+              - 'CLAUDE.md'
+              - 'AGENTS.md'
+              - '.env.example'
             images:
               - 'images/**'
+              - '!images/**/*.md'
 
   lint:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +67,7 @@ jobs:
 
   unit:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,7 +79,7 @@ jobs:
 
   verification-package:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

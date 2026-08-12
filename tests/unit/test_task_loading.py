@@ -82,6 +82,14 @@ def test_missing_solver_dockerfile_and_ref_fails_loading(tmp_path: Path) -> None
         load_tasks(task)
 
 
+def test_unknown_environment_is_rejected_at_load_time(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    manifest = task / "task.yaml"
+    manifest.write_text(manifest.read_text() + "environment: custom/unknown\n")
+    with pytest.raises(TaskDefinitionError, match="environment"):
+        load_tasks(task)
+
+
 def test_separate_verifier_dockerfile_requires_explicit_image_kind(
     tmp_path: Path,
 ) -> None:

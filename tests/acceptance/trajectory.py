@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from ale.run.secrets import provider_credentials
+from tests.support import sibling_checkout
 
 LIVE = pytest.mark.skipif(
     os.environ.get("ALE_RUN_LIVE_ACCEPTANCE") != "1",
@@ -20,7 +21,7 @@ LIVE = pytest.mark.skipif(
 )
 MODEL = os.environ.get("ALE_LIVE_MODEL", "claude-sonnet-5")
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
-WORKSPACE_ROOT = ENGINE_ROOT.parent
+WORKSPACE_ROOT = sibling_checkout("ale-tasks-base").parent
 
 
 def task_path(variable: str, default: Path) -> Path:

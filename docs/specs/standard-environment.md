@@ -103,7 +103,8 @@ cleanup command, and any reason.
   fail validation rather than becoming scores.
 
 Validation tests Task feasibility and verifier behavior. It is separate from ordinary
-run admission and from endpoint availability checks.
+run admission and from endpoint availability checks. The persisted `validation.json`
+contract is [schema version 1](schemas/validation-observation-v1.json).
 
 ## Extension boundary
 

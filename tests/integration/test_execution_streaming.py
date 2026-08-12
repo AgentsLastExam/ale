@@ -62,7 +62,9 @@ def context(tmp_path: Path):
         home="/home/user",
         session=SimpleNamespace(token=""),
         spec=SimpleNamespace(params={}, network=NetworkPolicy()),
-        extras={"phase_timeout_sec": 1.0},
+        verification_command_env={},
+        verification_secrets=(),
+        phase_timeout_sec=1.0,
         phases=[],
     )
 

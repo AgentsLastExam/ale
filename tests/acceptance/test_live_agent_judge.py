@@ -18,11 +18,11 @@ from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_prove
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
 from ale_verify import _agents
-from tests.support import provider_registry
+from tests.support import provider_registry, sibling_checkout
 
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm]
 
-TASKS = Path(__file__).resolve().parents[3] / "ale-tasks-base"
+TASKS = sibling_checkout("ale-tasks-base")
 CASES = (
     (
         "codex-cli",

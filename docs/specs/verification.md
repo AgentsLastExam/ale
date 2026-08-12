@@ -5,6 +5,8 @@ sandbox. The independent `ale_verify` package supplies deterministic checks, dir
 and Agent Judges, aggregation, and an atomic record. There is no Domain Kit,
 Verification Service, Judge Gateway, or Host callback.
 
+The persisted record follows [JSON schema version 1](schemas/verification-record-v1.json).
+
 ## Task entry point
 
 The standard shape is:

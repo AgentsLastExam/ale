@@ -79,8 +79,7 @@ def test_observation_matches_checked_in_json_schema() -> None:
         ),
     )
     schema_path = (
-        Path(__file__).resolve().parents[3]
-        / "specs/006-self-contained-task-contract/contracts/validation-observation.schema.json"
+        Path(__file__).resolve().parents[2] / "docs/specs/schemas/validation-observation-v1.json"
     )
     schema = json.loads(schema_path.read_text())
     jsonschema.validate(observation.model_dump(mode="json"), schema)

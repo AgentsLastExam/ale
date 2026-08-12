@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from ale.core.config import RunConfig
-from ale.run.cli.main import _validate
+from ale.run.cli.tasks import _validate
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 

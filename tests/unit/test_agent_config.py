@@ -8,7 +8,7 @@ import pytest
 
 from ale.core.config import load_run_config, select_agent_name
 from ale.core.errors import ConfigError
-from ale.run.cli.main import PRESET_DIR, _config
+from ale.run.cli.tasks import PRESET_DIR, _config
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.provenance import agent_provenance
 

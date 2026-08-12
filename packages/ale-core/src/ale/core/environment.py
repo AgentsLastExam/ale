@@ -12,18 +12,19 @@ budgets are enforced) hold for every domain by construction rather than by revie
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel
 
 from ale.core.blob import BlobSink
-from ale.core.harness import EffectiveAgentResources, HarnessSession
-from ale.core.lock import LimitTermination, SandboxProvenance
-from ale.core.result import PhaseTiming, ResultRecord
+from ale.core.config import LoggingPolicy, VerificationConfig
+from ale.core.harness import AgentRun, EffectiveAgentResources, HarnessSession
+from ale.core.lock import AleVerifyProvenance, LimitTermination, SandboxProvenance
+from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
 from ale.core.sandbox import (
     PreparedTaskImage,
     ResolvedImage,
@@ -31,13 +32,10 @@ from ale.core.sandbox import (
     Sandbox,
     SandboxRequest,
 )
-from ale.core.task import TaskSourceContext
+from ale.core.task import Task, TaskSourceContext
 from ale.core.taskspec import TaskSpec
 from ale.core.trajectory import AtifTrajectory
-from ale.core.verdict import Verdict
-
-if TYPE_CHECKING:
-    from ale.core.task import Task
+from ale.core.verdict import Rewards, Verdict
 
 __all__ = [
     "ArtifactSink",
@@ -168,7 +166,6 @@ class EpisodeContext:
     answered, and the two could disagree. Everything the agent touches lives under here,
     so nothing has to be handed to it afterwards.
     """
-    """Framework scratch inside the sandbox, created before setup runs."""
 
     phases: list[PhaseTiming] = field(default_factory=list)
     """Filled in as each phase exits; copied into the terminal result."""
@@ -183,6 +180,7 @@ class EpisodeContext:
     elevate. Recorded rather than asserted, like the image digest beside it."""
 
     resolved_image: ResolvedImage | None = None
+    """Resolved when the Sandbox is provisioned; an image tag alone proves nothing."""
     resource_allocation: ResourceAllocation | None = None
 
     agent_version: str | None = None
@@ -193,11 +191,34 @@ class EpisodeContext:
     worth recording is the second. Read before the install it describes, this said
     "unknown" on every run.
     """
-    """Resolved when the sandbox is provisioned — the tag alone proves nothing."""
 
     seed: int = 0
-    extras: dict[str, object] = field(default_factory=dict)
+    verified_rewards: Rewards | None = None
+    """Raw rewards emitted by successful verification."""
+    metrics: dict[str, float] = field(default_factory=dict)
+    phase_callback: Callable[[Phase], None] | None = None
+    failure_phase: Phase | None = None
+    phase_timeout_sec: float | None = None
+
+    logging_policy: LoggingPolicy = field(default_factory=LoggingPolicy)
+    verification_config: VerificationConfig = field(default_factory=VerificationConfig)
+    verification_command_env: dict[str, str] = field(default_factory=dict)
+    verification_secrets: tuple[str, ...] = ()
+    verification_record: object | None = None
+    ale_verify_provenance: AleVerifyProvenance | None = None
+    verifier_resolved_image: ResolvedImage | None = None
+    verifier_resource_allocation: ResourceAllocation | None = None
+
+    agent_started: bool = False
+    agent_run: AgentRun | None = None
+    trajectory_written: bool = False
+    solver_evidence_captured: bool = False
+    harness_execution_counter: int = 0
+    sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
     limit_termination: LimitTermination | None = None
+
+    extras: dict[str, object] = field(default_factory=dict)
+    """State owned exclusively by a custom Environment implementation."""
 
 
 class Environment(ABC):

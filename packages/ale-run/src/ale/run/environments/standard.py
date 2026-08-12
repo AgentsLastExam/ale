@@ -128,7 +128,7 @@ class StandardEnvironment(Environment):
             try:
                 await self._capture_solver_evidence(ctx, sandbox)
             except BaseException:
-                ctx.extras["failure_phase"] = Phase.AGENT.value
+                ctx.failure_phase = Phase.AGENT
                 raise
 
             async def verify() -> dict[str, float]:
@@ -149,12 +149,8 @@ class StandardEnvironment(Environment):
             # Teardown runs on every path, including cancellation.
             await asyncio.shield(self._timed(ctx, Phase.TEARDOWN, self._teardown(ctx, sandbox)))
 
-        ctx.extras["rewards"] = rewards
-        metrics = ctx.extras.get("metrics")
-        return Verdict.completed(
-            await task.score(ctx),
-            metrics=metrics if isinstance(metrics, dict) else None,
-        )
+        ctx.verified_rewards = rewards
+        return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
 
     # --- phases ---
 
@@ -208,8 +204,8 @@ class StandardEnvironment(Environment):
             sudo=False,
         )
         sandbox = await ctx.sandboxes.acquire(request)
-        ctx.extras["verifier_resolved_image"] = sandbox.resolved_image
-        ctx.extras["verifier_resource_allocation"] = sandbox.allocation
+        ctx.verifier_resolved_image = sandbox.resolved_image
+        ctx.verifier_resource_allocation = sandbox.allocation
         return sandbox
 
     async def _setup(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
@@ -237,7 +233,7 @@ class StandardEnvironment(Environment):
 
     async def _agent(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         spec = ctx.spec
-        ctx.extras["agent_started"] = True
+        ctx.agent_started = True
 
         harness = self.harness
         if isinstance(harness, PolicyHarness):
@@ -281,7 +277,7 @@ class StandardEnvironment(Environment):
             session,
             timeout_sec=spec.timeouts.agent,
         )
-        ctx.extras["agent_run"] = run
+        ctx.agent_run = run
         if run.exit_code != 0:
             detail = run.final_message or "no diagnostic output"
             raise AgentError(f"{harness.name} exited {run.exit_code}: {detail}")
@@ -355,7 +351,7 @@ class StandardEnvironment(Environment):
         if closing:
             builder.add(source="agent", message=closing)
         self._persist_trajectory(ctx, builder.build())
-        ctx.extras["trajectory_written"] = True
+        ctx.trajectory_written = True
 
     async def _seal(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         """Apply the declared policy, and record that it was applied.
@@ -448,7 +444,7 @@ class StandardEnvironment(Environment):
             f"{destination}/ale_verify",
         )
         await self._probe_package(sandbox, "ale-verify", "import ale_verify")
-        ctx.extras["ale_verify_provenance"] = AleVerifyProvenance(
+        ctx.ale_verify_provenance = AleVerifyProvenance(
             version=framework_version,
             content_hash=framework_hash,
         )
@@ -476,17 +472,12 @@ class StandardEnvironment(Environment):
             raise VerifierOutputError(
                 "verify record and reward envelope contain different rewards or metrics"
             )
-        ctx.extras["metrics"] = metrics
+        ctx.metrics = metrics
 
         return rewards
 
     async def _stage_verification_config(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
-        config = ctx.extras.get("verification_config")
-        payload = (
-            config.model_dump(mode="json", exclude_none=True)
-            if hasattr(config, "model_dump")
-            else {}
-        )
+        payload = ctx.verification_config.model_dump(mode="json", exclude_none=True)
         await sandbox.write_file(
             VERIFY_CONFIG_PATH,
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
@@ -500,8 +491,8 @@ class StandardEnvironment(Environment):
             if isinstance(name, str) and (value := os.environ.get(name)):
                 command_env[name] = value
                 secrets.append(value)
-        ctx.extras["verification_command_env"] = command_env
-        ctx.extras["verification_secrets"] = tuple(secrets)
+        ctx.verification_command_env = command_env
+        ctx.verification_secrets = tuple(secrets)
 
     async def _collect_verification_record(
         self, ctx: EpisodeContext, sandbox: Sandbox
@@ -510,15 +501,14 @@ class StandardEnvironment(Environment):
             raw = await sandbox.read_file(VERIFICATION_PATH)
         except Exception:
             return None
-        secrets = cast(tuple[str, ...], ctx.extras.get("verification_secrets", ()))
-        if any(secret.encode() in raw for secret in secrets if secret):
+        if any(secret.encode() in raw for secret in ctx.verification_secrets if secret):
             raise VerifierOutputError("verify record contains a configured credential")
         try:
             record = VerificationRecord.from_json(raw)
         except ValueError as exc:
             raise VerifierOutputError(f"verify wrote malformed verification record: {exc}") from exc
         atomic_write_json(ctx.run_dir / "verification.json", record.to_dict(), sort_keys=False)
-        ctx.extras["verification_record"] = record
+        ctx.verification_record = record
         return record
 
     async def _collect_agent_judge_log(
@@ -542,7 +532,7 @@ class StandardEnvironment(Environment):
                     "Agent Judge launched but wrote no agent-judge.jsonl transcript"
                 ) from exc
             return
-        redactor = Redactor(cast(tuple[str, ...], ctx.extras.get("verification_secrets", ())))
+        redactor = Redactor(ctx.verification_secrets)
         target = ctx.run_dir / "logs" / "agent-judge.jsonl"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
@@ -551,7 +541,7 @@ class StandardEnvironment(Environment):
         )
 
     async def _capture_solver_evidence(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
-        if ctx.extras.get("solver_evidence_captured"):
+        if ctx.solver_evidence_captured:
             return
         logger = logging.getLogger("ale.execution")
         if self.agent_enabled:
@@ -599,7 +589,7 @@ class StandardEnvironment(Environment):
                     },
                 )
 
-        if ctx.extras.get("agent_started") and not ctx.extras.get("trajectory_written"):
+        if ctx.agent_started and not ctx.trajectory_written:
             self._parse_harness_trajectory(ctx)
 
         if ctx.artifacts.enabled:
@@ -611,11 +601,11 @@ class StandardEnvironment(Environment):
                     extra={"ale_data": {"source": path, "name": name}},
                 )
 
-        ctx.extras["solver_evidence_captured"] = True
+        ctx.solver_evidence_captured = True
 
     async def _teardown(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         # Best-effort interrupted evidence does not replace the primary failure.
-        if ctx.extras.get("agent_started") and not ctx.extras.get("solver_evidence_captured"):
+        if ctx.agent_started and not ctx.solver_evidence_captured:
             try:
                 await self._capture_solver_evidence(ctx, sandbox)
             except Exception as exc:
@@ -648,7 +638,7 @@ class StandardEnvironment(Environment):
     def _parse_harness_trajectory(self, ctx: EpisodeContext) -> None:
         assert ctx.blobs is not None
         assert ctx.trajectory is not None
-        run = ctx.extras.get("agent_run")
+        run = ctx.agent_run
         trajectory = self.harness.parse_trajectory(
             TrajectoryParseContext(
                 episode_id=ctx.episode_id,
@@ -665,9 +655,8 @@ class StandardEnvironment(Environment):
             )
         )
         self._persist_trajectory(ctx, trajectory)
-        ctx.extras["trajectory_written"] = True
-        policy = ctx.extras.get("logging_policy")
-        if run is not None and getattr(policy, "native_logs", "minimal") == "minimal":
+        ctx.trajectory_written = True
+        if run is not None and ctx.logging_policy.native_logs == "minimal":
             shutil.rmtree(ctx.run_dir / "logs" / self.harness.name, ignore_errors=True)
 
     def _persist_trajectory(self, ctx: EpisodeContext, trajectory: AtifTrajectory) -> None:
@@ -736,10 +725,7 @@ class StandardEnvironment(Environment):
                     "ALE_TASK_INSTRUCTION_PATH": str(TASK_INSTRUCTION_PATH),
                     "ALE_TASK_PARAMETERS_PATH": str(TASK_PARAMETERS_PATH),
                     "ALE_AGENT_JUDGE_LOG_PATH": str(AGENT_JUDGE_LOG_PATH),
-                    **cast(
-                        dict[str, str],
-                        ctx.extras.get("verification_command_env", {}),
-                    ),
+                    **ctx.verification_command_env,
                 }
             )
             if (ctx.run_dir / "trajectory.json").is_file():
@@ -764,13 +750,13 @@ class StandardEnvironment(Environment):
                 secret
                 for secret in (
                     ctx.session.token,
-                    *cast(tuple[str, ...], ctx.extras.get("verification_secrets", ())),
+                    *ctx.verification_secrets,
                 )
                 if secret
             ),
         )
         started = time.monotonic()
-        timeout_sec = cast(float | None, ctx.extras.get("phase_timeout_sec"))
+        timeout_sec = ctx.phase_timeout_sec
         try:
             result = await sandbox.exec(
                 ["bash", entry.name],
@@ -892,9 +878,8 @@ class StandardEnvironment(Environment):
         started_at = datetime.now(UTC)
         started = time.monotonic()
         ctx.current_phase = phase
-        callback = ctx.extras.get("phase_callback")
-        if callable(callback):
-            callback(phase)
+        if ctx.phase_callback is not None:
+            ctx.phase_callback(phase)
         ctx.execution.append(
             PhaseStarted(
                 episode_id=ctx.episode_id,
@@ -904,8 +889,8 @@ class StandardEnvironment(Environment):
             durable=True,
         )
         outcome = "succeeded"
-        previous_timeout = ctx.extras.get("phase_timeout_sec")
-        ctx.extras["phase_timeout_sec"] = timeout_sec
+        previous_timeout = ctx.phase_timeout_sec
+        ctx.phase_timeout_sec = timeout_sec
         try:
             with execution_logging(
                 ctx.execution,
@@ -920,18 +905,18 @@ class StandardEnvironment(Environment):
                     return await coro
         except TimeoutError as exc:
             outcome = "timed_out"
-            ctx.extras["failure_phase"] = phase.value
+            ctx.failure_phase = phase
             raise PhaseTimeoutError(phase.value, timeout_sec or 0) from exc
         except PhaseTimeoutError:
             outcome = "timed_out"
-            ctx.extras["failure_phase"] = phase.value
+            ctx.failure_phase = phase
             raise
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise
         except BaseException:
             outcome = "failed"
-            ctx.extras["failure_phase"] = phase.value
+            ctx.failure_phase = phase
             raise
         finally:
             finished_at = datetime.now(UTC)
@@ -956,10 +941,7 @@ class StandardEnvironment(Environment):
                 durable=True,
             )
             ctx.current_phase = None
-            if previous_timeout is None:
-                ctx.extras.pop("phase_timeout_sec", None)
-            else:
-                ctx.extras["phase_timeout_sec"] = previous_timeout
+            ctx.phase_timeout_sec = previous_timeout
 
 
 def _agent_user(sandbox: Sandbox) -> str:
@@ -1057,8 +1039,8 @@ class _RecordedSandbox:
     ) -> ExecResult:
         assert self._ctx.execution is not None
         assert self._ctx.blobs is not None
-        counter = int(self._ctx.extras.get("harness_execution_counter", 0)) + 1
-        self._ctx.extras["harness_execution_counter"] = counter
+        self._ctx.harness_execution_counter += 1
+        counter = self._ctx.harness_execution_counter
         recorder = CommandRecorder(
             execution=self._ctx.execution,
             blobs=cast(BlobStore, self._ctx.blobs),

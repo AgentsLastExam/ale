@@ -1,0 +1,379 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agents-last-exam.org/schemas/verification-record-v1.json",
+  "title": "ALE Verification Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "criteria",
+    "metrics",
+    "aggregates",
+    "judge_invocations",
+    "diagnostics",
+    "failure"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "in_progress",
+        "completed",
+        "failed"
+      ]
+    },
+    "criteria": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/criterion"
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "aggregates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/aggregate"
+      }
+    },
+    "judge_invocations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/invocation"
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 2000
+      }
+    },
+    "failure": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 2000
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "location",
+        "sha256",
+        "size_bytes"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "file",
+            "reference",
+            "task_instruction",
+            "task_parameters",
+            "solver_trajectory"
+          ]
+        },
+        "location": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "source",
+        "score",
+        "weight",
+        "reasoning",
+        "raw_value",
+        "evidence",
+        "judge_invocation_id"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "enum": [
+            "check",
+            "llm_judge",
+            "agent_judge"
+          ]
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "weight": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "reasoning": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 10000
+        },
+        "raw_value": {},
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "judge_invocation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "method",
+        "inputs",
+        "weights",
+        "score"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "method": {
+          "enum": [
+            "mean",
+            "weighted_mean"
+          ]
+        },
+        "inputs": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "weights": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "mode",
+        "started_at",
+        "finished_at",
+        "outcome",
+        "model",
+        "reasoning_effort",
+        "endpoint_identity",
+        "prompt_hash",
+        "rubric_hash",
+        "request_id",
+        "usage",
+        "error"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mode": {
+          "enum": [
+            "initial",
+            "retry",
+            "schema_repair"
+          ]
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "invalid",
+            "refused",
+            "timed_out",
+            "failed"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reasoning_effort": {
+          "type": "string",
+          "minLength": 1
+        },
+        "endpoint_identity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prompt_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "rubric_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "request_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usage": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2000
+        }
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "criterion_name",
+        "adapter",
+        "adapter_version",
+        "status",
+        "attempts",
+        "failure"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "llm",
+            "agent"
+          ]
+        },
+        "criterion_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "adapter": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "codex-cli",
+            "claude-code",
+            null
+          ]
+        },
+        "adapter_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "enum": [
+            "running",
+            "recovering",
+            "completed",
+            "failed"
+          ]
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attempt"
+          }
+        },
+        "failure": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2000
+        }
+      }
+    }
+  }
+}

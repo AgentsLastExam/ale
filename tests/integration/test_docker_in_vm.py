@@ -18,10 +18,11 @@ from ale.run.provenance import (
 )
 from ale.run.providers import ProviderRegistry
 from ale.run.tasksets.manifest import load_tasks
+from tests.support import sibling_checkout
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_kvm]
 
-TASK = Path(__file__).resolve().parents[3] / "ale-tasks-base/tasks/demo/docker_in_vm"
+TASK = sibling_checkout("ale-tasks-base") / "tasks/demo/docker_in_vm"
 
 
 @pytest.mark.asyncio

@@ -13,12 +13,12 @@ from ale.core.errors import VerificationInfrastructureError, VerifierOutputError
 from ale.core.sandbox import PreparedTaskImage
 from ale.core.taskspec import ImageKind
 from ale.core.verdict import Status, Verdict
-from ale.run.cli.main import (
+from ale.run.cli.main import app
+from ale.run.cli.tasks import (
     _is_full_reward_map,
     _is_zero_reward_map,
     _validation_notices,
     _validation_outcome,
-    app,
 )
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.harnesses.builtin import NopHarness
@@ -146,7 +146,7 @@ def test_prepare_uses_selection_and_starts_no_runtime_services(
     write_task_repo,  # type: ignore[no-untyped-def]
 ) -> None:
     repository = write_task_repo("ale-tasks-prepare", tasks=("b", "a"))
-    cli = import_module("ale.run.cli.main")
+    task_cli = import_module("ale.run.cli.tasks")
     observed: list[str] = []
     digest = "sha256:" + "a" * 64
 
@@ -173,9 +173,9 @@ def test_prepare_uses_selection_and_starts_no_runtime_services(
     def forbidden(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         raise AssertionError("prepare started a runtime service")
 
-    monkeypatch.setattr(cli, "_prepare_images", fake_prepare)
+    monkeypatch.setattr(task_cli, "_prepare_images", fake_prepare)
     for name in ("Gateway", "Ledger", "StandardEnvironment"):
-        monkeypatch.setattr(cli, name, forbidden)
+        monkeypatch.setattr(task_cli, name, forbidden)
 
     result = CliRunner().invoke(app, ["prepare", str(repository)])
 

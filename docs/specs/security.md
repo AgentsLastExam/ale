@@ -132,12 +132,12 @@ non-zero if any scoring path exists during setup.
 
 ## 6. Limits end episodes rather than stalling them
 
-In API-key mode token, cost and model-call ceilings are enforced by the Gateway refusing
-the next call with a 429. Subscription traffic is not subject to those limits (Claude's
-Gateway use is relay-only), so only native Harness limits and phase deadlines apply;
-unavailable Gateway limits and cost are recorded honestly. Teardown is
-cancellation-shielded, so a killed phase still reclaims
-its container.
+API-key and subscription token, cost and model-call ceilings are enforced by the Gateway
+refusing the next call with a 429. Some subscription endpoints expose less request-side
+control; in particular, Codex rejects `max_output_tokens`, so ALE accounts the completed
+response and refuses a later call after the ceiling. Harness-native limits and phase
+deadlines remain additional layers. Teardown is cancellation-shielded, so a killed phase
+still reclaims its sandbox.
 
 Every terminal state is one typed status, and failures never enter score aggregates. A
 `task_error` — a crashed or silent verifier — is deliberately distinct from a zero score,
@@ -239,9 +239,8 @@ succeeds the tunnel is opaque by design — the point is to reach a declared hos
 inspect the conversation. An allowlisted host is a trusted host.
 
 **Exfiltration through the model service.** An agent can put anything it likes in a
-prompt. The Gateway records API-key calls but does not police their content. Subscription
-traffic has no retained Transport Trace: Codex/Grok use an opaque TLS tunnel, while the
-Claude relay still sees and controls requests in memory.
+prompt. The Gateway records API-key and subscription calls but does not police their
+content. A Transport Trace proves routing and accounting; it is not a content policy.
 
 **A compromised image.** The exact locally built Task-image content is recorded in
 provenance, so a change is *detectable*. Nothing verifies that its base or authored

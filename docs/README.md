@@ -18,6 +18,7 @@ lasting contract belongs here.
 | Results, trajectories, and logs | [specs/trace.md](specs/trace.md) |
 | Trust boundaries and guarantees | [specs/security.md](specs/security.md) |
 | Develop the engine | [guides/development.md](guides/development.md) |
+| Configure subscription login | [guides/subscription-auth.md](guides/subscription-auth.md) |
 | Why current architectural choices exist | [adr/](adr/) |
 
 Living specifications describe what is true now. ADRs retain the rationale for current

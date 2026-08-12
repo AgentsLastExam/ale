@@ -122,7 +122,9 @@ def context(root: Path, policy: LoggingPolicy, run: AgentRun | None):
         session=SimpleNamespace(model="model"),
         agent_version="1",
         spec=SimpleNamespace(instruction="instruction"),
-        extras={"agent_run": run, "logging_policy": policy},
+        agent_run=run,
+        logging_policy=policy,
+        trajectory_written=False,
     )
 
 

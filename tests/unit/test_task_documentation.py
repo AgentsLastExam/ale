@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests.support import sibling_checkout
 
 pytestmark = pytest.mark.unit
 
@@ -20,7 +21,6 @@ NORMATIVE = (
     ROOT / "docs/specs/security.md",
     ROOT / "docs/guides/development.md",
     ROOT / "docs/specs/lexicon.md",
-    ROOT.parent / "ale-tasks-base/README.md",
 )
 
 
@@ -70,10 +70,12 @@ def test_authoring_contract_names_the_current_task_shape() -> None:
 
 @pytest.mark.parametrize(
     "repository",
-    (ROOT.parent / "ale-tasks-base", ROOT.parent / "ale-tasks-152"),
+    (sibling_checkout("ale-tasks-base"), sibling_checkout("ale-tasks-152")),
     ids=("base", "152"),
 )
 def test_maintained_tasks_declare_an_explicit_image_kind(repository: Path) -> None:
+    if not repository.is_dir():
+        pytest.skip(f"optional Task checkout not present: {repository.name}")
     for manifest in repository.glob("tasks/**/task.yaml"):
         data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
         assert data["spec_type"] == "core/v1", manifest

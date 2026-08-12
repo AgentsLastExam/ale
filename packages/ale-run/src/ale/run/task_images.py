@@ -17,6 +17,7 @@ from typing import TextIO
 from ale.core.errors import AleError, ProviderStartError, TaskDefinitionError
 from ale.core.ids import content_hash
 from ale.core.sandbox import ImageRef, PreparedTaskImage
+from ale.core.task import Task, TaskFolder
 from ale.core.taskspec import ImageKind, VerificationMode
 from ale.run.providers import ProviderRegistry
 from ale.run.sources import cache_root
@@ -91,16 +92,22 @@ async def _run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
     )
 
 
-async def prepare_task_image(task: object, providers: ProviderRegistry) -> PreparedTaskImage:
+def _task_folder(task: Task) -> TaskFolder:
+    if task.folder is None:
+        raise TaskDefinitionError("standard image preparation requires a Task folder")
+    return task.folder
+
+
+async def prepare_task_image(task: Task, providers: ProviderRegistry) -> PreparedTaskImage:
     return (await prepare_task_image_result(task, providers)).image
 
 
 async def prepare_task_image_result(
-    task: object, providers: ProviderRegistry
+    task: Task, providers: ProviderRegistry
 ) -> ImagePreparationResult:
-    spec = task.spec.image  # type: ignore[attr-defined]
+    spec = task.spec.image
     provider = providers.get(spec.kind)
-    dockerfile = task.folder.image_dockerfile  # type: ignore[attr-defined]
+    dockerfile = _task_folder(task).image_dockerfile
     if dockerfile is None:
         if spec.ref is None:
             raise TaskDefinitionError("solver requires image/Dockerfile or image.ref")
@@ -123,7 +130,7 @@ async def prepare_task_image_result(
             ),
         )
 
-    source_identity = task.image_source_digest  # type: ignore[attr-defined]
+    source_identity = task.image_source_digest
     if source_identity is None:
         raise TaskDefinitionError("local solver image has no source identity")
     build = await _stage(
@@ -160,22 +167,24 @@ async def prepare_task_image_result(
 
 
 async def prepare_verifier_image(
-    task: object, providers: ProviderRegistry
+    task: Task, providers: ProviderRegistry
 ) -> PreparedTaskImage | None:
     result = await prepare_verifier_image_result(task, providers)
     return result.image if result is not None else None
 
 
 async def prepare_verifier_image_result(
-    task: object, providers: ProviderRegistry
+    task: Task, providers: ProviderRegistry
 ) -> ImagePreparationResult | None:
-    verify = task.spec.verify  # type: ignore[attr-defined]
+    verify = task.spec.verify
     if verify.environment_mode is VerificationMode.SHARED:
         return None
 
-    dockerfile = task.folder.verifier_dockerfile  # type: ignore[attr-defined]
+    dockerfile = _task_folder(task).verifier_dockerfile
     if dockerfile is None and verify.image is None:
-        image = task.prepared_image  # type: ignore[attr-defined]
+        image = task.prepared_image
+        if image is None:
+            raise TaskDefinitionError("solver image must be prepared before verifier image")
         return _result(
             task,
             "verifier",
@@ -210,7 +219,7 @@ async def prepare_verifier_image_result(
             ),
         )
 
-    source_identity = task.verifier_image_source_digest  # type: ignore[attr-defined]
+    source_identity = task.verifier_image_source_digest
     if source_identity is None:
         raise TaskDefinitionError("local verifier image has no source identity")
     build = await _stage(
@@ -247,12 +256,12 @@ async def prepare_verifier_image_result(
 
 
 def _result(
-    task: object,
+    task: Task,
     role: str,
     image: PreparedTaskImage,
     *steps: ImagePreparationStep,
 ) -> ImagePreparationResult:
-    spec = task.spec  # type: ignore[attr-defined]
+    spec = task.spec
     return ImagePreparationResult(
         task=f"{spec.name}@{spec.variant}",
         role=role,

@@ -40,7 +40,7 @@ Task-level `skills/` and `mcp/` are invalid; agent resources belong below `tools
 | `spec_type` | literal | required `core/v1` |
 | `name` | Task ID | required, stable, collection-unique |
 | `image` | mapping | required `kind`; optional `ref` |
-| `environment` | string | `core/standard` |
+| `environment` | literal | `core/standard` |
 | `resources` | mapping | solver resource request |
 | `network` | mapping | solver/oracle network policy |
 | `timeouts` | mapping | phase deadlines |

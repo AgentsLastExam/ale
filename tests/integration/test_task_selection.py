@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from ale.core.config import AgentConfig, RunConfig
-from ale.run.cli.main import _run_one
+from ale.run.cli.tasks import _run_one
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 

@@ -441,7 +441,7 @@ async def run_episode(
     ctx = EpisodeContext(
         episode_id=episode_id,
         spec=task.spec,
-        task_dir=getattr(getattr(task, "folder", None), "root", run_dir),
+        task_dir=task.folder.root if task.folder is not None else run_dir,
         run_dir=episode_dir,
         sandboxes=lease,
         artifacts=sink,
@@ -467,11 +467,10 @@ async def run_episode(
         allowed_hosts=allowed_hosts,
         prepared_image=task.prepared_image,
         prepared_verifier_image=task.prepared_verifier_image,
+        phase_callback=phase_callback,
+        logging_policy=logging_policy or LoggingPolicy(),
+        verification_config=verification_config or VerificationConfig(),
     )
-    if phase_callback is not None:
-        ctx.extras["phase_callback"] = phase_callback
-    ctx.extras["logging_policy"] = logging_policy or LoggingPolicy()
-    ctx.extras["verification_config"] = verification_config or VerificationConfig()
     try:
         verdict = await environment.run(task, ctx)
     except Exception as exc:  # every failure becomes a typed result, not a traceback
@@ -483,7 +482,7 @@ async def run_episode(
                 observed_value=exc.observed_value,
                 reason=type(exc).__name__,
             )
-        phase = _phase_of(exc, ctx.extras.get("failure_phase"))
+        phase = _phase_of(exc, ctx.failure_phase)
         verdict = Verdict.failed(status_for(exc), exc, phase=phase)
         recording.execution.append(
             ExecutionFailure(
@@ -511,7 +510,7 @@ async def run_episode(
             await lease.release_all()
         except RetentionFinalizationError as exc:
             finalization_error = finalization_error or exc
-        ctx.extras["sandbox_outcomes"] = tuple(lease.outcomes)
+        ctx.sandbox_outcomes = tuple(lease.outcomes)
         sink.cleanup()
         if finalization_error is not None and verdict.status is Status.COMPLETED:
             verdict = Verdict.failed(Status.ENV_ERROR, finalization_error, phase="teardown")
@@ -617,7 +616,7 @@ def _write_lock(
         inputs = replace(
             inputs, agent=inputs.agent.model_copy(update={"version": ctx.agent_version})
         )
-    record = ctx.extras.get("verification_record")
+    record = ctx.verification_record
     if isinstance(record, VerificationRecord):
         inputs = replace(inputs, judges=judge_provenance(record))
     observed_asset = task.asset_observation
@@ -640,12 +639,12 @@ def _write_lock(
         prepared_image=ctx.prepared_image,
         sandbox=ctx.sandbox_identity,
         asset=asset,
-        verifier_resolved_image=ctx.extras.get("verifier_resolved_image"),
-        verifier_allocation=ctx.extras.get("verifier_resource_allocation"),
+        verifier_resolved_image=ctx.verifier_resolved_image,
+        verifier_allocation=ctx.verifier_resource_allocation,
         prepared_verifier_image=ctx.prepared_verifier_image,
-        ale_verify=ctx.extras.get("ale_verify_provenance"),
+        ale_verify=ctx.ale_verify_provenance,
         termination=ctx.limit_termination,
-        sandbox_outcomes=ctx.extras.get("sandbox_outcomes", ()),
+        sandbox_outcomes=ctx.sandbox_outcomes,
         seed=seed,
     )
     return lock

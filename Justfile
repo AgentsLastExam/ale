@@ -48,7 +48,7 @@ wt-rm name:
     git -C "$main" worktree remove "$dest" --force
     git -C "$main" branch -d "{{ name }}" || true
 
-# Fast tests: unit only.
+# Fast in-process suite: unit and lightweight conformance.
 test:
     @uv run pytest -m unit
 

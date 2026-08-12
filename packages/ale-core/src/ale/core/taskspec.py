@@ -255,7 +255,7 @@ class TaskManifestV1(BaseModel):
 
     spec_type: Literal["core/v1"]
     name: TaskId
-    environment: str = "core/standard"
+    environment: Literal["core/standard"] = "core/standard"
     image: ImageSpec
     resources: Resources = Resources()
     network: NetworkPolicy = NetworkPolicy()
@@ -299,7 +299,7 @@ class TaskSpec(BaseModel):
     spec_type: Literal["core/v1"] = "core/v1"
     name: TaskId
     variant: str = Field(default="base", min_length=1)
-    environment: str = "core/standard"
+    environment: Literal["core/standard"] = "core/standard"
     image: ImageSpec
     instruction: str
     resources: Resources = Resources()

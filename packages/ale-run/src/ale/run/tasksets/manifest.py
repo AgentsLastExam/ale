@@ -138,6 +138,8 @@ class TaskFolder:
 
 
 class ManifestTask(Task):
+    folder: TaskFolder
+
     def __init__(self, spec: TaskSpec, folder: TaskFolder) -> None:
         super().__init__(
             spec,
@@ -149,12 +151,11 @@ class ManifestTask(Task):
         )
 
     async def score(self, ctx: EpisodeContext) -> Rewards:
-        rewards = ctx.extras.get("rewards")
-        if not isinstance(rewards, dict):
+        if ctx.verified_rewards is None:
             raise TaskDefinitionError(
                 "verification produced no rewards; verify/run.sh must write them"
             )
-        return {str(key): float(value) for key, value in rewards.items()}
+        return {str(key): float(value) for key, value in ctx.verified_rewards.items()}
 
 
 def discover_task_folders(path: Path) -> tuple[TaskFolder, ...]:
