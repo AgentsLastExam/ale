@@ -9,13 +9,13 @@ from pathlib import Path
 import yaml
 
 from ale.core.errors import TaskDefinitionError
+from ale.run.tasksets.loader import load_tasks
 from ale.run.tasksets.manifest import (
     INSTRUCTION,
     STAGE_ENTRY,
     TASK_MANIFEST,
-    TaskFolder,
-    discover_task_folders,
-    load_tasks,
+    StandardTaskFolder,
+    discover_standard_task_folders,
 )
 
 __all__ = ["Finding", "lint_repository"]
@@ -43,6 +43,14 @@ class Finding:
 def lint_repository(path: Path) -> list[Finding]:
     findings: list[Finding] = []
     source = path.expanduser().resolve()
+    harbor_manifests = list(source.rglob("task.toml")) if source.is_dir() else []
+    standard_manifests = list(source.rglob(TASK_MANIFEST)) if source.is_dir() else []
+    if harbor_manifests and not standard_manifests:
+        try:
+            load_tasks(source)
+        except TaskDefinitionError as error:
+            return [Finding(source, str(error))]
+        return []
     if not (source / TASK_MANIFEST).is_file():
         for removed, replacement in (
             ("domain.yaml", "put the stable name in each Task's task.yaml"),
@@ -57,7 +65,7 @@ def lint_repository(path: Path) -> list[Finding]:
                 findings.append(Finding(candidate, f"removed concept; {replacement}"))
 
     try:
-        folders = discover_task_folders(source)
+        folders = discover_standard_task_folders(source)
     except TaskDefinitionError as error:
         return [*findings, Finding(source, str(error))]
 
@@ -70,7 +78,7 @@ def lint_repository(path: Path) -> list[Finding]:
     return findings
 
 
-def _check_folder(folder: TaskFolder) -> list[Finding]:
+def _check_folder(folder: StandardTaskFolder) -> list[Finding]:
     findings: list[Finding] = []
     required = {
         INSTRUCTION: folder.root / INSTRUCTION,

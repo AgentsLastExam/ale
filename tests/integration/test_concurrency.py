@@ -28,7 +28,7 @@ from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 from tests.support import prepare_reference, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]

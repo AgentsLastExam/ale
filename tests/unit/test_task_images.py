@@ -20,7 +20,7 @@ from ale.run.task_images import (
     prepare_task_image_result,
     prepare_verifier_image,
 )
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 
 pytestmark = pytest.mark.unit
 

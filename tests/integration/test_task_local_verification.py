@@ -20,7 +20,7 @@ from ale.run.task_images import (
     _OciBuild,
     prepare_verifier_image_result,
 )
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]

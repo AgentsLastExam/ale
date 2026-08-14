@@ -6,14 +6,17 @@ import asyncio
 import hashlib
 import uuid
 from pathlib import Path
+from typing import cast
 
 import typer
 
 from ale.core.config import RunConfig, load_run_config, select_agent_name
+from ale.core.environment import Environment
 from ale.core.errors import AleError, ConfigError, TaskDefinitionError
 from ale.core.harness import EffectiveAgentResources, Harness
 from ale.core.ids import content_hash
 from ale.core.sandbox import ImageKind, PreparedTaskImage
+from ale.core.task import Task
 from ale.core.taskspec import VerificationMode
 from ale.core.validation import (
     TaskValidationObservation,
@@ -30,6 +33,7 @@ from ale.run.episode import EpisodeResult, run_episode
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
+from ale.run.harbor import HarborEnvironment, HarborProviderRegistry
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
@@ -54,7 +58,7 @@ from ale.run.task_images import (
     prepare_task_image_result,
     prepare_verifier_image_result,
 )
-from ale.run.tasksets.manifest import ManifestTask, load_tasks
+from ale.run.tasksets import load_tasks
 
 EXIT_SOME_FAILED = 2
 EXIT_BAD_REFERENCE = 3
@@ -135,6 +139,35 @@ def _require_gateway_dialect(settings: RunConfig, expected: str) -> None:
         )
 
 
+def _providers(tasks: list[Task], settings: RunConfig) -> ProviderRegistry:
+    environments = {task.spec.environment for task in tasks}
+    if len(environments) != 1:
+        raise TaskDefinitionError("a run must contain Tasks from one Environment protocol")
+    environment = next(iter(environments))
+    if environment == "standard":
+        return ProviderRegistry(settings)
+    if environment == "harbor":
+        return HarborProviderRegistry(settings)
+    raise TaskDefinitionError(f"unknown Environment protocol {environment!r}")
+
+
+def _environment(
+    task: Task,
+    harness: Harness,
+    *,
+    max_steps: int | None = None,
+    agent_enabled: bool = True,
+) -> Environment:
+    options: dict[str, object] = {"agent_enabled": agent_enabled}
+    if max_steps is not None:
+        options["max_steps"] = max_steps
+    if task.spec.environment == "standard":
+        return StandardEnvironment(harness, **options)  # type: ignore[arg-type]
+    if task.spec.environment == "harbor":
+        return HarborEnvironment(harness, **options)  # type: ignore[arg-type]
+    raise TaskDefinitionError(f"unknown Environment protocol {task.spec.environment!r}")
+
+
 async def _run_one(
     reference: str,
     settings: RunConfig,
@@ -156,14 +189,14 @@ async def _run_one(
     except AleError as error:
         typer.echo(f"{error}", err=True)
         return EXIT_BAD_REFERENCE
-    providers = ProviderRegistry(settings)
     try:
         task_reference = parse_task_reference(reference)
         resolved = resolve(task_reference.source)
-        tasks = select_tasks(
-            list(load_tasks(resolved.task_dir)),
-            task_reference.variants,
+        tasks = cast(
+            list[Task],
+            select_tasks(list(load_tasks(resolved.task_dir)), task_reference.variants),
         )
+        providers = _providers(tasks, settings)
         await _prepare_images(tasks, providers)
     except AleError as error:
         typer.echo(f"{error}", err=True)
@@ -227,7 +260,7 @@ async def _run_one(
     gate = asyncio.Semaphore(settings.concurrency)
 
     async def one(
-        task: ManifestTask,
+        task: Task,
         episode_id: str,
         inputs: ProvenanceInputs,
         agent_resources: EffectiveAgentResources,
@@ -237,7 +270,7 @@ async def _run_one(
         async def execute() -> EpisodeResult:
             return await run_episode(
                 task,
-                StandardEnvironment(harness, max_steps=settings.agent.max_steps),
+                _environment(task, harness, max_steps=settings.agent.max_steps),
                 providers,
                 run_dir=run_dir,
                 gateway_url=gateway_url,
@@ -382,14 +415,14 @@ def _check_reportable(result: EpisodeResult) -> bool:
 
 
 async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
-    providers = ProviderRegistry(settings)
     try:
         task_reference = parse_task_reference(reference)
         resolved = resolve(task_reference.source)
-        tasks = select_tasks(
-            list(load_tasks(resolved.task_dir)),
-            task_reference.variants,
+        tasks = cast(
+            list[Task],
+            select_tasks(list(load_tasks(resolved.task_dir)), task_reference.variants),
         )
+        providers = _providers(tasks, settings)
         await _prepare_images(tasks, providers)
     except AleError as error:
         typer.echo(f"{error}", err=True)
@@ -439,7 +472,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                 ledger.mark_running(episode_id)
                 result = await run_episode(
                     task,
-                    StandardEnvironment(harness, agent_enabled=agent_enabled),
+                    _environment(task, harness, agent_enabled=agent_enabled),
                     providers,
                     run_dir=run_dir,
                     episode_id=episode_id,
@@ -498,16 +531,16 @@ async def _prepare_only(reference: str, settings: RunConfig) -> int:
     try:
         task_reference = parse_task_reference(reference)
         resolved = resolve(task_reference.source)
-        tasks = select_tasks(
-            list(load_tasks(resolved.task_dir)),
-            task_reference.variants,
+        tasks = cast(
+            list[Task],
+            select_tasks(list(load_tasks(resolved.task_dir)), task_reference.variants),
         )
         for root in {task.folder.root for task in tasks}:
             if findings := lint_repository(root):
                 raise TaskDefinitionError(
                     "lint: " + "; ".join(str(item) for item in findings)[:2000]
                 )
-        results = await _prepare_images(tasks, ProviderRegistry(settings))
+        results = await _prepare_images(tasks, _providers(tasks, settings))
     except AleError as error:
         typer.echo(str(error), err=True)
         return EXIT_BAD_REFERENCE
@@ -526,7 +559,7 @@ async def _prepare_only(reference: str, settings: RunConfig) -> int:
 
 
 async def _prepare_images(
-    tasks: list[ManifestTask], providers: ProviderRegistry
+    tasks: list[Task], providers: ProviderRegistry
 ) -> tuple[ImagePreparationResult, ...]:
     by_source: dict[str, PreparedTaskImage] = {}
     by_identity: dict[tuple[ImageKind, str], PreparedTaskImage] = {}
@@ -591,9 +624,7 @@ async def _prepare_images(
     return tuple(results)
 
 
-def _reused_result(
-    task: ManifestTask, role: str, image: PreparedTaskImage
-) -> ImagePreparationResult:
+def _reused_result(task: Task, role: str, image: PreparedTaskImage) -> ImagePreparationResult:
     spec = task.spec
     return ImagePreparationResult(
         task=f"{spec.name}@{spec.variant}",

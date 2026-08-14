@@ -17,8 +17,8 @@ from ale.core.task import Task, TaskSourceContext
 from ale.core.taskspec import (
     PhaseTimeouts,
     Resources,
-    TaskManifestV1,
-    TaskSpec,
+    StandardTaskManifest,
+    StandardTaskSpec,
     VariantOverride,
     VerificationMode,
 )
@@ -33,11 +33,11 @@ __all__ = [
     "STAGE_ENTRY",
     "TASK_MANIFEST",
     "VERIFY_DIR",
-    "ManifestTask",
-    "TaskFolder",
-    "discover_task_folders",
-    "load_task_folder",
-    "load_tasks",
+    "StandardTask",
+    "StandardTaskFolder",
+    "discover_standard_task_folders",
+    "load_standard_task_folder",
+    "load_standard_tasks",
 ]
 
 TASK_MANIFEST = "task.yaml"
@@ -68,7 +68,7 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return loaded
 
 
-class TaskFolder:
+class StandardTaskFolder:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
 
@@ -137,10 +137,10 @@ class TaskFolder:
         )
 
 
-class ManifestTask(Task):
-    folder: TaskFolder
+class StandardTask(Task):
+    folder: StandardTaskFolder
 
-    def __init__(self, spec: TaskSpec, folder: TaskFolder) -> None:
+    def __init__(self, spec: StandardTaskSpec, folder: StandardTaskFolder) -> None:
         super().__init__(
             spec,
             folder=folder,
@@ -158,26 +158,26 @@ class ManifestTask(Task):
         return {str(key): float(value) for key, value in ctx.verified_rewards.items()}
 
 
-def discover_task_folders(path: Path) -> tuple[TaskFolder, ...]:
+def discover_standard_task_folders(path: Path) -> tuple[StandardTaskFolder, ...]:
     source = path.expanduser().resolve()
     if not source.exists():
         raise TaskDefinitionError(f"Task path does not exist: {source}")
     if (source / TASK_MANIFEST).is_file():
-        return (TaskFolder(source),)
+        return (StandardTaskFolder(source),)
     manifests = sorted(
         source.rglob(TASK_MANIFEST),
         key=lambda item: item.relative_to(source).as_posix(),
     )
     if not manifests:
         raise TaskDefinitionError(f"no {TASK_MANIFEST} found below {source}")
-    return tuple(TaskFolder(manifest.parent) for manifest in manifests)
+    return tuple(StandardTaskFolder(manifest.parent) for manifest in manifests)
 
 
-def load_tasks(path: Path) -> list[ManifestTask]:
-    tasks: list[ManifestTask] = []
+def load_standard_tasks(path: Path) -> list[StandardTask]:
+    tasks: list[StandardTask] = []
     seen: dict[str, Path] = {}
     repositories: dict[str, Path] = {}
-    for folder in discover_task_folders(path):
+    for folder in discover_standard_task_folders(path):
         source = folder.source
         if source.repository_name and source.repository_root:
             previous_root = repositories.get(source.repository_name)
@@ -198,8 +198,8 @@ def load_tasks(path: Path) -> list[ManifestTask]:
     return tasks
 
 
-def load_task_folder(path: Path, *, variant: str = "base") -> ManifestTask:
-    tasks = [task for task in load_tasks(path) if task.spec.variant == variant]
+def load_standard_task_folder(path: Path, *, variant: str = "base") -> StandardTask:
+    tasks = [task for task in load_standard_tasks(path) if task.spec.variant == variant]
     if not tasks:
         raise TaskDefinitionError(f"{path} has no variant {variant!r}")
     if len(tasks) > 1:
@@ -207,10 +207,10 @@ def load_task_folder(path: Path, *, variant: str = "base") -> ManifestTask:
     return tasks[0]
 
 
-def _load_folder(folder: TaskFolder) -> Iterator[ManifestTask]:
+def _load_folder(folder: StandardTaskFolder) -> Iterator[StandardTask]:
     _require_folder(folder)
     try:
-        manifest = TaskManifestV1.model_validate(_read_yaml(folder.root / TASK_MANIFEST))
+        manifest = StandardTaskManifest.model_validate(_read_yaml(folder.root / TASK_MANIFEST))
     except ValidationError as exc:
         raise TaskDefinitionError(
             f"invalid task manifest {folder.root / TASK_MANIFEST}: {exc}"
@@ -229,12 +229,12 @@ def _load_folder(folder: TaskFolder) -> Iterator[ManifestTask]:
     elif manifest.verify.image is not None and manifest.verify.image.ref is None:
         raise TaskDefinitionError("external verifier requires verify.image.ref")
     template = (folder.root / INSTRUCTION).read_text(encoding="utf-8")
-    yield ManifestTask(_effective_spec(manifest, template, "base", None), folder)
+    yield StandardTask(_effective_spec(manifest, template, "base", None), folder)
     for variant in manifest.variants:
-        yield ManifestTask(_effective_spec(manifest, template, str(variant.name), variant), folder)
+        yield StandardTask(_effective_spec(manifest, template, str(variant.name), variant), folder)
 
 
-def _require_folder(folder: TaskFolder) -> None:
+def _require_folder(folder: StandardTaskFolder) -> None:
     required = (
         folder.root / TASK_MANIFEST,
         folder.root / INSTRUCTION,
@@ -249,11 +249,11 @@ def _require_folder(folder: TaskFolder) -> None:
 
 
 def _effective_spec(
-    manifest: TaskManifestV1,
+    manifest: StandardTaskManifest,
     template: str,
     variant_name: str,
     variant: VariantOverride | None,
-) -> TaskSpec:
+) -> StandardTaskSpec:
     params = manifest.params | (variant.params if variant else {})
     resources = _overlay(manifest.resources, variant.resources if variant else None)
     timeouts = _overlay(manifest.timeouts, variant.timeouts if variant else None)
@@ -262,7 +262,7 @@ def _effective_spec(
         params,
         where=f"{manifest.name}/{INSTRUCTION}",
     )
-    return TaskSpec(
+    return StandardTaskSpec(
         name=manifest.name,
         variant=variant_name,
         environment=manifest.environment,

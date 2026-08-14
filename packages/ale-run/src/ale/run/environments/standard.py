@@ -52,7 +52,13 @@ from ale.core.sandbox import (
     SandboxRole,
 )
 from ale.core.task import Task
-from ale.core.taskspec import NetworkMode, NetworkPolicy, StdioMcpServer, VerificationMode
+from ale.core.taskspec import (
+    NetworkMode,
+    NetworkPolicy,
+    StandardTaskSpec,
+    StdioMcpServer,
+    VerificationMode,
+)
 from ale.core.trace import (
     PhaseFinished,
     PhaseStarted,
@@ -97,7 +103,7 @@ AGENT_JUDGE_LOG_PATH = PurePosixPath("/opt/ale/verify/agent-judge.jsonl")
 class StandardEnvironment(Environment):
     """Linear provision → setup → agent → verify flow."""
 
-    name = "core/standard"
+    name = "standard"
 
     def __init__(
         self,
@@ -113,6 +119,7 @@ class StandardEnvironment(Environment):
         self.agent_enabled = agent_enabled
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
+        self._validate_task(task)
         spec = task.spec
         if self.agent_enabled:
             self.harness.validate_resources(ctx.agent_resources)
@@ -151,6 +158,10 @@ class StandardEnvironment(Environment):
 
         ctx.verified_rewards = rewards
         return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
+
+    def _validate_task(self, task: Task) -> None:
+        if not isinstance(task.spec, StandardTaskSpec):
+            raise TaskError("StandardEnvironment requires a StandardTaskSpec")
 
     # --- phases ---
 
@@ -593,7 +604,7 @@ class StandardEnvironment(Environment):
             self._parse_harness_trajectory(ctx)
 
         if ctx.artifacts.enabled:
-            for index, path in enumerate(ctx.spec.artifacts):
+            for index, path in enumerate(self._artifact_paths(ctx)):
                 name = Path(path).name or f"artifact-{index}"
                 await ctx.artifacts.collect(sandbox, path, name)
                 logger.info(
@@ -602,6 +613,9 @@ class StandardEnvironment(Environment):
                 )
 
         ctx.solver_evidence_captured = True
+
+    def _artifact_paths(self, ctx: EpisodeContext) -> tuple[str, ...]:
+        return cast(StandardTaskSpec, ctx.spec).artifacts
 
     async def _teardown(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         # Best-effort interrupted evidence does not replace the primary failure.

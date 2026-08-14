@@ -16,7 +16,7 @@ from typing import Literal
 from ale.core.config import resolve_asset_collection
 from ale.core.errors import AssetError
 from ale.core.task import Task, TaskAssetObservation
-from ale.run.tasksets.manifest import ManifestTask, load_tasks
+from ale.run.tasksets.manifest import StandardTask, load_standard_tasks
 
 Stage = Literal["image", "setup", "verify", "oracle"]
 STAGES: tuple[Stage, ...] = ("image", "setup", "verify", "oracle")
@@ -40,7 +40,7 @@ AssetObservation = TaskAssetObservation
 class AssetRepositorySelection:
     repository_name: str
     repository_root: Path
-    tasks: tuple[ManifestTask, ...]
+    tasks: tuple[StandardTask, ...]
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,7 @@ def _asset_roots(task: Task) -> tuple[Path, ...]:
     return tuple(path for stage in STAGES if (path := task.folder.root / stage / "assets").is_dir())
 
 
-def _task_path(task: ManifestTask) -> str:
+def _task_path(task: StandardTask) -> str:
     if task.source.task_relative_path is None:
         raise AssetError("asset commands require Tasks inside a Git repository")
     return task.source.task_relative_path
@@ -103,13 +103,13 @@ def asset_status(paths: Sequence[Path]) -> tuple[AssetObservation, ...]:
 
 
 def select_asset_repositories(paths: Sequence[Path]) -> tuple[AssetRepositorySelection, ...]:
-    tasks_by_root: dict[Path, ManifestTask] = {}
+    tasks_by_root: dict[Path, StandardTask] = {}
     for path in paths:
-        for task in load_tasks(path.expanduser().resolve()):
+        for task in load_standard_tasks(path.expanduser().resolve()):
             if task.spec.variant == "base":
                 tasks_by_root[task.folder.root] = task
 
-    repositories: dict[Path, list[ManifestTask]] = {}
+    repositories: dict[Path, list[StandardTask]] = {}
     names: dict[str, Path] = {}
     for task in tasks_by_root.values():
         source = task.source
@@ -254,7 +254,7 @@ def push_assets(
     return tuple(results)
 
 
-def _replace_selected_assets(tasks: Sequence[ManifestTask], downloaded: Path) -> None:
+def _replace_selected_assets(tasks: Sequence[StandardTask], downloaded: Path) -> None:
     entries: list[tuple[Path, Path, Path]] = []
     for task in tasks:
         task_path = _task_path(task)

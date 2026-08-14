@@ -29,7 +29,7 @@ from ale.core.sandbox import (
     SandboxRequest,
 )
 from ale.core.task import Task
-from ale.core.taskspec import TaskSpec
+from ale.core.taskspec import StandardTaskSpec
 from ale.core.trace import (
     PhaseFinished,
     PhaseStarted,
@@ -230,7 +230,7 @@ async def test_complete_episode_has_one_authoritative_home_per_fact(
     tmp_path: Path,
 ) -> None:
     task = DemoTask(
-        TaskSpec(
+        StandardTaskSpec(
             name="demo-logging",
             instruction="Use the task tool and inspect the image.",
             image={"kind": "container"},

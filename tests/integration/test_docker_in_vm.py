@@ -17,7 +17,7 @@ from ale.run.provenance import (
     gateway_provenance,
 )
 from ale.run.providers import ProviderRegistry
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 from tests.support import sibling_checkout
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_kvm]

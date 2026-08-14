@@ -1,6 +1,6 @@
 # 0008: Isolate Harbor task compatibility
 
-**Status:** Proposed
+**Status:** Accepted
 
 ## Context
 
@@ -16,7 +16,7 @@ and the `standard` Environment. Ordinary Harbor images also do not satisfy ALE's
 standard image contract: Harbor supplies the long-running command at runtime and does
 not require system Python or an `ale.user` account.
 
-## Proposed decision
+## Decision
 
 Use the explicit Environment selectors `standard` and `harbor`. Do not add namespace
 prefixes or a dynamic plugin registry.
@@ -39,7 +39,8 @@ ale.run.harbor
 ├── config.py       supported task.toml model and validation
 ├── task.py         HarborTaskSpec, HarborTask, folder mapping, loader
 ├── environment.py Harbor single-step evaluation protocol
-└── docker.py       Harbor-compatible Provider and Sandbox adapter
+├── docker.py       Harbor-compatible Provider and Sandbox adapter
+└── providers.py    Harbor Provider selection
 ```
 
 The existing `DockerProvider`, `QemuProvider`, `Sandbox` interface, Harnesses, and
@@ -94,15 +95,12 @@ Explicitly rejected at task load time:
 Rejection is preferable to silently changing Harbor semantics. Each rejected capability
 can be considered independently after the initial compatibility path is proven.
 
-## Cross-module changes requiring approval
+## Consequences
 
-The implementation must not begin these changes until this proposal is approved:
-
-1. Rename and split the task types in `ale.core.taskspec` and update their type users.
-2. Rename the standard task loader and add manifest-based dispatch in `ale.run.tasksets`.
-3. Replace the two CLI constructions of `StandardEnvironment` and the Provider registry
-   with explicit `standard`/`harbor` composition.
-4. Update living specifications and focused tests for those public names.
+The shared `BaseTaskSpec` and `TaskFolder` surface remain deliberately small. Protocol
+fields stay on `StandardTaskSpec` or `HarborTaskSpec`, and runtime behavior stays in its
+matching Environment. Supporting another task protocol requires another explicit loader
+and Environment selection rather than adding ambiguous fields to either existing format.
 
 No existing Provider behavior, Sandbox method, persisted schema version, or run result
-schema changes in this proposal.
+schema changes as a result of this decision.

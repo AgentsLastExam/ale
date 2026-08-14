@@ -1,6 +1,6 @@
 # Standard Environment evaluation protocol
 
-`StandardEnvironment` implements ALE's `core/standard` evaluation protocol. It turns one
+`StandardEnvironment` implements ALE's `standard` evaluation protocol. It turns one
 prepared Task instance into one Episode using the same phase ordering for container and
 VM sandboxes.
 
@@ -8,7 +8,7 @@ VM sandboxes.
 
 Before the Environment starts, the engine has already:
 
-- loaded and rendered one base or selected variant into `TaskSpec`;
+- loaded and rendered one base or selected variant into `StandardTaskSpec`;
 - linted the Task and prepared the solver image and any dedicated verifier image;
 - resolved the Harness and the effective Skill/MCP resources;
 - resolved the Harness authentication path, created its episode capabilities and
@@ -25,7 +25,7 @@ provision -> setup -> agent/oracle -> Harness cleanup -> evidence capture
 ```
 
 Every phase is timed and attributed independently. Setup, agent, and verify use the
-deadlines from `TaskSpec.timeouts`. Teardown is cancellation-shielded and runs on every
+deadlines from `StandardTaskSpec.timeouts`. Teardown is cancellation-shielded and runs on every
 exit path.
 
 ### Provision
@@ -108,6 +108,6 @@ contract is [schema version 1](schemas/validation-observation-v1.json).
 
 ## Extension boundary
 
-`core/standard` is the only standard Task protocol. A protocol that requires a different
+`standard` is the only standard Task protocol. A protocol that requires a different
 phase graph, several cooperating solver sandboxes, or a human gate is a new `Environment`
 implemented in the engine; it must not overload fields in this contract.

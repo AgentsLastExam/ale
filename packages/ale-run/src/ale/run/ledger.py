@@ -12,7 +12,7 @@ from typing import Any
 
 from ale.core.ids import content_hash
 from ale.core.result import ResultRecord
-from ale.core.taskspec import TaskSpec
+from ale.core.taskspec import BaseTaskSpec
 from ale.core.verdict import Status
 
 __all__ = ["EpisodeRow", "Ledger", "episode_identity"]
@@ -65,7 +65,7 @@ ON episodes (run_id, identity, status);
 
 
 def episode_identity(
-    spec: TaskSpec,
+    spec: BaseTaskSpec,
     *,
     task_digest: str,
     image_digest: str,
@@ -197,7 +197,7 @@ class Ledger:
         episode_id: str,
         run_id: str,
         identity: str,
-        spec: TaskSpec,
+        spec: BaseTaskSpec,
         episode_path: str | None = None,
     ) -> None:
         now = time.time()
@@ -235,7 +235,7 @@ class Ledger:
         episode_id: str,
         run_id: str,
         identity: str,
-        spec: TaskSpec,
+        spec: BaseTaskSpec,
         episode_path: str | None = None,
     ) -> None:
         self.queue_episode(

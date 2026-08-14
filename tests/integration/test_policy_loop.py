@@ -20,7 +20,7 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import ScriptedPolicyHarness
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]

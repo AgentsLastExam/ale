@@ -12,6 +12,7 @@ lasting contract belongs here.
 | Author a standard Task | [guides/task-authoring.md](guides/task-authoring.md) |
 | Task folder and manifest contract | [specs/task-folder.md](specs/task-folder.md) |
 | `StandardEnvironment` episode flow | [specs/standard-environment.md](specs/standard-environment.md) |
+| Harbor Task compatibility | [specs/harbor-environment.md](specs/harbor-environment.md) |
 | Sandbox and image contract | [specs/sandbox-image.md](specs/sandbox-image.md) |
 | Verification API and records | [specs/verification.md](specs/verification.md) |
 | Harness integration | [specs/autonomous-harness.md](specs/autonomous-harness.md) |

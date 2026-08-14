@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from ale.core.sandbox import PreparedTaskImage
-from ale.core.taskspec import TaskSpec
+from ale.core.taskspec import BaseTaskSpec
 from ale.core.verdict import Rewards
 
 if TYPE_CHECKING:
@@ -38,7 +38,7 @@ class TaskAssetObservation:
 
 
 class TaskFolder(Protocol):
-    """Filesystem surface used by the standard runtime."""
+    """Filesystem surface shared by image preparation and evaluation protocols."""
 
     root: Path
 
@@ -59,7 +59,7 @@ class TaskFolder(Protocol):
 class Task(ABC):
     def __init__(
         self,
-        spec: TaskSpec,
+        spec: BaseTaskSpec,
         *,
         folder: TaskFolder | None,
         source: TaskSourceContext | None = None,

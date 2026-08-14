@@ -52,7 +52,7 @@ repository images, Task `files/`, or top-level `skills/` and `mcp/`.
 ```yaml
 spec_type: core/v1
 name: my-first
-environment: core/standard
+environment: standard
 image: {kind: container}
 
 resources:
