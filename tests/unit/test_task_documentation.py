@@ -12,9 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 NORMATIVE = (
     ROOT / "README.md",
     ROOT / "docs/README.md",
-    ROOT / "docs/guides/task-authoring.md",
-    ROOT / "docs/specs/task-design.md",
-    ROOT / "docs/specs/task-folder.md",
+    ROOT / "docs/specs/task-quality-standard.md",
+    ROOT / "docs/specs/task-authoring.md",
     ROOT / "docs/specs/standard-environment.md",
     ROOT / "docs/specs/sandbox-image.md",
     ROOT / "docs/specs/verification.md",
@@ -49,7 +48,7 @@ def test_living_task_docs_do_not_recommend_removed_contracts(path: Path) -> None
 
 
 def test_authoring_contract_names_the_current_task_shape() -> None:
-    text = (ROOT / "docs/guides/task-authoring.md").read_text(encoding="utf-8")
+    text = (ROOT / "docs/specs/task-authoring.md").read_text(encoding="utf-8")
     for required in (
         "spec_type: core/v1",
         "image.kind",
@@ -64,8 +63,25 @@ def test_authoring_contract_names_the_current_task_shape() -> None:
         "environment_mode: separate",
         "sandbox-base-vm-gui",
         "[sandbox_retention]",
+        "metadata.network_justification",
     ):
         assert required in text
+
+
+def test_task_quality_standard_owns_only_semantic_quality() -> None:
+    text = (ROOT / "docs/specs/task-quality-standard.md").read_text(encoding="utf-8")
+    for required in (
+        "instruction",
+        "initial context",
+        "verification",
+        "without human clarification",
+        "inclusive range from `0` to `1`",
+        "blocked agent network access by default",
+        "reward hacking",
+    ):
+        assert required in text
+    for implementation_detail in ("task.yaml", "image/assets", "oracle", "trajectory"):
+        assert implementation_detail not in text
 
 
 @pytest.mark.parametrize(

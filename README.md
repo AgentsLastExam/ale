@@ -36,7 +36,7 @@ uv run ale run /path/to/task --agent nop
 | Understand contracts and persisted records | [`packages/ale-core/README.md`](packages/ale-core/README.md) |
 | Write verification code | [`packages/ale-verify/README.md`](packages/ale-verify/README.md) |
 | Configure subscription login | [`docs/guides/subscription-auth.md`](docs/guides/subscription-auth.md) |
-| Author a Task | [`docs/guides/task-authoring.md`](docs/guides/task-authoring.md) |
+| Design and author a Task | [`docs/specs/task-quality-standard.md`](docs/specs/task-quality-standard.md), [`docs/specs/task-authoring.md`](docs/specs/task-authoring.md) |
 | Navigate specifications and decisions | [`docs/README.md`](docs/README.md) |
 | Develop ALE | [`docs/guides/development.md`](docs/guides/development.md) |
 

@@ -1,9 +1,14 @@
 # Writing a standard Task
 
-A standard Task is one self-contained folder for the container or VM
-`setup -> agent -> verify` protocol. Read
-[task-design.md](../specs/task-design.md) before authoring and use
-[task-folder.md](../specs/task-folder.md) as the normative format reference.
+A standard Task is one self-contained folder implementing the
+[Task quality standard](task-quality-standard.md) for a container or VM Sandbox. This document
+is the normative authoring and folder contract.
+
+The author-facing protocol is intentionally small: ALE prepares the image, provisions a Sandbox,
+runs optional trusted setup, gives the agent or oracle autonomous control, captures declared
+artifacts, runs trusted verification, and then tears down or retains the Sandbox. Task authors
+need the phase boundaries below, not the engine's internal orchestration. The complete engine
+flow remains specified in [Standard Environment](standard-environment.md).
 
 The conventional verifier program is `verify/verify.py`; `verify/run.sh` invokes it
 with a relative path from the staged verification directory.
@@ -48,6 +53,25 @@ Use either `image/Dockerfile` or `image.ref`. Do not create `domain.yaml`, repos
 repository images, Task `files/`, or top-level `skills/` and `mcp/`.
 
 ## Manifest
+
+`task.yaml` is strict. Its complete top-level field set is:
+
+| Field | Rule |
+|---|---|
+| `spec_type` | required literal `core/v1` |
+| `name` | required stable, collection-unique Task ID |
+| `image` | required `kind`; optional `ref` |
+| `environment` | optional literal `core/standard` |
+| `resources` | solver CPU, memory, storage, GPU, and sudo request |
+| `network` | solver/oracle network policy |
+| `timeouts` | setup, agent, and verify deadlines |
+| `artifacts` | absolute, unique, non-overlapping solver output paths |
+| `tools` | Task-owned Skill and MCP declarations |
+| `params` | instruction template inputs |
+| `verify` | shared or separate verification placement |
+| `variants` | bounded parameter/resource/timeout instances |
+| `metadata` | descriptive data with no standard runtime behavior |
+| `extras` | namespaced extensions with no standard runtime behavior |
 
 ```yaml
 spec_type: core/v1
@@ -99,6 +123,17 @@ uv run ale run '../tasks/my_first@{base,hard}'    # ordered selection
 ```
 
 The same selection rules apply to `validate`.
+
+## Source identity
+
+Task identity comes from the explicit `name`, not its directory. ALE computes the Task source
+digest from canonical relative paths, entry types, regular-file bytes, executable bits, and
+supported symlink targets. It excludes only the four stage asset roots and generated
+`.ale-cache` state. Image source identity is computed separately from `image/`, excluding only
+`image/assets`; the current asset bytes remain available to the native Docker build context.
+
+When the Task is in Git, runtime evidence records its repository, Task-relative path, commit, and
+dirty asset state. A copied Task without assets remains loadable without Git source context.
 
 ## Choose and prepare the image
 
@@ -210,6 +245,10 @@ them. After Harness cleanup it captures each declared regular file or directory 
 immutable solver evidence; missing paths, symlinks, special files, and transfer failures
 are explicit errors.
 
+Artifact collection is Run configuration, not a Task field. `artifacts.collect = "host"`
+captures declared artifacts; `"none"` does not inspect, copy, retain, or restore them. A separate
+verifier that needs solver outputs therefore requires host collection.
+
 ## Resources and network
 
 `resources` requests enforced CPU, memory, optional writable storage, NVIDIA GPU count,
@@ -217,9 +256,14 @@ and solver sudo. Tasks never choose physical GPU indices. A Provider either admi
 whole request or fails explicitly.
 
 `network.mode` is `block`, `allowlist`, or `open`; `allowed_hosts` is required only for
-`allowlist`. It governs solver/oracle traffic. Setup and verification are trusted phases
-with open egress. The image kind routes each physical sandbox to the matching configured
-Provider. Tasks do not name a Provider implementation.
+`allowlist`. It governs solver/oracle traffic. Author for `block` by default: install stable
+software and services in the image and bake or stage every required input. Use `allowlist` only
+for intrinsic external dependencies that cannot be made local. Use `open` only when a restricted
+network would materially change the capability being evaluated, and explain why in
+`metadata.network_justification`.
+
+Setup and verification are trusted phases with open egress. The image kind routes each physical
+Sandbox to the matching configured Provider. Tasks do not name a Provider implementation.
 
 ## Skills and MCP
 
@@ -293,14 +337,12 @@ The oracle performs the requested work as the same unprivileged identity as a so
 `ale validate` runs independent untouched and oracle episodes:
 
 - untouched must complete with a non-empty all-zero reward map;
-- oracle must complete with the same reward names;
-- arbitrary oracle values are recorded; non-one values are warnings, not fabricated full
-  credit;
+- oracle must complete with the same reward names and full credit for every required outcome;
 - any image, setup, artifact, verifier, Judge, timeout, or infrastructure failure remains
   a failure.
 
-After validation, run a real agent and use its trajectory to discover ambiguity, missing
-context, and verifier blind spots. Never fit reward to that agent's particular path.
+Current `ale validate` records a non-one oracle value as a warning rather than fabricating full
+credit. Treat that warning as an unfinished Task and correct the oracle, context, or verification.
 
 ## Debug retention
 
@@ -329,8 +371,6 @@ uv run ale sandbox destroy HANDLE
 - Stable software and solver-visible state are in `image/`; setup is dynamic only.
 - Large data lives only in the stage's ignored `assets/` directory.
 - Verification material is absent until Harness cleanup.
-- Prompt, context, artifacts, and reward describe the same result.
-- Verification judges final state rather than one completion path.
 - Variants change only params, resources, and timeouts.
-- Untouched validation is all-zero and oracle validation completes with matching names.
+- Untouched validation is all-zero and oracle validation earns full credit with matching names.
 - Every failure remains an explicit failure rather than a synthetic zero.
