@@ -8,14 +8,14 @@ import textwrap
 
 import pytest
 
-from ale.core.taskspec import ImageSpec, TaskSpec
+from ale.core.taskspec import ImageSpec, StandardTaskSpec
 from ale.run.ledger import Ledger
 
 pytestmark = pytest.mark.integration
 
 
-def task() -> TaskSpec:
-    return TaskSpec(
+def task() -> StandardTaskSpec:
+    return StandardTaskSpec(
         name="demo-crash",
         instruction="work",
         image=ImageSpec(kind="container", ref="ghcr.io/example/fixture:1"),
@@ -28,10 +28,10 @@ def test_reopen_marks_stale_attempt_interrupted_and_preserves_retry(tmp_path) ->
         f"""
         import os
         from pathlib import Path
-        from ale.core.taskspec import ImageSpec, TaskSpec
+        from ale.core.taskspec import ImageSpec, StandardTaskSpec
         from ale.run.ledger import Ledger
 
-        task = TaskSpec(
+        task = StandardTaskSpec(
             name="demo-crash",
             instruction="work",
             image=ImageSpec(kind="container", ref="ghcr.io/example/fixture:1"),

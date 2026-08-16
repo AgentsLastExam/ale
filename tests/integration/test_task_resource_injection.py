@@ -25,7 +25,7 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 from tests.support import provider_registry
 
 from .conftest import IMAGE

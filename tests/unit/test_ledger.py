@@ -12,23 +12,23 @@ import pytest
 
 from ale.core.lock import AssetProvenance
 from ale.core.result import FailureInfo, ResultRecord
-from ale.core.taskspec import TaskSpec
+from ale.core.taskspec import StandardTaskSpec
 from ale.core.verdict import Status
 from ale.run.ledger import Ledger, episode_identity
 
 pytestmark = pytest.mark.unit
 
 
-def spec(**overrides: object) -> TaskSpec:
+def spec(**overrides: object) -> StandardTaskSpec:
     base: dict[str, object] = {
         "name": "demo-hello",
         "instruction": "write hello",
         "image": {"kind": "container"},
     }
-    return TaskSpec(**(base | overrides))  # type: ignore[arg-type]
+    return StandardTaskSpec(**(base | overrides))  # type: ignore[arg-type]
 
 
-def identity(task: TaskSpec, **overrides: object) -> str:
+def identity(task: StandardTaskSpec, **overrides: object) -> str:
     args: dict[str, object] = {
         "task_digest": "sha256:" + "1" * 64,
         "image_digest": "sha256:" + "2" * 64,

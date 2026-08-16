@@ -15,7 +15,7 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 from ale_verify import ScoredChoice, _llm
 from tests.support import provider_registry
 

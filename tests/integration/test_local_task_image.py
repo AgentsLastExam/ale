@@ -18,7 +18,7 @@ from ale.run.harnesses.builtin import OracleHarness
 from ale.run.providers import ProviderRegistry
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import prepare_task_image, prepare_task_image_result
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 

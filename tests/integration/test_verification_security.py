@@ -12,7 +12,7 @@ from ale.run.harnesses.builtin import OracleHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import Redactor
 from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 from ale_verify._io import EvidenceError, read_text_evidence
 from tests.support import provider_registry
 

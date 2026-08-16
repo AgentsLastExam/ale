@@ -12,7 +12,7 @@ from ale.run.providers import ProviderRegistry
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import prepare_task_image
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 
 pytestmark = [pytest.mark.conformance, pytest.mark.needs_docker]
 

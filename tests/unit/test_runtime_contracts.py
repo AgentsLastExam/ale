@@ -39,7 +39,7 @@ from ale.core.taskspec import (
     NetworkMode,
     NetworkPolicy,
     Resources,
-    TaskSpec,
+    StandardTaskSpec,
 )
 from ale.core.trace import TransportCall
 
@@ -307,7 +307,7 @@ class TestArtifactPolicy:
     """Declaring an output and keeping a copy of it are separate decisions."""
 
     def test_a_task_declares_paths_not_dispositions(self) -> None:
-        spec = TaskSpec(
+        spec = StandardTaskSpec(
             name="demo-hello",
             instruction="write",
             image={"kind": "container"},

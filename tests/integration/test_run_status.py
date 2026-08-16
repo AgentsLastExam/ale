@@ -8,15 +8,15 @@ from datetime import UTC, datetime
 import pytest
 
 from ale.core.result import ResultRecord
-from ale.core.taskspec import ImageSpec, TaskSpec
+from ale.core.taskspec import ImageSpec, StandardTaskSpec
 from ale.core.verdict import Status
 from ale.run.ledger import Ledger
 
 pytestmark = pytest.mark.integration
 
 
-def task() -> TaskSpec:
-    return TaskSpec(
+def task() -> StandardTaskSpec:
+    return StandardTaskSpec(
         name="demo-live",
         instruction="work",
         image=ImageSpec(kind="container", ref="ghcr.io/example/fixture:1"),

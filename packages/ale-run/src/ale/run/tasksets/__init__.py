@@ -1,17 +1,20 @@
 """Filesystem Task discovery and loading."""
 
+from ale.run.tasksets.loader import load_task_folder, load_tasks
 from ale.run.tasksets.manifest import (
-    ManifestTask,
-    TaskFolder,
-    discover_task_folders,
-    load_task_folder,
-    load_tasks,
+    StandardTask,
+    StandardTaskFolder,
+    discover_standard_task_folders,
+    load_standard_task_folder,
+    load_standard_tasks,
 )
 
 __all__ = [
-    "ManifestTask",
-    "TaskFolder",
-    "discover_task_folders",
+    "StandardTask",
+    "StandardTaskFolder",
+    "discover_standard_task_folders",
+    "load_standard_task_folder",
+    "load_standard_tasks",
     "load_task_folder",
     "load_tasks",
 ]

@@ -26,7 +26,7 @@ from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DEFAULT_AGENT_USER, DockerProvider
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]

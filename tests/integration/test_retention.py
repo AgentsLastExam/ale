@@ -31,7 +31,7 @@ from ale.run.providers.docker import (
 )
 from ale.run.recording import EpisodeRecording
 from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 from tests.support import provider_registry
 
 pytestmark = pytest.mark.integration

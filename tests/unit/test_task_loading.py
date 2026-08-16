@@ -7,7 +7,8 @@ import pytest
 
 from ale.core.errors import TaskDefinitionError
 from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import discover_task_folders, load_tasks
+from ale.run.tasksets import load_tasks
+from ale.run.tasksets.manifest import discover_standard_task_folders
 
 pytestmark = pytest.mark.unit
 
@@ -19,7 +20,7 @@ def test_collection_order_and_names_are_manifest_owned(tmp_path: Path) -> None:
     (z / "task.yaml").write_text((z / "task.yaml").read_text().replace("name: z", "name: zz"))
     tasks = load_tasks(collection)
     assert [str(task.spec.name) for task in tasks] == ["a", "zz"]
-    assert [folder.root.name for folder in discover_task_folders(collection)] == ["a", "z"]
+    assert [folder.root.name for folder in discover_standard_task_folders(collection)] == ["a", "z"]
 
 
 def test_git_repository_source_context_is_bound_to_each_task(

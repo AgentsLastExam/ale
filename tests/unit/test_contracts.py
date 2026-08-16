@@ -14,11 +14,11 @@ from ale.core.taskspec import (
     NetworkMode,
     NetworkPolicy,
     SkillSource,
+    StandardTaskManifest,
+    StandardTaskSpec,
     StdioMcpServer,
     StreamableHttpMcpServer,
-    TaskManifestV1,
     TaskMcpSource,
-    TaskSpec,
     ToolProvision,
     VerificationMode,
     VerifierResources,
@@ -30,13 +30,13 @@ from ale.core.verdict import Status, Verdict
 pytestmark = pytest.mark.unit
 
 
-def make_spec(**overrides: object) -> TaskSpec:
+def make_spec(**overrides: object) -> StandardTaskSpec:
     base: dict[str, object] = {
         "name": TaskId("demo-hello"),
         "image": {"kind": "container"},
         "instruction": "Write hello into /home/user/output/result.txt",
     }
-    return TaskSpec(**(base | overrides))  # type: ignore[arg-type]
+    return StandardTaskSpec(**(base | overrides))  # type: ignore[arg-type]
 
 
 def test_task_spec_is_strict_core_v1_and_path_independent() -> None:
@@ -74,14 +74,14 @@ def test_task_spec_hash_tracks_rendered_semantics() -> None:
 
 def test_task_spec_round_trips() -> None:
     spec = make_spec(params={"rows": 3}, metadata={"category": "cli"})
-    restored = TaskSpec.model_validate_json(spec.model_dump_json())
+    restored = StandardTaskSpec.model_validate_json(spec.model_dump_json())
     assert restored == spec
 
 
 def test_manifest_requires_explicit_name_and_rejects_removed_fields() -> None:
-    TaskManifestV1(spec_type="core/v1", name="demo", image={"kind": "container"})
+    StandardTaskManifest(spec_type="core/v1", name="demo", image={"kind": "container"})
     with pytest.raises(ValidationError):
-        TaskManifestV1.model_validate({"spec_type": "core/v1", "name": "demo"})
+        StandardTaskManifest.model_validate({"spec_type": "core/v1", "name": "demo"})
     for removed in (
         "domain",
         "setup",
@@ -90,7 +90,7 @@ def test_manifest_requires_explicit_name_and_rejects_removed_fields() -> None:
         "gpu_vram_gb",
     ):
         with pytest.raises(ValidationError):
-            TaskManifestV1.model_validate(
+            StandardTaskManifest.model_validate(
                 {
                     "spec_type": "core/v1",
                     "name": "demo",
@@ -110,7 +110,7 @@ def test_manifest_requires_explicit_name_and_rejects_removed_fields() -> None:
 )
 def test_manifest_rejects_authored_asset_fields(payload: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
-        TaskManifestV1.model_validate(
+        StandardTaskManifest.model_validate(
             {
                 "spec_type": "core/v1",
                 "name": "demo",
@@ -121,7 +121,7 @@ def test_manifest_rejects_authored_asset_fields(payload: dict[str, object]) -> N
 
 
 def test_manifest_field_set_is_exact() -> None:
-    assert set(TaskManifestV1.model_fields) == {
+    assert set(StandardTaskManifest.model_fields) == {
         "spec_type",
         "name",
         "environment",
@@ -234,7 +234,7 @@ def test_shared_and_separate_verification_contracts_are_strict() -> None:
 )
 def test_artifacts_are_absolute_unique_and_non_overlapping(artifacts: tuple[str, ...]) -> None:
     with pytest.raises(ValidationError):
-        TaskManifestV1(
+        StandardTaskManifest(
             spec_type="core/v1",
             name="demo",
             image={"kind": "container"},

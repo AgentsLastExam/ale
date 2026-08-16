@@ -33,7 +33,7 @@ from ale.core.sandbox import (
     SandboxRequest,
 )
 from ale.core.task import Task, TaskSourceContext
-from ale.core.taskspec import TaskSpec
+from ale.core.taskspec import BaseTaskSpec
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Rewards, Verdict
 
@@ -132,7 +132,7 @@ class EpisodeContext:
     """Everything an environment is allowed to touch."""
 
     episode_id: str
-    spec: TaskSpec
+    spec: BaseTaskSpec
     task_dir: Path
     """Host-side task folder: manifest, verify, oracle, setup scripts, files."""
 

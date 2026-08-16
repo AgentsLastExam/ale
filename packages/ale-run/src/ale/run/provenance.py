@@ -41,7 +41,7 @@ from ale.core.lock import (
 )
 from ale.core.result import SandboxOutcome
 from ale.core.sandbox import PreparedTaskImage, ResolvedImage, ResourceAllocation
-from ale.core.taskspec import ImageSpec, TaskSpec
+from ale.core.taskspec import BaseTaskSpec, ImageSpec
 from ale.run import __version__
 from ale_verify import VerificationRecord
 
@@ -202,7 +202,7 @@ class ProvenanceInputs:
 
 def build_lock(
     inputs: ProvenanceInputs,
-    spec: TaskSpec,
+    spec: BaseTaskSpec,
     *,
     resolved_image: ResolvedImage,
     allocation: ResourceAllocation,

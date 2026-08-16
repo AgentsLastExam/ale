@@ -19,7 +19,7 @@ from ale.run.harnesses.builtin import OracleHarness
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider, destroy_retained
 from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 from tests.support import prepare_reference, provider_registry
 
 pytestmark = [

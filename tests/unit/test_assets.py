@@ -12,7 +12,7 @@ from ale.run.assets import (
     observe_task_assets,
     select_asset_repositories,
 )
-from ale.run.tasksets.manifest import load_tasks
+from ale.run.tasksets import load_tasks
 
 pytestmark = pytest.mark.unit
 

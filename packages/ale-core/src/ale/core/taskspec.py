@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from ale.core.ids import TaskId, content_hash
 
 __all__ = [
+    "BaseTaskSpec",
     "ImageKind",
     "ImageSpec",
     "McpServer",
@@ -22,11 +23,11 @@ __all__ = [
     "ResourceOverride",
     "Resources",
     "SkillSource",
+    "StandardTaskManifest",
+    "StandardTaskSpec",
     "StdioMcpServer",
     "StreamableHttpMcpServer",
-    "TaskManifestV1",
     "TaskMcpSource",
-    "TaskSpec",
     "ToolProvision",
     "VariantOverride",
     "VerificationMode",
@@ -248,14 +249,14 @@ class VariantOverride(BaseModel):
         return value
 
 
-class TaskManifestV1(BaseModel):
+class StandardTaskManifest(BaseModel):
     """The strict authored shape of ``task.yaml``."""
 
     model_config = _FROZEN
 
     spec_type: Literal["core/v1"]
     name: TaskId
-    environment: Literal["core/standard"] = "core/standard"
+    environment: Literal["standard"] = "standard"
     image: ImageSpec
     resources: Resources = Resources()
     network: NetworkPolicy = NetworkPolicy()
@@ -291,21 +292,20 @@ class TaskManifestV1(BaseModel):
         return self
 
 
-class TaskSpec(BaseModel):
-    """One rendered base or variant instance used by the runtime."""
+class BaseTaskSpec(BaseModel):
+    """Protocol-neutral fields required to administer one Task episode."""
 
     model_config = _FROZEN
 
-    spec_type: Literal["core/v1"] = "core/v1"
+    spec_type: str
     name: TaskId
     variant: str = Field(default="base", min_length=1)
-    environment: Literal["core/standard"] = "core/standard"
+    environment: str
     image: ImageSpec
     instruction: str
     resources: Resources = Resources()
     network: NetworkPolicy = NetworkPolicy()
     timeouts: PhaseTimeouts = PhaseTimeouts()
-    artifacts: tuple[str, ...] = ()
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
@@ -324,3 +324,11 @@ class TaskSpec(BaseModel):
     @property
     def label(self) -> str:
         return str(self.name) if self.variant == "base" else f"{self.name}@{self.variant}"
+
+
+class StandardTaskSpec(BaseTaskSpec):
+    """One rendered base or variant for the standard evaluation protocol."""
+
+    spec_type: Literal["core/v1"] = "core/v1"
+    environment: Literal["standard"] = "standard"
+    artifacts: tuple[str, ...] = ()
