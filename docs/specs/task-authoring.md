@@ -10,20 +10,7 @@ artifacts, runs trusted verification, and then tears down or retains the Sandbox
 need the phase boundaries below, not the engine's internal orchestration. The complete engine
 flow remains specified in [Standard Environment](standard-environment.md).
 
-The conventional verifier program is `verify/verify.py`; `verify/run.sh` invokes it
-with a relative path from the staged verification directory.
-
-## Start from one folder
-
-Run authoring commands from the ALE engine checkout. A Task repository does not install
-its own copy of `ale-run`.
-
-```bash
-uv run ale new-task ../ale-tasks-cli/tasks/my_first
-uv run ale lint ../ale-tasks-cli/tasks/my_first
-uv run ale prepare ../ale-tasks-cli/tasks/my_first
-uv run ale validate ../ale-tasks-cli/tasks/my_first
-```
+## Task folder
 
 ```text
 tasks/my_first/
@@ -49,6 +36,7 @@ tasks/my_first/
 ```
 
 Required files are `task.yaml`, `instruction.md`, `verify/run.sh`, and `oracle/run.sh`.
+Verifier code conventionally lives at `verify/verify.py`.
 Use either `image/Dockerfile` or `image.ref`. Do not create `domain.yaml`, repository `kits/`,
 repository images, Task `files/`, or top-level `skills/` and `mcp/`.
 
@@ -124,17 +112,6 @@ uv run ale run '../tasks/my_first@{base,hard}'    # ordered selection
 
 The same selection rules apply to `validate`.
 
-## Source identity
-
-Task identity comes from the explicit `name`, not its directory. ALE computes the Task source
-digest from canonical relative paths, entry types, regular-file bytes, executable bits, and
-supported symlink targets. It excludes only the four stage asset roots and generated
-`.ale-cache` state. Image source identity is computed separately from `image/`, excluding only
-`image/assets`; the current asset bytes remain available to the native Docker build context.
-
-When the Task is in Git, runtime evidence records its repository, Task-relative path, commit, and
-dirty asset state. A copied Task without assets remains loadable without Git source context.
-
 ## Choose and prepare the image
 
 Use `image: {kind: container}` or `image: {kind: vm}`. If `image/Dockerfile` exists it
@@ -170,7 +147,8 @@ are allowed; the final runtime stage still starts from an ALE base.
 
 ## Stage-local assets
 
-Large files live at the exact path where Task code uses them:
+Task code, scripts, manifests, and ordinary small fixtures live outside `assets/` and are tracked
+by Git. Data that should be managed separately from Task source lives under the stage that uses it:
 
 ```text
 image/assets/...
@@ -179,24 +157,8 @@ verify/assets/...
 oracle/assets/...
 ```
 
-These directories are ignored by Git. Every Task repository maps to a same-named
-Hugging Face dataset in the configured collection. Synchronization is explicit and may
-select one Task, a repository, overlapping paths, or multiple repositories:
-
-```bash
-export ALE_ASSETS_COLLECTION='<owner>/<collection>'
-uv run ale assets pull ../ale-tasks-cli
-uv run ale assets pull --force ../ale-tasks-cli/tasks/a ../ale-tasks-extra
-uv run ale assets status ../ale-tasks-cli
-uv run ale assets push ../ale-tasks-cli/tasks/my_first
-```
-
-Pull restores those four roots directly into Task folders. Push uploads only their
-contents and mirrors deletions below selected roots. Runtime never pulls assets. Local
-state is one repository-local `.ale-cache/assets.json` marker; public provenance is only
-repository name, Task path, remote commit, and `dirty`. No asset bytes are hashed during
-normal status or execution. A dirty or never-synchronized Task may run for debugging but
-cannot resume, deduplicate, or back a reportable result.
+These four directories are ignored by Git and managed by the platform. Authors only choose the
+correct visibility stage and reference files from that stage's code.
 
 Image code uses normal Docker paths:
 
@@ -331,18 +293,13 @@ rubric, evidence, and invocation-local MCP; run TOML owns model, endpoint, crede
 environment name, reasoning effort, Agent adapter, and exact CLI version. Judge failures
 are infrastructure failures, never zero rewards.
 
-## Oracle and validation
+## Oracle
 
 The oracle performs the requested work as the same unprivileged identity as a solver.
-`ale validate` runs independent untouched and oracle episodes:
-
-- untouched must complete with a non-empty all-zero reward map;
-- oracle must complete with the same reward names and full credit for every required outcome;
-- any image, setup, artifact, verifier, Judge, timeout, or infrastructure failure remains
-  a failure.
-
-Current `ale validate` records a non-one oracle value as a warning rather than fabricating full
-credit. Treat that warning as an unfinished Task and correct the oracle, context, or verification.
+An untouched episode must produce a non-empty all-zero reward map. An oracle episode must produce
+the same reward names and full credit for every required outcome. Image, setup, artifact,
+verifier, Judge, timeout, and infrastructure failures remain failures rather than synthetic
+scores.
 
 ## Debug retention
 
@@ -364,13 +321,3 @@ uv run ale sandbox destroy HANDLE
 ```
 
 `HANDLE` is emitted as `docker:<runtime-id>` or `qemu:<runtime-id>`.
-
-## Submission checklist
-
-- The folder is independently lintable and has no repository runtime dependency.
-- Stable software and solver-visible state are in `image/`; setup is dynamic only.
-- Large data lives only in the stage's ignored `assets/` directory.
-- Verification material is absent until Harness cleanup.
-- Variants change only params, resources, and timeouts.
-- Untouched validation is all-zero and oracle validation earns full credit with matching names.
-- Every failure remains an explicit failure rather than a synthetic zero.
