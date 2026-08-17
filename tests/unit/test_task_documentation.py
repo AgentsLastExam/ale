@@ -6,6 +6,8 @@ import pytest
 import yaml
 from tests.support import sibling_checkout
 
+from ale.core.taskspec import TaskManifestV1
+
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,10 +64,23 @@ def test_authoring_contract_names_the_current_task_shape() -> None:
         "tools/mcp/",
         "environment_mode: separate",
         "sandbox-base-vm-gui",
-        "[sandbox_retention]",
         "metadata.network_justification",
     ):
         assert required in text
+    for irrelevant in (
+        "sandbox-base-cli",
+        "artifacts.collect",
+        "ALE_ASSETS_COLLECTION",
+        "There is no Image Tree",
+        "Submission checklist",
+    ):
+        assert irrelevant not in text
+
+
+def test_authoring_annotated_manifest_matches_the_schema() -> None:
+    text = (ROOT / "docs/specs/task-authoring.md").read_text(encoding="utf-8")
+    manifest = text.split("```yaml\n", 1)[1].split("\n```", 1)[0]
+    TaskManifestV1.model_validate(yaml.safe_load(manifest))
 
 
 def test_task_quality_standard_owns_only_semantic_quality() -> None:
