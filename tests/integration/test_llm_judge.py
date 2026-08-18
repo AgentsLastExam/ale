@@ -120,7 +120,7 @@ def direct_llm_task(root: Path) -> Path:
         "HTTPServer(('127.0.0.1', 18765), Handler).handle_request()\n"
     )
     (task / "image" / "Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/sandbox-base-cli:latest\n"
+        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
         "COPY server.py /opt/task/server.py\n"
         "RUN mkdir -p /home/user/output && chown -R user:user /home/user/output\n"
     )

@@ -2,7 +2,7 @@
 
 Read [`README.md`](README.md) and `../../docs/specs/sandbox-image.md` first.
 
-- These are foundational CLI/GUI/VM images, never Task or domain images.
+- These are foundational desktop container/VM images, never Task or domain images.
 - Keep the image-declared agent user, GUI capability, guest integration and labels in
   sync with Provider checks and the image specification.
 - Never bake provider credentials, benchmark answers or Task-specific dependencies.

@@ -752,13 +752,17 @@ class DockerProvider(Provider):
             "sh",
             reference,
             "-c",
-            f"command -v python3 >/dev/null || echo no-python3; "
+            "if command -v python3 >/dev/null; then "
+            "python3 -c 'import sys; raise SystemExit(sys.version_info < (3,12))' "
+            ">/dev/null 2>&1 || echo old-python3; else echo no-python3; fi; "
             f"id -u {await self._agent_user(reference)} >/dev/null 2>&1 || echo no-agent-user",
             timeout=120,
         )
         for line in probe[1].split():
             if line == "no-python3":
                 missing.append("no python3 on PATH: the guest service runs on it")
+            elif line == "old-python3":
+                missing.append("python3 on PATH is older than 3.12: ale_verify cannot run on it")
             elif line == "no-agent-user":
                 user = await self._agent_user(reference)
                 missing.append(

@@ -25,9 +25,6 @@ from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
 
-GUI_IMAGE = "ghcr.io/agentslastexam/sandbox-base-gui:latest"
-CLI_IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
-
 
 class PolicyEnvironment(StandardEnvironment):
     async def _verify(self, task, ctx, sandbox):  # type: ignore[no-untyped-def]
@@ -35,11 +32,7 @@ class PolicyEnvironment(StandardEnvironment):
 
 
 def gui_repo(write_repo: Callable[..., Path], root: Path) -> Path:
-    """The standard fixture task, moved onto the desktop image."""
-    task_root = write_repo(root)
-    dockerfile = task_root / "image" / "Dockerfile"
-    dockerfile.write_text(dockerfile.read_text().replace(f"FROM {CLI_IMAGE}", f"FROM {GUI_IMAGE}"))
-    return task_root
+    return write_repo(root)
 
 
 async def run_policy(task_root: Path, run_dir: Path, harness: ScriptedPolicyHarness, **kwargs):  # type: ignore[no-untyped-def]

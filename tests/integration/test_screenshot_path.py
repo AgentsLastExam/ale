@@ -21,7 +21,7 @@ from tests.support import prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
 
-GUI_IMAGE = "ghcr.io/agentslastexam/sandbox-base-gui:latest"
+GUI_IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
 
 #: Runs inside the sandbox: import what the fast path needs and capture through it,
 #: reporting which route actually ran rather than only whether an image appeared.

@@ -27,11 +27,11 @@ class TestDockerProvider(ProviderConformance):
     provider = DockerProvider()
     image = ImageRef(
         kind="container",
-        reference="ghcr.io/agentslastexam/sandbox-base-cli:latest",
+        reference="ghcr.io/agentslastexam/container-ubuntu22-base:latest",
     )
     gui_image = ImageRef(
         kind="container",
-        reference="ghcr.io/agentslastexam/sandbox-base-gui:latest",
+        reference="ghcr.io/agentslastexam/container-ubuntu22-base:latest",
     )
 
 
@@ -45,7 +45,7 @@ async def test_blocked_network_has_no_route_off_the_host() -> None:
     prepared = await provider.prepare_image(
         ImageRef(
             kind="container",
-            reference="ghcr.io/agentslastexam/sandbox-base-cli:latest",
+            reference="ghcr.io/agentslastexam/container-ubuntu22-base:latest",
         )
     )
     request = SandboxRequest(
@@ -73,7 +73,7 @@ async def test_proxy_only_sandbox_can_resolve_the_host_proxy() -> None:
     prepared = await provider.prepare_image(
         ImageRef(
             kind="container",
-            reference="ghcr.io/agentslastexam/sandbox-base-cli:latest",
+            reference="ghcr.io/agentslastexam/container-ubuntu22-base:latest",
         )
     )
     request = SandboxRequest(

@@ -34,7 +34,7 @@ from tests.support import prepare_reference, provider_registry
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 #: Our own base image, which satisfies the sandbox contract; see tests/integration/conftest.
-IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
+IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
 
 EPISODES = 4
 

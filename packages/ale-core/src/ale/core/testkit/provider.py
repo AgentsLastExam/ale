@@ -25,7 +25,7 @@ class ProviderConformance:
     provider: Provider
     image = ImageRef(
         kind="container",
-        reference="ghcr.io/agentslastexam/sandbox-base-cli:latest",
+        reference="ghcr.io/agentslastexam/container-ubuntu22-base:latest",
     )
 
     gui_image: ImageRef | None = None

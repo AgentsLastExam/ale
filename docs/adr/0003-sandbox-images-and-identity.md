@@ -11,7 +11,7 @@ and verifier kinds.
 
 ## Decision
 
-ALE maintains foundational CLI, GUI, and Ubuntu VM GUI images. A conforming image declares
+ALE maintains foundational desktop container and Ubuntu VM images. A conforming image declares
 its agent user and GUI capability, supplies system Python and guest integration, and owns
 its long-lived command. Tasks build from these bases rather than naming arbitrary
 upstream runtime images or shared domain images.

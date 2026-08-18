@@ -101,9 +101,9 @@ def test_vm_final_stage_matches_kind_and_owns_no_boot_contract(tmp_path: Path) -
     manifest = task / "task.yaml"
     manifest.write_text(manifest.read_text().replace("kind: container", "kind: vm"))
     dockerfile = task / "image" / "Dockerfile"
-    dockerfile.write_text('FROM ghcr.io/agentslastexam/sandbox-base-vm-gui:24.04\nCMD ["bash"]\n')
+    dockerfile.write_text('FROM ghcr.io/agentslastexam/vm-ubuntu24-base:24.04\nCMD ["bash"]\n')
     assert "CMD" in messages(task)
-    dockerfile.write_text("FROM ghcr.io/agentslastexam/sandbox-base-cli:latest\n")
+    dockerfile.write_text("FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n")
     assert "declared vm" in messages(task)
 
 

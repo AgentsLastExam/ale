@@ -19,7 +19,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        image: [cli, gui, vm-gui, vm-materializer]
+        image: [gui, vm-gui, vm-materializer]
     steps:
       - uses: actions/checkout@v4
 
@@ -50,12 +50,12 @@ jobs:
               echo "context=images/base/vm-materializer" >> "$GITHUB_OUTPUT"
               ;;
             vm-gui)
-              echo "repository=sandbox-base-vm-gui" >> "$GITHUB_OUTPUT"
+              echo "repository=vm-ubuntu24-base" >> "$GITHUB_OUTPUT"
               echo "version=0.1.0" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
               ;;
-            *)
-              echo "repository=sandbox-base-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+            gui)
+              echo "repository=container-ubuntu22-base" >> "$GITHUB_OUTPUT"
               echo "version=latest" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
               ;;

@@ -412,12 +412,14 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
     )
     (task / "instruction.md").write_text("Produce both declared outputs.\n")
     (task / "image/Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/sandbox-base-cli:latest\n"
+        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
         "RUN mkdir -p /home/user/output /var/lib/ale-report "
         "&& printf '{}\\n' > /home/user/output/result.json "
         "&& chown -R user:user /home/user/output /var/lib/ale-report\n"
     )
-    (task / "verify/Dockerfile").write_text("FROM ghcr.io/agentslastexam/sandbox-base-cli:latest\n")
+    (task / "verify/Dockerfile").write_text(
+        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
+    )
     (task / "oracle/run.sh").write_text(
         "#!/bin/sh\nset -eu\n"
         'printf \'{"status":"ok"}\\n\' > /home/user/output/result.json\n'
@@ -450,7 +452,9 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
     "image_line",
     [
         "",
-        "  image:\n    kind: container\n    ref: ghcr.io/agentslastexam/sandbox-base-cli:latest\n",
+        "  image:\n"
+        "    kind: container\n"
+        "    ref: ghcr.io/agentslastexam/container-ubuntu22-base:latest\n",
     ],
     ids=["solver-image", "external-ref"],
 )

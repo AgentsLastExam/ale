@@ -4,9 +4,8 @@ ALE publishes foundational Sandbox images, not Task-specific environments.
 
 | Image | Purpose |
 |---|---|
-| `cli/` | unprivileged command-line agent runtime |
-| `gui/` | container runtime with a desktop |
-| `vm-gui/` | OCI source for a bootable desktop VM |
+| `gui/` → `container-ubuntu22-base` | Ubuntu 22.04 container with a desktop |
+| `vm-gui/` → `vm-ubuntu24-base` | Ubuntu 24.04 OCI source for a bootable desktop VM |
 | `vm-materializer/` | converts final VM OCI content to qcow2 |
 
 Task repositories extend one of these images with their fixed dependencies and inputs.

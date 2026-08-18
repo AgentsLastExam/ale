@@ -22,7 +22,7 @@ from ale.run.tasksets.manifest import load_tasks
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-VM_BASE = "ghcr.io/agentslastexam/sandbox-base-vm-gui:0.1.0"
+VM_BASE = "ghcr.io/agentslastexam/vm-ubuntu24-base:0.1.0"
 BASE_ROOT = Path(__file__).resolve().parents[2] / "images/base"
 
 

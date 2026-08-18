@@ -21,8 +21,8 @@ from ale.run.tasksets.manifest import (
 __all__ = ["Finding", "lint_repository"]
 
 _FIXED_SETUP = re.compile(r"\b(apt-get|apt |dnf |yum |pip3? install|curl |wget )")
-_CONTAINER_BASE = re.compile(r"^ghcr\.io/agentslastexam/sandbox-base-(cli|gui):[^ ]+$")
-_VM_BASE = re.compile(r"^ghcr\.io/agentslastexam/sandbox-base-vm-gui:(?!latest$)[^ ]+$")
+_CONTAINER_BASE = re.compile(r"^ghcr\.io/agentslastexam/container-ubuntu22-base:[^ ]+$")
+_VM_BASE = re.compile(r"^ghcr\.io/agentslastexam/vm-ubuntu24-base:(?!latest$)[^ ]+$")
 _VM_RESERVED_NAMES = {
     "ale-guestd.service",
     "autoinstall.yaml",
@@ -141,9 +141,7 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
         final = _final_from(dockerfile)
         expected = _VM_BASE if kind == "vm" else _CONTAINER_BASE
         if final is None or not expected.fullmatch(final):
-            label = (
-                "sandbox-base-vm-gui" if kind == "vm" else "sandbox-base-cli or sandbox-base-gui"
-            )
+            label = "vm-ubuntu24-base" if kind == "vm" else "container-ubuntu22-base"
             findings.append(
                 Finding(
                     dockerfile,

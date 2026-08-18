@@ -17,7 +17,7 @@ remains `core/v1`.
 | **Image declaration** | Required `image.kind: container|vm` plus optional `image.ref` for a solver or dedicated verifier. | not a Provider selection or build flag |
 | **Task image** | The final container or VM image prepared from one fixed local Dockerfile or matching-kind ref. | not a shared Image Tree node |
 | **Prepared Task image** | Immutable kind-aware output consumed by a sandbox request. | not mutable sandbox state |
-| **ALE base image** | A foundational CLI, GUI, or Ubuntu VM GUI OCI image providing the sandbox contract and guest service. | not a domain image or Task-specific dependency bundle |
+| **ALE base image** | A foundational desktop container or VM OCI image providing the sandbox contract and guest service. | not a domain image or Task-specific dependency bundle |
 | **VM materializer** | ALE-owned versioned conversion from final VM OCI rootfs to bootable qcow2. | never Task-authored boot or partition code |
 | **Task assets** | Optional ignored files directly below a Task's `image/assets`, `setup/assets`, `verify/assets`, or `oracle/assets`, synchronized explicitly with a same-named HF dataset. | not a manifest declaration, central cache tree, content hash, or implicit runtime download |
 | **Image assets** | Task-local `image/assets` bytes consumed through the ordinary `image/` Docker context. | not a named BuildKit context or runtime mount |

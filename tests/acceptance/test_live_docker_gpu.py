@@ -36,8 +36,9 @@ pytestmark = [
 async def test_live_docker_gpu_operation_and_exclusive_lease() -> None:
     index = int(os.environ.get("ALE_TEST_DOCKER_GPU_INDEX", "0"))
     provider = DockerProvider(gpus=(index,))
+    default_image = "ghcr.io/agentslastexam/container-ubuntu22-base"
     reference = (
-        f"{os.environ.get('ALE_TEST_DOCKER_GPU_IMAGE', 'ghcr.io/agentslastexam/sandbox-base-cli')}:"
+        f"{os.environ.get('ALE_TEST_DOCKER_GPU_IMAGE', default_image)}:"
         f"{os.environ.get('ALE_TEST_DOCKER_GPU_TAG', 'latest')}"
     )
     prepared = await prepare_reference(provider, reference)

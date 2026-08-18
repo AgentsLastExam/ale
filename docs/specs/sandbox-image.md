@@ -6,9 +6,8 @@ is required.
 
 ## ALE base images
 
-- `sandbox-base-cli` provides a headless Linux sandbox.
-- `sandbox-base-gui` additionally starts a usable desktop.
-- `sandbox-base-vm-gui` provides Ubuntu 24.04, systemd, full GNOME/GDM, the declared
+- `container-ubuntu22-base` provides an Ubuntu 22.04 desktop container.
+- `vm-ubuntu24-base` provides Ubuntu 24.04, systemd, full GNOME/GDM, the declared
   unprivileged user, and ALE guest integration for QEMU.
 
 Both provide framework integration that should not be recreated per Task:
@@ -18,7 +17,7 @@ Both provide framework integration that should not be recreated per Task:
 - the guest service and dependencies needed by the Docker Provider;
 - a long-lived image command that ALE does not replace;
 - `sudo` where Tasks requesting solver elevation are supported;
-- `ale.gui=true` and a ready graphical session for the GUI base.
+- `ale.gui=true` and a ready graphical session.
 
 They do not contain domain stacks, benchmark data, databases, robotics suites, or
 Task-specific tools.
@@ -28,7 +27,7 @@ Task-specific tools.
 For a local image, `image/` is the sole ordinary Docker build context:
 
 ```dockerfile
-FROM ghcr.io/agentslastexam/sandbox-base-cli:latest
+FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends sqlite3 \
@@ -62,7 +61,7 @@ it does not invent a whole-disk content digest.
 
 ## Local VM preparation
 
-A VM Task Dockerfile ends in `sandbox-base-vm-gui`. ALE exports the final OCI rootfs and
+A VM Task Dockerfile ends in `vm-ubuntu24-base`. ALE exports the final OCI rootfs and
 runs its pinned materializer, which owns initramfs, boot, partition assembly, and the
 minimal bootable qcow2 template. Reuse is keyed by final OCI plus materializer identities
 and validated structurally without hashing the whole disk.

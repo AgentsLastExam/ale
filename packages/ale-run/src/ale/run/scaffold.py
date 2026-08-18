@@ -33,7 +33,7 @@ Write the word ${greeting} into /home/user/output/result.txt
 """
 
 DOCKERFILE = """\
-FROM ghcr.io/agentslastexam/sandbox-base-cli:latest
+FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest
 
 RUN mkdir -p /home/user/output && chown -R user:user /home/user/output
 """

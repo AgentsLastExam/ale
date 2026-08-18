@@ -22,7 +22,7 @@ from tests.support import prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
 
-GUI_IMAGE = "ghcr.io/agentslastexam/sandbox-base-gui:latest"
+GUI_IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
 WORK_DIR = "/home/user/work"
 
 

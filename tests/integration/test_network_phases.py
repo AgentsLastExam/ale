@@ -23,7 +23,7 @@ from tests.support import prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
+IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
 PROBE = ["timeout", "10", "curl", "-sS", "-o", "/dev/null", "https://registry.npmjs.org/"]
 
 

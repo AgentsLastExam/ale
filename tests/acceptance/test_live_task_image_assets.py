@@ -25,7 +25,7 @@ def write_task(repository: Path) -> Path:
     )
     (path / "instruction.md").write_text("Inspect /home/user/input/public.txt.\n")
     (path / "image" / "Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/sandbox-base-cli:latest\n"
+        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
         "COPY assets/public.txt /home/user/input/public.txt\n"
         "RUN chown -R user:user /home/user/input\n"
     )

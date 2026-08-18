@@ -143,7 +143,7 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         "'result':json.dumps(verdict)}))\n"
     )
     (task_root / "image" / "Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/sandbox-base-cli:latest\n"
+        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
         f"COPY fake-agent.py /usr/local/bin/{binary_name}\n"
         f"RUN chmod 755 /usr/local/bin/{binary_name} "
         "&& mkdir -p /home/user/output && chown -R user:user /home/user/output\n"

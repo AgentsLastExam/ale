@@ -27,7 +27,7 @@ from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
+IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
 HASH0 = "sha256:" + "0" * 64
 HASH1 = "sha256:" + "1" * 64
 

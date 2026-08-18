@@ -107,7 +107,9 @@ async def test_cli_manages_multiple_mixed_retained_sandboxes() -> None:
     docker = DockerProvider()
     qemu = QemuProvider(image=IMAGE)
     docker_image = await docker.prepare_image(
-        ImageRef(kind="container", reference="ghcr.io/agentslastexam/sandbox-base-cli:latest")
+        ImageRef(
+            kind="container", reference="ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+        )
     )
     qemu_image = await qemu.prepare_image(
         ImageRef(kind="vm", reference="ale-guest-ubuntu-desktop:24.04")

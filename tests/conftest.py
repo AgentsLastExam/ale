@@ -69,12 +69,12 @@ def write_task_repo(tmp_path: Path) -> Callable[..., Path]:
             (task / "instruction.md").write_text("Do the task.\n", encoding="utf-8")
             if with_image_dockerfile:
                 (task / "image" / "Dockerfile").write_text(
-                    "FROM ghcr.io/agentslastexam/sandbox-base-cli:latest\n",
+                    "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n",
                     encoding="utf-8",
                 )
             if with_verifier_dockerfile:
                 (task / "verify" / "Dockerfile").write_text(
-                    "FROM ghcr.io/agentslastexam/sandbox-base-cli:latest\n",
+                    "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n",
                     encoding="utf-8",
                 )
             for stage in ("verify", "oracle"):

@@ -20,11 +20,12 @@ from ale.run.providers.docker import DEFAULT_AGENT_USER, DockerProvider
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-CONFORMING = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
+CONFORMING = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
 
 #: A build environment, not a sandbox: no unprivileged account, and a command that exits
 #: at once. Referencing one directly is exactly what the contract rules out.
 UPSTREAM = "docker.io/library/python:3.12-slim"
+OLD_PYTHON = "docker.io/library/python:3.10-slim"
 
 
 @pytest.mark.asyncio
@@ -39,6 +40,13 @@ async def test_an_upstream_image_is_refused_by_name() -> None:
 
     assert problems
     assert any("unprivileged" in problem for problem in problems)
+
+
+@pytest.mark.asyncio
+async def test_an_old_python_image_is_refused_by_name() -> None:
+    problems = await DockerProvider().check_image(OLD_PYTHON)
+
+    assert any("older than 3.12" in problem for problem in problems)
 
 
 @pytest.mark.asyncio

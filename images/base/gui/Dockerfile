@@ -1,4 +1,4 @@
-# sandbox-base-gui — the desktop sandbox image.
+# container-ubuntu22-base — the desktop container image.
 #
 # Adapted from cua-lite's `lite/gym/sandbox/docker/Dockerfile.linux`, kept close to the
 # original on purpose. That file is 800 lines of debugged detail — GNOME-Shell without
@@ -20,7 +20,7 @@
 # service needs into the system Python instead.
 #
 # Rebuild with:
-#   docker build -f images/base/gui/Dockerfile -t ghcr.io/agentslastexam/sandbox-base-gui .
+#   docker build -f images/base/gui/Dockerfile -t ghcr.io/agentslastexam/container-ubuntu22-base .
 #
 FROM ubuntu:22.04
 
@@ -57,24 +57,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gnome-text-editor eog evince file-roller gnome-screenshot \
         fonts-dejavu fonts-liberation \
         psmisc procps less nano \
-        python3 python3-pip \
+        python3 \
         gedit \
         pulseaudio pulseaudio-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# One interpreter, and it is the image's own. The guest service, the task's stages and
-# the agent all use /usr/bin/python3 — so nothing has to choose between interpreters, and
-# nothing installs into the environment a task runs in.
-#
-# cua-lite kept a separate venv here for the same packages. We install them into the
-# system interpreter instead, because an engine that has to be told which of several
-# interpreters to use is one rule too many. It cost us: the hint was a symlink to the
-# venv, and Python derives its prefix from the invocation path, so the symlinked
-# interpreter silently lost the venv's packages and the fast screenshot path fell back
-# for as long as the mechanism existed.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3-pil python3-xlib \
-    && rm -rf /var/lib/apt/lists/*
+# ALE verification requires Python 3.12+. Jammy's system 3.10 remains at its explicit
+# /usr/bin/python3.10 path for GNOME's distro Python modules; normal PATH lookup uses this
+# pinned, relocatable build for the guest service, Task stages, and agents.
+ARG PYTHON_VERSION=3.12.14
+ARG PYTHON_BUILD=20260814
+ARG PYTHON_SHA256=5acfa3e9ba26b51ae161c83aff278da915b590d22373a424b2ba55b8afe91fcc
+RUN set -eux; \
+    archive="cpython-${PYTHON_VERSION}+${PYTHON_BUILD}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"; \
+    curl -fsSLo /tmp/python.tar.gz \
+        "https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_BUILD}/${archive}"; \
+    echo "${PYTHON_SHA256}  /tmp/python.tar.gz" | sha256sum -c -; \
+    mkdir -p /opt/python; \
+    tar -xzf /tmp/python.tar.gz -C /opt/python --strip-components=1; \
+    rm /tmp/python.tar.gz; \
+    ln -s /opt/python/bin/python3 /usr/local/bin/python3; \
+    ln -s /opt/python/bin/pip3 /usr/local/bin/pip3; \
+    python3 -m pip install --no-cache-dir Pillow==11.3.0 python-xlib==0.33; \
+    python3 -c 'import sys; assert sys.version_info >= (3, 12); import PIL, Xlib'
 
 # ----- Agent-terminal isolation: gnome-terminal forwards the LAUNCHER's environment to
 # every new terminal shell (the terminal server's own environment is ignored). A task
@@ -758,7 +763,7 @@ RUN sed -i \
 # Node, and only Node. Several autonomous harnesses are distributed as npm packages, and
 # a runtime is a property of the platform — the kind of thing an image is for.
 #
-# Node, from nodejs.org's own tarball — see sandbox-base-cli for why.
+# Node, from nodejs.org's own pinned tarball.
 # xz-utils to unpack it; the desktop base does not ship one.
 RUN apt-get update && apt-get install -y --no-install-recommends xz-utils \
     && rm -rf /var/lib/apt/lists/*
@@ -774,7 +779,7 @@ RUN set -eux; \
     rm /tmp/node.tar.xz; \
     node --version; npm --version
 
-# One agent, at one pinned version — the same pin sandbox-base-cli carries.
+# One agent, at one pinned version.
 #
 # Which agent a run uses is a property of the experiment, not of the image, and the
 # harness treats it that way: it compares what is here against what the run pinned and

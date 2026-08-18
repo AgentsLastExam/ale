@@ -1,4 +1,4 @@
-FROM ghcr.io/agentslastexam/sandbox-base-cli:latest
+FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest
 
 RUN npm install -g \
         @openai/codex@0.146.0 \

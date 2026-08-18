@@ -36,7 +36,7 @@ async def test_real_claude_launch_and_two_resumes_share_one_native_session(tmp_p
             recording.transport,
         )
         provider = DockerProvider()
-        prepared = await prepare_reference(provider, "sandbox-base-cli:latest")
+        prepared = await prepare_reference(provider, "container-ubuntu22-base:latest")
         sandbox = await provider.create(
             SandboxRequest(
                 episode_id="live-native-resume",

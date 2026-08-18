@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-IMAGE = "ghcr.io/agentslastexam/sandbox-base-cli:latest"
+IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
 
 VERIFY_DEFAULT = textwrap.dedent("""
     #!/usr/bin/env bash

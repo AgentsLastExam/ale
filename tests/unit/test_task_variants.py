@@ -26,7 +26,7 @@ def _task(tmp_path: Path, variants: str = "") -> Path:
     )
     (task / "instruction.md").write_text("Write ${count} items")
     (task / "image" / "Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/sandbox-base-cli:latest\n"
+        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
     )
     for stage in ("verify", "oracle"):
         (task / stage / "run.sh").write_text("#!/bin/sh\n")

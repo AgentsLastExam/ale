@@ -72,7 +72,7 @@ async def test_real_native_resume_keeps_exact_session_and_only_new_input(
             recording.transport,
         )
         provider = DockerProvider()
-        prepared = await prepare_reference(provider, "sandbox-base-cli:latest")
+        prepared = await prepare_reference(provider, "container-ubuntu22-base:latest")
         sandbox = await provider.create(
             SandboxRequest(
                 episode_id=f"live-{harness.name}-resume",

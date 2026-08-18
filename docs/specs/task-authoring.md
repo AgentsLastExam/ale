@@ -139,8 +139,8 @@ The image is the reproducible initial computer state supplied to the agent. Star
 base matching `image.kind`, then add every stable dependency, service, file, permission, and piece
 of initial state required by the Task:
 
-- container: `ghcr.io/agentslastexam/sandbox-base-gui:latest` (Ubuntu 22.04);
-- VM: `ghcr.io/agentslastexam/sandbox-base-vm-gui:0.1.0` (Ubuntu 24.04).
+- container: `ghcr.io/agentslastexam/container-ubuntu22-base:latest` (Ubuntu 22.04);
+- VM: `ghcr.io/agentslastexam/vm-ubuntu24-base:0.1.0` (Ubuntu 24.04).
 
 Develop it in two passes:
 
@@ -154,7 +154,7 @@ reproducible from `image/`; large build inputs belong in `image/assets/` and are
 Dockerfile. Prefer image-local scripts when they make non-trivial setup easier to test and maintain.
 
 ```dockerfile
-FROM ghcr.io/agentslastexam/sandbox-base-gui:latest
+FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest
 
 COPY install.sh /tmp/install.sh
 RUN /tmp/install.sh && rm /tmp/install.sh
@@ -192,9 +192,13 @@ here.
 
 ## oracle/
 
-`oracle/run.sh` completes the Task as the same unprivileged identity as an evaluated agent. An
-untouched run must receive a non-empty all-zero reward map; an oracle run must receive the same
-reward names and full credit.
+`oracle/run.sh` checks that successful final state can receive credit. Prefer an executable
+solution that performs the Task normally. When that is not practical, the oracle may instead use
+protected reference data from `oracle/assets/` to write or upload a full-credit final state
+directly. That reference must never be visible to the evaluated agent.
+
+An untouched run must receive a non-empty all-zero reward map. Oracle full credit is the target,
+but a lower oracle score is a validation warning rather than a Task failure.
 
 ## Debugging
 
