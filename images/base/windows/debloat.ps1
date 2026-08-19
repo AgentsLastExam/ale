@@ -98,17 +98,21 @@ Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
 } | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
 
 $uninstallRoots = @(
-    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
-    "Registry::HKEY_USERS\*\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
 )
+$uninstallRoots += Get-ChildItem "Registry::HKEY_USERS" -ErrorAction SilentlyContinue |
+    ForEach-Object { Join-Path $_.PSPath "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" } |
+    Where-Object { Test-Path -LiteralPath $_ }
 $removedProducts = "GIMP|GooGet|Google Chrome|Google Cloud SDK|Microsoft 365|OneDrive|" +
     "Office 16 Click-to-Run|Microsoft Visual Studio Code|Mozilla|Thunderbird|Nmap|Npcap|" +
-    "VLC media player|VMware Tools|VNC Server|Microsoft Update Health Tools"
-Get-ItemProperty $uninstallRoots -ErrorAction SilentlyContinue | Where-Object {
-    $_.DisplayName -match $removedProducts
-} | ForEach-Object {
-    Remove-Item -LiteralPath $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+    "VLC media player|VMware Tools|VNC Server|Microsoft Update Health Tools|" +
+    "Python .* (Documentation|Development Libraries|Tcl/Tk Support)"
+foreach ($root in $uninstallRoots) {
+    Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | Where-Object {
+        (Get-ItemPropertyValue -LiteralPath $_.PSPath -Name DisplayName `
+            -ErrorAction SilentlyContinue) -match $removedProducts
+    } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $removeTrees = @(
@@ -116,11 +120,14 @@ $removeTrees = @(
     "$env:SystemDrive\inetpub",
     "$env:ProgramData\GooGet",
     "$env:ProgramData\Google",
-    "$env:ProgramData\Microsoft\OneDrive",
+    "$env:ProgramData\Microsoft OneDrive",
+    "$env:ProgramData\RealVNC-Service",
+    "$env:ProgramData\VMware",
     "$env:ProgramFiles\Google",
     "${env:ProgramFiles(x86)}\Google",
     "$env:ProgramFiles\GIMP 2",
     "$env:ProgramFiles\Microsoft OneDrive",
+    "$env:ProgramFiles\Microsoft Update Health Tools",
     "$env:ProgramFiles\Microsoft Office",
     "${env:ProgramFiles(x86)}\Microsoft Office",
     "$env:ProgramFiles\Common Files\Microsoft Shared\ClickToRun",
@@ -131,6 +138,7 @@ $removeTrees = @(
     "${env:ProgramFiles(x86)}\VideoLAN",
     "$env:ProgramFiles\RealVNC",
     "$env:ProgramFiles\VMware",
+    "${env:ProgramFiles(x86)}\nssm-2.24",
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\Google",
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\Package Cache\{b6ce88eb-2ce3-4d91-8efc-425ae1f48caf}",
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\Programs\Microsoft VS Code"
@@ -138,6 +146,8 @@ $removeTrees = @(
 foreach ($path in $removeTrees) {
     Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
 }
+Get-ChildItem "$env:ProgramData\Mozilla-*" -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:SystemDrive\Users\$AgentUser\Downloads\*", "$env:TEMP\*", `
     "$env:SystemRoot\Temp\*", "$env:SystemRoot\SoftwareDistribution\Download\*" `
     -Recurse -Force -ErrorAction SilentlyContinue
@@ -157,5 +167,14 @@ if ($RemoveInstallCache) {
 Set-ItemProperty `
     "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" `
     -Name EnableLUA -Value 1 -Force
+$remainingProducts = foreach ($root in $uninstallRoots) {
+    Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | Where-Object {
+        (Get-ItemPropertyValue -LiteralPath $_.PSPath -Name DisplayName `
+            -ErrorAction SilentlyContinue) -match $removedProducts
+    }
+}
+if ($remainingProducts) {
+    throw "Removed products remain registered: $($remainingProducts.PSChildName -join ', ')"
+}
 New-Item "$env:ProgramData\ALE\debloat.done" -ItemType File -Force | Out-Null
 Stop-Transcript | Out-Null

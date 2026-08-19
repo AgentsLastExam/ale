@@ -18,8 +18,9 @@ the licensed Windows bytes remain in private storage.
 The recipe installs pinned Python and Cua Driver releases, stages guestd under
 `C:\ProgramData\ALE`, registers both interactive-login services, opens guestd only to the
 QEMU runner, removes the GCP/VMware integration and non-base desktop applications, cleans
-stable system state, and optionally zeroes free space. It deliberately keeps Edge and
-WebView2, LibreOffice, Git, 7-Zip, Python, and the Visual C++ runtimes. Reboot once and
+their stale data and uninstall inventory, cleans stable system state, and optionally zeroes
+free space. It deliberately keeps Edge and WebView2, LibreOffice, Git, 7-Zip, Python, and
+the Visual C++ runtimes. Reboot once and
 verify both services before requesting shutdown. The current GCP seed reaches Windows'
 shutdown screen but does not always complete ACPI power-off under the QEMU runner; wait for
 disk I/O to quiesce before stopping the disposable preparation VM. Normal ALE episodes use

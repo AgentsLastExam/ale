@@ -28,11 +28,14 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
     for stage in ("setup", "oracle", "verify"):
         (task / stage / "assets").mkdir(parents=True)
 
-    image = (
-        {"kind": "vm", "ref": "local/windows-base"}
-        if windows
-        else {"kind": "container", "ref": LINUX_IMAGE}
-    )
+    if windows:
+        image = {"kind": "vm", "ref": "local/windows-base"}
+    elif local_linux_image := os.environ.get("ALE_TEST_LINUX_IMAGE"):
+        (task / "image").mkdir()
+        (task / "image" / "Dockerfile").write_text(f"FROM {local_linux_image}\n")
+        image = {"kind": "container"}
+    else:
+        image = {"kind": "container", "ref": LINUX_IMAGE}
     home = r"C:\Users\user" if windows else "/home/user"
     memory = 8192 if windows else 1024
     alternate_memory = 9216 if windows else 1536
