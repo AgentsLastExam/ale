@@ -164,7 +164,10 @@ def llm_audit_episode(episode: Path, *, requirement: str) -> dict[str, Any]:
 
 def llm_audit_evidence(evidence: dict[str, Any], *, requirement: str) -> dict[str, Any]:
     """Judge a live acceptance artifact with an independent model call."""
-    api_key, upstream = provider_credentials()
+    api_key, upstream = provider_credentials(
+        os.environ.get("ALE_LIVE_ANTHROPIC_API_KEY_ENV", ""),
+        os.environ.get("ALE_LIVE_ANTHROPIC_BASE_URL", ""),
+    )
     payload = json.dumps(
         {
             "model": MODEL,

@@ -40,7 +40,8 @@ def _call(tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise GuiUnavailable(f"cua-driver {tool} returned invalid JSON") from exc
+        detail = (result.stdout.strip() or result.stderr.strip())[:300]
+        raise GuiUnavailable(f"cua-driver {tool} returned invalid JSON: {detail!r}") from exc
     if not isinstance(payload, dict):
         raise GuiUnavailable(f"cua-driver {tool} returned a non-object result")
     return payload

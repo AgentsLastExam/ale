@@ -75,6 +75,11 @@ recipe installs and pins ALE's cross-platform components, and `compact.sh` valid
 compresses the resulting qcow2. Episodes always cold-boot a fresh overlay. ALE creates no
 ready snapshot, warm pool, or environment server.
 
+GUI image qualification includes a real visual agent completing a task whose decisive
+input exists only on screen, followed by inspection of its canonical trajectory,
+screenshots, desktop actions, artifact, and reward. An oracle-only run checks plumbing but
+does not establish GUI readiness.
+
 The QEMU Provider sizes a fresh overlay from `storage_mb`, boots it over the prepared
 qcow2, grows the guest root filesystem, waits for guestd and the declared desktop,
 and observes usable root capacity. The guest health contract reports its OS, agent user,

@@ -17,10 +17,13 @@ the licensed Windows bytes remain in private storage.
 
 The recipe installs pinned Python and Cua Driver releases, stages guestd under
 `C:\ProgramData\ALE`, registers both interactive-login services, opens guestd only to the
-QEMU runner, removes the GCP/VMware integration and non-base desktop applications, cleans
-their stale data and uninstall inventory, cleans stable system state, and optionally zeroes
-free space. It deliberately keeps Edge and WebView2, LibreOffice, Git, 7-Zip, Python, and
-the Visual C++ runtimes. Reboot once and
+QEMU runner, removes the GCP/VMware integration and every non-system user application,
+cleans their stale data and uninstall inventory, cleans stable system state, and optionally
+zeroes free space. Only Windows components plus ALE's Python and Cua Driver guest
+dependencies remain. The recipe fixes the system at en-US and UTC; disables update,
+rollback, recovery, sleep, hibernation, automatic maintenance and background prompt paths;
+and clears the seed user's credentials, profiles, history, stale startup tasks and window
+placement. Reboot once and
 verify both services before requesting shutdown. The current GCP seed reaches Windows'
 shutdown screen but does not always complete ACPI power-off under the QEMU runner; wait for
 disk I/O to quiesce before stopping the disposable preparation VM. Normal ALE episodes use
@@ -35,6 +38,12 @@ uv run images/base/windows/compact.sh input.qcow2 output.qcow2
 The resulting disk is packaged through the existing private VM-image distribution path.
 Every episode cold-boots a fresh qcow2 overlay; ALE does not create ready snapshots or a
 warm pool.
+
+A GUI base is not qualified by an oracle-only Task. Before publication, run a real visual
+agent against screen-only information and inspect its canonical trajectory, screenshot
+blobs, desktop actions, final artifact, and reward. Oracle runs remain useful for the
+deterministic setup/verify and cross-OS protocol checks, but cannot prove that an agent can
+see or control the desktop.
 
 ## Guest contract
 

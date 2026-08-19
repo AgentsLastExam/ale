@@ -55,6 +55,9 @@ Invoke-Uninstaller "$env:ProgramFiles\Npcap\uninstall.exe" @("/S")
 Invoke-Uninstaller "${env:ProgramFiles(x86)}\VideoLAN\VLC\uninstall.exe" @("/S")
 Invoke-Uninstaller "$env:SystemDrive\Users\$AgentUser\AppData\Local\Programs\Microsoft VS Code\unins000.exe" `
     @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+Invoke-Uninstaller "$env:ProgramFiles\7-Zip\Uninstall.exe" @("/S")
+Invoke-Uninstaller "$env:ProgramFiles\Git\unins000.exe" `
+    @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
 
 $clickToRun = "$env:ProgramFiles\Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe"
 Invoke-Uninstaller $clickToRun @(
@@ -71,6 +74,7 @@ Remove-Msi "{1FC1A6C2-576E-489A-9B4A-92D21F542136}" # Update Health Tools
 Remove-Msi "{18DF3488-2245-432B-A023-3AA05C2A00C8}" # Python documentation
 Remove-Msi "{EF4A3D60-9A53-4697-A18D-D3353F8554E6}" # Python development headers
 Remove-Msi "{75485683-EF03-41E6-BF21-D1491694548C}" # Python Tcl/Tk
+Remove-Msi "{AB39A2A5-6C29-49BB-87B3-99C1ECE806C0}" # LibreOffice
 
 $googet = "$env:ProgramData\GooGet\googet.exe"
 foreach ($package in @(
@@ -96,6 +100,12 @@ Get-Service -ErrorAction SilentlyContinue | Where-Object {
 Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
     $_.TaskName -match $vendorPattern -or $_.TaskPath -match $vendorPattern
 } | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
+Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
+    $_.TaskName -in "AutoShutdown-agenthle", "CuaServer-agenthle" -or
+    ($_.Actions | Where-Object {
+        "$($_.Execute) $($_.Arguments)" -match "Users\\[^\\]+\\scripts|start_server\.vbs"
+    })
+} | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
 
 $uninstallRoots = @(
     "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -104,28 +114,39 @@ $uninstallRoots = @(
 $uninstallRoots += Get-ChildItem "Registry::HKEY_USERS" -ErrorAction SilentlyContinue |
     ForEach-Object { Join-Path $_.PSPath "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" } |
     Where-Object { Test-Path -LiteralPath $_ }
-$removedProducts = "GIMP|GooGet|Google Chrome|Google Cloud SDK|Microsoft 365|OneDrive|" +
+$removedProducts = "7-Zip|GIMP|Git|GooGet|Google Chrome|Google Cloud SDK|LibreOffice|" +
+    "Microsoft 365|OneDrive|" +
     "Office 16 Click-to-Run|Microsoft Visual Studio Code|Mozilla|Thunderbird|Nmap|Npcap|" +
     "VLC media player|VMware Tools|VNC Server|Microsoft Update Health Tools|" +
     "Python .* (Documentation|Development Libraries|Tcl/Tk Support)"
 foreach ($root in $uninstallRoots) {
-    Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | Where-Object {
-        (Get-ItemPropertyValue -LiteralPath $_.PSPath -Name DisplayName `
-            -ErrorAction SilentlyContinue) -match $removedProducts
-    } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object {
+        $product = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
+        if ($product.DisplayName -match $removedProducts) {
+            Remove-Item -LiteralPath $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 $removeTrees = @(
+    "$env:SystemDrive\`$WINDOWS.~BT",
+    "$env:SystemDrive\`$WinREAgent",
     "$env:SystemDrive\Google",
     "$env:SystemDrive\inetpub",
+    "$env:SystemDrive\Windows.old",
+    "$env:SystemDrive\Windows10Upgrade",
     "$env:ProgramData\GooGet",
     "$env:ProgramData\Google",
     "$env:ProgramData\Microsoft OneDrive",
+    "$env:ProgramData\Microsoft\Office",
     "$env:ProgramData\RealVNC-Service",
     "$env:ProgramData\VMware",
     "$env:ProgramFiles\Google",
+    "$env:ProgramFiles\7-Zip",
+    "$env:ProgramFiles\Git",
     "${env:ProgramFiles(x86)}\Google",
     "$env:ProgramFiles\GIMP 2",
+    "$env:ProgramFiles\LibreOffice",
     "$env:ProgramFiles\Microsoft OneDrive",
     "$env:ProgramFiles\Microsoft Update Health Tools",
     "$env:ProgramFiles\Microsoft Office",
@@ -139,18 +160,68 @@ $removeTrees = @(
     "$env:ProgramFiles\RealVNC",
     "$env:ProgramFiles\VMware",
     "${env:ProgramFiles(x86)}\nssm-2.24",
+    "$env:SystemDrive\Users\$AgentUser\.conda",
+    "$env:SystemDrive\Users\$AgentUser\.ssh",
+    "$env:SystemDrive\Users\$AgentUser\.vscode",
+    "$env:SystemDrive\Users\$AgentUser\ale-smoke-dir",
+    "$env:SystemDrive\Users\$AgentUser\scripts",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\GIMP",
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\Google",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\Credentials",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\Edge\User Data",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\Excel",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\FORMS",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\Office",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\OneAuth",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\OneDrive",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\Outlook",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\PowerPoint",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\TokenBroker",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\Vault",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\Word",
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\Package Cache\{b6ce88eb-2ce3-4d91-8efc-425ae1f48caf}",
-    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Programs\Microsoft VS Code"
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Programs\Microsoft VS Code",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\RealVNC",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Thunderbird",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Roaming\Code",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Roaming\GIMP",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Roaming\gcloud",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Roaming\Microsoft\Credentials",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Roaming\Microsoft\Protect",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Roaming\Microsoft\Vault",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Roaming\Mozilla",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Roaming\Thunderbird",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Roaming\vlc"
 )
 foreach ($path in $removeTrees) {
     Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
 }
 Get-ChildItem "$env:ProgramData\Mozilla-*" -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item "$env:SystemDrive\Users\$AgentUser\Downloads\*", "$env:TEMP\*", `
-    "$env:SystemRoot\Temp\*", "$env:SystemRoot\SoftwareDistribution\Download\*" `
-    -Recurse -Force -ErrorAction SilentlyContinue
+$userHome = "$env:SystemDrive\Users\$AgentUser"
+foreach ($name in @(
+    ".bash_history", ".tmp.7z", ".viminfo", "ale-smoke.txt", "thunderbird-profile.7z"
+)) {
+    Remove-Item -LiteralPath (Join-Path $userHome $name) -Force -ErrorAction SilentlyContinue
+}
+foreach ($directory in @(
+    "$userHome\Desktop", "$userHome\Documents", "$userHome\Downloads",
+    "$userHome\AppData\Local\Temp", "$userHome\AppData\Roaming\Microsoft\Windows\Recent",
+    "$env:SystemRoot\Temp", "$env:SystemRoot\SoftwareDistribution\Download",
+    "$env:SystemDrive\`$Recycle.Bin"
+)) {
+    Get-ChildItem -LiteralPath $directory -Force -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+foreach ($key in @(
+    "HKCU:\SOFTWARE\Microsoft\Notepad",
+    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32",
+    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs",
+    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\RunMRU",
+    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\UserAssist"
+)) {
+    Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 $iis = Get-WindowsOptionalFeature -Online -FeatureName IIS-WebServerRole `
     -ErrorAction SilentlyContinue
@@ -168,9 +239,11 @@ Set-ItemProperty `
     "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" `
     -Name EnableLUA -Value 1 -Force
 $remainingProducts = foreach ($root in $uninstallRoots) {
-    Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | Where-Object {
-        (Get-ItemPropertyValue -LiteralPath $_.PSPath -Name DisplayName `
-            -ErrorAction SilentlyContinue) -match $removedProducts
+    Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object {
+        $product = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
+        if ($product.DisplayName -match $removedProducts) {
+            $_
+        }
     }
 }
 if ($remainingProducts) {

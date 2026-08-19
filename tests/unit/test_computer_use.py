@@ -9,7 +9,17 @@ from __future__ import annotations
 import pytest
 
 from ale.core.errors import AgentError
-from ale.run.harnesses.computer_use import GRID, translate_action
+from ale.run.harnesses.computer_use import GRID, _computer_tool, translate_action
+
+
+def test_computer_tool_uses_native_claude_and_generic_compatible_schemas() -> None:
+    assert _computer_tool("claude-opus-4-8")["type"] == "computer_20250124"
+    generic = _computer_tool("qwen3.5-plus")
+    assert "type" not in generic
+    assert {"screenshot", "type", "key"} <= set(
+        generic["input_schema"]["properties"]["action"]["enum"]
+    )
+
 
 pytestmark = pytest.mark.unit
 
@@ -36,6 +46,12 @@ def test_a_chord_becomes_a_key_sequence() -> None:
     action = translate_action({"action": "key", "text": "ctrl+s"})
     assert action is not None
     assert (action.type, action.keys) == ("key", ("ctrl", "s"))
+    spaced = translate_action({"action": "key", "text": "ctrl s"})
+    assert spaced is not None and spaced.keys == ("ctrl", "s")
+    array = translate_action({"action": "key", "keys": ["ctrl", "s"]})
+    assert array is not None and array.keys == ("ctrl", "s")
+    encoded = translate_action({"action": "key", "keys": '["ctrl", "s"]'})
+    assert encoded is not None and encoded.keys == ("ctrl", "s")
 
 
 def test_a_screenshot_request_becomes_an_action() -> None:

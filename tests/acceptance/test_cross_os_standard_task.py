@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import textwrap
 from pathlib import Path
@@ -7,15 +8,22 @@ from pathlib import Path
 import pytest
 import yaml
 
+from ale.core.config import LoggingPolicy
 from ale.core.taskspec import ImageKind, OperatingSystem
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
+from ale.run.gateway.server import Gateway
+from ale.run.gateway.session import Limits
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.harnesses.computer_use import ComputerUseHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.qemu import QemuProvider
+from ale.run.secrets import provider_credentials
 from ale.run.tasksets.manifest import load_task_folder
 from tests.support import provider_registry
+
+from .trajectory import LIVE, llm_audit_evidence
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -169,6 +177,76 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
     return task
 
 
+def _write_windows_gui_task(root: Path) -> Path:
+    task = _write_task(root, OperatingSystem.WINDOWS)
+    manifest = yaml.safe_load((task / "task.yaml").read_text())
+    manifest.pop("params")
+    manifest.pop("variants")
+    (task / "task.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
+    (task / "instruction.md").write_text(
+        "Use the visible Notepad window. Read the value after SCREEN_CODE=, type the "
+        "same value after ANSWER=, and save the file. Do not change the first line.\n"
+    )
+    expected = "SCREEN_CODE=ALE-5827\r\nANSWER=ALE-5827\r\n"
+    (task / "setup" / "assets" / "screen.txt").write_text("SCREEN_CODE=ALE-5827\r\nANSWER=\r\n")
+    (task / "oracle" / "assets" / "answer.txt").write_text(expected)
+    (task / "verify" / "assets" / "answer.txt").write_text(expected)
+    (task / "setup" / "run.ps1").write_text(
+        textwrap.dedent(
+            r"""
+            $ErrorActionPreference = "Stop"
+            if ((Get-Culture).Name -ne "en-US") { throw "culture is not en-US" }
+            if ((Get-WinSystemLocale).Name -ne "en-US") { throw "system locale is not en-US" }
+            if ((Get-TimeZone).Id -ne "UTC") { throw "time zone is not UTC" }
+            if (Test-Path "$env:SystemDrive\hiberfil.sys") { throw "hibernation is enabled" }
+            $updatePolicy = Get-ItemProperty `
+                "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+            if ($updatePolicy.NoAutoUpdate -ne 1) { throw "automatic updates are enabled" }
+            $connectionPolicy = Get-ItemProperty `
+                "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+            if ($connectionPolicy.DoNotConnectToWindowsUpdateInternetLocations -ne 1) {
+                throw "Windows Update network access is enabled"
+            }
+            foreach ($path in @(
+                "$env:ProgramFiles\7-Zip", "$env:ProgramFiles\Git",
+                "$env:ProgramFiles\LibreOffice", "$env:USERPROFILE\.conda",
+                "$env:USERPROFILE\.ssh"
+            )) {
+                if (Test-Path -LiteralPath $path) { throw "unexpected base content: $path" }
+            }
+            New-Item "$env:ALE_HOME\output" -ItemType Directory -Force | Out-Null
+            $document = "$env:ALE_HOME\output\result.txt"
+            Copy-Item ".\assets\screen.txt" $document -Force
+            Start-Process notepad.exe -ArgumentList "`"$document`""
+            Start-Sleep -Seconds 3
+            """
+        ).lstrip()
+    )
+    (task / "oracle" / "run.ps1").write_text(
+        'Copy-Item ".\\assets\\answer.txt" "$env:ALE_HOME\\output\\result.txt" -Force\n'
+    )
+    (task / "verify" / "verify.py").write_text(
+        textwrap.dedent(
+            """\
+            import os
+            from pathlib import Path
+
+            from ale_verify import Verification, checks
+
+            home = Path(os.environ["ALE_HOME"])
+            expected = Path("assets/answer.txt").read_text()
+            verification = Verification()
+            verification.check(
+                "desktop_answer",
+                checks.text_equals(str(home / "output/result.txt"), expected),
+            )
+            verification.write()
+            """
+        )
+    )
+    return task
+
+
 @pytest.mark.parametrize("variant", ["base", "alternate"])
 @pytest.mark.parametrize(
     "operating_system",
@@ -210,4 +288,81 @@ async def test_standard_task_assets_and_variants_across_operating_systems(
     }
     assert (result.run_dir / "artifacts/output/result.txt").read_text() == (
         f"{greeting} world verified"
+    )
+
+
+@pytest.mark.needs_kvm
+@pytest.mark.needs_gui
+@pytest.mark.needs_llm
+@LIVE
+async def test_real_llm_reads_and_edits_the_windows_desktop(tmp_path: Path) -> None:
+    image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+    if not image.is_file():
+        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows qcow2")
+
+    task = load_task_folder(_write_windows_gui_task(tmp_path / "tasks"))
+    model = os.environ.get("ALE_LIVE_WINDOWS_MODEL", "claude-opus-4-8")
+    api_key, upstream = provider_credentials(
+        os.environ.get("ALE_LIVE_ANTHROPIC_API_KEY_ENV", ""),
+        os.environ.get("ALE_LIVE_ANTHROPIC_BASE_URL", ""),
+    )
+    gateway = Gateway(api_key=api_key, upstream=upstream, dialect="anthropic", host="0.0.0.0")
+    await gateway.start()
+    try:
+        result = await run_episode(
+            task,
+            StandardEnvironment(
+                ComputerUseHarness(model=model),
+                max_steps=20,
+                stall_limit=6,
+            ),
+            provider_registry(
+                QemuProvider(image=image, overlay_dir=tmp_path / "qemu"),
+                kind=ImageKind.VM,
+            ),
+            run_dir=tmp_path / "runs",
+            gateway_url=gateway.base_url,
+            gateway=gateway,
+            model=model,
+            limits=Limits(max_model_calls=20),
+            logging_policy=LoggingPolicy(transport_payloads="debug"),
+        )
+    finally:
+        await gateway.stop()
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"desktop_answer": 1.0}
+    trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
+    transport = [
+        json.loads(line)
+        for line in (result.run_dir / "trace.transport.jsonl").read_text().splitlines()
+    ]
+    calls = [call for step in trajectory["steps"] for call in step.get("tool_calls") or ()]
+    actions = [call["extra"]["ale"]["normalized_action"] for call in calls]
+    assert any(action["type"] == "screenshot" for action in actions)
+    assert any(action["type"] in {"type", "key"} for action in actions)
+    screenshots = [
+        content
+        for step in trajectory["steps"]
+        for result_item in (step.get("observation") or {}).get("results", ())
+        for content in (
+            result_item.get("content") if isinstance(result_item.get("content"), list) else ()
+        )
+        if content.get("type") == "image"
+    ]
+    assert screenshots
+    assert all((result.run_dir / item["source"]["path"]).is_file() for item in screenshots)
+    assert any(
+        record.get("kind") == "call" and record.get("model") == model for record in transport
+    )
+    llm_audit_evidence(
+        {
+            "trajectory": trajectory,
+            "result": json.loads((result.run_dir / "result.json").read_text()),
+            "transport": transport,
+        },
+        requirement=(
+            "The real computer-use agent inspected a Windows screenshot, copied the "
+            "screen-only code with desktop input, saved it, and earned the verifier reward."
+        ),
     )

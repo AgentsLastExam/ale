@@ -74,17 +74,23 @@ foreach ($stage in $setup, $verify) {
         "SYSTEM:(OI)(CI)(F)" "Administrators:(OI)(CI)(F)" "${AgentUser}:(OI)(CI)(M)" | Out-Null
 }
 
-$driverInstaller = "$work\install-cua-driver.ps1"
-Invoke-WebRequest "https://cua.ai/driver/install.ps1" -OutFile $driverInstaller
-$env:CUA_DRIVER_RS_VERSION = $CuaDriverVersion
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $driverInstaller `
-    -Release $CuaDriverVersion -AutoStart
-if ($LASTEXITCODE -ne 0) {
-    throw "Cua Driver installer exited $LASTEXITCODE."
-}
-
 $driver = "$env:LOCALAPPDATA\Programs\Cua\cua-driver\bin\cua-driver.exe"
-if (-not (Test-Path $driver)) {
+$installedDriver = if (Test-Path $driver) {
+    (& $driver --version 2>$null) -join " "
+} else {
+    ""
+}
+if ($installedDriver -notmatch [regex]::Escape($CuaDriverVersion)) {
+    $driverInstaller = "$work\install-cua-driver.ps1"
+    Invoke-WebRequest "https://cua.ai/driver/install.ps1" -OutFile $driverInstaller
+    $env:CUA_DRIVER_RS_VERSION = $CuaDriverVersion
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $driverInstaller `
+        -Release $CuaDriverVersion -AutoStart
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cua Driver installer exited $LASTEXITCODE."
+    }
+}
+if (-not (Test-Path $driver) -or ((& $driver --version) -join " ") -notmatch $CuaDriverVersion) {
     throw "Cua Driver binary is missing after installation: $driver"
 }
 Unregister-ScheduledTask -TaskName "cua-driver-serve" -Confirm:$false `
@@ -148,13 +154,79 @@ if (-not (Test-Path "$env:ProgramData\ALE\debloat.done")) {
     throw "Windows base cleanup did not complete; inspect C:\ProgramData\ALE\debloat.log."
 }
 
-# A Task episode must not mutate its operating system or reboot midway through a run.
-$updatePolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
-New-Item -Path $updatePolicy -Force | Out-Null
-New-ItemProperty -Path $updatePolicy -Name NoAutoUpdate -Value 1 `
+# The screen, filesystem and timestamps must begin every episode in one predictable locale.
+$languageList = New-WinUserLanguageList "en-US"
+Set-WinUserLanguageList $languageList -Force
+Set-WinUILanguageOverride -Language "en-US"
+Set-WinSystemLocale "en-US"
+Set-Culture "en-US"
+Set-WinHomeLocation -GeoId 244
+Set-TimeZone -Id "UTC"
+if (Get-Command Copy-UserInternationalSettingsToSystem -ErrorAction SilentlyContinue) {
+    Copy-UserInternationalSettingsToSystem -WelcomeScreen $true -NewUser $true
+}
+
+# A Task episode must never update, reboot, recover, sleep or display background prompts.
+$windowsUpdate = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+$automaticUpdate = Join-Path $windowsUpdate "AU"
+New-Item -Path $automaticUpdate -Force | Out-Null
+foreach ($entry in @{
+    DisableWindowsUpdateAccess = 1
+    DoNotConnectToWindowsUpdateInternetLocations = 1
+    SetDisableUXWUAccess = 1
+}.GetEnumerator()) {
+    New-ItemProperty -Path $windowsUpdate -Name $entry.Key -Value $entry.Value `
+        -PropertyType DWord -Force | Out-Null
+}
+foreach ($entry in @{
+    AUOptions = 1
+    NoAutoRebootWithLoggedOnUsers = 1
+    NoAutoUpdate = 1
+}.GetEnumerator()) {
+    New-ItemProperty -Path $automaticUpdate -Name $entry.Key -Value $entry.Value `
+        -PropertyType DWord -Force | Out-Null
+}
+foreach ($service in "wuauserv", "UsoSvc", "WaaSMedicSvc", "DoSvc") {
+    Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$service" `
+        -Name Start -Value 4 -Force -ErrorAction SilentlyContinue
+}
+Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
+    $_.TaskName -match "MicrosoftEdgeUpdate" -or
+    $_.TaskPath -match "WindowsUpdate|UpdateOrchestrator|WaaSMedic|WindowsBackup|FileHistory"
+} | ForEach-Object {
+    Disable-ScheduledTask -InputObject $_ -ErrorAction SilentlyContinue | Out-Null
+}
+$windowsStore = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore"
+New-Item $windowsStore -Force | Out-Null
+New-ItemProperty $windowsStore -Name AutoDownload -Value 2 -PropertyType DWord -Force | Out-Null
+$edgeUpdate = "HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate"
+New-Item $edgeUpdate -Force | Out-Null
+New-ItemProperty $edgeUpdate -Name UpdateDefault -Value 0 -PropertyType DWord -Force | Out-Null
+Get-Service -ErrorAction SilentlyContinue | Where-Object {
+    $_.Name -match "^edgeupdate" -or $_.DisplayName -match "Microsoft Edge Update"
+} | ForEach-Object {
+    Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue
+    Set-Service -Name $_.Name -StartupType Disabled -ErrorAction SilentlyContinue
+}
+
+reagentc.exe /disable | Out-Null
+Disable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction SilentlyContinue
+vssadmin.exe delete shadows /all /quiet | Out-Null
+Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl" `
+    -Name AutoReboot -Value 0 -Force
+
+$errorReporting = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting"
+New-Item $errorReporting -Force | Out-Null
+New-ItemProperty $errorReporting -Name Disabled -Value 1 -PropertyType DWord -Force | Out-Null
+New-ItemProperty $errorReporting -Name DontShowUI -Value 1 -PropertyType DWord -Force | Out-Null
+Stop-Service WerSvc -Force -ErrorAction SilentlyContinue
+Set-Service WerSvc -StartupType Disabled -ErrorAction SilentlyContinue
+
+$maintenance = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance"
+New-Item $maintenance -Force | Out-Null
+New-ItemProperty $maintenance -Name MaintenanceDisabled -Value 1 `
     -PropertyType DWord -Force | Out-Null
-Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
-Set-Service -Name wuauserv -StartupType Disabled
 
 $contentDelivery = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
 New-Item -Path $contentDelivery -Force | Out-Null
@@ -162,13 +234,40 @@ foreach ($name in "SilentInstalledAppsEnabled", "SoftLandingEnabled", "SystemPan
     New-ItemProperty -Path $contentDelivery -Name $name -Value 0 `
         -PropertyType DWord -Force | Out-Null
 }
+$cloudContent = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"
+New-Item $cloudContent -Force | Out-Null
+New-ItemProperty $cloudContent -Name DisableWindowsConsumerFeatures -Value 1 `
+    -PropertyType DWord -Force | Out-Null
+$notifications = "HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer"
+New-Item $notifications -Force | Out-Null
+New-ItemProperty $notifications -Name DisableNotificationCenter -Value 1 `
+    -PropertyType DWord -Force | Out-Null
+$edgePolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"
+New-Item $edgePolicy -Force | Out-Null
+New-ItemProperty $edgePolicy -Name HideFirstRunExperience -Value 1 `
+    -PropertyType DWord -Force | Out-Null
+New-ItemProperty $edgePolicy -Name DefaultBrowserSettingEnabled -Value 0 `
+    -PropertyType DWord -Force | Out-Null
 
 Get-NetFirewallRule -DisplayName "ALE guestd" -ErrorAction SilentlyContinue | `
     Remove-NetFirewallRule
 New-NetFirewallRule -DisplayName "ALE guestd" -Direction Inbound -Action Allow `
     -Protocol TCP -LocalPort 7411 -RemoteAddress 172.30.0.1 | Out-Null
 
+powercfg.exe /setactive SCHEME_BALANCED
 powercfg.exe /hibernate off
+powercfg.exe /change monitor-timeout-ac 0
+powercfg.exe /change monitor-timeout-dc 0
+powercfg.exe /change disk-timeout-ac 0
+powercfg.exe /change disk-timeout-dc 0
+powercfg.exe /change standby-timeout-ac 0
+powercfg.exe /change standby-timeout-dc 0
+powercfg.exe /change hibernate-timeout-ac 0
+powercfg.exe /change hibernate-timeout-dc 0
+Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" `
+    -Name HiberbootEnabled -Value 0 -Force
+Set-ItemProperty "HKCU:\Control Panel\Desktop" -Name ScreenSaveActive -Value "0" -Force
+Set-ItemProperty "HKCU:\Control Panel\Desktop" -Name ScreenSaveTimeOut -Value "0" -Force
 Remove-Item "$env:TEMP\*", "$env:SystemRoot\Temp\*" -Recurse -Force `
     -ErrorAction SilentlyContinue
 Optimize-Volume -DriveLetter C -ReTrim -ErrorAction SilentlyContinue
