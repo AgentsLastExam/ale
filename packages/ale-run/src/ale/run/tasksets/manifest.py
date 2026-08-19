@@ -15,6 +15,7 @@ from ale.core.environment import EpisodeContext
 from ale.core.errors import TaskDefinitionError
 from ale.core.task import Task, TaskSourceContext
 from ale.core.taskspec import (
+    OperatingSystem,
     PhaseTimeouts,
     Resources,
     TaskManifestV1,
@@ -90,9 +91,13 @@ class TaskFolder:
         path = self.root / name
         return path if path.is_dir() else None
 
-    def stage_entry(self, name: str) -> Path | None:
+    def stage_entry(
+        self,
+        name: str,
+        operating_system: OperatingSystem = OperatingSystem.LINUX,
+    ) -> Path | None:
         directory = self.stage_dir(name)
-        entry = directory / STAGE_ENTRY if directory else None
+        entry = directory / _stage_entry(operating_system) if directory else None
         return entry if entry and entry.is_file() else None
 
     @cached_property
@@ -208,13 +213,13 @@ def load_task_folder(path: Path, *, variant: str = "base") -> ManifestTask:
 
 
 def _load_folder(folder: TaskFolder) -> Iterator[ManifestTask]:
-    _require_folder(folder)
     try:
         manifest = TaskManifestV1.model_validate(_read_yaml(folder.root / TASK_MANIFEST))
     except ValidationError as exc:
         raise TaskDefinitionError(
             f"invalid task manifest {folder.root / TASK_MANIFEST}: {exc}"
         ) from exc
+    _require_folder(folder, manifest.os)
     if folder.image_dockerfile is None and manifest.image.ref is None:
         raise TaskDefinitionError("solver requires image/Dockerfile or image.ref")
     if folder.image_dockerfile is None and _has_files(folder.image_dir / "assets"):
@@ -234,12 +239,17 @@ def _load_folder(folder: TaskFolder) -> Iterator[ManifestTask]:
         yield ManifestTask(_effective_spec(manifest, template, str(variant.name), variant), folder)
 
 
-def _require_folder(folder: TaskFolder) -> None:
+def _stage_entry(operating_system: OperatingSystem) -> str:
+    return "run.ps1" if operating_system is OperatingSystem.WINDOWS else STAGE_ENTRY
+
+
+def _require_folder(folder: TaskFolder, operating_system: OperatingSystem) -> None:
+    entry = _stage_entry(operating_system)
     required = (
         folder.root / TASK_MANIFEST,
         folder.root / INSTRUCTION,
-        folder.root / VERIFY_DIR / STAGE_ENTRY,
-        folder.root / ORACLE_DIR / STAGE_ENTRY,
+        folder.root / VERIFY_DIR / entry,
+        folder.root / ORACLE_DIR / entry,
     )
     missing = [path.relative_to(folder.root).as_posix() for path in required if not path.is_file()]
     if missing:
@@ -264,6 +274,7 @@ def _effective_spec(
     )
     return TaskSpec(
         name=manifest.name,
+        os=manifest.os,
         variant=variant_name,
         environment=manifest.environment,
         image=manifest.image,

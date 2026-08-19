@@ -41,7 +41,7 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode
+from ale.core.taskspec import NetworkMode, OperatingSystem
 from ale.run.gpu import GpuLease, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
 from ale.run.sources import cache_root
@@ -468,7 +468,7 @@ class DockerProvider(Provider):
 
     def capabilities(self) -> Capabilities:
         return Capabilities(
-            os="linux",
+            operating_systems=frozenset({OperatingSystem.LINUX}),
             gui=True,  # depends on the image; the GUI base image provides a desktop
             network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.ALLOWLIST, NetworkMode.OPEN}),
         )
@@ -605,11 +605,12 @@ class DockerProvider(Provider):
             await self._install_guestd(container)
             if request.sudo:
                 await self._grant_sudo(container, agent_user)
-            client = await self._connect(container)
+            has_desktop = await self._has_desktop(resolved_image.observed_ref)
+            client = await self._connect(container, agent_user, has_desktop)
             observed_gpu = await self._container_gpus(client) if selected else ()
             if selected:
                 _verify_docker_gpu(selected, observed_gpu)
-            if await self._has_desktop(resolved_image.observed_ref):
+            if has_desktop:
                 await self._await_desktop(client)
         except BaseException:
             with contextlib.suppress(BaseException):
@@ -873,12 +874,20 @@ class DockerProvider(Provider):
             if code != 0:
                 raise ProviderStartError(f"could not install {name}: {stderr.strip()}")
 
-    async def _connect(self, container: str) -> GuestClient:
+    async def _connect(self, container: str, agent_user: str, has_desktop: bool) -> GuestClient:
         transport = StdioTransport(
             [
                 "docker",
                 "exec",
                 "-i",
+                "--env",
+                f"ALE_AGENT_USER={agent_user}",
+                "--env",
+                f"ALE_AGENT_HOME=/home/{agent_user}",
+                "--env",
+                f"ALE_GUI={'true' if has_desktop else 'false'}",
+                "--env",
+                "ALE_CUA_DRIVER_SOCKET=/tmp/ale-cua-driver.sock",
                 container,
                 # One interpreter, and it is the image's own. An image that needs the
                 # guest service to have Pillow installs it there; choosing between

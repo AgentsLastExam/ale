@@ -29,7 +29,7 @@ from ale.core.blob import BlobSink
 from ale.core.env import Observation, StepResult, TaskEnv
 from ale.core.errors import AgentUnsupportedError
 from ale.core.sandbox import Sandbox
-from ale.core.taskspec import McpServer
+from ale.core.taskspec import McpServer, OperatingSystem
 from ale.core.trace import DesktopAction
 from ale.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
 
@@ -82,6 +82,7 @@ class HarnessSession(BaseModel):
     gateway_url: str
     token: str = Field(description="Per-episode bearer; never a provider credential")
     model: str
+    os: OperatingSystem = OperatingSystem.LINUX
     authentication: Literal["api-key", "subscription"] = "api-key"
     profile_slot_id: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     sandbox_id: str = ""

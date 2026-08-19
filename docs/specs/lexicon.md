@@ -11,19 +11,20 @@ remains `core/v1`.
 | **Task folder** | The complete self-contained authored source unit: manifest, instruction, image build context, setup, verification, oracle, and optional agent resources. | not dependent on `domain.yaml`, a repository Kit, sibling Task, or shared domain image |
 | **Task source digest** | A digest of the Task folder's canonical paths, bytes, executable bits, and symlink targets, pruning only the four exact stage asset roots and generated state. | not a hash of `task.yaml` alone or of asset bytes |
 | **TaskSpec** | The frozen, serializable effective specification of one selected Task instance after instruction rendering and variant application. | not the folder on disk |
+| **Task operating system** | `linux` (default) or explicit `windows`; it selects path and stage-entry semantics and must match the prepared image. | not a Provider name inferred from an image tag |
 | **Task** | One self-contained Task folder bound to its effective TaskSpec and standard behavior. | not a collection or loader |
 | **Task collection** | A directory or source that contains several independent Task folders for selection. | not a Task and not an execution contract |
 | **Variant** | An additional named parameter/resource/timeout instance of one Task. The top-level Task is always `base`. | not allowed to change image, setup, verification, network, artifacts, Skills, or MCP |
 | **Image declaration** | Required `image.kind: container|vm` plus optional `image.ref` for a solver or dedicated verifier. | not a Provider selection or build flag |
 | **Task image** | The final container or VM image prepared from one fixed local Dockerfile or matching-kind ref. | not a shared Image Tree node |
 | **Prepared Task image** | Immutable kind-aware output consumed by a sandbox request. | not mutable sandbox state |
-| **ALE base image** | A foundational desktop container or VM OCI image providing the sandbox contract and guest service. | not a domain image or Task-specific dependency bundle |
-| **VM materializer** | ALE-owned versioned conversion from final VM OCI rootfs to bootable qcow2. | never Task-authored boot or partition code |
+| **ALE base image** | A foundational Linux desktop container, Ubuntu VM, or private Windows BYOL image providing the sandbox contract and guest service. | not a domain image or Task-specific dependency bundle |
+| **VM materializer** | ALE-owned versioned conversion from final Linux VM OCI rootfs to bootable qcow2. | never Task-authored boot or partition code |
 | **Task assets** | Optional ignored files directly below a Task's `image/assets`, `setup/assets`, `verify/assets`, or `oracle/assets`, synchronized explicitly with a same-named HF dataset. | not a manifest declaration, central cache tree, content hash, or implicit runtime download |
 | **Image assets** | Task-local `image/assets` bytes consumed through the ordinary `image/` Docker context. | not a named BuildKit context or runtime mount |
 | **Verify assets** | Task-local `verify/assets` bytes uploaded only with the verify stage and read by verifier code through ordinary relative paths. | never baked into the solver image or published during agent execution |
 | **Oracle assets** | Task-local `oracle/assets` bytes uploaded only when the oracle harness runs and read through ordinary relative paths. | never uploaded for an evaluated solver |
-| **Setup** | Trusted root work that creates irreducibly per-episode state after the Task image starts. | not package installation, fixed compilation, or fixed input download |
+| **Setup** | Trusted framework-controlled Task work that creates irreducibly per-episode state after the Task image starts. | not package installation, fixed compilation, or fixed input download |
 | **Framework Verification Library** (`ale_verify`) | The engine-owned Python package staged for verify; it composes checks, direct Judges, aggregates, stats, and the final reward map. | not a repository Kit, Host verification service, Gateway client, or plugin |
 | **Judge Invocation** | One attributable LLM or agent Judge execution with its resolved configuration, attempts, usage, verdict, and evidence links. | not a Task manifest declaration or reusable profile |
 | **Verification Record** | The sandbox-owned `verification.json` derivation of rewards: criteria, stats, aggregates, Judge invocations, diagnostics, and failure. | not the Episode Result or solver trajectory |

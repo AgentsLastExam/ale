@@ -12,13 +12,15 @@ callbacks, Gateway sessions, and Harness machinery.
 
 `StandardEnvironment` owns the linear provision, setup, agent/oracle, evidence capture,
 verify, and teardown order for both container and VM Tasks. Setup and verification run as
-trusted root with open egress; solver and oracle run as the image user under Task network
-policy. Phase deadlines and cancellation-safe teardown are framework enforced.
+trusted framework-controlled Task code with open egress; solver and oracle run as the
+image user under Task network policy. Linux uses root for framework work; the first
+Windows base uses lifecycle withholding in one interactive user session. Phase deadlines
+and cancellation-safe teardown are framework enforced.
 
-Withholding is staging time plus framework-directory permissions. `verify/` is uploaded
-only after the solver and Harness cleanup finish. `oracle/` is uploaded only for an oracle
-episode. Stage-local assets arrive with their stage directory and use ordinary relative
-paths.
+Withholding is staging time, plus framework-directory permissions where the OS image
+provides them. `verify/` is uploaded only after the solver and Harness cleanup finish.
+`oracle/` is uploaded only for an oracle episode. Stage-local assets arrive with their
+stage directory and use ordinary relative paths.
 
 Shared verification runs in the completed solver sandbox. Separate verification starts a
 fresh independently resourced sandbox, optionally with its own local or referenced image,

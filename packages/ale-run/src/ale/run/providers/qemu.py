@@ -30,7 +30,7 @@ import uuid
 import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 from urllib.parse import quote
 
@@ -53,7 +53,7 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode
+from ale.core.taskspec import NetworkMode, OperatingSystem
 from ale.run.gpu import GpuLease, normalize_pci_bdf, parse_nvidia_smi
 from ale.run.images import (
     resolve_local_vm_fixture,
@@ -77,7 +77,7 @@ VM_STORAGE_OVERHEAD_MB = 1024
 RUNNER_IMAGE = os.environ.get("ALE_QEMU_RUNNER", "ghcr.io/agentslastexam/ale-qemu-runner:0.1.0")
 
 #: Where the runner expects the disk to boot, and the address it presents the host at.
-#: The in-guest firewall rule and the rewritten gateway URL both target the latter.
+#: Runner-side forwarding and the rewritten gateway URL both target the latter.
 RUNNER_DISK = "/storage/data.qcow2"
 
 #: Where the guest disk is published, and how it travels. A qcow2 is not a container
@@ -93,14 +93,12 @@ RUNNER_BASE = "/images/base.qcow2"
 #: sends arrives on it, which is what makes one rule enough to confine it.
 GUEST_BRIDGE = "docker"
 
-#: The deny-all ruleset baked into the guest, reloaded when the agent's phase begins.
-GUEST_RULES = "/etc/nftables.conf"
+#: Fixed address through which the guest reaches Host services exposed by the runner.
 HOST_IP = "172.30.0.1"
 
 #: Where the guest writes the same facts a container image puts in labels: which account
 #: is the agent's, and whether there is a screen. A disk image has nowhere to hang a label,
 #: so the contract of docs/specs/sandbox-image.md is carried in a file instead.
-MANIFEST_PATH = "/etc/ale/image.json"
 DEFAULT_AGENT_USER = "user"
 
 #: A guest boots an operating system, so this is minutes rather than the seconds a
@@ -320,6 +318,7 @@ class QemuSandbox(Sandbox):
         allocation: ResourceAllocation,
         resource_lease: GpuLease | None = None,
         agent_user: str = DEFAULT_AGENT_USER,
+        agent_home: str = "/home/user",
         host_ip: str = "",
     ) -> None:
         super().__init__(
@@ -333,6 +332,7 @@ class QemuSandbox(Sandbox):
         self.storage = storage
         self.host_port = host_port
         self.agent_user = agent_user
+        self.agent_home = agent_home
         self.host_ip = host_ip
         self._client = client
         self._sealed = False
@@ -398,20 +398,20 @@ class QemuSandbox(Sandbox):
 
     async def write_file(
         self,
-        path: PurePosixPath | str,
+        path: str,
         data: bytes,
         *,
         identity: Identity = Identity.FRAMEWORK,
     ) -> None:
         await self._client.write_file(str(path), data, run_as=self._as(identity))
 
-    async def read_file(self, path: PurePosixPath | str) -> bytes:
+    async def read_file(self, path: str) -> bytes:
         return await self._client.read_file(str(path))
 
     async def upload_dir(
         self,
         source: str,
-        target: PurePosixPath | str,
+        target: str,
         *,
         identity: Identity = Identity.FRAMEWORK,
     ) -> None:
@@ -423,31 +423,32 @@ class QemuSandbox(Sandbox):
         """
         root = Path(source)
         run_as = self._as(identity)
-        await self._client.mkdirs(str(target))
+        path_type = PureWindowsPath if self.request.os is OperatingSystem.WINDOWS else PurePosixPath
+        target_path = path_type(str(target))
+        await self._client.mkdirs(str(target_path), run_as=run_as)
         for entry in sorted(root.rglob("*")):
             relative = entry.relative_to(root)
-            destination = PurePosixPath(str(target)) / relative
+            destination = target_path.joinpath(*relative.parts)
             if entry.is_dir():
-                await self._client.mkdirs(str(destination))
+                await self._client.mkdirs(str(destination), run_as=run_as)
             elif entry.is_file():
-                await self._client.mkdirs(str(destination.parent))
+                await self._client.mkdirs(str(destination.parent), run_as=run_as)
                 await self._client.write_file(str(destination), entry.read_bytes(), run_as=run_as)
-        if run_as:
+        if run_as and self.request.os is OperatingSystem.LINUX:
             # The directories were made by the guest service, which is root; without this
             # the agent owns the files it was given and not the tree holding them.
             await self._client.exec(["chown", "-R", run_as, str(target)])
 
-    async def download_dir(self, source: PurePosixPath | str, target: str) -> None:
+    async def download_dir(self, source: str, target: str) -> None:
         Path(target).mkdir(parents=True, exist_ok=True)
-        listing = await self.exec(["find", str(source), "-type", "f"])
-        for line in listing.stdout.splitlines():
-            remote = line.strip()
-            if not remote:
-                continue
-            relative = PurePosixPath(remote).relative_to(PurePosixPath(str(source)))
-            local = Path(target) / relative
+        path_type = PureWindowsPath if self.request.os is OperatingSystem.WINDOWS else PurePosixPath
+        source_path = path_type(str(source))
+        for relative_name in await self._client.list_files(str(source_path)):
+            relative = PurePosixPath(relative_name)
+            remote = source_path.joinpath(*relative.parts)
+            local = Path(target).joinpath(*relative.parts)
             local.parent.mkdir(parents=True, exist_ok=True)
-            local.write_bytes(await self._client.read_file(remote))
+            local.write_bytes(await self._client.read_file(str(remote)))
 
     async def screenshot(self) -> bytes:
         return await self._client.screenshot()
@@ -460,27 +461,18 @@ class QemuSandbox(Sandbox):
         return await self._client.inject_input(payload)
 
     async def open_egress(self) -> None:
-        """Lift both halves of the confinement, for the framework's own phases.
-
-        Both, because either alone would leave the guest sealed: the runner drops what the
-        guest forwards, and the guest's own firewall permits only the runner. They are
-        applied and lifted together for the same reason they exist together.
-        """
+        """Lift the runner firewall for the framework's own phases."""
         for rule in (
             f"iptables -D FORWARD -i {GUEST_BRIDGE} ! -d {self.host_ip} -j DROP",
             f"iptables -D INPUT -i {GUEST_BRIDGE} -j DROP",
         ):
             await _run("docker", "exec", self.container, "sh", "-c", rule, timeout=60)
-        await self._client.exec(["nft", "flush", "ruleset"], timeout_sec=60)
         self._sealed = False
 
     async def close_egress(self) -> None:
-        """Put both halves back, before the agent starts."""
+        """Restore the runner firewall before the agent starts."""
         if self.request.network.mode is NetworkMode.OPEN:
             return
-        result = await self._client.exec(["nft", "-f", GUEST_RULES], timeout_sec=60)
-        if result[0] != 0:
-            raise ProviderStartError(f"could not restore the guest firewall: {result[2].strip()}")
         for rule in (
             f"iptables -I FORWARD -i {GUEST_BRIDGE} ! -d {self.host_ip} -j DROP",
             f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -j DROP",
@@ -556,7 +548,7 @@ class QemuProvider(Provider):
 
     def capabilities(self) -> Capabilities:
         return Capabilities(
-            os="linux",
+            operating_systems=frozenset({OperatingSystem.LINUX, OperatingSystem.WINDOWS}),
             # Whether there is a screen is a property of the disk that was built, not of
             # this backend; a guest with no desktop refuses the request when asked.
             gui=True,
@@ -660,9 +652,9 @@ class QemuProvider(Provider):
             transport = TcpTransport("127.0.0.1", host_port)
             await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
             client = GuestClient(transport)
-            agent_user, has_desktop = await self._read_manifest(client)
+            agent_user, agent_home, has_desktop = await self._read_guest_contract(client, request)
             effective_storage_mb = await self._prepare_root_storage(
-                client, request.resources.storage_mb
+                client, request.resources.storage_mb, request.os
             )
             observed_gpu = await self._guest_gpus(client) if selected else ()
             if selected:
@@ -674,9 +666,9 @@ class QemuProvider(Provider):
                 # "the sandbox has a screen". No probe can tell the difference on its own:
                 # a screenshot that fails at this instant means "no desktop here" and
                 # "not yet" equally, and only the image knows which.
-                await self._await_desktop(client, agent_user)
+                await self._await_desktop(client)
             if request.sudo:
-                await self._grant_sudo(client, agent_user)
+                await self._grant_sudo(client, agent_user, request.os)
         except BaseException:
             with contextlib.suppress(BaseException):
                 await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))
@@ -716,6 +708,7 @@ class QemuProvider(Provider):
             ),
             resource_lease=lease,
             agent_user=agent_user,
+            agent_home=agent_home,
             host_ip=host_ip,
         )
         if request.network.mode is NetworkMode.OPEN:
@@ -787,9 +780,8 @@ class QemuProvider(Provider):
             "--label", f"{RETENTION_LABEL}={request.retention}",
             "--label", f"{STORAGE_LABEL}={storage.resolve()}",
             "--device=/dev/kvm",
-            # The runner builds the guest's network itself, which needs the capability;
-            # the guest is still confined by the container's own network and by the
-            # firewall baked into the image.
+            # The runner builds and confines the guest network itself, which needs this
+            # capability. Enforcement stays outside the guest on every operating system.
             "--cap-add", "NET_ADMIN",
             "--shm-size", "1g",
             "--mount",
@@ -801,7 +793,7 @@ class QemuProvider(Provider):
             "--env", "CPU_MODEL=host",
             # Hypervisor enlightenments are for Windows guests; a Linux guest boots
             # faster without them.
-            "--env", "HV=N",
+            "--env", f"HV={'Y' if request.os is OperatingSystem.WINDOWS else 'N'}",
         ]  # fmt: skip
         if gpus:
             argv += ["--label", f"{GPU_LABEL}={','.join(gpu.bdf for gpu in gpus)}"]
@@ -847,31 +839,46 @@ class QemuProvider(Provider):
             )
         return parse_nvidia_smi(stdout)
 
-    async def _root_capacity_mb(self, client: GuestClient) -> int:
-        code, stdout, stderr, _ = await client.exec(["df", "-Pm", "/"], timeout_sec=30)
+    async def _root_capacity_mb(
+        self, client: GuestClient, operating_system: OperatingSystem
+    ) -> int:
+        root = "C:\\" if operating_system is OperatingSystem.WINDOWS else "/"
         try:
-            capacity = int(stdout.strip().splitlines()[-1].split()[1])
-        except (IndexError, ValueError) as exc:
+            total, _, _ = await client.disk_usage(root)
+        except Exception as exc:
             raise ProviderStartError(
-                f"could not observe VM root filesystem capacity: {stderr.strip() or stdout.strip()}"
+                f"could not observe VM root filesystem capacity: {exc}"
             ) from exc
-        if code != 0 or capacity <= 0:
-            raise ProviderStartError(
-                f"could not observe VM root filesystem capacity: {stderr.strip() or stdout.strip()}"
-            )
-        return capacity
+        return total // (1024 * 1024)
 
     async def _prepare_root_storage(
-        self, client: GuestClient, requested_storage_mb: int | None
+        self,
+        client: GuestClient,
+        requested_storage_mb: int | None,
+        operating_system: OperatingSystem,
     ) -> int:
-        capacity = await self._root_capacity_mb(client)
+        capacity = await self._root_capacity_mb(client, operating_system)
         if requested_storage_mb is None or capacity >= requested_storage_mb:
             return capacity
 
-        for argv in (
-            ["systemd-repart", "--dry-run=no"],
-            ["/usr/lib/systemd/systemd-growfs", "/"],
-        ):
+        commands = (
+            (
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "$s=(Get-PartitionSupportedSize -DriveLetter C); "
+                    "Resize-Partition -DriveLetter C -Size $s.SizeMax",
+                ],
+            )
+            if operating_system is OperatingSystem.WINDOWS
+            else (
+                ["systemd-repart", "--dry-run=no"],
+                ["/usr/lib/systemd/systemd-growfs", "/"],
+            )
+        )
+        for argv in commands:
             code, stdout, stderr, _ = await client.exec(argv, timeout_sec=120)
             if code != 0:
                 raise ProviderStartError(
@@ -879,7 +886,7 @@ class QemuProvider(Provider):
                     f"{stderr.strip() or stdout.strip()}"
                 )
 
-        capacity = await self._root_capacity_mb(client)
+        capacity = await self._root_capacity_mb(client, operating_system)
         if capacity < requested_storage_mb:
             raise ProviderCapabilityError(
                 f"VM root filesystem provides {capacity} MB after expansion, "
@@ -926,9 +933,7 @@ class QemuProvider(Provider):
                 raise ProviderStartError(f"could not route the gateway: {stderr.strip()}")
         return host_ip
 
-    async def _await_desktop(
-        self, client: GuestClient, agent_user: str, timeout_sec: float = 300
-    ) -> None:
+    async def _await_desktop(self, client: GuestClient, timeout_sec: float = 300) -> None:
         """Block until the screen can be captured *and* something has been drawn on it.
 
         Capturing alone is not enough here, and that is the difference from the container
@@ -951,23 +956,8 @@ class QemuProvider(Provider):
         last = "no screenshot was taken"
         while loop.time() < deadline:
             try:
-                display_manager = await client.exec(
-                    ["systemctl", "is-active", "gdm3"], timeout_sec=30
-                )
-                session = await client.exec(
-                    ["pgrep", "-u", agent_user, "-x", "gnome-shell"], timeout_sec=30
-                )
-            except TimeoutError as exc:
-                last = f"desktop readiness probe timed out: {exc}"
-                await asyncio.sleep(2)
-                continue
-            if display_manager[0] != 0 or session[0] != 0:
-                last = "GDM or the declared user's GNOME Shell session is not active"
-                await asyncio.sleep(2)
-                continue
-            try:
                 png = await client.screenshot()
-            except Exception as exc:  # X is not up yet
+            except Exception as exc:
                 last = str(exc)
                 await asyncio.sleep(2)
                 continue
@@ -979,40 +969,60 @@ class QemuProvider(Provider):
             f"this guest declares a desktop but none was ready within {timeout_sec:g}s ({last})"
         )
 
-    async def _read_manifest(self, client: GuestClient) -> tuple[str, bool]:
-        """Read which account this image calls the agent's, and whether it has a screen.
-
-        A container image answers with a label. A disk image has nowhere to put one, so it
-        is a file in the guest — read through the guest service, which is the only channel
-        into a machine that has no exec.
-        """
-        result = await client.exec(["cat", MANIFEST_PATH], timeout_sec=30)
-        if result[0] != 0:
-            raise ProviderCapabilityError(
-                f"this guest image has no {MANIFEST_PATH}, so there is no way to know which "
-                "account the agent runs as; rebuild it with images/base/qemu/build-desktop.sh"
-            )
+    async def _read_guest_contract(
+        self, client: GuestClient, request: SandboxRequest
+    ) -> tuple[str, str, bool]:
+        health = await client.health()
         try:
-            manifest = json.loads(result[1])
-        except json.JSONDecodeError as exc:
-            raise ProviderCapabilityError(f"{MANIFEST_PATH} is not valid JSON: {exc}") from exc
-
-        user = str(manifest.get("user") or DEFAULT_AGENT_USER)
-        code, _, _, _ = await client.exec(["id", "-u", user], timeout_sec=30)
-        if code != 0:
+            observed_os = OperatingSystem(str(health["os"]))
+        except (KeyError, ValueError) as exc:
+            raise ProviderCapabilityError("guestd health omitted a valid os") from exc
+        if observed_os is not request.os:
             raise ProviderCapabilityError(
-                f"{MANIFEST_PATH} names {user!r} as the agent account, but no such user "
-                "exists in this guest"
+                f"task requests {request.os} but the VM image runs {observed_os}"
             )
-        return user, bool(manifest.get("gui"))
+        user = str(health.get("agent_user") or "")
+        home = str(health.get("agent_home") or "")
+        if request.os is OperatingSystem.LINUX:
+            # Published pre-Windows Linux images predate these health fields but already
+            # implement the fixed base-image identity contract.
+            user = user or DEFAULT_AGENT_USER
+            home = home or f"/home/{user}"
+        if not user or not home or not await client.exists(home):
+            raise ProviderCapabilityError(
+                f"guestd names {user!r} at {home!r} as the agent account, but that home is absent"
+            )
+        return user, home, bool(health.get("gui"))
 
-    async def _grant_sudo(self, client: GuestClient, agent_user: str) -> None:
+    async def _grant_sudo(
+        self, client: GuestClient, agent_user: str, operating_system: OperatingSystem
+    ) -> None:
         """Elevate the agent, and prove it took.
 
         Written and then checked, because a rule can land in a guest with no sudo binary
         at all: the write succeeds, the run reports an elevated agent, and nothing can
         actually elevate. Provenance would record an isolation level that never applied.
         """
+        if operating_system is OperatingSystem.WINDOWS:
+            code, _, stderr, _ = await client.exec(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "if (-not ([Security.Principal.WindowsPrincipal] "
+                    "[Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("
+                    "[Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 1 }",
+                ],
+                run_as=agent_user,
+                timeout_sec=30,
+            )
+            if code != 0:
+                raise ProviderCapabilityError(
+                    f"elevated privileges were requested but {agent_user} is not an Administrator: "
+                    f"{stderr.strip()}"
+                )
+            return
         await client.write_file(
             f"/etc/sudoers.d/ale-{agent_user}",
             f"{agent_user} ALL=(ALL) NOPASSWD: ALL\n".encode(),

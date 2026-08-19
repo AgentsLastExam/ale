@@ -289,12 +289,23 @@ class GuestClient:
             if event.get("event") == "chunk"
         )
 
-    async def mkdirs(self, path: str) -> None:
-        await self.call("mkdirs", {"path": path})
+    async def mkdirs(self, path: str, *, run_as: str | None = None) -> None:
+        params = {"path": path}
+        if run_as:
+            params["run_as"] = run_as
+        await self.call("mkdirs", params)
 
     async def exists(self, path: str) -> bool:
         data, _ = await self.call("stat", {"path": path})
         return bool(data.get("exists"))
+
+    async def list_files(self, path: str) -> tuple[str, ...]:
+        data, _ = await self.call("list_files", {"path": path})
+        return tuple(str(item) for item in data.get("files", ()))
+
+    async def disk_usage(self, path: str) -> tuple[int, int, int]:
+        data, _ = await self.call("disk_usage", {"path": path})
+        return int(data["total"]), int(data["used"]), int(data["free"])
 
     async def screenshot(self) -> bytes:
         data, _ = await self.call("screenshot", timeout_sec=60)

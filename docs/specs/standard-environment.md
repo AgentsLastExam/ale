@@ -39,22 +39,24 @@ Shared verification provisions one physical sandbox with role `shared`. Separate
 verification provisions a `solver` sandbox first and a `verifier` sandbox only after
 solver evidence capture.
 
-The image declares the unprivileged agent account. Its home is the solver workspace.
-Framework material lives under root-owned `/opt/ale`; ALE does not add a Task path prefix
-or pre-create declared artifacts.
+The image declares the agent account and home. ALE does not add a Task path prefix or
+pre-create declared artifacts. Framework staging uses `/opt/ale` on Linux and
+`C:\ProgramData\ALE` on Windows.
 
 ### Setup
 
-If `setup/` exists, ALE uploads the complete directory to `/opt/ale/setup`, opens egress,
-and executes `run.sh` as trusted root with that directory as cwd. `assets/` is therefore
-available by an ordinary relative path. Setup is optional and runs once.
+If `setup/` exists, ALE uploads the complete directory to the OS staging root, opens
+egress, and executes `run.sh` on Linux or `run.ps1` on Windows with that directory as cwd.
+`assets/` is therefore available by an ordinary relative path. Setup is optional and runs once.
 
 ### Agent or oracle
 
 ALE installs the selected Harness and its declared resources, validates staged stdio MCP
 commands, then applies the Task network policy. Autonomous Harnesses launch inside the
 sandbox; Policy Harnesses drive the framework-owned `TaskEnv`. The evaluated solver and
-the validation oracle both run as the image's agent account.
+the validation oracle both run as the image's agent account. Windows currently supports
+Policy Harnesses plus the built-in `nop` and `oracle`; Linux-only autonomous CLI Harnesses
+fail before installation.
 
 `oracle/` is uploaded only for an oracle episode and is absent for an evaluated solver.
 `verify/` is also absent throughout this phase.
@@ -78,10 +80,12 @@ verification first releases or retains the solver according to run policy, provi
 fresh verifier sandbox, restores captured artifacts to their original absolute paths,
 and uploads the same `verify/`. It never reruns setup or copies the solver filesystem.
 
-Verification runs as trusted root with open egress. ALE stages `ale_verify`, the rendered
+Verification runs as framework-controlled Task code with open egress. ALE stages `ale_verify`, the rendered
 instruction, parameters, optional solver trajectory, and run-level Judge configuration,
-then executes `verify/run.sh` from `/opt/ale/verify`. Both placements must produce the
-same reward envelope and `verification.json` contract.
+then executes the OS entry from the verification staging directory. Linux uses
+`/opt/ale/verify/run.sh` and system `python3`; Windows uses
+`C:\ProgramData\ALE\verify\run.ps1` and system `python.exe`. Both placements must produce
+the same reward envelope and `verification.json` contract.
 
 ### Teardown and retention
 

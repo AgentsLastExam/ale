@@ -34,14 +34,21 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
         "systemd",
         "ubuntu-desktop",
         "gdm3.service",
-        "python3-pil",
-        "python3-xlib",
-        "xdotool",
+        "CUA_DRIVER_VERSION=0.12.6",
+        "cua-driver serve",
         "sudo",
         "ale-guestd.service",
     ):
         assert required in dockerfile
-    for forbidden in ("docker.io", "docker-ce", "ros-", "gazebo"):
+    for forbidden in (
+        "docker.io",
+        "docker-ce",
+        "ros-",
+        "gazebo",
+        "python3-pil",
+        "python3-xlib",
+        "xdotool",
+    ):
         assert forbidden not in dockerfile
 
     manifest = json.loads((BASE_ROOT / "vm-gui/image.json").read_text())

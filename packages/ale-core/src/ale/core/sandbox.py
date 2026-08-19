@@ -15,13 +15,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from enum import StrEnum
-from pathlib import PurePosixPath
 from typing import Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ale.core.errors import ProviderCapabilityError
-from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, Resources
+from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 
 __all__ = [
     "Capabilities",
@@ -156,7 +155,7 @@ class Capabilities(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    os: str = "linux"
+    operating_systems: frozenset[OperatingSystem] = frozenset({OperatingSystem.LINUX})
     gui: bool = False
     network_modes: frozenset[NetworkMode] = frozenset({NetworkMode.OPEN})
     max_cpus: int | None = None
@@ -164,7 +163,12 @@ class Capabilities(BaseModel):
     reset: bool = False
     snapshot: bool = False
 
-    def check(self, resources: Resources, network: NetworkPolicy) -> None:
+    def check(
+        self,
+        resources: Resources,
+        network: NetworkPolicy,
+        operating_system: OperatingSystem = OperatingSystem.LINUX,
+    ) -> None:
         """Raise :class:`ProviderCapabilityError` if this provider cannot serve a task.
 
         A desktop is not among the things checked. Whether one exists is a property of the
@@ -172,6 +176,9 @@ class Capabilities(BaseModel):
         asks for a screenshot in a sandbox without one is told so by the screenshot.
         """
         problems: list[str] = []
+        if operating_system not in self.operating_systems:
+            offered = ", ".join(sorted(self.operating_systems))
+            problems.append(f"operating system {operating_system} unsupported (offers: {offered})")
         if network.mode not in self.network_modes:
             offered = ", ".join(sorted(self.network_modes))
             problems.append(f"network mode {network.mode} unsupported (offers: {offered})")
@@ -213,6 +220,7 @@ class SandboxRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     episode_id: str
+    os: OperatingSystem = OperatingSystem.LINUX
     role: SandboxRole = SandboxRole.SOLVER
     retention: Literal["destroy", "keep"] = "destroy"
     prepared_image: PreparedTaskImage
@@ -355,11 +363,11 @@ class Sandbox(ABC):
 
     @abstractmethod
     async def write_file(
-        self, path: PurePosixPath | str, data: bytes, *, identity: Identity = Identity.FRAMEWORK
+        self, path: str, data: bytes, *, identity: Identity = Identity.FRAMEWORK
     ) -> None: ...
 
     @abstractmethod
-    async def read_file(self, path: PurePosixPath | str) -> bytes: ...
+    async def read_file(self, path: str) -> bytes: ...
 
     async def open_egress(self) -> None:
         """Let the sandbox reach the network, for the framework's own phases.
@@ -383,11 +391,11 @@ class Sandbox(ABC):
 
     @abstractmethod
     async def upload_dir(
-        self, source: str, target: PurePosixPath | str, *, identity: Identity = Identity.FRAMEWORK
+        self, source: str, target: str, *, identity: Identity = Identity.FRAMEWORK
     ) -> None: ...
 
     @abstractmethod
-    async def download_dir(self, source: PurePosixPath | str, target: str) -> None: ...
+    async def download_dir(self, source: str, target: str) -> None: ...
 
     @abstractmethod
     async def destroy(self) -> None:
@@ -433,4 +441,4 @@ class Provider(ABC):
 
     def accepts(self, request: SandboxRequest) -> None:
         """Raise unless this provider can serve ``request``."""
-        self.capabilities().check(request.resources, request.network)
+        self.capabilities().check(request.resources, request.network, request.os)

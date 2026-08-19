@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from ale.core.harness import ResolvedMcpServer
 from ale.core.sandbox import Identity, Sandbox
@@ -45,8 +45,10 @@ def resolved_cua_desktop() -> ResolvedMcpServer:
 
 async def stage_cua_desktop(sandbox: Sandbox, home: str) -> str:
     """Stage the built-in implementation and return its sandbox directory."""
-    root = PurePosixPath(home) / ".ale-cua-desktop"
-    await sandbox.exec(["mkdir", "-p", str(root)], identity=Identity.AGENT)
+    path_type = PureWindowsPath if sandbox.request.os.value == "windows" else PurePosixPath
+    root = path_type(home) / ".ale-cua-desktop"
     for source in _SOURCES:
-        await sandbox.write_file(root / source.name, source.read_bytes(), identity=Identity.AGENT)
+        await sandbox.write_file(
+            str(root / source.name), source.read_bytes(), identity=Identity.AGENT
+        )
     return str(root)

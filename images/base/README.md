@@ -6,6 +6,7 @@ ALE publishes foundational Sandbox images, not Task-specific environments.
 |---|---|
 | `gui/` → `container-ubuntu22-base` | Ubuntu 22.04 container with a desktop |
 | `vm-gui/` → `vm-ubuntu24-base` | Ubuntu 24.04 OCI source for a bootable desktop VM |
+| `windows/` | Win10 BYOL seed post-processing and compaction recipe |
 | `vm-materializer/` | converts final VM OCI content to qcow2 |
 
 Task repositories extend one of these images with their fixed dependencies and inputs.

@@ -13,13 +13,13 @@ The standard shape is:
 
 ```text
 verify/
-├── run.sh
+├── run.sh          # Linux; run.ps1 on Windows
 ├── verify.py
 ├── Dockerfile       # optional, separate mode only
 └── assets/          # optional, synchronized outside Git
 ```
 
-`run.sh` executes the verifier by a relative path:
+The OS entry executes the verifier by a relative path. Linux uses:
 
 ```bash
 #!/usr/bin/env bash
@@ -27,10 +27,16 @@ set -euo pipefail
 exec python3 verify.py
 ```
 
+Windows uses:
+
+```powershell
+python.exe .\verify.py
+```
+
 ALE runs the stage with `verify/` as cwd. Task code should use ordinary relative paths
 for its own code and assets, and literal absolute paths for solver outputs. The selected
-verification image must expose system `python3` 3.12 or newer; ALE stages the package
-into that interpreter's site-packages.
+verification image must expose system Python 3.12 or newer; ALE stages the package into
+that interpreter's site-packages.
 
 ## Stateful API
 
@@ -115,7 +121,7 @@ invalid verdicts receive a schema-repair prompt, while transient failures retry.
 ## Records and failure
 
 `verification.json` contains ordered criteria, stats, aggregates, Judge invocations and
-attempts, diagnostics, status, and failure. ALE collects it after `run.sh`, verifies that
+attempts, diagnostics, status, and failure. ALE collects it after the OS entry exits, verifies that
 its rewards and stats exactly match the reward envelope, and stores it at the episode
 root. A launched Agent Judge also produces sanitized `logs/agent-judge.jsonl`.
 

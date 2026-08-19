@@ -21,12 +21,12 @@ import argparse
 import base64
 import contextlib
 import os
-import selectors
+import queue
 import shutil
-import signal
 import socketserver
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, BinaryIO, TextIO
@@ -67,14 +67,21 @@ class Handler:
     # --- introspection ------------------------------------------------------
 
     def op_health(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
+        from gui import available
+
+        operating_system = "windows" if os.name == "nt" else "linux"
+        declared_gui = os.environ.get("ALE_GUI", "").lower() in {"1", "true", "yes"}
         return ok(
             req_id,
             proto=PROTOCOL_VERSION,
             guestd_version=GUESTD_VERSION,
-            os=sys.platform,
+            os=operating_system,
             python=sys.version.split()[0],
             user=_current_user(),
-            gui=_has_display(),
+            agent_user=os.environ.get("ALE_AGENT_USER") or _current_user(),
+            agent_home=os.environ.get("ALE_AGENT_HOME") or str(Path.home()),
+            gui=declared_gui,
+            gui_ready=available() if declared_gui else False,
         )
 
     # --- execution ----------------------------------------------------------
@@ -95,8 +102,11 @@ class Handler:
             "env": env,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
-            "start_new_session": True,
         }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
         popen_kwargs.update(_drop_to(params.get("run_as"), env))
         try:
             if shell_cmd:
@@ -118,32 +128,36 @@ class Handler:
     def _stream_process(
         self, req_id: int, proc: subprocess.Popen[bytes], timeout: float | None
     ) -> bool:
-        selector = selectors.DefaultSelector()
         assert proc.stdout is not None and proc.stderr is not None
-        selector.register(proc.stdout, selectors.EVENT_READ, "stdout_chunk")
-        selector.register(proc.stderr, selectors.EVENT_READ, "stderr_chunk")
+        chunks: queue.Queue[tuple[str, bytes | None]] = queue.Queue()
+
+        def read(stream: BinaryIO, name: str) -> None:
+            read_chunk = getattr(stream, "read1", stream.read)
+            while block := read_chunk(CHUNK_BYTES):
+                chunks.put((name, block))
+            chunks.put((name, None))
+
+        readers = [
+            threading.Thread(target=read, args=(proc.stdout, "stdout_chunk"), daemon=True),
+            threading.Thread(target=read, args=(proc.stderr, "stderr_chunk"), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
         deadline = time.monotonic() + float(timeout) if timeout else None
         timed_out = False
-
-        while selector.get_map():
+        open_streams = len(readers)
+        while open_streams:
             if deadline is not None and time.monotonic() >= deadline and proc.poll() is None:
                 timed_out = True
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(proc.pid, signal.SIGKILL)
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            wait = 0.1 if remaining is None else min(0.1, remaining)
-            for key, _ in selector.select(wait):
-                block = os.read(key.fileobj.fileno(), CHUNK_BYTES)
-                if not block:
-                    selector.unregister(key.fileobj)
-                    continue
-                self._emit(
-                    event(
-                        req_id,
-                        key.data,
-                        b64=base64.b64encode(block).decode("ascii"),
-                    )
-                )
+                _terminate(proc)
+            try:
+                name, block = chunks.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if block is None:
+                open_streams -= 1
+                continue
+            self._emit(event(req_id, name, b64=base64.b64encode(block).decode("ascii")))
         proc.wait()
         return timed_out
 
@@ -159,7 +173,7 @@ class Handler:
                 handle.write(data)
         except PermissionError as exc:
             raise ProtocolError(ERR_PERMISSION, str(exc)) from exc
-        if (mode := params.get("mode")) is not None:
+        if os.name != "nt" and (mode := params.get("mode")) is not None:
             os.chmod(path, int(mode, 8) if isinstance(mode, str) else mode)
         if (owner := _owner_of(params.get("run_as"))) is not None:
             # Written by the service, which is root, so ownership is set explicitly.
@@ -199,8 +213,24 @@ class Handler:
         )
 
     def op_mkdirs(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
-        Path(_require(params, "path")).mkdir(parents=True, exist_ok=True)
+        path = Path(_require(params, "path"))
+        path.mkdir(parents=True, exist_ok=True)
+        if (owner := _owner_of(params.get("run_as"))) is not None:
+            os.chown(path, *owner)
         return ok(req_id)
+
+    def op_list_files(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
+        root = Path(_require(params, "path"))
+        if not root.is_dir():
+            raise ProtocolError(ERR_NOT_FOUND, f"not a directory: {root}")
+        return ok(
+            req_id,
+            files=[path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()],
+        )
+
+    def op_disk_usage(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
+        usage = shutil.disk_usage(Path(_require(params, "path")))
+        return ok(req_id, total=usage.total, used=usage.used, free=usage.free)
 
     def op_remove(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
         path = Path(_require(params, "path"))
@@ -248,6 +278,16 @@ def _drop_to(name: str | None, env: dict[str, str]) -> dict[str, Any]:
     Silently ignored when we are not root — a guest service that is already unprivileged
     cannot drop further, and refusing would break images that run as a normal user.
     """
+    if os.name == "nt":
+        if name and name.casefold() not in {
+            _current_user().casefold(),
+            _current_user().rsplit("\\", 1)[-1].casefold(),
+        }:
+            raise ProtocolError(
+                ERR_UNSUPPORTED,
+                f"Windows guestd is running as {_current_user()!r}, not requested user {name!r}",
+            )
+        return {}
     if not name or os.geteuid() != 0:
         return {}
 
@@ -284,7 +324,7 @@ def _drop_to(name: str | None, env: dict[str, str]) -> dict[str, Any]:
 
 def _owner_of(name: str | None) -> tuple[int, int] | None:
     """The uid/gid pair for a user, or ``None`` when there is nothing to change."""
-    if not name or os.geteuid() != 0:
+    if os.name == "nt" or not name or os.geteuid() != 0:
         return None
 
     import pwd
@@ -305,8 +345,17 @@ def _current_user() -> str:
         return str(os.getuid()) if hasattr(os, "getuid") else "unknown"
 
 
-def _has_display() -> bool:
-    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+def _terminate(proc: subprocess.Popen[bytes]) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    else:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, 9)
 
 
 def serve_stream(reader: TextIO | BinaryIO, writer: TextIO) -> None:

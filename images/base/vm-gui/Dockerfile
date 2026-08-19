@@ -12,8 +12,6 @@ RUN apt-get update \
         linux-image-generic \
         nftables \
         python3 \
-        python3-pil \
-        python3-xlib \
         sudo \
         systemd \
         systemd-boot-efi \
@@ -21,7 +19,6 @@ RUN apt-get update \
         systemd-sysv \
         ubuntu-desktop \
         udev \
-        xdotool \
     && rm -rf /var/lib/apt/lists/*
 
 ARG NODE_VERSION=v24.15.0
@@ -33,6 +30,17 @@ RUN curl -fsSLo /tmp/node.tar.xz \
         --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md \
     && rm /tmp/node.tar.xz
 
+ARG CUA_DRIVER_VERSION=0.12.6
+RUN curl -fsSL https://cua.ai/driver/install.sh -o /tmp/install-cua-driver.sh \
+    && CUA_DRIVER_RS_VERSION=${CUA_DRIVER_VERSION} \
+       CUA_DRIVER_RS_INSTALL_DIR=/usr/local/bin \
+       bash /tmp/install-cua-driver.sh --bin-dir /usr/local/bin --no-modify-path \
+    && rm /tmp/install-cua-driver.sh \
+    && driver_target="$(readlink -f /usr/local/bin/cua-driver)" \
+    && install -m 0755 "$driver_target" /usr/local/bin/cua-driver.standalone \
+    && mv -f /usr/local/bin/cua-driver.standalone /usr/local/bin/cua-driver \
+    && cua-driver --version
+
 RUN id -u user >/dev/null 2>&1 || useradd --create-home --shell /bin/bash user
 
 COPY packages/ale-run/src/ale/run/guestd/ /opt/ale/guestd/
@@ -43,7 +51,14 @@ COPY images/base/vm-gui/nftables.conf /etc/nftables.conf
 COPY images/base/vm-gui/image.json /etc/ale/image.json
 COPY images/base/vm-materializer/10-root.conf /usr/lib/repart.d/10-ale-root.conf
 
-RUN mkdir -p /efi /home/user/.config \
+RUN mkdir -p /efi /home/user/.config/autostart \
+    && printf '%s\n' \
+        '[Desktop Entry]' \
+        'Type=Application' \
+        'Name=ALE Cua Driver' \
+        'Exec=/usr/local/bin/cua-driver serve --socket /tmp/ale-cua-driver.sock --permission-mode unrestricted --dangerously-bypass-approvals' \
+        'X-GNOME-Autostart-enabled=true' \
+        > /home/user/.config/autostart/ale-cua-driver.desktop \
     && touch /home/user/.config/gnome-initial-setup-done \
     && chown -R user:user /home/user \
     && chown -R root:root /opt/ale \

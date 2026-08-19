@@ -8,17 +8,18 @@ broken task, and finding that out costs one container rather than one agent run.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from pathlib import PurePosixPath
+from pathlib import PurePath, PurePosixPath, PureWindowsPath
 
 from ale.core.env import Observation, StepResult
 from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, StepwisePolicy
 from ale.core.sandbox import Identity, Sandbox
+from ale.core.taskspec import OperatingSystem
 from ale.core.trace import DesktopAction
 
 __all__ = ["NopHarness", "OracleHarness", "oracle_dir"]
 
 
-def oracle_dir(home: str) -> PurePosixPath:
+def oracle_dir(home: str, operating_system: OperatingSystem = OperatingSystem.LINUX) -> PurePath:
     """Where a task's own solution is staged, when one is being run.
 
     In the agent's home, and deliberately not with the rest of the framework's machinery:
@@ -28,7 +29,8 @@ def oracle_dir(home: str) -> PurePosixPath:
     Nothing leaks by putting it there. Under a real agent the oracle is never uploaded at
     all — it is staged only by the harness that exists to run it.
     """
-    return PurePosixPath(home) / ".ale-oracle"
+    path_type = PureWindowsPath if operating_system is OperatingSystem.WINDOWS else PurePosixPath
+    return path_type(home) / ".ale-oracle"
 
 
 class NopHarness(AutonomousHarness):
@@ -103,10 +105,23 @@ class OracleHarness(AutonomousHarness):
         *,
         timeout_sec: float,
     ) -> AgentRun:
-        root = oracle_dir(session.home)
-        entry = root / "run.sh"
+        root = oracle_dir(session.home, session.os)
+        entry = root / ("run.ps1" if session.os is OperatingSystem.WINDOWS else "run.sh")
+        argv = (
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(entry),
+            ]
+            if session.os is OperatingSystem.WINDOWS
+            else ["bash", str(entry)]
+        )
         result = await sandbox.exec(
-            ["bash", str(entry)],
+            argv,
             cwd=str(root),
             # The oracle stands in for an agent, but it is task code and gets the same
             # environment contract a stage does — otherwise a solution that works during
