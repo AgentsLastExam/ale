@@ -32,7 +32,7 @@ Provider destruction and do not depend on guest ACPI power-off.
 Back on the Host, compact the prepared disk with qcow2's zstd compression:
 
 ```bash
-uv run images/base/windows/compact.sh input.qcow2 output.qcow2
+uv run images/base/vm-windows10/compact.sh input.qcow2 output.qcow2
 ```
 
 The resulting disk is packaged through the existing private VM-image distribution path.

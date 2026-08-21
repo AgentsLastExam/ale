@@ -46,7 +46,7 @@ uv run ale run /path/to/task --agent nop
 packages/ale-core/    public contracts and interfaces
 packages/ale-run/     orchestration, providers, harnesses, Gateway and CLI
 packages/ale-verify/  sandbox-local verification library
-images/base/          foundational sandbox images
+images/               Sandbox bases, image builders and Provider runtimes
 docs/                 maintained specifications, decisions and guides
 tests/                engine unit, conformance, integration and live acceptance tests
 ```

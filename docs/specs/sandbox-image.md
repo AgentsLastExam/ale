@@ -25,6 +25,10 @@ The bases provide framework integration that should not be recreated per Task:
 They do not contain domain stacks, benchmark data, databases, robotics suites, or
 Task-specific tools.
 
+Repository sources are separated by responsibility: `images/base/` contains the three
+Task foundations, `images/builders/vm-materializer/` turns Linux VM OCI content into
+qcow2, and `images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM.
+
 ## Task image
 
 For a local image, `image/` is the sole ordinary Docker build context:
@@ -70,7 +74,7 @@ minimal bootable qcow2 template. Reuse is keyed by final OCI plus materializer i
 and validated structurally without hashing the whole disk.
 
 Windows 10 has no public ISO build path in ALE. The current private BYOL base starts from
-the GCP image `agenthle-win10-base-0210`; the maintained `images/base/windows/prepare.ps1`
+the GCP image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
 recipe installs and pins ALE's cross-platform components, and `compact.sh` validates and
 compresses the resulting qcow2. Episodes always cold-boot a fresh overlay. ALE creates no
 ready snapshot, warm pool, or environment server.

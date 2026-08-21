@@ -69,7 +69,7 @@ __all__ = ["QemuProvider", "QemuSandbox", "destroy_retained", "list_retained"]
 GUEST_PORT = 7411
 VM_STORAGE_OVERHEAD_MB = 1024
 
-#: The image that hosts the virtual machine (built by images/base/qemu-runner). It is
+#: The image that hosts the virtual machine (built by images/runtimes/qemu-runner). It is
 #: inherited from the previous framework, which had already worked out the device
 #: permissions, guest bridge and signal handling a QEMU-in-a-container needs; ours is
 #: published under our own namespace so a run does not depend on an image someone else

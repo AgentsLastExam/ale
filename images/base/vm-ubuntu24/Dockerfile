@@ -44,12 +44,12 @@ RUN curl -fsSL https://cua.ai/driver/install.sh -o /tmp/install-cua-driver.sh \
 RUN id -u user >/dev/null 2>&1 || useradd --create-home --shell /bin/bash user
 
 COPY packages/ale-run/src/ale/run/guestd/ /opt/ale/guestd/
-COPY images/base/vm-gui/ale-guestd.service /etc/systemd/system/ale-guestd.service
-COPY images/base/vm-gui/20-wired.network /etc/systemd/network/20-wired.network
-COPY images/base/vm-gui/gdm-custom.conf /etc/gdm3/custom.conf
-COPY images/base/vm-gui/nftables.conf /etc/nftables.conf
-COPY images/base/vm-gui/image.json /etc/ale/image.json
-COPY images/base/vm-materializer/10-root.conf /usr/lib/repart.d/10-ale-root.conf
+COPY images/base/vm-ubuntu24/ale-guestd.service /etc/systemd/system/ale-guestd.service
+COPY images/base/vm-ubuntu24/20-wired.network /etc/systemd/network/20-wired.network
+COPY images/base/vm-ubuntu24/gdm-custom.conf /etc/gdm3/custom.conf
+COPY images/base/vm-ubuntu24/nftables.conf /etc/nftables.conf
+COPY images/base/vm-ubuntu24/image.json /etc/ale/image.json
+COPY images/builders/vm-materializer/10-root.conf /usr/lib/repart.d/10-ale-root.conf
 
 RUN mkdir -p /efi /home/user/.config/autostart \
     && printf '%s\n' \

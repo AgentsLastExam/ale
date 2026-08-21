@@ -20,7 +20,7 @@
 # service needs into the system Python instead.
 #
 # Rebuild with:
-#   docker build -f images/base/gui/Dockerfile -t ghcr.io/agentslastexam/container-ubuntu22-base .
+#   docker build -f images/base/container-ubuntu22/Dockerfile -t ghcr.io/agentslastexam/container-ubuntu22-base .
 #
 FROM ubuntu:22.04
 
