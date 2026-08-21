@@ -352,33 +352,9 @@ KEY_MAP = {
     "PrintScreen": "print_screen",
 }
 
-XDOTOOL_KEYS = {
-    "cmd": "super",
-    "enter": "Return",
-    "esc": "Escape",
-    "page_up": "Page_Up",
-    "page_down": "Page_Down",
-    "caps_lock": "Caps_Lock",
-    "print_screen": "Print",
-    "backspace": "BackSpace",
-    "delete": "Delete",
-    "home": "Home",
-    "end": "End",
-    "insert": "Insert",
-    "up": "Up",
-    "down": "Down",
-    "left": "Left",
-    "right": "Right",
-    "tab": "Tab",
-}
-
 
 def _normalize_key(key: str) -> str:
     return KEY_MAP.get(key, key.lower())
-
-
-def _backend_key(key: str) -> str:
-    return XDOTOOL_KEYS.get(key, key)
 
 
 def _text(label: str) -> dict[str, Any]:
@@ -434,12 +410,12 @@ def _call(name: str, arguments: Any) -> dict[str, Any]:
 
     if name == "key":
         keys = [_normalize_key(key) for key in args["keys"]]
-        gui.dispatch_actions([{"type": "key", "keys": [_backend_key(key) for key in keys]}])
+        gui.dispatch_actions([{"type": "key", "keys": keys}])
         return _text(f"Pressed: {'+'.join(keys)}")
 
     if name in {"key_down", "key_up"}:
         keys = [_normalize_key(key) for key in args["keys"]]
-        gui.dispatch_actions([{"type": name, "keys": [_backend_key(key) for key in keys]}])
+        gui.dispatch_actions([{"type": name, "keys": keys}])
         return _text(f"{'Key down' if name == 'key_down' else 'Key up'}: {'+'.join(keys)}")
 
     if name == "type":
@@ -450,10 +426,9 @@ def _call(name: str, arguments: Any) -> dict[str, Any]:
 
     if name == "hold_key":
         keys = [_normalize_key(key) for key in args["keys"]]
-        backend = [_backend_key(key) for key in keys]
-        gui.dispatch_actions([{"type": "key_down", "keys": backend}])
+        gui.dispatch_actions([{"type": "key_down", "keys": keys}])
         time.sleep(args["duration"])
-        gui.dispatch_actions([{"type": "key_up", "keys": list(reversed(backend))}])
+        gui.dispatch_actions([{"type": "key_up", "keys": list(reversed(keys))}])
         return _text(f"Held {'+'.join(keys)} for {args['duration']}s")
 
     if name == "mouse_move":

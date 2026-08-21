@@ -11,7 +11,7 @@
 # the other half — a run should not depend on an image someone else can move or delete.
 #
 # Build and publish:
-#   docker build -f images/base/qemu-runner/Dockerfile -t ghcr.io/agentslastexam/ale-qemu-runner:0.1.0 images/base/qemu-runner
+#   docker build -f images/runtimes/qemu-runner/Dockerfile -t ghcr.io/agentslastexam/ale-qemu-runner:0.1.0 images/runtimes/qemu-runner
 #   docker push ghcr.io/agentslastexam/ale-qemu-runner:0.1.0
 FROM agentslastexam/ale-qemu:0.2.0
 

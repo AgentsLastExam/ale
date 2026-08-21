@@ -3,6 +3,10 @@ Description=ALE guest service
 After=network.target
 
 [Service]
+Environment=ALE_AGENT_USER=user
+Environment=ALE_AGENT_HOME=/home/user
+Environment=ALE_GUI=true
+Environment=ALE_CUA_DRIVER_SOCKET=/tmp/ale-cua-driver.sock
 ExecStart=/usr/bin/python3 /opt/ale/guestd/main.py --tcp 0.0.0.0:7411
 Restart=always
 RestartSec=1

@@ -23,7 +23,13 @@ from ale.core.sandbox import (
     ResolvedImage,
     SandboxRequest,
 )
-from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, Resources
+from ale.core.taskspec import (
+    ImageKind,
+    NetworkMode,
+    NetworkPolicy,
+    OperatingSystem,
+    Resources,
+)
 from ale.run.providers.qemu import (
     EPISODE_LABEL,
     GPU_LABEL,
@@ -237,25 +243,23 @@ def test_overlay_size_is_driven_by_requested_storage(
 
 def test_vm_storage_uses_observed_root_filesystem_capacity() -> None:
     class Client:
-        async def exec(self, *_args: object, **_kwargs: object) -> tuple[int, str, str, bool]:
-            return (
-                0,
-                "Filesystem 1048576-blocks Used Available Capacity Mounted on\n"
-                "root 40123 1 40122 1% /\n",
-                "",
-                False,
-            )
+        async def disk_usage(self, path: str) -> tuple[int, int, int]:
+            assert path == "/"
+            return 40123 * 1024 * 1024, 1, 1
 
-    assert asyncio.run(QemuProvider()._root_capacity_mb(Client())) == 40123  # type: ignore[arg-type]
+    assert (
+        asyncio.run(QemuProvider()._root_capacity_mb(Client(), OperatingSystem.LINUX))  # type: ignore[arg-type]
+        == 40123
+    )
 
 
 def test_invalid_vm_root_capacity_is_rejected() -> None:
     class Client:
-        async def exec(self, *_args: object, **_kwargs: object) -> tuple[int, str, str, bool]:
-            return 1, "", "df failed", False
+        async def disk_usage(self, _path: str) -> tuple[int, int, int]:
+            raise RuntimeError("disk probe failed")
 
-    with pytest.raises(ProviderStartError, match="df failed"):
-        asyncio.run(QemuProvider()._root_capacity_mb(Client()))  # type: ignore[arg-type]
+    with pytest.raises(ProviderStartError, match="disk probe failed"):
+        asyncio.run(QemuProvider()._root_capacity_mb(Client(), OperatingSystem.LINUX))  # type: ignore[arg-type]
 
 
 def test_vm_root_storage_expands_to_the_request() -> None:
@@ -264,26 +268,25 @@ def test_vm_root_storage_expands_to_the_request() -> None:
             self.capacities = iter((6433, 8677))
             self.commands: list[tuple[str, ...]] = []
 
+        async def disk_usage(self, path: str) -> tuple[int, int, int]:
+            assert path == "/"
+            capacity = next(self.capacities)
+            return capacity * 1024 * 1024, 1, 1
+
         async def exec(self, argv: list[str], **_kwargs: object) -> tuple[int, str, str, bool]:
             self.commands.append(tuple(argv))
-            if argv[0] == "df":
-                capacity = next(self.capacities)
-                return (
-                    0,
-                    "Filesystem 1048576-blocks Used Available Capacity Mounted on\n"
-                    f"root {capacity} 1 {capacity - 1} 1% /\n",
-                    "",
-                    False,
-                )
             return 0, "", "", False
 
     client = Client()
-    assert asyncio.run(QemuProvider()._prepare_root_storage(client, 8192)) == 8677  # type: ignore[arg-type]
+    assert (
+        asyncio.run(
+            QemuProvider()._prepare_root_storage(client, 8192, OperatingSystem.LINUX)  # type: ignore[arg-type]
+        )
+        == 8677
+    )
     assert client.commands == [
-        ("df", "-Pm", "/"),
         ("systemd-repart", "--dry-run=no"),
         ("/usr/lib/systemd/systemd-growfs", "/"),
-        ("df", "-Pm", "/"),
     ]
 
 
@@ -294,13 +297,10 @@ def test_desktop_readiness_retries_a_transient_probe_timeout(
         def __init__(self) -> None:
             self.calls = 0
 
-        async def exec(self, *_args: object, **_kwargs: object) -> tuple[int, str, str, bool]:
+        async def screenshot(self) -> bytes:
             self.calls += 1
             if self.calls == 1:
                 raise TimeoutError
-            return 0, "", "", False
-
-        async def screenshot(self) -> bytes:
             return b"non-flat-png"
 
     async def no_sleep(_seconds: float) -> None:
@@ -308,8 +308,59 @@ def test_desktop_readiness_retries_a_transient_probe_timeout(
 
     monkeypatch.setattr("ale.run.providers.qemu.asyncio.sleep", no_sleep)
     client = Client()
-    asyncio.run(QemuProvider()._await_desktop(client, "user", timeout_sec=1))  # type: ignore[arg-type]
-    assert client.calls == 3
+    asyncio.run(QemuProvider()._await_desktop(client, timeout_sec=1))  # type: ignore[arg-type]
+    assert client.calls == 2
+
+
+def test_windows_guest_contract_is_read_from_guestd_health() -> None:
+    class Client:
+        async def health(self) -> dict[str, object]:
+            return {
+                "os": "windows",
+                "agent_user": "user",
+                "agent_home": r"C:\Users\user",
+                "gui": True,
+            }
+
+        async def exists(self, path: str) -> bool:
+            return path == r"C:\Users\user"
+
+    observed = asyncio.run(
+        QemuProvider()._read_guest_contract(  # type: ignore[arg-type]
+            Client(), request(os=OperatingSystem.WINDOWS)
+        )
+    )
+    assert observed == ("user", r"C:\Users\user", True)
+
+
+def test_legacy_linux_health_uses_the_fixed_base_identity() -> None:
+    class Client:
+        async def health(self) -> dict[str, object]:
+            return {"os": "linux", "gui": False}
+
+        async def exists(self, path: str) -> bool:
+            return path == "/home/user"
+
+    observed = asyncio.run(
+        QemuProvider()._read_guest_contract(Client(), request())  # type: ignore[arg-type]
+    )
+    assert observed == ("user", "/home/user", False)
+
+
+def test_windows_health_must_declare_its_agent_identity() -> None:
+    class Client:
+        async def health(self) -> dict[str, object]:
+            return {"os": "windows", "gui": True}
+
+        async def exists(self, path: str) -> bool:
+            return False
+
+    with pytest.raises(ProviderCapabilityError, match="agent account"):
+        asyncio.run(
+            QemuProvider()._read_guest_contract(  # type: ignore[arg-type]
+                Client(), request(os=OperatingSystem.WINDOWS)
+            )
+        )
 
 
 @pytest.mark.asyncio
@@ -497,7 +548,7 @@ class _ExecClient:
         return 0, "", "", False
 
 
-def test_open_mode_flushes_the_guest_firewall(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_open_mode_uses_only_the_runner_firewall(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_run(*_argv: str, **_kwargs: object) -> tuple[int, str, str]:
         return 0, "", ""
 
@@ -511,7 +562,7 @@ def test_open_mode_flushes_the_guest_firewall(monkeypatch: pytest.MonkeyPatch) -
 
     asyncio.run(sandbox.open_egress())
 
-    assert sandbox._client.argv == ["nft", "flush", "ruleset"]  # type: ignore[attr-defined]
+    assert sandbox._client.argv is None  # type: ignore[attr-defined]
     assert sandbox._sealed is False  # type: ignore[attr-defined]
 
 

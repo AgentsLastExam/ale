@@ -56,7 +56,7 @@ class ProviderConformance:
     async def test_declares_capabilities(self) -> None:
         caps = self.provider.capabilities()
         assert caps.network_modes, "a provider must declare at least one network mode"
-        assert caps.os
+        assert caps.operating_systems
 
     @pytest.mark.asyncio
     async def test_exec_reports_exit_codes_and_streams(self) -> None:

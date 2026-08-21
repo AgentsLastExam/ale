@@ -9,18 +9,25 @@ is required.
 - `container-ubuntu22-base` provides an Ubuntu 22.04 desktop container.
 - `vm-ubuntu24-base` provides Ubuntu 24.04, systemd, full GNOME/GDM, the declared
   unprivileged user, and ALE guest integration for QEMU.
+- The private Windows 10 BYOL base provides a logged-in desktop, system Python, guestd,
+  and Cua Driver for QEMU. Its licensed disk is not a public ALE artifact.
 
-Both provide framework integration that should not be recreated per Task:
+The bases provide framework integration that should not be recreated per Task:
 
-- system `python3` 3.12 or newer;
-- an unprivileged account with a real home, identified by `ale.user` (default `user`);
-- the guest service and dependencies needed by the Docker Provider;
+- system Python 3.12 or newer (`python3` on Linux, `python.exe` on Windows);
+- an unprivileged account with a real home, exposed by the Provider contract;
+- the guest service and dependencies needed by the Providers;
 - a long-lived image command that ALE does not replace;
 - `sudo` where Tasks requesting solver elevation are supported;
-- `ale.gui=true` and a ready graphical session.
+- Cua Driver and a ready graphical session for GUI bases. All guestd screenshot and input
+  operations go through Cua Driver on both Linux and Windows.
 
 They do not contain domain stacks, benchmark data, databases, robotics suites, or
 Task-specific tools.
+
+Repository sources are separated by responsibility: `images/base/` contains the three
+Task foundations, `images/builders/vm-materializer/` turns Linux VM OCI content into
+qcow2, and `images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM.
 
 ## Task image
 
@@ -59,17 +66,30 @@ BuildKit decides cache reuse. Dirty or unsynchronized assets disable resume and 
 RunLock schema 2 records declaration, preparation, Provider, and exact observed identity;
 it does not invent a whole-disk content digest.
 
-## Local VM preparation
+## VM preparation
 
 A VM Task Dockerfile ends in `vm-ubuntu24-base`. ALE exports the final OCI rootfs and
 runs its pinned materializer, which owns initramfs, boot, partition assembly, and the
 minimal bootable qcow2 template. Reuse is keyed by final OCI plus materializer identities
 and validated structurally without hashing the whole disk.
 
+Windows 10 has no public ISO build path in ALE. The current private BYOL base starts from
+the GCP image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
+recipe installs and pins ALE's cross-platform components, and `compact.sh` validates and
+compresses the resulting qcow2. Episodes always cold-boot a fresh overlay. ALE creates no
+ready snapshot, warm pool, or environment server.
+
+GUI image qualification includes a real visual agent completing a task whose decisive
+input exists only on screen, followed by inspection of its canonical trajectory,
+screenshots, desktop actions, artifact, and reward. An oracle-only run checks plumbing but
+does not establish GUI readiness.
+
 The QEMU Provider sizes a fresh overlay from `storage_mb`, boots it over the prepared
-qcow2, grows the guest root filesystem, waits for guestd and the declared GNOME session,
-and observes usable guest `/` capacity. Tasks may install ordinary OS packages and
-services, including Docker; VM boot machinery stays engine-owned.
+qcow2, grows the guest root filesystem, waits for guestd and the declared desktop,
+and observes usable root capacity. The guest health contract reports its OS, agent user,
+agent home, and GUI readiness; a Task whose `os` disagrees with the image is rejected.
+Tasks may install ordinary OS packages and services, including Docker; VM boot machinery
+stays engine-owned.
 
 ## Stable state versus setup
 
@@ -102,8 +122,9 @@ references are pulled and resolved to an immutable repository/content identity b
 solver execution. They are verifier-only; the standard solver image remains locally
 built from `image/`.
 
-Any verifier image must satisfy the same guest contract, expose system `python3` 3.12 or
-newer, and permit ALE to stage `ale_verify`. Verification runs as framework/root.
+Any verifier image must satisfy the same guest contract, expose system Python 3.12 or
+newer, and permit ALE to stage `ale_verify`. Verification runs as framework-controlled
+Task code.
 
 ## Runtime behavior
 
@@ -123,6 +144,9 @@ episode qcow2 overlay mounted into it. `keep` leaves both alive and discoverable
 `ale sandbox destroy HANDLE` removes both. Provider-qualified QEMU handles prevent the
 runner from being mistaken for a container sandbox.
 
+QEMU enforces Task egress in the runner network namespace, outside both Linux and Windows
+guests. The guest does not need an OS-specific firewall implementation for ALE policy.
+
 Retained handles are always provider-qualified: `docker:<runtime-id>` for containers and
 `qemu:<runtime-id>` for VMs. Unqualified handles are rejected.
 
@@ -133,10 +157,12 @@ not a Task image declaration.
 
 ## Permissions
 
-Solver and oracle run as the image user. Setup and verification run as root. A requested
-solver sudo grant is verified before use and recorded. ALE does not pre-create declared
-artifacts or silently repair Task filesystem ownership: the image/setup/agent owns the
-type and existence of each output.
+Solver and oracle run as the image user. Linux setup and verification run as root. The
+current Windows guestd runs in the interactive agent session so Cua Driver and process
+execution share one desktop; stage directories are withheld by lifecycle rather than a
+second Windows account. A requested solver sudo/admin grant is verified before use and
+recorded. ALE does not pre-create declared artifacts or silently repair Task filesystem
+ownership: the image/setup/agent owns the type and existence of each output.
 
 ## Base-image changes
 

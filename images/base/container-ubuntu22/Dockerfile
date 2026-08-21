@@ -20,7 +20,7 @@
 # service needs into the system Python instead.
 #
 # Rebuild with:
-#   docker build -f images/base/gui/Dockerfile -t ghcr.io/agentslastexam/container-ubuntu22-base .
+#   docker build -f images/base/container-ubuntu22/Dockerfile -t ghcr.io/agentslastexam/container-ubuntu22-base .
 #
 FROM ubuntu:22.04
 
@@ -43,15 +43,13 @@ ENV VNC_RESOLUTION=1024x768
 ENV VNC_COL_DEPTH=24
 
 # ----- System utilities + common desktop apps -----
-# The exec_stdio backend's own tools — xdotool (op_input), ffmpeg + ImageMagick
-# (op_screenshot fallbacks) — plus desktop plumbing and the everyday GUI apps a
-# task-agnostic desktop agent expects: a terminal, file manager, text editor,
-# calculator, image viewer, archive + screenshot tools, fonts, and xdg-utils
-# (xdg-open — without it file-open and url-handler launches silently no-op).
+# Desktop plumbing and the everyday GUI apps a task-agnostic desktop agent expects:
+# a terminal, file manager, text editor, calculator, image viewer, archive + screenshot
+# tools, fonts, and xdg-utils (xdg-open — without it file-open and url-handler launches
+# silently no-op). Cua Driver below owns capture and input.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl wget sudo git supervisor \
         dbus dbus-x11 x11-utils x11-xserver-utils \
-        xdotool ffmpeg imagemagick \
         xdg-utils \
         gnome-terminal nautilus gedit gnome-calculator \
         gnome-text-editor eog evince file-roller gnome-screenshot \
@@ -80,6 +78,19 @@ RUN set -eux; \
     ln -s /opt/python/bin/pip3 /usr/local/bin/pip3; \
     python3 -m pip install --no-cache-dir Pillow==11.3.0 python-xlib==0.33; \
     python3 -c 'import sys; assert sys.version_info >= (3, 12); import PIL, Xlib'
+
+# One cross-platform desktop implementation. guestd and the built-in CUA MCP both call
+# this daemon; they do not carry a second X11-specific input or capture stack.
+ARG CUA_DRIVER_VERSION=0.12.6
+RUN curl -fsSL https://cua.ai/driver/install.sh -o /tmp/install-cua-driver.sh \
+    && CUA_DRIVER_RS_VERSION=${CUA_DRIVER_VERSION} \
+       CUA_DRIVER_RS_INSTALL_DIR=/usr/local/bin \
+       bash /tmp/install-cua-driver.sh --bin-dir /usr/local/bin --no-modify-path \
+    && rm /tmp/install-cua-driver.sh \
+    && driver_target="$(readlink -f /usr/local/bin/cua-driver)" \
+    && install -m 0755 "$driver_target" /usr/local/bin/cua-driver.standalone \
+    && mv -f /usr/local/bin/cua-driver.standalone /usr/local/bin/cua-driver \
+    && cua-driver --version
 
 # ----- Agent-terminal isolation: gnome-terminal forwards the LAUNCHER's environment to
 # every new terminal shell (the terminal server's own environment is ignored). A task
@@ -721,6 +732,30 @@ environment=HOME="/home/user",USER="user",DISPLAY=":1",XDG_RUNTIME_DIR="/tmp/run
 priority=35
 stdout_logfile=/var/log/supervisor/apply-settings.log
 stderr_logfile=/var/log/supervisor/apply-settings.err
+EOF
+
+cat > /usr/local/bin/start-cua-driver.sh <<'EOF'
+#!/bin/bash
+set -e
+while [ ! -f /tmp/gnome-ready ]; do
+    [ -f /tmp/gnome-failed ] && exit 1
+    sleep 1
+done
+export DBUS_SESSION_BUS_ADDRESS="$(cat /tmp/dbus-session-bus-address)"
+exec cua-driver serve --socket /tmp/ale-cua-driver.sock \
+    --permission-mode unrestricted --dangerously-bypass-approvals
+EOF
+chmod +x /usr/local/bin/start-cua-driver.sh
+cat > /etc/supervisor/conf.d/34-cua-driver.conf <<'EOF'
+[program:cua-driver]
+command=/usr/local/bin/start-cua-driver.sh
+autostart=true
+autorestart=true
+user=user
+environment=HOME="/home/user",USER="user",DISPLAY=":1",XDG_RUNTIME_DIR="/tmp/runtime-user",XDG_CONFIG_HOME="/home/user/.config"
+priority=34
+stdout_logfile=/var/log/supervisor/cua-driver.log
+stderr_logfile=/var/log/supervisor/cua-driver.err
 EOF
 DONE
 

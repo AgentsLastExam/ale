@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from ale.core.sandbox import PreparedTaskImage
-from ale.core.taskspec import TaskSpec
+from ale.core.taskspec import OperatingSystem, TaskSpec
 from ale.core.verdict import Rewards
 
 if TYPE_CHECKING:
@@ -53,7 +53,9 @@ class TaskFolder(Protocol):
 
     def stage_dir(self, name: str) -> Path | None: ...
 
-    def stage_entry(self, name: str) -> Path | None: ...
+    def stage_entry(
+        self, name: str, operating_system: OperatingSystem = OperatingSystem.LINUX
+    ) -> Path | None: ...
 
 
 class Task(ABC):

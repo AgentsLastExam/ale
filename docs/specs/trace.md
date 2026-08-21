@@ -166,7 +166,7 @@ its bounded, sanitized native JSONL transcript is retained at
 
 `verification.json` is atomically replaced after each accepted mutation. It preserves
 completed deterministic criteria and judge attempts even when later verification fails.
-The verifier owns this file until `run.sh` exits. ALE then validates it against the
+The verifier owns this file until its OS-specific entry exits. ALE then validates it against the
 reward envelope and copies it unchanged to the episode. No intermediate snapshot is
 sent to the Host, and Judge calls never merge into the solver's `trajectory.json` or
 Transport Trace.

@@ -3,9 +3,13 @@ name: images
 on:
   push:
     branches: [main]
-    paths: ['images/**']
+    paths:
+      - 'images/**'
+      - 'packages/ale-run/src/ale/run/guestd/**'
   pull_request:
-    paths: ['images/**']
+    paths:
+      - 'images/**'
+      - 'packages/ale-run/src/ale/run/guestd/**'
   workflow_dispatch:
 
 env:
@@ -19,7 +23,27 @@ jobs:
       packages: write
     strategy:
       matrix:
-        image: [gui, vm-gui, vm-materializer]
+        include:
+          - path: images/base/container-ubuntu22
+            inputs: images/base/container-ubuntu22 packages/ale-run/src/ale/run/guestd
+            repository: container-ubuntu22-base
+            version: latest
+            context: .
+          - path: images/base/vm-ubuntu24
+            inputs: images/base/vm-ubuntu24 images/builders/vm-materializer/10-root.conf packages/ale-run/src/ale/run/guestd
+            repository: vm-ubuntu24-base
+            version: 0.1.0
+            context: .
+          - path: images/builders/vm-materializer
+            inputs: images/builders/vm-materializer
+            repository: ale-vm-materializer
+            version: 0.1.0
+            context: images/builders/vm-materializer
+          - path: images/runtimes/qemu-runner
+            inputs: images/runtimes/qemu-runner
+            repository: ale-qemu-runner
+            version: 0.1.0
+            context: images/runtimes/qemu-runner
     steps:
       - uses: actions/checkout@v4
 
@@ -36,39 +60,18 @@ jobs:
       - name: Compute content tag
         id: tag
         run: |
-          hash=$(git ls-files -s images/base/${{ matrix.image }} packages/ale-run/src/ale/run/guestd \
+          hash=$(git ls-files -s ${{ matrix.inputs }} \
                  | sha256sum | cut -c1-12)
           echo "content=$hash" >> "$GITHUB_OUTPUT"
 
-      - name: Select image repository
-        id: image
-        run: |
-          case "${{ matrix.image }}" in
-            vm-materializer)
-              echo "repository=ale-vm-materializer" >> "$GITHUB_OUTPUT"
-              echo "version=0.1.0" >> "$GITHUB_OUTPUT"
-              echo "context=images/base/vm-materializer" >> "$GITHUB_OUTPUT"
-              ;;
-            vm-gui)
-              echo "repository=vm-ubuntu24-base" >> "$GITHUB_OUTPUT"
-              echo "version=0.1.0" >> "$GITHUB_OUTPUT"
-              echo "context=." >> "$GITHUB_OUTPUT"
-              ;;
-            gui)
-              echo "repository=container-ubuntu22-base" >> "$GITHUB_OUTPUT"
-              echo "version=latest" >> "$GITHUB_OUTPUT"
-              echo "context=." >> "$GITHUB_OUTPUT"
-              ;;
-          esac
-
       - uses: docker/build-push-action@v6
         with:
-          context: ${{ steps.image.outputs.context }}
-          file: images/base/${{ matrix.image }}/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.path }}/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
-            ${{ env.REGISTRY }}/agentslastexam/${{ steps.image.outputs.repository }}:${{ steps.image.outputs.version }}
-            ${{ env.REGISTRY }}/agentslastexam/${{ steps.image.outputs.repository }}:${{ steps.tag.outputs.content }}
+            ${{ env.REGISTRY }}/agentslastexam/${{ matrix.repository }}:${{ matrix.version }}
+            ${{ env.REGISTRY }}/agentslastexam/${{ matrix.repository }}:${{ steps.tag.outputs.content }}
           labels: ale.content_hash=${{ steps.tag.outputs.content }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

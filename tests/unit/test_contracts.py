@@ -13,6 +13,7 @@ from ale.core.taskspec import (
     McpSource,
     NetworkMode,
     NetworkPolicy,
+    OperatingSystem,
     SkillSource,
     StdioMcpServer,
     StreamableHttpMcpServer,
@@ -124,6 +125,7 @@ def test_manifest_field_set_is_exact() -> None:
     assert set(TaskManifestV1.model_fields) == {
         "spec_type",
         "name",
+        "os",
         "environment",
         "image",
         "resources",
@@ -137,6 +139,19 @@ def test_manifest_field_set_is_exact() -> None:
         "metadata",
         "extras",
     }
+
+
+def test_windows_artifacts_use_windows_absolute_path_rules() -> None:
+    manifest = TaskManifestV1(
+        spec_type="core/v1",
+        name="windows-demo",
+        os=OperatingSystem.WINDOWS,
+        image={"kind": "vm"},
+        artifacts=(r"C:\Users\user\output",),
+    )
+    assert manifest.artifacts == (r"C:\Users\user\output",)
+    with pytest.raises(ValidationError, match="absolute"):
+        TaskManifestV1.model_validate(manifest.model_dump() | {"artifacts": ("output",)})
 
 
 def test_network_and_agent_resource_contracts_remain_strict() -> None:

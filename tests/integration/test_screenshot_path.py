@@ -1,12 +1,4 @@
-"""The fast screen capture is actually the one being used.
-
-This exists because the fast path failed silently for as long as it existed. Capture
-tries Xlib and Pillow in-process first and falls back to shelling out, and the fallback
-is a correct screenshot — just twenty times slower. So when a symlinked interpreter lost
-its own site-packages, nothing broke, nothing warned, and every episode paid the cost.
-
-A test that only asserts "a screenshot came back" would have passed throughout.
-"""
+"""The sandbox desktop path is backed by Cua Driver end to end."""
 
 from __future__ import annotations
 
@@ -23,25 +15,17 @@ pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.nee
 
 GUI_IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
 
-#: Runs inside the sandbox: import what the fast path needs and capture through it,
-#: reporting which route actually ran rather than only whether an image appeared.
 PROBE = """
 import sys
 sys.path.insert(0, "/opt/ale/guestd")
 import gui
-
-try:
-    png = gui._capture_in_process()
-except Exception as exc:
-    print("FALLBACK", type(exc).__name__, exc)
-else:
-    print("INPROCESS", len(png), png.startswith(bytes([137, 80, 78, 71])))
+png = gui.capture_screen()
+print(gui._binary(), len(png), png.startswith(bytes([137, 80, 78, 71])))
 """
 
 
 @pytest.mark.asyncio
-async def test_the_in_process_path_is_the_one_taken() -> None:
-    """The image installs Pillow and python-xlib, so nothing should shell out."""
+async def test_cua_driver_is_the_only_screenshot_backend() -> None:
     provider = DockerProvider()
     prepared = await prepare_reference(provider, GUI_IMAGE)
     request = SandboxRequest(
@@ -55,10 +39,8 @@ async def test_the_in_process_path_is_the_one_taken() -> None:
         result = await sandbox.exec(["python3", "-c", PROBE], timeout_sec=120)
 
     assert result.exit_code == 0, result.stderr
-    assert result.stdout.startswith("INPROCESS"), (
-        f"capture fell back to an external tool: {result.stdout.strip()} {result.stderr.strip()}"
-    )
-    assert "True" in result.stdout, "the fast path returned something that is not a PNG"
+    assert "cua-driver" in result.stdout
+    assert result.stdout.rstrip().endswith("True"), result.stdout
 
 
 @pytest.mark.asyncio

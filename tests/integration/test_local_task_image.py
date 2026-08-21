@@ -23,28 +23,38 @@ from ale.run.tasksets.manifest import load_tasks
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 VM_BASE = "ghcr.io/agentslastexam/vm-ubuntu24-base:0.1.0"
-BASE_ROOT = Path(__file__).resolve().parents[2] / "images/base"
+IMAGE_ROOT = Path(__file__).resolve().parents[2] / "images"
 
 
 def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
-    dockerfile = (BASE_ROOT / "vm-gui/Dockerfile").read_text()
+    vm_base = IMAGE_ROOT / "base/vm-ubuntu24"
+    materializer = IMAGE_ROOT / "builders/vm-materializer"
+    runner = IMAGE_ROOT / "runtimes/qemu-runner"
+    dockerfile = (vm_base / "Dockerfile").read_text()
     for required in (
         "ubuntu:24.04@sha256:",
         "linux-image-generic",
         "systemd",
         "ubuntu-desktop",
         "gdm3.service",
-        "python3-pil",
-        "python3-xlib",
-        "xdotool",
+        "CUA_DRIVER_VERSION=0.12.6",
+        "cua-driver serve",
         "sudo",
         "ale-guestd.service",
     ):
         assert required in dockerfile
-    for forbidden in ("docker.io", "docker-ce", "ros-", "gazebo"):
+    for forbidden in (
+        "docker.io",
+        "docker-ce",
+        "ros-",
+        "gazebo",
+        "python3-pil",
+        "python3-xlib",
+        "xdotool",
+    ):
         assert forbidden not in dockerfile
 
-    manifest = json.loads((BASE_ROOT / "vm-gui/image.json").read_text())
+    manifest = json.loads((vm_base / "image.json").read_text())
     assert manifest == {
         "schema": 1,
         "os": "ubuntu",
@@ -56,18 +66,21 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
         "base_release": "0.1.0",
     }
 
-    materialize = (BASE_ROOT / "vm-materializer/materialize.sh").read_text()
+    materialize = (materializer / "materialize.sh").read_text()
     assert "truncate -s 40G" not in materialize
     assert "qemu-img convert" in materialize
     assert "qemu-img check" in materialize
-    assert (BASE_ROOT / "vm-materializer/10-root.conf").read_text().find("GrowFileSystem=yes") >= 0
+    assert (materializer / "10-root.conf").read_text().find("GrowFileSystem=yes") >= 0
 
-    guestd_unit = (BASE_ROOT / "vm-gui/ale-guestd.service").read_text()
+    guestd_unit = (vm_base / "ale-guestd.service").read_text()
     assert "After=network.target" in guestd_unit
     assert "network-online.target" not in guestd_unit
 
-    runner = (BASE_ROOT / "qemu-runner/entrypoint.sh").read_text()
-    assert 'iptables -t nat -A POSTROUTING -p tcp -d 172.30.0.2 --dport "$guest_port"' in runner
+    runner_entrypoint = (runner / "entrypoint.sh").read_text()
+    assert (
+        'iptables -t nat -A POSTROUTING -p tcp -d 172.30.0.2 --dport "$guest_port"'
+        in runner_entrypoint
+    )
 
 
 @pytest.mark.asyncio

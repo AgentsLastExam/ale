@@ -11,6 +11,7 @@ from ale_verify import (
     JudgeInvocation,
     Verification,
     VerificationRecord,
+    _io,
 )
 
 HASH0 = "sha256:" + "0" * 64
@@ -102,6 +103,14 @@ def test_one_state_holds_checks_stats_judge_aggregate_and_final_write(
 
 def test_verification_has_no_stage_asset_resolver() -> None:
     assert not hasattr(Verification, "asset_path")
+
+
+def test_windows_skips_unsupported_directory_fsync(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(_io.os, "name", "nt")
+    monkeypatch.setattr(_io.os, "open", lambda *_args: pytest.fail("os.open was called"))
+    _io._fsync_directory(tmp_path)
 
 
 def test_duplicate_invalid_and_terminal_mutations_fail(verify_env: tuple[Path, Path]) -> None:

@@ -65,9 +65,9 @@ fmt:
     @uv run ruff format .
     @uv run ruff check --fix .
 
-# Build the base sandbox images locally (publishing happens in CI).
+# Build the publishable Sandbox images locally (publishing happens in CI).
 images:
-    @images/base/build.sh
+    @images/build.sh
 
 # The canonical smoke run: one command, one verdict.
 demo:

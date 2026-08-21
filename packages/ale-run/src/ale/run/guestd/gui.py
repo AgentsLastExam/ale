@@ -1,88 +1,66 @@
-"""Desktop capture and input for GUI images.
-
-Imported lazily by the guest service, so headless images never need these tools
-installed. Everything shells out to X utilities that the GUI base image provides
-(``scrot``/``import`` for capture, ``xdotool`` for input) — no Python GUI stack, in
-keeping with the standard-library-only rule.
-
-Coordinates arrive in a normalised [0, 1000] space so a recorded trajectory stays
-meaningful across resolutions; they are mapped to pixels here, at the last moment.
-"""
+"""Cross-platform desktop capture and input through Cua Driver."""
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import shutil
 import subprocess
-import tempfile
-from pathlib import Path
+import time
 from typing import Any
 
 COORDINATE_SPACE = 1000
 
-#: Where an X server advertises itself. One socket per display.
-_X_SOCKETS = Path("/tmp/.X11-unix")
-
-
-def attach_display() -> None:
-    """Find the desktop, if this process was not started with one.
-
-    A container image starts its session from the same command that starts the guest
-    service, so the service inherits ``DISPLAY`` and this does nothing. A virtual machine
-    does not: the service is a system unit that starts before anyone has logged in, so it
-    has no display at the moment it starts and a perfectly good one a few seconds later.
-    Baking a display number into the unit would be a guess — which number a session gets
-    depends on whether a greeter ran first — so it is discovered when it is first needed.
-
-    Called before capture and before input, because either can be the first thing asked
-    of a machine whose desktop came up after the service did.
-    """
-    if os.environ.get("DISPLAY"):
-        return
-    try:
-        sockets = sorted(entry.name for entry in _X_SOCKETS.iterdir() if entry.name.startswith("X"))
-    except OSError:
-        return
-    if not sockets:
-        return
-    os.environ["DISPLAY"] = f":{sockets[0][1:]}"
-
-    # The cookie belongs to whoever owns the session. Running as root, any of them can be
-    # read; running as the agent, its own is the one that works — so the search order is
-    # "mine first, then anyone's".
-    if os.environ.get("XAUTHORITY"):
-        return
-    candidates = [
-        Path(f"/run/user/{os.getuid()}/gdm/Xauthority"),
-        *sorted(Path("/run/user").glob("*/gdm/Xauthority")),
-        *sorted(Path("/home").glob("*/.Xauthority")),
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            os.environ["XAUTHORITY"] = str(candidate)
-            return
-
 
 class GuiUnavailable(RuntimeError):
-    """The image has no desktop, or lacks the tools to drive one."""
+    """The image has no reachable Cua Driver desktop service."""
 
 
-def _require(tool: str) -> str:
-    path = shutil.which(tool)
-    if path is None:
-        raise GuiUnavailable(f"{tool} is not installed in this image")
-    return path
+def _binary() -> str:
+    configured = os.environ.get("ALE_CUA_DRIVER")
+    found = configured or shutil.which("cua-driver") or shutil.which("cua-driver.exe")
+    if not found:
+        raise GuiUnavailable("cua-driver is not installed in this image")
+    return found
+
+
+def _call(tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    command = [_binary(), "call", tool, json.dumps(arguments or {}, separators=(",", ":"))]
+    if socket := os.environ.get("ALE_CUA_DRIVER_SOCKET"):
+        command += ["--socket", socket]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GuiUnavailable(f"cua-driver {tool} failed: {exc}") from exc
+    if result.returncode != 0:
+        raise GuiUnavailable(
+            f"cua-driver {tool} failed: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        detail = (result.stdout.strip() or result.stderr.strip())[:300]
+        raise GuiUnavailable(f"cua-driver {tool} returned invalid JSON: {detail!r}") from exc
+    if not isinstance(payload, dict):
+        raise GuiUnavailable(f"cua-driver {tool} returned a non-object result")
+    return payload
+
+
+def available() -> bool:
+    try:
+        screen_size()
+    except GuiUnavailable:
+        return False
+    return True
 
 
 def screen_size() -> tuple[int, int]:
-    """Return the desktop size in pixels."""
-    attach_display()
-    xdotool = _require("xdotool")
-    out = subprocess.run(
-        [xdotool, "getdisplaygeometry"], capture_output=True, text=True, check=True
-    ).stdout
-    width, height = out.split()
-    return int(width), int(height)
+    payload = _call("get_screen_size")
+    try:
+        return int(payload["width"]), int(payload["height"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GuiUnavailable("cua-driver get_screen_size omitted width or height") from exc
 
 
 def _to_pixels(coordinate: list[int] | tuple[int, int]) -> tuple[int, int]:
@@ -92,153 +70,94 @@ def _to_pixels(coordinate: list[int] | tuple[int, int]) -> tuple[int, int]:
 
 
 def cursor_position() -> tuple[int, int]:
-    """Return the current cursor position in normalized coordinates."""
-    attach_display()
-    xdotool = _require("xdotool")
-    out = subprocess.run(
-        [xdotool, "getmouselocation", "--shell"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    values = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    payload = _call("get_cursor_position")
     width, height = screen_size()
-    return (
-        round(int(values["X"]) * COORDINATE_SPACE / width),
-        round(int(values["Y"]) * COORDINATE_SPACE / height),
-    )
-
-
-def _capture_in_process() -> bytes:
-    """Grab the root window through Xlib and encode with Pillow.
-
-    Roughly twenty times faster than shelling out — about 25ms against 400ms — which
-    matters because a stepwise agent takes one of these every single step.
-
-    The imports are deliberately here rather than at module scope. A guest service has
-    to run on whatever interpreter an image happens to have, so it cannot *depend* on
-    Pillow and python-xlib; an image that provides them gets the fast path, and one that
-    does not falls back below. This is the pattern cua-lite's server uses, for the same
-    reason.
-    """
-    import io
-
-    from PIL import Image
-    from Xlib import X, display
-
-    dh = display.Display()
     try:
-        root = dh.screen().root
-        geometry = root.get_geometry()
-        width, height = geometry.width, geometry.height
-        raw = root.get_image(0, 0, width, height, X.ZPixmap, 0xFFFFFFFF)
-        image = Image.frombytes("RGB", (width, height), raw.data, "raw", "BGRX")
-    finally:
-        dh.close()
-
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
+        return (
+            round(float(payload["x"]) * COORDINATE_SPACE / width),
+            round(float(payload["y"]) * COORDINATE_SPACE / height),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GuiUnavailable("cua-driver did not report a cursor position") from exc
 
 
 def capture_screen() -> bytes:
-    """Capture the desktop as PNG bytes, fastest available way first."""
-    attach_display()
+    payload = _call("get_desktop_state")
+    encoded = payload.get("screenshot_png_b64")
+    if not isinstance(encoded, str):
+        raise GuiUnavailable("cua-driver get_desktop_state returned no screenshot")
     try:
-        return _capture_in_process()
-    except Exception:
-        pass
+        return base64.b64decode(encoded, validate=True)
+    except ValueError as exc:
+        raise GuiUnavailable("cua-driver returned an invalid screenshot") from exc
 
-    for tool, argv in (
-        ("scrot", ["-o", "-z"]),
-        ("import", ["-window", "root"]),
-    ):
-        path = shutil.which(tool)
-        if path is None:
-            continue
-        with tempfile.NamedTemporaryFile(suffix=".png") as tmp:
-            subprocess.run([path, *argv, tmp.name], check=True, capture_output=True)
-            return Path(tmp.name).read_bytes()
-    raise GuiUnavailable(
-        "no way to capture the screen: install Pillow and python-xlib for the fast path, "
-        "or scrot / ImageMagick import as a fallback"
-    )
+
+def _point(action: dict[str, Any], key: str = "coordinate") -> tuple[int, int]:
+    coordinate = action.get(key)
+    if not isinstance(coordinate, (list, tuple)) or len(coordinate) != 2:
+        raise GuiUnavailable(f"desktop action requires a two-value {key}")
+    return _to_pixels(coordinate)
 
 
 def dispatch_actions(actions: list[dict[str, Any]]) -> int:
-    """Perform desktop actions; returns how many were applied."""
-    attach_display()
-    xdotool = _require("xdotool")
     applied = 0
     for action in actions:
         kind = action.get("type")
-        if kind in {
-            "click",
-            "double_click",
-            "right_click",
-            "move",
-            "mouse_down",
-            "mouse_up",
-        }:
-            if coordinate := action.get("coordinate"):
-                x, y = _to_pixels(coordinate)
-                subprocess.run([xdotool, "mousemove", str(x), str(y)], check=True)
-            button = {"left": "1", "middle": "2", "right": "3"}.get(
-                str(action.get("button") or "left"), "1"
+        if kind in {"click", "double_click", "right_click"}:
+            x, y = _point(action)
+            _call(
+                "click",
+                {
+                    "x": x,
+                    "y": y,
+                    "scope": "desktop",
+                    "button": "right" if kind == "right_click" else action.get("button", "left"),
+                    "count": 2 if kind == "double_click" else int(action.get("clicks") or 1),
+                },
             )
-            if kind == "click":
-                subprocess.run(
-                    [
-                        xdotool,
-                        "click",
-                        "--repeat",
-                        str(int(action.get("clicks") or 1)),
-                        button,
-                    ],
-                    check=True,
-                )
-            elif kind == "double_click":
-                subprocess.run([xdotool, "click", "--repeat", "2", "1"], check=True)
-            elif kind == "right_click":
-                subprocess.run([xdotool, "click", "3"], check=True)
-            elif kind == "mouse_down":
-                subprocess.run([xdotool, "mousedown", button], check=True)
-            elif kind == "mouse_up":
-                subprocess.run([xdotool, "mouseup", button], check=True)
+        elif kind == "move":
+            x, y = _point(action)
+            _call("move_cursor", {"x": x, "y": y, "scope": "desktop"})
         elif kind == "drag":
-            start, end = action.get("coordinate"), action.get("to")
-            if not end:
-                continue
-            ex, ey = _to_pixels(end)
-            button = {"left": "1", "middle": "2", "right": "3"}.get(
-                str(action.get("button") or "left"), "1"
+            end_x, end_y = _point(action, "to")
+            start = action.get("coordinate")
+            start_x, start_y = _to_pixels(start) if start else cursor_position()
+            _call(
+                "drag",
+                {
+                    "from_x": start_x,
+                    "from_y": start_y,
+                    "to_x": end_x,
+                    "to_y": end_y,
+                    "scope": "desktop",
+                    "button": action.get("button", "left"),
+                },
             )
-            if start:
-                sx, sy = _to_pixels(start)
-                subprocess.run([xdotool, "mousemove", str(sx), str(sy)], check=True)
-            subprocess.run([xdotool, "mousedown", button], check=True)
-            subprocess.run([xdotool, "mousemove", str(ex), str(ey)], check=True)
-            subprocess.run([xdotool, "mouseup", button], check=True)
         elif kind == "scroll":
-            button = {"up": "4", "down": "5", "left": "6", "right": "7"}.get(
-                str(action.get("direction", "down")), "5"
+            coordinate = action.get("coordinate")
+            x, y = _to_pixels(coordinate) if coordinate else cursor_position()
+            _call(
+                "scroll",
+                {
+                    "x": x,
+                    "y": y,
+                    "direction": action.get("direction", "down"),
+                    "amount": max(1, min(50, int(action.get("amount") or 3))),
+                    "scope": "desktop",
+                },
             )
-            amount = int(action.get("amount") or 3)
-            subprocess.run([xdotool, "click", "--repeat", str(amount), button], check=True)
         elif kind == "type":
-            subprocess.run([xdotool, "type", "--delay", "12", action.get("text") or ""], check=True)
+            _call("type_text", {"text": action.get("text") or "", "scope": "desktop"})
         elif kind == "key":
-            keys = action.get("keys") or []
-            if keys:
-                subprocess.run([xdotool, "key", "+".join(keys)], check=True)
-        elif kind in {"key_down", "key_up"}:
-            command = "keydown" if kind == "key_down" else "keyup"
-            for key in action.get("keys") or []:
-                subprocess.run([xdotool, command, key], check=True)
+            keys = [str(key) for key in action.get("keys") or []]
+            if len(keys) > 1:
+                _call("hotkey", {"keys": keys, "scope": "desktop"})
+            elif keys:
+                _call("press_key", {"key": keys[0], "scope": "desktop"})
         elif kind == "wait":
-            import time
-
             time.sleep((action.get("duration_ms") or 500) / 1000)
+        elif kind in {"mouse_down", "mouse_up", "key_down", "key_up"}:
+            raise GuiUnavailable(f"cua-driver does not expose the stateful action {kind}")
         else:
             continue
         applied += 1

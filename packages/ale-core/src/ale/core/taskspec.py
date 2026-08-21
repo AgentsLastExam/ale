@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -17,6 +17,7 @@ __all__ = [
     "McpSource",
     "NetworkMode",
     "NetworkPolicy",
+    "OperatingSystem",
     "PhaseTimeoutOverride",
     "PhaseTimeouts",
     "ResourceOverride",
@@ -40,6 +41,31 @@ _FROZEN = ConfigDict(frozen=True, extra="forbid")
 class ImageKind(StrEnum):
     CONTAINER = "container"
     VM = "vm"
+
+
+class OperatingSystem(StrEnum):
+    LINUX = "linux"
+    WINDOWS = "windows"
+
+
+def _task_path(path: str, operating_system: OperatingSystem) -> PurePosixPath | PureWindowsPath:
+    path_type = PureWindowsPath if operating_system is OperatingSystem.WINDOWS else PurePosixPath
+    return path_type(path)
+
+
+def _validate_artifact_paths(paths: tuple[str, ...], operating_system: OperatingSystem) -> None:
+    normalized = [_task_path(path, operating_system) for path in paths]
+    relative = [
+        path for path, parsed in zip(paths, normalized, strict=True) if not parsed.is_absolute()
+    ]
+    if relative:
+        raise ValueError("artifact paths must be absolute: " + ", ".join(relative))
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("artifact paths must be unique")
+    for index, path in enumerate(normalized):
+        for other in normalized[index + 1 :]:
+            if path in other.parents or other in path.parents:
+                raise ValueError(f"artifact paths overlap: {path} and {other}")
 
 
 class ImageSpec(BaseModel):
@@ -162,7 +188,10 @@ class StdioMcpServer(BaseModel):
     @model_validator(mode="after")
     def _absolute_cwd(self) -> Self:
         if self.cwd is not None and not (
-            self.cwd.startswith("/") or self.cwd == "{mcp}" or self.cwd.startswith("{mcp}/")
+            PurePosixPath(self.cwd).is_absolute()
+            or PureWindowsPath(self.cwd).is_absolute()
+            or self.cwd == "{mcp}"
+            or self.cwd.startswith(("{mcp}/", "{mcp}\\"))
         ):
             raise ValueError("stdio MCP cwd must be an absolute sandbox path")
         return self
@@ -255,6 +284,7 @@ class TaskManifestV1(BaseModel):
 
     spec_type: Literal["core/v1"]
     name: TaskId
+    os: OperatingSystem = OperatingSystem.LINUX
     environment: Literal["core/standard"] = "core/standard"
     image: ImageSpec
     resources: Resources = Resources()
@@ -268,23 +298,12 @@ class TaskManifestV1(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     extras: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
-    @field_validator("artifacts")
-    @classmethod
-    def _absolute_artifacts(cls, paths: tuple[str, ...]) -> tuple[str, ...]:
-        relative = [path for path in paths if not PurePosixPath(path).is_absolute()]
-        if relative:
-            raise ValueError("artifact paths must be absolute: " + ", ".join(relative))
-        normalized = [PurePosixPath(path) for path in paths]
-        if len(normalized) != len(set(normalized)):
-            raise ValueError("artifact paths must be unique")
-        for index, path in enumerate(normalized):
-            for other in normalized[index + 1 :]:
-                if path in other.parents or other in path.parents:
-                    raise ValueError(f"artifact paths overlap: {path} and {other}")
-        return paths
+    def _check_artifacts(self) -> None:
+        _validate_artifact_paths(self.artifacts, self.os)
 
     @model_validator(mode="after")
     def _valid_manifest(self) -> Self:
+        self._check_artifacts()
         names = [variant.name for variant in self.variants]
         if len(names) != len(set(names)):
             raise ValueError("variant names must be unique")
@@ -298,6 +317,7 @@ class TaskSpec(BaseModel):
 
     spec_type: Literal["core/v1"] = "core/v1"
     name: TaskId
+    os: OperatingSystem = OperatingSystem.LINUX
     variant: str = Field(default="base", min_length=1)
     environment: Literal["core/standard"] = "core/standard"
     image: ImageSpec
@@ -311,6 +331,11 @@ class TaskSpec(BaseModel):
     verify: VerifySpec = VerifySpec()
     metadata: dict[str, Any] = Field(default_factory=dict)
     extras: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _valid_artifacts(self) -> Self:
+        _validate_artifact_paths(self.artifacts, self.os)
+        return self
 
     @property
     def id(self) -> TaskId:

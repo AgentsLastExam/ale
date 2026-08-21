@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from ale.core.errors import TaskDefinitionError
+from ale.core.taskspec import OperatingSystem
 from ale.run.tasksets.manifest import (
     INSTRUCTION,
     STAGE_ENTRY,
@@ -72,15 +73,6 @@ def lint_repository(path: Path) -> list[Finding]:
 
 def _check_folder(folder: TaskFolder) -> list[Finding]:
     findings: list[Finding] = []
-    required = {
-        INSTRUCTION: folder.root / INSTRUCTION,
-        "verify/run.sh": folder.root / "verify" / STAGE_ENTRY,
-        "oracle/run.sh": folder.root / "oracle" / STAGE_ENTRY,
-    }
-    for label, file in required.items():
-        if not file.is_file():
-            findings.append(Finding(folder.root, f"no {label}"))
-
     for removed in ("files", "kits", "skills", "mcp"):
         candidate = folder.root / removed
         if candidate.exists():
@@ -128,9 +120,27 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
                         )
                     )
 
+    try:
+        operating_system = OperatingSystem(str(manifest.get("os", "linux")))
+    except ValueError:
+        operating_system = OperatingSystem.LINUX
+    stage_entry = "run.ps1" if operating_system is OperatingSystem.WINDOWS else STAGE_ENTRY
+    required = {
+        INSTRUCTION: folder.root / INSTRUCTION,
+        f"verify/{stage_entry}": folder.root / "verify" / stage_entry,
+        f"oracle/{stage_entry}": folder.root / "oracle" / stage_entry,
+    }
+    for label, file in required.items():
+        if not file.is_file():
+            findings.append(Finding(folder.root, f"no {label}"))
+
     for stage in ("setup", "verify", "oracle"):
-        entry = folder.stage_entry(stage)
-        if entry is not None and not _is_executable(entry):
+        entry = folder.stage_entry(stage, operating_system)
+        if (
+            operating_system is OperatingSystem.LINUX
+            and entry is not None
+            and not _is_executable(entry)
+        ):
             findings.append(Finding(entry, "not executable: chmod +x it"))
 
     dockerfile = folder.image_dir / "Dockerfile"
@@ -172,7 +182,7 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
     if (verify / "check.py").exists() and not (verify / "verify.py").exists():
         findings.append(Finding(verify / "check.py", "rename the default verifier to verify.py"))
 
-    setup = folder.stage_entry("setup")
+    setup = folder.stage_entry("setup", operating_system)
     if setup and _FIXED_SETUP.search(setup.read_text(encoding="utf-8", errors="replace")):
         findings.append(
             Finding(

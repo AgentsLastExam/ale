@@ -22,8 +22,9 @@ import os
 import shutil
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Literal, cast
 
 from ale.core.environment import Environment, EpisodeContext, Phase
@@ -52,7 +53,13 @@ from ale.core.sandbox import (
     SandboxRole,
 )
 from ale.core.task import Task
-from ale.core.taskspec import NetworkMode, NetworkPolicy, StdioMcpServer, VerificationMode
+from ale.core.taskspec import (
+    NetworkMode,
+    NetworkPolicy,
+    OperatingSystem,
+    StdioMcpServer,
+    VerificationMode,
+)
 from ale.core.trace import (
     PhaseFinished,
     PhaseStarted,
@@ -76,6 +83,7 @@ from ale_verify import VerificationRecord
 
 __all__ = ["StandardEnvironment"]
 
+
 #: Where the framework's own machinery goes. Under a root-owned, root-only directory,
 #: which is the whole point: the verify stage holds the scorer and the oracle holds the
 #: answer, and until now they were kept from the agent by *timing* alone — uploaded only
@@ -83,15 +91,30 @@ __all__ = ["StandardEnvironment"]
 #:
 #: It also leaves exactly two roots in a sandbox: this one, which belongs to the framework
 #: and which the agent cannot read, and the agent's home, which is entirely its own.
-SETUP_DIR = PurePosixPath("/opt/ale/setup")
-VERIFY_DIR = PurePosixPath("/opt/ale/verify")
-VERDICT_PATH = PurePosixPath("/opt/ale/verify/rewards.json")
-VERIFICATION_PATH = PurePosixPath("/opt/ale/verify/verification.json")
-TRAJECTORY_STAGE_PATH = PurePosixPath("/opt/ale/verify/trajectory.json")
-VERIFY_CONFIG_PATH = PurePosixPath("/opt/ale/verify/config.json")
-TASK_INSTRUCTION_PATH = PurePosixPath("/opt/ale/verify/instruction.md")
-TASK_PARAMETERS_PATH = PurePosixPath("/opt/ale/verify/parameters.json")
-AGENT_JUDGE_LOG_PATH = PurePosixPath("/opt/ale/verify/agent-judge.jsonl")
+@dataclass(frozen=True)
+class _StageLayout:
+    root: PurePath
+
+    def path(self, *parts: str) -> PurePath:
+        return self.root.joinpath(*parts)
+
+
+def _layout(operating_system: OperatingSystem) -> _StageLayout:
+    root: PurePath = (
+        PureWindowsPath("C:/ProgramData/ALE")
+        if operating_system is OperatingSystem.WINDOWS
+        else PurePosixPath("/opt/ale")
+    )
+    return _StageLayout(root)
+
+
+def _sandbox_path(operating_system: OperatingSystem, root: str, *parts: str) -> str:
+    path_type = PureWindowsPath if operating_system is OperatingSystem.WINDOWS else PurePosixPath
+    return str(path_type(root).joinpath(*parts))
+
+
+def _python(operating_system: OperatingSystem) -> str:
+    return "python.exe" if operating_system is OperatingSystem.WINDOWS else "python3"
 
 
 class StandardEnvironment(Environment):
@@ -164,6 +187,7 @@ class StandardEnvironment(Environment):
             )
         request = SandboxRequest(
             episode_id=ctx.episode_id,
+            os=spec.os,
             role=(
                 SandboxRole.SHARED
                 if spec.verify.environment_mode is VerificationMode.SHARED
@@ -184,7 +208,7 @@ class StandardEnvironment(Environment):
         # Derived from the account the image declared, not configured anywhere. A run
         # that could choose its own working directory was a second answer to a question
         # the image had already answered, and two answers can disagree.
-        ctx.home = f"/home/{_agent_user(sandbox)}"
+        ctx.home = getattr(sandbox, "agent_home", f"/home/{_agent_user(sandbox)}")
         ctx.sandbox_identity = SandboxProvenance(
             user=_agent_user(sandbox), sudo=spec.resources.sudo
         )
@@ -196,6 +220,7 @@ class StandardEnvironment(Environment):
             raise TaskError("separate verification image/resources were not prepared")
         request = SandboxRequest(
             episode_id=ctx.episode_id,
+            os=ctx.spec.os,
             role=SandboxRole.VERIFIER,
             prepared_image=ctx.prepared_verifier_image,
             resources=resources.as_resources(),
@@ -227,9 +252,10 @@ class StandardEnvironment(Environment):
             return
 
         if setup_dir := folder.stage_dir("setup"):
-            await sandbox.upload_dir(str(setup_dir), str(SETUP_DIR))
-            if folder.stage_entry("setup"):
-                await self._run_stage(ctx, sandbox, SETUP_DIR, Phase.SETUP)
+            target = _layout(ctx.spec.os).path("setup")
+            await sandbox.upload_dir(str(setup_dir), str(target))
+            if folder.stage_entry("setup", ctx.spec.os):
+                await self._run_stage(ctx, sandbox, target, Phase.SETUP)
 
     async def _agent(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         spec = ctx.spec
@@ -239,6 +265,9 @@ class StandardEnvironment(Environment):
         if isinstance(harness, PolicyHarness):
             await self._rollout(harness, ctx, sandbox)
             return
+
+        if spec.os is OperatingSystem.WINDOWS and harness.name not in {"nop", "oracle"}:
+            raise AgentError(f"{harness.name} does not support Windows")
 
         if harness.name == "oracle":
             await self._upload_oracle(ctx, task, sandbox)
@@ -289,7 +318,7 @@ class StandardEnvironment(Environment):
         for item in ctx.agent_resources.mcp_servers:
             server = item.server
             if item.staged_files is not None and isinstance(server, StdioMcpServer):
-                target = f"{ctx.home}/.ale-mcp/{item.name}"
+                target = _sandbox_path(ctx.spec.os, ctx.home, ".ale-mcp", item.name)
                 await sandbox.upload_dir(
                     str(item.staged_files),
                     target,
@@ -297,7 +326,11 @@ class StandardEnvironment(Environment):
                 )
                 server = server.model_copy(
                     update={
-                        "command": server.command.replace("{mcp}", target),
+                        "command": (
+                            "python.exe"
+                            if ctx.spec.os is OperatingSystem.WINDOWS and item.name == "cua-desktop"
+                            else server.command.replace("{mcp}", target)
+                        ),
                         "args": tuple(arg.replace("{mcp}", target) for arg in server.args),
                         "cwd": server.cwd.replace("{mcp}", target) if server.cwd else None,
                         "environment": {
@@ -397,7 +430,20 @@ class StandardEnvironment(Environment):
             if not isinstance(server, StdioMcpServer):
                 continue
             command = server.command.replace("{home}", ctx.home)
-            if command.startswith("/"):
+            if ctx.spec.os is OperatingSystem.WINDOWS:
+                quoted = command.replace("'", "''")
+                result = await sandbox.exec(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        f"if (-not (Get-Command '{quoted}' -ErrorAction SilentlyContinue)) "
+                        "{ exit 1 }",
+                    ],
+                    identity=Identity.AGENT,
+                )
+            elif command.startswith("/"):
                 result = await sandbox.exec(["test", "-x", command], identity=Identity.AGENT)
             else:
                 result = await sandbox.exec(
@@ -410,7 +456,21 @@ class StandardEnvironment(Environment):
                 )
             if server.cwd:
                 cwd = server.cwd.replace("{home}", ctx.home)
-                result = await sandbox.exec(["test", "-d", cwd], identity=Identity.AGENT)
+                if ctx.spec.os is OperatingSystem.WINDOWS:
+                    quoted = cwd.replace("'", "''")
+                    result = await sandbox.exec(
+                        [
+                            "powershell.exe",
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-Command",
+                            f"if (-not (Test-Path -LiteralPath '{quoted}' -PathType Container)) "
+                            "{ exit 1 }",
+                        ],
+                        identity=Identity.AGENT,
+                    )
+                else:
+                    result = await sandbox.exec(["test", "-d", cwd], identity=Identity.AGENT)
                 if not result.ok:
                     raise TaskError(f"MCP server {resolved.name!r} cwd is not a directory: {cwd}")
 
@@ -425,30 +485,36 @@ class StandardEnvironment(Environment):
         if verify_dir is None:
             raise TaskError("task has no verify stage")
 
-        await sandbox.upload_dir(str(verify_dir), str(VERIFY_DIR))
+        layout = _layout(ctx.spec.os)
+        verify_root = layout.path("verify")
+        await sandbox.upload_dir(str(verify_dir), str(verify_root))
         trajectory = ctx.run_dir / "trajectory.json"
         if trajectory.is_file():
-            await sandbox.write_file(TRAJECTORY_STAGE_PATH, trajectory.read_bytes())
-        await sandbox.write_file(TASK_INSTRUCTION_PATH, ctx.spec.instruction.encode("utf-8"))
+            await sandbox.write_file(
+                str(layout.path("verify", "trajectory.json")), trajectory.read_bytes()
+            )
+        await sandbox.write_file(
+            str(layout.path("verify", "instruction.md")), ctx.spec.instruction.encode("utf-8")
+        )
         parameters = json.dumps(ctx.spec.params, ensure_ascii=False).encode("utf-8")
-        await sandbox.write_file(TASK_PARAMETERS_PATH, parameters)
+        await sandbox.write_file(str(layout.path("verify", "parameters.json")), parameters)
         await self._stage_verification_config(ctx, sandbox)
         # Scoring is the framework's own work, and a verifier may need to reach something
         # the agent could not. The agent has already finished; nothing it does can follow.
         await sandbox.open_egress()
 
-        destination = await self._site_packages(sandbox)
+        destination = await self._site_packages(ctx, sandbox)
         framework_source, framework_version, framework_hash = installed_ale_verify()
         await sandbox.upload_dir(
             str(framework_source),
             f"{destination}/ale_verify",
         )
-        await self._probe_package(sandbox, "ale-verify", "import ale_verify")
+        await self._probe_package(ctx, sandbox, "ale-verify", "import ale_verify")
         ctx.ale_verify_provenance = AleVerifyProvenance(
             version=framework_version,
             content_hash=framework_hash,
         )
-        exit_code = await self._run_stage(ctx, sandbox, VERIFY_DIR, Phase.VERIFY)
+        exit_code = await self._run_stage(ctx, sandbox, verify_root, Phase.VERIFY)
         record = await self._collect_verification_record(ctx, sandbox)
         await self._collect_agent_judge_log(ctx, sandbox, record)
         if exit_code != 0:
@@ -464,10 +530,12 @@ class StandardEnvironment(Environment):
                 + (f": {record.failure}" if record is not None and record.failure else "")
             )
         if record is None:
-            raise VerifierOutputError(f"verify wrote no record to {VERIFICATION_PATH}")
+            raise VerifierOutputError(
+                f"verify wrote no record to {layout.path('verify', 'verification.json')}"
+            )
         if record.status != "completed":
             raise VerifierOutputError(f"verify record is {record.status}, expected completed")
-        rewards, metrics = await self._read_verdict(sandbox)
+        rewards, metrics = await self._read_verdict(sandbox, ctx.spec.os)
         if rewards != record.rewards or metrics != record.metrics:
             raise VerifierOutputError(
                 "verify record and reward envelope contain different rewards or metrics"
@@ -479,7 +547,7 @@ class StandardEnvironment(Environment):
     async def _stage_verification_config(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         payload = ctx.verification_config.model_dump(mode="json", exclude_none=True)
         await sandbox.write_file(
-            VERIFY_CONFIG_PATH,
+            str(_layout(ctx.spec.os).path("verify", "config.json")),
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
         )
         command_env: dict[str, str] = {}
@@ -498,7 +566,9 @@ class StandardEnvironment(Environment):
         self, ctx: EpisodeContext, sandbox: Sandbox
     ) -> VerificationRecord | None:
         try:
-            raw = await sandbox.read_file(VERIFICATION_PATH)
+            raw = await sandbox.read_file(
+                str(_layout(ctx.spec.os).path("verify", "verification.json"))
+            )
         except Exception:
             return None
         if any(secret.encode() in raw for secret in ctx.verification_secrets if secret):
@@ -525,7 +595,9 @@ class StandardEnvironment(Environment):
             for invocation in record.judge_invocations
         )
         try:
-            raw = await sandbox.read_file(AGENT_JUDGE_LOG_PATH)
+            raw = await sandbox.read_file(
+                str(_layout(ctx.spec.os).path("verify", "agent-judge.jsonl"))
+            )
         except Exception as exc:
             if launched:
                 raise VerifierOutputError(
@@ -571,7 +643,9 @@ class StandardEnvironment(Environment):
         for name in getattr(self.harness, "logs", ()):
             try:
                 await ctx.artifacts.collect_file(
-                    sandbox, f"{ctx.home}/{name}", f"{self.harness.name}/{name}"
+                    sandbox,
+                    _sandbox_path(ctx.spec.os, ctx.home, *PurePosixPath(name).parts),
+                    f"{self.harness.name}/{name}",
                 )
                 logger.info(
                     "native log collected",
@@ -594,7 +668,10 @@ class StandardEnvironment(Environment):
 
         if ctx.artifacts.enabled:
             for index, path in enumerate(ctx.spec.artifacts):
-                name = Path(path).name or f"artifact-{index}"
+                path_type = (
+                    PureWindowsPath if ctx.spec.os is OperatingSystem.WINDOWS else PurePosixPath
+                )
+                name = path_type(path).name or f"artifact-{index}"
                 await ctx.artifacts.collect(sandbox, path, name)
                 logger.info(
                     "artifact collected",
@@ -621,14 +698,28 @@ class StandardEnvironment(Environment):
         if sandbox.request.retention == "destroy":
             ctx.sandboxes.mark_sanitized(sandbox, succeeded=True)
             return
+        layout = _layout(ctx.spec.os)
         paths = [
-            str(VERIFY_CONFIG_PATH),
-            str(VERIFY_DIR / "agent"),
-            str(VERIFY_DIR / "agent-tools"),
-            f"{ctx.home}/.codex/auth.json",
-            f"{ctx.home}/.claude/.credentials.json",
+            str(layout.path("verify", "config.json")),
+            str(layout.path("verify", "agent")),
+            str(layout.path("verify", "agent-tools")),
+            _sandbox_path(ctx.spec.os, ctx.home, ".codex", "auth.json"),
+            _sandbox_path(ctx.spec.os, ctx.home, ".claude", ".credentials.json"),
         ]
-        result = await sandbox.exec(["rm", "-rf", "--", *paths])
+        if ctx.spec.os is OperatingSystem.WINDOWS:
+            quoted = ",".join("'" + path.replace("'", "''") + "'" for path in paths)
+            result = await sandbox.exec(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    f"Remove-Item -LiteralPath @({quoted}) -Recurse -Force "
+                    "-ErrorAction SilentlyContinue",
+                ]
+            )
+        else:
+            result = await sandbox.exec(["rm", "-rf", "--", *paths])
         ctx.sandboxes.mark_sanitized(
             sandbox,
             succeeded=result.ok,
@@ -707,35 +798,49 @@ class StandardEnvironment(Environment):
     # --- helpers ---
 
     async def _run_stage(
-        self, ctx: EpisodeContext, sandbox: Sandbox, directory: PurePosixPath, phase: Phase
+        self, ctx: EpisodeContext, sandbox: Sandbox, directory: PurePath, phase: Phase
     ) -> int:
-        entry = directory / "run.sh"
+        layout = _layout(ctx.spec.os)
+        entry = directory / ("run.ps1" if ctx.spec.os is OperatingSystem.WINDOWS else "run.sh")
         env = {
             "ALE_STAGE_DIR": str(directory),
             "ALE_HOME": ctx.home,
             "ALE_PARAMS_JSON": str(directory / "params.json"),
-            "ALE_VERDICT_PATH": str(VERDICT_PATH),
+            "ALE_VERDICT_PATH": str(layout.path("verify", "rewards.json")),
         }
         if phase is Phase.VERIFY:
             env.update(
                 {
                     "ALE_EPISODE_ID": ctx.episode_id,
-                    "ALE_VERIFICATION_PATH": str(VERIFICATION_PATH),
-                    "ALE_VERIFY_CONFIG_PATH": str(VERIFY_CONFIG_PATH),
-                    "ALE_TASK_INSTRUCTION_PATH": str(TASK_INSTRUCTION_PATH),
-                    "ALE_TASK_PARAMETERS_PATH": str(TASK_PARAMETERS_PATH),
-                    "ALE_AGENT_JUDGE_LOG_PATH": str(AGENT_JUDGE_LOG_PATH),
+                    "ALE_VERIFICATION_PATH": str(layout.path("verify", "verification.json")),
+                    "ALE_VERIFY_CONFIG_PATH": str(layout.path("verify", "config.json")),
+                    "ALE_TASK_INSTRUCTION_PATH": str(layout.path("verify", "instruction.md")),
+                    "ALE_TASK_PARAMETERS_PATH": str(layout.path("verify", "parameters.json")),
+                    "ALE_AGENT_JUDGE_LOG_PATH": str(layout.path("verify", "agent-judge.jsonl")),
                     **ctx.verification_command_env,
                 }
             )
             if (ctx.run_dir / "trajectory.json").is_file():
-                env["ALE_TRAJECTORY_PATH"] = str(TRAJECTORY_STAGE_PATH)
+                env["ALE_TRAJECTORY_PATH"] = str(layout.path("verify", "trajectory.json"))
         await sandbox.write_file(
-            directory / "params.json", json.dumps(ctx.spec.params).encode("utf-8")
+            str(directory / "params.json"), json.dumps(ctx.spec.params).encode("utf-8")
         )
         assert ctx.execution is not None
         assert ctx.blobs is not None
         execution_id = f"{phase.value}-{len(ctx.phases) + 1}"
+        argv = (
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                entry.name,
+            ]
+            if ctx.spec.os is OperatingSystem.WINDOWS
+            else ["bash", entry.name]
+        )
         recorder = CommandRecorder(
             execution=ctx.execution,
             blobs=cast(BlobStore, ctx.blobs),
@@ -744,7 +849,7 @@ class StandardEnvironment(Environment):
             component="task-stage",
             execution_id=execution_id,
             actor="task",
-            argv=["bash", entry.name],
+            argv=argv,
             cwd=str(directory),
             secrets=tuple(
                 secret
@@ -759,7 +864,7 @@ class StandardEnvironment(Environment):
         timeout_sec = ctx.phase_timeout_sec
         try:
             result = await sandbox.exec(
-                ["bash", entry.name],
+                argv,
                 cwd=str(directory),
                 env=env,
                 timeout_sec=timeout_sec,
@@ -783,19 +888,21 @@ class StandardEnvironment(Environment):
             )
         return result.exit_code
 
-    async def _probe_package(self, sandbox: Sandbox, name: str, statement: str) -> None:
-        result = await sandbox.exec(["python3", "-c", statement])
+    async def _probe_package(
+        self, ctx: EpisodeContext, sandbox: Sandbox, name: str, statement: str
+    ) -> None:
+        result = await sandbox.exec([_python(ctx.spec.os), "-c", statement])
         if not result.ok:
             raise TaskError(
                 f"package {name!r} is incompatible with the selected image: "
                 f"{result.stderr.strip() or result.stdout.strip()}"
             )
 
-    async def _site_packages(self, sandbox: Sandbox) -> str:
+    async def _site_packages(self, ctx: EpisodeContext, sandbox: Sandbox) -> str:
         """Where this image's interpreter looks for installed packages."""
         result = await sandbox.exec(
             [
-                "python3",
+                _python(ctx.spec.os),
                 "-c",
                 (
                     "import sys,sysconfig;"
@@ -808,7 +915,7 @@ class StandardEnvironment(Environment):
         path = result.stdout.strip()
         if result.exit_code != 0 or not path:
             raise TaskError(
-                "verify-stage python3 must be Python 3.12+ and expose site-packages: "
+                "verify-stage Python must be Python 3.12+ and expose site-packages: "
                 f"{result.stderr.strip() or result.stdout.strip()}"
             )
         return path
@@ -819,19 +926,24 @@ class StandardEnvironment(Environment):
         if source is None:
             raise TaskError("validation requires an oracle stage, and this task has none")
         # As the agent, since the agent is the account that will run it.
-        root = oracle_dir(ctx.home)
+        root = oracle_dir(ctx.home, ctx.spec.os)
         await sandbox.upload_dir(str(source), str(root), identity=Identity.AGENT)
         await sandbox.write_file(
-            root / "params.json",
+            str(root / "params.json"),
             json.dumps(task.spec.params).encode("utf-8"),
             identity=Identity.AGENT,
         )
 
-    async def _read_verdict(self, sandbox: Sandbox) -> tuple[dict[str, float], dict[str, float]]:
+    async def _read_verdict(
+        self,
+        sandbox: Sandbox,
+        operating_system: OperatingSystem = OperatingSystem.LINUX,
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        path = str(_layout(operating_system).path("verify", "rewards.json"))
         try:
-            raw = await sandbox.read_file(VERDICT_PATH)
+            raw = await sandbox.read_file(path)
         except Exception as exc:
-            raise VerifierOutputError(f"verify wrote no rewards to {VERDICT_PATH}") from exc
+            raise VerifierOutputError(f"verify wrote no rewards to {path}") from exc
         try:
             payload = json.loads(raw.decode("utf-8"))
             rewards = payload["rewards"]
@@ -854,8 +966,12 @@ class StandardEnvironment(Environment):
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise VerifierOutputError(f"verify wrote malformed rewards: {exc}") from exc
 
-    async def _read_rewards(self, sandbox: Sandbox) -> dict[str, float]:
-        rewards, _ = await self._read_verdict(sandbox)
+    async def _read_rewards(
+        self,
+        sandbox: Sandbox,
+        operating_system: OperatingSystem = OperatingSystem.LINUX,
+    ) -> dict[str, float]:
+        rewards, _ = await self._read_verdict(sandbox, operating_system)
         return rewards
 
     async def _with_deadline(self, ctx, phase: Phase, seconds: float, coro):  # type: ignore[no-untyped-def]

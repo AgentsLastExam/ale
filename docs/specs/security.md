@@ -15,8 +15,8 @@ stops measuring what it says it measures.
 ## 1. A sandbox has only declared ways out
 
 Default is `network.mode: block`. Docker uses a per-episode `--internal` bridge with no
-route off the host. QEMU uses guest and runner deny-all rules, forwarding only the
-episode's framework-owned service ports.
+route off the host. QEMU enforces deny-all in the runner network namespace, outside the
+guest OS, and forwards only the episode's framework-owned service ports.
 
 This is why the address is read from the network rather than assumed: Docker's
 `host-gateway` alias does not work on an internal bridge, and a wrong assumption here
@@ -81,9 +81,9 @@ neither raw credential nor profile path.
 
 Verification is a separate trusted phase after solver exit. `[verification.llm]` and
 `[verification.agent]` name an environment variable, model, endpoint, and reasoning
-effort at run level. ALE resolves the key only for `verify/run.sh`, injects it only into
-that command environment, registers the value for output/transcript redaction, and
-removes the sandbox after verification. The key is absent from provisioning, setup, the
+effort at run level. ALE resolves and injects the key only for the OS-specific
+verification entry, registers the value for output/transcript redaction, and removes the
+sandbox after verification. The key is absent from provisioning, setup, the
 solver environment, staged configuration, result, record, and RunLock.
 
 LLM and Agent Judges call their configured endpoints directly from the active
@@ -94,9 +94,11 @@ credential; a malicious Task author is outside this threat model.
 
 ## 4. The agent cannot change what it is measured under
 
-The agent runs as an unprivileged account the image declares, and so does the oracle that
-stands in for it during validation. The framework's own work — installing the guest
-service, staging content, running the task's stages, collecting artifacts — runs as root.
+The agent runs as the account the image declares, and so does the oracle that stands in
+for it during validation. Linux framework work runs as root. The current Windows base
+runs guestd in the interactive agent session so it can share the Cua Driver desktop;
+withholding of setup, oracle, and verification material is therefore enforced by phase
+ordering rather than a second Windows identity.
 
 This is what stops an agent rewriting the network policy that isolates it, the clock its
 timeouts are measured against, or the guest service driving its own sandbox. None of that
@@ -223,10 +225,10 @@ Retention does not change rewards or verification records.
 Stating these plainly is part of the model. Treating an unlisted gap as covered is how
 security claims rot.
 
-**A malicious task author.** A Task folder's `setup/run.sh` and `verify/run.sh` run as root
-in the sandbox, and a Task may declare `resources.sudo` for its agent. Tasks are reviewed
-content, not untrusted input; the identity model protects a result from its *agent*, not a
-host from its Task. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are
+**A malicious task author.** A Task folder's setup and verification entries run as trusted
+framework-controlled code, and a Task may declare `resources.sudo` for its agent. Tasks
+are reviewed content, not untrusted input; the identity model protects a result from its
+*agent*, not a host from its Task. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are
 aimed at *broken* Tasks, not hostile ones. A malicious verifier can also read and
 exfiltrate a Judge credential injected for its direct provider call.
 

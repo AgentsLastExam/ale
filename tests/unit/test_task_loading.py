@@ -75,6 +75,23 @@ def test_ref_only_solver_has_no_local_source_digest(tmp_path: Path) -> None:
     assert loaded.image_source_digest is None
 
 
+def test_windows_task_uses_powershell_stage_entries(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "windows-demo")
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        .replace("name: windows-demo", "name: windows-demo\nos: windows")
+        .replace("kind: container", "kind: vm")
+        .replace("/home/user/output", r"C:\Users\user\output")
+    )
+    for stage in ("verify", "oracle"):
+        (task / stage / "run.sh").rename(task / stage / "run.ps1")
+
+    loaded = load_tasks(task)[0]
+    assert loaded.spec.os.value == "windows"
+    assert loaded.folder.stage_entry("verify", loaded.spec.os).name == "run.ps1"  # type: ignore[union-attr]
+
+
 def test_missing_solver_dockerfile_and_ref_fails_loading(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     (task / "image" / "Dockerfile").unlink()

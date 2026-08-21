@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Literal
 
 from ale.core.config import LoggingPolicy, SandboxRetentionConfig, VerificationConfig
@@ -39,6 +39,7 @@ from ale.core.result import FailureInfo as ResultFailureInfo
 from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
 from ale.core.sandbox import RetainedSandbox, Sandbox, SandboxRequest, SandboxRole
 from ale.core.task import Task
+from ale.core.taskspec import OperatingSystem
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import Status, Verdict
 from ale.run.assets import observe_task_assets
@@ -242,7 +243,7 @@ class _Artifacts(ArtifactSink):
             raise ArtifactTransferError("artifact collection is disabled")
         probe = await sandbox.exec(
             [
-                "python3",
+                "python.exe" if sandbox.request.os is OperatingSystem.WINDOWS else "python3",
                 "-c",
                 (
                     "import json,os,stat,sys; s=os.lstat(sys.argv[1]); "
@@ -313,9 +314,25 @@ class _Artifacts(ArtifactSink):
         for entry in self.entries:
             source = str(entry["source"])
             target = self.root / str(entry["stored_path"])
-            await sandbox.exec(["rm", "-rf", "--", source])
-            parent = str(Path(source).parent)
-            created = await sandbox.exec(["mkdir", "-p", "--", parent])
+            if sandbox.request.os is OperatingSystem.WINDOWS:
+                quoted = source.replace("'", "''")
+                parent = str(PureWindowsPath(source).parent)
+                parent_quoted = parent.replace("'", "''")
+                created = await sandbox.exec(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        f"Remove-Item -LiteralPath '{quoted}' -Recurse -Force "
+                        "-ErrorAction SilentlyContinue; "
+                        f"New-Item -ItemType Directory -Path '{parent_quoted}' -Force | Out-Null",
+                    ]
+                )
+            else:
+                await sandbox.exec(["rm", "-rf", "--", source])
+                parent = str(Path(source).parent)
+                created = await sandbox.exec(["mkdir", "-p", "--", parent])
             if not created.ok:
                 raise ArtifactTransferError(f"could not create artifact parent {parent}")
             try:
@@ -323,9 +340,10 @@ class _Artifacts(ArtifactSink):
                     await sandbox.write_file(source, target.read_bytes())
                 else:
                     await sandbox.upload_dir(str(target), source)
-                mode = await sandbox.exec(["chmod", f"{int(entry['mode']):o}", "--", source])
-                if not mode.ok:
-                    raise ArtifactTransferError(f"could not restore artifact mode: {source}")
+                if sandbox.request.os is OperatingSystem.LINUX:
+                    mode = await sandbox.exec(["chmod", f"{int(entry['mode']):o}", "--", source])
+                    if not mode.ok:
+                        raise ArtifactTransferError(f"could not restore artifact mode: {source}")
             except ArtifactTransferError:
                 raise
             except Exception as exc:
@@ -451,6 +469,7 @@ async def run_episode(
             gateway_url=gateway_url,
             token=session_token,
             model=model,
+            os=task.spec.os,
             authentication=authentication,
             profile_slot_id=profile_slot_id,
         ),

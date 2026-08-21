@@ -15,23 +15,24 @@ tasks/my_task/
 │   ├── install.sh              # optional image-build helper
 │   └── assets/                 # optional separately managed image data
 ├── setup/                       # optional per-episode initialization
-│   ├── run.sh
+│   ├── run.sh                   # Linux; run.ps1 on Windows
 │   └── assets/
 ├── verify/
-│   ├── run.sh
+│   ├── run.sh                   # Linux; run.ps1 on Windows
 │   ├── verify.py
 │   ├── Dockerfile              # optional separate-verifier image
 │   └── assets/
 ├── oracle/
-│   ├── run.sh
+│   ├── run.sh                   # Linux; run.ps1 on Windows
 │   └── assets/
 └── tools/                       # optional Task-requested agent resources
     ├── skills/<name>/SKILL.md
     └── mcp/<server>.toml
 ```
 
-Required files are `task.yaml`, `instruction.md`, `verify/run.sh`, and `oracle/run.sh`.
-The Task must use either `image/Dockerfile` or `image.ref`.
+Required files are `task.yaml`, `instruction.md`, and the verify/oracle entry for the
+declared OS: `run.sh` for Linux or `run.ps1` for Windows. The Task must use either
+`image/Dockerfile` or `image.ref`.
 
 Task source, scripts, manifests, and ordinary small fixtures are tracked by Git. `assets/` is for
 data managed separately from source because of its size or lifecycle. Assets live under the stage
@@ -45,6 +46,9 @@ that consumes them:
 
 These four directories are ignored by Git and managed by the platform. Task code references their
 contents through normal stage-relative paths such as `assets/reference.json`.
+PowerShell stages use the same convention, for example
+`python.exe .\helper.py .\assets\seed.json`. `ALE_STAGE_DIR` remains available when a
+subprocess requires an absolute stage path.
 
 ## task.yaml
 
@@ -55,6 +59,7 @@ its nesting; omit optional sections that the Task does not use.
 spec_type: core/v1                 # required; current Task schema
 name: my-task                      # required stable ID, unique in its Task collection
 environment: core/standard         # optional; this is the only supported Environment
+os: linux                           # optional: linux | windows; default: linux
 
 image:                              # required initial sandbox image
   kind: container                   # required: container | vm
@@ -142,6 +147,10 @@ of initial state required by the Task:
 - container: `ghcr.io/agentslastexam/container-ubuntu22-base:latest` (Ubuntu 22.04);
 - VM: `ghcr.io/agentslastexam/vm-ubuntu24-base:0.1.0` (Ubuntu 24.04).
 
+Windows VM Tasks declare `os: windows` and currently use a private prebuilt qcow2
+reference. ALE does not publish licensed Windows image bytes or offer a general Windows
+image builder.
+
 Develop it in two passes:
 
 1. **Explore.** Start the matching base sandbox, construct and inspect the required environment
@@ -166,7 +175,7 @@ Task code does not implement boot or disk assembly.
 
 ## setup/
 
-`setup/` is optional trusted initialization executed after the sandbox starts. Use it only for
+`setup/` is optional framework-controlled initialization executed after the sandbox starts. Use it only for
 state that must vary by episode: reset mutable data, generate per-episode values, create writable
 copies, or start services that depend on dynamic state. Stable installation and configuration
 belong in `image/`.
@@ -176,6 +185,8 @@ belong in `image/`.
 Describe the required outcome and constraints, not a preferred implementation path. Any input or
 output location needed to complete the Task must agree with the initial environment and
 `task.yaml`. Declared `${name}` placeholders are rendered from `params`.
+Use literal sandbox paths: `/home/user/...` on Linux and `C:\Users\user\...` on
+Windows. ALE does not add or rewrite a workspace prefix.
 
 ## tools/
 
@@ -185,14 +196,14 @@ in `task.yaml`; never depend on ambient Host configuration.
 
 ## verify/
 
-`verify/run.sh` evaluates the final outcome and writes the reward map. Verifier implementation
+`verify/run.sh` (or Windows `verify/run.ps1`) evaluates the final outcome and writes the reward map. Verifier implementation
 conventionally lives in `verify/verify.py`; private references belong in `verify/assets/`. Use the
 APIs and scoring behavior defined in [Verification](verification.md) rather than duplicating them
 here.
 
 ## oracle/
 
-`oracle/run.sh` checks that successful final state can receive credit. Prefer an executable
+`oracle/run.sh` (or Windows `oracle/run.ps1`) checks that successful final state can receive credit. Prefer an executable
 solution that performs the Task normally. When that is not practical, the oracle may instead use
 protected reference data from `oracle/assets/` to write or upload a full-credit final state
 directly. That reference must never be visible to the evaluated agent.

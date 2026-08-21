@@ -59,15 +59,21 @@ def atomic_json(path: str | os.PathLike[str], payload: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
-        directory = os.open(target.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_directory(target.parent)
     except BaseException:
         with suppress(FileNotFoundError):
             os.unlink(temporary)
         raise
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def load_config() -> dict[str, dict[str, str]]:

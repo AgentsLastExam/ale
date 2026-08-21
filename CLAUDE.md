@@ -56,7 +56,7 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 - `packages/ale-verify/AGENTS.md` — sandbox-local public verification API
 - `tests/AGENTS.md` — test taxonomy and infrastructure markers
 - `docs/AGENTS.md` — specifications, ADRs and guides
-- `images/base/AGENTS.md` — foundational image contract
+- `images/AGENTS.md` — Sandbox bases, image builders and Provider runtimes
 
 ## Checks
 

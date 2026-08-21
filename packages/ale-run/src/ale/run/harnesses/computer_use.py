@@ -52,6 +52,49 @@ _ACTIONS = {
 }
 
 
+def _computer_tool(model: str) -> dict[str, Any]:
+    if model.lower().startswith("claude"):
+        return {
+            "type": "computer_20250124",
+            "name": "computer",
+            "display_width_px": GRID,
+            "display_height_px": GRID,
+        }
+    return {
+        "name": "computer",
+        "description": (
+            "Control the visible desktop with exactly one action per call. Coordinates "
+            "use a 0-1000 grid. Use screenshot after an action when you need to see its result."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": list(_ACTIONS)},
+                "coordinate": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 0, "maximum": GRID},
+                    "minItems": 2,
+                    "maxItems": 2,
+                },
+                "to": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 0, "maximum": GRID},
+                    "minItems": 2,
+                    "maxItems": 2,
+                },
+                "text": {"type": "string"},
+                "keys": {"type": "array", "items": {"type": "string"}},
+                "scroll_direction": {
+                    "type": "string",
+                    "enum": ["up", "down", "left", "right"],
+                },
+                "scroll_amount": {"type": "integer", "minimum": 1},
+            },
+            "required": ["action"],
+        },
+    }
+
+
 def translate_action(raw: dict[str, Any]) -> DesktopAction | None:
     """Convert one computer-use tool call. ``None`` means "nothing to dispatch"."""
     name = str(raw.get("action", "")).lower()
@@ -62,13 +105,28 @@ def translate_action(raw: dict[str, Any]) -> DesktopAction | None:
         return None
 
     coordinate = raw.get("coordinate")
-    keys = raw.get("text") if kind == "key" else None
+    raw_keys = raw.get("keys", raw.get("text")) if kind == "key" else None
+    if isinstance(raw_keys, str):
+        try:
+            decoded_keys = json.loads(raw_keys)
+        except json.JSONDecodeError:
+            decoded_keys = raw_keys
+    else:
+        decoded_keys = raw_keys
+    key_values = decoded_keys if isinstance(decoded_keys, list) else [decoded_keys]
+    key_parts = [
+        part
+        for value in key_values
+        if isinstance(value, str)
+        for part in value.replace("-", "+").replace(" ", "+").split("+")
+        if part.strip()
+    ]
     return DesktopAction(
         type=kind,  # type: ignore[arg-type]
         coordinate=tuple(coordinate) if coordinate else None,  # type: ignore[arg-type]
         to=tuple(raw["to"]) if raw.get("to") else None,
         text=raw.get("text") if kind == "type" else None,
-        keys=tuple(part.strip() for part in keys.replace("-", "+").split("+")) if keys else None,
+        keys=tuple(part.strip() for part in key_parts) or None,
         direction=raw.get("scroll_direction"),
         amount=raw.get("scroll_amount"),
     )
@@ -166,14 +224,7 @@ class ComputerUseHarness(StepwisePolicy):
             "model": self.model,
             "max_tokens": self.max_tokens,
             "messages": self._messages,
-            "tools": [
-                {
-                    "type": "computer_20250124",
-                    "name": "computer",
-                    "display_width_px": GRID,
-                    "display_height_px": GRID,
-                }
-            ],
+            "tools": [_computer_tool(self.model)],
         }
         headers = {
             "authorization": f"Bearer {session.token}",
