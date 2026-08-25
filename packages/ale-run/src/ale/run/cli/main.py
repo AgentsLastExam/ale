@@ -60,6 +60,8 @@ app = typer.Typer(
 )
 assets_app = typer.Typer(help="Synchronize canonical Task assets.", no_args_is_help=True)
 app.add_typer(assets_app, name="assets")
+vm_image_app = typer.Typer(help="Publish and acquire prebuilt VM disks.", no_args_is_help=True)
+app.add_typer(vm_image_app, name="vm-image")
 sandbox_app = typer.Typer(help="Inspect and remove retained sandboxes.", no_args_is_help=True)
 app.add_typer(sandbox_app, name="sandbox")
 
@@ -197,33 +199,46 @@ def lint(
     typer.echo("ok")
 
 
-@app.command("pull-guest")
-def pull_guest(
-    reference: Annotated[
-        str, typer.Option("--from", help="Published guest image to take the disk from")
-    ] = "",
-    dest: Annotated[Path | None, typer.Option("--to", help="Where to write the qcow2")] = None,
+@vm_image_app.command("push")
+def vm_image_push(
+    source: Annotated[Path, typer.Argument(help="Local qcow2 disk")],
+    reference: Annotated[str, typer.Argument(help="Destination OCI image reference")],
 ) -> int:
-    """Fetch the virtual-machine guest disk that the VM backend boots.
+    """Publish a local qcow2 through an OCI registry."""
+    from ale.run.images import publish_vm_image
+
+    typer.echo(f"pushing {source} to {reference}")
+    try:
+        resolved = asyncio.run(publish_vm_image(source, reference))
+    except AleError as error:
+        typer.echo(str(error), err=True)
+        return EXIT_BAD_REFERENCE
+    typer.echo(f"ok    {resolved}")
+    return 0
+
+
+@vm_image_app.command("pull")
+def vm_image_pull(
+    reference: Annotated[str, typer.Argument(help="Source OCI image reference")],
+    destination: Annotated[Path, typer.Argument(help="Local qcow2 destination")],
+) -> int:
+    """Acquire a published qcow2 from an OCI registry.
 
     The disk is published as the single layer of a container image, so it arrives over the
-    registry everyone is already authenticated to. Building one instead takes about forty
-    minutes and an Ubuntu ISO; this takes as long as the download.
+    registry everyone is already authenticated to.
     """
     from ale.core.sandbox import ImageRef
     from ale.run.images import resolve_vm_image
-    from ale.run.providers.qemu import GUEST_IMAGE
 
-    source = reference or GUEST_IMAGE
-    typer.echo(f"pulling {source}")
+    typer.echo(f"pulling {reference}")
     try:
-        prepared = asyncio.run(resolve_vm_image(ImageRef(kind="vm", reference=source)))
+        prepared = asyncio.run(resolve_vm_image(ImageRef(kind="vm", reference=reference)))
     except AleError as error:
         typer.echo(str(error), err=True)
         return EXIT_BAD_REFERENCE
 
     cached = Path(prepared.runtime_ref)
-    target = dest or cached
+    target = destination.resolve()
     if target != cached:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(cached, target)

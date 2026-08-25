@@ -26,6 +26,8 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
   contract instead of concrete Providers.
 - Put a responsibility in the narrowest existing owner. Do not add a package, registry,
   interface, flag or compatibility layer until more than one concrete use needs it.
+- This project is in active development. Do not preserve backward compatibility: change
+  interfaces directly and update every caller, test and document in the same change.
 - Keep CLI modules as composition, `ale.core` as contracts, and Provider/Harness code as
   edge adapters. Cross boundaries through public types, not `Any`, ambient state or
   private imports.

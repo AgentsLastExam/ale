@@ -39,6 +39,11 @@ The resulting disk is packaged through the existing private VM-image distributio
 Every episode cold-boots a fresh qcow2 overlay; ALE does not create ready snapshots or a
 warm pool.
 
+```bash
+uv run ale vm-image push output.qcow2 ghcr.io/agentslastexam/vm-windows10-base:0.1.0
+uv run ale vm-image pull ghcr.io/agentslastexam/vm-windows10-base:0.1.0 output.qcow2
+```
+
 A GUI base is not qualified by an oracle-only Task. Before publication, run a real visual
 agent against screen-only information and inspect its canonical trajectory, screenshot
 blobs, desktop actions, final artifact, and reward. Oracle runs remain useful for the

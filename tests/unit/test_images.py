@@ -2,16 +2,57 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import json
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from ale.core.errors import ProviderStartError
 from ale.core.sandbox import ImageRef
 from ale.core.taskspec import ImageKind
-from ale.run.images import _acquire_lock, _select_repo_digest, resolve_vm_image
+from ale.run.cli.main import app
+from ale.run.images import _acquire_lock, _select_repo_digest, publish_vm_image, resolve_vm_image
 
 pytestmark = pytest.mark.unit
+
+
+def test_vm_image_commands_replace_the_legacy_guest_command() -> None:
+    help_text = CliRunner().invoke(app, ["--help"]).stdout
+    assert "vm-image" in help_text
+    assert "pull-guest" not in help_text
+
+
+@pytest.mark.asyncio
+async def test_vm_publish_wraps_the_checked_disk_at_the_pull_contract_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    disk = tmp_path / "windows.qcow2"
+    disk.write_bytes(b"qcow2")
+    digest = "sha256:" + "7" * 64
+
+    async def valid(path: Path) -> bool:
+        return path == disk
+
+    async def fake_run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
+        assert argv[:3] == ("docker", "buildx", "build")
+        assert "--push" in argv
+        assert timeout == 7200
+        context = Path(argv[-1])
+        assert (context / "disk.qcow2").samefile(disk)
+        assert (context / "Dockerfile").read_text() == (
+            "FROM scratch\nCOPY disk.qcow2 /disk.qcow2\n"
+        )
+        metadata = Path(argv[argv.index("--metadata-file") + 1])
+        metadata.write_text(json.dumps({"containerimage.digest": digest}))
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.images._valid_qcow2", valid)
+    monkeypatch.setattr("ale.run.images._run", fake_run)
+
+    reference = "ghcr.io/acme/windows:v1"
+    assert await publish_vm_image(disk, reference) == f"{reference}@{digest}"
+    assert not list(tmp_path.glob(".ale-vm-publish-*"))
 
 
 def test_selects_the_digest_for_the_declared_repository() -> None:

@@ -18,6 +18,7 @@ from ale.core.taskspec import ImageKind
 from ale.run.sources import cache_root
 
 __all__ = [
+    "publish_vm_image",
     "resolve_container_image",
     "resolve_container_reference",
     "resolve_local_vm_fixture",
@@ -196,6 +197,47 @@ async def resolve_vm_image(
         prepared_identity=identity,
         resolved_reference=resolved_reference,
     )
+
+
+async def publish_vm_image(disk: Path, reference: str) -> str:
+    """Publish a qcow2 as the disk layer consumed by ``resolve_vm_image``."""
+    source = disk.resolve()
+    if not await _valid_qcow2(source):
+        raise ProviderStartError(f"VM disk is missing or invalid: {source}")
+    if not reference.strip():
+        raise ProviderStartError("VM image reference must not be blank")
+
+    with tempfile.TemporaryDirectory(prefix=".ale-vm-publish-", dir=source.parent) as temporary:
+        context = Path(temporary)
+        os.link(source, context / "disk.qcow2")
+        (context / "Dockerfile").write_text(
+            "FROM scratch\nCOPY disk.qcow2 /disk.qcow2\n",
+            encoding="utf-8",
+        )
+        metadata_file = context / "metadata.json"
+        code, _, stderr = await _run(
+            "docker",
+            "buildx",
+            "build",
+            "--push",
+            "--provenance=false",
+            "--sbom=false",
+            "--tag",
+            reference,
+            "--metadata-file",
+            str(metadata_file),
+            str(context),
+            timeout=7200,
+        )
+        if code != 0:
+            raise ProviderStartError(f"could not publish VM image {reference}: {stderr.strip()}")
+        try:
+            digest = json.loads(metadata_file.read_text(encoding="utf-8"))["containerimage.digest"]
+        except (KeyError, OSError, json.JSONDecodeError) as exc:
+            raise ProviderStartError(f"Docker returned no digest for {reference}: {exc}") from exc
+    if not isinstance(digest, str) or not digest.startswith("sha256:"):
+        raise ProviderStartError(f"Docker returned an invalid digest for {reference}: {digest}")
+    return f"{reference}@{digest}"
 
 
 async def resolve_prepared_vm_image(image: PreparedTaskImage) -> ResolvedImage:
