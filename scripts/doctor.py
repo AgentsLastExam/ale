@@ -11,6 +11,7 @@ debugs a "works on main but not in my worktree" problem by hand again.
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -197,12 +198,18 @@ def check_sandbox_backends() -> list[Result]:
 
     runtime = next((r for r in ("docker", "podman") if shutil.which(r)), None)
     if runtime is None:
+        container_status = WARN if sys.platform == "darwin" else FAIL
+        container_fix = (
+            "install Docker Desktop to enable the optional container provider"
+            if sys.platform == "darwin"
+            else "install Docker Engine: https://docs.docker.com/engine/install/"
+        )
         results.append(
             Result(
-                FAIL,
+                container_status,
                 "container runtime",
                 "neither docker nor podman found — the container backend cannot run",
-                "install Docker Engine: https://docs.docker.com/engine/install/",
+                container_fix,
             )
         )
     else:
@@ -222,36 +229,63 @@ def check_sandbox_backends() -> list[Result]:
         else:
             results.append(
                 Result(
-                    FAIL,
+                    WARN if sys.platform == "darwin" else FAIL,
                     "container runtime",
                     f"{runtime} present but daemon unreachable",
-                    f"sudo systemctl start {runtime} && sudo usermod -aG {runtime} $USER",
+                    (
+                        "start Docker Desktop"
+                        if sys.platform == "darwin"
+                        else f"sudo systemctl start {runtime} && sudo usermod -aG {runtime} $USER"
+                    ),
                 )
             )
 
-    kvm = Path("/dev/kvm")
-    if not kvm.exists():
-        results.append(
-            Result(
-                WARN,
-                "kvm",
-                "/dev/kvm missing — the qemu backend is unavailable",
-                "enable virtualisation in BIOS, or use --provider docker",
-            )
+    if sys.platform == "darwin":
+        native_qemu = (
+            "qemu-system-aarch64"
+            if platform.machine().lower() in {"arm64", "aarch64"}
+            else "qemu-system-x86_64"
         )
-    elif not os.access(kvm, os.R_OK | os.W_OK):
-        results.append(
-            Result(
-                WARN,
-                "kvm",
-                "/dev/kvm not accessible",
-                "sudo usermod -aG kvm $USER && re-login",
+        code, accelerators = _run(native_qemu, "-accel", "help")
+        if shutil.which(native_qemu) and code == 0 and "hvf" in accelerators:
+            results.append(Result(OK, "hvf", "Hypervisor.framework available to QEMU"))
+        else:
+            results.append(
+                Result(
+                    WARN,
+                    "hvf",
+                    f"{native_qemu} cannot use Hypervisor.framework",
+                    "brew install qemu",
+                )
             )
-        )
+        qemu_tools = ("qemu-system-aarch64", "qemu-system-x86_64", "qemu-img")
+        qemu_fix = "brew install qemu"
     else:
-        results.append(Result(OK, "kvm", "/dev/kvm accessible"))
+        kvm = Path("/dev/kvm")
+        if not kvm.exists():
+            results.append(
+                Result(
+                    WARN,
+                    "kvm",
+                    "/dev/kvm missing — the qemu backend is unavailable",
+                    "enable virtualisation in BIOS, or use --provider docker",
+                )
+            )
+        elif not os.access(kvm, os.R_OK | os.W_OK):
+            results.append(
+                Result(
+                    WARN,
+                    "kvm",
+                    "/dev/kvm not accessible",
+                    "sudo usermod -aG kvm $USER && re-login",
+                )
+            )
+        else:
+            results.append(Result(OK, "kvm", "/dev/kvm accessible"))
+        qemu_tools = ("qemu-system-x86_64", "qemu-img")
+        qemu_fix = "sudo apt install qemu-system-x86 qemu-utils"
 
-    for tool in ("qemu-system-x86_64", "qemu-img"):
+    for tool in qemu_tools:
         found = shutil.which(tool)
         if found is None:
             results.append(
@@ -259,7 +293,7 @@ def check_sandbox_backends() -> list[Result]:
                     WARN,
                     tool,
                     "not found — qemu backend unavailable",
-                    "sudo apt install qemu-system-x86 qemu-utils",
+                    qemu_fix,
                 )
             )
         else:

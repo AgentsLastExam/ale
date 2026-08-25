@@ -30,12 +30,14 @@ $setup = "$env:ProgramData\ALE\setup"
 $verify = "$env:ProgramData\ALE\verify"
 New-Item -ItemType Directory -Path $work, $guestd, $setup, $verify -Force | Out-Null
 
+$nativeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$packageArchitecture = if ($nativeArchitecture -eq "Arm64") { "arm64" } else { "amd64" }
 $python = "C:\Python312\python.exe"
 if (-not (Test-Path $python)) {
-    $installer = "$work\python-$PythonVersion-amd64.exe"
+    $installer = "$work\python-$PythonVersion-$packageArchitecture.exe"
     $installLog = "$work\python-install.log"
     Invoke-WebRequest `
-        "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-amd64.exe" `
+        "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-$packageArchitecture.exe" `
         -OutFile $installer
     if ((Get-AuthenticodeSignature $installer).Status -ne "Valid") {
         throw "Python installer signature is not valid."
@@ -276,7 +278,8 @@ if ($Compact) {
     $archive = "$work\SDelete.zip"
     Invoke-WebRequest "https://download.sysinternals.com/files/SDelete.zip" -OutFile $archive
     Expand-Archive $archive "$work\sdelete" -Force
-    $sdelete = "$work\sdelete\sdelete64.exe"
+    $sdeleteName = if ($nativeArchitecture -eq "Arm64") { "sdelete64a.exe" } else { "sdelete64.exe" }
+    $sdelete = "$work\sdelete\$sdeleteName"
     if ((Get-AuthenticodeSignature $sdelete).Status -ne "Valid") {
         throw "SDelete signature is not valid."
     }

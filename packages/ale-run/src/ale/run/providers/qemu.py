@@ -7,11 +7,9 @@ macOS guests) becomes "swap the guest image" rather than "write another framewor
 
 Three choices are worth stating, because each has a plausible alternative:
 
-* **The VM is hosted by a container.** Rather than running ``qemu-system-x86_64`` on the
-  host, a runner image holds it — the same one the previous framework used, which already
-  solves the parts that are tedious and easy to get subtly wrong: device permissions,
-  networking, signal handling, and a supervisor that dies with the guest rather than
-  outliving it. It also means the host needs nothing installed but Docker and ``/dev/kvm``.
+* **The host selects the runtime.** Linux keeps the QEMU-in-Docker KVM runner. macOS runs
+  QEMU natively so ARM guests can use Hypervisor.framework and x86 guests can use TCG;
+  both paths preserve the same Provider and guest-service contracts.
 * **Overlays, not copies.** Each episode gets a qcow2 whose backing file is the golden
   image, so a pristine guest costs milliseconds and no disk. It is also the primitive a
   future ``reset()`` would use.
@@ -26,6 +24,7 @@ import contextlib
 import json
 import os
 import shutil
+import sys
 import uuid
 import zlib
 from collections.abc import Sequence
@@ -61,6 +60,8 @@ from ale.run.images import (
     resolve_prepared_vm_image,
     resolve_vm_image,
 )
+from ale.run.providers.qemu_darwin import HOST_IP as DARWIN_HOST_IP
+from ale.run.providers.qemu_darwin import DarwinRuntime, image_architecture
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, TcpTransport
 
@@ -144,6 +145,8 @@ async def _managed_gpu_ids() -> set[str]:
 
 
 async def list_retained() -> list[dict[str, object]]:
+    if sys.platform == "darwin":
+        return await DarwinRuntime().list_retained()
     code, output, stderr = await _run(
         "docker",
         "ps",
@@ -186,6 +189,9 @@ async def destroy_retained(handle: str) -> None:
     if not handle.startswith(HANDLE_PREFIX):
         raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
     container = handle.removeprefix(HANDLE_PREFIX)
+    if sys.platform == "darwin":
+        await DarwinRuntime().destroy_retained(container)
+        return
     code, raw, stderr = await _run("docker", "inspect", container, timeout=30)
     if code != 0:
         raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
@@ -341,11 +347,11 @@ def _inspect_vfio_gpu(
     return _VfioGpu(bdf=bdf, group=group)
 
 
-def _proxy_env(request: SandboxRequest) -> dict[str, str]:
+def _proxy_env(request: SandboxRequest, host_ip: str = HOST_IP) -> dict[str, str]:
     if not request.proxy_url:
         return {}
     port = _port_of(request.proxy_url)
-    proxy = f"http://{HOST_IP}:{port}"
+    proxy = f"http://{host_ip}:{port}"
     if request.proxy_token:
         proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}:@", 1)
     return {
@@ -353,7 +359,7 @@ def _proxy_env(request: SandboxRequest) -> dict[str, str]:
         "HTTPS_PROXY": proxy,
         "http_proxy": proxy,
         "https_proxy": proxy,
-        "NO_PROXY": f"{HOST_IP},localhost,127.0.0.1",
+        "NO_PROXY": f"{host_ip},localhost,127.0.0.1",
     }
 
 
@@ -391,6 +397,7 @@ class QemuSandbox(Sandbox):
         agent_user: str = DEFAULT_AGENT_USER,
         agent_home: str = "/home/user",
         host_ip: str = "",
+        darwin_runtime: DarwinRuntime | None = None,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -405,6 +412,7 @@ class QemuSandbox(Sandbox):
         self.agent_user = agent_user
         self.agent_home = agent_home
         self.host_ip = host_ip
+        self.darwin_runtime = darwin_runtime
         self._client = client
         self._sealed = False
         self.state = SandboxState.READY
@@ -431,7 +439,8 @@ class QemuSandbox(Sandbox):
             return None
         scheme, _, rest = url.partition("://")
         _, _, port = rest.partition(":")
-        return f"{scheme}://{HOST_IP}:{port}" if port else url
+        host_ip = self.host_ip or HOST_IP
+        return f"{scheme}://{host_ip}:{port}" if port else url
 
     async def exec(
         self,
@@ -448,7 +457,8 @@ class QemuSandbox(Sandbox):
             and self._sealed
             and self.request.network.mode is NetworkMode.ALLOWLIST
         ):
-            env = _proxy_env(self.request) | (env or {})
+            host_ip = self.host_ip or HOST_IP
+            env = _proxy_env(self.request, host_ip) | (env or {})
         loop = asyncio.get_running_loop()
         started = loop.time()
         exit_code, stdout, stderr, timed_out = await self._client.exec(
@@ -533,6 +543,10 @@ class QemuSandbox(Sandbox):
 
     async def open_egress(self) -> None:
         """Lift the runner firewall for the framework's own phases."""
+        if self.darwin_runtime is not None:
+            await self.darwin_runtime.set_egress(self.storage, enabled=True)
+            self._sealed = False
+            return
         for rule in (
             f"iptables -D FORWARD -i {GUEST_BRIDGE} ! -d {self.host_ip} -j DROP",
             f"iptables -D INPUT -i {GUEST_BRIDGE} -j DROP",
@@ -543,6 +557,10 @@ class QemuSandbox(Sandbox):
     async def close_egress(self) -> None:
         """Restore the runner firewall before the agent starts."""
         if self.request.network.mode is NetworkMode.OPEN:
+            return
+        if self.darwin_runtime is not None:
+            await self.darwin_runtime.set_egress(self.storage, enabled=False)
+            self._sealed = True
             return
         for rule in (
             f"iptables -I FORWARD -i {GUEST_BRIDGE} ! -d {self.host_ip} -j DROP",
@@ -568,7 +586,10 @@ class QemuSandbox(Sandbox):
             with contextlib.suppress(Exception):
                 await self._client.close()
             with contextlib.suppress(Exception):
-                await _run("docker", "rm", "-f", self.container, timeout=60)
+                if self.darwin_runtime is not None:
+                    await self.darwin_runtime.destroy(self.storage)
+                else:
+                    await _run("docker", "rm", "-f", self.container, timeout=60)
             # The overlay is this episode's entire mutable state.
             with contextlib.suppress(OSError):
                 shutil.rmtree(self.storage, ignore_errors=True)
@@ -607,6 +628,7 @@ class QemuProvider(Provider):
         image_cache_dir: Path | None = None,
         gpu_devices: tuple[str, ...] = (),
         gpu_lock_dir: Path | None = None,
+        runtime: Literal["auto", "linux", "darwin"] = "auto",
     ) -> None:
         self.fixture_image = image
         # Host-side, and named for what it holds. It was `work_dir`, which is a retired
@@ -616,6 +638,12 @@ class QemuProvider(Provider):
         self.image_cache_dir = image_cache_dir
         self.gpu_devices = gpu_devices
         self.gpu_lock_dir = gpu_lock_dir or cache_root() / "gpu-locks" / self.name
+        selected_runtime = "darwin" if runtime == "auto" and sys.platform == "darwin" else runtime
+        if selected_runtime == "auto":
+            selected_runtime = "linux"
+        self.darwin_runtime = (
+            DarwinRuntime(self.overlay_dir) if selected_runtime == "darwin" else None
+        )
 
     def capabilities(self) -> Capabilities:
         return Capabilities(
@@ -630,6 +658,9 @@ class QemuProvider(Provider):
 
     async def preflight(self) -> None:
         """Fail early and specifically, before anything is provisioned."""
+        if self.darwin_runtime is not None:
+            await self.darwin_runtime.preflight(self.fixture_image)
+            return
         problems: list[str] = []
 
         if shutil.which("docker") is None:
@@ -677,6 +708,8 @@ class QemuProvider(Provider):
         selected: tuple[_VfioGpu, ...] = ()
         by_group: dict[str, _VfioGpu] = {}
         if request.resources.gpus:
+            if self.darwin_runtime is not None:
+                raise ProviderCapabilityError("Darwin QEMU does not support GPU passthrough")
             candidates = tuple(_inspect_vfio_gpu(value) for value in self.gpu_devices)
             if not candidates:
                 raise ProviderCapabilityError("no QEMU VFIO GPU pool is configured")
@@ -742,7 +775,10 @@ class QemuProvider(Provider):
                 await self._grant_sudo(client, agent_user, request.os)
         except BaseException:
             with contextlib.suppress(BaseException):
-                await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))
+                if self.darwin_runtime is not None:
+                    await asyncio.shield(self.darwin_runtime.destroy(storage))
+                else:
+                    await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))
             shutil.rmtree(storage, ignore_errors=True)
             if lease:
                 lease.release()
@@ -781,6 +817,7 @@ class QemuProvider(Provider):
             agent_user=agent_user,
             agent_home=agent_home,
             host_ip=host_ip,
+            darwin_runtime=self.darwin_runtime,
         )
         if request.network.mode is NetworkMode.OPEN:
             await sandbox.open_egress()
@@ -817,11 +854,16 @@ class QemuProvider(Provider):
             requested_size = (requested_storage_mb + VM_STORAGE_OVERHEAD_MB) * 1024 * 1024
             virtual_size = max(virtual_size, requested_size)
 
+        backing = (
+            self.darwin_runtime.backing_path(base_image)
+            if self.darwin_runtime is not None
+            else RUNNER_BASE
+        )
         code, _, stderr = await _run(
             "qemu-img", "create", "-u",
             "-f", "qcow2",
             "-F", "qcow2",
-            "-b", RUNNER_BASE,
+            "-b", backing,
             str(overlay),
             str(virtual_size),
             timeout=60,
@@ -842,6 +884,14 @@ class QemuProvider(Provider):
         The golden image is mounted read-only beside the overlay that backs onto it, so
         one image serves every concurrent episode and none of them can write to it.
         """
+        if self.darwin_runtime is not None:
+            return await self.darwin_runtime.boot(
+                request,
+                storage,
+                host_port,
+                image_architecture(request.prepared_image),
+            )
+
         name = f"ale-qemu-{uuid.uuid4().hex[:10]}"
         argv = [
             "docker", "run", "--detach", "--name", name,
@@ -978,6 +1028,9 @@ class QemuProvider(Provider):
         here rather than in the guest means the host's address is discovered at run time
         instead of baked into a disk.
         """
+        if self.darwin_runtime is not None:
+            return DARWIN_HOST_IP
+
         code, route, _ = await _run(
             "docker", "exec", container, "sh", "-c",
             "ip route | awk '/^default/{print $3}'", timeout=60,

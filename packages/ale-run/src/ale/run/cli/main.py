@@ -220,7 +220,7 @@ def lint(
 def vm_image_push(
     source: Annotated[Path, typer.Argument(help="Local qcow2 disk")],
     reference: Annotated[str, typer.Argument(help="Destination OCI image reference")],
-) -> int:
+) -> None:
     """Publish a local qcow2 through an OCI registry."""
     from ale.run.images import publish_vm_image
 
@@ -229,16 +229,15 @@ def vm_image_push(
         resolved = asyncio.run(publish_vm_image(source, reference))
     except AleError as error:
         typer.echo(str(error), err=True)
-        return EXIT_BAD_REFERENCE
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
     typer.echo(f"ok    {resolved}")
-    return 0
 
 
 @vm_image_app.command("pull")
 def vm_image_pull(
     reference: Annotated[str, typer.Argument(help="Source OCI image reference")],
     destination: Annotated[Path, typer.Argument(help="Local qcow2 destination")],
-) -> int:
+) -> None:
     """Acquire a published qcow2 from an OCI registry.
 
     The disk is published as the single layer of a container image, so it arrives over the
@@ -252,7 +251,7 @@ def vm_image_pull(
         prepared = asyncio.run(resolve_vm_image(ImageRef(kind="vm", reference=reference)))
     except AleError as error:
         typer.echo(str(error), err=True)
-        return EXIT_BAD_REFERENCE
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
 
     cached = Path(prepared.runtime_ref)
     target = destination.resolve()
@@ -260,7 +259,6 @@ def vm_image_pull(
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(cached, target)
     typer.echo(f"ok    {target}")
-    return 0
 
 
 @app.command("new-task")

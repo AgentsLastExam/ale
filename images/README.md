@@ -6,7 +6,8 @@ This directory separates Task foundations from the tools that build and run them
 base/
 ├── container-ubuntu22/  Ubuntu desktop container base
 ├── vm-ubuntu24/         Ubuntu OCI source for a bootable VM
-└── vm-windows10/        private Windows seed preparation recipe
+├── vm-windows10/        private Windows x86_64 seed preparation recipe
+└── vm-windows11-arm64/  Windows 11 ARM64 ISO build recipe
 builders/
 └── vm-materializer/     converts a VM OCI rootfs to qcow2
 runtimes/
@@ -14,8 +15,10 @@ runtimes/
 ```
 
 Task repositories extend or reference only entries under `base/`. Linux VM Tasks build an
-OCI rootfs from `vm-ubuntu24`; the materializer converts it to qcow2 and the QEMU runner
-boots it. Windows preparation already produces qcow2, so it goes directly to the runner.
+OCI rootfs from `vm-ubuntu24`; the materializer converts it to qcow2 and the QEMU runtime
+boots it. Windows preparation already produces qcow2, so it goes directly to the selected
+host runtime. The ARM64 base is built independently from ISO and shares the Windows guest
+post-processing contract; installed x86_64 disks are not architecture-converted.
 
 The image contract, identity rules and required labels are defined in
 [`../docs/specs/sandbox-image.md`](../docs/specs/sandbox-image.md).

@@ -37,7 +37,7 @@ IMAGE = Path(os.environ.get("ALE_QEMU_IMAGE", DEFAULT_IMAGE))
 
 pytestmark = [
     pytest.mark.conformance,
-    pytest.mark.needs_kvm,
+    pytest.mark.needs_hvf if sys.platform == "darwin" else pytest.mark.needs_kvm,
     pytest.mark.skipif(
         not IMAGE.is_file(),
         reason=f"no prepared VM disk at {IMAGE}; run ale prepare on a VM Task",

@@ -73,11 +73,14 @@ runs its pinned materializer, which owns initramfs, boot, partition assembly, an
 minimal bootable qcow2 template. Reuse is keyed by final OCI plus materializer identities
 and validated structurally without hashing the whole disk.
 
-Windows 10 has no public ISO build path in ALE. The current private BYOL base starts from
+Windows 10 x86_64 has no public ISO build path in ALE. The current private BYOL base starts from
 the GCP image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
 recipe installs and pins ALE's cross-platform components, and `compact.sh` validates and
 compresses the resulting qcow2. Episodes always cold-boot a fresh overlay. ALE creates no
-ready snapshot, warm pool, or environment server.
+ready snapshot, warm pool, or environment server. The Windows 11 ARM64 base starts from
+Microsoft's Enterprise Evaluation ARM64 ISO and applies the same guest contract. Its
+`arm64` image-name suffix selects the native macOS QEMU/HVF path; legacy Windows image
+names remain x86_64.
 
 GUI image qualification includes a real visual agent completing a task whose decisive
 input exists only on screen, followed by inspection of its canonical trajectory,
@@ -144,8 +147,9 @@ episode qcow2 overlay mounted into it. `keep` leaves both alive and discoverable
 `ale sandbox destroy HANDLE` removes both. Provider-qualified QEMU handles prevent the
 runner from being mistaken for a container sandbox.
 
-QEMU enforces Task egress in the runner network namespace, outside both Linux and Windows
-guests. The guest does not need an OS-specific firewall implementation for ALE policy.
+QEMU enforces Task egress outside both Linux and Windows guests. Linux uses the runner
+network namespace; native macOS QEMU keeps a restricted control NIC and toggles a separate
+internet NIC through QMP. The guest does not implement ALE's phase policy itself.
 
 Retained handles are always provider-qualified: `docker:<runtime-id>` for containers and
 `qemu:<runtime-id>` for VMs. Unqualified handles are rejected.
