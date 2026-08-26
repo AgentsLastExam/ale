@@ -96,6 +96,23 @@ credential cleanup step. Failure of other required sanitation still forces destr
 Result and RunLock record the requested policy, actual Provider outcome, retained handle,
 cleanup command, and any reason.
 
+## Reverification
+
+`ale reverify TASK SOURCE_RUN` is an internal authoring optimization for a Task whose
+`verify.environment_mode` is `separate`. Each source episode must have a running retained solver,
+a complete RunLock, and the same prepared solver-image identity as the current Task.
+
+ALE reconnects to the retained solver only long enough to capture the Task's declared artifacts.
+It then detaches without destroying the solver, provisions a fresh verifier sandbox, restores the
+artifacts, and runs the current `verify/` stage through the ordinary separate-verification path.
+The Harness, setup, and agent phases do not run again. The new episode copies the source trajectory
+for verifier and review use and records its own verification, result, execution trace, RunLock, and
+verifier outcome.
+
+Reverification does not support shared verification. A shared verifier may inspect undeclared
+solver state, which cannot be reproduced in an independent sandbox without changing evaluation
+semantics; callers must run a full new episode instead.
+
 ## Validation
 
 `ale validate` uses this same protocol twice with fresh sandboxes:

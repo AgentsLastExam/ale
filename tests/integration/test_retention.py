@@ -7,9 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from ale.core.config import LoggingPolicy, SandboxRetentionConfig
+from ale.core.config import LoggingPolicy, RunConfig, SandboxRetentionConfig
 from ale.core.errors import TrajectoryConversionError
 from ale.core.harness import AgentRun
+from ale.core.lock import TaskSource
 from ale.core.sandbox import (
     ExecResult,
     ImageKind,
@@ -19,10 +20,12 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import NetworkPolicy, Resources
 from ale.core.verdict import Status
+from ale.run.cli.tasks import _reverify
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import _Lease, run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
+from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import (
     DockerProvider,
     DockerSandbox,
@@ -154,6 +157,57 @@ def test_debug_and_interruption_keep_native_logs(tmp_path: Path) -> None:
     assert (interrupted / "logs/claude-code/transcript.jsonl").is_file()
     trajectory = json.loads((interrupted / "trajectory.json").read_text())
     assert trajectory["extra"]["ale"]["incomplete"] is True
+
+
+@pytest.mark.needs_docker
+@pytest.mark.asyncio
+async def test_retained_solver_is_reverified_in_a_fresh_sandbox(tmp_path: Path) -> None:
+    task_path = scaffold_task(tmp_path / "reverify")
+    manifest = task_path / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + "verify:\n"
+        + "  environment_mode: separate\n"
+        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    )
+    dockerfile = task_path / "image/Dockerfile"
+    dockerfile.write_text(dockerfile.read_text() + "\nLABEL ale.gui=false\n")
+    registry = provider_registry(DockerProvider())
+    task = load_tasks(task_path)[0]
+    settings = RunConfig()
+    first = await run_episode(
+        task,
+        StandardEnvironment(OracleHarness()),
+        registry,
+        run_dir=tmp_path / "first",
+        provenance=ProvenanceInputs(
+            source=TaskSource(kind="local", path=str(task_path)),
+            agent=agent_provenance(OracleHarness(), ""),
+            gateway=gateway_provenance(settings),
+            config_hash=settings.config_hash,
+        ),
+        sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
+    )
+    retained = next(item for item in first.record.sandboxes if item.outcome == "retained")
+    assert retained.handle is not None
+    assert task.prepared_image is not None
+
+    (task_path / "verify/verify.py").write_text(
+        "from ale_verify import Verification, checks\n"
+        "v = Verification()\n"
+        "v.check('reverified', checks.text_equals("
+        "'/home/user/output/result.txt', 'hello\\n'))\n"
+        "v.write()\n"
+    )
+    try:
+        assert await _reverify(str(task_path), first.run_dir, settings, tmp_path / "second") == 0
+        result_path = next((tmp_path / "second").rglob("result.json"))
+        result = json.loads(result_path.read_text())
+        assert result["rewards"] == {"reverified": 1.0}
+        assert result["sandboxes"][0]["roles"] == ["verifier"]
+        assert retained.handle in {item["handle"] for item in await list_retained()}
+    finally:
+        await destroy_retained(retained.handle)
 
 
 def test_conversion_failure_keeps_native_logs(tmp_path: Path) -> None:

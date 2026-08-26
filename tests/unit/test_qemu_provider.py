@@ -21,6 +21,7 @@ from ale.core.sandbox import (
     ImageRef,
     PreparedTaskImage,
     ResolvedImage,
+    ResourceAllocation,
     SandboxRequest,
 )
 from ale.core.taskspec import (
@@ -47,6 +48,7 @@ from ale.run.providers.qemu import (
     _port_of,
     _verify_qemu_gpu_count,
     _VfioGpu,
+    attach_retained,
     destroy_retained,
     list_retained,
 )
@@ -201,6 +203,79 @@ async def test_qemu_retained_listing_and_destroy_remove_the_overlay(
     await destroy_retained("qemu:ale-qemu-test")
     assert removed == ["ale-qemu-test"]
     assert not storage.exists()
+
+
+@pytest.mark.asyncio
+async def test_qemu_retained_solver_can_be_reattached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    storage = tmp_path / "episode"
+    storage.mkdir()
+    record = {
+        "Name": "/ale-qemu-test",
+        "Config": {
+            "Labels": {
+                MANAGED_LABEL: "true",
+                RETENTION_LABEL: "keep",
+                EPISODE_LABEL: "e1",
+                ROLE_LABEL: "solver",
+                STORAGE_LABEL: str(storage),
+            }
+        },
+        "State": {"Running": True},
+        "Mounts": [{"Type": "bind", "Source": str(storage), "Destination": "/storage"}],
+        "NetworkSettings": {"Ports": {"7411/tcp": [{"HostPort": "17411"}]}},
+    }
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        assert argv[:2] == ("docker", "inspect")
+        return 0, json.dumps([record]), ""
+
+    class Transport:
+        def __init__(self, host: str, port: int) -> None:
+            assert (host, port) == ("127.0.0.1", 17411)
+
+        async def start(self, *, timeout_sec: float) -> None:
+            assert timeout_sec > 0
+
+    class Client:
+        def __init__(self, _transport: object) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    async def resolve(image: PreparedTaskImage) -> ResolvedImage:
+        return ResolvedImage(
+            kind="vm",
+            prepared_identity=image.prepared_identity,
+            observed_identity=image.prepared_identity,
+            observed_ref=image.runtime_ref,
+        )
+
+    async def contract(
+        _provider: QemuProvider, _client: object, _request: SandboxRequest
+    ) -> tuple[str, str, bool]:
+        return "user", "/home/user", False
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.TcpTransport", Transport)
+    monkeypatch.setattr("ale.run.providers.qemu.GuestClient", Client)
+    monkeypatch.setattr("ale.run.providers.qemu.resolve_prepared_vm_image", resolve)
+    monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
+    allocation = ResourceAllocation(
+        cpus=2,
+        memory_mb=2048,
+        sudo=False,
+        network_mode=NetworkMode.BLOCK,
+        provider="qemu",
+    )
+
+    sandbox = await attach_retained("qemu:ale-qemu-test", request(), allocation)
+
+    assert sandbox.storage == storage
+    assert sandbox.host_port == 17411
+    assert sandbox.request.role.value == "solver"
 
 
 def test_overlay_uses_the_prepared_disks_virtual_size(

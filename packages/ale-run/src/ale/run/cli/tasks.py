@@ -9,11 +9,13 @@ from pathlib import Path
 
 import typer
 
-from ale.core.config import RunConfig, load_run_config, select_agent_name
+from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config, select_agent_name
 from ale.core.errors import AleError, ConfigError, TaskDefinitionError
 from ale.core.harness import EffectiveAgentResources, Harness
 from ale.core.ids import content_hash
-from ale.core.sandbox import ImageKind, PreparedTaskImage
+from ale.core.lock import RunLock
+from ale.core.result import ResultRecord
+from ale.core.sandbox import ImageKind, PreparedTaskImage, Sandbox, SandboxRequest, SandboxRole
 from ale.core.taskspec import VerificationMode
 from ale.core.validation import (
     TaskValidationObservation,
@@ -25,7 +27,7 @@ from ale.core.validation import (
 from ale.core.verdict import Status, Verdict
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.assets import observe_task_assets
-from ale.run.environments.standard import StandardEnvironment
+from ale.run.environments.standard import RetainedVerificationEnvironment, StandardEnvironment
 from ale.run.episode import EpisodeResult, run_episode
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
@@ -45,7 +47,7 @@ from ale.run.provenance import (
 )
 from ale.run.providers import ProviderRegistry
 from ale.run.recording import atomic_write_json
-from ale.run.secrets import provider_credentials
+from ale.run.secrets import load_env, provider_credentials
 from ale.run.sources import parse_task_reference, resolve, select_tasks
 from ale.run.subscription import SubscriptionCredential, resolve_authentication
 from ale.run.task_images import (
@@ -361,6 +363,148 @@ async def _run_one(
 
     typer.echo(f"run {run_id}: {total - failures}/{total} completed")
     return 0 if failures == 0 else EXIT_SOME_FAILED
+
+
+async def _reverify(
+    reference: str,
+    source_run: Path,
+    settings: RunConfig,
+    runs_dir: Path,
+) -> int:
+    """Reverify retained solver episodes without launching their Harness again."""
+    load_env()
+    try:
+        task_reference = parse_task_reference(reference)
+        resolved = resolve(task_reference.source)
+        tasks = select_tasks(list(load_tasks(resolved.task_dir)), task_reference.variants)
+        providers = ProviderRegistry(settings)
+        await _prepare_images(tasks, providers)
+        by_id = {(str(task.spec.name), task.spec.variant): task for task in tasks}
+        sources = _retained_source_episodes(source_run)
+    except (AleError, OSError, ValueError) as error:
+        typer.echo(str(error), err=True)
+        return EXIT_BAD_REFERENCE
+
+    run_dir = runs_dir / f"reverify-{uuid.uuid4().hex[:8]}"
+    failures = 0
+    for source_dir, source_result, source_lock, handle in sources:
+        task = by_id.get((str(source_lock.task.name), source_lock.task.variant))
+        if task is None:
+            typer.echo(
+                f"source episode {source_result.episode_id} does not match the selected Task",
+                err=True,
+            )
+            failures += 1
+            continue
+        if task.spec.verify.environment_mode is not VerificationMode.SEPARATE:
+            typer.echo(
+                f"{task.spec.id}: reverification requires verify.environment_mode=separate",
+                err=True,
+            )
+            failures += 1
+            continue
+        assert task.prepared_image is not None
+        if source_lock.image.prepared_identity != task.prepared_image.prepared_identity:
+            typer.echo(f"{task.spec.id}: solver image changed since the source episode", err=True)
+            failures += 1
+            continue
+        if source_lock.resources is None:
+            typer.echo(f"{task.spec.id}: source RunLock has no solver allocation", err=True)
+            failures += 1
+            continue
+
+        request = SandboxRequest(
+            episode_id=source_result.episode_id,
+            os=task.spec.os,
+            role=SandboxRole.SOLVER,
+            retention="keep",
+            prepared_image=task.prepared_image,
+            resources=task.spec.resources,
+            network=task.spec.network,
+            sudo=task.spec.resources.sudo,
+        )
+        try:
+            solver = await _attach_retained(handle, request, source_lock)
+        except AleError as error:
+            typer.echo(f"{task.spec.id}: {error}", err=True)
+            failures += 1
+            continue
+        provenance = ProvenanceInputs(
+            source=resolved.source,
+            agent=source_lock.agent,
+            gateway=source_lock.gateway,
+            config_hash=source_lock.config_hash,
+        )
+        result = await run_episode(
+            task,
+            RetainedVerificationEnvironment(solver, source_dir, source_lock.sandbox),
+            providers,
+            run_dir=run_dir,
+            model=source_lock.agent.model,
+            seed=source_lock.seed,
+            collect_artifacts=True,
+            provenance=provenance,
+            episode_id=f"{source_result.episode_id}-reverify-{uuid.uuid4().hex[:6]}",
+            verification_config=settings.verification,
+            sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
+            authentication=source_lock.agent.authentication.effective,
+            profile_slot_id=source_lock.agent.authentication.profile_slot_id,
+        )
+        _report(result)
+        if result.verdict.status is not Status.COMPLETED:
+            failures += 1
+    typer.echo(f"reverification run: {run_dir}")
+    return 0 if failures == 0 else EXIT_SOME_FAILED
+
+
+def _retained_source_episodes(
+    source_run: Path,
+) -> tuple[tuple[Path, ResultRecord, RunLock, str], ...]:
+    source_run = source_run.expanduser().resolve()
+    result_paths = (
+        (source_run / "result.json",)
+        if (source_run / "result.json").is_file()
+        else tuple(sorted(source_run.rglob("result.json")))
+    )
+    episodes = []
+    for result_path in result_paths:
+        lock_path = result_path.with_name("lock.json")
+        if not lock_path.is_file():
+            continue
+        result = ResultRecord.model_validate_json(result_path.read_text())
+        lock = RunLock.model_validate_json(lock_path.read_text())
+        retained = next(
+            (
+                sandbox
+                for sandbox in result.sandboxes
+                if "solver" in sandbox.roles
+                and sandbox.outcome == "retained"
+                and sandbox.handle is not None
+            ),
+            None,
+        )
+        if retained is not None:
+            episodes.append((result_path.parent, result, lock, retained.handle))
+    if not episodes:
+        raise ValueError(f"no retained solver episode found under {source_run}")
+    return tuple(episodes)
+
+
+async def _attach_retained(
+    handle: str,
+    request: SandboxRequest,
+    lock: RunLock,
+) -> Sandbox:
+    assert lock.resources is not None
+    if handle.startswith("docker:"):
+        from ale.run.providers.docker import attach_retained
+
+        return await attach_retained(handle, request, lock.resources.effective)
+    if handle.startswith("qemu:"):
+        from ale.run.providers.qemu import attach_retained
+
+        return await attach_retained(handle, request, lock.resources.effective)
+    raise TaskDefinitionError(f"unsupported retained sandbox handle: {handle}")
 
 
 def _check_reportable(result: EpisodeResult) -> bool:

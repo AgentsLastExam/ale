@@ -81,7 +81,7 @@ from ale.run.recording import (
 from ale.run.verification import installed_ale_verify
 from ale_verify import VerificationRecord
 
-__all__ = ["StandardEnvironment"]
+__all__ = ["RetainedVerificationEnvironment", "StandardEnvironment"]
 
 
 #: Where the framework's own machinery goes. Under a root-owned, root-only directory,
@@ -1058,6 +1058,66 @@ class StandardEnvironment(Environment):
             )
             ctx.current_phase = None
             ctx.phase_timeout_sec = previous_timeout
+
+
+class RetainedVerificationEnvironment(StandardEnvironment):
+    """Reverify artifacts from a retained solver in a fresh verifier sandbox."""
+
+    def __init__(
+        self,
+        solver: Sandbox,
+        source_run_dir: Path,
+        sandbox_identity: SandboxProvenance | None,
+    ) -> None:
+        self.solver = solver
+        self.source_run_dir = source_run_dir
+        self.sandbox_identity = sandbox_identity
+        self.harness = None  # type: ignore[assignment]
+        self.max_steps = 0
+        self.stall_limit = 0
+        self.agent_enabled = False
+
+    async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
+        if ctx.spec.verify.environment_mode is not VerificationMode.SEPARATE:
+            raise TaskError("reverification requires verify.environment_mode=separate")
+
+        ctx.resolved_image = self.solver.resolved_image
+        ctx.resource_allocation = self.solver.allocation
+        ctx.sandbox_identity = self.sandbox_identity
+        ctx.home = getattr(
+            self.solver,
+            "agent_home",
+            f"/home/{_agent_user(self.solver)}",
+        )
+        trajectory = self.source_run_dir / "trajectory.json"
+        if trajectory.is_file():
+            shutil.copy2(trajectory, ctx.run_dir / "trajectory.json")
+
+        try:
+            await self._capture_solver_evidence(ctx, self.solver)
+        finally:
+            await self.solver.retain(
+                roles=("solver",),
+                reason="preserved after artifact capture for reverification",
+            )
+
+        async def verify() -> dict[str, float]:
+            verifier = await self._provision_verifier(ctx)
+            try:
+                await ctx.artifacts.restore(verifier)
+                return await self._verify(task, ctx, verifier)
+            finally:
+                await self._sanitize_for_retention(ctx, verifier)
+                await ctx.sandboxes.release(verifier)
+
+        rewards = await self._with_deadline(
+            ctx,
+            Phase.VERIFY,
+            ctx.spec.timeouts.verify,
+            verify(),
+        )
+        ctx.verified_rewards = rewards
+        return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
 
 
 def _agent_user(sandbox: Sandbox) -> str:

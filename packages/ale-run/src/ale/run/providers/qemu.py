@@ -51,6 +51,7 @@ from ale.core.sandbox import (
     RetainedSandbox,
     Sandbox,
     SandboxRequest,
+    SandboxRole,
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem
@@ -63,7 +64,13 @@ from ale.run.images import (
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, TcpTransport
 
-__all__ = ["QemuProvider", "QemuSandbox", "destroy_retained", "list_retained"]
+__all__ = [
+    "QemuProvider",
+    "QemuSandbox",
+    "attach_retained",
+    "destroy_retained",
+    "list_retained",
+]
 
 #: Where the guest service listens inside the VM. Forwarded to an ephemeral host port.
 GUEST_PORT = 7411
@@ -205,6 +212,70 @@ async def destroy_retained(handle: str) -> None:
         raise ProviderStartError(
             f"destroyed {handle} but could not remove its overlay {storage}: {exc}"
         ) from exc
+
+
+async def attach_retained(
+    handle: str,
+    request: SandboxRequest,
+    allocation: ResourceAllocation,
+) -> QemuSandbox:
+    """Reconnect to a running retained VM without taking ownership of it."""
+    if not handle.startswith(HANDLE_PREFIX):
+        raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
+    container = handle.removeprefix(HANDLE_PREFIX)
+    code, raw, stderr = await _run("docker", "inspect", container, timeout=30)
+    if code != 0:
+        raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
+    record = json.loads(raw)[0]
+    labels = record.get("Config", {}).get("Labels", {}) or {}
+    role = labels.get(ROLE_LABEL, "")
+    if (
+        labels.get(MANAGED_LABEL) != "true"
+        or labels.get(RETENTION_LABEL) != "keep"
+        or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
+    ):
+        raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
+    if labels.get(EPISODE_LABEL) != request.episode_id:
+        raise ProviderCapabilityError(f"{handle!r} belongs to a different episode")
+    if not record.get("State", {}).get("Running"):
+        raise ProviderStartError(f"retained sandbox {handle!r} is not running")
+    storage = labels.get(STORAGE_LABEL, "")
+    mounted_storage = {
+        mount.get("Source", "")
+        for mount in record.get("Mounts", ())
+        if mount.get("Type") == "bind" and mount.get("Destination") == "/storage"
+    }
+    if not storage or storage not in mounted_storage:
+        raise ProviderCapabilityError(f"{handle!r} has no valid ALE-owned QEMU overlay")
+    ports = record.get("NetworkSettings", {}).get("Ports", {}).get(f"{GUEST_PORT}/tcp") or []
+    try:
+        host_port = int(ports[0]["HostPort"])
+    except (IndexError, KeyError, TypeError, ValueError) as exc:
+        raise ProviderCapabilityError(f"{handle!r} has no guest service port") from exc
+
+    resolved = await resolve_prepared_vm_image(request.prepared_image)
+    transport = TcpTransport("127.0.0.1", host_port)
+    await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
+    client = GuestClient(transport)
+    provider = QemuProvider()
+    attached_request = request.model_copy(update={"role": SandboxRole(role)})
+    try:
+        agent_user, agent_home, _ = await provider._read_guest_contract(client, attached_request)
+    except BaseException:
+        await client.close()
+        raise
+    return QemuSandbox(
+        sandbox_id=container.removeprefix("ale-qemu-"),
+        request=attached_request,
+        container=container,
+        storage=Path(storage),
+        host_port=host_port,
+        client=client,
+        resolved_image=resolved,
+        allocation=allocation,
+        agent_user=agent_user,
+        agent_home=agent_home,
+    )
 
 
 def _index_vfio_gpus(candidates: tuple[_VfioGpu, ...]) -> dict[str, _VfioGpu]:

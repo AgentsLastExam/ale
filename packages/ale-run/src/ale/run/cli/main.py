@@ -28,6 +28,7 @@ from ale.run.cli.tasks import (
     EXIT_BAD_REFERENCE,
     _config,
     _prepare_only,
+    _reverify,
     _run_one,
     _validate,
 )
@@ -179,6 +180,22 @@ def prepare(
     """Build or acquire Task images without starting an episode."""
     settings = _config(config, overrides, agent="oracle", model="")
     raise typer.Exit(asyncio.run(_prepare_only(reference, settings)))
+
+
+@app.command(hidden=True)
+def reverify(
+    reference: Annotated[str, typer.Argument(help="Task or collection filesystem path")],
+    source_run: Annotated[
+        Path,
+        typer.Argument(help="Prior run or episode directory with a retained solver"),
+    ],
+    config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
+    overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
+    runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
+) -> None:
+    """Re-run separate verification against retained solver output."""
+    settings = _config(config, overrides, agent="nop", model="")
+    raise typer.Exit(asyncio.run(_reverify(reference, source_run, settings, runs_dir)))
 
 
 @app.command()
