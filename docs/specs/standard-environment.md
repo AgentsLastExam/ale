@@ -98,20 +98,18 @@ cleanup command, and any reason.
 
 ## Reverification
 
-`ale reverify TASK SOURCE_RUN` is an internal authoring optimization for a Task whose
-`verify.environment_mode` is `separate`. Each source episode must have a running retained solver,
-a complete RunLock, and the same prepared solver-image identity as the current Task.
+`ale reverify TASK SOURCE_RUN` is an internal authoring optimization. Each source episode must
+have a running retained solver or shared Sandbox, a complete RunLock, and the same prepared
+solver-image identity as the current Task.
 
-ALE reconnects to the retained solver only long enough to capture the Task's declared artifacts.
-It then detaches without destroying the solver, provisions a fresh verifier sandbox, restores the
-artifacts, and runs the current `verify/` stage through the ordinary separate-verification path.
+For shared verification, ALE reconnects to the retained shared Sandbox and runs the current
+`verify/` stage there. For separate verification, ALE captures the declared artifacts from the
+retained solver, detaches without destroying it, provisions a fresh verifier Sandbox, restores the
+artifacts, and runs the current `verify/` stage there. Before either path uploads `verify/`, ALE
+removes the previously staged verifier files so deleted files cannot survive a revision.
+
 The Harness, setup, and agent phases do not run again. The new episode copies the source trajectory
-for verifier and review use and records its own verification, result, execution trace, RunLock, and
-verifier outcome.
-
-Reverification does not support shared verification. A shared verifier may inspect undeclared
-solver state, which cannot be reproduced in an independent sandbox without changing evaluation
-semantics; callers must run a full new episode instead.
+for verifier and review use and records its own verification, result, execution trace, and RunLock.
 
 ## Validation
 

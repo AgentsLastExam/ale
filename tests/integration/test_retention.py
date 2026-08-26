@@ -161,15 +161,21 @@ def test_debug_and_interruption_keep_native_logs(tmp_path: Path) -> None:
 
 @pytest.mark.needs_docker
 @pytest.mark.asyncio
-async def test_retained_solver_is_reverified_in_a_fresh_sandbox(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["shared", "separate"])
+async def test_retained_episode_is_reverified_without_rerunning_agent(
+    tmp_path: Path, mode: str
+) -> None:
     task_path = scaffold_task(tmp_path / "reverify")
-    manifest = task_path / "task.yaml"
-    manifest.write_text(
-        manifest.read_text()
-        + "verify:\n"
-        + "  environment_mode: separate\n"
-        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
-    )
+    if mode == "separate":
+        manifest = task_path / "task.yaml"
+        manifest.write_text(
+            manifest.read_text()
+            + "verify:\n"
+            + "  environment_mode: separate\n"
+            + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+        )
+    stale = task_path / "verify/stale.txt"
+    stale.write_text("must not survive a verifier revision\n")
     dockerfile = task_path / "image/Dockerfile"
     dockerfile.write_text(dockerfile.read_text() + "\nLABEL ale.gui=false\n")
     registry = provider_registry(DockerProvider())
@@ -190,21 +196,25 @@ async def test_retained_solver_is_reverified_in_a_fresh_sandbox(tmp_path: Path) 
     )
     retained = next(item for item in first.record.sandboxes if item.outcome == "retained")
     assert retained.handle is not None
+    assert retained.roles == (("solver", "verifier") if mode == "shared" else ("solver",))
     assert task.prepared_image is not None
 
+    stale.unlink()
     (task_path / "verify/verify.py").write_text(
         "from ale_verify import Verification, checks\n"
         "v = Verification()\n"
         "v.check('reverified', checks.text_equals("
         "'/home/user/output/result.txt', 'hello\\n'))\n"
+        "v.check('stale_removed', checks.file_missing('/opt/ale/verify/stale.txt'))\n"
         "v.write()\n"
     )
     try:
         assert await _reverify(str(task_path), first.run_dir, settings, tmp_path / "second") == 0
         result_path = next((tmp_path / "second").rglob("result.json"))
         result = json.loads(result_path.read_text())
-        assert result["rewards"] == {"reverified": 1.0}
-        assert result["sandboxes"][0]["roles"] == ["verifier"]
+        assert result["rewards"] == {"reverified": 1.0, "stale_removed": 1.0}
+        if mode == "separate":
+            assert result["sandboxes"][0]["roles"] == ["verifier"]
         assert retained.handle in {item["handle"] for item in await list_retained()}
     finally:
         await destroy_retained(retained.handle)

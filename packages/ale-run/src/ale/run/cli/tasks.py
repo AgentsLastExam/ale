@@ -396,13 +396,6 @@ async def _reverify(
             )
             failures += 1
             continue
-        if task.spec.verify.environment_mode is not VerificationMode.SEPARATE:
-            typer.echo(
-                f"{task.spec.id}: reverification requires verify.environment_mode=separate",
-                err=True,
-            )
-            failures += 1
-            continue
         assert task.prepared_image is not None
         if source_lock.image.prepared_identity != task.prepared_image.prepared_identity:
             typer.echo(f"{task.spec.id}: solver image changed since the source episode", err=True)
@@ -416,7 +409,11 @@ async def _reverify(
         request = SandboxRequest(
             episode_id=source_result.episode_id,
             os=task.spec.os,
-            role=SandboxRole.SOLVER,
+            role=(
+                SandboxRole.SHARED
+                if task.spec.verify.environment_mode is VerificationMode.SHARED
+                else SandboxRole.SOLVER
+            ),
             retention="keep",
             prepared_image=task.prepared_image,
             resources=task.spec.resources,

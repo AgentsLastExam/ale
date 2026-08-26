@@ -487,6 +487,12 @@ class StandardEnvironment(Environment):
 
         layout = _layout(ctx.spec.os)
         verify_root = layout.path("verify")
+        removed = await self._remove_paths(ctx, sandbox, (str(verify_root),))
+        if not removed.ok:
+            raise TaskError(
+                "could not clear the previous verify stage: "
+                + (removed.stderr.strip() or f"exit {removed.exit_code}")
+            )
         await sandbox.upload_dir(str(verify_dir), str(verify_root))
         trajectory = ctx.run_dir / "trajectory.json"
         if trajectory.is_file():
@@ -694,10 +700,10 @@ class StandardEnvironment(Environment):
         await ctx.sandboxes.release(sandbox)
         logging.getLogger("ale.execution").info("sandbox released")
 
-    async def _sanitize_for_retention(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
+    async def _sanitize_for_retention(self, ctx: EpisodeContext, sandbox: Sandbox) -> bool:
         if sandbox.request.retention == "destroy":
             ctx.sandboxes.mark_sanitized(sandbox, succeeded=True)
-            return
+            return True
         layout = _layout(ctx.spec.os)
         paths = [
             str(layout.path("verify", "config.json")),
@@ -706,9 +712,23 @@ class StandardEnvironment(Environment):
             _sandbox_path(ctx.spec.os, ctx.home, ".codex", "auth.json"),
             _sandbox_path(ctx.spec.os, ctx.home, ".claude", ".credentials.json"),
         ]
+        result = await self._remove_paths(ctx, sandbox, paths)
+        ctx.sandboxes.mark_sanitized(
+            sandbox,
+            succeeded=result.ok,
+            reason=None if result.ok else result.stderr.strip() or "credential sanitation failed",
+        )
+        return result.ok
+
+    async def _remove_paths(
+        self,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        paths: Sequence[str],
+    ) -> ExecResult:
         if ctx.spec.os is OperatingSystem.WINDOWS:
             quoted = ",".join("'" + path.replace("'", "''") + "'" for path in paths)
-            result = await sandbox.exec(
+            return await sandbox.exec(
                 [
                     "powershell.exe",
                     "-NoProfile",
@@ -718,13 +738,7 @@ class StandardEnvironment(Environment):
                     "-ErrorAction SilentlyContinue",
                 ]
             )
-        else:
-            result = await sandbox.exec(["rm", "-rf", "--", *paths])
-        ctx.sandboxes.mark_sanitized(
-            sandbox,
-            succeeded=result.ok,
-            reason=None if result.ok else result.stderr.strip() or "credential sanitation failed",
-        )
+        return await sandbox.exec(["rm", "-rf", "--", *paths])
 
     def _parse_harness_trajectory(self, ctx: EpisodeContext) -> None:
         assert ctx.blobs is not None
@@ -1061,7 +1075,7 @@ class StandardEnvironment(Environment):
 
 
 class RetainedVerificationEnvironment(StandardEnvironment):
-    """Reverify artifacts from a retained solver in a fresh verifier sandbox."""
+    """Run current verification against a retained episode without rerunning its agent."""
 
     def __init__(
         self,
@@ -1078,9 +1092,6 @@ class RetainedVerificationEnvironment(StandardEnvironment):
         self.agent_enabled = False
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
-        if ctx.spec.verify.environment_mode is not VerificationMode.SEPARATE:
-            raise TaskError("reverification requires verify.environment_mode=separate")
-
         ctx.resolved_image = self.solver.resolved_image
         ctx.resource_allocation = self.solver.allocation
         ctx.sandbox_identity = self.sandbox_identity
@@ -1092,6 +1103,27 @@ class RetainedVerificationEnvironment(StandardEnvironment):
         trajectory = self.source_run_dir / "trajectory.json"
         if trajectory.is_file():
             shutil.copy2(trajectory, ctx.run_dir / "trajectory.json")
+
+        if ctx.spec.verify.environment_mode is VerificationMode.SHARED:
+            try:
+                await self._capture_solver_evidence(ctx, self.solver)
+                rewards = await self._with_deadline(
+                    ctx,
+                    Phase.VERIFY,
+                    ctx.spec.timeouts.verify,
+                    self._verify(task, ctx, self.solver),
+                )
+            finally:
+                if await self._sanitize_for_retention(ctx, self.solver):
+                    await self.solver.retain(
+                        roles=("solver", "verifier"),
+                        reason="preserved after shared reverification",
+                    )
+                else:
+                    await self.solver.destroy()
+                    self.solver.release_resources()
+            ctx.verified_rewards = rewards
+            return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
 
         try:
             await self._capture_solver_evidence(ctx, self.solver)
