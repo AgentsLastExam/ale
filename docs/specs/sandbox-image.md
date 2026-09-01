@@ -78,9 +78,15 @@ the GCP image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows
 recipe installs and pins ALE's cross-platform components, and `compact.sh` validates and
 compresses the resulting qcow2. Episodes always cold-boot a fresh overlay. ALE creates no
 ready snapshot, warm pool, or environment server. The Windows 11 ARM64 base starts from
-Microsoft's Enterprise Evaluation ARM64 ISO and applies the same guest contract. Its
+Microsoft's official multi-edition ARM64 ISO, selects Windows 11 Pro, and applies the
+same guest contract. Its
 `arm64` image-name suffix selects the native macOS QEMU/HVF path; legacy Windows image
 names remain x86_64.
+
+The Darwin ARM build and runtime use ALE's pinned command-line UTM QEMU fork with HVF,
+matching EDK2 firmware, `virtio-ramfb`, `-display none`, and QMP control. UTM's application
+UI is not part of either path. Each episode receives its own native process, qcow2 overlay,
+firmware variables, QMP socket, PID file, and forwarded guest port.
 
 GUI image qualification includes a real visual agent completing a task whose decisive
 input exists only on screen, followed by inspection of its canonical trajectory,

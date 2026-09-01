@@ -1,0 +1,2 @@
+@echo -off
+FS0:\EFI\BOOT\BOOTAA64.EFI

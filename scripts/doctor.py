@@ -241,13 +241,22 @@ def check_sandbox_backends() -> list[Result]:
             )
 
     if sys.platform == "darwin":
-        native_qemu = (
-            "qemu-system-aarch64"
-            if platform.machine().lower() in {"arm64", "aarch64"}
-            else "qemu-system-x86_64"
+        apple_silicon = platform.machine().lower() in {"arm64", "aarch64"}
+        cache = Path(
+            os.environ.get("ALE_CACHE_DIR")
+            or Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ale"
         )
+        qemu_root = Path(
+            os.environ.get("ALE_DARWIN_QEMU_ROOT") or cache / "darwin-qemu" / "v10.0.2-utm"
+        )
+        pinned_arm_qemu = qemu_root / "bin" / "qemu-system-aarch64-utm"
+        native_qemu = str(pinned_arm_qemu) if apple_silicon else "qemu-system-x86_64"
         code, accelerators = _run(native_qemu, "-accel", "help")
-        if shutil.which(native_qemu) and code == 0 and "hvf" in accelerators:
+        if (
+            (Path(native_qemu).is_file() or shutil.which(native_qemu))
+            and code == 0
+            and ("hvf" in accelerators)
+        ):
             results.append(Result(OK, "hvf", "Hypervisor.framework available to QEMU"))
         else:
             results.append(
@@ -255,10 +264,23 @@ def check_sandbox_backends() -> list[Result]:
                     WARN,
                     "hvf",
                     f"{native_qemu} cannot use Hypervisor.framework",
-                    "brew install qemu",
+                    "scripts/build-darwin-qemu.sh" if apple_silicon else "brew install qemu",
                 )
             )
-        qemu_tools = ("qemu-system-aarch64", "qemu-system-x86_64", "qemu-img")
+        if apple_silicon:
+            code, devices = _run(str(pinned_arm_qemu), "-device", "help")
+            if code == 0 and 'name "virtio-ramfb"' in devices:
+                results.append(Result(OK, "qemu-system-aarch64-utm", str(pinned_arm_qemu)))
+            else:
+                results.append(
+                    Result(
+                        WARN,
+                        "qemu-system-aarch64-utm",
+                        "pinned ARM QEMU is missing or lacks virtio-ramfb",
+                        "scripts/build-darwin-qemu.sh",
+                    )
+                )
+        qemu_tools = ("qemu-system-x86_64", "qemu-img")
         qemu_fix = "brew install qemu"
     else:
         kvm = Path("/dev/kvm")

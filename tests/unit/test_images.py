@@ -4,6 +4,7 @@ import asyncio
 import fcntl
 import json
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 from typer.testing import CliRunner
@@ -15,6 +16,25 @@ from ale.run.cli.main import app
 from ale.run.images import _acquire_lock, _select_repo_digest, publish_vm_image, resolve_vm_image
 
 pytestmark = pytest.mark.unit
+
+
+def test_windows_arm_builder_uses_the_specialize_bootstrap_chain() -> None:
+    root = Path(__file__).parents[2]
+    image = root / "images/base/vm-windows11-arm64"
+    answer = (image / "Autounattend.xml").read_text()
+    ElementTree.fromstring(answer)
+
+    assert "FirstLogonCommands" not in answer
+    assert "bootstrap-system.ps1 -InstallTask" in answer
+    assert "<Value>ale</Value>" in answer
+
+    build = (image / "build.sh").read_text()
+    assert 'cp "$source_dir/bootstrap-system.ps1" "$config/"' in build
+    assert 'cp "$source_dir/bootstrap-user.ps1" "$config/"' in build
+
+    installer = (image / "install.ps1").read_text()
+    assert '$_.FullName -match "\\\\ARM64\\\\"' in installer
+    assert "$LASTEXITCODE -notin 0, 259, 3010" in installer
 
 
 def test_vm_image_commands_replace_the_legacy_guest_command() -> None:

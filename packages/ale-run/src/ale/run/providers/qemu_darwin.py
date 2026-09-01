@@ -28,6 +28,7 @@ HOST_IP = "172.30.0.100"
 CONTROL_NET = "172.30.0.0/24"
 EGRESS_NET = "10.0.2.0/24"
 STATE_FILE = "runtime.json"
+DARWIN_QEMU_TAG = "v10.0.2-utm"
 
 Architecture = Literal["x86_64", "arm64"]
 
@@ -42,6 +43,12 @@ def host_architecture() -> Architecture:
     """Return the two host architectures supported by QEMU on macOS."""
     machine = platform.machine().lower()
     return "arm64" if machine in {"arm64", "aarch64"} else "x86_64"
+
+
+def darwin_qemu_root() -> Path:
+    """Return the pinned headless QEMU installation built by ALE's setup script."""
+    configured = os.environ.get("ALE_DARWIN_QEMU_ROOT")
+    return Path(configured) if configured else cache_root() / "darwin-qemu" / DARWIN_QEMU_TAG
 
 
 def _process_alive(pid: int) -> bool:
@@ -116,9 +123,27 @@ class DarwinRuntime:
 
     async def preflight(self, fixture_image: Path | None = None) -> None:
         problems: list[str] = []
-        for binary in ("qemu-img", "qemu-system-x86_64", "qemu-system-aarch64"):
+        for binary in ("qemu-img", "qemu-system-x86_64"):
             if shutil.which(binary) is None:
                 problems.append(f"{binary} is not on PATH (brew install qemu)")
+        if host_architecture() == "arm64":
+            arm_qemu = self._arm_binary()
+            if not arm_qemu.is_file() or not os.access(arm_qemu, os.X_OK):
+                problems.append(
+                    f"pinned ARM QEMU is unavailable at {arm_qemu}; "
+                    "run scripts/build-darwin-qemu.sh"
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    str(arm_qemu),
+                    "-device",
+                    "help",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                output, _ = await process.communicate()
+                if process.returncode != 0 or b'name "virtio-ramfb"' not in output:
+                    problems.append(f"pinned ARM QEMU at {arm_qemu} lacks virtio-ramfb")
         if fixture_image is not None and not fixture_image.is_file():
             problems.append(
                 f"no injected guest image at {fixture_image}; run ale prepare on a VM Task"
@@ -129,9 +154,13 @@ class DarwinRuntime:
     def backing_path(self, base_image: Path) -> str:
         return str(base_image.resolve())
 
+    def _arm_binary(self) -> Path:
+        return darwin_qemu_root() / "bin/qemu-system-aarch64-utm"
+
     def _firmware_dir(self, binary: str) -> Path:
-        executable = shutil.which(binary)
-        if executable is None:
+        requested = Path(binary)
+        executable = requested if requested.is_absolute() else shutil.which(binary)
+        if executable is None or not Path(executable).is_file():
             raise ProviderCapabilityError(f"{binary} is not on PATH (brew install qemu)")
         resolved = Path(executable).resolve()
         candidates = (
@@ -170,6 +199,11 @@ class DarwinRuntime:
         ):
             control += f",guestfwd=tcp:{HOST_IP}:{port}-cmd:/usr/bin/nc 127.0.0.1 {port}"
 
+        # The published x86 Windows base predates the VirtIO driver injection used by
+        # the ARM builder.  e1000e is supported by an inbox Windows driver, while the
+        # ARM image deliberately uses the faster VirtIO devices installed at build time.
+        nic = "virtio-net-pci" if architecture == "arm64" else "e1000e"
+
         common = [
             "-name",
             f"ale-{storage.name}",
@@ -177,16 +211,14 @@ class DarwinRuntime:
             str(request.resources.memory_mb),
             "-smp",
             str(request.resources.cpus),
-            "-drive",
-            f"file={overlay},if=virtio,format=qcow2,discard=unmap",
             "-netdev",
             control,
             "-device",
-            "virtio-net-pci,netdev=control,id=control-nic,mac=52:54:00:30:00:02",
+            f"{nic},netdev=control,id=control-nic,mac=52:54:00:30:00:02",
             "-netdev",
             f"user,id=egress,net={EGRESS_NET},host=10.0.2.2,dhcpstart=10.0.2.15",
             "-device",
-            "virtio-net-pci,netdev=egress,id=egress-nic,mac=52:54:00:20:00:02",
+            f"{nic},netdev=egress,id=egress-nic,mac=52:54:00:20:00:02",
             "-qmp",
             f"unix:{qmp},server=on,wait=off",
             "-pidfile",
@@ -198,7 +230,7 @@ class DarwinRuntime:
         native = architecture == host_architecture()
         accelerator = "hvf" if native else "tcg"
         if architecture == "arm64":
-            binary = "qemu-system-aarch64"
+            binary = str(self._arm_binary())
             firmware = self._firmware_dir(binary)
             code = firmware / "edk2-aarch64-code.fd"
             template = firmware / "edk2-arm-vars.fd"
@@ -209,26 +241,41 @@ class DarwinRuntime:
                 shutil.copyfile(template, variables)
             return [
                 binary,
+                "-L",
+                str(firmware),
                 "-machine",
-                f"virt,accel={accelerator},highmem=on",
+                f"virt,accel={accelerator},highmem=off",
                 "-cpu",
                 "host" if native else "max",
                 "-drive",
                 f"if=pflash,format=raw,readonly=on,file={code}",
                 "-drive",
-                f"if=pflash,format=raw,file={variables}",
+                f"if=pflash,format=qcow2,file={variables}",
                 "-device",
-                "ramfb",
+                "virtio-ramfb",
                 "-device",
                 "qemu-xhci",
                 "-device",
                 "usb-kbd",
                 "-device",
                 "usb-tablet",
+                "-drive",
+                f"if=none,id=system,file={overlay},format=qcow2,discard=unmap",
+                "-device",
+                "nvme,drive=system,serial=ALEWIN11ARM64,bootindex=0",
                 *common,
             ]
+        binary = "qemu-system-x86_64"
+        firmware = self._firmware_dir(binary)
+        code = firmware / "edk2-x86_64-code.fd"
+        template = firmware / "edk2-i386-vars.fd"
+        variables = storage / "efi-vars.fd"
+        if not code.is_file() or not template.is_file():
+            raise ProviderCapabilityError("QEMU x86_64 UEFI firmware is unavailable")
+        if not variables.exists():
+            shutil.copyfile(template, variables)
         return [
-            "qemu-system-x86_64",
+            binary,
             "-machine",
             f"q35,accel={accelerator}",
             "-cpu",
@@ -237,6 +284,12 @@ class DarwinRuntime:
                 if native
                 else "max,hv_relaxed=on,hv_vapic=on,hv_time=on"
             ),
+            "-drive",
+            f"if=pflash,format=raw,readonly=on,file={code}",
+            "-drive",
+            f"if=pflash,format=raw,file={variables}",
+            "-drive",
+            f"file={overlay},if=ide,format=qcow2,discard=unmap",
             *common,
         ]
 

@@ -45,15 +45,27 @@ def test_x86_command_uses_tcg_and_separate_control_and_egress_nics(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr("ale.run.providers.qemu_darwin.host_architecture", lambda: "arm64")
+    firmware = tmp_path / "firmware"
+    firmware.mkdir()
+    (firmware / "edk2-x86_64-code.fd").write_bytes(b"code")
+    (firmware / "edk2-i386-vars.fd").write_bytes(b"vars")
+    storage = tmp_path / "episode"
+    storage.mkdir()
     runtime = DarwinRuntime(tmp_path)
-    argv = runtime.command(request(), tmp_path / "episode", 17411, "x86_64")
+    monkeypatch.setattr(runtime, "_firmware_dir", lambda _binary: firmware)
+    argv = runtime.command(request(), storage, 17411, "x86_64")
     rendered = " ".join(argv)
     assert argv[0] == "qemu-system-x86_64"
     assert "q35,accel=tcg" in argv
+    assert "if=ide" in rendered
+    assert "edk2-x86_64-code.fd" in rendered
+    assert (storage / "efi-vars.fd").read_bytes() == b"vars"
     assert "hostfwd=tcp:127.0.0.1:17411-:7411" in rendered
     assert "guestfwd=tcp:172.30.0.100:8931-cmd:/usr/bin/nc 127.0.0.1 8931" in rendered
     assert "id=control-nic" in rendered
     assert "id=egress-nic" in rendered
+    assert rendered.count("e1000e") == 2
+    assert "virtio-net-pci" not in rendered
 
 
 def test_arm_command_uses_hvf_and_private_uefi_variables(
@@ -67,6 +79,11 @@ def test_arm_command_uses_hvf_and_private_uefi_variables(
     storage.mkdir()
     runtime = DarwinRuntime(tmp_path)
     monkeypatch.setattr(runtime, "_firmware_dir", lambda _binary: firmware)
+    monkeypatch.setattr(
+        runtime,
+        "_arm_binary",
+        lambda: tmp_path / "qemu-system-aarch64-utm",
+    )
     monkeypatch.setattr("ale.run.providers.qemu_darwin.host_architecture", lambda: "arm64")
 
     argv = runtime.command(
@@ -76,14 +93,27 @@ def test_arm_command_uses_hvf_and_private_uefi_variables(
         "arm64",
     )
 
-    assert argv[0] == "qemu-system-aarch64"
-    assert "virt,accel=hvf,highmem=on" in argv
+    assert argv[0] == str(tmp_path / "qemu-system-aarch64-utm")
+    assert "virt,accel=hvf,highmem=off" in argv
+    assert "virtio-ramfb" in argv
+    assert "format=qcow2,file=" in " ".join(argv)
+    assert "if=none,id=system" in " ".join(argv)
+    assert "nvme,drive=system,serial=ALEWIN11ARM64,bootindex=0" in argv
+    assert " ".join(argv).count("virtio-net-pci") == 2
     assert (storage / "efi-vars.fd").read_bytes() == b"vars"
 
 
 def test_native_x86_uses_hvf(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("ale.run.providers.qemu_darwin.host_architecture", lambda: "x86_64")
-    argv = DarwinRuntime(tmp_path).command(request(), tmp_path / "episode", 17411, "x86_64")
+    firmware = tmp_path / "firmware"
+    firmware.mkdir()
+    (firmware / "edk2-x86_64-code.fd").write_bytes(b"code")
+    (firmware / "edk2-i386-vars.fd").write_bytes(b"vars")
+    storage = tmp_path / "episode"
+    storage.mkdir()
+    runtime = DarwinRuntime(tmp_path)
+    monkeypatch.setattr(runtime, "_firmware_dir", lambda _binary: firmware)
+    argv = runtime.command(request(), storage, 17411, "x86_64")
     assert "q35,accel=hvf" in argv
     assert any(value.startswith("host,") for value in argv)
 
