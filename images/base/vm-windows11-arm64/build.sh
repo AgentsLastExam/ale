@@ -26,7 +26,7 @@ firmware="$qemu_root/share/qemu"
   exit 65
 }
 
-for binary in qemu-img hdiutil uv; do
+for binary in qemu-img hdiutil python3; do
   command -v "$binary" >/dev/null || {
     echo "$binary is required (brew install qemu)" >&2
     exit 69
@@ -135,10 +135,16 @@ qemu-img create -f qcow2 "$output" 80G
   > "$temporary/qemu.log" 2>&1 &
 qemu_pid=$!
 
-(cd "$repository" && uv run python "$source_dir/qmp_boot.py" "$temporary/qmp.sock")
-deadline=$((SECONDS + ${ALE_WINDOWS_BUILD_TIMEOUT_SECONDS:-7200}))
+python3 "$source_dir/qmp_boot.py" "$temporary/qmp.sock"
+timeout_seconds="${ALE_WINDOWS_BUILD_TIMEOUT_SECONDS:-7200}"
+[[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || {
+  echo "ALE_WINDOWS_BUILD_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 65
+}
+deadline_epoch=$(($(date +%s) + timeout_seconds))
+echo "waiting for Windows ARM64 build (timeout: ${timeout_seconds}s)"
 while kill -0 "$qemu_pid" 2>/dev/null; do
-  if (( SECONDS >= deadline )); then
+  if (( $(date +%s) >= deadline_epoch )); then
     echo "Windows ARM64 build timed out; QEMU log follows" >&2
     tail -100 "$temporary/qemu.log" >&2
     exit 70
