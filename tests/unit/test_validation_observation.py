@@ -11,7 +11,6 @@ from ale.core.validation import (
     TaskValidationObservation,
     ValidationAttempt,
     ValidationEngine,
-    ValidationNotice,
     ValidationObservation,
 )
 
@@ -73,7 +72,6 @@ def test_observation_matches_checked_in_json_schema() -> None:
                 untouched=completed("untouched"),
                 oracle=completed("oracle"),
                 reward_names=("reward",),
-                warnings=(ValidationNotice(code="partial_oracle", message="oracle reward is 0.5"),),
                 passed=True,
             ),
         ),

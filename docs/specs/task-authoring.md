@@ -219,8 +219,8 @@ solution that performs the Task normally. When that is not practical, the oracle
 protected reference data from `oracle/assets/` to write or upload a full-credit final state
 directly. That reference must never be visible to the evaluated agent.
 
-An untouched run must receive a non-empty all-zero reward map. Oracle full credit is the target,
-but a lower oracle score is a validation warning rather than a Task failure.
+An untouched run must receive a non-empty all-zero reward map. Every oracle reward must equal one;
+lower oracle credit fails validation.
 
 ## Debugging
 

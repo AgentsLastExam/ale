@@ -205,14 +205,14 @@ def test_validation_failure_output_is_actionable() -> None:
     )
 
 
-def test_partial_oracle_is_a_warning_not_a_failure() -> None:
+def test_partial_oracle_is_a_hard_failure() -> None:
     names, warnings, failures = _validation_notices(
         Verdict.completed({"correctness": 0.0}),
         Verdict.completed({"correctness": 0.5}),
     )
     assert names == ("correctness",)
-    assert [notice.code for notice in warnings] == ["partial_oracle"]
-    assert failures == ()
+    assert warnings == ()
+    assert [notice.code for notice in failures] == ["oracle_not_full"]
 
 
 def test_nonzero_untouched_and_name_mismatch_are_hard_failures() -> None:

@@ -117,7 +117,7 @@ for verifier and review use and records its own verification, result, execution 
 
 - untouched must complete with a non-empty all-zero reward map;
 - oracle must complete with the same reward names;
-- the oracle's actual values are recorded, and non-one values are warnings;
+- every oracle reward must equal one;
 - setup, image, resource, artifact, verifier, Judge, timeout, and infrastructure failures
   fail validation rather than becoming scores.
 

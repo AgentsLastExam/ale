@@ -791,6 +791,13 @@ def _validation_notices(
                 message=f"oracle episode ended with {oracle.status.value}",
             )
         )
+    elif not _is_full_reward_map(oracle.rewards):
+        failures.append(
+            ValidationNotice(
+                code="oracle_not_full",
+                message=f"oracle rewards must all be one, got {oracle.rewards}",
+            )
+        )
 
     untouched_names = tuple((untouched.rewards or {}).keys())
     oracle_names = tuple((oracle.rewards or {}).keys())
@@ -809,15 +816,7 @@ def _validation_notices(
             )
         )
 
-    warnings: tuple[ValidationNotice, ...] = ()
-    if not failures and oracle.rewards and not _is_full_reward_map(oracle.rewards):
-        warnings = (
-            ValidationNotice(
-                code="partial_oracle",
-                message=f"oracle rewards are not all 1.0: {oracle.rewards}",
-            ),
-        )
-    return untouched_names or oracle_names, warnings, tuple(failures)
+    return untouched_names or oracle_names, (), tuple(failures)
 
 
 def _validation_attempt(result: EpisodeResult, run_dir: Path) -> ValidationAttempt:
