@@ -33,10 +33,13 @@ produce the outcome must be accepted. If a path or behavior is an explicit part 
 the requested outcome, verification must check it. State exact output locations, formats,
 tolerances, and protected side effects whenever correctness depends on them.
 
-Design for blocked agent network access by default. Bake or stage every required dependency,
-input, and local service into the initial context. Use the narrowest practical allowlist when
-external access is intrinsic to the Task. Use open network access only when restricting it would
-materially change the intended capability, and record that justification in the Task metadata.
+Design for blocked agent network access by default. Before choosing that policy, trace at least one
+normal, solver-feasible route from the supplied state to the required outcome. Bake or stage every
+software dependency, input, and local service needed by that route into the initial context; a
+runtime package download or other network workaround is not a feasible blocked-network route. Use
+the narrowest practical allowlist when external access is intrinsic to the Task. Use open network
+access only when restricting it would materially change the intended capability, and record that
+justification in the Task metadata.
 
 ## 2. Resist reward hacking
 

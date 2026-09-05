@@ -118,6 +118,10 @@ extras:                             # optional namespaced extensions; no standar
   example.org: {difficulty: hard}
 ```
 
+When the instruction requires deliverable files, every instructed destination must equal or be
+contained by a declared `artifacts` path. Commands and examples in `instruction.md` must write to
+that same destination; do not declare one path while instructing the agent to use another.
+
 ### Verification topology
 
 For shared verification, omit `verify` or set only `environment_mode: shared`. Separate
@@ -133,10 +137,11 @@ to image, setup, verification, network, artifacts, or tools is a different Task.
 ### Resources and network
 
 Request only what the Task needs. `image.kind` selects container or VM behavior; Tasks never name
-a Provider. Design for `network.mode: block` by preparing all required data, software, and local
-services in the initial environment. Use `allowlist` for intrinsic external dependencies and
-`open` only when restriction would materially change the capability being evaluated; explain that
-choice in `metadata.network_justification`.
+a Provider. For `network.mode: block`, first trace a normal solver-feasible completion route, then
+prepare all data, software, and local services required by that route in the initial environment.
+Do not rely on the solver downloading packages at runtime. Use `allowlist` for intrinsic external
+dependencies and `open` only when restriction would materially change the capability being
+evaluated; explain that choice in `metadata.network_justification`.
 
 ## image/
 
@@ -179,6 +184,12 @@ Task code does not implement boot or disk assembly.
 state that must vary by episode: reset mutable data, generate per-episode values, create writable
 copies, or start services that depend on dynamic state. Stable installation and configuration
 belong in `image/`.
+
+On Linux, `setup/run.sh` executes as `root`, while both the evaluated solver and the validation
+oracle execute as the image's agent account (`user` in the ALE base images). `verify/run.sh`
+executes as `root`. ALE does not change ownership of Task-created paths. If image or setup code
+creates a directory or file that the solver or oracle must modify, it must explicitly grant that
+account the required ownership or permissions, for example with `chown` or `install -o user`.
 
 ## instruction.md
 
