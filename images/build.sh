@@ -60,8 +60,7 @@ for image in "${images[@]}"; do
             ;;
     esac
 
-    content=$(find "${inputs[@]}" -type f -print0 \
-        | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)
+    content=$(git ls-files -s "${inputs[@]}" | sha256sum | cut -c1-12)
     name="ghcr.io/agentslastexam/${repository}"
     tags=(--tag "${name}:${version}" --tag "${name}:${content}")
 
