@@ -16,6 +16,7 @@ runs/
 .cache/
 .ale/
 .ale-cache/
+/.ale-brew/
 *.qcow2
 task-data/
 
