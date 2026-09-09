@@ -111,6 +111,12 @@ removes the previously staged verifier files so deleted files cannot survive a r
 The Harness, setup, and agent phases do not run again. The new episode copies the source trajectory
 for verifier and review use and records its own verification, result, execution trace, and RunLock.
 
+`ale reverify --episode-retries N` (or `--set episode_retries=N`) retries incomplete
+separate verification with a new verifier Sandbox each time, preserving the source solver.
+Shared reverification remains a single attempt because verification may modify that same
+source Sandbox; a clean retry requires a new full `ale run`. The original shared attempt
+is still allowed when the retry configuration is nonzero.
+
 ## Validation
 
 `ale validate` uses this same protocol twice with fresh sandboxes:
@@ -124,6 +130,12 @@ for verifier and review use and records its own verification, result, execution 
 Validation tests Task feasibility and verifier behavior. It is separate from ordinary
 run admission and from endpoint availability checks. The persisted `validation.json`
 contract is [schema version 1](schemas/validation-observation-v1.json).
+
+Validation honors `episode_retries` independently for untouched and oracle episodes.
+Every retry starts the complete protocol in fresh Sandboxes. Only each episode's last
+result enters `validation.json`; a completed result with an incorrect reward map fails
+validation without retrying to seek a different score. Attempt retention and cancellation
+follow the [episode result contract](trace.md#result-and-run-status).
 
 ## Extension boundary
 

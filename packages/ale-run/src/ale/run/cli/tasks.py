@@ -29,7 +29,7 @@ from ale.core.verdict import Status, Verdict
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.assets import observe_task_assets
 from ale.run.environments.standard import RetainedVerificationEnvironment, StandardEnvironment
-from ale.run.episode import EpisodeResult, run_episode
+from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
@@ -262,13 +262,16 @@ async def _run_one(
                 logging_policy=settings.logging,
                 verification_config=settings.verification,
                 sandbox_retention=settings.sandbox_retention,
+                destroy_failed_sandboxes=settings.episode_retries > 0,
                 authentication=authentication.mode,
                 profile_slot_id=authentication.profile_slot_id,
             )
 
         async with gate:
             ledger.mark_running(episode_id)
-            result = await execute()
+            result = await run_episode_with_retries(
+                execute, retries=settings.episode_retries, on_retry=_report_retry
+            )
         ledger.finish_episode(result.episode_id, result.record)
 
         _report(result)
@@ -423,33 +426,56 @@ async def _reverify(
             network=task.spec.network,
             sudo=task.spec.resources.sudo,
         )
-        try:
-            solver = await _attach_retained(handle, request, source_lock)
-        except AleError as error:
-            typer.echo(f"{task.spec.id}: {error}", err=True)
-            failures += 1
-            continue
         provenance = ProvenanceInputs(
             source=resolved.source,
             agent=source_lock.agent,
             gateway=source_lock.gateway,
             config_hash=source_lock.config_hash,
         )
-        result = await run_episode(
-            task,
-            RetainedVerificationEnvironment(solver, source_dir, source_lock.sandbox),
-            providers,
-            run_dir=run_dir,
-            model=source_lock.agent.model,
-            seed=source_lock.seed,
-            collect_artifacts=True,
-            provenance=provenance,
-            episode_id=f"{source_result.episode_id}-reverify-{uuid.uuid4().hex[:6]}",
-            verification_config=settings.verification,
-            sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
-            authentication=source_lock.agent.authentication.effective,
-            profile_slot_id=source_lock.agent.authentication.profile_slot_id,
+        episode_id = f"{source_result.episode_id}-reverify-{uuid.uuid4().hex[:6]}"
+
+        async def execute(
+            task: ManifestTask = task,
+            handle: str = handle,
+            request: SandboxRequest = request,
+            source_lock: RunLock = source_lock,
+            source_dir: Path = source_dir,
+            provenance: ProvenanceInputs = provenance,
+            episode_id: str = episode_id,
+        ) -> EpisodeResult:
+            solver = await _attach_retained(handle, request, source_lock)
+            return await run_episode(
+                task,
+                RetainedVerificationEnvironment(solver, source_dir, source_lock.sandbox),
+                providers,
+                run_dir=run_dir,
+                model=source_lock.agent.model,
+                seed=source_lock.seed,
+                collect_artifacts=True,
+                provenance=provenance,
+                episode_id=episode_id,
+                verification_config=settings.verification,
+                sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
+                destroy_failed_sandboxes=True,
+                authentication=source_lock.agent.authentication.effective,
+                profile_slot_id=source_lock.agent.authentication.profile_slot_id,
+            )
+
+        # Shared verification mutates its source; only separate verification has a
+        # fresh verifier Sandbox on every attempt.
+        retries = (
+            settings.episode_retries
+            if task.spec.verify.environment_mode is VerificationMode.SEPARATE
+            else 0
         )
+        try:
+            result = await run_episode_with_retries(
+                execute, retries=retries, on_retry=_report_retry
+            )
+        except AleError as error:
+            typer.echo(f"{task.spec.id}: {error}", err=True)
+            failures += 1
+            continue
         _report(result)
         if result.verdict.status is not Status.COMPLETED:
             failures += 1
@@ -464,7 +490,10 @@ def _retained_source_episodes(
     result_paths = (
         (source_run / "result.json",)
         if (source_run / "result.json").is_file()
-        else tuple(sorted(source_run.rglob("result.json")))
+        else (
+            tuple(sorted(source_run.glob("*/result.json")))
+            or tuple(sorted(source_run.glob("*/*/result.json")))
+        )
     )
     episodes = []
     for result_path in result_paths:
@@ -582,19 +611,32 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                     spec=spec,
                 )
                 ledger.mark_running(episode_id)
-                result = await run_episode(
-                    task,
-                    StandardEnvironment(harness, agent_enabled=agent_enabled),
-                    providers,
-                    run_dir=run_dir,
-                    episode_id=episode_id,
-                    provenance=inputs,
-                    phase_callback=lambda phase, current=episode_id: ledger.update_phase(
-                        current, phase.value
-                    ),
-                    logging_policy=settings.logging,
-                    verification_config=settings.verification,
-                    sandbox_retention=settings.sandbox_retention,
+
+                async def execute(
+                    task: ManifestTask = task,
+                    harness: Harness = harness,
+                    agent_enabled: bool = agent_enabled,
+                    episode_id: str = episode_id,
+                    inputs: ProvenanceInputs = inputs,
+                ) -> EpisodeResult:
+                    return await run_episode(
+                        task,
+                        StandardEnvironment(harness, agent_enabled=agent_enabled),
+                        providers,
+                        run_dir=run_dir,
+                        episode_id=episode_id,
+                        provenance=inputs,
+                        phase_callback=lambda phase, current=episode_id: ledger.update_phase(
+                            current, phase.value
+                        ),
+                        logging_policy=settings.logging,
+                        verification_config=settings.verification,
+                        sandbox_retention=settings.sandbox_retention,
+                        destroy_failed_sandboxes=settings.episode_retries > 0,
+                    )
+
+                result = await run_episode_with_retries(
+                    execute, retries=settings.episode_retries, on_retry=_report_retry
                 )
                 ledger.finish_episode(episode_id, result.record)
                 results[pass_name] = result
@@ -863,6 +905,15 @@ def _gateway_host() -> str:
     bearer token is refused, and those tokens die with their episode.
     """
     return "0.0.0.0"
+
+
+def _report_retry(result: EpisodeResult, retry: int, retries: int) -> None:
+    failure = result.record.failure
+    reason = f"{failure.error_type}: {failure.message}" if failure is not None else ""
+    typer.echo(
+        f"retry {retry}/{retries}  {result.episode_id}  after {result.record.status.value}: "
+        + " ".join(reason.split())[:1000]
+    )
 
 
 def _report(result: EpisodeResult) -> None:

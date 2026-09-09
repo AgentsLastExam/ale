@@ -114,6 +114,10 @@ def run(
     overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
     runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
     episodes: Annotated[int, typer.Option("-n", "--episodes", min=1)] = 1,
+    episode_retries: Annotated[
+        int | None,
+        typer.Option("--episode-retries", min=0, help="Extra attempts for incomplete episodes"),
+    ] = None,
     concurrency: Annotated[
         int,
         typer.Option(
@@ -142,6 +146,8 @@ def run(
     episodes are matched by what they are, not by when they ran.
     """
     flags = [*(overrides or []), f"episodes={episodes}", f"concurrency={concurrency}"]
+    if episode_retries is not None:
+        flags.append(f"episode_retries={episode_retries}")
     if no_resume:
         flags.append("resume=false")
     if auth:
@@ -192,9 +198,16 @@ def reverify(
     config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
     overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
     runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
+    episode_retries: Annotated[
+        int | None,
+        typer.Option("--episode-retries", min=0, help="Extra attempts for incomplete episodes"),
+    ] = None,
 ) -> None:
     """Re-run separate verification against retained solver output."""
-    settings = _config(config, overrides, agent="nop", model="")
+    flags = [*(overrides or [])]
+    if episode_retries is not None:
+        flags.append(f"episode_retries={episode_retries}")
+    settings = _config(config, flags, agent="nop", model="")
     raise typer.Exit(asyncio.run(_reverify(reference, source_run, settings, runs_dir)))
 
 

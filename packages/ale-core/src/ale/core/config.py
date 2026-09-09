@@ -261,6 +261,7 @@ class RunConfig(BaseModel):
     sandbox_retention: SandboxRetentionConfig = SandboxRetentionConfig()
     logging: LoggingPolicy = LoggingPolicy()
     episodes: int = Field(default=1, ge=1)
+    episode_retries: int = Field(default=0, ge=0, strict=True)
     seed: int = 0
     resume: bool = True
     tasks_ref: str | None = Field(default=None, description="Override the registry pin")

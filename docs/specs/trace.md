@@ -129,7 +129,43 @@ phase/terminal/interrupted state. It uses WAL and stores bounded failures and fi
 maps, never full trajectory, trace, lock, or native-log documents. Rows are inserted
 before the concurrency semaphore, marked running before episode orchestration, updated
 by explicit phase callbacks, and projected terminal only after `result.json` is durable.
-On reopen, stale queued/running rows become interrupted; retries receive new episode IDs.
+On reopen, stale queued/running rows become interrupted. An explicit resumed invocation
+creates new episode IDs for work that has no completed result.
+
+`RunConfig.episode_retries` sets the number of additional automatic attempts for an
+incomplete episode; its default is zero. `ale run --episode-retries N` and
+`--set episode_retries=N` override the run TOML. Each attempt runs in fresh Sandboxes
+with a new Gateway session and trajectory, preserving the logical episode ID and seed.
+Only `status=completed` stops retries successfully; a completed zero score is still a
+completed episode. Host cancellation interrupts the loop immediately. Missing results
+caused by a host interruption are not treated as an unlimited retry request.
+
+There is one run-level ledger row per logical episode and one current result directory:
+
+```text
+runs/<run>/<episode>/
+  result.json                  # last attempt; only this result participates in the run
+  lock.json                    # provenance of the same attempt
+  trajectory.json              # evidence of the same attempt, when produced
+  attempts/1/                  # first attempt, only if a later retry replaced it
+    result.json
+    lock.json
+    logs/...
+  attempts/2/...               # next replaced attempt, if any
+```
+
+Every archived attempt retains its complete records, artifacts, and relative blob paths.
+Archives are never additional evaluation samples. Consumers of a run enumerate immediate
+episode directories (`*/result.json`), not recursive result files. While a retry is
+running, the current directory has no terminal result; the previous failed result is
+already archived. The ledger remains running until the last result is durable. Exhaustion
+leaves that last failed result current and makes the run fail. Successful logical episodes
+are not repeated by another episode's retry or by resuming the same completed run.
+
+When automatic retries are enabled, failed attempts destroy their owned Sandboxes even
+when retention requested `keep`; successful final attempts use the configured policy.
+The same result layout applies to validation and separate reverification; their execution
+boundaries are specified in [Standard Environment](standard-environment.md).
 
 ## Retention
 

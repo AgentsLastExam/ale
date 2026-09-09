@@ -15,7 +15,7 @@ import hashlib
 import json
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
@@ -51,7 +51,7 @@ from ale.run.recording import EpisodeRecording
 from ale.run.task_images import prepare_task_image, prepare_verifier_image
 from ale_verify import VerificationRecord
 
-__all__ = ["EpisodeResult", "run_episode"]
+__all__ = ["EpisodeResult", "run_episode", "run_episode_with_retries"]
 
 #: Which status an error class implies. Order matters: the first match wins, so
 #: subclasses must precede their bases.
@@ -86,6 +86,31 @@ class EpisodeResult:
     """Absent when the caller asked for no provenance, or the episode never provisioned."""
 
 
+async def run_episode_with_retries(
+    execute: Callable[[], Awaitable[EpisodeResult]],
+    *,
+    retries: int,
+    on_retry: Callable[[EpisodeResult, int, int], None] | None = None,
+) -> EpisodeResult:
+    """Keep one final episode result and archive superseded failed executions."""
+    if retries < 0:
+        raise ValueError("episode retries must be non-negative")
+    for attempt in range(retries + 1):
+        result = await execute()
+        if result.record.status is Status.COMPLETED or attempt == retries:
+            return result
+        history = result.run_dir / "attempts"
+        archive = history / str(attempt + 1)
+        archive.mkdir(parents=True, exist_ok=False)
+        # Move each complete record with its relative blobs and artifacts intact.
+        for path in result.run_dir.iterdir():
+            if path != history:
+                path.rename(archive / path.name)
+        if on_retry is not None:
+            on_retry(result, attempt + 1, retries)
+    raise AssertionError("episode retry loop did not return")
+
+
 @dataclass
 class _LeaseEntry:
     sandbox: Sandbox
@@ -108,6 +133,7 @@ class _Lease:
         self.retention = retention
         self.live: list[_LeaseEntry] = []
         self.outcomes: list[SandboxOutcome] = []
+        self.retained: list[tuple[_LeaseEntry, SandboxOutcome]] = []
 
     async def acquire(self, request: SandboxRequest) -> Sandbox:
         roles: tuple[Literal["solver", "verifier"], ...]
@@ -149,10 +175,14 @@ class _Lease:
             entry.sanitation = "succeeded" if succeeded else "failed"
             entry.sanitation_reason = reason
 
-    async def finalize(self) -> None:
+    async def finalize(self, *, allow_retention: bool = True) -> None:
         for entry in list(self.live):
-            if entry.requested != "keep" or entry.sanitation != "succeeded":
-                outcome = "destroyed" if entry.requested == "destroy" else "retention-failed"
+            if not allow_retention or entry.requested != "keep" or entry.sanitation != "succeeded":
+                outcome = (
+                    "destroyed"
+                    if not allow_retention or entry.requested == "destroy"
+                    else "retention-failed"
+                )
                 await self._destroy(entry, outcome=outcome)
                 continue
             try:
@@ -166,7 +196,22 @@ class _Lease:
             else:
                 entry.sandbox.release_resources()
                 self.live.remove(entry)
-                self.outcomes.append(_retained_outcome(entry, retained))
+                outcome = _retained_outcome(entry, retained)
+                self.outcomes.append(outcome)
+                self.retained.append((entry, outcome))
+
+    async def destroy_retained(self) -> None:
+        """Undo retention if terminal recording fails after Sandbox finalization."""
+        failure: RetentionFinalizationError | None = None
+        for entry, outcome in self.retained:
+            self.outcomes.remove(outcome)
+            try:
+                await self._destroy(entry, outcome="destroyed")
+            except RetentionFinalizationError as exc:
+                failure = failure or exc
+        self.retained.clear()
+        if failure is not None:
+            raise failure
 
     async def _destroy(
         self,
@@ -402,6 +447,7 @@ async def run_episode(
     logging_policy: LoggingPolicy | None = None,
     verification_config: VerificationConfig | None = None,
     sandbox_retention: SandboxRetentionConfig | None = None,
+    destroy_failed_sandboxes: bool = False,
     authentication: Literal["api-key", "subscription"] = "api-key",
     profile_slot_id: str | None = None,
 ) -> EpisodeResult:
@@ -490,6 +536,7 @@ async def run_episode(
         logging_policy=logging_policy or LoggingPolicy(),
         verification_config=verification_config or VerificationConfig(),
     )
+    verdict: Verdict | None = None
     try:
         verdict = await environment.run(task, ctx)
     except Exception as exc:  # every failure becomes a typed result, not a traceback
@@ -522,7 +569,10 @@ async def run_episode(
             session_registry.close(session)
         finalization_error: RetentionFinalizationError | None = None
         try:
-            await lease.finalize()
+            await lease.finalize(
+                allow_retention=verdict is not None
+                and (verdict.status is Status.COMPLETED or not destroy_failed_sandboxes)
+            )
         except RetentionFinalizationError as exc:
             finalization_error = exc
         try:
@@ -531,9 +581,14 @@ async def run_episode(
             finalization_error = finalization_error or exc
         ctx.sandbox_outcomes = tuple(lease.outcomes)
         sink.cleanup()
-        if finalization_error is not None and verdict.status is Status.COMPLETED:
+        if (
+            finalization_error is not None
+            and verdict is not None
+            and verdict.status is Status.COMPLETED
+        ):
             verdict = Verdict.failed(Status.ENV_ERROR, finalization_error, phase="teardown")
 
+    assert verdict is not None
     finalize_started_at = datetime.now(UTC)
     finalize_started = time.monotonic()
     recording.execution.append(
@@ -545,11 +600,12 @@ async def run_episode(
         durable=True,
     )
     finalize_outcome = "succeeded"
-    lock = _write_lock(ctx, task, provenance, seed=seed) if provenance else None
-    if lock is not None:
-        recording.write_lock(lock)
+    lock = None
     try:
         recording.verify_blob_references()
+        lock = _write_lock(ctx, task, provenance, seed=seed) if provenance else None
+        if lock is not None:
+            recording.write_lock(lock)
     except Exception as exc:
         finalize_outcome = "failed"
         verdict = Verdict.failed(Status.ENV_ERROR, exc, phase="finalize")
@@ -564,6 +620,15 @@ async def run_episode(
             ),
             durable=True,
         )
+    if destroy_failed_sandboxes and verdict.status is not Status.COMPLETED:
+        try:
+            await lease.destroy_retained()
+        except RetentionFinalizationError as exc:
+            verdict = Verdict.failed(Status.ENV_ERROR, exc, phase="teardown")
+        ctx.sandbox_outcomes = tuple(lease.outcomes)
+        if lock is not None:
+            lock = lock.model_copy(update={"sandbox_outcomes": ctx.sandbox_outcomes})
+            recording.write_lock(lock)
     finished_at = datetime.now(UTC)
     finalize_duration_ms = int((time.monotonic() - finalize_started) * 1000)
     ctx.phases.append(
