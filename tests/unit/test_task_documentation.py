@@ -90,13 +90,21 @@ def test_task_quality_standard_owns_only_semantic_quality() -> None:
         "initial context",
         "verification",
         "without human clarification",
-        "inclusive range from `0` to `1`",
-        "blocked agent network access by default",
+        "Blocked agent network access is the default",
         "reward hacking",
     ):
         assert required in text
-    for implementation_detail in ("task.yaml", "image/assets", "oracle", "trajectory"):
+    for implementation_detail in (
+        "task.yaml",
+        "image/assets",
+        "requirement matrix",
+        "ale validate",
+        "Required final response",
+    ):
         assert implementation_detail not in text
+    verification = (ROOT / "docs/specs/verification.md").read_text(encoding="utf-8")
+    assert "Scores are finite values from 0 through 1" in verification
+    assert "explicit `overall` aggregate" in verification
 
 
 @pytest.mark.parametrize(

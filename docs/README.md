@@ -9,7 +9,7 @@ lasting contract belongs here.
 | Durable project principles | [constitution.md](constitution.md) |
 | Canonical terms | [specs/lexicon.md](specs/lexicon.md) |
 | Task definition and quality standard | [specs/task-quality-standard.md](specs/task-quality-standard.md) |
-| Task authoring, folder, and manifest contract | [specs/task-authoring.md](specs/task-authoring.md) |
+| Task engineering: directory, configuration, environment, visibility, and stage interfaces | [specs/task-authoring.md](specs/task-authoring.md) |
 | `StandardEnvironment` episode flow | [specs/standard-environment.md](specs/standard-environment.md) |
 | Sandbox and image contract | [specs/sandbox-image.md](specs/sandbox-image.md) |
 | Verification API and records | [specs/verification.md](specs/verification.md) |

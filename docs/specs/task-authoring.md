@@ -1,8 +1,9 @@
-# Writing a standard Task
+# Task authoring contract
 
-A Task is one self-contained folder implementing the
-[Task quality standard](task-quality-standard.md). ALE creates the declared initial sandbox,
-lets an agent work autonomously, and verifies the resulting outcome.
+A Task is one self-contained folder. This document owns its directory, configuration,
+environment, data visibility, and stage interfaces. Design and acceptance standards belong to
+the [Task quality standard](task-quality-standard.md); scoring and Judge APIs belong to
+[Verification](verification.md).
 
 ## Task folder
 
@@ -136,12 +137,10 @@ to image, setup, verification, network, artifacts, or tools is a different Task.
 
 ### Resources and network
 
-Request only what the Task needs. `image.kind` selects container or VM behavior; Tasks never name
-a Provider. For `network.mode: block`, first trace a normal solver-feasible completion route, then
-prepare all data, software, and local services required by that route in the initial environment.
-Do not rely on the solver downloading packages at runtime. Use `allowlist` for intrinsic external
-dependencies and `open` only when restriction would materially change the capability being
-evaluated; explain that choice in `metadata.network_justification`.
+`image.kind` selects container or VM behavior; Tasks never name a Provider. `network` applies to
+the evaluated agent and oracle; its enforcement is specified in [Security](security.md).
+The quality standard owns resource feasibility and network-policy selection. An open-network
+justification uses `metadata.network_justification`.
 
 ## image/
 
@@ -156,16 +155,9 @@ Windows VM Tasks declare `os: windows` and currently use a private prebuilt qcow
 reference. ALE does not publish licensed Windows image bytes or offer a general Windows
 image builder.
 
-Develop it in two passes:
-
-1. **Explore.** Start the matching base sandbox, construct and inspect the required environment
-   interactively, and preserve a snapshot as the reference state.
-2. **Reproduce.** Encode those changes in `image/Dockerfile` and image-local scripts, build from a
-   clean base, and compare the result with the reference snapshot until the required state matches.
-
-The snapshot is an authoring aid, not Task source. The submitted initial environment must be
-reproducible from `image/`; large build inputs belong in `image/assets/` and are copied by the
-Dockerfile. Prefer image-local scripts when they make non-trivial setup easier to test and maintain.
+The submitted initial environment must be reproducible from `image/`; an exploratory sandbox
+snapshot is not Task source. Large build inputs belong in `image/assets/` and are copied by the
+Dockerfile. Image-local scripts may implement non-trivial installation and configuration.
 
 ```dockerfile
 FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest
@@ -193,9 +185,8 @@ account the required ownership or permissions, for example with `chown` or `inst
 
 ## instruction.md
 
-Describe the required outcome and constraints, not a preferred implementation path. Any input or
-output location needed to complete the Task must agree with the initial environment and
-`task.yaml`. Declared `${name}` placeholders are rendered from `params`.
+`instruction.md` is the evaluated-agent instruction. Its input and output paths refer to the
+declared initial environment and artifacts. Declared `${name}` placeholders are rendered from `params`.
 Use literal sandbox paths: `/home/user/...` on Linux and `C:\Users\user\...` on
 Windows. ALE does not add or rewrite a workspace prefix.
 
@@ -208,21 +199,32 @@ in `task.yaml`; never depend on ambient Host configuration.
 ## verify/
 
 `verify/run.sh` (or Windows `verify/run.ps1`) evaluates the final outcome and writes the reward map. Verifier implementation
-conventionally lives in `verify/verify.py`; private references belong in `verify/assets/`. Use the
-APIs and scoring behavior defined in [Verification](verification.md) rather than duplicating them
-here.
+conventionally lives in `verify/verify.py`; private references belong in `verify/assets/`.
+ALE runs the stage with `verify/` as cwd. Stage code and assets use ordinary relative paths;
+solver outputs use literal absolute paths. The verification image must expose system Python 3.12
+or newer; ALE stages the `ale_verify` package into that interpreter's site-packages.
+
+The Linux entry is:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+exec python3 verify.py
+```
+
+The Windows entry is:
+
+```powershell
+python.exe .\verify.py
+```
+
+APIs, scoring, and record behavior are defined in [Verification](verification.md).
 
 ## oracle/
 
-`oracle/run.sh` (or Windows `oracle/run.ps1`) checks that successful final state can receive credit. Prefer an executable
-solution that performs the Task normally. When that is not practical, the oracle may instead use
-protected reference data from `oracle/assets/` to write or upload a full-credit final state
-directly. That reference must never be visible to the evaluated agent.
+`oracle/run.sh` (or Windows `oracle/run.ps1`) supplies a successful final state for validation.
+It may execute a solution normally or use protected reference data from `oracle/assets/` to
+write or upload that state directly. Oracle assets are absent during evaluated-agent execution.
 
-An untouched run must receive a non-empty all-zero reward map. Every oracle reward must equal one;
-lower oracle credit fails validation.
-
-## Debugging
-
-Retain a sandbox when its final state needs inspection. ALE lists and destroys retained container
-and VM sandboxes with `ale sandbox list` and `ale sandbox destroy HANDLE`.
+Validation's untouched and oracle reward requirements are defined in
+[StandardEnvironment](standard-environment.md#validation).

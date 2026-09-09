@@ -13,11 +13,26 @@ instruction and initial context must therefore define a feasible, sufficiently d
 and unambiguous target. Multiple valid solutions are acceptable only when their common
 acceptance boundary is clear.
 
-Verification may combine deterministic code, LLM Judges, and Agent Judges. Whatever method is
-used, it must evaluate performance fairly and produce explicit, fine-grained scores in the
-inclusive range from `0` to `1`.
+This document owns Task design and acceptance standards. The folder and stage contracts are in
+[Task authoring](task-authoring.md); scoring APIs, evidence inputs, and failure behavior are in
+[Verification](verification.md).
 
-## 1. Keep the contract aligned
+## 1. Preserve the intended work
+
+The Task must represent a coherent, realistic workflow and retain the substantive decisions and
+difficulty of the intended capability. Its supplied inputs, scale, constraints, and initial state
+must support that work. Construction conveniences must not turn the requested problem into a
+trivial proxy, disclose the answer, or require unrelated expertise.
+
+The initial context must admit at least one normal, solver-feasible route to completion within
+the declared resources, permissions, and time. Blocked agent network access is the default; all
+software, inputs, and local services required by that route must already be available. A runtime
+download or network workaround is not a feasible blocked-network route. Intrinsic external
+dependencies justify the narrowest practical allowlist. Open access is justified only when
+restriction would materially change the intended capability, with that reason recorded in Task
+metadata.
+
+## 2. Keep the contract aligned
 
 Instruction, initial context, and verification must describe the same outcome:
 
@@ -33,19 +48,40 @@ produce the outcome must be accepted. If a path or behavior is an explicit part 
 the requested outcome, verification must check it. State exact output locations, formats,
 tolerances, and protected side effects whenever correctness depends on them.
 
-Design for blocked agent network access by default. Before choosing that policy, trace at least one
-normal, solver-feasible route from the supplied state to the required outcome. Bake or stage every
-software dependency, input, and local service needed by that route into the initial context; a
-runtime package download or other network workaround is not a feasible blocked-network route. Use
-the narrowest practical allowlist when external access is intrinsic to the Task. Use open network
-access only when restricting it would materially change the intended capability, and record that
-justification in the Task metadata.
+Incidental delivery conventions should be explicit when this removes acceptance ambiguity without
+reducing difficulty, realism, or substantive decisions. Meaningful valid outcomes must not be
+narrowed, and solution steps must not be prescribed merely to simplify verification. Every
+retained degree of freedom needs a clear acceptance boundary that the chosen verification method
+can assess fairly. The public instruction defines that boundary before the evaluated agent works;
+the verifier and oracle cannot create additional hidden requirements.
 
-## 2. Resist reward hacking
+## 3. Evaluate evidence fairly
+
+Expected facts and acceptance conditions must follow from the supplied inputs and the public
+contract. A particular solver output or oracle implementation is not an independent source of
+truth. An oracle receiving full credit establishes one accepted outcome, not the verifier's
+coverage or fairness.
+
+Equivalent expressions of correct content must receive equivalent credit. Superficially similar
+but materially incorrect content must be distinguished from correct content. Deterministic checks
+are suitable when parsing and normalization can reliably preserve these distinctions across the
+permitted variations. Semantic or perceptual requirements need an LLM Judge or Agent Judge when
+deterministic inspection cannot establish them reliably; the methods may be combined. The chosen
+evidence must expose the actual property being assessed. Text extraction alone does not establish
+visual correctness, and a proxy's presence does not establish the outcome it is meant to measure.
+
+Rubrics and decision rules must assess the instruction's level of precision. Scores must provide
+meaningful detail about the required outcomes, and full credit must cover all material
+requirements. Empty, placeholder, malformed, stale, incomplete, or otherwise materially incorrect
+outcomes must not receive credit for requirements they fail. Verification failures are not evidence
+that the evaluated agent failed the Task; their technical behavior belongs to the verification
+contract.
+
+## 4. Resist reward hacking
 
 Full credit must require evidence of the intended capability, not knowledge of the verifier or a
 cheap proxy for success. Protect reference data and scoring internals from the evaluated agent,
-and inspect the initial context for information that reveals or makes it trivial to derive the
+and exclude initial-context information that reveals or makes it trivial to derive the
 answer. Verification must reject self-reported success, incomplete artifacts, superficial proxy
 outputs, and other shortcuts that bypass the work the instruction is intended to measure.
 

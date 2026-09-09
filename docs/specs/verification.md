@@ -5,47 +5,20 @@ sandbox. The independent `ale_verify` package supplies deterministic checks, dir
 and Agent Judges, aggregation, and an atomic record. There is no Domain Kit,
 Verification Service, Judge Gateway, or Host callback.
 
-The persisted record follows [JSON schema version 1](schemas/verification-record-v1.json).
-
-## Task entry point
-
-The standard shape is:
-
-```text
-verify/
-├── run.sh          # Linux; run.ps1 on Windows
-├── verify.py
-├── Dockerfile       # optional, separate mode only
-└── assets/          # optional, synchronized outside Git
-```
-
-The OS entry executes the verifier by a relative path. Linux uses:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-exec python3 verify.py
-```
-
-Windows uses:
-
-```powershell
-python.exe .\verify.py
-```
-
-ALE runs the stage with `verify/` as cwd. Task code should use ordinary relative paths
-for its own code and assets, and literal absolute paths for solver outputs. The selected
-verification image must expose system Python 3.12 or newer; ALE stages the package into
-that interpreter's site-packages.
+The Task's verification entry point, working directory, Python requirement, and private assets
+are defined in [Task authoring](task-authoring.md#verify). The persisted record follows
+[JSON schema version 1](schemas/verification-record-v1.json).
 
 ## Stateful API
 
+Task-owned inspection computes a `CheckResult` named `content_result` from the actual outcome
+and its acceptance conditions. Recording that result uses the same API for every domain:
+
 ```python
-from ale_verify import Verification, checks
+from ale_verify import Verification
 
 verification = Verification()
-verification.check("format", checks.file_exists("/home/user/output/report.json"))
-verification.stat("files_checked", 1)
+verification.check("correctness", content_result)
 verification.aggregate("overall")
 verification.write()
 ```
@@ -58,6 +31,9 @@ verification.write()
   selected inputs exactly.
 - `write()` finalizes the record and writes the complete named reward map. It is required
   exactly once after at least one criterion or aggregate.
+
+A Task verifier must expose an explicit `overall` aggregate and retain the underlying named
+criteria as detailed evaluation evidence.
 
 Every accepted mutation atomically replaces `verification.json`. Names are non-empty and
 unique across criteria, stats, and aggregates. Scores are finite values from 0 through 1;
@@ -86,25 +62,10 @@ verification.judge(
 )
 ```
 
-Task code owns the prompt, rubric, evidence paths, optional reference, optional solver
-trajectory, and invocation-local Agent Judge MCP servers. Run TOML owns execution
-configuration:
-
-```toml
-[verification.llm]
-model = "gpt-5-mini"
-reasoning_effort = "medium"
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
-
-[verification.agent]
-adapter = "codex-cli"
-version = "1.2.3"
-model = "gpt-5-mini"
-reasoning_effort = "medium"
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
-```
+Task code owns the Judge kind, prompt, rubric, evidence paths, optional reference, optional
+solver trajectory, and invocation-local Agent Judge MCP servers. It does not select a model,
+reasoning effort, endpoint, credential, harness, or harness version. These are execution
+configuration supplied by the runtime, outside the Task and the `judge()` API.
 
 LLM Judge protocol is inferred from the endpoint and supports Anthropic Messages, OpenAI
 Chat Completions, and OpenAI Responses. Agent Judge supports the small package-owned
