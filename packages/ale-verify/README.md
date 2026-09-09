@@ -23,6 +23,11 @@ The package intentionally imports neither `ale.core` nor `ale.run`, so it can be
 into a Task image without pulling in the engine. Its public API is documented in
 [`../../docs/specs/verification.md`](../../docs/specs/verification.md).
 
+Judge `files` can include text, images, and PDFs. LLM Judge sends supported media as native
+multimodal input; Agent Judge inspects files through its harness. Both receive inline
+`reference` text. See the verification specification for evidence formats, limits, and
+failure behavior.
+
 ```bash
 uv run pytest packages/ale-verify/tests
 ```

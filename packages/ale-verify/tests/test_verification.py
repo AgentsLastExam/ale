@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -233,5 +234,71 @@ def test_judge_failure_persists_failed_state_and_cannot_be_caught_into_a_score(
     record = VerificationRecord.from_json(verify_env[0].read_bytes())
     assert record.status == "failed"
     assert record.rewards == {}
+    with pytest.raises(RuntimeError, match="terminal"):
+        verification.check("fallback", CheckResult(1))
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing",
+        "directory",
+        "symlink",
+        "fifo",
+        "binary",
+        "large",
+        "total",
+        "reference",
+        "trajectory",
+    ],
+)
+def test_evidence_failure_is_terminal_before_contacting_a_judge(
+    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path], tmp_path: Path, case: str
+) -> None:
+    path = tmp_path / "evidence"
+    options: dict[str, object] = {"files": [str(path)]}
+    if case == "directory":
+        path.mkdir()
+    elif case == "symlink":
+        target = tmp_path / "target"
+        target.write_text("content")
+        path.symlink_to(target)
+    elif case == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFOs are POSIX-only")
+        os.mkfifo(path)
+    elif case == "binary":
+        path.write_bytes(b"\xffunsupported binary")
+    elif case == "large":
+        with path.open("wb") as handle:
+            handle.truncate(_io.MAX_FILE_BYTES + 1)
+    elif case == "total":
+        path.write_text("content")
+        monkeypatch.setattr("ale_verify.MAX_TOTAL_EVIDENCE_BYTES", 10)
+        options["files"] = [str(path), str(path)]
+    elif case == "reference":
+        options = {"reference": "x" * (_io.MAX_REFERENCE_BYTES + 1)}
+    elif case == "trajectory":
+        monkeypatch.setenv("ALE_TRAJECTORY_PATH", str(path))
+        options = {"trajectory": True}
+
+    monkeypatch.setattr("ale_verify._llm.run", lambda **_: pytest.fail("Judge was contacted"))
+    verification = Verification()
+    with pytest.raises(_io.VerificationError):
+        verification.judge(
+            "llm",
+            "content",
+            prompt="Judge content.",
+            rubric={
+                "no": {"score": 0, "description": "Wrong."},
+                "yes": {"score": 1, "description": "Correct."},
+            },
+            **options,
+        )
+    record = VerificationRecord.from_json(verify_env[0].read_bytes())
+    assert record.status == "failed"
+    assert record.rewards == {}
+    assert record.failure
+    assert not verify_env[1].exists()
     with pytest.raises(RuntimeError, match="terminal"):
         verification.check("fallback", CheckResult(1))

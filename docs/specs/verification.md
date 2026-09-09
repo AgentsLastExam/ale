@@ -74,9 +74,35 @@ uses that installed binary or installs that exact version inside verification. A
 Judge runs as root in a fresh private native home and may inspect the completed workspace.
 It creates a bounded native transcript, not an ATIF trajectory.
 
+### Evidence inputs
+
+`files` contains absolute paths to local regular files. LLM Judge sends UTF-8 text as text,
+and PNG, JPEG, GIF, WebP, and PDF content as native multimodal inputs. Image and PDF types
+are identified from their contents; binary bytes are never decoded as text or replaced by
+filenames. Responses uses `input_image` and `input_file`, Chat Completions uses `image_url`
+and `file`, and Anthropic Messages uses `image` and `document` blocks. The configured
+model and endpoint must support the supplied modalities; rejection is a verification failure.
+
+Agent Judge accepts bounded binary or text files and receives their paths for inspection
+through its harness. `reference` is inline text supplied to both Judge types, including on
+retries. `trajectory=True` includes the selected solver trajectory; it is otherwise omitted
+from Judge inputs. A configured Agent Judge Task-instruction path must be readable UTF-8.
+
+Each file is limited to 20 MiB, with a combined evidence limit of 32 MiB per invocation.
+Inline references are limited to 256 KiB; LLM text files and selected trajectories are
+limited to 1 MiB each. Oversized, missing, non-regular, or unsupported evidence fails
+explicitly; evidence is never silently truncated. Symbolic-link evidence files are rejected.
+Records retain paths, byte sizes, and SHA-256 hashes, not inline media payloads. Schema-repair
+and transport retries retain the same selected evidence.
+
+LLM Judge transmits selected files; it does not render documents or extract additional evidence.
+Agent Judge can inspect the supplied files with its configured harness tools. Evidence and rubric
+validity are governed by the [Task quality standard](task-quality-standard.md#3-evaluate-evidence-fairly).
+
 Both Judge types call the configured endpoint directly from the sandbox. The named API
 key is injected only into the verify command environment, redacted from captured output,
-and never written to Task configuration or records. A Judge makes at most three attempts;
+and never written to Task configuration or records. A Judge makes one initial attempt and
+at most three retries;
 invalid verdicts receive a schema-repair prompt, while transient failures retry.
 
 ## Records and failure

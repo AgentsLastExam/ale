@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from ale_verify import JudgeError, ScoredChoice, _agents
+from ale_verify import JudgeError, ScoredChoice, Verification, VerificationRecord, _agents
 from test_agent_adapters import codex_config, completed
 
 
@@ -16,13 +16,18 @@ def agent_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path
     instruction = tmp_path / "instruction.md"
     instruction.write_text("Create a working program.")
     log = tmp_path / "agent-judge.jsonl"
+    record = tmp_path / "verification.json"
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"agent": codex_config()}))
     monkeypatch.setenv("ALE_HOME", str(workspace))
     monkeypatch.setenv("ALE_STAGE_DIR", str(tmp_path))
     monkeypatch.setenv("ALE_TASK_INSTRUCTION_PATH", str(instruction))
     monkeypatch.setenv("ALE_AGENT_JUDGE_LOG_PATH", str(log))
+    monkeypatch.setenv("ALE_VERIFY_CONFIG_PATH", str(config))
+    monkeypatch.setenv("ALE_VERIFICATION_PATH", str(record))
     monkeypatch.setenv("JUDGE_KEY", "provider-secret")
     monkeypatch.setattr(_agents.os, "geteuid", lambda: 0)
-    return {"workspace": workspace, "log": log}
+    return {"workspace": workspace, "log": log, "record": record, "instruction": instruction}
 
 
 def run():  # type: ignore[no-untyped-def]
@@ -35,8 +40,6 @@ def run():  # type: ignore[no-untyped-def]
             "yes": ScoredChoice(1, "Works."),
         },
         evidence=(),
-        reference=None,
-        trajectory=None,
         config=codex_config(),
     )
 
@@ -131,3 +134,83 @@ def test_transcript_is_sanitized(
     assert final is not None
     assert json.loads(final)["choice"] == "yes"
     assert "provider-secret" not in transcript
+
+
+@pytest.mark.parametrize("include_trajectory", [True, False])
+def test_agent_receives_selected_evidence_during_initial_and_repair_calls(
+    monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path], include_trajectory: bool
+) -> None:
+    artifact = agent_env["workspace"] / "report.pdf"
+    artifact.write_bytes(b"%PDF-1.7\n\xff\xfe\x00")
+    trajectory = agent_env["workspace"] / "trajectory.json"
+    trajectory.write_text('{"steps":[]}')
+    monkeypatch.setenv("ALE_TRAJECTORY_PATH", str(trajectory))
+    monkeypatch.setattr(_agents.shutil, "which", lambda name: f"/usr/bin/{name}")
+    calls = []
+
+    def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
+        if "--version" in argv:
+            return completed("codex 1.2.3\n")
+        calls.append((argv, kwargs))
+        assert "Expected totals: accepted=17, rejected=4." in kwargs["input"]
+        assert "Create a working program." in kwargs["input"]
+        assert f"file: {artifact}" in kwargs["input"]
+        assert (f"solver_trajectory: {trajectory}" in kwargs["input"]) == include_trajectory
+        assert (str(trajectory) in kwargs["input"]) == include_trajectory
+        assert ("ALE_TRAJECTORY_PATH" in kwargs["env"]) == include_trajectory
+        assert "%PDF" not in kwargs["input"]
+        choice = "invalid" if len(calls) == 1 else "yes"
+        return completed(event("thread-1", {"choice": choice, "reasoning": "Checked evidence."}))
+
+    monkeypatch.setattr(_agents.subprocess, "run", execute)
+    verification = Verification()
+    assert (
+        verification.judge(
+            "agent",
+            "content",
+            prompt="Compare the artifact against the expected totals.",
+            files=[str(artifact)],
+            reference="Expected totals: accepted=17, rejected=4.",
+            trajectory=include_trajectory,
+            rubric={
+                "no": {"score": 0, "description": "Incorrect."},
+                "yes": {"score": 1, "description": "Correct."},
+            },
+        )
+        == 1
+    )
+    assert len(calls) == 2
+    assert calls[1][0][-3:-1] == ["resume", "thread-1"]
+    record = VerificationRecord.from_json(agent_env["record"].read_bytes())
+    assert [item.kind for item in record.criteria[0].evidence] == ["file", "reference"] + (
+        ["solver_trajectory"] if include_trajectory else []
+    )
+
+
+@pytest.mark.parametrize("unreadable", ["missing", "invalid_utf8"])
+def test_configured_instruction_cannot_be_silently_omitted(
+    monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path], unreadable: str
+) -> None:
+    if unreadable == "missing":
+        agent_env["instruction"].unlink()
+    else:
+        agent_env["instruction"].write_bytes(b"\xff\xfe")
+    monkeypatch.setattr(
+        _agents.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("Agent must not start without its instruction"),
+    )
+    verification = Verification()
+    with pytest.raises(RuntimeError, match="judge infrastructure: evidence"):
+        verification.judge(
+            "agent",
+            "content",
+            prompt="Check the artifact.",
+            rubric={
+                "no": {"score": 0, "description": "Incorrect."},
+                "yes": {"score": 1, "description": "Correct."},
+            },
+        )
+    record = VerificationRecord.from_json(agent_env["record"].read_bytes())
+    assert record.status == "failed"
+    assert record.rewards == {}

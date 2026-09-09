@@ -57,8 +57,6 @@ async def test_direct_llm_call_uses_provider_without_gateway(
                 "yes": ScoredChoice(1, "Correct."),
             },
             evidence=(),
-            reference=None,
-            trajectory=None,
             config={
                 "model": "gpt-5-mini",
                 "reasoning_effort": "medium",

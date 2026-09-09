@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import socket
@@ -10,10 +11,11 @@ import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from ._io import JudgeError, digest, endpoint_identity, sanitize
+from ._io import EvidenceError, JudgeError, digest, endpoint_identity, media_type, redact, sanitize
 from ._records import (
     EvidenceReference,
     JudgeAttempt,
@@ -52,12 +54,9 @@ def run(
     name: str,
     prompt: str,
     rubric: Mapping[str, ScoredChoice],
-    evidence: Sequence[tuple[str, EvidenceReference]],
-    reference: str | None,
-    trajectory: str | None,
+    evidence: Sequence[tuple[str | bytes, EvidenceReference]],
     config: Mapping[str, str],
 ) -> tuple[str, str, JudgeInvocation]:
-    del reference, trajectory
     protocol = resolve_protocol(config)
     effort = config["reasoning_effort"]
     if effort not in _EFFORTS:
@@ -91,7 +90,7 @@ def run(
         request_id = None
         usage = None
         try:
-            payload = _request(protocol, config, request_prompt, secret)
+            payload = _request(protocol, config, request_prompt, secret, evidence)
             request_id = _request_id(payload, secret)
             usage = _usage(payload)
             text = _response_text(protocol, payload)
@@ -167,13 +166,15 @@ def _request(
     config: Mapping[str, str],
     prompt: str,
     secret: str,
+    evidence: Sequence[tuple[str | bytes, EvidenceReference]] = (),
 ) -> dict[str, Any]:
+    content = _content(protocol, prompt, evidence)
     if protocol == "anthropic":
         payload = {
             "model": config["model"],
             "max_tokens": 4096,
             "output_config": {"effort": config["reasoning_effort"]},
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": content}],
         }
         headers = {
             "Content-Type": "application/json",
@@ -183,7 +184,7 @@ def _request(
     elif protocol == "openai-chat-completions":
         payload = {
             "model": config["model"],
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": content}],
             "reasoning_effort": config["reasoning_effort"],
             "max_completion_tokens": 4096,
             "response_format": {"type": "json_object"},
@@ -195,7 +196,9 @@ def _request(
     else:
         payload = {
             "model": config["model"],
-            "input": prompt,
+            "input": content
+            if isinstance(content, str)
+            else [{"role": "user", "content": content}],
             "reasoning": {"effort": config["reasoning_effort"]},
             "max_output_tokens": 4096,
         }
@@ -214,10 +217,58 @@ def _request(
             loaded = json.load(response)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
+        body = redact(
+            body,
+            tuple(
+                base64.b64encode(raw).decode("ascii")
+                for raw, _ in evidence
+                if isinstance(raw, bytes)
+            ),
+        )
         raise RuntimeError(f"provider returned HTTP {exc.code}: {body[:500]}") from exc
     if not isinstance(loaded, dict):
         raise RuntimeError("provider response must be a JSON object")
     return loaded
+
+
+def _content(
+    protocol: str,
+    prompt: str,
+    evidence: Sequence[tuple[str | bytes, EvidenceReference]],
+) -> str | list[dict[str, Any]]:
+    attachments = [(raw, item) for raw, item in evidence if isinstance(raw, bytes)]
+    if not attachments:
+        return prompt
+    text_type = "input_text" if protocol == "openai-responses" else "text"
+    parts: list[dict[str, Any]] = [{"type": text_type, "text": prompt}]
+    for raw, item in attachments:
+        mime = media_type(raw)
+        if mime is None:
+            raise EvidenceError(f"unsupported binary LLM evidence: {item.location}")
+        encoded = base64.b64encode(raw).decode("ascii")
+        url = f"data:{mime};base64,{encoded}"
+        filename = Path(item.location or "evidence").name
+        parts.append({"type": text_type, "text": f"Evidence: {item.location} ({item.sha256})"})
+        if protocol == "anthropic":
+            parts.append(
+                {
+                    "type": "document" if mime == "application/pdf" else "image",
+                    "source": {"type": "base64", "media_type": mime, "data": encoded},
+                }
+            )
+        elif protocol == "openai-chat-completions":
+            parts.append(
+                {"type": "file", "file": {"filename": filename, "file_data": url}}
+                if mime == "application/pdf"
+                else {"type": "image_url", "image_url": {"url": url}}
+            )
+        else:
+            parts.append(
+                {"type": "input_file", "filename": filename, "file_data": url}
+                if mime == "application/pdf"
+                else {"type": "input_image", "image_url": url}
+            )
+    return parts
 
 
 def _endpoint(base_url: str, protocol: str) -> str:
@@ -236,7 +287,7 @@ def _prompt(
     name: str,
     prompt: str,
     rubric: Mapping[str, ScoredChoice],
-    evidence: Sequence[tuple[str, EvidenceReference]],
+    evidence: Sequence[tuple[str | bytes, EvidenceReference]],
 ) -> str:
     choices = "|".join(rubric)
     sections = [
@@ -250,7 +301,8 @@ def _prompt(
         sections.append(
             "Evidence:\n"
             + "\n\n".join(
-                f"{reference.kind.upper()} {reference.location or ''} ({reference.sha256})\n{text}"
+                f"{reference.kind.upper()} {reference.location or ''} ({reference.sha256})\n"
+                + (text if isinstance(text, str) else "Binary content is attached to this request.")
                 for text, reference in evidence
             )
         )

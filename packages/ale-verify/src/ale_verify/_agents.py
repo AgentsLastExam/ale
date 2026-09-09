@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import _llm
-from ._io import JudgeError, digest, endpoint_identity, redact, sanitize
+from ._io import JudgeError, digest, endpoint_identity, read_text_evidence, redact, sanitize
 from ._records import EvidenceReference, JudgeAttempt, JudgeInvocation, ScoredChoice
 
 ATTEMPTS = 4
@@ -26,13 +26,10 @@ def run(
     name: str,
     prompt: str,
     rubric: Mapping[str, ScoredChoice],
-    evidence: Sequence[tuple[str, EvidenceReference]],
-    reference: str | None,
-    trajectory: str | None,
+    evidence: Sequence[tuple[str | bytes, EvidenceReference]],
     config: Mapping[str, str],
     mcp_servers: Sequence[Mapping[str, object]] = (),
 ) -> tuple[str, str, JudgeInvocation]:
-    del reference, trajectory
     adapter = config["adapter"]
     binary_name = "codex" if adapter == "codex-cli" else "claude"
     endpoint = endpoint_identity(config["base_url"])
@@ -95,6 +92,8 @@ def run(
             sanitize(exc, (secret,)),
         )
     environment = _environment(adapter, home, config, secret)
+    if not any(reference.kind == "solver_trajectory" for _, reference in evidence):
+        environment.pop("ALE_TRAJECTORY_PATH", None)
     attempts: list[JudgeAttempt] = []
     session_id: str | None = None
     repair_error = ""
@@ -394,15 +393,12 @@ def _prompt(
     name: str,
     prompt: str,
     rubric: Mapping[str, ScoredChoice],
-    evidence: Sequence[tuple[str, EvidenceReference]],
+    evidence: Sequence[tuple[str | bytes, EvidenceReference]],
 ) -> str:
     instruction_path = os.environ.get("ALE_TASK_INSTRUCTION_PATH")
     instruction = ""
     if instruction_path:
-        try:
-            instruction = Path(instruction_path).read_text(encoding="utf-8")
-        except OSError:
-            instruction = ""
+        instruction, _ = read_text_evidence(instruction_path)
     resources = {
         key: os.environ.get(key)
         for key in (
@@ -413,10 +409,13 @@ def _prompt(
         )
         if os.environ.get(key)
     }
+    if not any(reference.kind == "solver_trajectory" for _, reference in evidence):
+        resources.pop("ALE_TRAJECTORY_PATH", None)
     choices = "|".join(rubric)
     evidence_lines = "\n".join(
-        f"- {reference.kind}: {reference.location} ({reference.sha256})"
-        for _, reference in evidence
+        f"- {reference.kind}: {reference.location or 'inline'} ({reference.sha256})"
+        + (f"\n{content}" if reference.location is None else "")
+        for content, reference in evidence
     )
     return (
         "You are a verification agent running as root with the completed solver artifacts.\n"

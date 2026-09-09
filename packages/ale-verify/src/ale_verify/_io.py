@@ -17,6 +17,8 @@ from ._records import EvidenceReference
 
 MAX_EVIDENCE_BYTES = 1024 * 1024
 MAX_REFERENCE_BYTES = 256 * 1024
+MAX_FILE_BYTES = 20 * 1024 * 1024
+MAX_TOTAL_EVIDENCE_BYTES = 32 * 1024 * 1024
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -110,16 +112,16 @@ def load_config() -> dict[str, dict[str, str]]:
     return normalized
 
 
-def read_text_evidence(
+def read_file_evidence(
     path: str | os.PathLike[str],
     *,
     kind: str = "file",
-    max_bytes: int = MAX_EVIDENCE_BYTES,
-) -> tuple[str, EvidenceReference]:
+    max_bytes: int = MAX_FILE_BYTES,
+) -> tuple[bytes, EvidenceReference]:
     authored = os.fspath(path)
     if not os.path.isabs(authored):
         raise EvidenceError(f"evidence paths must be absolute: {authored}")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(authored, flags)
     except OSError as exc:
@@ -136,16 +138,47 @@ def read_text_evidence(
             raise EvidenceError(f"evidence exceeds {max_bytes} bytes: {authored}")
     finally:
         os.close(descriptor)
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise EvidenceError(f"evidence is not UTF-8 text: {authored}") from exc
-    return text, EvidenceReference(
+    return raw, EvidenceReference(
         kind=kind,  # type: ignore[arg-type]
         location=authored,
         sha256=digest(raw),
         size_bytes=len(raw),
     )
+
+
+def read_text_evidence(
+    path: str | os.PathLike[str],
+    *,
+    kind: str = "file",
+    max_bytes: int = MAX_EVIDENCE_BYTES,
+) -> tuple[str, EvidenceReference]:
+    raw, reference = read_file_evidence(path, kind=kind, max_bytes=max_bytes)
+    return evidence_text(raw, reference), reference
+
+
+def evidence_text(raw: bytes, reference: EvidenceReference) -> str:
+    if len(raw) > MAX_EVIDENCE_BYTES:
+        raise EvidenceError(
+            f"text evidence exceeds {MAX_EVIDENCE_BYTES} bytes: {reference.location}"
+        )
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EvidenceError(f"evidence is not UTF-8 text: {reference.location}") from exc
+
+
+def media_type(raw: bytes) -> str | None:
+    if raw.startswith(b"%PDF-"):
+        return "application/pdf"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 def inline_evidence(

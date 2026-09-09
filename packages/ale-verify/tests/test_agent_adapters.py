@@ -38,8 +38,6 @@ def run(config: dict[str, str]):  # type: ignore[no-untyped-def]
         prompt="Inspect and execute the program.",
         rubric=rubric(),
         evidence=(),
-        reference=None,
-        trajectory=None,
         config=config,
     )
 

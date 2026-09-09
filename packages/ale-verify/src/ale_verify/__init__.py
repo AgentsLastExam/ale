@@ -11,13 +11,17 @@ from typing import Any
 
 from . import _agents, _llm
 from ._io import (
+    MAX_TOTAL_EVIDENCE_BYTES,
     ConfigurationError,
     EvidenceError,
     JudgeError,
     VerificationError,
     atomic_json,
+    evidence_text,
     inline_evidence,
     load_config,
+    media_type,
+    read_file_evidence,
     read_text_evidence,
     sanitize,
 )
@@ -125,23 +129,30 @@ class Verification:
                 raise RuntimeError("only one Agent Judge invocation is allowed")
             self._agent_judge_started = True
 
-        evidence_text: list[tuple[str, EvidenceReference]] = []
-        for path in files:
-            evidence_text.append(read_text_evidence(path))
-        reference_text = None
-        if reference is not None:
-            reference_text = inline_evidence(reference, kind="reference")
-            evidence_text.append(reference_text)
-        trajectory_text = None
-        if trajectory:
-            path = os.environ.get("ALE_TRAJECTORY_PATH")
-            if not path:
-                return self._fail("ALE_TRAJECTORY_PATH is not configured")
-            trajectory_text = read_text_evidence(path, kind="solver_trajectory")
-            evidence_text.append(trajectory_text)
-
+        evidence: list[tuple[str | bytes, EvidenceReference]] = []
         invocation_id = "judge-" + uuid.uuid4().hex
         try:
+            size = 0
+            for path in files:
+                raw, item = read_file_evidence(path)
+                size += item.size_bytes
+                if size > MAX_TOTAL_EVIDENCE_BYTES:
+                    raise EvidenceError(
+                        f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total"
+                    )
+                content = (
+                    evidence_text(raw, item) if kind == "llm" and media_type(raw) is None else raw
+                )
+                evidence.append((content, item))
+            if reference is not None:
+                evidence.append(inline_evidence(reference, kind="reference"))
+            if trajectory:
+                path = os.environ.get("ALE_TRAJECTORY_PATH")
+                if not path:
+                    raise EvidenceError("ALE_TRAJECTORY_PATH is not configured")
+                evidence.append(read_text_evidence(path, kind="solver_trajectory"))
+            if sum(item.size_bytes for _, item in evidence) > MAX_TOTAL_EVIDENCE_BYTES:
+                raise EvidenceError(f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total")
             config = load_config().get(kind)
             if config is None:
                 raise ConfigurationError(f"verification {kind} configuration is missing")
@@ -151,9 +162,7 @@ class Verification:
                 name=name,
                 prompt=prompt,
                 rubric=choices,
-                evidence=tuple(evidence_text),
-                reference=reference_text[0] if reference_text else None,
-                trajectory=trajectory_text[0] if trajectory_text else None,
+                evidence=tuple(evidence),
                 config=config,
             )
             if kind == "agent":
@@ -186,7 +195,7 @@ class Verification:
             weight=weight,
             reasoning=reasoning,
             raw_value=choice,
-            evidence=tuple(reference for _, reference in evidence_text),
+            evidence=tuple(reference for _, reference in evidence),
             judge_invocation_id=invocation.id,
         )
         self._criteria[name] = criterion

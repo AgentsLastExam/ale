@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 import urllib.error
@@ -9,7 +10,7 @@ from dataclasses import asdict
 import pytest
 
 from ale_verify import JudgeError, ScoredChoice, _llm
-from ale_verify._io import EvidenceError, read_text_evidence
+from ale_verify._io import EvidenceError, inline_evidence, read_file_evidence, read_text_evidence
 
 
 class Response:
@@ -48,9 +49,7 @@ def call(**overrides):  # type: ignore[no-untyped-def]
         name="correctness",
         prompt="Judge the answer.",
         rubric=rubric(),
-        evidence=(),
-        reference=None,
-        trajectory=None,
+        evidence=overrides.pop("evidence", ()),
         config=selected_config,
         **overrides,
     )
@@ -308,3 +307,153 @@ def test_evidence_requires_absolute_bounded_regular_utf8_files(tmp_path) -> None
     large.write_bytes(b"x" * 10)
     with pytest.raises(EvidenceError, match="exceeds"):
         read_text_evidence(large, max_bytes=5)
+
+
+@pytest.mark.parametrize(
+    ("protocol", "endpoint"),
+    [
+        ("openai-responses", "https://example.test/v1/responses"),
+        ("openai-chat-completions", "https://example.test/v1/chat/completions"),
+        ("anthropic", "https://example.test/v1/messages"),
+    ],
+)
+def test_mixed_evidence_reaches_each_protocol_and_survives_repair(
+    monkeypatch, tmp_path, protocol, endpoint
+) -> None:  # type: ignore[no-untyped-def]
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN1sAAAAASUVORK5CYII="
+    )
+    pdf = b"%PDF-1.4\n%binary \xff\n%%EOF"
+    files = [tmp_path / "image.png", tmp_path / "document.pdf"]
+    for path, data in zip(files, (png, pdf), strict=True):
+        path.write_bytes(data)
+    evidence = (
+        inline_evidence("The reference fact is 47.", kind="reference"),
+        inline_evidence("Observed action was inspect.", kind="solver_trajectory"),
+        *(read_file_evidence(path) for path in files),
+    )
+    observed = []
+
+    def open_(request, timeout):  # type: ignore[no-untyped-def]
+        observed.append(json.loads(request.data))
+        text = "{}" if len(observed) == 1 else '{"choice":"yes","reasoning":"Observed."}'
+        if protocol == "anthropic":
+            return Response({"content": [{"type": "text", "text": text}]})
+        if protocol == "openai-chat-completions":
+            return Response({"choices": [{"message": {"content": text}}]})
+        return Response({"output_text": text})
+
+    monkeypatch.setenv("JUDGE_KEY", "provider-secret")
+    monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
+    monkeypatch.setattr(_llm.time, "sleep", lambda _: None)
+    choice, _, invocation = call(config=config(base_url=endpoint), evidence=evidence)
+    assert choice == "yes"
+    assert [attempt.mode for attempt in invocation.attempts] == ["initial", "schema_repair"]
+    for payload in observed:
+        parts = payload.get("input", payload.get("messages"))[0]["content"]
+        prompt = parts[0]["text"]
+        assert "The reference fact is 47." in prompt
+        assert "Observed action was inspect." in prompt
+        assert "provider-secret" not in prompt
+        if protocol == "anthropic":
+            image, document = parts[2], parts[4]
+            assert (image["type"], document["type"]) == ("image", "document")
+            assert image["source"]["media_type"] == "image/png"
+            assert document["source"]["media_type"] == "application/pdf"
+            assert base64.b64decode(image["source"]["data"]) == png
+            assert base64.b64decode(document["source"]["data"]) == pdf
+        else:
+            image, document = parts[2], parts[4]
+            if protocol == "openai-responses":
+                assert (image["type"], document["type"]) == ("input_image", "input_file")
+                image_url = image["image_url"]
+                file = document
+            else:
+                assert (image["type"], document["type"]) == ("image_url", "file")
+                image_url = image["image_url"]["url"]
+                file = document["file"]
+            assert image_url == "data:image/png;base64," + base64.b64encode(png).decode()
+            assert file["filename"] == "document.pdf"
+            assert (
+                file["file_data"] == "data:application/pdf;base64," + base64.b64encode(pdf).decode()
+            )
+    assert observed[0] != observed[1]
+    assert "Your previous verdict was rejected" in parts[0]["text"]
+    assert base64.b64encode(png).decode() not in json.dumps(asdict(invocation))
+
+
+@pytest.mark.parametrize(
+    ("raw", "mime"),
+    [
+        (b"\x89PNG\r\n\x1a\n", "image/png"),
+        (b"\xff\xd8\xff", "image/jpeg"),
+        (b"GIF89a", "image/gif"),
+        (b"RIFF\x00\x00\x00\x00WEBP", "image/webp"),
+        (b"%PDF-1.7\n", "application/pdf"),
+    ],
+)
+def test_public_judge_sends_media_bytes_and_records_original_evidence(
+    monkeypatch, tmp_path, raw, mime
+) -> None:  # type: ignore[no-untyped-def]
+    from ale_verify import Verification, VerificationRecord
+    from ale_verify._io import digest
+
+    path = tmp_path / "artifact"
+    path.write_bytes(raw)
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"llm": config()}))
+    record_path = tmp_path / "verification.json"
+    monkeypatch.setenv("JUDGE_KEY", "secret")
+    monkeypatch.setenv("ALE_VERIFY_CONFIG_PATH", str(settings))
+    monkeypatch.setenv("ALE_VERIFICATION_PATH", str(record_path))
+    monkeypatch.setenv("ALE_VERDICT_PATH", str(tmp_path / "rewards.json"))
+
+    def open_(request, timeout):  # type: ignore[no-untyped-def]
+        parts = json.loads(request.data)["input"][0]["content"]
+        assert "reference value" in parts[0]["text"]
+        attachment = parts[2]
+        url = attachment.get("file_data", attachment.get("image_url"))
+        assert url == f"data:{mime};base64," + base64.b64encode(raw).decode()
+        return Response({"output_text": '{"choice":"yes","reasoning":"Checked evidence."}'})
+
+    monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
+    verification = Verification()
+    assert (
+        verification.judge(
+            "llm",
+            "correctness",
+            prompt="Inspect the attached artifact.",
+            rubric=rubric(),
+            files=[str(path)],
+            reference="reference value",
+        )
+        == 1
+    )
+    verification.write()
+    record = VerificationRecord.from_json(record_path.read_bytes())
+    assert record.criteria[0].evidence[0].sha256 == digest(raw)
+    assert record.criteria[0].evidence[0].size_bytes == len(raw)
+    assert record.criteria[0].evidence[1].kind == "reference"
+    assert base64.b64encode(raw).decode() not in record_path.read_text()
+
+
+def test_provider_error_cannot_echo_media_into_failure_records(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    path = tmp_path / "image.png"
+    raw = b"\x89PNG\r\n\x1a\n" + b"private media contents" * 50
+    path.write_bytes(raw)
+    encoded = base64.b64encode(raw).decode()
+
+    def fail(request, timeout):  # type: ignore[no-untyped-def]
+        body = json.dumps({"error": {"message": f"Invalid image: data:image/png;base64,{encoded}"}})
+        raise urllib.error.HTTPError(
+            request.full_url, 400, "Bad Request", {}, io.BytesIO(body.encode())
+        )
+
+    monkeypatch.setenv("JUDGE_KEY", "secret")
+    monkeypatch.setattr(_llm.urllib.request, "urlopen", fail)
+    monkeypatch.setattr(_llm.time, "sleep", lambda _: None)
+    with pytest.raises(JudgeError) as caught:
+        call(evidence=(read_file_evidence(path),))
+    assert "HTTP 400" in str(caught.value)
+    assert encoded[:40] not in str(caught.value)
+    assert encoded[:40] not in json.dumps(asdict(caught.value.invocation))
