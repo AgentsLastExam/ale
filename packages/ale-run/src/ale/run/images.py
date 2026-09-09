@@ -160,15 +160,7 @@ async def resolve_vm_image(
     if image.kind is not ImageKind.VM:
         raise ProviderStartError("VM image resolution requires kind=vm")
     declared = image.reference
-    code, _, stderr = await _run("docker", "pull", declared, timeout=900)
-    if code != 0:
-        raise ProviderStartError(f"could not pull VM image {declared}: {stderr.strip()}")
-    code, output, stderr = await _run(
-        "docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", declared
-    )
-    if code != 0:
-        raise ProviderStartError(f"could not inspect VM image {declared}: {stderr.strip()}")
-    resolved_reference = output.strip()
+    resolved_reference, transport = await _resolve_vm_reference(declared)
     identity = resolved_reference.partition("@")[2]
     if not identity.startswith("sha256:"):
         raise ProviderStartError(f"registry returned no immutable digest for {declared}")
@@ -185,7 +177,7 @@ async def resolve_vm_image(
         try:
             if not await _valid_qcow2(disk):
                 disk.unlink(missing_ok=True)
-                await _extract_vm_disk(resolved_reference, entry, disk)
+                await _extract_vm_disk(resolved_reference, entry, disk, transport=transport)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -261,10 +253,60 @@ async def _valid_qcow2(path: Path) -> bool:
     return code == 0
 
 
-async def _extract_vm_disk(resolved_reference: str, entry: Path, disk: Path) -> None:
+async def _resolve_vm_reference(declared: str) -> tuple[str, str]:
+    """Resolve through Docker when present, otherwise use a daemonless registry client."""
+    docker_error = ""
+    try:
+        code, _, stderr = await _run("docker", "pull", declared, timeout=900)
+    except FileNotFoundError:
+        code, stderr = 127, "docker is not on PATH"
+    if code == 0:
+        code, output, stderr = await _run(
+            "docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", declared
+        )
+        if code == 0:
+            return output.strip(), "docker"
+        docker_error = stderr.strip()
+    else:
+        docker_error = stderr.strip()
+
+    if shutil.which("crane") is None:
+        raise ProviderStartError(
+            f"could not pull VM image {declared}: {docker_error}; install crane for "
+            "daemonless pulls (brew install crane)"
+        )
+    code, digest, stderr = await _run("crane", "digest", declared, timeout=900)
+    identity = digest.strip()
+    if code != 0 or not identity.startswith("sha256:"):
+        raise ProviderStartError(
+            f"could not resolve VM image {declared} with crane: {stderr.strip()}"
+        )
+    repository = declared.rsplit("@", 1)[0]
+    last_slash = repository.rfind("/")
+    tag = repository.rfind(":")
+    if tag > last_slash:
+        repository = repository[:tag]
+    return f"{repository}@{identity}", "crane"
+
+
+async def _extract_vm_disk(
+    resolved_reference: str,
+    entry: Path,
+    disk: Path,
+    *,
+    transport: str = "docker",
+) -> None:
     staging = Path(tempfile.mkdtemp(prefix=f".{entry.name}-", dir=entry.parent))
     container = ""
     try:
+        candidate = staging / "disk.qcow2"
+        if transport == "crane":
+            await _extract_vm_disk_with_crane(resolved_reference, candidate)
+            if not await _valid_qcow2(candidate):
+                raise ProviderStartError(f"invalid qcow2 in {resolved_reference}")
+            entry.mkdir(parents=True, exist_ok=True)
+            os.replace(candidate, disk)
+            return
         code, output, stderr = await _run(
             "docker", "create", "--entrypoint", "/disk.qcow2", resolved_reference
         )
@@ -273,7 +315,6 @@ async def _extract_vm_disk(resolved_reference: str, entry: Path, disk: Path) -> 
                 f"could not stage VM image {resolved_reference}: {stderr.strip()}"
             )
         container = output.strip()
-        candidate = staging / "disk.qcow2"
         code, _, stderr = await _run(
             "docker", "cp", f"{container}:/disk.qcow2", str(candidate), timeout=900
         )
@@ -287,3 +328,40 @@ async def _extract_vm_disk(resolved_reference: str, entry: Path, disk: Path) -> 
         if container:
             await _run("docker", "rm", "-f", container, timeout=60)
         shutil.rmtree(staging, ignore_errors=True)
+
+
+async def _extract_vm_disk_with_crane(resolved_reference: str, candidate: Path) -> None:
+    """Stream the exported root filesystem into bsdtar without a second disk-sized file."""
+    read_fd, write_fd = os.pipe()
+    try:
+        crane = await asyncio.create_subprocess_exec(
+            "crane",
+            "export",
+            resolved_reference,
+            "-",
+            stdout=write_fd,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    finally:
+        os.close(write_fd)
+    try:
+        with candidate.open("wb") as output:
+            archive = await asyncio.create_subprocess_exec(
+                "tar",
+                "-xOf",
+                "-",
+                "disk.qcow2",
+                stdin=read_fd,
+                stdout=output,
+                stderr=asyncio.subprocess.PIPE,
+            )
+    finally:
+        os.close(read_fd)
+    crane_stderr, archive_stderr = await asyncio.gather(
+        crane.stderr.read() if crane.stderr is not None else asyncio.sleep(0, result=b""),
+        archive.stderr.read() if archive.stderr is not None else asyncio.sleep(0, result=b""),
+    )
+    crane_code, archive_code = await asyncio.gather(crane.wait(), archive.wait())
+    if crane_code != 0 or archive_code != 0:
+        detail = (crane_stderr + archive_stderr).decode("utf-8", "replace").strip()
+        raise ProviderStartError(f"could not extract /disk.qcow2: {detail}")

@@ -108,7 +108,7 @@ def test_cancelled_boot_removes_the_started_runner(
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(
-            QemuProvider()._boot(
+            QemuProvider(runtime="linux")._boot(
                 request(retention="keep"),
                 tmp_path,
                 tmp_path / "base.qcow2",
@@ -187,6 +187,7 @@ async def test_qemu_retained_listing_and_destroy_remove_the_overlay(
         raise AssertionError(argv)
 
     monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.sys.platform", "linux")
 
     assert await list_retained() == [
         {
@@ -525,6 +526,7 @@ class TestGatewayAddressing:
         """
         sandbox = QemuSandbox.__new__(QemuSandbox)
         sandbox.request = request(gateway_url="http://0.0.0.0:8931")  # type: ignore[attr-defined]
+        sandbox.host_ip = HOST_IP  # type: ignore[attr-defined]
         assert sandbox.gateway_url == f"http://{HOST_IP}:8931"
 
     def test_no_gateway_stays_absent(self) -> None:
@@ -632,6 +634,7 @@ def test_open_mode_uses_only_the_runner_firewall(monkeypatch: pytest.MonkeyPatch
     sandbox.request = request(network=NetworkPolicy(mode=NetworkMode.OPEN))  # type: ignore[attr-defined]
     sandbox.container = "runner"  # type: ignore[attr-defined]
     sandbox.host_ip = "172.17.0.1"  # type: ignore[attr-defined]
+    sandbox.darwin_runtime = None  # type: ignore[attr-defined]
     sandbox._client = _ExecClient()  # type: ignore[attr-defined]
     sandbox._sealed = True  # type: ignore[attr-defined]
 
@@ -648,6 +651,7 @@ def test_allowlist_proxy_is_injected_only_for_sealed_agent_commands() -> None:
         proxy_url="http://0.0.0.0:9443",
     )
     sandbox.agent_user = "user"  # type: ignore[attr-defined]
+    sandbox.host_ip = HOST_IP  # type: ignore[attr-defined]
     sandbox._client = _ExecClient()  # type: ignore[attr-defined]
     sandbox._sealed = False  # type: ignore[attr-defined]
 
@@ -678,7 +682,7 @@ def test_allowlist_forwards_gateway_and_proxy_ports(
         return 0, "", ""
 
     monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
-    provider = QemuProvider()
+    provider = QemuProvider(runtime="linux")
     host = asyncio.run(
         provider._wire_network(
             "runner",
@@ -710,6 +714,7 @@ def test_allowlist_direct_bypass_is_dropped(monkeypatch: pytest.MonkeyPatch) -> 
     )
     sandbox.container = "runner"  # type: ignore[attr-defined]
     sandbox.host_ip = "172.17.0.1"  # type: ignore[attr-defined]
+    sandbox.darwin_runtime = None  # type: ignore[attr-defined]
     sandbox._client = _ExecClient()  # type: ignore[attr-defined]
     sandbox._sealed = False  # type: ignore[attr-defined]
 

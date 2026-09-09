@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import textwrap
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from tests.support import provider_registry
 from .trajectory import LIVE, llm_audit_evidence
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
+VM_ACCELERATOR = pytest.mark.needs_hvf if sys.platform == "darwin" else pytest.mark.needs_kvm
 
 LINUX_IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
 
@@ -252,7 +254,7 @@ def _write_windows_gui_task(root: Path) -> Path:
     "operating_system",
     [
         OperatingSystem.LINUX,
-        pytest.param(OperatingSystem.WINDOWS, marks=pytest.mark.needs_kvm),
+        pytest.param(OperatingSystem.WINDOWS, marks=VM_ACCELERATOR),
     ],
 )
 async def test_standard_task_assets_and_variants_across_operating_systems(
@@ -291,7 +293,7 @@ async def test_standard_task_assets_and_variants_across_operating_systems(
     )
 
 
-@pytest.mark.needs_kvm
+@VM_ACCELERATOR
 @pytest.mark.needs_gui
 @pytest.mark.needs_llm
 @LIVE
