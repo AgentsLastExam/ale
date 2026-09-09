@@ -7,9 +7,50 @@ happened, so each case here pins one shape of the computer-use tool's vocabulary
 from __future__ import annotations
 
 import pytest
+from aiohttp import web
 
 from ale.core.errors import AgentError
-from ale.run.harnesses.computer_use import GRID, _computer_tool, translate_action
+from ale.core.harness import HarnessSession
+from ale.run.harnesses.computer_use import (
+    GRID,
+    ComputerUseHarness,
+    _computer_tool,
+    translate_action,
+)
+
+
+@pytest.mark.parametrize("status", [200, 503])
+async def test_model_error_keeps_native_cause_and_redacts_gateway_token(status: int) -> None:
+    async def reply(_request: web.Request) -> web.Response:
+        return web.json_response(
+            {"type": "error", "error": {"message": "capacity exhausted secret-episode-key"}},
+            status=status,
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/messages", reply)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    try:
+        port = site._server.sockets[0].getsockname()[1]
+        harness = ComputerUseHarness()
+        await harness.start(
+            HarnessSession(
+                episode_id="episode",
+                model="model",
+                gateway_url=f"http://127.0.0.1:{port}",
+                token="secret-episode-key",
+            )
+        )
+        with pytest.raises(AgentError) as caught:
+            await harness._ask()
+        assert f"HTTP {status}" in str(caught.value)
+        assert "capacity exhausted" in str(caught.value)
+        assert "secret-episode-key" not in str(caught.value)
+    finally:
+        await runner.cleanup()
 
 
 def test_computer_tool_uses_native_claude_and_generic_compatible_schemas() -> None:

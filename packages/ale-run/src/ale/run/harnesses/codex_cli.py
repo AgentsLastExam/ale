@@ -38,6 +38,8 @@ from ale.run.harnesses._npm import ensure_npm_cli, npm_env
 from ale.run.subscription import classify_subscription_error
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
+from ._diagnostics import error_text, failure_detail
+
 __all__ = ["CodexCliHarness", "CodexCliSettings"]
 
 DEFAULT_CLI_VERSION = "0.146.0"
@@ -259,11 +261,19 @@ class CodexCliHarness(AutonomousHarness):
             identity=Identity.AGENT,
         )
         transcript = await _read(sandbox, home / TRANSCRIPT_NAME)
-        if result.exit_code != 0:
-            detail = await _read(sandbox, home / STDERR_NAME)
+        native_error = _native_error(transcript)
+        if result.exit_code != 0 or native_error:
+            detail = failure_detail(
+                self.name,
+                result.exit_code,
+                native=native_error or "",
+                stderr=await _read(sandbox, home / STDERR_NAME) or result.stderr,
+                stdout=transcript or result.stdout,
+                token=session.token,
+            )
             if session.authentication == "subscription":
-                raise classify_subscription_error(self.name, detail or "Codex failed")
-            raise AgentError(detail[-1000:] or "Codex failed")
+                raise classify_subscription_error(self.name, detail)
+            raise AgentError(detail)
         confirmed = _thread_id(transcript)
         if confirmed is None:
             raise NativeContinuationError("Codex did not report a native thread ID")
@@ -544,6 +554,10 @@ def _events(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
 
 
 def _thread_id(text: str) -> str | None:
+    return _thread_id_from_events(_stream_events(text))
+
+
+def _stream_events(text: str) -> list[dict[str, Any]]:
     events = []
     for line in text.splitlines():
         try:
@@ -552,7 +566,18 @@ def _thread_id(text: str) -> str | None:
             continue
         if isinstance(value, dict):
             events.append(value)
-    return _thread_id_from_events(events)
+    return events
+
+
+def _native_error(text: str) -> str | None:
+    failure = None
+    for event in _stream_events(text):
+        kind = event.get("type")
+        if kind in {"thread.started", "turn.started", "turn.completed"}:
+            failure = None
+        elif kind in {"error", "turn.failed"}:
+            failure = error_text(event.get("error") or event.get("message")) or str(kind)
+    return failure
 
 
 def _thread_id_from_events(events: list[dict[str, Any]]) -> str | None:
@@ -576,12 +601,8 @@ def _session_id_marker(session_id: str) -> str:
 
 def _final_message(text: str) -> str | None:
     final = None
-    for line in text.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        item = event.get("item") or {}
+    for event in _stream_events(text):
+        item = _dict(event.get("item"))
         if event.get("type") == "item.completed" and item.get("type") == "agent_message":
             final = str(item.get("text") or "")
     return final

@@ -89,6 +89,8 @@ def test_gateway_and_native_limit_exits_are_distinct() -> None:
     assert isinstance(native, HarnessLimitError)
     assert native.layer == "harness"
     assert native.limit == "max_turns"
+    structured = ClaudeCodeHarness(settings={"max_turns": 12})._classify("error_max_turns", 0)
+    assert isinstance(structured, HarnessLimitError)
 
 
 class FakeSandbox:

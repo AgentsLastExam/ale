@@ -39,6 +39,8 @@ from ale.run.harnesses._npm import agent_home, npm_env
 from ale.run.subscription import classify_subscription_error
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
+from ._diagnostics import error_text, failure_detail
+
 __all__ = ["GrokBuildHarness", "GrokBuildSettings"]
 
 DEFAULT_CLI_VERSION = "0.2.112"
@@ -373,13 +375,19 @@ class GrokBuildHarness(AutonomousHarness):
         )
         segment_output = await _read(sandbox, segment)
         confirmed = _terminal_session_id(segment_output)
-        if result.exit_code != 0:
-            detail = await _read(sandbox, home / STDERR_NAME)
+        native_error = _native_error(segment_output)
+        if result.exit_code != 0 or native_error:
+            detail = failure_detail(
+                self.name,
+                result.exit_code,
+                native=native_error or "",
+                stderr=await _read(sandbox, home / STDERR_NAME) or result.stderr,
+                stdout=segment_output or result.stdout,
+                token=session.token,
+            )
             if session.authentication == "subscription":
-                raise classify_subscription_error(
-                    self.name, detail or segment_output or "Grok failed"
-                )
-            raise AgentError(detail[-1000:] or "Grok failed")
+                raise classify_subscription_error(self.name, detail)
+            raise AgentError(detail)
         if confirmed != native_session_id:
             raise NativeContinuationError("Grok did not confirm the requested native session ID")
         await self._export_session(sandbox, session, confirmed)
@@ -560,6 +568,21 @@ def _terminal_session_id(text: str) -> str | None:
     return _terminal_session_id_from_events(
         [event for line in text.splitlines() if (event := _json(line)) is not None]
     )
+
+
+def _native_error(text: str) -> str | None:
+    for line in reversed(text.splitlines()):
+        event = _json(line)
+        if event is None:
+            continue
+        if event.get("type") == "error":
+            return (
+                error_text(event.get("error") or event.get("message") or event.get("data"))
+                or "native error"
+            )
+        if event.get("type") == "end":
+            return error_text(event.get("error")) or None
+    return None
 
 
 def _terminal_session_id_from_events(events: list[dict[str, Any]]) -> str | None:

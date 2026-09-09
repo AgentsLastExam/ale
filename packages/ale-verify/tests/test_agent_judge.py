@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,39 @@ def test_invalid_verdict_repairs_in_the_same_session_with_concrete_error(
     assert "unknown choice 'mostly'" in calls[1][1]["input"]
     assert '{"choice":"no|yes","reasoning":"..."}' in calls[1][1]["input"]
     assert invocation.attempts[1].mode == "schema_repair"
+
+
+def test_timeout_after_schema_repair_keeps_latest_error_and_partial_native_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    agent_env: dict[str, Path],
+) -> None:
+    monkeypatch.setattr(_agents, "_ensure_binary", lambda *_args: ("codex", "1.2.3"))
+    calls = []
+
+    def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(argv)
+        if len(calls) == 1:
+            return completed(event("thread-1", {"choice": "invalid", "reasoning": "No."}))
+        raise subprocess.TimeoutExpired(
+            argv,
+            600,
+            output=b'{"type":"error","message":"provider capacity exhausted provider-secret"}',
+            stderr=b"native warning provider-secret",
+        )
+
+    monkeypatch.setattr(_agents.subprocess, "run", execute)
+    with pytest.raises(JudgeError) as caught:
+        run()
+    invocation = caught.value.invocation
+    assert invocation.attempts[-1].outcome == "timed_out"
+    assert "timed out" in invocation.failure
+    assert "provider capacity exhausted" in invocation.failure
+    assert "unknown choice" not in invocation.failure
+    assert "provider-secret" not in invocation.failure
+    logs = [json.loads(line) for line in agent_env["log"].read_text().splitlines()]
+    assert len(logs) == 2
+    assert "provider capacity exhausted" in logs[-1]["stdout"]
+    assert "provider-secret" not in agent_env["log"].read_text()
 
 
 def test_three_repairs_are_the_limit_and_no_fresh_session_is_started(

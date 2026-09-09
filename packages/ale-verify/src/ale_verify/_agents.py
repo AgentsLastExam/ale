@@ -31,7 +31,6 @@ def run(
     mcp_servers: Sequence[Mapping[str, object]] = (),
 ) -> tuple[str, str, JudgeInvocation]:
     adapter = config["adapter"]
-    binary_name = "codex" if adapter == "codex-cli" else "claude"
     endpoint = endpoint_identity(config["base_url"])
     rendered = _prompt(name, prompt, rubric, evidence)
     prompt_hash = digest(rendered)
@@ -122,7 +121,22 @@ def run(
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            error = sanitize(f"Agent Judge timed out: {exc}", (secret,))
+            stdout = (
+                exc.stdout.decode("utf-8", "replace")
+                if isinstance(exc.stdout, bytes)
+                else exc.stdout or ""
+            )
+            stderr = (
+                exc.stderr.decode("utf-8", "replace")
+                if isinstance(exc.stderr, bytes)
+                else exc.stderr or ""
+            )
+            _append_transcript(
+                log_path, index=index, argv=argv, stdout=stdout, stderr=stderr, secrets=(secret,)
+            )
+            error = repair_error = "Agent Judge timed out: " + _failure_detail(
+                adapter, None, stdout, stderr, secret
+            )
             attempts.append(
                 _attempt(
                     index,
@@ -138,7 +152,7 @@ def run(
             )
             break
         except OSError as exc:
-            error = sanitize(f"Agent Judge could not start: {exc}", (secret,))
+            error = repair_error = sanitize(f"Agent Judge could not start: {exc}", (secret,))
             attempts.append(
                 _attempt(
                     index,
@@ -162,10 +176,11 @@ def run(
             stderr=completed.stderr,
             secrets=(secret,),
         )
-        if completed.returncode != 0:
-            repair_error = sanitize(
-                completed.stderr or completed.stdout or f"{binary_name} exited nonzero",
-                (secret,),
+        observed_session, final = _final_response(adapter, completed.stdout)
+        if completed.returncode != 0 or _native_error(adapter, completed.stdout):
+            session_id = observed_session or session_id
+            repair_error = _failure_detail(
+                adapter, completed.returncode, completed.stdout, completed.stderr, secret
             )
             attempts.append(
                 _attempt(
@@ -182,7 +197,6 @@ def run(
             )
             break
 
-        observed_session, final = _final_response(adapter, completed.stdout)
         if adapter == "codex-cli":
             if session_id is None:
                 session_id = observed_session
@@ -445,18 +459,16 @@ def _repair_prompt(
 def _final_response(adapter: str, transcript: str) -> tuple[str | None, str | None]:
     session_id = None
     final = None
-    for line in transcript.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
+    for event in _stream_events(transcript):
         if adapter == "codex-cli":
             if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
                 session_id = event["thread_id"]
-            item = event.get("item") or {}
-            if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+            item = event.get("item")
+            if (
+                event.get("type") == "item.completed"
+                and isinstance(item, dict)
+                and item.get("type") == "agent_message"
+            ):
                 final = str(item.get("text") or "")
         elif event.get("type") == "result":
             if isinstance(event.get("session_id"), str):
@@ -464,6 +476,79 @@ def _final_response(adapter: str, transcript: str) -> tuple[str | None, str | No
             if isinstance(event.get("result"), str):
                 final = event["result"]
     return session_id, final
+
+
+def _stream_events(transcript: str) -> list[dict[str, object]]:
+    events = []
+    for line in transcript.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _native_error(adapter: str, transcript: str) -> str | None:
+    failure = None
+    for event in _stream_events(transcript):
+        kind = event.get("type")
+        if adapter == "codex-cli":
+            if kind in {"thread.started", "turn.started", "turn.completed"}:
+                failure = None
+            elif kind in {"error", "turn.failed"}:
+                failure = _error_text(event.get("error") or event.get("message")) or str(kind)
+        elif kind == "result":
+            subtype = str(event.get("subtype") or "")
+            detail = _error_text(event.get("errors") or event.get("error") or event.get("result"))
+            failure = (
+                f"{subtype or 'native error'}: {detail}".rstrip(": ")
+                if event.get("is_error") or subtype.startswith("error")
+                else None
+            )
+        elif kind == "error" or (kind == "assistant" and event.get("error")):
+            failure = _error_text(event.get("error") or event.get("message")) or "native error"
+    return failure
+
+
+def _error_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "; ".join(filter(None, (_error_text(item) for item in value)))
+    if isinstance(value, dict):
+        return "; ".join(
+            filter(
+                None,
+                (
+                    _error_text(value.get(key))
+                    for key in ("message", "detail", "error", "errors", "code", "type")
+                ),
+            )
+        )
+    return ""
+
+
+def _failure_detail(
+    adapter: str, exit_code: int | None, stdout: str, stderr: str, secret: str
+) -> str:
+    native = _native_error(adapter, stdout)
+    parts = [f"{adapter} failed (exit code {exit_code})" if exit_code is not None else adapter]
+    if native:
+        parts.append("native: " + redact(native, (secret,))[:1400])
+    if stderr.strip():
+        parts.append("stderr: " + redact(stderr.strip(), (secret,))[-400:])
+    if not native:
+        lines = []
+        for line in stdout.splitlines():
+            try:
+                json.loads(line)
+            except json.JSONDecodeError:
+                lines.append(line)
+        if lines:
+            parts.append("stdout: " + redact("\n".join(lines), (secret,))[-400:])
+    return "; ".join(parts)
 
 
 def _version(binary: str) -> str:

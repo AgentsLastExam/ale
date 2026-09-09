@@ -26,6 +26,9 @@ from ale.core.env import Observation
 from ale.core.errors import AgentError
 from ale.core.harness import HarnessSession, StepwisePolicy
 from ale.core.trace import DesktopAction
+from ale.run.recording import Redactor
+
+from ._diagnostics import error_text
 
 __all__ = ["ComputerUseHarness", "translate_action"]
 
@@ -239,9 +242,25 @@ class ComputerUseHarness(StepwisePolicy):
             http.post(url, data=json.dumps(payload), headers=headers) as response,
         ):
             body = await response.read()
+            redact = Redactor((session.token,))
+            try:
+                reply = json.loads(body)
+            except (ValueError, UnicodeError) as exc:
+                raise AgentError(
+                    f"computer-use received invalid model JSON (HTTP {response.status}): "
+                    f"{redact(body.decode('utf-8', 'replace'))[:600]}"
+                ) from exc
             if response.status != 200:
                 raise AgentError(
-                    f"the model call failed ({response.status}): "
-                    f"{body.decode('utf-8', 'replace')[:300]}"
+                    f"the model call failed (HTTP {response.status}): "
+                    f"{redact(error_text(reply) or body.decode('utf-8', 'replace'))[:1600]}"
                 )
-            return json.loads(body)
+            if not isinstance(reply, dict):
+                raise AgentError("computer-use model response is not a JSON object (HTTP 200)")
+            if reply.get("type") == "error" or reply.get("error"):
+                raise AgentError(
+                    f"computer-use model failed (HTTP 200): {redact(error_text(reply))[:1600]}"
+                )
+            if not isinstance(reply.get("content"), list):
+                raise AgentError("computer-use model response has no content array (HTTP 200)")
+            return reply

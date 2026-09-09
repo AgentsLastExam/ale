@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from ale.core.config import load_run_config
-from ale.core.errors import ConfigError
+from ale.core.errors import AgentError, ConfigError, SubscriptionProviderLimitError
 from ale.core.harness import (
     EffectiveAgentResources,
     HarnessSession,
@@ -17,6 +17,8 @@ from ale.core.harness import (
 from ale.core.sandbox import ExecResult
 from ale.core.taskspec import StdioMcpServer
 from ale.run.cli.tasks import PRESET_DIR, _harness
+from ale.run.harnesses.builtin import OracleHarness
+from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness, _supported_node
@@ -26,16 +28,17 @@ pytestmark = pytest.mark.unit
 
 
 class FakeSandbox:
-    def __init__(self) -> None:
+    def __init__(self, exit_code: int = 0, *, stdout: str = "", stderr: str = "") -> None:
         self.files: dict[str, bytes] = {}
         self.uploads: list[tuple[str, str]] = []
         self.commands: list[list[str]] = []
         self.environments: list[dict[str, str]] = []
+        self.result = ExecResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
     async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
         self.commands.append([str(part) for part in argv])
         self.environments.append(kwargs.get("env") or {})
-        return ExecResult(exit_code=0)
+        return self.result
 
     async def write_file(self, path, data, **kwargs):  # type: ignore[no-untyped-def]
         self.files[str(path)] = data
@@ -59,6 +62,124 @@ def session(**updates: object) -> HarnessSession:
     }
     values.update(updates)
     return HarnessSession(**values)
+
+
+@pytest.mark.parametrize("exit_code", [0, 17])
+@pytest.mark.parametrize(
+    ("harness", "path", "native"),
+    [
+        (
+            CodexCliHarness(),
+            "transcript.jsonl",
+            {"type": "turn.failed", "error": {"message": "capacity limit reached token"}},
+        ),
+        (
+            GrokBuildHarness(),
+            ".grok-ale/segment.jsonl",
+            {"type": "error", "message": "capacity limit reached token"},
+        ),
+        (
+            ClaudeCodeHarness(),
+            "transcript.jsonl",
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "errors": ["capacity limit reached token"],
+            },
+        ),
+        (
+            OpenClawCliHarness(),
+            "result.json",
+            {"payloads": [{"isError": True, "text": "capacity limit reached token"}]},
+        ),
+    ],
+    ids=["codex", "grok", "claude", "openclaw"],
+)
+async def test_native_failures_keep_the_cause_exit_code_and_stderr(
+    harness, path, native, exit_code
+) -> None:
+    sandbox = FakeSandbox(exit_code, stderr="shell diagnostic token")
+    sandbox.files[f"/home/agent/{path}"] = json.dumps(native).encode()
+    sandbox.files["/home/agent/stderr.log"] = b"warning token\n" * 1000
+    with pytest.raises(AgentError) as caught:
+        await harness.launch("work", sandbox, session(), timeout_sec=60)
+    detail = str(caught.value)
+    assert "capacity limit reached" in detail
+    assert f"exit code {exit_code}" in detail
+    assert "stderr:" in detail
+    assert "token" not in detail
+    assert len(detail) < 3000
+
+
+@pytest.mark.parametrize(
+    "harness", [CodexCliHarness(), GrokBuildHarness(), ClaudeCodeHarness(), OpenClawCliHarness()]
+)
+async def test_nonzero_process_failure_keeps_stdout_when_stderr_has_only_warning(harness) -> None:
+    sandbox = FakeSandbox(9, stdout="native startup detail token", stderr="warning token")
+    with pytest.raises(AgentError) as caught:
+        await harness.launch("work", sandbox, session(), timeout_sec=60)
+    assert "native startup detail" in str(caught.value)
+    assert "warning" in str(caught.value)
+    assert "exit code 9" in str(caught.value)
+    assert "token" not in str(caught.value)
+
+
+async def test_codex_recovered_transport_and_tool_errors_do_not_fail_success() -> None:
+    sandbox = FakeSandbox()
+    sandbox.files["/home/agent/transcript.jsonl"] = b"\n".join(
+        [
+            b'{"type":"thread.started","thread_id":"thread-1"}',
+            b'{"type":"error","message":"Reconnecting"}',
+            b'{"type":"item.completed","item":{"type":"command_execution","exit_code":1}}',
+            b'{"type":"item.completed","item":{"type":"error",'
+            b'"message":"optional metadata unavailable"}}',
+            b'{"type":"item.completed","item":{"type":"agent_message","text":"Done"}}',
+            b'{"type":"turn.completed"}',
+        ]
+    )
+    result = await CodexCliHarness().launch("work", sandbox, session(), timeout_sec=60)
+    assert result.exit_code == 0
+    assert result.final_message == "Done"
+
+
+async def test_nonzero_codex_does_not_treat_solver_output_as_failure_diagnostic() -> None:
+    sandbox = FakeSandbox(1, stderr="native process failed")
+    sandbox.files["/home/agent/transcript.jsonl"] = (
+        b'{"type":"item.completed","item":{"type":"agent_message","text":"PRIVATE TASK ANSWER"}}'
+    )
+    with pytest.raises(AgentError) as caught:
+        await CodexCliHarness().launch("work", sandbox, session(), timeout_sec=60)
+    assert "PRIVATE TASK ANSWER" not in str(caught.value)
+    assert "native process failed" in str(caught.value)
+
+
+async def test_subscription_failure_keeps_native_reason_before_long_stderr() -> None:
+    sandbox = FakeSandbox(1)
+    sandbox.files["/home/agent/transcript.jsonl"] = (
+        b'{"type":"turn.failed","error":{"message":"rate limit reached token"}}'
+    )
+    sandbox.files["/home/agent/stderr.log"] = b"unrelated warning\n" * 1000
+    with pytest.raises(SubscriptionProviderLimitError) as caught:
+        await CodexCliHarness().launch(
+            "work", sandbox, session(authentication="subscription"), timeout_sec=60
+        )
+    assert "rate limit reached" in str(caught.value)
+    assert "exit code 1" in str(caught.value)
+    assert "token" not in str(caught.value)
+
+
+async def test_oracle_nonzero_keeps_both_streams_and_redacts_credentials() -> None:
+    result = await OracleHarness().launch(
+        "",
+        FakeSandbox(3, stdout="actual error token", stderr="warning token"),
+        session(),
+        timeout_sec=60,
+    )
+    assert result.exit_code == 3
+    assert "actual error" in result.final_message
+    assert "warning" in result.final_message
+    assert "token" not in result.final_message
 
 
 def resources(tmp_path: Path) -> EffectiveAgentResources:

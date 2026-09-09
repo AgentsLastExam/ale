@@ -40,6 +40,8 @@ from ale.run.agent_resources import continuation_fingerprint
 from ale.run.harnesses._npm import ensure_npm_cli, npm_env
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
+from ._diagnostics import error_text, failure_detail
+
 __all__ = ["OpenClawCliHarness", "OpenClawCliSettings"]
 
 DEFAULT_CLI_VERSION = "2026.7.1"
@@ -341,9 +343,20 @@ class OpenClawCliHarness(AutonomousHarness):
         )
         raw_result = await _read(sandbox, home / RESULT_NAME)
         envelope = _json_object(raw_result)
-        if result.exit_code != 0 or envelope is None:
-            detail = await _read(sandbox, home / STDERR_NAME)
-            raise AgentError(detail[-1200:] or raw_result[-1200:] or "OpenClaw failed")
+        native_error = _native_error(envelope) if envelope is not None else None
+        if result.exit_code != 0 or native_error or envelope is None:
+            raise AgentError(
+                failure_detail(
+                    self.name,
+                    result.exit_code,
+                    native=native_error
+                    or ("Invalid native result JSON" if result.exit_code == 0 else ""),
+                    stderr=await _read(sandbox, home / STDERR_NAME) or result.stderr,
+                    stdout=raw_result or result.stdout,
+                    token=session.token,
+                )
+            )
+        assert envelope is not None
         confirmed = ((envelope.get("meta") or {}).get("agentMeta") or {}).get("sessionId")
         if confirmed != native_session_id:
             raise NativeContinuationError(
@@ -522,6 +535,20 @@ def _envelope_message(envelope: dict[str, Any]) -> str | None:
         if isinstance(payload, dict)
     ).strip()
     return text or None
+
+
+def _native_error(envelope: dict[str, Any]) -> str | None:
+    if envelope.get("error") or envelope.get("status") in {"error", "failed"}:
+        return error_text(envelope.get("error") or envelope.get("message")) or "native error"
+    meta = envelope.get("meta")
+    if isinstance(meta, dict) and (meta.get("aborted") or meta.get("error")):
+        return error_text(meta.get("error") or meta.get("abortReason")) or "native run aborted"
+    failures = [
+        str(payload.get("text") or "native error")
+        for payload in envelope.get("payloads") or ()
+        if isinstance(payload, dict) and payload.get("isError") is True
+    ]
+    return "; ".join(failures) or None
 
 
 def _events(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

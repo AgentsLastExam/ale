@@ -123,6 +123,12 @@ the agent deadline. It must:
 - return `AgentRun`;
 - classify known refusals and native limits with typed errors.
 
+A failed launch retains the process exit code and a bounded, credential-redacted diagnostic
+from native error events and stderr. Stderr warnings must not displace the native failure
+reason; ordinary assistant messages and tool output are not failure diagnostics. A terminal
+native error is a failure even when the process exits zero. Recovered transport errors and
+individual tool failures do not invalidate a subsequently successful native turn.
+
 The Harness does not create, destroy, or reopen egress on a Sandbox or add resources
 after sealing. API-key and subscription modes use the same metered Gateway path. The
 Host selects API-key or subscription upstream authentication, while model authority,

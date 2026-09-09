@@ -424,7 +424,7 @@ def _timestamp(value: object) -> datetime | None:
 
 
 def classify_subscription_error(harness: str, detail: str) -> Exception:
-    """Classify stable provider failure signatures; leave unknown failures alone."""
+    """Classify the harness's bounded, redacted failure without discarding its cause."""
     lowered = detail.lower()
     if any(
         marker in lowered
@@ -437,7 +437,7 @@ def classify_subscription_error(harness: str, detail: str) -> Exception:
         )
     ):
         return SubscriptionCompatibilityError(
-            f"{harness} no longer matches ALE's pinned subscription contract: {detail[-500:]}"
+            f"{harness} no longer matches ALE's pinned subscription contract: {detail}"
         )
     if any(
         marker in lowered
@@ -453,7 +453,7 @@ def classify_subscription_error(harness: str, detail: str) -> Exception:
             "429 ",
         )
     ):
-        return SubscriptionProviderLimitError(f"{harness} subscription limit: {detail[-500:]}")
+        return SubscriptionProviderLimitError(f"{harness} subscription limit: {detail}")
     if any(
         marker in lowered
         for marker in (
@@ -470,7 +470,7 @@ def classify_subscription_error(harness: str, detail: str) -> Exception:
     ):
         recovery = _PROVIDERS.get(harness, (None, None, "run the native login"))[2]
         return SubscriptionAuthenticationError(
-            f"{harness} subscription login failed: {detail[-500:]}; recover by: {recovery}"
+            f"{harness} subscription login failed: {detail}; recover by: {recovery}"
         )
     if any(
         marker in lowered
@@ -483,7 +483,5 @@ def classify_subscription_error(harness: str, detail: str) -> Exception:
             "not entitled",
         )
     ):
-        return SubscriptionEntitlementError(
-            f"{harness} subscription entitlement failed: {detail[-500:]}"
-        )
-    return AgentError(f"{harness} failed: {detail[-500:]}")
+        return SubscriptionEntitlementError(f"{harness} subscription entitlement failed: {detail}")
+    return AgentError(f"{harness} failed: {detail}")

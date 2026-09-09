@@ -60,6 +60,8 @@ from ale.run.agent_resources import continuation_fingerprint
 from ale.run.subscription import classify_subscription_error
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
+from ._diagnostics import error_text, failure_detail
+
 __all__ = ["ClaudeCodeHarness", "ClaudeCodeSettings"]
 
 #: File names inside whatever workspace the session supplies. The directory itself is
@@ -425,12 +427,19 @@ class ClaudeCodeHarness(AutonomousHarness):
         )
 
         transcript = await self._read_text(sandbox, transcript_path)
-        if result.exit_code != 0:
+        native_error = _native_error(transcript)
+        if result.exit_code != 0 or native_error:
+            detail = failure_detail(
+                self.name,
+                result.exit_code,
+                native=native_error or "",
+                stderr=result.stderr,
+                stdout=transcript or result.stdout,
+                token=session.token,
+            )
             if session.authentication == "subscription":
-                raise classify_subscription_error(
-                    self.name, transcript or result.stderr or "Claude failed"
-                )
-            raise self._classify(transcript or result.stderr, result.exit_code)
+                raise classify_subscription_error(self.name, detail)
+            raise self._classify(detail, result.exit_code)
         confirmed = _native_session_id(transcript)
         if confirmed != native_session_id:
             raise NativeContinuationError(
@@ -884,13 +893,17 @@ class ClaudeCodeHarness(AutonomousHarness):
                 float(observed) if observed is not None else None,
             )
         lowered = stderr.lower()
-        if isinstance(self.settings.max_turns, int) and "max turns" in lowered:
+        if isinstance(self.settings.max_turns, int) and any(
+            marker in lowered for marker in ("max turns", "error_max_turns")
+        ):
             return HarnessLimitError(
                 "max_turns",
                 self.settings.max_turns,
                 self.settings.max_turns,
             )
-        if isinstance(self.settings.max_budget_usd, float) and "max budget" in lowered:
+        if isinstance(self.settings.max_budget_usd, float) and any(
+            marker in lowered for marker in ("max budget", "error_max_budget_usd")
+        ):
             return HarnessLimitError(
                 "max_budget_usd",
                 self.settings.max_budget_usd,
@@ -898,8 +911,8 @@ class ClaudeCodeHarness(AutonomousHarness):
             )
         for needle, error_type in ERROR_PATTERNS:
             if needle.lower() in stderr.lower():
-                return error_type(f"claude-code failed: {stderr[-500:]}")
-        return AgentError(f"claude-code exited {exit_code}: {stderr[-500:]}")
+                return error_type(stderr)
+        return AgentError(stderr)
 
     async def _read_text(self, sandbox: Sandbox, path: PurePosixPath) -> str:
         try:
@@ -910,13 +923,38 @@ class ClaudeCodeHarness(AutonomousHarness):
 
 def _final_message(transcript: str) -> str | None:
     """The last thing the agent said, which is what a human reads first."""
-    for line in reversed(transcript.splitlines()):
+    for event in reversed(_stream_events(transcript)):
+        if event.get("type") in {"assistant", "result"}:
+            return _text_of(event)
+    return None
+
+
+def _stream_events(transcript: str) -> list[dict[str, Any]]:
+    events = []
+    for line in transcript.splitlines():
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") in {"assistant", "result"}:
-            return _text_of(event)
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _native_error(transcript: str) -> str | None:
+    for event in reversed(_stream_events(transcript)):
+        if event.get("type") == "result":
+            subtype = str(event.get("subtype") or "")
+            if event.get("is_error") or subtype.startswith("error"):
+                detail = error_text(
+                    event.get("errors") or event.get("error") or event.get("result")
+                )
+                return f"{subtype or 'native error'}: {detail}".rstrip(": ")
+            return None
+        if event.get("type") == "error" or (
+            event.get("type") == "assistant" and event.get("error")
+        ):
+            return error_text(event.get("error") or event.get("message")) or "native error"
     return None
 
 
@@ -1053,11 +1091,7 @@ def _text_of(event: dict[str, Any]) -> str:
 
 
 def _native_session_id(transcript: str) -> str | None:
-    for line in reversed(transcript.splitlines()):
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for event in reversed(_stream_events(transcript)):
         session_id = event.get("session_id")
         if isinstance(session_id, str) and session_id:
             return session_id

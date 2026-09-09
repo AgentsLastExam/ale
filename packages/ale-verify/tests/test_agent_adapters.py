@@ -64,8 +64,71 @@ def claude_config() -> dict[str, str]:
     }
 
 
-def completed(stdout: str, *, returncode: int = 0):  # type: ignore[no-untyped-def]
-    return type("Completed", (), {"stdout": stdout, "stderr": "", "returncode": returncode})()
+def completed(stdout: str, *, returncode: int = 0, stderr: str = ""):  # type: ignore[no-untyped-def]
+    return type("Completed", (), {"stdout": stdout, "stderr": stderr, "returncode": returncode})()
+
+
+@pytest.mark.parametrize("config", [codex_config(), claude_config()], ids=["codex", "claude"])
+@pytest.mark.parametrize("exit_code", [0, 19])
+def test_native_failure_is_terminal_and_keeps_cause_despite_stderr_noise(
+    monkeypatch: pytest.MonkeyPatch,
+    agent_env: dict[str, Path],
+    config: dict[str, str],
+    exit_code: int,
+) -> None:
+    monkeypatch.setattr(_agents, "_ensure_binary", lambda *_args: ("agent", config["version"]))
+    calls = []
+
+    def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(argv)
+        native = (
+            {"type": "turn.failed", "error": {"message": "capacity exhausted provider-secret"}}
+            if config["adapter"] == "codex-cli"
+            else {
+                "type": "result",
+                "is_error": True,
+                "subtype": "error_during_execution",
+                "errors": ["capacity exhausted provider-secret"],
+                "result": '{"choice":"yes","reasoning":"stale verdict"}',
+            }
+        )
+        return completed(
+            json.dumps(native), returncode=exit_code, stderr="warning provider-secret\n" * 1000
+        )
+
+    monkeypatch.setattr(_agents.subprocess, "run", execute)
+    with pytest.raises(JudgeError) as caught:
+        run(config)
+    assert len(calls) == 1
+    invocation = caught.value.invocation
+    assert invocation.status == "failed"
+    assert invocation.attempts[0].outcome == "failed"
+    assert f"exit code {exit_code}" in invocation.failure
+    assert "capacity exhausted" in invocation.failure
+    assert "stderr:" in invocation.failure
+    assert "provider-secret" not in invocation.failure
+    assert "provider-secret" not in agent_env["log"].read_text()
+    assert len(invocation.failure) < 2200
+
+
+def test_recovered_codex_error_does_not_reject_a_valid_judge_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    agent_env: dict[str, Path],
+) -> None:
+    monkeypatch.setattr(_agents, "_ensure_binary", lambda *_args: ("codex", "1.2.3"))
+    monkeypatch.setattr(
+        _agents.subprocess,
+        "run",
+        lambda *_args, **_kwargs: completed(
+            '{"type":"thread.started","thread_id":"thread-1"}\n'
+            '{"type":"error","message":"Reconnecting"}\n'
+            '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"choice\\":\\"yes\\",\\"reasoning\\":\\"Verified\\"}"}}\n'
+            '{"type":"turn.completed"}\n'
+        ),
+    )
+    choice, _, invocation = run(codex_config())
+    assert choice == "yes"
+    assert invocation.status == "completed"
 
 
 def test_codex_command_root_home_cwd_version_and_final_response(

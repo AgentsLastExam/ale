@@ -16,6 +16,8 @@ from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import OperatingSystem
 from ale.core.trace import DesktopAction
 
+from ._diagnostics import failure_detail
+
 __all__ = ["NopHarness", "OracleHarness", "oracle_dir"]
 
 
@@ -139,5 +141,15 @@ class OracleHarness(AutonomousHarness):
         )
         return AgentRun(
             exit_code=result.exit_code,
-            final_message=result.stderr.strip() or result.stdout.strip() or None,
+            final_message=(
+                failure_detail(
+                    self.name,
+                    result.exit_code,
+                    stderr=result.stderr,
+                    stdout=result.stdout,
+                    token=session.token,
+                )
+                if result.exit_code != 0
+                else result.stderr.strip() or result.stdout.strip() or None
+            ),
         )
