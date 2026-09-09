@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 from importlib import import_module
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+from ale.core.config import RunConfig
 from ale.core.errors import VerificationInfrastructureError, VerifierOutputError
 from ale.core.sandbox import PreparedTaskImage
 from ale.core.taskspec import ImageKind
@@ -17,6 +19,7 @@ from ale.run.cli.main import app
 from ale.run.cli.tasks import (
     _is_full_reward_map,
     _is_zero_reward_map,
+    _validate,
     _validation_notices,
     _validation_outcome,
 )
@@ -139,6 +142,28 @@ def test_validate_accepts_run_level_judge_config(
     assert observed["reference"] == "task"
     assert observed["settings"].verification.llm.reasoning_effort == "high"
     assert observed["runs_dir"] == tmp_path / "runs"
+
+
+@pytest.mark.asyncio
+async def test_validation_loads_the_selected_credential_file_before_preparing_tasks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    task_cli = import_module("ale.run.cli.tasks")
+    credential_file = tmp_path / "judge.env"
+    credential_file.write_text("TEST_VALIDATION_JUDGE_KEY=test-secret\n")
+    monkeypatch.setenv("ALE_ENV_FILE", str(credential_file))
+    monkeypatch.delenv("TEST_VALIDATION_JUDGE_KEY", raising=False)
+
+    def inspect_environment(settings: RunConfig) -> None:
+        assert os.environ["TEST_VALIDATION_JUDGE_KEY"] == "test-secret"
+        raise RuntimeError("credential loading verified before provisioning")
+
+    monkeypatch.setattr(task_cli, "ProviderRegistry", inspect_environment)
+    try:
+        with pytest.raises(RuntimeError, match="credential loading verified"):
+            await _validate("task", RunConfig(), tmp_path / "runs")
+    finally:
+        os.environ.pop("TEST_VALIDATION_JUDGE_KEY", None)
 
 
 def test_prepare_uses_selection_and_starts_no_runtime_services(

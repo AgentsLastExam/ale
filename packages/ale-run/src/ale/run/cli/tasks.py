@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import uuid
 from pathlib import Path
 
@@ -72,16 +73,18 @@ def _config(
     agent: str | None,
     model: str | None,
 ) -> RunConfig:
+    if config is None and (default_config := os.environ.get("ALE_RUN_CONFIG")):
+        config = Path(default_config).expanduser()
     flags = [*(overrides or [])]
     if agent is not None:
         flags.append(f"agent.name={agent}")
     if model:
         flags.append(f"agent.model={model}")
-    selected = select_agent_name(run_path=config, overrides=flags)
-    preset = PRESET_DIR / f"{selected}.toml"
-    if not preset.is_file():
-        preset = None
     try:
+        selected = select_agent_name(run_path=config, overrides=flags)
+        preset = PRESET_DIR / f"{selected}.toml"
+        if not preset.is_file():
+            preset = None
         return load_run_config(preset_path=preset, run_path=config, overrides=flags)
     except AleError as error:
         typer.echo(f"configuration error: {error}", err=True)
@@ -523,6 +526,7 @@ def _check_reportable(result: EpisodeResult) -> bool:
 
 
 async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
+    load_env()
     providers = ProviderRegistry(settings)
     try:
         task_reference = parse_task_reference(reference)

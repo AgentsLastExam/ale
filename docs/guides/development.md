@@ -44,6 +44,7 @@ is the one condition under which installs silently degrade to copies.
 | Task asset sync state | each Task repository's `.ale-cache/` | generated commit/dirty marker; ignored by Git |
 | Task assets | each Task's `{image,setup,verify,oracle}/assets/` | direct development paths; explicit HF pull/push/status |
 | Secrets | checkout `.env` (`ALE_ENV_FILE` overrides) | solver keys stay on the Host; configured Judge keys exist only for the verifier command |
+| Default run configuration | `ALE_RUN_CONFIG` points to a run TOML | used when `--config` is absent; see [`ale-run`](../../packages/ale-run/README.md) for precedence |
 
 Set `ALE_REPO_PATH` to the absolute active engine checkout for engine discovery. Configure
 `ALE_ASSETS_COLLECTION` only when synchronizing Task assets. Runtime never downloads
