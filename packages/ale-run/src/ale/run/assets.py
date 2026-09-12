@@ -11,12 +11,15 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from ale.core.config import resolve_asset_collection
 from ale.core.errors import AssetError
-from ale.core.task import Task, TaskAssetObservation
-from ale.run.tasksets.manifest import ManifestTask, load_tasks
+from ale.core.task import Task, TaskAssetObservation, TaskSourceContext
+from ale.run.tasksets.manifest import TaskFolder, load_tasks
+
+if TYPE_CHECKING:
+    from huggingface_hub import HfApi
 
 Stage = Literal["image", "setup", "verify", "oracle"]
 STAGES: tuple[Stage, ...] = ("image", "setup", "verify", "oracle")
@@ -37,10 +40,19 @@ AssetObservation = TaskAssetObservation
 
 
 @dataclass(frozen=True)
+class AssetLocation:
+    folder: TaskFolder
+
+    @property
+    def source(self) -> TaskSourceContext:
+        return self.folder.source
+
+
+@dataclass(frozen=True)
 class AssetRepositorySelection:
     repository_name: str
     repository_root: Path
-    tasks: tuple[ManifestTask, ...]
+    tasks: tuple[AssetLocation, ...]
 
 
 @dataclass(frozen=True)
@@ -52,19 +64,20 @@ class AssetSyncResult:
     tasks: tuple[AssetObservation, ...]
 
 
-def _asset_roots(task: Task) -> tuple[Path, ...]:
+def _asset_roots(task: Task | AssetLocation) -> tuple[Path, ...]:
     if task.folder is None:
         return ()
+    validate_asset_paths(task.folder.root)
     return tuple(path for stage in STAGES if (path := task.folder.root / stage / "assets").is_dir())
 
 
-def _task_path(task: ManifestTask) -> str:
+def _task_path(task: AssetLocation) -> str:
     if task.source.task_relative_path is None:
         raise AssetError("asset commands require Tasks inside a Git repository")
     return task.source.task_relative_path
 
 
-def observe_task_assets(task: Task) -> AssetObservation | None:
+def observe_task_assets(task: Task | AssetLocation) -> AssetObservation | None:
     if task.folder is None:
         return None
     roots = _asset_roots(task)
@@ -103,13 +116,13 @@ def asset_status(paths: Sequence[Path]) -> tuple[AssetObservation, ...]:
 
 
 def select_asset_repositories(paths: Sequence[Path]) -> tuple[AssetRepositorySelection, ...]:
-    tasks_by_root: dict[Path, ManifestTask] = {}
+    tasks_by_root: dict[Path, AssetLocation] = {}
     for path in paths:
         for task in load_tasks(path.expanduser().resolve()):
             if task.spec.variant == "base":
-                tasks_by_root[task.folder.root] = task
+                tasks_by_root[task.folder.root] = AssetLocation(task.folder)
 
-    repositories: dict[Path, list[ManifestTask]] = {}
+    repositories: dict[Path, list[AssetLocation]] = {}
     names: dict[str, Path] = {}
     for task in tasks_by_root.values():
         source = task.source
@@ -122,7 +135,7 @@ def select_asset_repositories(paths: Sequence[Path]) -> tuple[AssetRepositorySel
         repositories.setdefault(source.repository_root, []).append(task)
     return tuple(
         AssetRepositorySelection(
-            root.name,
+            items[0].source.repository_name or root.name,
             root,
             tuple(sorted(items, key=_task_path)),
         )
@@ -131,17 +144,23 @@ def select_asset_repositories(paths: Sequence[Path]) -> tuple[AssetRepositorySel
 
 
 def pull_assets(
-    paths: Sequence[Path], *, collection: str | None = None, force: bool = False
+    paths: Sequence[Path],
+    *,
+    collection: str | None = None,
+    force: bool = False,
+    revision: str | None = None,
 ) -> tuple[AssetSyncResult, ...]:
     from huggingface_hub import HfApi, snapshot_download
 
-    config = resolve_asset_collection(collection)
     api = HfApi()
-    remote_collection = api.get_collection(config.collection_slug)
     results: list[AssetSyncResult] = []
     for selection in select_asset_repositories(paths):
-        remote_repo_id = _collection_dataset(remote_collection, selection.repository_name)
-        commit = api.repo_info(remote_repo_id, repo_type="dataset").sha
+        remote_repo_id = f"agents-last-exam/{selection.repository_name}"
+        collection_slug = asset_collection(api, collection, create=False)
+        info = api.repo_info(remote_repo_id, repo_type="dataset", revision=revision or "main")
+        if not info.private:
+            raise AssetError(f"asset dataset must be private: {remote_repo_id}")
+        commit = info.sha
         if not commit:
             raise AssetError(f"dataset {remote_repo_id} has no resolved commit")
         dirty = [
@@ -176,7 +195,7 @@ def pull_assets(
             AssetSyncResult(
                 selection.repository_name,
                 remote_repo_id,
-                config.collection_slug,
+                collection_slug,
                 commit,
                 observations,
             )
@@ -187,77 +206,80 @@ def pull_assets(
 def push_assets(
     paths: Sequence[Path], *, collection: str | None = None
 ) -> tuple[AssetSyncResult, ...]:
-    from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
-
-    api = HfApi()
-    try:
-        username = str(api.whoami()["name"])
-    except Exception as exc:
-        raise AssetError(f"Hugging Face authentication is required for push: {exc}") from exc
-    if collection:
-        collection_slug = resolve_asset_collection(collection).collection_slug
-        api.get_collection(collection_slug)
-    else:
-        environment = os.environ.get("ALE_ASSETS_COLLECTION", "").strip()
-        collection_slug = (
-            resolve_asset_collection().collection_slug
-            if environment
-            else api.create_collection("assets", namespace=username, exists_ok=True).slug
-        )
+    from ale.run.asset_git import checkpoint_assets, publish_assets
 
     results: list[AssetSyncResult] = []
     for selection in select_asset_repositories(paths):
-        remote_repo_id = f"{username}/{selection.repository_name}"
-        api.create_repo(remote_repo_id, repo_type="dataset", private=False, exist_ok=True)
-        api.add_collection_item(collection_slug, remote_repo_id, "dataset", exists_ok=True)
-        parent = api.repo_info(remote_repo_id, repo_type="dataset").sha or None
-        remote_files = set(api.list_repo_files(remote_repo_id, repo_type="dataset"))
-        operations: list[CommitOperationAdd | CommitOperationDelete] = []
         for task in selection.tasks:
-            task_path = _task_path(task)
-            prefixes = [f"{task_path}/{stage}/assets/" for stage in STAGES]
-            local_files: dict[str, Path] = {}
-            for root in _asset_roots(task):
-                for file in _regular_files(root):
-                    remote = f"{task_path}/{file.relative_to(task.folder.root).as_posix()}"
-                    local_files[remote] = file
-                    operations.append(CommitOperationAdd(path_in_repo=remote, path_or_fileobj=file))
-            for remote in sorted(remote_files):
-                if (
-                    any(remote.startswith(prefix) for prefix in prefixes)
-                    and remote not in local_files
-                ):
-                    operations.append(CommitOperationDelete(path_in_repo=remote))
-        if operations:
-            commit = api.create_commit(
-                remote_repo_id,
-                operations,
-                commit_message="Synchronize ALE Task assets",
-                repo_type="dataset",
-                parent_commit=parent,
-            ).oid
-        elif parent:
-            commit = parent
-        else:
-            raise AssetError(f"{selection.repository_name} has no local assets to push")
-        with _repository_lock(selection.repository_root, exclusive=True):
-            observations = _mark_clean(selection, commit)
-        results.append(
-            AssetSyncResult(
-                selection.repository_name,
-                remote_repo_id,
-                collection_slug,
-                commit,
-                observations,
+            name = task.folder.root.name
+            workspace = selection.repository_root / ".ale-cache/asset-worktrees" / _task_path(task)
+            checkpoint = checkpoint_assets(
+                task.folder.root,
+                workspace=workspace,
+                branch=f"manual/{_task_path(task)}",
+                collection=collection,
             )
-        )
+            if checkpoint.commit is None:
+                continue
+            publish_assets(
+                checkpoint,
+                title=f"Update {name} assets",
+                description="",
+                output=workspace.with_suffix(".publication.json"),
+                target_main=True,
+            )
+            results.append(
+                AssetSyncResult(
+                    selection.repository_name,
+                    checkpoint.repo_id,
+                    checkpoint.collection_slug or "",
+                    checkpoint.commit,
+                    asset_status([task.folder.root]),
+                )
+            )
     return tuple(results)
 
 
-def _replace_selected_assets(tasks: Sequence[ManifestTask], downloaded: Path) -> None:
+def asset_collection(api: HfApi, collection: str | None = None, *, create: bool) -> str:
+    """Resolve the organization's assets collection without depending on the caller's account."""
+    configured = collection or os.environ.get("ALE_ASSETS_COLLECTION", "").strip()
+    if configured:
+        slug = resolve_asset_collection(configured).collection_slug
+        item = api.get_collection(slug)
+        if not slug.startswith("agents-last-exam/") or item.title != "assets":
+            raise AssetError("asset collection must be agents-last-exam's assets collection")
+        return slug
+    matches = [
+        item for item in api.list_collections(owner="agents-last-exam") if item.title == "assets"
+    ]
+    if len(matches) == 1:
+        return matches[0].slug
+    if not matches and create:
+        return api.create_collection(
+            "assets", namespace="agents-last-exam", private=True, exists_ok=True
+        ).slug
+    raise AssetError("agents-last-exam must have exactly one assets collection")
+
+
+def ensure_asset_repository(repository_name: str, collection: str | None = None) -> tuple[str, str]:
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    repo_id = f"agents-last-exam/{repository_name}"
+    api.create_repo(repo_id, repo_type="dataset", private=True, exist_ok=True)
+    if not api.repo_info(repo_id, repo_type="dataset").private:
+        raise AssetError(f"asset dataset must be private: {repo_id}")
+    slug = asset_collection(api, collection, create=True)
+    api.add_collection_item(slug, repo_id, "dataset", exists_ok=True)
+    return repo_id, slug
+
+
+def _replace_selected_assets(tasks: Sequence[AssetLocation], downloaded: Path) -> None:
     entries: list[tuple[Path, Path, Path]] = []
     for task in tasks:
         task_path = _task_path(task)
+        validate_asset_paths(task.folder.root)
+        validate_asset_paths(downloaded / task_path)
         for stage in STAGES:
             source = downloaded / task_path / stage / "assets"
             destination = task.folder.root / stage / "assets"
@@ -308,7 +330,7 @@ def _mark_clean(selection: AssetRepositorySelection, commit: str) -> tuple[Asset
     return tuple(observations)
 
 
-def _asset_inventory(task: Task) -> list[dict[str, int | str]]:
+def _asset_inventory(task: Task | AssetLocation) -> list[dict[str, int | str]]:
     if task.folder is None:
         return []
     task_root = task.folder.root
@@ -324,12 +346,25 @@ def _asset_inventory(task: Task) -> list[dict[str, int | str]]:
                     "type": "file" if path.is_file() else "directory",
                     "size": stat.st_size,
                     "mtime_ns": stat.st_mtime_ns,
+                    "executable": stat.st_mode & 0o111,
                 }
             )
     return inventory
 
 
+def validate_asset_paths(task_root: Path) -> None:
+    for path in (
+        task_root,
+        *(task_root / stage for stage in STAGES),
+        *(task_root / stage / "assets" for stage in STAGES),
+    ):
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise AssetError(f"asset directory must be a real directory: {path}")
+
+
 def _regular_files(root: Path) -> Iterator[Path]:
+    if root.is_symlink():
+        raise AssetError(f"Task assets support only regular files and directories: {root}")
     if not root.is_dir():
         return
     for path in sorted(root.rglob("*")):
@@ -380,19 +415,3 @@ def _repository_lock(repository_root: Path, *, exclusive: bool) -> Iterator[None
             yield
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
-
-
-def _collection_dataset(collection: object, repository_name: str) -> str:
-    matches = [
-        item_id
-        for item in getattr(collection, "items", ())
-        if getattr(item, "item_type", getattr(item, "type", None)) == "dataset"
-        and isinstance((item_id := getattr(item, "item_id", getattr(item, "id", None))), str)
-        and item_id.rsplit("/", 1)[-1] == repository_name
-    ]
-    if len(matches) != 1:
-        raise AssetError(
-            f"collection must contain exactly one dataset named {repository_name!r}; "
-            f"found {len(matches)}"
-        )
-    return matches[0]

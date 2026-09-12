@@ -47,8 +47,9 @@ is the one condition under which installs silently degrade to copies.
 | Default run configuration | `ALE_RUN_CONFIG` points to a run TOML | used when `--config` is absent; see [`ale-run`](../../packages/ale-run/README.md) for precedence |
 
 Set `ALE_REPO_PATH` to the absolute active engine checkout for engine discovery. Configure
-`ALE_ASSETS_COLLECTION` only when synchronizing Task assets. Runtime never downloads
-assets, and Tasks without stage-local asset directories require no collection or token.
+`HF_TOKEN` when synchronizing private Task assets. The `agents-last-exam/assets` collection
+is discovered automatically; see [Task assets](../specs/task-assets.md). Runtime never
+downloads assets, and Tasks without stage-local assets require no collection or token.
 
 ## When something looks wrong
 

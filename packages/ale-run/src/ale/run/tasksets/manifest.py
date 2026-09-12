@@ -118,9 +118,12 @@ class TaskFolder:
 
     @cached_property
     def source(self) -> TaskSourceContext:
+        location = self.root
+        while not location.exists():
+            location = location.parent
         try:
             result = subprocess.run(
-                ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
+                ["git", "-C", str(location), "rev-parse", "--show-toplevel"],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -137,9 +140,36 @@ class TaskFolder:
             return TaskSourceContext()
         return TaskSourceContext(
             repository_root=repository_root,
-            repository_name=repository_root.name,
+            repository_name=_repository_name(repository_root),
             task_relative_path=relative,
         )
+
+
+def _repository_name(root: Path) -> str:
+    origin = subprocess.run(
+        ["git", "-C", str(root), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if origin.returncode == 0 and origin.stdout.strip():
+        return (
+            origin.stdout.strip()
+            .rstrip("/")
+            .rsplit("/", 1)[-1]
+            .rsplit(":", 1)[-1]
+            .removesuffix(".git")
+        )
+    common = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    directory = Path(common.stdout.strip())
+    return (
+        directory.parent.name if directory.name == ".git" else directory.name.removesuffix(".git")
+    )
 
 
 class ManifestTask(Task):

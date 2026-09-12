@@ -30,8 +30,10 @@ irreducibly per-episode initialization. Task-owned Skills and MCP servers live u
 
 Large files live in ignored `image/assets`, `setup/assets`, `verify/assets`, or
 `oracle/assets` directories. Explicit `ale assets` commands synchronize only those roots
-with a same-named dataset. Runtime never downloads them. Task source identity covers the
-folder except exact asset roots and generated state; asset provenance records the remote
+with a same-named private dataset in `agents-last-exam`. Local Git/LFS checkpoints and
+HF draft publication preserve the same commit identity; the operational contract lives in
+[Task assets](../specs/task-assets.md). Runtime never downloads assets. Task source identity covers the
+folder except exact asset roots and generated state; asset provenance records the accepted
 commit and whether the selected local view is dirty without hashing all bytes.
 
 ## Consequences

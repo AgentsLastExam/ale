@@ -51,6 +51,9 @@ PowerShell stages use the same convention, for example
 `python.exe .\helper.py .\assets\seed.json`. `ALE_STAGE_DIR` remains available when a
 subprocess requires an absolute stage path.
 
+Asset checkpointing and synchronization are platform operations specified by
+[Task assets](task-assets.md); they do not add fields to the Task manifest.
+
 ## task.yaml
 
 `task.yaml` is strict: unknown fields fail. The annotated shape below describes every field and

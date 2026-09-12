@@ -24,6 +24,7 @@ from ale.run.assets import (
     pull_assets,
     push_assets,
 )
+from ale.run.cli.assets import assets_app
 from ale.run.cli.tasks import (
     EXIT_BAD_REFERENCE,
     _config,
@@ -59,7 +60,6 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
-assets_app = typer.Typer(help="Synchronize canonical Task assets.", no_args_is_help=True)
 app.add_typer(assets_app, name="assets")
 vm_image_app = typer.Typer(help="Publish and acquire prebuilt VM disks.", no_args_is_help=True)
 app.add_typer(vm_image_app, name="vm-image")
@@ -330,10 +330,14 @@ def assets_pull(
         bool,
         typer.Option("--force", help="Replace locally dirty selected asset roots"),
     ] = False,
+    revision: Annotated[
+        str | None,
+        typer.Option("--revision", help="HF revision; pass a fixed commit SHA for reproducibility"),
+    ] = None,
 ) -> None:
     """Pull selected asset roots directly into their Task folders."""
     try:
-        results = pull_assets(paths, collection=collection, force=force)
+        results = pull_assets(paths, collection=collection, force=force, revision=revision)
     except AleError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
