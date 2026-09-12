@@ -6,12 +6,13 @@ import json
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from ale.core.ids import content_hash
 from ale.core.result import ResultRecord
+from ale.core.task import TaskAssetObservation
 from ale.core.taskspec import TaskSpec
 from ale.core.verdict import Status
 
@@ -73,6 +74,7 @@ def episode_identity(
     seed: int,
     config_hash: str,
     resources_digest: str = "",
+    assets: TaskAssetObservation | None = None,
 ) -> str:
     return content_hash(
         {
@@ -83,6 +85,7 @@ def episode_identity(
             "seed": seed,
             "config": config_hash,
             "resources": resources_digest,
+            "assets": asdict(assets) if assets is not None else None,
         }
     )
 

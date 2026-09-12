@@ -131,6 +131,9 @@ before the concurrency semaphore, marked running before episode orchestration, u
 by explicit phase callbacks, and projected terminal only after `result.json` is durable.
 On reopen, stale queued/running rows become interrupted. An explicit resumed invocation
 creates new episode IDs for work that has no completed result.
+The reuse identity includes the observed asset repository, Task path, and fixed asset commit
+alongside Task, image, agent, and configuration identity. A changed asset revision cannot reuse
+an older completed episode. Dirty or unversioned assets disable completed-episode reuse.
 
 `RunConfig.episode_retries` sets the number of additional automatic attempts for an
 incomplete episode; its default is zero. `ale run --episode-retries N` and

@@ -12,6 +12,7 @@ import pytest
 
 from ale.core.lock import AssetProvenance
 from ale.core.result import FailureInfo, ResultRecord
+from ale.core.task import TaskAssetObservation
 from ale.core.taskspec import TaskSpec
 from ale.core.verdict import Status
 from ale.run.ledger import Ledger, episode_identity
@@ -61,6 +62,13 @@ def result(
 
 
 class TestEpisodeIdentity:
+    def test_asset_revisions_are_distinct_work(self) -> None:
+        first = TaskAssetObservation("tasks", "tasks/task-a", "a" * 40, False)
+        second = TaskAssetObservation("tasks", "tasks/task-a", "b" * 40, False)
+        assert identity(spec(), assets=first) == identity(spec(), assets=first)
+        assert identity(spec(), assets=first) != identity(spec(), assets=second)
+        assert identity(spec(), assets=first) != identity(spec())
+
     def test_the_same_work_has_the_same_identity(self) -> None:
         assert identity(spec()) == identity(spec())
 

@@ -320,6 +320,7 @@ async def _run_one(
                 seed=settings.seed,
                 config_hash=settings.config_hash,
                 resources_digest=agent_resources.digest,
+                assets=task.asset_observation,
             )
             done = (
                 sum(
@@ -603,6 +604,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                     agent=f"validation-{pass_name}@{harness.version()}",
                     seed=settings.seed,
                     config_hash=settings.config_hash,
+                    assets=task.asset_observation,
                 )
                 ledger.queue_episode(
                     episode_id=episode_id,
