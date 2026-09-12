@@ -97,7 +97,22 @@ async def run_episode_with_retries(
         raise ValueError("episode retries must be non-negative")
     for attempt in range(retries + 1):
         result = await execute()
-        if result.record.status is Status.COMPLETED or attempt == retries:
+        failure = result.record.failure
+        if (
+            result.record.status is Status.COMPLETED
+            or attempt == retries
+            or (
+                failure is not None
+                and failure.error_type
+                in {
+                    "VerificationInfrastructureError",
+                    "VerificationConfigurationError",
+                    "VerificationProviderError",
+                    "VerificationAdapterError",
+                    "VerificationVerdictError",
+                }
+            )
+        ):
             return result
         history = result.run_dir / "attempts"
         archive = history / str(attempt + 1)

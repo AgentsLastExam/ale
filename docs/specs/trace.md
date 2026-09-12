@@ -137,7 +137,9 @@ incomplete episode; its default is zero. `ale run --episode-retries N` and
 `--set episode_retries=N` override the run TOML. Each attempt runs in fresh Sandboxes
 with a new Gateway session and trajectory, preserving the logical episode ID and seed.
 Only `status=completed` stops retries successfully; a completed zero score is still a
-completed episode. Host cancellation interrupts the loop immediately. Missing results
+completed episode. Judge infrastructure failures stop without another episode attempt;
+their internal retry budget is defined in [Verification](verification.md). Host cancellation
+interrupts the loop immediately. Missing results
 caused by a host interruption are not treated as an unlimited retry request.
 
 There is one run-level ledger row per logical episode and one current result directory:

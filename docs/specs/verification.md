@@ -102,8 +102,11 @@ validity are governed by the [Task quality standard](task-quality-standard.md#3-
 Both Judge types call the configured endpoint directly from the sandbox. The named API
 key is injected only into the verify command environment, redacted from captured output,
 and never written to Task configuration or records. A Judge makes one initial attempt and
-at most three retries;
-invalid verdicts receive a schema-repair prompt, while transient failures retry.
+at most three retries, shared between service failures and invalid verdicts. Agent Judge
+retries launched CLI failures and timeouts with the same evidence in a fresh native session;
+invalid verdicts receive a schema-repair prompt in the existing session. Preflight failures
+and native session identity mismatches stop immediately. Judge infrastructure failures
+are terminal for the episode after this budget; outer episode retries do not repeat them.
 
 ## Records and failure
 

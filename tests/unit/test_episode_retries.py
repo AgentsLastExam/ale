@@ -27,7 +27,9 @@ from ale.run.tasksets.manifest import load_tasks
 pytestmark = pytest.mark.unit
 
 
-def write_result(root: Path, status: Status, attempt: int) -> EpisodeResult:
+def write_result(
+    root: Path, status: Status, attempt: int, *, failure_type: str = "TestFailure"
+) -> EpisodeResult:
     root.mkdir(parents=True, exist_ok=True)
     assert not (root / "result.json").exists(), "retry reused previous execution files"
     now = datetime.now(UTC)
@@ -37,7 +39,7 @@ def write_result(root: Path, status: Status, attempt: int) -> EpisodeResult:
         rewards={"quality": 0.0} if status is Status.COMPLETED else None,
         failure=None
         if status is Status.COMPLETED
-        else FailureInfo(error_type="TestFailure", message=f"failure {attempt}"),
+        else FailureInfo(error_type=failure_type, message=f"failure {attempt}"),
         started_at=now,
         finished_at=now,
     )
@@ -76,6 +78,36 @@ async def test_retry_preserves_failed_evidence_and_stops_on_completed_zero(
     )
     assert previous.status is failure
     assert previous.episode_id == result.episode_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_type",
+    [
+        "VerificationInfrastructureError",
+        "VerificationConfigurationError",
+        "VerificationProviderError",
+        "VerificationAdapterError",
+        "VerificationVerdictError",
+    ],
+)
+async def test_judge_failure_is_not_retried_as_an_episode(
+    tmp_path: Path, failure_type: str
+) -> None:
+    calls = 0
+
+    async def execute() -> EpisodeResult:
+        nonlocal calls
+        calls += 1
+        return write_result(
+            tmp_path / "episode", Status.ENV_ERROR, calls, failure_type=failure_type
+        )
+
+    result = await run_episode_with_retries(execute, retries=3)
+    assert calls == 1
+    assert result.record.status is Status.ENV_ERROR
+    assert result.record.failure.error_type == failure_type
+    assert not (result.run_dir / "attempts").exists()
 
 
 @pytest.mark.asyncio

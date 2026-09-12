@@ -7,10 +7,12 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from . import _llm
 from ._io import JudgeError, digest, endpoint_identity, read_text_evidence, redact, sanitize
@@ -96,8 +98,14 @@ def run(
     attempts: list[JudgeAttempt] = []
     session_id: str | None = None
     repair_error = ""
+    repair = False
     for index in range(1, ATTEMPTS + 1):
-        current_prompt = rendered if index == 1 else _repair_prompt(rendered, rubric, repair_error)
+        mode: Literal["initial", "retry", "schema_repair"] = (
+            "initial" if index == 1 else "schema_repair" if repair else "retry"
+        )
+        current_prompt = _repair_prompt(rendered, rubric, repair_error) if repair else rendered
+        if index > 1 and not repair:
+            time.sleep(0.25 * (index - 1))
         if adapter == "claude-code" and session_id is None:
             session_id = str(uuid.uuid4())
         argv = _command(
@@ -105,7 +113,7 @@ def run(
             binary,
             config,
             session_id=session_id,
-            resume=index > 1,
+            resume=repair,
             mcp_config=mcp_config,
         )
         started = _now()
@@ -140,6 +148,7 @@ def run(
             attempts.append(
                 _attempt(
                     index,
+                    mode,
                     "timed_out",
                     config,
                     endpoint,
@@ -150,12 +159,15 @@ def run(
                     error,
                 )
             )
-            break
+            session_id = None
+            repair = False
+            continue
         except OSError as exc:
             error = repair_error = sanitize(f"Agent Judge could not start: {exc}", (secret,))
             attempts.append(
                 _attempt(
                     index,
+                    mode,
                     "failed",
                     config,
                     endpoint,
@@ -185,6 +197,7 @@ def run(
             attempts.append(
                 _attempt(
                     index,
+                    mode,
                     "failed",
                     config,
                     endpoint,
@@ -195,7 +208,9 @@ def run(
                     repair_error,
                 )
             )
-            break
+            session_id = None
+            repair = False
+            continue
 
         if adapter == "codex-cli":
             if session_id is None:
@@ -205,6 +220,7 @@ def run(
                 attempts.append(
                     _attempt(
                         index,
+                        mode,
                         "failed",
                         config,
                         endpoint,
@@ -221,6 +237,7 @@ def run(
             attempts.append(
                 _attempt(
                     index,
+                    mode,
                     "failed",
                     config,
                     endpoint,
@@ -244,6 +261,7 @@ def run(
             attempts.append(
                 _attempt(
                     index,
+                    mode,
                     "invalid",
                     config,
                     endpoint,
@@ -256,11 +274,13 @@ def run(
             )
             if not session_id:
                 break
+            repair = True
             continue
 
         attempts.append(
             _attempt(
                 index,
+                mode,
                 "completed",
                 config,
                 endpoint,
@@ -711,6 +731,7 @@ def _append_transcript(
 
 def _attempt(
     index: int,
+    mode: Literal["initial", "retry", "schema_repair"],
     outcome: str,
     config: Mapping[str, str],
     endpoint: str,
@@ -722,7 +743,7 @@ def _attempt(
 ) -> JudgeAttempt:
     return JudgeAttempt(
         index=index,
-        mode="initial" if index == 1 else "schema_repair",
+        mode=mode,
         started_at=started_at,
         finished_at=_now(),
         outcome=outcome,  # type: ignore[arg-type]

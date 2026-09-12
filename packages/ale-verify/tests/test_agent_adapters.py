@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ def agent_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path
     monkeypatch.setenv("ALE_AGENT_JUDGE_LOG_PATH", str(log))
     monkeypatch.setenv("JUDGE_KEY", "provider-secret")
     monkeypatch.setattr(_agents.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(_agents.time, "sleep", lambda _delay: None)
     return {"workspace": workspace, "log": log}
 
 
@@ -70,7 +72,7 @@ def completed(stdout: str, *, returncode: int = 0, stderr: str = ""):  # type: i
 
 @pytest.mark.parametrize("config", [codex_config(), claude_config()], ids=["codex", "claude"])
 @pytest.mark.parametrize("exit_code", [0, 19])
-def test_native_failure_is_terminal_and_keeps_cause_despite_stderr_noise(
+def test_native_failure_exhausts_internal_retries_and_keeps_cause_despite_stderr_noise(
     monkeypatch: pytest.MonkeyPatch,
     agent_env: dict[str, Path],
     config: dict[str, str],
@@ -99,9 +101,10 @@ def test_native_failure_is_terminal_and_keeps_cause_despite_stderr_noise(
     monkeypatch.setattr(_agents.subprocess, "run", execute)
     with pytest.raises(JudgeError) as caught:
         run(config)
-    assert len(calls) == 1
+    assert len(calls) == 4
     invocation = caught.value.invocation
     assert invocation.status == "failed"
+    assert [attempt.mode for attempt in invocation.attempts] == ["initial", *["retry"] * 3]
     assert invocation.attempts[0].outcome == "failed"
     assert f"exit code {exit_code}" in invocation.failure
     assert "capacity exhausted" in invocation.failure
@@ -109,6 +112,67 @@ def test_native_failure_is_terminal_and_keeps_cause_despite_stderr_noise(
     assert "provider-secret" not in invocation.failure
     assert "provider-secret" not in agent_env["log"].read_text()
     assert len(invocation.failure) < 2200
+
+
+@pytest.mark.parametrize("config", [codex_config(), claude_config()], ids=["codex", "claude"])
+@pytest.mark.parametrize("failure", ["native_error", "nonzero", "timeout"])
+def test_service_failure_retries_then_repairs_a_verdict_within_one_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    agent_env: dict[str, Path],
+    config: dict[str, str],
+    failure: str,
+) -> None:
+    monkeypatch.setattr(_agents, "_ensure_binary", lambda *_args: ("agent", config["version"]))
+    calls = []
+
+    def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((argv, kwargs))
+        if len(calls) == 1:
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, 600)
+            if failure == "nonzero":
+                return completed("", returncode=1, stderr="Service unavailable")
+            native = (
+                {"type": "turn.failed", "error": {"message": "capacity exhausted"}}
+                if config["adapter"] == "codex-cli"
+                else {"type": "result", "is_error": True, "errors": ["capacity exhausted"]}
+            )
+            return completed(json.dumps(native))
+        verdict = json.dumps(
+            {"choice": "invalid" if len(calls) == 2 else "yes", "reasoning": "Checked."}
+        )
+        if config["adapter"] == "codex-cli":
+            return completed(
+                '{"type":"thread.started","thread_id":"thread-2"}\n'
+                + json.dumps(
+                    {"type": "item.completed", "item": {"type": "agent_message", "text": verdict}}
+                )
+            )
+        selector = "--session-id" if len(calls) == 2 else "--resume"
+        return completed(
+            json.dumps(
+                {
+                    "type": "result",
+                    "session_id": argv[argv.index(selector) + 1],
+                    "result": verdict,
+                }
+            )
+        )
+
+    monkeypatch.setattr(_agents.subprocess, "run", execute)
+    choice, _, invocation = run(config)
+    assert choice == "yes"
+    assert len(calls) == 3
+    assert [attempt.mode for attempt in invocation.attempts] == [
+        "initial",
+        "retry",
+        "schema_repair",
+    ]
+    assert calls[0][1]["input"] == calls[1][1]["input"]
+    assert "unknown choice 'invalid'" in calls[2][1]["input"]
+    resume_flag = "resume" if config["adapter"] == "codex-cli" else "--resume"
+    assert resume_flag not in calls[1][0]
+    assert resume_flag in calls[2][0]
 
 
 def test_recovered_codex_error_does_not_reject_a_valid_judge_verdict(

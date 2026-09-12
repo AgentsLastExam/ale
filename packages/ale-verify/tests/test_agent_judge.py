@@ -28,6 +28,7 @@ def agent_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path
     monkeypatch.setenv("ALE_VERIFICATION_PATH", str(record))
     monkeypatch.setenv("JUDGE_KEY", "provider-secret")
     monkeypatch.setattr(_agents.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(_agents.time, "sleep", lambda _delay: None)
     return {"workspace": workspace, "log": log, "record": record, "instruction": instruction}
 
 
@@ -115,7 +116,13 @@ def test_timeout_after_schema_repair_keeps_latest_error_and_partial_native_evide
     assert "unknown choice" not in invocation.failure
     assert "provider-secret" not in invocation.failure
     logs = [json.loads(line) for line in agent_env["log"].read_text().splitlines()]
-    assert len(logs) == 2
+    assert len(logs) == 4
+    assert [attempt.mode for attempt in invocation.attempts] == [
+        "initial",
+        "schema_repair",
+        "retry",
+        "retry",
+    ]
     assert "provider capacity exhausted" in logs[-1]["stdout"]
     assert "provider-secret" not in agent_env["log"].read_text()
 
