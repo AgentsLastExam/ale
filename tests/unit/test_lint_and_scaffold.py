@@ -126,13 +126,13 @@ def test_assets_cli_accepts_multiple_paths_collection_and_force(
 ) -> None:
     seen: dict[str, object] = {}
 
-    def pull(paths, *, collection, force):  # type: ignore[no-untyped-def]
-        seen.update(paths=paths, collection=collection, force=force)
+    def pull(paths, *, collection, force, revision):  # type: ignore[no-untyped-def]
+        seen.update(paths=paths, collection=collection, force=force, revision=revision)
         return (
             SimpleNamespace(
                 repository="repo",
-                remote_repo_id="owner/repo",
-                collection_slug="owner/assets-1",
+                remote_repo_id="agents-last-exam/repo",
+                collection_slug="agents-last-exam/assets-1",
                 commit="a" * 40,
                 tasks=(),
             ),
@@ -150,13 +150,16 @@ def test_assets_cli_accepts_multiple_paths_collection_and_force(
             str(first),
             str(second),
             "--collection",
-            "owner/assets-1",
+            "agents-last-exam/assets-1",
             "--force",
+            "--revision",
+            "a" * 40,
         ],
     )
     assert result.exit_code == 0, result.output
     assert seen == {
         "paths": [first, second],
-        "collection": "owner/assets-1",
+        "collection": "agents-last-exam/assets-1",
         "force": True,
+        "revision": "a" * 40,
     }
