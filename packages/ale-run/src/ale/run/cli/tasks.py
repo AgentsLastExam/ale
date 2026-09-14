@@ -169,6 +169,8 @@ async def _run_one(
             list(load_tasks(resolved.task_dir)),
             task_reference.variants,
         )
+        for task in tasks:
+            harness.validate_os(task.spec.os)
         await _prepare_images(tasks, providers)
     except AleError as error:
         typer.echo(f"{error}", err=True)
@@ -730,6 +732,7 @@ async def _prepare_images(
                 "kind": spec.kind,
                 "local": task.image_source_digest,
                 "ref": spec.ref,
+                "base_ref": spec.base_ref,
             }
         )
         windows_build = (

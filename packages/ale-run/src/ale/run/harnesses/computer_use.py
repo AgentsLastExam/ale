@@ -25,6 +25,7 @@ from typing import Any
 from ale.core.env import Observation
 from ale.core.errors import AgentError
 from ale.core.harness import HarnessSession, StepwisePolicy
+from ale.core.taskspec import OperatingSystem
 from ale.core.trace import DesktopAction
 from ale.run.recording import Redactor
 
@@ -139,6 +140,7 @@ class ComputerUseHarness(StepwisePolicy):
     """Claude, driving a desktop one observation at a time."""
 
     name = "computer-use"
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
 
     def __init__(self, model: str = "claude-opus-4-8", max_tokens: int = 2048) -> None:
         self.model = model

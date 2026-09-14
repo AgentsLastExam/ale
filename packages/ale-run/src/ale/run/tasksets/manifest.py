@@ -261,15 +261,25 @@ def _load_folder(folder: TaskFolder) -> Iterator[ManifestTask]:
             raise TaskDefinitionError("Windows Tasks require image.kind: vm")
         if folder.image_dockerfile is not None:
             raise TaskDefinitionError("Windows Tasks use image/run.ps1, not image/Dockerfile")
-        if manifest.image.ref is None:
-            raise TaskDefinitionError("Windows Tasks require image.ref as their base image")
+        if folder.image_script is not None and manifest.image.base_ref is None:
+            raise TaskDefinitionError(
+                "image/run.ps1 requires image.base_ref; image.ref is for direct use"
+            )
         if folder.verifier_dockerfile is not None:
             raise TaskDefinitionError(
                 "Windows verification must reuse the solver image or use a ref"
             )
     elif folder.image_script is not None and folder.image_dockerfile is None:
         raise TaskDefinitionError("image/run.ps1 requires os: windows")
-    if folder.image_dockerfile is None and manifest.image.ref is None:
+    if manifest.image.base_ref is not None and (
+        manifest.os is not OperatingSystem.WINDOWS or folder.image_script is None
+    ):
+        raise TaskDefinitionError("image.base_ref requires os: windows and image/run.ps1")
+    if (
+        folder.image_dockerfile is None
+        and folder.image_script is None
+        and manifest.image.ref is None
+    ):
         raise TaskDefinitionError("solver requires image/Dockerfile or image.ref")
     if (
         folder.image_dockerfile is None

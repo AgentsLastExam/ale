@@ -54,15 +54,26 @@ def test_task_spec_is_strict_core_v1_and_path_independent() -> None:
 
 def test_image_spec_is_explicit_strict_and_nonblank() -> None:
     assert ImageSpec(kind="vm", ref="ghcr.io/acme/disk:v1").kind is ImageKind.VM
+    assert ImageSpec(kind="vm", base_ref="/images/base.qcow2").ref is None
     for payload in (
         {},
         {"kind": "unknown"},
         {"kind": "container", "ref": "   "},
         {"kind": "container", "build": "image"},
         {"kind": "vm", "path": "/tmp/disk.qcow2"},
+        {"kind": "vm", "base_ref": "   "},
+        {"kind": "vm", "ref": "task.qcow2", "base_ref": "base.qcow2"},
+        {"kind": "container", "base_ref": "base:latest"},
     ):
         with pytest.raises(ValidationError):
             ImageSpec.model_validate(payload)
+
+    with pytest.raises(ValidationError, match=r"verify\.image\.base_ref"):
+        VerifySpec(
+            environment_mode="separate",
+            resources=VerifierResources(cpus=1, memory_mb=512, storage_mb=None, gpus=0),
+            image={"kind": "vm", "base_ref": "/images/base.qcow2"},
+        )
 
 
 def test_task_spec_hash_tracks_rendered_semantics() -> None:

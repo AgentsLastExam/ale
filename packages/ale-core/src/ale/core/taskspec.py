@@ -75,13 +75,25 @@ class ImageSpec(BaseModel):
 
     kind: ImageKind
     ref: str | None = Field(default=None, min_length=1)
+    base_ref: str | None = Field(default=None, min_length=1)
 
-    @field_validator("ref")
+    # --- validation ---
+
+    @field_validator("ref", "base_ref")
     @classmethod
     def _nonblank_ref(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
             raise ValueError("image ref must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def _valid_source(self) -> Self:
+        if self.base_ref is not None:
+            if self.ref is not None:
+                raise ValueError("image.ref and image.base_ref are mutually exclusive")
+            if self.kind is not ImageKind.VM:
+                raise ValueError("image.base_ref requires image.kind: vm")
+        return self
 
 
 class Resources(BaseModel):
@@ -253,6 +265,10 @@ class VerifySpec(BaseModel):
 
     @model_validator(mode="after")
     def _valid_topology(self) -> Self:
+        if self.image is not None and self.image.base_ref is not None:
+            raise ValueError(
+                "verify.image.base_ref is unsupported; reuse the solver image or use a ref"
+            )
         if self.environment_mode is VerificationMode.SHARED:
             if self.image is not None or self.resources is not None:
                 raise ValueError("shared verification cannot declare image or resources")

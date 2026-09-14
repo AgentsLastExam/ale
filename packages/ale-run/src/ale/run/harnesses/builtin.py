@@ -43,6 +43,7 @@ class NopHarness(AutonomousHarness):
     """
 
     name = "nop"
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
 
     def version(self) -> str:
         return "1"
@@ -67,6 +68,7 @@ class ScriptedPolicyHarness(StepwisePolicy):
     """
 
     name = "scripted"
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
 
     def __init__(self, script: Sequence[Sequence[DesktopAction]] = ()) -> None:
         self._script = [list(batch) for batch in script]
@@ -95,6 +97,7 @@ class OracleHarness(AutonomousHarness):
     """
 
     name = "oracle"
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
 
     def version(self) -> str:
         return "1"

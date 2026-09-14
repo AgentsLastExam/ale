@@ -21,7 +21,7 @@ from ale.core.harness import (
     TrajectoryParseContext,
 )
 from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer, StreamableHttpMcpServer
+from ale.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
 from ale.core.trajectory import (
     AtifAgent,
     AtifContentPart,
@@ -59,6 +59,7 @@ class CodexCliSettings(BaseModel):
 
 class CodexCliHarness(AutonomousHarness):
     name = "codex-cli"
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
     resume_support = ResumeSupport.NATIVE
     logs = (TRANSCRIPT_NAME, SESSION_NAME, STDERR_NAME)
     __slots__ = ("cli_version", "settings")

@@ -19,7 +19,8 @@ lifecycle. Tasks build from these bases rather than shared domain images.
 Every Task explicitly declares or defaults its OS and every solver and dedicated verifier
 declares `image.kind: container|vm` and may declare `image.ref`. A fixed local Dockerfile
 wins on Linux; without it, the matching Provider acquires the ref. Windows Tasks may add
-`image/run.ps1` to install and configure a VM based on `image.ref`. Linux VM preparation
+`image/run.ps1` to install and configure a VM based on `image.base_ref`, mutually exclusive
+with the direct-use `image.ref`. Linux VM preparation
 uses ALE's versioned OCI materializer. The Windows base is a
 private licensed seed plus a maintained ALE post-processing recipe, not a public ISO
 build. Task authors do not own guestd, bootloader, partition, mkosi, or qcow conversion

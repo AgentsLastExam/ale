@@ -23,7 +23,7 @@ from ale.core.harness import (
     TrajectoryParseContext,
 )
 from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer, StreamableHttpMcpServer
+from ale.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
 from ale.core.trajectory import (
     AtifAgent,
     AtifContentPart,
@@ -84,6 +84,7 @@ class GrokBuildSettings(BaseModel):
 
 class GrokBuildHarness(AutonomousHarness):
     name = "grok-build"
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
     resume_support = ResumeSupport.NATIVE
     logs = (TRANSCRIPT_NAME, STDERR_NAME, CHAT_NAME, UPDATES_NAME)
     __slots__ = ("cli_version", "gateway_dialect", "settings")

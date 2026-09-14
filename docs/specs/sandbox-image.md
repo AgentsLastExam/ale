@@ -2,7 +2,7 @@
 
 Normative for standard container and VM Tasks. Every solver and dedicated verifier
 declares `image.kind`. Linux uses a Dockerfile or `image.ref`; Windows uses `image.ref`
-with optional `image/run.ps1` preparation.
+directly, or builds `image/run.ps1` on `image.base_ref`.
 
 ## ALE base images
 
@@ -59,8 +59,11 @@ build context. `image/assets` is already inside that context and uses ordinary r
 
 Before any solver model call, ALE builds an existing Linux Dockerfile or Windows
 `image/run.ps1`; failure is terminal. Windows scripts require `image.kind: vm` and use
-`image.ref` as the base. Without local build instructions, the matching Provider resolves
-the declared ref. Container and VM refs are both supported and recorded immutably.
+`image.base_ref` as the base. `image.ref` always names an image for direct use and is
+mutually exclusive with `base_ref`. A base ref requires the Windows solver image script;
+it is unsupported for Linux and separate verifier declarations. Without local build
+instructions, the matching Provider resolves the declared ref. Container and VM refs are
+both supported and recorded immutably.
 
 The authored image source digest excludes `image/assets` so normal Task identity and
 asset provenance remain separate. Docker still consumes current asset bytes natively and

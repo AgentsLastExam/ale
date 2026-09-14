@@ -43,7 +43,7 @@ from ale.core.harness import (
     TrajectoryParseContext,
 )
 from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer, StreamableHttpMcpServer
+from ale.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
 from ale.core.trace import DesktopAction
 from ale.core.trajectory import (
     AtifAgent,
@@ -135,6 +135,7 @@ class ClaudeCodeHarness(AutonomousHarness):
     """Runs the Claude Code CLI inside the sandbox."""
 
     name = "claude-code"
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
     resume_support = ResumeSupport.NATIVE
 
     #: Both streams are in here: the CLI is run with them interleaved on purpose, because
@@ -216,27 +217,7 @@ class ClaudeCodeHarness(AutonomousHarness):
         )
 
     async def install(self, sandbox: Sandbox) -> str:
-        """Put the pinned CLI in place, whatever the image happened to ship.
-
-        Three cases, and the middle one is the one that matters:
-
-        * **Missing** — install it. An image is not required to bake an agent, and a run
-          that fails because the image is not the one somebody assumed is a run that
-          reports nothing about the model.
-        * **Present but a different version** — install the pinned one anyway. This is
-          what makes an experiment controlled: "claude-code" is not a version, and two
-          runs a month apart against an image tagged ``latest`` are two different agents
-          being compared as though they were one. It is also what lets the pin move
-          without rebuilding every image.
-        * **Present and already the pinned version** — do nothing, and cost no network.
-
-        Installed under the agent's own ``~/.local`` and prepended to ``PATH`` so it wins
-        over any baked copy. Prepending unconditionally rather than checking membership:
-        the directory can already be on ``PATH`` but *behind* the one holding the stale
-        copy, which looks identical until you read the version that actually ran.
-
-        Follows ``agents-last-exam``'s deployer, which had already worked all of this out.
-        """
+        """Install the pinned CLI under the agent's ~/.local unless that version exists."""
         # Resolved rather than assumed: the home directory belongs to the image, which
         # declares the account but not where it lives.
         home = await agent_home(sandbox)
@@ -259,16 +240,6 @@ class ClaudeCodeHarness(AutonomousHarness):
             )
             if not result.ok:
                 detail = (result.stderr or result.stdout)[-500:]
-                if "EAI_AGAIN" in detail or "ENOTFOUND" in detail:
-                    # The ordinary case, and worth naming: a sandbox has no egress but the
-                    # gateway, so an image that does not carry the pinned build cannot
-                    # obtain it. Both ways out are the operator's to choose.
-                    raise AgentError(
-                        f"this image has {installed or 'no claude'} and the run pinned "
-                        f"{wanted}, but the sandbox has no network to install it. Either "
-                        f"rebuild the image with CLAUDE_CODE_VERSION={wanted}, or run a "
-                        f"task whose network policy reaches a registry."
-                    )
                 raise AgentError(f"could not install {spec}: {detail}")
             installed = await self._installed_version(sandbox, home, env)
 

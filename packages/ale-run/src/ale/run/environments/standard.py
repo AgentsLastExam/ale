@@ -138,6 +138,7 @@ class StandardEnvironment(Environment):
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
         spec = task.spec
         if self.agent_enabled:
+            self.harness.validate_os(spec.os)
             self.harness.validate_resources(ctx.agent_resources)
         sandbox = await self._timed(ctx, Phase.PROVISION, self._provision(ctx))
         try:

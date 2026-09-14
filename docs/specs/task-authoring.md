@@ -33,8 +33,8 @@ tasks/my_task/
 
 Required files are `task.yaml`, `instruction.md`, and the verify/oracle entry for the
 declared OS: `run.sh` for Linux or `run.ps1` for Windows. Linux builds `image/Dockerfile`
-or uses `image.ref`. Windows builds `image/run.ps1` on `image.ref`, or uses the ref directly
-when no image script exists.
+or uses `image.ref`. Windows builds `image/run.ps1` on `image.base_ref`, or directly uses
+`image.ref` without an image script. `ref` and `base_ref` are mutually exclusive.
 
 Task source, scripts, manifests, and ordinary small fixtures are tracked by Git. `assets/` is for
 data managed separately from source because of its size or lifecycle. Assets live under the stage
@@ -65,7 +65,7 @@ os: linux                           # optional: linux | windows; default: linux
 
 image:                              # required initial sandbox image
   kind: container                   # required: container | vm
-  # ref: registry.example/image:tag # required without Dockerfile; always required on Windows
+  # ref: registry.example/image:tag # use an existing image directly
 
 resources:                          # optional solver allocation; defaults shown
   cpus: 1                           # integer >= 1
@@ -167,9 +167,17 @@ COPY assets/corpus.json /home/user/input/corpus.json
 For a Linux VM Task, use the VM base as the final stage. ALE converts that OCI image into the bootable VM;
 Task code does not implement boot or disk assembly.
 
-Windows Tasks declare `os: windows`, `image.kind: vm`, and `image.ref` pointing to the
-private Windows base. Put installation and configuration in `image/run.ps1`; Dockerfiles
-are unsupported on Windows. The base includes WinGet and Chocolatey. For example:
+Windows image builds declare a base and provide `image/run.ps1`:
+
+```yaml
+os: windows
+image:
+  kind: vm
+  base_ref: /path/to/windows-base.qcow2
+```
+
+The base includes WinGet and Chocolatey. Put installation and configuration in
+`image/run.ps1`; Dockerfiles are unsupported on Windows. For example:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -187,8 +195,10 @@ installer reboots; builds requiring a mid-script restart are unsupported. ALE ow
 Build-only materials are removed before saving; copy required files to their final locations.
 Only `image/` is staged.
 The whole build is cached by base, builder, and all image inputs including assets.
-Without `image/run.ps1`, the ref is used directly. Windows separate verification reuses
-the solver image or supplies `verify.image.ref`.
+To use a prepared image directly, declare `image.ref` and omit `image/run.ps1` and
+`image.base_ref`. `base_ref` is supported only for Windows solver builds and requires
+the script. Windows separate verification reuses the solver image or supplies
+`verify.image.ref`.
 
 ## setup/
 

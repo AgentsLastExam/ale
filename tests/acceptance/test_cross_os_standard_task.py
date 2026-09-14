@@ -122,6 +122,10 @@ async def test_windows_task_image_installs_software_and_reuses_cache(
         pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows qcow2")
     monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
     folder = _write_task(tmp_path / "tasks", OperatingSystem.WINDOWS)
+    manifest_path = folder / "task.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest["image"] = {"kind": "vm", "base_ref": str(image)}
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
     (folder / "image/assets").mkdir(parents=True)
     (folder / "image/assets/proof.txt").write_text("built from image materials")
     (folder / "image/run.ps1").write_text(

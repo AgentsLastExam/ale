@@ -134,7 +134,7 @@ class AgentConfig(BaseModel):
     model: str = "claude-opus-4-8"
     authentication: Literal["auto", "api-key", "subscription"] = "auto"
     version: str | None = Field(
-        default=None, description="Pin the agent build; None uses the image"
+        default=None, description="Pin the agent build; None uses the harness default version"
     )
     max_steps: int = Field(
         default=100,

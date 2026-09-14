@@ -76,18 +76,21 @@ def test_ref_only_solver_has_no_local_source_digest(tmp_path: Path) -> None:
     assert loaded.image_source_digest is None
 
 
-def _windows_task(tmp_path: Path) -> Path:
+def _windows_task(tmp_path: Path, *, build: bool = False) -> Path:
     task = scaffold_task(tmp_path / "windows-demo")
+    reference = "base_ref" if build else "ref"
     manifest = task / "task.yaml"
     manifest.write_text(
         manifest.read_text()
         .replace("name: windows-demo", "name: windows-demo\nos: windows")
-        .replace("kind: container", "kind: vm\n  ref: /images/windows-base.qcow2")
+        .replace("kind: container", f"kind: vm\n  {reference}: /images/windows-base.qcow2")
         .replace("/home/user/output", r"C:\Users\user\output")
     )
     for stage in ("verify", "oracle"):
         (task / stage / "run.sh").rename(task / stage / "run.ps1")
     (task / "image" / "Dockerfile").unlink()
+    if build:
+        (task / "image" / "run.ps1").write_text("Write-Output 'build'\n")
     return task
 
 
@@ -96,17 +99,21 @@ def test_windows_task_uses_powershell_stage_entries(tmp_path: Path) -> None:
     loaded = load_tasks(task)[0]
     assert loaded.spec.os.value == "windows"
     assert loaded.image_source_digest is None
+    assert loaded.spec.image.ref == "/images/windows-base.qcow2"
+    assert loaded.spec.image.base_ref is None
     assert loaded.folder.stage_entry("verify", loaded.spec.os).name == "run.ps1"  # type: ignore[union-attr]
 
 
 def test_windows_image_script_tracks_source_and_accepts_assets(tmp_path: Path) -> None:
-    task = _windows_task(tmp_path)
+    task = _windows_task(tmp_path, build=True)
     entry = task / "image" / "run.ps1"
     entry.write_text("$ErrorActionPreference = 'Stop'\n& .\\install.ps1\n")
     helper = task / "image" / "install.ps1"
     helper.write_text("choco install -y git\n")
     loaded = load_tasks(task)[0]
     assert loaded.folder.image_script == entry
+    assert loaded.spec.image.base_ref == "/images/windows-base.qcow2"
+    assert loaded.spec.image.ref is None
     assert loaded.image_source_digest is not None
     assert lint_repository(task) == []
 
@@ -127,7 +134,10 @@ def test_windows_image_script_tracks_source_and_accepts_assets(tmp_path: Path) -
     ("invalid", "message"),
     [
         ("dockerfile", "image/Dockerfile"),
-        ("missing-ref", "image.ref"),
+        ("missing-base-ref", "image.base_ref"),
+        ("ref-with-script", "image.base_ref"),
+        ("both-refs", "mutually exclusive"),
+        ("missing-script", "image/run.ps1"),
         ("container", "image.kind: vm"),
         ("verifier-dockerfile", "reuse the solver image or use a ref"),
     ],
@@ -135,13 +145,20 @@ def test_windows_image_script_tracks_source_and_accepts_assets(tmp_path: Path) -
 def test_windows_image_contract_rejects_invalid_sources(
     tmp_path: Path, invalid: str, message: str
 ) -> None:
-    task = _windows_task(tmp_path)
-    (task / "image" / "run.ps1").write_text("Write-Output 'build'\n")
+    task = _windows_task(tmp_path, build=True)
     manifest = task / "task.yaml"
     if invalid == "dockerfile":
         (task / "image" / "Dockerfile").write_text("FROM scratch\n")
-    elif invalid == "missing-ref":
-        manifest.write_text(manifest.read_text().replace("  ref: /images/windows-base.qcow2\n", ""))
+    elif invalid == "missing-base-ref":
+        manifest.write_text(
+            manifest.read_text().replace("  base_ref: /images/windows-base.qcow2\n", "")
+        )
+    elif invalid == "ref-with-script":
+        manifest.write_text(manifest.read_text().replace("base_ref:", "ref:"))
+    elif invalid == "both-refs":
+        manifest.write_text(manifest.read_text().replace("kind: vm", "kind: vm\n  ref: task.qcow2"))
+    elif invalid == "missing-script":
+        (task / "image" / "run.ps1").unlink()
     elif invalid == "container":
         manifest.write_text(manifest.read_text().replace("kind: vm", "kind: container"))
     else:
@@ -149,6 +166,16 @@ def test_windows_image_contract_rejects_invalid_sources(
     with pytest.raises(TaskDefinitionError, match=message):
         load_tasks(task)
     assert any(message in finding.message for finding in lint_repository(task))
+
+
+def test_linux_base_ref_is_rejected_instead_of_ignored(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text().replace("kind: container", "kind: vm\n  base_ref: base.qcow2")
+    )
+    with pytest.raises(TaskDefinitionError, match=r"image\.base_ref requires os: windows"):
+        load_tasks(task)
 
 
 def test_linux_powershell_helper_still_requires_dockerfile(tmp_path: Path) -> None:

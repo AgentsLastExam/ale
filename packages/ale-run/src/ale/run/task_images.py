@@ -123,11 +123,11 @@ async def prepare_task_image_result(
     provider = providers.get(spec.kind)
     folder = _task_folder(task)
     if task.spec.os is OperatingSystem.WINDOWS and folder.image_script is not None:
-        if spec.kind is not ImageKind.VM or spec.ref is None:
-            raise TaskDefinitionError("image/run.ps1 requires image.kind=vm and image.ref as base")
+        if spec.kind is not ImageKind.VM or spec.base_ref is None:
+            raise TaskDefinitionError("image/run.ps1 requires image.kind=vm and image.base_ref")
         base = await _stage(
             "base-resolution",
-            provider.prepare_image(ImageRef(kind=spec.kind, reference=spec.ref)),
+            provider.prepare_image(ImageRef(kind=spec.kind, reference=spec.base_ref)),
         )
         candidate, reused = await _stage("windows-build", _prepare_windows_image(task, base))
         image = await _stage("artifact-check", provider.prepare_image(candidate))

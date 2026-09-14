@@ -814,16 +814,6 @@ RUN set -eux; \
     rm /tmp/node.tar.xz; \
     node --version; npm --version
 
-# One agent, at one pinned version.
-#
-# Which agent a run uses is a property of the experiment, not of the image, and the
-# harness treats it that way: it compares what is here against what the run pinned and
-# installs the difference. What makes baking necessary anyway is that a sandbox has no
-# network — the only egress is the gateway — so an image that ships nothing can only
-# ever run an agent in a task that opened its network, and every GUI task is closed.
-#
-# So this is a cache of the default, not a decision. A run that pins another version and
-# can reach a registry gets that version instead, ahead of this one on PATH.
 # Bake the guest service. Every exec, file transfer, screenshot and input event in a
 # sandbox goes through this, over stdio for containers and TCP for virtual machines.
 # Stdlib-only by contract, so it runs on whatever interpreter an image happens to have.

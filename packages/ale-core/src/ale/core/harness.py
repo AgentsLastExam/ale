@@ -193,6 +193,7 @@ class Harness(ABC):
 
     name: str
     family: HarnessFamily
+    supported_os: tuple[OperatingSystem, ...] = (OperatingSystem.LINUX,)
 
     logs: tuple[str, ...] = ()
     """Files this harness writes about its own run, relative to the agent's home.
@@ -222,8 +223,13 @@ class Harness(ABC):
         if resources.skills or resources.mcp_servers:
             raise AgentUnsupportedError(f"{self.name} does not support agent resources")
 
+    def validate_os(self, operating_system: OperatingSystem) -> None:
+        """Reject unsupported guest systems before provisioning or installation."""
+        if operating_system not in self.supported_os:
+            raise AgentUnsupportedError(f"{self.name} does not support {operating_system.value}")
+
     async def install(self, sandbox: Sandbox) -> str:
-        """Prepare the sandbox. Default: nothing, because the image already has it."""
+        """Prepare the sandbox. Default: no installation required."""
         return self.version()
 
     async def install_resources(

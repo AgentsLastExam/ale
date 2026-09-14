@@ -15,16 +15,35 @@ from ale.core.harness import (
     TrajectoryParseContext,
 )
 from ale.core.sandbox import ExecResult
-from ale.core.taskspec import StdioMcpServer
+from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.harnesses.builtin import OracleHarness
+from ale.run.harnesses.builtin import NopHarness, OracleHarness, ScriptedPolicyHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
+from ale.run.harnesses.computer_use import ComputerUseHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness, _supported_node
 from ale.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize(
+    "harness",
+    [
+        ClaudeCodeHarness(),
+        CodexCliHarness(),
+        GrokBuildHarness(),
+        OpenClawCliHarness(),
+        NopHarness(),
+        OracleHarness(),
+        ScriptedPolicyHarness(),
+        ComputerUseHarness(),
+    ],
+)
+def test_shipped_harnesses_declare_both_guest_systems(harness) -> None:
+    for operating_system in OperatingSystem:
+        harness.validate_os(operating_system)
 
 
 class FakeSandbox:

@@ -87,7 +87,7 @@ class _Registry:
 @pytest.fixture
 def windows_task(write_task_repo) -> Task:  # type: ignore[no-untyped-def]
     repository = write_task_repo(
-        image={"kind": "vm", "ref": "/images/windows.qcow2"},
+        image={"kind": "vm", "base_ref": "/images/windows.qcow2"},
         with_image_dockerfile=False,
         manifest_suffix="os: windows\n",
     )
@@ -125,6 +125,9 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
     monkeypatch.setattr(images, "_valid_qcow2", valid)
     registry = _Registry()
     first = await prepare_task_image_result(windows_task, registry)  # type: ignore[arg-type]
+    assert registry.get(ImageKind.VM).inputs[0] == ImageRef(
+        kind=ImageKind.VM, reference="/images/windows.qcow2"
+    )
     second = await prepare_task_image_result(windows_task, registry)  # type: ignore[arg-type]
     assert len(builds) == 1
     assert [step.name for step in first.steps] == [

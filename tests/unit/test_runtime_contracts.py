@@ -173,7 +173,7 @@ class TestRunLock:
             TaskSpec(
                 name="windows",
                 os="windows",
-                image={"kind": "vm", "ref": "/images/base.qcow2"},
+                image={"kind": "vm", "base_ref": "/images/base.qcow2"},
                 instruction="Complete the task.",
             ),
             resolved_image=ResolvedImage(
@@ -187,6 +187,8 @@ class TestRunLock:
             prepared_image=prepared,
         )
         restored = RunLock.model_validate_json(lock.model_dump_json())
+        assert restored.image.declaration.base_ref == "/images/base.qcow2"
+        assert restored.image.declaration.ref is None
         assert restored.image.builder_identity == DIGEST
         assert restored.image.base_materials == (DIGEST,)
         assert restored.image.oci_identity is None

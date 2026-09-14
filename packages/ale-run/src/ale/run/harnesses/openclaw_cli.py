@@ -23,7 +23,7 @@ from ale.core.harness import (
     TrajectoryParseContext,
 )
 from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer, StreamableHttpMcpServer
+from ale.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
 from ale.core.trajectory import (
     AtifAgent,
     AtifContentPart,
@@ -82,6 +82,7 @@ class OpenClawCliSettings(BaseModel):
 
 class OpenClawCliHarness(AutonomousHarness):
     name = "openclaw-cli"
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
     resume_support = ResumeSupport.NATIVE
     logs = (TRANSCRIPT_NAME, RESULT_NAME, STDERR_NAME)
     __slots__ = ("cli_version", "settings")

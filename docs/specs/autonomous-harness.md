@@ -26,7 +26,7 @@ resource.
 
 ## Shipped Integrations
 
-ALE ships these official upstream agent programs:
+ALE integrates these official upstream agent programs:
 
 | Harness | Pinned package | Gateway dialect | Public settings |
 |---------|----------------|-----------------|-----------------|
@@ -36,8 +36,15 @@ ALE ships these official upstream agent programs:
 | `openclaw-cli` | `openclaw@2026.7.1` | OpenAI Responses | `provider`, `thinking`, `timeout_seconds`, `tool_profile`, `tools_allow`, `tools_deny`, `model_params` |
 
 The npm integrations use the official packages above. ALE does not install a fork or
-carry agent-program patches. The base images pin Node.js 24.15.0, which satisfies the
-current packages' runtime requirements.
+carry agent-program patches. Bases provide runtimes, not agent CLI packages; they pin
+Node.js 24.15.0. Each run installs and configures the selected CLI before applying the
+Task network policy. `agent.version` selects an exact version; omitting it uses the
+adapter's pinned default. An already matching installation may be reused.
+
+Harnesses declare `supported_os` and validate it before Sandbox creation; the CLI also
+checks it before image preparation. The default is Linux only. All four shipped CLI
+adapters explicitly support Linux and Windows; unsupported systems raise
+`AgentUnsupportedError` before installation.
 
 On Windows, the base also supplies Git for Windows at `C:/Program Files/Git` and
 puts its `bin` and `usr/bin` directories on `PATH`. Harnesses use Git Bash to launch
