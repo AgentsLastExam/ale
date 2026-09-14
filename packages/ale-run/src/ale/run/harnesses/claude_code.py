@@ -57,6 +57,7 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.run.agent_resources import continuation_fingerprint
+from ale.run.harnesses._npm import agent_home, agent_path, bash_command, npm_command, npm_env
 from ale.run.subscription import classify_subscription_error
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
@@ -174,7 +175,7 @@ class ClaudeCodeHarness(AutonomousHarness):
         session: HarnessSession,
         resources: EffectiveAgentResources,
     ) -> None:
-        root = PurePosixPath(session.home) / ".claude-config" / "skills"
+        root = agent_path(session.home) / ".claude-config" / "skills"
         await sandbox.exec(["mkdir", "-p", str(root)], identity=Identity.AGENT)
         for skill in resources.skills:
             target = root / skill.name
@@ -207,7 +208,7 @@ class ClaudeCodeHarness(AutonomousHarness):
                 raise ConfigError(f"unsupported MCP transport for {resolved.name}")
             mcp_servers[resolved.name] = native
 
-        config_path = PurePosixPath(session.home) / ".claude-config" / "mcp.json"
+        config_path = agent_path(session.home) / ".claude-config" / "mcp.json"
         await sandbox.write_file(
             config_path,
             json.dumps({"mcpServers": mcp_servers}, sort_keys=True).encode(),
@@ -238,12 +239,12 @@ class ClaudeCodeHarness(AutonomousHarness):
         """
         # Resolved rather than assumed: the home directory belongs to the image, which
         # declares the account but not where it lives.
-        home = await sandbox.exec(["sh", "-c", "echo $HOME"], identity=Identity.AGENT)
-        prefix = f"{home.stdout.strip() or '/home/user'}/{CLI_PREFIX}"
-        path = f"{prefix}/bin:/usr/local/bin:/usr/bin:/bin"
+        home = await agent_home(sandbox)
+        prefix = f"{home}/{CLI_PREFIX}"
+        env = await npm_env(sandbox, home)
 
         wanted = self.cli_version or DEFAULT_CLI_VERSION
-        installed = await self._installed_version(sandbox, path)
+        installed = await self._installed_version(sandbox, home, env)
 
         if installed != wanted:
             spec = f"@anthropic-ai/claude-code@{wanted}"
@@ -251,8 +252,8 @@ class ClaudeCodeHarness(AutonomousHarness):
             # root's prefix is one the unprivileged account may not be able to execute.
             # `--force` so a same-version residue under the prefix is overwritten cleanly.
             result = await sandbox.exec(
-                ["npm", "install", "-g", "--force", "--prefix", prefix, spec],
-                env={"npm_config_cache": f"{prefix}/.npm-cache"},
+                npm_command(home, "install", "-g", "--force", "--prefix", prefix, spec),
+                env=env,
                 timeout_sec=900,  # a cold install on an image with no cache is minutes
                 identity=Identity.AGENT,
             )
@@ -269,7 +270,7 @@ class ClaudeCodeHarness(AutonomousHarness):
                         f"task whose network policy reaches a registry."
                     )
                 raise AgentError(f"could not install {spec}: {detail}")
-            installed = await self._installed_version(sandbox, path)
+            installed = await self._installed_version(sandbox, home, env)
 
         if installed != wanted:
             raise AgentError(
@@ -278,14 +279,18 @@ class ClaudeCodeHarness(AutonomousHarness):
             )
         return installed
 
-    async def _installed_version(self, sandbox: Sandbox, path: str) -> str | None:
+    async def _installed_version(
+        self, sandbox: Sandbox, home: str, env: dict[str, str]
+    ) -> str | None:
         """What ``claude --version`` says, or ``None`` when there is no claude."""
         # Through a shell, so "there is no claude" is an exit code rather than an
         # exception: the guest service raises when it cannot find a binary at all, and
         # the missing case is the ordinary one here, not an error.
         probe = await sandbox.exec(
-            ["sh", "-c", "command -v claude >/dev/null 2>&1 && claude --version"],
-            env={"PATH": path},
+            bash_command(
+                home, "command -v claude >/dev/null 2>&1 && claude --version", login=False
+            ),
+            env=env,
             timeout_sec=60,
             identity=Identity.AGENT,
         )
@@ -333,14 +338,14 @@ class ClaudeCodeHarness(AutonomousHarness):
                 "model, settings, or effective resources changed since launch"
             )
         state = await sandbox.exec(
-            [
-                "sh",
-                "-c",
+            bash_command(
+                session.home,
                 'find "$CLAUDE_CONFIG_DIR/projects" -type f '
                 f"-name {shlex.quote(continuation.native_session_id + '.jsonl')} "
                 "-print -quit | grep -q .",
-            ],
-            env=self._env(session),
+                login=False,
+            ),
+            env={**self._env(session), **await npm_env(sandbox, session.home)},
             identity=Identity.AGENT,
         )
         if not state.ok:
@@ -366,9 +371,9 @@ class ClaudeCodeHarness(AutonomousHarness):
         resume: bool,
         timeout_sec: float,
     ) -> AgentRun:
-        home = PurePosixPath(session.home)
+        home = agent_path(session.home)
         transcript_path = home / TRANSCRIPT_NAME
-        env = self._env(session)
+        env = {**self._env(session), **await npm_env(sandbox, session.home)}
 
         config_path = home / ".claude-config" / "mcp.json"
         mcp_flags = f"--strict-mcp-config --mcp-config {shlex.quote(str(config_path))}"
@@ -376,13 +381,13 @@ class ClaudeCodeHarness(AutonomousHarness):
         # The CLI expects its configuration directory to exist, with these subdirectories
         # in place. It creates neither, and the failures are opaque when they are missing.
         await sandbox.exec(
-            [
-                "sh",
-                "-c",
+            bash_command(
+                session.home,
                 'mkdir -p "$CLAUDE_CONFIG_DIR"/debug "$CLAUDE_CONFIG_DIR"/projects '
                 '"$CLAUDE_CONFIG_DIR"/shell-snapshots "$CLAUDE_CONFIG_DIR"/statsig '
                 '"$CLAUDE_CONFIG_DIR"/todos',
-            ],
+                login=False,
+            ),
             env=env,
             identity=Identity.AGENT,
         )
@@ -413,11 +418,11 @@ class ClaudeCodeHarness(AutonomousHarness):
             f'printf "%s" "$prompt" | '
             f"claude --verbose --output-format=stream-json {self._flags()} "
             f"{mcp_flags} {selector} --print "
-            f"{redirect} {transcript_path} 2>&1"
+            f"{redirect} {shlex.quote(str(transcript_path))} 2>&1"
         )
 
         result = await sandbox.exec(
-            ["bash", "-lc", command],
+            bash_command(session.home, command),
             cwd=str(home),
             env={**env, prompt_var: instruction},
             timeout_sec=timeout_sec,
@@ -807,7 +812,7 @@ class ClaudeCodeHarness(AutonomousHarness):
         one model a run declared is what makes a third-party endpoint usable at all.
         Borrowed from Harbor, which learned it the same way.
         """
-        config_dir = PurePosixPath(session.home) / ".claude-config"
+        config_dir = agent_path(session.home) / ".claude-config"
         env = {
             "ANTHROPIC_MODEL": session.model,
             # Telemetry has nowhere to go under a deny-all policy, and an agent retrying a
@@ -819,12 +824,6 @@ class ClaudeCodeHarness(AutonomousHarness):
             # Somewhere writable that belongs to the agent. Left unset, the CLI writes to a
             # home directory it may not own.
             "CLAUDE_CONFIG_DIR": str(config_dir),
-            # The same search path `install` verified against. Without it the launch can
-            # run a different binary from the one whose version was checked and recorded,
-            # and provenance would name a build that never ran.
-            "PATH": (
-                f"{PurePosixPath(session.home) / CLI_PREFIX}/bin:/usr/local/bin:/usr/bin:/bin"
-            ),
         }
         if session.authentication == "subscription":
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"

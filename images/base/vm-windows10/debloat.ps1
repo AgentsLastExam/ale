@@ -56,8 +56,6 @@ Invoke-Uninstaller "${env:ProgramFiles(x86)}\VideoLAN\VLC\uninstall.exe" @("/S")
 Invoke-Uninstaller "$env:SystemDrive\Users\$AgentUser\AppData\Local\Programs\Microsoft VS Code\unins000.exe" `
     @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
 Invoke-Uninstaller "$env:ProgramFiles\7-Zip\Uninstall.exe" @("/S")
-Invoke-Uninstaller "$env:ProgramFiles\Git\unins000.exe" `
-    @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
 
 $clickToRun = "$env:ProgramFiles\Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe"
 Invoke-Uninstaller $clickToRun @(
@@ -114,7 +112,7 @@ $uninstallRoots = @(
 $uninstallRoots += Get-ChildItem "Registry::HKEY_USERS" -ErrorAction SilentlyContinue |
     ForEach-Object { Join-Path $_.PSPath "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" } |
     Where-Object { Test-Path -LiteralPath $_ }
-$removedProducts = "7-Zip|GIMP|Git|GooGet|Google Chrome|Google Cloud SDK|LibreOffice|" +
+$removedProducts = "7-Zip|GIMP|GooGet|Google Chrome|Google Cloud SDK|LibreOffice|" +
     "Microsoft 365|OneDrive|" +
     "Office 16 Click-to-Run|Microsoft Visual Studio Code|Mozilla|Thunderbird|Nmap|Npcap|" +
     "VLC media player|VMware Tools|VNC Server|Microsoft Update Health Tools|" +
@@ -143,7 +141,6 @@ $removeTrees = @(
     "$env:ProgramData\VMware",
     "$env:ProgramFiles\Google",
     "$env:ProgramFiles\7-Zip",
-    "$env:ProgramFiles\Git",
     "${env:ProgramFiles(x86)}\Google",
     "$env:ProgramFiles\GIMP 2",
     "$env:ProgramFiles\LibreOffice",

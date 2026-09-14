@@ -17,7 +17,7 @@ from ale.core.ids import content_hash
 from ale.core.lock import RunLock
 from ale.core.result import ResultRecord
 from ale.core.sandbox import ImageKind, PreparedTaskImage, Sandbox, SandboxRequest, SandboxRole
-from ale.core.taskspec import VerificationMode
+from ale.core.taskspec import OperatingSystem, VerificationMode
 from ale.core.validation import (
     TaskValidationObservation,
     ValidationAttempt,
@@ -293,6 +293,7 @@ async def _run_one(
                 task_root=task.folder.root,
                 task_source=resolved.source,
                 network=task.spec.network,
+                operating_system=task.spec.os,
             )
             harness.validate_resources(agent_resources)
             inputs = ProvenanceInputs(
@@ -731,7 +732,10 @@ async def _prepare_images(
                 "ref": spec.ref,
             }
         )
-        image = by_source.get(key)
+        windows_build = (
+            task.spec.os is OperatingSystem.WINDOWS and task.folder.image_script is not None
+        )
+        image = None if windows_build else by_source.get(key)
         if image is None:
             prepared = await prepare_task_image_result(task, providers)
             image = prepared.image

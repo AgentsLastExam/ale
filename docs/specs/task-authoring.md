@@ -12,8 +12,8 @@ tasks/my_task/
 ├── task.yaml                    # Task configuration
 ├── instruction.md              # instruction shown to the evaluated agent
 ├── image/
-│   ├── Dockerfile              # reproducible initial environment
-│   ├── install.sh              # optional image-build helper
+│   ├── Dockerfile              # Linux; run.ps1 on Windows
+│   ├── install.sh              # optional image-build helper (install.ps1 on Windows)
 │   └── assets/                 # optional separately managed image data
 ├── setup/                       # optional per-episode initialization
 │   ├── run.sh                   # Linux; run.ps1 on Windows
@@ -32,8 +32,9 @@ tasks/my_task/
 ```
 
 Required files are `task.yaml`, `instruction.md`, and the verify/oracle entry for the
-declared OS: `run.sh` for Linux or `run.ps1` for Windows. The Task must use either
-`image/Dockerfile` or `image.ref`.
+declared OS: `run.sh` for Linux or `run.ps1` for Windows. Linux builds `image/Dockerfile`
+or uses `image.ref`. Windows builds `image/run.ps1` on `image.ref`, or uses the ref directly
+when no image script exists.
 
 Task source, scripts, manifests, and ordinary small fixtures are tracked by Git. `assets/` is for
 data managed separately from source because of its size or lifecycle. Assets live under the stage
@@ -64,7 +65,7 @@ os: linux                           # optional: linux | windows; default: linux
 
 image:                              # required initial sandbox image
   kind: container                   # required: container | vm
-  # ref: registry.example/image:tag # required only when image/Dockerfile is absent
+  # ref: registry.example/image:tag # required without Dockerfile; always required on Windows
 
 resources:                          # optional solver allocation; defaults shown
   cpus: 1                           # integer >= 1
@@ -151,13 +152,9 @@ of initial state required by the Task:
 - container: `ghcr.io/agentslastexam/container-ubuntu22-base:latest` (Ubuntu 22.04);
 - VM: `ghcr.io/agentslastexam/vm-ubuntu24-base:0.1.0` (Ubuntu 24.04).
 
-Windows VM Tasks declare `os: windows` and currently use a private prebuilt qcow2
-reference. ALE does not publish licensed Windows image bytes or offer a general Windows
-image builder.
-
 The submitted initial environment must be reproducible from `image/`; an exploratory sandbox
 snapshot is not Task source. Large build inputs belong in `image/assets/` and are copied by the
-Dockerfile. Image-local scripts may implement non-trivial installation and configuration.
+image build. Image-local scripts may implement non-trivial installation and configuration.
 
 ```dockerfile
 FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest
@@ -167,8 +164,31 @@ RUN /tmp/install.sh && rm /tmp/install.sh
 COPY assets/corpus.json /home/user/input/corpus.json
 ```
 
-For a VM Task, use the VM base as the final stage. ALE converts that OCI image into the bootable VM;
+For a Linux VM Task, use the VM base as the final stage. ALE converts that OCI image into the bootable VM;
 Task code does not implement boot or disk assembly.
+
+Windows Tasks declare `os: windows`, `image.kind: vm`, and `image.ref` pointing to the
+private Windows base. Put installation and configuration in `image/run.ps1`; Dockerfiles
+are unsupported on Windows. The base includes WinGet and Chocolatey. For example:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+choco install -y 7zip --no-progress
+if ($LASTEXITCODE -ne 0) { throw "7zip installation failed: $LASTEXITCODE" }
+Copy-Item .\assets\input.txt "$env:ALE_HOME\input.txt"
+```
+
+`ale prepare TASK` copies `image/` into a temporary Windows VM, runs `run.ps1` with that
+directory as cwd and `ALE_HOME` set to the agent home, then saves the configured qcow2.
+Scripts may use WinGet, Chocolatey, or
+local unattended installers; pin package versions where supported and check native command
+exit codes. Scripts must finish within 30 minutes; nonzero exits fail the build. Suppress
+installer reboots; builds requiring a mid-script restart are unsupported. ALE owns shutdown.
+Build-only materials are removed before saving; copy required files to their final locations.
+Only `image/` is staged.
+The whole build is cached by base, builder, and all image inputs including assets.
+Without `image/run.ps1`, the ref is used directly. Windows separate verification reuses
+the solver image or supplies `verify.image.ref`.
 
 ## setup/
 

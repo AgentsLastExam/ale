@@ -32,7 +32,13 @@ from ale.core.lock import (
     TaskProvenance,
     TaskSource,
 )
-from ale.core.sandbox import Capabilities, ImageRef, ResourceAllocation
+from ale.core.sandbox import (
+    Capabilities,
+    ImageRef,
+    PreparedTaskImage,
+    ResolvedImage,
+    ResourceAllocation,
+)
 from ale.core.taskspec import (
     ImageKind,
     ImageSpec,
@@ -42,6 +48,7 @@ from ale.core.taskspec import (
     TaskSpec,
 )
 from ale.core.trace import TransportCall
+from ale.run.provenance import ProvenanceInputs, build_lock
 
 pytestmark = pytest.mark.unit
 
@@ -142,6 +149,58 @@ class TestRunLock:
 
     def test_pre_release_schema_version_does_not_change(self) -> None:
         assert make_lock().framework.schema_version == 2
+
+    def test_windows_build_identity_survives_provenance_and_rejects_mixed_builders(self) -> None:
+        prepared = PreparedTaskImage(
+            kind="vm",
+            source="solver-local",
+            input_identity=DIGEST,
+            image_source_identity=DIGEST,
+            runtime_ref="/images/task.qcow2",
+            prepared_identity=DIGEST,
+            builder_identity=DIGEST,
+            base_materials=(DIGEST,),
+        )
+        existing = make_lock()
+        lock = build_lock(
+            ProvenanceInputs(
+                source=existing.task.source,
+                agent=existing.agent,
+                gateway=existing.gateway,
+                config_hash=DIGEST,
+                framework=existing.framework,
+            ),
+            TaskSpec(
+                name="windows",
+                os="windows",
+                image={"kind": "vm", "ref": "/images/base.qcow2"},
+                instruction="Complete the task.",
+            ),
+            resolved_image=ResolvedImage(
+                kind="vm",
+                prepared_identity=DIGEST,
+                observed_identity=DIGEST,
+                observed_ref=prepared.runtime_ref,
+            ),
+            allocation=existing.resources.effective.model_copy(update={"provider": "qemu"}),
+            task_digest=DIGEST,
+            prepared_image=prepared,
+        )
+        restored = RunLock.model_validate_json(lock.model_dump_json())
+        assert restored.image.builder_identity == DIGEST
+        assert restored.image.base_materials == (DIGEST,)
+        assert restored.image.oci_identity is None
+        assert restored.image.materializer_identity is None
+
+        for model in (prepared, restored.image):
+            values = model.model_dump(mode="json")
+            for invalid in (
+                {"base_materials": []},
+                {"builder_identity": None},
+                {"oci_identity": DIGEST, "materializer_identity": DIGEST},
+            ):
+                with pytest.raises(ValidationError):
+                    type(model).model_validate(values | invalid)
 
 
 class TestConfigLayering:

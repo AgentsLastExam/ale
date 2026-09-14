@@ -15,19 +15,14 @@ the licensed Windows bytes remain in private storage.
 .\prepare.ps1 -AgentUser user -GuestdSource .\guestd -Compact
 ```
 
-The recipe installs pinned Python and Cua Driver releases, stages guestd under
-`C:\ProgramData\ALE`, registers both interactive-login services, opens guestd only to the
-QEMU runner, removes the GCP/VMware integration and every non-system user application,
-cleans their stale data and uninstall inventory, cleans stable system state, and optionally
-zeroes free space. Only Windows components plus ALE's Python and Cua Driver guest
-dependencies remain. The recipe fixes the system at en-US and UTC; disables update,
+The recipe installs pinned Python, Cua Driver, WinGet, Chocolatey, Node.js/npm and Git Bash.
+It stages guestd under `C:\ProgramData\ALE`, registers the interactive-login services,
+opens guestd only to the QEMU runner, removes GCP/VMware integration and inherited domain
+applications, cleans their stale data and uninstall inventory, cleans stable system state, and optionally
+zeroes free space. The recipe fixes the system at en-US and UTC; disables update,
 rollback, recovery, sleep, hibernation, automatic maintenance and background prompt paths;
 and clears the seed user's credentials, profiles, history, stale startup tasks and window
-placement. Reboot once and
-verify both services before requesting shutdown. The current GCP seed reaches Windows'
-shutdown screen but does not always complete ACPI power-off under the QEMU runner; wait for
-disk I/O to quiesce before stopping the disposable preparation VM. Normal ALE episodes use
-Provider destruction and do not depend on guest ACPI power-off.
+placement. Reboot once and verify both services before requesting shutdown.
 
 Back on the Host, compact the prepared disk with qcow2's zstd compression:
 
@@ -58,6 +53,11 @@ see or control the desktop.
 - guestd provides exec, file transfer, health, lifecycle, and the shared Sandbox protocol.
 - Cua Driver 0.12.6 exclusively provides screenshots and desktop input.
 
-The current Windows path targets in-process Policy Harnesses plus `nop` and `oracle`.
-Autonomous CLI Harness support is separate because their installers and native log paths
-are currently Linux-specific.
+Autonomous CLI Harnesses use native Windows Node.js and Git Bash; their CLI packages are
+installed per run, and model credentials stay on the Host Gateway.
+
+Re-run `prepare.ps1` to update an existing ALE seed. After reboot, run `tools.ps1 -CheckOnly`
+to check package managers, Python, Node.js/npm and Git Bash. Task-specific software belongs
+in the Task's `image/run.ps1`. The login launcher runs guestd elevated only when the Host
+sets the `ale-sudo` SMBIOS serial for image preparation or a Task requesting `sudo`;
+ordinary Tasks retain the limited token.

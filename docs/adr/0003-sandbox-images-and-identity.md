@@ -18,8 +18,9 @@ lifecycle. Tasks build from these bases rather than shared domain images.
 
 Every Task explicitly declares or defaults its OS and every solver and dedicated verifier
 declares `image.kind: container|vm` and may declare `image.ref`. A fixed local Dockerfile
-wins where local building is supported; without it, the matching Provider acquires the
-ref. Linux VM preparation uses ALE's versioned OCI materializer. The Windows base is a
+wins on Linux; without it, the matching Provider acquires the ref. Windows Tasks may add
+`image/run.ps1` to install and configure a VM based on `image.ref`. Linux VM preparation
+uses ALE's versioned OCI materializer. The Windows base is a
 private licensed seed plus a maintained ALE post-processing recipe, not a public ISO
 build. Task authors do not own guestd, bootloader, partition, mkosi, or qcow conversion
 machinery.
@@ -41,6 +42,8 @@ Task may request solver sudo/admin, but the Provider verifies and records the gr
 ## Consequences
 
 Container, VM, and mixed-kind episodes share one Environment. Failures in image
-capability, resource admission, or observed identity stop before scoring. Local VM reuse
-depends on final OCI and materializer identities without scanning the complete disk.
+capability, resource admission, or observed identity stop before scoring. Local Linux VM
+reuse depends on final OCI and materializer identities. Windows reuses the whole build
+from its base, builder, and image inputs; it records builder identity without fabricating
+OCI provenance. Neither path scans the complete output disk.
 Every VM episode cold-boots a fresh overlay; ready snapshots and warm pools are deferred.

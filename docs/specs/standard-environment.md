@@ -54,9 +54,8 @@ egress, and executes `run.sh` on Linux or `run.ps1` on Windows with that directo
 ALE installs the selected Harness and its declared resources, validates staged stdio MCP
 commands, then applies the Task network policy. Autonomous Harnesses launch inside the
 sandbox; Policy Harnesses drive the framework-owned `TaskEnv`. The evaluated solver and
-the validation oracle both run as the image's agent account. Windows currently supports
-Policy Harnesses plus the built-in `nop` and `oracle`; Linux-only autonomous CLI Harnesses
-fail before installation.
+the validation oracle both run as the image's agent account. Windows autonomous CLI
+Harnesses use the base's native Node.js and Git Bash.
 
 `oracle/` is uploaded only for an oracle episode and is absent for an evaluated solver.
 `verify/` is also absent throughout this phase.

@@ -283,6 +283,7 @@ def _image_provenance(
         base_materials=prepared.base_materials,
         resolved_reference=prepared.resolved_reference,
         materializer_identity=prepared.materializer_identity,
+        builder_identity=prepared.builder_identity,
         provider=allocation.provider,
         observed_identity=resolved.observed_identity,
         observed_ref=resolved.observed_ref,

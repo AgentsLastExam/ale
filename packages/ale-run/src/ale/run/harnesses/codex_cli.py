@@ -34,7 +34,7 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.run.agent_resources import continuation_fingerprint
-from ale.run.harnesses._npm import ensure_npm_cli, npm_env
+from ale.run.harnesses._npm import agent_path, bash_command, ensure_npm_cli, npm_env
 from ale.run.subscription import classify_subscription_error
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
@@ -104,7 +104,7 @@ class CodexCliHarness(AutonomousHarness):
         session: HarnessSession,
         resources: EffectiveAgentResources,
     ) -> None:
-        codex_home = PurePosixPath(session.home) / ".codex-ale"
+        codex_home = agent_path(session.home) / ".codex-ale"
         skills_root = codex_home / "skills"
         await sandbox.exec(["mkdir", "-p", str(skills_root)], identity=Identity.AGENT)
         for skill in resources.skills:
@@ -191,14 +191,15 @@ class CodexCliHarness(AutonomousHarness):
     ) -> AgentRun:
         self._check_continuation(continuation, session)
         state = await sandbox.exec(
-            [
-                "sh",
-                "-c",
-                f"find {shlex.quote(session.home + '/.codex-ale/sessions')} -type f "
+            bash_command(
+                session.home,
+                f"find {shlex.quote(str(agent_path(session.home) / '.codex-ale/sessions'))} "
+                "-type f "
                 f"-name '*.jsonl' -exec grep -l -F "
                 f"{shlex.quote(_session_id_marker(continuation.native_session_id))} "
                 "{} + | grep -q .",
-            ],
+                login=False,
+            ),
             identity=Identity.AGENT,
         )
         if not state.ok:
@@ -222,7 +223,7 @@ class CodexCliHarness(AutonomousHarness):
         native_session_id: str | None,
         timeout_sec: float,
     ) -> AgentRun:
-        home = PurePosixPath(session.home)
+        home = agent_path(session.home)
         prompt_var = f"ALE_PROMPT_{native_session_id or 'NEW'}".replace("-", "_")
         argv = [
             "codex",
@@ -247,14 +248,14 @@ class CodexCliHarness(AutonomousHarness):
             f"2>> {shlex.quote(str(home / STDERR_NAME))}"
         )
         env = {
-            **npm_env(session.home),
+            **await npm_env(sandbox, session.home),
             "CODEX_HOME": str(home / ".codex-ale"),
             "NO_COLOR": "1",
             "ALE_GATEWAY_TOKEN": session.token,
             prompt_var: instruction,
         }
         result = await sandbox.exec(
-            ["bash", "-lc", command],
+            bash_command(session.home, command),
             cwd=session.home,
             env=env,
             timeout_sec=timeout_sec,
@@ -282,14 +283,14 @@ class CodexCliHarness(AutonomousHarness):
                 "Codex started a different thread instead of resuming the requested ID"
             )
         exported = await sandbox.exec(
-            [
-                "sh",
-                "-c",
-                f"file=$(find {shlex.quote(session.home + '/.codex-ale/sessions')} "
+            bash_command(
+                session.home,
+                f"file=$(find {shlex.quote(str(home / '.codex-ale/sessions'))} "
                 "-type f -name '*.jsonl' -exec grep -l -m 1 -F "
                 f"{shlex.quote(_session_id_marker(confirmed))} {{}} + | head -n 1); "
                 f'test -n "$file" && cp "$file" {shlex.quote(str(home / SESSION_NAME))}',
-            ],
+                login=False,
+            ),
             identity=Identity.AGENT,
         )
         if not exported.ok:

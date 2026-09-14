@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
+import struct
 import textwrap
 from pathlib import Path
 
@@ -9,18 +11,22 @@ import pytest
 import yaml
 
 from ale.core.config import LoggingPolicy
-from ale.core.taskspec import ImageKind, OperatingSystem
+from ale.core.sandbox import Identity, ImageRef, SandboxRequest
+from ale.core.taskspec import ImageKind, NetworkPolicy, OperatingSystem, Resources
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
+from ale.run.harnesses._npm import agent_home
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.harnesses.computer_use import ComputerUseHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.qemu import QemuProvider
 from ale.run.secrets import provider_credentials
+from ale.run.task_images import prepare_task_image_result
 from ale.run.tasksets.manifest import load_task_folder
+from ale.run.tools import resolved_cua_desktop, stage_cua_desktop
 from tests.support import provider_registry
 
 from .trajectory import LIVE, llm_audit_evidence
@@ -28,6 +34,137 @@ from .trajectory import LIVE, llm_audit_evidence
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 LINUX_IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+
+
+@pytest.mark.needs_kvm
+@pytest.mark.needs_gui
+async def test_windows_builtin_desktop_mcp_over_stdio(tmp_path: Path) -> None:
+    image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+    if not image.is_file():
+        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows qcow2")
+    provider = QemuProvider(image=image, overlay_dir=tmp_path / "qemu")
+    prepared = await provider.prepare_image(ImageRef(kind=ImageKind.VM, reference=str(image)))
+    sandbox = await provider.create(
+        SandboxRequest(
+            episode_id="windows-desktop-mcp",
+            os=OperatingSystem.WINDOWS,
+            prepared_image=prepared,
+            resources=Resources(cpus=2, memory_mb=8192),
+            network=NetworkPolicy(),
+        )
+    )
+    try:
+        home = await agent_home(sandbox)
+        await stage_cua_desktop(sandbox, home)
+        server = resolved_cua_desktop(OperatingSystem.WINDOWS).server
+        argv = [value.replace("{home}", home) for value in (server.command, *server.args)]
+        requests = [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "ale-acceptance", "version": "1"},
+                },
+            },
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "screenshot", "arguments": {}},
+            },
+        ]
+        result = await sandbox.exec(
+            [
+                "python.exe",
+                "-c",
+                "import json, subprocess, sys; "
+                "result = subprocess.run(json.loads(sys.argv[1]), input=sys.argv[2], "
+                "capture_output=True, text=True, timeout=30); "
+                "sys.stdout.write(result.stdout); sys.stderr.write(result.stderr); "
+                "sys.exit(result.returncode)",
+                json.dumps(argv),
+                "".join(json.dumps(request) + "\n" for request in requests),
+            ],
+            identity=Identity.AGENT,
+            timeout_sec=60,
+        )
+        assert result.ok, result.stderr or result.stdout
+        responses = {
+            reply["id"]: reply for line in result.stdout.splitlines() if (reply := json.loads(line))
+        }
+        assert responses[1]["result"]["serverInfo"]["name"] == "cua-desktop"
+        tools = {tool["name"] for tool in responses[2]["result"]["tools"]}
+        assert {"screenshot", "click", "type", "key", "mouse_move"} <= tools
+        screenshot = responses[3]["result"]
+        assert not screenshot.get("isError"), screenshot
+        content = next(item for item in screenshot["content"] if item["type"] == "image")
+        assert content["mimeType"] == "image/png"
+        png = base64.b64decode(content["data"], validate=True)
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+        width, height = struct.unpack(">II", png[16:24])
+        assert width >= 640 and height >= 480
+        (tmp_path / "desktop.png").write_bytes(png)
+    finally:
+        await sandbox.destroy()
+
+
+@pytest.mark.needs_kvm
+async def test_windows_task_image_installs_software_and_reuses_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+    if not image.is_file():
+        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows qcow2")
+    monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
+    folder = _write_task(tmp_path / "tasks", OperatingSystem.WINDOWS)
+    (folder / "image/assets").mkdir(parents=True)
+    (folder / "image/assets/proof.txt").write_text("built from image materials")
+    (folder / "image/run.ps1").write_text(
+        textwrap.dedent(r"""
+        $ErrorActionPreference = 'Stop'
+        choco install 7zip --version=24.9.0 -y --no-progress --limit-output
+        if ($LASTEXITCODE -notin 0, 3010) { exit $LASTEXITCODE }
+        Copy-Item .\assets\proof.txt "$env:ALE_HOME\image-proof.txt"
+        exit 0
+    """).lstrip()
+    )
+    task = load_task_folder(folder)
+    providers = provider_registry(QemuProvider(image=image), kind=ImageKind.VM)
+    built = await prepare_task_image_result(task, providers)
+    cached = await prepare_task_image_result(task, providers)
+    assert built.image == cached.image
+    assert built.steps[2].outcome == "executed"
+    assert cached.steps[2].outcome == "reused"
+    sandbox = await QemuProvider(overlay_dir=tmp_path / "restarted").create(
+        SandboxRequest(
+            episode_id="windows-image-check",
+            os=OperatingSystem.WINDOWS,
+            prepared_image=built.image,
+            resources=task.spec.resources,
+            network=task.spec.network,
+        )
+    )
+    try:
+        result = await sandbox.exec(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "$ErrorActionPreference = 'Stop'; "
+                "if (Test-Path 'C:\\ProgramData\\ALE\\image') { exit 11 }; "
+                "if ((Get-Content ($env:USERPROFILE + '\\image-proof.txt')) "
+                "-ne 'built from image materials') { exit 12 }; "
+                "& 'C:\\Program Files\\7-Zip\\7z.exe' i; exit $LASTEXITCODE",
+            ]
+        )
+        assert result.ok, result.stderr or result.stdout
+    finally:
+        await sandbox.destroy()
 
 
 def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
@@ -208,7 +345,7 @@ def _write_windows_gui_task(root: Path) -> Path:
                 throw "Windows Update network access is enabled"
             }
             foreach ($path in @(
-                "$env:ProgramFiles\7-Zip", "$env:ProgramFiles\Git",
+                "$env:ProgramFiles\7-Zip",
                 "$env:ProgramFiles\LibreOffice", "$env:USERPROFILE\.conda",
                 "$env:USERPROFILE\.ssh"
             )) {

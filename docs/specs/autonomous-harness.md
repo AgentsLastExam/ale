@@ -39,6 +39,13 @@ The npm integrations use the official packages above. ALE does not install a for
 carry agent-program patches. The base images pin Node.js 24.15.0, which satisfies the
 current packages' runtime requirements.
 
+On Windows, the base also supplies Git for Windows at `C:/Program Files/Git` and
+puts its `bin` and `usr/bin` directories on `PATH`. Harnesses use Git Bash to launch
+the native Windows CLI packages; WSL is not required. npm installs stay under the
+agent's `.local` directory, and the inherited Windows tool search path is preserved.
+The built-in `cua-desktop` uses the OS's system Python. Task-provided Skills and MCP
+commands must themselves work on Windows.
+
 All four adapters support local Skills, canonical stdio and Streamable HTTP MCP
 servers, and same-sandbox native resume at their pinned versions. Support is determined
 from the pinned program's verified behavior, not a permanent assumption about a product

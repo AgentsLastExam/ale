@@ -11,7 +11,9 @@ import pytest
 from ale.core.errors import ProviderStartError, TaskDefinitionError
 from ale.core.ids import content_hash
 from ale.core.sandbox import ImageRef, PreparedTaskImage
+from ale.core.task import Task
 from ale.core.taskspec import ImageKind, VerifySpec
+from ale.run.cli.tasks import _prepare_images
 from ale.run.task_images import (
     _materialize,
     _materialize_vm,
@@ -80,6 +82,125 @@ class _Registry:
 
     def get(self, kind: ImageKind) -> _Provider:
         return self.providers[kind]
+
+
+@pytest.fixture
+def windows_task(write_task_repo) -> Task:  # type: ignore[no-untyped-def]
+    repository = write_task_repo(
+        image={"kind": "vm", "ref": "/images/windows.qcow2"},
+        with_image_dockerfile=False,
+        manifest_suffix="os: windows\n",
+    )
+    folder = repository / "tasks/demo"
+    (folder / "image/run.ps1").write_text("Write-Output 'installed'\n")
+    for stage in ("verify", "oracle"):
+        (folder / stage / "run.sh").rename(folder / stage / "run.ps1")
+    return load_tasks(folder)[0]
+
+
+@pytest.mark.asyncio
+async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
+    windows_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ale.run.task_images as images
+
+    builds: list[Path] = []
+    runner = "sha256:" + "e" * 64
+
+    async def runner_identity(reference: str) -> str:
+        return runner
+
+    async def build(base, context, output, resources, runner_identity):  # type: ignore[no-untyped-def]
+        assert resources.cpus == 2 and resources.memory_mb == 4096
+        assert runner_identity == runner
+        builds.append(output)
+        output.write_bytes(b"valid-disk")
+
+    async def valid(path: Path) -> bool:
+        return path.is_file() and path.read_bytes() == b"valid-disk"
+
+    monkeypatch.setattr(images, "cache_root", lambda: tmp_path / "cache")
+    monkeypatch.setattr(images, "_docker_image_identity", runner_identity)
+    monkeypatch.setattr(images, "_build_windows_image", build)
+    monkeypatch.setattr(images, "_valid_qcow2", valid)
+    registry = _Registry()
+    first = await prepare_task_image_result(windows_task, registry)  # type: ignore[arg-type]
+    second = await prepare_task_image_result(windows_task, registry)  # type: ignore[arg-type]
+    assert len(builds) == 1
+    assert [step.name for step in first.steps] == [
+        "lint",
+        "base-resolution",
+        "windows-build",
+        "artifact-check",
+    ]
+    assert second.steps[2].outcome == "reused"
+    assert first.image == second.image
+    assert first.image.base_materials == ("sha256:" + "b" * 64,)
+    assert first.image.builder_identity and first.image.oci_identity is None
+
+    assert windows_task.folder is not None
+    asset = windows_task.folder.image_dir / "assets/input.txt"
+    asset.parent.mkdir()
+    for value in ("first", "changed"):
+        asset.write_text(value)
+        changed = await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
+        assert changed.prepared_identity != first.image.prepared_identity
+    assert len(builds) == 3
+    (windows_task.folder.image_dir / "empty").mkdir()
+    await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
+    assert len(builds) == 4
+    runner = "sha256:" + "f" * 64
+    await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
+    assert len(builds) == 5
+    base = _prepared(ImageKind.VM, "external-ref")
+    await images._prepare_windows_image(windows_task, base)
+    assert len(builds) == 6
+
+    other = load_tasks(windows_task.folder.root)[0]
+    other.spec = other.spec.model_copy(
+        update={
+            "resources": other.spec.resources.model_copy(
+                update={"storage_mb": (other.spec.resources.storage_mb or 0) + 4096}
+            )
+        }
+    )
+    monkeypatch.setattr("ale.run.cli.tasks.observe_task_assets", lambda task: None)
+    results = await _prepare_images([windows_task, other], registry)  # type: ignore[arg-type]
+    assert results[0].image.prepared_identity != results[1].image.prepared_identity
+    assert len(builds) == 7  # The unchanged first Task reuses its disk; the larger one builds.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["script", "input-change", "invalid-disk"])
+async def test_failed_windows_build_does_not_publish_or_fall_back(
+    windows_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import ale.run.task_images as images
+
+    async def runner_identity(reference: str) -> str:
+        return "sha256:" + "e" * 64
+
+    async def build(base, context, output, resources, runner):  # type: ignore[no-untyped-def]
+        output.write_bytes(b"partial")
+        if failure == "script":
+            raise TaskDefinitionError("installer failed")
+        if failure == "input-change":
+            (context / "added-during-build").mkdir()
+
+    async def valid(path: Path) -> bool:
+        return False
+
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(images, "cache_root", lambda: cache)
+    monkeypatch.setattr(images, "_docker_image_identity", runner_identity)
+    monkeypatch.setattr(images, "_build_windows_image", build)
+    monkeypatch.setattr(images, "_valid_qcow2", valid)
+    registry = _Registry()
+    with pytest.raises((TaskDefinitionError, ProviderStartError), match="windows-build:"):
+        await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
+    assert len(registry.get(ImageKind.VM).inputs) == 1
+    assert isinstance(registry.get(ImageKind.VM).inputs[0], ImageRef)
+    assert list(cache.rglob("*.qcow2")) == []
 
 
 @pytest.mark.asyncio

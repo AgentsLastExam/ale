@@ -16,10 +16,19 @@ from typing import TextIO
 
 from ale.core.errors import AleError, ProviderStartError, TaskDefinitionError
 from ale.core.ids import content_hash
-from ale.core.sandbox import ImageRef, PreparedTaskImage
+from ale.core.sandbox import ImageRef, PreparedTaskImage, SandboxRequest
 from ale.core.task import Task, TaskFolder
-from ale.core.taskspec import ImageKind, VerificationMode
+from ale.core.taskspec import (
+    ImageKind,
+    NetworkMode,
+    NetworkPolicy,
+    OperatingSystem,
+    Resources,
+    VerificationMode,
+)
+from ale.run.content import tree_digest
 from ale.run.providers import ProviderRegistry
+from ale.run.providers.qemu import RUNNER_IMAGE, QemuProvider
 from ale.run.sources import cache_root
 
 __all__ = [
@@ -37,6 +46,7 @@ MATERIALIZER_IMAGE = os.environ.get(
     "ghcr.io/agentslastexam/ale-vm-materializer:0.1.0",
 )
 VM_OUTPUT_CONTRACT = "ale-vm-qcow2/v1"
+WINDOWS_BUILD_CONTRACT = "ale-windows-powershell/v1"
 
 
 @dataclass(frozen=True)
@@ -82,9 +92,13 @@ async def _run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
     )
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
-    except TimeoutError:
-        process.kill()
-        raise ProviderStartError(f"{' '.join(argv[:3])} timed out after {timeout:g}s") from None
+    except (TimeoutError, asyncio.CancelledError) as error:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+        if isinstance(error, TimeoutError):
+            raise ProviderStartError(f"{' '.join(argv[:3])} timed out after {timeout:g}s") from None
+        raise
     return (
         process.returncode or 0,
         stdout.decode("utf-8", "replace"),
@@ -107,7 +121,30 @@ async def prepare_task_image_result(
 ) -> ImagePreparationResult:
     spec = task.spec.image
     provider = providers.get(spec.kind)
-    dockerfile = _task_folder(task).image_dockerfile
+    folder = _task_folder(task)
+    if task.spec.os is OperatingSystem.WINDOWS and folder.image_script is not None:
+        if spec.kind is not ImageKind.VM or spec.ref is None:
+            raise TaskDefinitionError("image/run.ps1 requires image.kind=vm and image.ref as base")
+        base = await _stage(
+            "base-resolution",
+            provider.prepare_image(ImageRef(kind=spec.kind, reference=spec.ref)),
+        )
+        candidate, reused = await _stage("windows-build", _prepare_windows_image(task, base))
+        image = await _stage("artifact-check", provider.prepare_image(candidate))
+        return _result(
+            task,
+            "solver",
+            image,
+            ImagePreparationStep("base-resolution", "executed", base.prepared_identity),
+            ImagePreparationStep(
+                "windows-build",
+                "reused" if reused else "executed",
+                image.prepared_identity,
+                image.runtime_ref,
+            ),
+            ImagePreparationStep("artifact-check", "executed", image.prepared_identity),
+        )
+    dockerfile = folder.image_dockerfile
     if dockerfile is None:
         if spec.ref is None:
             raise TaskDefinitionError("solver requires image/Dockerfile or image.ref")
@@ -282,6 +319,133 @@ def _local_container(build: _OciBuild, *, source: str) -> PreparedTaskImage:
     )
 
 
+async def _prepare_windows_image(
+    task: Task, base: PreparedTaskImage
+) -> tuple[PreparedTaskImage, bool]:
+    folder = _task_folder(task)
+    script = folder.image_script
+    if script is None or task.image_source_digest is None:
+        raise TaskDefinitionError("Windows image requires image/run.ps1")
+    context = script.parent
+    for entry in context.rglob("*"):
+        if entry.is_symlink():
+            raise TaskDefinitionError(f"Windows image inputs cannot be symlinks: {entry}")
+    context_identity = _windows_context_identity(context)
+    runner_identity = await _docker_image_identity(RUNNER_IMAGE)
+    builder_identity = content_hash(
+        {
+            "contract": WINDOWS_BUILD_CONTRACT,
+            "runner": runner_identity,
+        }
+    )
+    resources = Resources(cpus=2, memory_mb=4096, storage_mb=task.spec.resources.storage_mb)
+    identity = content_hash(
+        {
+            "base": base.prepared_identity,
+            "context": context_identity,
+            "builder": builder_identity,
+            "resources": resources.model_dump(mode="json"),
+        }
+    )
+    root = cache_root() / "vm-builds"
+    root.mkdir(parents=True, exist_ok=True)
+    disk = root / f"{identity.removeprefix('sha256:')}.qcow2"
+    with disk.with_suffix(".lock").open("a+") as lock:
+        await _acquire_lock(lock)
+        try:
+            reused = await _valid_qcow2(disk)
+            if not reused:
+                with tempfile.TemporaryDirectory(prefix=f".{disk.stem}-", dir=root) as temporary:
+                    output = Path(temporary) / "disk.qcow2"
+                    await _build_windows_image(base, context, output, resources, runner_identity)
+                    if _windows_context_identity(context) != context_identity:
+                        raise TaskDefinitionError("Windows image inputs changed during build")
+                    if not await _valid_qcow2(output):
+                        raise ProviderStartError("Windows build produced no valid qcow2")
+                    os.replace(output, disk)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+    return PreparedTaskImage(
+        kind=ImageKind.VM,
+        source="solver-local",
+        input_identity=identity,
+        image_source_identity=task.image_source_digest,
+        runtime_ref=str(disk.resolve()),
+        prepared_identity=identity,
+        base_materials=(base.prepared_identity,),
+        builder_identity=builder_identity,
+    ), reused
+
+
+def _windows_context_identity(context: Path) -> str:
+    return content_hash(
+        {
+            "files": tree_digest(context),
+            "directories": sorted(
+                str(entry.relative_to(context)) for entry in context.rglob("*") if entry.is_dir()
+            ),
+        }
+    )
+
+
+async def _build_windows_image(
+    base: PreparedTaskImage,
+    context: Path,
+    output: Path,
+    resources: Resources,
+    runner_identity: str,
+) -> None:
+    provider = QemuProvider(overlay_dir=output.parent / "vm", runner_image=runner_identity)
+    sandbox = await provider.create(
+        SandboxRequest(
+            episode_id=f"image-{output.parent.name}",
+            os=OperatingSystem.WINDOWS,
+            prepared_image=base,
+            resources=resources,
+            network=NetworkPolicy(mode=NetworkMode.OPEN),
+            sudo=True,
+        )
+    )
+    target = r"C:\ProgramData\ALE\image"
+    try:
+        await sandbox.upload_dir(str(context), target)
+        result = await sandbox.exec(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "$ErrorActionPreference = 'Stop'; & .\\run.ps1; "
+                "if (-not $?) { exit 1 }; if ($LASTEXITCODE) { exit $LASTEXITCODE }",
+            ],
+            cwd=target,
+            env={"ALE_HOME": sandbox.agent_home},
+            timeout_sec=1800,
+        )
+        if not result.ok:
+            raise TaskDefinitionError(
+                f"image/run.ps1 failed (exit={result.exit_code}, timeout={result.timed_out}): "
+                f"{result.stderr or result.stdout}"
+            )
+        result = await sandbox.exec(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"Remove-Item -LiteralPath '{target}' -Recurse -Force -ErrorAction Stop",
+            ],
+            timeout_sec=60,
+        )
+        if not result.ok:
+            raise ProviderStartError(f"could not remove image build inputs: {result.stderr}")
+        await sandbox.save_image(output)
+    finally:
+        await asyncio.shield(sandbox.destroy())
+
+
 async def _build_oci(*, context: Path, source_digest: str, source: str) -> _OciBuild:
     code, _, stderr = await _run("docker", "buildx", "version", timeout=30)
     if code != 0:
@@ -382,29 +546,31 @@ async def _materialize_vm_with_status(
 
 
 async def _materializer_identity() -> str:
-    code, image_id, _ = await _run(
-        "docker", "image", "inspect", "--format", "{{.Id}}", MATERIALIZER_IMAGE, timeout=30
-    )
-    if code != 0:
-        code, _, stderr = await _run("docker", "pull", MATERIALIZER_IMAGE, timeout=900)
-        if code != 0:
-            raise ProviderStartError(
-                f"could not acquire VM materializer {MATERIALIZER_IMAGE}: {stderr.strip()}"
-            )
-        code, image_id, stderr = await _run(
-            "docker", "image", "inspect", "--format", "{{.Id}}", MATERIALIZER_IMAGE, timeout=30
-        )
-        if code != 0:
-            raise ProviderStartError(f"could not inspect VM materializer: {stderr.strip()}")
-    image_id = image_id.strip()
-    if not image_id.startswith("sha256:"):
-        raise ProviderStartError("VM materializer has no immutable local image identity")
     return content_hash(
         {
-            "image_identity": image_id,
+            "image_identity": await _docker_image_identity(MATERIALIZER_IMAGE),
             "output_contract": VM_OUTPUT_CONTRACT,
         }
     )
+
+
+async def _docker_image_identity(reference: str) -> str:
+    code, image_id, _ = await _run(
+        "docker", "image", "inspect", "--format", "{{.Id}}", reference, timeout=30
+    )
+    if code != 0:
+        code, _, stderr = await _run("docker", "pull", reference, timeout=900)
+        if code != 0:
+            raise ProviderStartError(f"could not acquire image {reference}: {stderr.strip()}")
+        code, image_id, stderr = await _run(
+            "docker", "image", "inspect", "--format", "{{.Id}}", reference, timeout=30
+        )
+        if code != 0:
+            raise ProviderStartError(f"could not inspect image {reference}: {stderr.strip()}")
+    image_id = image_id.strip()
+    if not image_id.startswith("sha256:"):
+        raise ProviderStartError(f"image {reference} has no immutable local identity")
+    return image_id
 
 
 async def _materialize(runtime_ref: str, disk: Path) -> None:

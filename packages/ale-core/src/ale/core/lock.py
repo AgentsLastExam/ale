@@ -97,9 +97,12 @@ class ImageProvenance(BaseModel):
     base_materials: tuple[str, ...] = ()
     resolved_reference: str | None = None
     materializer_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    builder_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     provider: str
     observed_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     observed_ref: str = Field(min_length=1)
+
+    # --- validation ---
 
     @model_validator(mode="after")
     def _check_source_shape(self) -> Self:
@@ -109,10 +112,18 @@ class ImageProvenance(BaseModel):
         if local == (self.resolved_reference is not None):
             raise ValueError("ref image provenance requires resolved_reference")
         if self.declaration.kind is ImageKind.VM and local:
+            if self.builder_identity is not None:
+                if self.oci_identity is not None or self.materializer_identity is not None:
+                    raise ValueError("VM builder provenance cannot declare OCI materialization")
+                if not self.base_materials:
+                    raise ValueError("VM builder provenance requires base_materials")
+                return self
             if self.oci_identity is None or self.materializer_identity is None:
-                raise ValueError("local VM provenance requires OCI and materializer identities")
-        elif self.oci_identity is not None or self.materializer_identity is not None:
-            raise ValueError("only local VM provenance has OCI and materializer identities")
+                raise ValueError(
+                    "local VM provenance requires OCI/materializer or builder identities"
+                )
+        elif any((self.oci_identity, self.materializer_identity, self.builder_identity)):
+            raise ValueError("only local VM provenance has VM build identities")
         return self
 
 

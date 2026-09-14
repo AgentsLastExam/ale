@@ -64,6 +64,42 @@ def session(**updates: object) -> HarnessSession:
     return HarnessSession(**values)
 
 
+@pytest.mark.parametrize(
+    ("harness", "path", "native"),
+    [
+        (CodexCliHarness(), "transcript.jsonl", {"type": "turn.failed", "error": "proof"}),
+        (GrokBuildHarness(), ".grok-ale/segment.jsonl", {"type": "error", "message": "proof"}),
+        (
+            ClaudeCodeHarness(),
+            "transcript.jsonl",
+            {"type": "result", "is_error": True, "errors": ["proof"]},
+        ),
+        (OpenClawCliHarness(), "result.json", {"payloads": [{"isError": True, "text": "proof"}]}),
+    ],
+)
+async def test_windows_harness_uses_git_bash_native_paths_and_retains_failure(
+    harness, path, native
+) -> None:
+    inherited_path = r"C:\Windows\System32;C:\Program Files\nodejs"
+    sandbox = FakeSandbox(stdout=inherited_path)
+    sandbox.files[f"C:/Users/Agent User/{path}"] = json.dumps(native).encode()
+    with pytest.raises(AgentError, match="proof"):
+        await harness.launch("work", sandbox, session(home=r"C:\Users\Agent User"), timeout_sec=60)
+    commands = list(zip(sandbox.commands, sandbox.environments, strict=True))
+    shell, env = next(
+        (argv, environment)
+        for argv, environment in reversed(commands)
+        if argv[0] == "C:/Program Files/Git/bin/bash.exe"
+    )
+    assert shell[1] == "-c"
+    assert 'export PATH="/usr/bin:$PATH"' in shell[2]
+    assert "'C:/Users/Agent User/" in shell[2]
+    assert env["PATH"] == f"C:/Users/Agent User/.local;{inherited_path}"
+    assert env["HOME"] == "C:/Users/Agent User"
+    if isinstance(harness, GrokBuildHarness):
+        assert "/bin/grok.exe'" in shell[2]
+
+
 @pytest.mark.parametrize("exit_code", [0, 17])
 @pytest.mark.parametrize(
     ("harness", "path", "native"),

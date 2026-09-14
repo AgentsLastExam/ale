@@ -8,7 +8,9 @@ anything is provisioned — because a provider that fails late fails expensively
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -127,6 +129,124 @@ def test_cancelled_boot_removes_the_started_runner(
         f"{STORAGE_LABEL}={tmp_path.resolve()}",
     ):
         assert label in started
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operating_system", "sudo", "marker"),
+    [("windows", True, True), ("windows", False, False), ("linux", True, False)],
+)
+async def test_windows_admin_boot_is_explicit_and_uses_the_resolved_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operating_system: str,
+    sudo: bool,
+    marker: bool,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        commands.append(argv)
+        return 0, "true\n", ""
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.asyncio.sleep", no_sleep)
+    runner = "sha256:" + "a" * 64
+    await QemuProvider(runner_image=runner)._boot(
+        request(os=operating_system, sudo=sudo), tmp_path, tmp_path / "base.qcow2", 7411
+    )
+    assert commands[0][-1] == runner
+    assert "VM_NET_IP=172.30.0.2" in commands[0]
+    assert ("ARGUMENTS=-smbios type=1,serial=ale-sudo" in commands[0]) is marker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "shutdown", "wait"])
+async def test_windows_image_export_requires_clean_shutdown_and_preserves_the_base(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    class Client:
+        closed = False
+
+        async def exec(self, argv: list[str], **_kwargs: object) -> tuple[int, str, str, bool]:
+            assert argv == ["shutdown.exe", "/s", "/t", "1"]
+            return int(failure == "shutdown"), "", "shutdown result", False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        commands.append(argv)
+        if argv[:2] == ("docker", "wait"):
+            assert client.closed
+            return 0, "137\n" if failure == "wait" else "0\n", ""
+        return 0, "", ""
+
+    client = Client()
+    sandbox = QemuSandbox.__new__(QemuSandbox)
+    sandbox._client = client  # type: ignore[assignment]
+    sandbox.request = request(os="windows")
+    sandbox.container = "ale-qemu-build"
+    sandbox.storage = tmp_path / "storage"
+    base = tmp_path / "exact-base.qcow2"
+    sandbox.resolved_image = ResolvedImage(
+        kind="vm",
+        prepared_identity=sandbox.request.prepared_image.prepared_identity,
+        observed_identity=sandbox.request.prepared_image.prepared_identity,
+        observed_ref=str(base),
+    )
+    destination = tmp_path / "built.qcow2"
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    if failure:
+        with pytest.raises(ProviderStartError, match="shut down"):
+            await sandbox.save_image(destination)
+        assert not any(command[0] == "qemu-img" for command in commands)
+        return
+
+    await sandbox.save_image(destination)
+    overlay = str(sandbox.storage / "data.qcow2")
+    assert commands == [
+        ("docker", "wait", "ale-qemu-build"),
+        ("qemu-img", "rebase", "-u", "-F", "qcow2", "-b", str(base), overlay),
+        ("qemu-img", "convert", "-O", "qcow2", overlay, str(destination)),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("module_name", ["ale.run.providers.qemu", "ale.run.task_images"])
+async def test_cancelled_image_command_reaps_its_subprocess(
+    monkeypatch: pytest.MonkeyPatch, module_name: str
+) -> None:
+    module = importlib.import_module(module_name)
+    original = asyncio.create_subprocess_exec
+    processes: list[asyncio.subprocess.Process] = []
+    started = asyncio.Event()
+
+    async def tracked(*argv: str, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await original(*argv, **kwargs)
+        processes.append(process)
+        started.set()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", tracked)
+    command = asyncio.create_task(module._run(sys.executable, "-c", "import time; time.sleep(60)"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        command.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await command
+        assert processes[0].returncode is not None
+    finally:
+        command.cancel()
+        for process in processes:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
 
 
 @pytest.mark.asyncio

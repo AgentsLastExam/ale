@@ -21,7 +21,11 @@ from ale.run.tasksets.manifest import (
 
 __all__ = ["Finding", "lint_repository"]
 
-_FIXED_SETUP = re.compile(r"\b(apt-get|apt |dnf |yum |pip3? install|curl |wget )")
+_FIXED_SETUP = re.compile(
+    r"\b(apt-get|apt |dnf |yum |pip3? install|curl |wget |winget install|choco install|"
+    r"Invoke-WebRequest|Invoke-RestMethod)",
+    re.IGNORECASE,
+)
 _CONTAINER_BASE = re.compile(r"^ghcr\.io/agentslastexam/container-ubuntu22-base:[^ ]+$")
 _VM_BASE = re.compile(r"^ghcr\.io/agentslastexam/vm-ubuntu24-base:(?!latest$)[^ ]+$")
 _VM_RESERVED_NAMES = {
@@ -48,7 +52,7 @@ def lint_repository(path: Path) -> list[Finding]:
         for removed, replacement in (
             ("domain.yaml", "put the stable name in each Task's task.yaml"),
             ("kits", "move Task-specific helpers below the owning Task"),
-            ("images", "put each Dockerfile below its Task image/ directory"),
+            ("images", "put image build materials below each Task image/ directory"),
             ("files", "put content below the Task stage that owns it"),
             ("skills", "move Task Skills below tools/skills/"),
             ("mcp", "move Task MCP below tools/mcp/"),
@@ -147,7 +151,12 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
     image = manifest.get("image")
     kind = image.get("kind") if isinstance(image, dict) else None
     ref = image.get("ref") if isinstance(image, dict) else None
-    if dockerfile.is_file():
+    if operating_system is OperatingSystem.WINDOWS:
+        if folder.image_script is None and _has_files(folder.image_dir / "assets"):
+            findings.append(
+                Finding(folder.image_dir / "assets", "image/assets requires image/run.ps1")
+            )
+    elif dockerfile.is_file():
         final = _final_from(dockerfile)
         expected = _VM_BASE if kind == "vm" else _CONTAINER_BASE
         if final is None or not expected.fullmatch(final):
@@ -184,10 +193,13 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
 
     setup = folder.stage_entry("setup", operating_system)
     if setup and _FIXED_SETUP.search(setup.read_text(encoding="utf-8", errors="replace")):
+        image_entry = (
+            "image/run.ps1" if operating_system is OperatingSystem.WINDOWS else "image/Dockerfile"
+        )
         findings.append(
             Finding(
                 setup,
-                "fixed installation or download belongs in image/Dockerfile; "
+                f"fixed installation or download belongs in {image_entry}; "
                 "setup is for episode-dynamic initialization",
             )
         )

@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from ale.core.harness import ResolvedMcpServer
 from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
+from ale.core.taskspec import OperatingSystem, StdioMcpServer
 
 __all__ = ["CUA_DESKTOP_NAME", "resolved_cua_desktop", "stage_cua_desktop"]
 
@@ -18,9 +18,13 @@ _SOURCES = (
 )
 
 
-def resolved_cua_desktop() -> ResolvedMcpServer:
+def resolved_cua_desktop(
+    operating_system: OperatingSystem = OperatingSystem.LINUX,
+) -> ResolvedMcpServer:
     """Return the built-in through the same canonical contract as external servers."""
+    command = "python.exe" if operating_system is OperatingSystem.WINDOWS else "python3"
     hasher = hashlib.sha256()
+    hasher.update(command.encode() + b"\0")
     for source in _SOURCES:
         hasher.update(source.name.encode())
         hasher.update(b"\0")
@@ -31,7 +35,7 @@ def resolved_cua_desktop() -> ResolvedMcpServer:
         server=StdioMcpServer(
             name=CUA_DESKTOP_NAME,
             transport="stdio",
-            command="python3",
+            command=command,
             args=("{home}/.ale-cua-desktop/cua_desktop_mcp.py",),
         ),
         source_layers=("run",),

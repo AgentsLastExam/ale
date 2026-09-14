@@ -18,6 +18,7 @@ from ale.core.taskspec import (
     McpSource,
     NetworkMode,
     NetworkPolicy,
+    OperatingSystem,
     SkillSource,
     StdioMcpServer,
     StreamableHttpMcpServer,
@@ -57,6 +58,7 @@ def resolve_agent_resources(
     task_root: Path,
     task_source: TaskSource,
     network: NetworkPolicy | None = None,
+    operating_system: OperatingSystem = OperatingSystem.LINUX,
 ) -> EffectiveAgentResources:
     """Resolve all declarations before a provider or sandbox is created."""
     skill_sources = [
@@ -93,6 +95,7 @@ def resolve_agent_resources(
                 task_root=task_root,
                 task_source=task_source,
                 network=network or NetworkPolicy(),
+                operating_system=operating_system,
             )
             for source in mcp_sources
         ]
@@ -242,6 +245,7 @@ def _resolve_mcp_source(
     task_root: Path,
     task_source: TaskSource,
     network: NetworkPolicy,
+    operating_system: OperatingSystem,
 ) -> ResolvedMcpServer:
     origin = source.origin or "run"
     declared = source.declared or source.path or source.builtin or ""
@@ -250,7 +254,7 @@ def _resolve_mcp_source(
             raise AgentResourceError(f"unknown built-in MCP server: {source.builtin}")
         from ale.run.tools import resolved_cua_desktop
 
-        resolved = resolved_cua_desktop()
+        resolved = resolved_cua_desktop(operating_system)
         return resolved.model_copy(
             update={
                 "source_layers": (origin,),

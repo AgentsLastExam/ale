@@ -15,6 +15,7 @@ from ale.core.environment import EpisodeContext
 from ale.core.errors import TaskDefinitionError
 from ale.core.task import Task, TaskSourceContext
 from ale.core.taskspec import (
+    ImageKind,
     OperatingSystem,
     PhaseTimeouts,
     Resources,
@@ -83,6 +84,11 @@ class TaskFolder:
         return path if path.is_file() else None
 
     @property
+    def image_script(self) -> Path | None:
+        path = self.image_dir / "run.ps1"
+        return path if path.is_file() else None
+
+    @property
     def verifier_dockerfile(self) -> Path | None:
         path = self.root / VERIFY_DIR / "Dockerfile"
         return path if path.is_file() else None
@@ -106,7 +112,7 @@ class TaskFolder:
 
     @cached_property
     def image_source_digest(self) -> str | None:
-        if self.image_dockerfile is None:
+        if self.image_dockerfile is None and self.image_script is None:
             return None
         return tree_digest(self.image_dir, exclude=("assets",))
 
@@ -250,9 +256,26 @@ def _load_folder(folder: TaskFolder) -> Iterator[ManifestTask]:
             f"invalid task manifest {folder.root / TASK_MANIFEST}: {exc}"
         ) from exc
     _require_folder(folder, manifest.os)
+    if manifest.os is OperatingSystem.WINDOWS:
+        if manifest.image.kind is not ImageKind.VM:
+            raise TaskDefinitionError("Windows Tasks require image.kind: vm")
+        if folder.image_dockerfile is not None:
+            raise TaskDefinitionError("Windows Tasks use image/run.ps1, not image/Dockerfile")
+        if manifest.image.ref is None:
+            raise TaskDefinitionError("Windows Tasks require image.ref as their base image")
+        if folder.verifier_dockerfile is not None:
+            raise TaskDefinitionError(
+                "Windows verification must reuse the solver image or use a ref"
+            )
+    elif folder.image_script is not None and folder.image_dockerfile is None:
+        raise TaskDefinitionError("image/run.ps1 requires os: windows")
     if folder.image_dockerfile is None and manifest.image.ref is None:
         raise TaskDefinitionError("solver requires image/Dockerfile or image.ref")
-    if folder.image_dockerfile is None and _has_files(folder.image_dir / "assets"):
+    if (
+        folder.image_dockerfile is None
+        and folder.image_script is None
+        and _has_files(folder.image_dir / "assets")
+    ):
         raise TaskDefinitionError("image/assets is unused when solver uses image.ref")
 
     verifier_dockerfile = folder.verifier_dockerfile

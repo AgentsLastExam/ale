@@ -99,6 +99,8 @@ for it during validation. Linux framework work runs as root. The current Windows
 runs guestd in the interactive agent session so it can share the Cua Driver desktop;
 withholding of setup, oracle, and verification material is therefore enforced by phase
 ordering rather than a second Windows identity.
+Its default token is limited; an administrator session requires the Host's SMBIOS
+`ale-sudo` marker, supplied only for `request.sudo`, including Windows image builds.
 
 This is what stops an agent rewriting the network policy that isolates it, the clock its
 timeouts are measured against, or the guest service driving its own sandbox. None of that

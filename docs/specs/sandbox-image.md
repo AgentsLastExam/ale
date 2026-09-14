@@ -1,8 +1,8 @@
 # Container and VM sandbox image specification
 
 Normative for standard container and VM Tasks. Every solver and dedicated verifier
-declares `image.kind`; a fixed Dockerfile selects local preparation, otherwise `image.ref`
-is required.
+declares `image.kind`. Linux uses a Dockerfile or `image.ref`; Windows uses `image.ref`
+with optional `image/run.ps1` preparation.
 
 ## ALE base images
 
@@ -10,7 +10,8 @@ is required.
 - `vm-ubuntu24-base` provides Ubuntu 24.04, systemd, full GNOME/GDM, the declared
   unprivileged user, and ALE guest integration for QEMU.
 - The private Windows 10 BYOL base provides a logged-in desktop, system Python, guestd,
-  and Cua Driver for QEMU. Its licensed disk is not a public ALE artifact.
+  Cua Driver, WinGet, Chocolatey, and the runtimes required by autonomous agents.
+  Its licensed disk is not a public ALE artifact.
 
 The bases provide framework integration that should not be recreated per Task:
 
@@ -31,7 +32,7 @@ qcow2, and `images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/
 
 ## Task image
 
-For a local image, `image/` is the sole ordinary Docker build context:
+For a local Linux image, `image/` is the sole ordinary Docker build context:
 
 ```dockerfile
 FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest
@@ -56,19 +57,22 @@ build context. `image/assets` is already inside that context and uses ordinary r
 
 ## Source selection and identity
 
-Before any solver model call, ALE applies one rule: an existing fixed Dockerfile is built
-locally and failure is terminal; with no Dockerfile, the matching Provider resolves the
-declared ref. Container and VM refs are both supported and recorded immutably.
+Before any solver model call, ALE builds an existing Linux Dockerfile or Windows
+`image/run.ps1`; failure is terminal. Windows scripts require `image.kind: vm` and use
+`image.ref` as the base. Without local build instructions, the matching Provider resolves
+the declared ref. Container and VM refs are both supported and recorded immutably.
 
 The authored image source digest excludes `image/assets` so normal Task identity and
 asset provenance remain separate. Docker still consumes current asset bytes natively and
-BuildKit decides cache reuse. Dirty or unsynchronized assets disable resume and reporting.
+BuildKit decides Linux cache reuse; Windows cache keys include the actual image asset
+bytes. Dirty or unsynchronized assets disable resume and reporting.
 RunLock schema 2 records declaration, preparation, Provider, and exact observed identity;
-it does not invent a whole-disk content digest.
+it does not invent a whole-disk content digest. Local Linux VMs record OCI and materializer
+identities; local Windows VMs record builder identity and resolved base materials.
 
 ## VM preparation
 
-A VM Task Dockerfile ends in `vm-ubuntu24-base`. ALE exports the final OCI rootfs and
+A Linux VM Task Dockerfile ends in `vm-ubuntu24-base`. ALE exports the final OCI rootfs and
 runs its pinned materializer, which owns initramfs, boot, partition assembly, and the
 minimal bootable qcow2 template. Reuse is keyed by final OCI plus materializer identities
 and validated structurally without hashing the whole disk.
@@ -79,10 +83,18 @@ recipe installs and pins ALE's cross-platform components, and `compact.sh` valid
 compresses the resulting qcow2. Episodes always cold-boot a fresh overlay. ALE creates no
 ready snapshot, warm pool, or environment server.
 
+Windows Task preparation boots a temporary VM from the resolved base, stages only
+`image/`, and executes `image/run.ps1` with network access for unattended installation.
+ALE removes the build materials, shuts down the VM, and saves its configured qcow2.
+Reuse covers the whole build and is keyed by base, builder, scripts, and asset bytes;
+there is no per-command cache or new recipe language. Authoring details belong to
+[Task authoring](task-authoring.md#image).
+
 GUI image qualification includes a real visual agent completing a task whose decisive
 input exists only on screen, followed by inspection of its canonical trajectory,
-screenshots, desktop actions, artifact, and reward. An oracle-only run checks plumbing but
-does not establish GUI readiness.
+screenshots, desktop actions, artifact, and reward. Windows base qualification also checks
+autonomous agent installation, execution, and Gateway access. An oracle-only run checks
+plumbing but does not establish agent readiness.
 
 The QEMU Provider sizes a fresh overlay from `storage_mb`, boots it over the prepared
 qcow2, grows the guest root filesystem, waits for guestd and the declared desktop,
@@ -106,15 +118,15 @@ generated values, writable copies, dynamic service start/reset, and readiness ch
 Setup is not a second image builder.
 
 Small static data may be committed anywhere under `image/`. Large data uses the ignored
-`image/assets/` directory restored by `ale assets pull`, then the same normal Dockerfile
-path. Runtime never downloads it.
+`image/assets/` directory restored by `ale assets pull`, then the same image build path.
+Runtime never downloads it.
 
 ## Verifier images
 
 Shared verification uses the solver image. Separate verification may:
 
 1. reuse the prepared solver image when neither local nor external image is supplied;
-2. build `verify/Dockerfile` with `verify/` as context and explicit nested kind;
+2. on Linux, build `verify/Dockerfile` with `verify/` as context and explicit nested kind;
 3. resolve a container or VM `verify.image.ref` through the matching Provider.
 
 The local verifier context is fixed at `verify/`; its Dockerfile is the declaration. External
@@ -160,13 +172,14 @@ not a Task image declaration.
 Solver and oracle run as the image user. Linux setup and verification run as root. The
 current Windows guestd runs in the interactive agent session so Cua Driver and process
 execution share one desktop; stage directories are withheld by lifecycle rather than a
-second Windows account. A requested solver sudo/admin grant is verified before use and
-recorded. ALE does not pre-create declared artifacts or silently repair Task filesystem
+second Windows account. The Windows base starts with a limited token by default; only
+Host-provided SMBIOS `ale-sudo` for `request.sudo` selects an administrator session, and
+image builds explicitly request it. A requested solver sudo/admin grant is verified before
+use and recorded. ALE does not pre-create declared artifacts or silently repair Task filesystem
 ownership: the image/setup/agent owns the type and existence of each output.
 
 ## Base-image changes
 
-Base Dockerfiles live in the ALE engine repository and are Provider-conformance tested.
+Base build sources live in the ALE engine repository and are Provider-conformance tested.
 Changing them changes every Task foundation and requires image contract tests. Task
-contributors add dependencies to their own Dockerfile rather than adding domain bases to
-ALE.
+contributors add dependencies to their own `image/` rather than adding domain bases to ALE.

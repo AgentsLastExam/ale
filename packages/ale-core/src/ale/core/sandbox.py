@@ -78,6 +78,9 @@ class PreparedTaskImage(BaseModel):
     resolved_reference: str | None = None
     oci_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     materializer_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    builder_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+
+    # --- validation ---
 
     @field_validator("runtime_ref", "resolved_reference")
     @classmethod
@@ -98,14 +101,17 @@ class PreparedTaskImage(BaseModel):
         if not local and self.image_source_identity is not None:
             raise ValueError("external prepared images cannot declare image_source_identity")
 
-        if self.kind is ImageKind.CONTAINER:
-            if self.oci_identity is not None or self.materializer_identity is not None:
-                raise ValueError("container images cannot declare VM materialization identities")
-        elif local:
+        if self.kind is ImageKind.VM and local:
+            if self.builder_identity is not None:
+                if self.oci_identity is not None or self.materializer_identity is not None:
+                    raise ValueError("VM builders cannot declare OCI materialization identities")
+                if not self.base_materials:
+                    raise ValueError("VM builders require base_materials")
+                return self
             if self.oci_identity is None or self.materializer_identity is None:
-                raise ValueError("local VM images require OCI and materializer identities")
-        elif self.oci_identity is not None or self.materializer_identity is not None:
-            raise ValueError("referenced VM images cannot declare local materialization identities")
+                raise ValueError("local VM images require OCI/materializer or builder identities")
+        elif any((self.oci_identity, self.materializer_identity, self.builder_identity)):
+            raise ValueError("only local VM images can declare VM build identities")
         return self
 
 

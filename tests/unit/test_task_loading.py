@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from ale.core.errors import TaskDefinitionError
+from ale.run.lint import lint_repository
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import discover_task_folders, load_tasks
 
@@ -75,21 +76,88 @@ def test_ref_only_solver_has_no_local_source_digest(tmp_path: Path) -> None:
     assert loaded.image_source_digest is None
 
 
-def test_windows_task_uses_powershell_stage_entries(tmp_path: Path) -> None:
+def _windows_task(tmp_path: Path) -> Path:
     task = scaffold_task(tmp_path / "windows-demo")
     manifest = task / "task.yaml"
     manifest.write_text(
         manifest.read_text()
         .replace("name: windows-demo", "name: windows-demo\nos: windows")
-        .replace("kind: container", "kind: vm")
+        .replace("kind: container", "kind: vm\n  ref: /images/windows-base.qcow2")
         .replace("/home/user/output", r"C:\Users\user\output")
     )
     for stage in ("verify", "oracle"):
         (task / stage / "run.sh").rename(task / stage / "run.ps1")
+    (task / "image" / "Dockerfile").unlink()
+    return task
 
+
+def test_windows_task_uses_powershell_stage_entries(tmp_path: Path) -> None:
+    task = _windows_task(tmp_path)
     loaded = load_tasks(task)[0]
     assert loaded.spec.os.value == "windows"
+    assert loaded.image_source_digest is None
     assert loaded.folder.stage_entry("verify", loaded.spec.os).name == "run.ps1"  # type: ignore[union-attr]
+
+
+def test_windows_image_script_tracks_source_and_accepts_assets(tmp_path: Path) -> None:
+    task = _windows_task(tmp_path)
+    entry = task / "image" / "run.ps1"
+    entry.write_text("$ErrorActionPreference = 'Stop'\n& .\\install.ps1\n")
+    helper = task / "image" / "install.ps1"
+    helper.write_text("choco install -y git\n")
+    loaded = load_tasks(task)[0]
+    assert loaded.folder.image_script == entry
+    assert loaded.image_source_digest is not None
+    assert lint_repository(task) == []
+
+    assets = task / "image" / "assets"
+    assets.mkdir()
+    (assets / "data.txt").write_text("input")
+    assert load_tasks(task)[0].image_source_digest == loaded.image_source_digest
+    assert lint_repository(task) == []
+    helper.write_text("choco install -y git 7zip\n")
+    assert load_tasks(task)[0].image_source_digest != loaded.image_source_digest
+
+    (task / "setup").mkdir()
+    (task / "setup" / "run.ps1").write_text("winget install Git.Git\n")
+    assert any("belongs in image/run.ps1" in finding.message for finding in lint_repository(task))
+
+
+@pytest.mark.parametrize(
+    ("invalid", "message"),
+    [
+        ("dockerfile", "image/Dockerfile"),
+        ("missing-ref", "image.ref"),
+        ("container", "image.kind: vm"),
+        ("verifier-dockerfile", "reuse the solver image or use a ref"),
+    ],
+)
+def test_windows_image_contract_rejects_invalid_sources(
+    tmp_path: Path, invalid: str, message: str
+) -> None:
+    task = _windows_task(tmp_path)
+    (task / "image" / "run.ps1").write_text("Write-Output 'build'\n")
+    manifest = task / "task.yaml"
+    if invalid == "dockerfile":
+        (task / "image" / "Dockerfile").write_text("FROM scratch\n")
+    elif invalid == "missing-ref":
+        manifest.write_text(manifest.read_text().replace("  ref: /images/windows-base.qcow2\n", ""))
+    elif invalid == "container":
+        manifest.write_text(manifest.read_text().replace("kind: vm", "kind: container"))
+    else:
+        (task / "verify" / "Dockerfile").write_text("FROM scratch\n")
+    with pytest.raises(TaskDefinitionError, match=message):
+        load_tasks(task)
+    assert any(message in finding.message for finding in lint_repository(task))
+
+
+def test_linux_powershell_helper_still_requires_dockerfile(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    (task / "image" / "run.ps1").write_text("Write-Output 'build'\n")
+    assert load_tasks(task)[0].image_source_digest is not None
+    (task / "image" / "Dockerfile").unlink()
+    with pytest.raises(TaskDefinitionError, match="requires os: windows"):
+        load_tasks(task)
 
 
 def test_missing_solver_dockerfile_and_ref_fails_loading(tmp_path: Path) -> None:

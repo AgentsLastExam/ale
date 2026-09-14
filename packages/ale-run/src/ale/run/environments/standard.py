@@ -266,9 +266,6 @@ class StandardEnvironment(Environment):
             await self._rollout(harness, ctx, sandbox)
             return
 
-        if spec.os is OperatingSystem.WINDOWS and harness.name not in {"nop", "oracle"}:
-            raise AgentError(f"{harness.name} does not support Windows")
-
         if harness.name == "oracle":
             await self._upload_oracle(ctx, task, sandbox)
 
@@ -487,7 +484,20 @@ class StandardEnvironment(Environment):
 
         layout = _layout(ctx.spec.os)
         verify_root = layout.path("verify")
-        removed = await self._remove_paths(ctx, sandbox, (str(verify_root),))
+        if ctx.spec.os is OperatingSystem.WINDOWS:
+            # Preserve the base's writable stage directory under the protected ALE root.
+            removed = await sandbox.exec(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    f"Get-ChildItem -LiteralPath '{verify_root}' -Force -ErrorAction Stop | "
+                    "Remove-Item -Recurse -Force -ErrorAction Stop",
+                ]
+            )
+        else:
+            removed = await self._remove_paths(ctx, sandbox, (str(verify_root),))
         if not removed.ok:
             raise TaskError(
                 "could not clear the previous verify stage: "
@@ -914,15 +924,20 @@ class StandardEnvironment(Environment):
 
     async def _site_packages(self, ctx: EpisodeContext, sandbox: Sandbox) -> str:
         """Where this image's interpreter looks for installed packages."""
+        destination = (
+            "site.getusersitepackages()"
+            if ctx.spec.os is OperatingSystem.WINDOWS
+            else "sysconfig.get_paths()['purelib']"
+        )
         result = await sandbox.exec(
             [
                 _python(ctx.spec.os),
                 "-c",
                 (
-                    "import sys,sysconfig;"
+                    "import sys,sysconfig,site;"
                     "assert sys.version_info >= (3,12), "
                     "f'ale_verify requires Python 3.12+, got {sys.version.split()[0]}';"
-                    "print(sysconfig.get_paths()['purelib'])"
+                    f"print({destination})"
                 ),
             ],
         )

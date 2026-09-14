@@ -363,8 +363,10 @@ async def _run(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
-    except TimeoutError:
-        proc.kill()
+    except (TimeoutError, asyncio.CancelledError):
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
         raise
     return (
         proc.returncode or 0,
@@ -558,6 +560,45 @@ class QemuSandbox(Sandbox):
                 raise ProviderStartError(f"could not close egress: {stderr.strip()}")
         self._sealed = True
 
+    async def save_image(self, destination: Path) -> None:
+        """Shut down a Windows build VM and export a standalone disk."""
+        if self.request.os is not OperatingSystem.WINDOWS:
+            raise ProviderCapabilityError("image scripts require a Windows VM")
+        result = await self.exec(["shutdown.exe", "/s", "/t", "1"], timeout_sec=30)
+        if not result.ok:
+            raise ProviderStartError(f"could not shut down build VM: {result.stderr}")
+        await self._client.close()
+        code, output, stderr = await _run("docker", "wait", self.container, timeout=300)
+        if code != 0 or output.strip() != "0":
+            raise ProviderStartError(f"build VM did not shut down cleanly: {stderr or output}")
+
+        # The stopped overlay names the runner's mount; point it at the same host disk.
+        overlay = self.storage / "data.qcow2"
+        code, _, stderr = await _run(
+            "qemu-img",
+            "rebase",
+            "-u",
+            "-F",
+            "qcow2",
+            "-b",
+            self.resolved_image.observed_ref,
+            str(overlay),
+            timeout=60,
+        )
+        if code != 0:
+            raise ProviderStartError(f"could not resolve build VM backing disk: {stderr}")
+        code, _, stderr = await _run(
+            "qemu-img",
+            "convert",
+            "-O",
+            "qcow2",
+            str(overlay),
+            str(destination),
+            timeout=1800,
+        )
+        if code != 0:
+            raise ProviderStartError(f"could not export build VM: {stderr}")
+
     async def destroy(self) -> None:
         """Idempotent: teardown also runs on failure paths, sometimes twice."""
         if self.state is SandboxState.DESTROYED:
@@ -607,8 +648,10 @@ class QemuProvider(Provider):
         image_cache_dir: Path | None = None,
         gpu_devices: tuple[str, ...] = (),
         gpu_lock_dir: Path | None = None,
+        runner_image: str = RUNNER_IMAGE,
     ) -> None:
         self.fixture_image = image
+        self.runner_image = runner_image
         # Host-side, and named for what it holds. It was `work_dir`, which is a retired
         # name: the workspace is the agent's home *inside* a sandbox, and reusing the word
         # for a directory on this machine is the collision the lexicon exists to prevent.
@@ -668,7 +711,7 @@ class QemuProvider(Provider):
         await resolve_prepared_vm_image(prepared)
         return prepared
 
-    async def create(self, request: SandboxRequest) -> Sandbox:
+    async def create(self, request: SandboxRequest) -> QemuSandbox:
         self.accepts(request)
         if request.image_kind is not ImageKind.VM:
             raise ProviderCapabilityError("QemuProvider requires image.kind=vm")
@@ -768,7 +811,7 @@ class QemuProvider(Provider):
                         provider_addresses=tuple(gpu.bdf for gpu in selected),
                         lease_keys=lease.device_keys,
                         observed_devices=observed_gpu,
-                        runtime_identity=f"qemu-runner/{RUNNER_IMAGE}",
+                        runtime_identity=f"qemu-runner/{self.runner_image}",
                     )
                     if lease
                     else None
@@ -862,17 +905,21 @@ class QemuProvider(Provider):
             "--env", f"RAM_SIZE={request.resources.memory_mb}M",
             "--env", f"CPU_CORES={request.resources.cpus}",
             "--env", "CPU_MODEL=host",
+            # Match guest forwarding even when the outer container gets another address.
+            "--env", "VM_NET_IP=172.30.0.2",
             # Hypervisor enlightenments are for Windows guests; a Linux guest boots
             # faster without them.
             "--env", f"HV={'Y' if request.os is OperatingSystem.WINDOWS else 'N'}",
         ]  # fmt: skip
+        if request.os is OperatingSystem.WINDOWS and request.sudo:
+            argv += ["--env", "ARGUMENTS=-smbios type=1,serial=ale-sudo"]
         if gpus:
             argv += ["--label", f"{GPU_LABEL}={','.join(gpu.bdf for gpu in gpus)}"]
             argv += ["--device=/dev/vfio/vfio", "--ulimit", "memlock=-1:-1"]
             for group in sorted({gpu.group for gpu in gpus}):
                 argv += [f"--device=/dev/vfio/{group}"]
             argv += ["--env", f"ALE_QEMU_VFIO_DEVICES={','.join(gpu.bdf for gpu in gpus)}"]
-        argv += [RUNNER_IMAGE]
+        argv += [self.runner_image]
 
         code, stdout, stderr = await _run(*argv, timeout=180)
         if code != 0:

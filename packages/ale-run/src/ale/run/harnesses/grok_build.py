@@ -35,7 +35,14 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.run.agent_resources import continuation_fingerprint
-from ale.run.harnesses._npm import agent_home, npm_env
+from ale.run.harnesses._npm import (
+    agent_home,
+    agent_path,
+    bash_command,
+    is_windows,
+    npm_command,
+    npm_env,
+)
 from ale.run.subscription import classify_subscription_error
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
@@ -116,13 +123,17 @@ class GrokBuildHarness(AutonomousHarness):
         home = await agent_home(sandbox)
         install_home = f"{home}/.grok-build-install"
         env = {
-            **npm_env(home),
+            **await npm_env(sandbox, home),
             "GROK_HOME": install_home,
             "GROK_MANAGED_BY_NPM": "1",
         }
-        binary = f"{install_home}/bin/grok"
+        binary = f"{install_home}/bin/grok" + (".exe" if is_windows(home) else "")
         probe = await sandbox.exec(
-            ["sh", "-c", f"test -x {shlex.quote(binary)} && {shlex.quote(binary)} --version"],
+            bash_command(
+                home,
+                f"test -x {shlex.quote(binary)} && {shlex.quote(binary)} --version",
+                login=False,
+            ),
             env=env,
             timeout_sec=60,
             identity=Identity.AGENT,
@@ -130,15 +141,15 @@ class GrokBuildHarness(AutonomousHarness):
         installed = _version(probe.stdout + probe.stderr) if probe.ok else None
         if installed != self.version():
             result = await sandbox.exec(
-                [
-                    "npm",
+                npm_command(
+                    home,
                     "install",
                     "-g",
                     "--force",
                     "--prefix",
                     f"{home}/.local",
                     f"@xai-official/grok@{self.version()}",
-                ],
+                ),
                 env=env,
                 timeout_sec=1200,
                 identity=Identity.AGENT,
@@ -164,7 +175,7 @@ class GrokBuildHarness(AutonomousHarness):
         session: HarnessSession,
         resources: EffectiveAgentResources,
     ) -> None:
-        grok_home = PurePosixPath(session.home) / ".grok-ale"
+        grok_home = agent_path(session.home) / ".grok-ale"
         skills_root = grok_home / "skills"
         await sandbox.exec(["mkdir", "-p", str(skills_root)], identity=Identity.AGENT)
         for skill in resources.skills:
@@ -274,12 +285,12 @@ class GrokBuildHarness(AutonomousHarness):
     ) -> AgentRun:
         self._check_continuation(continuation, session)
         state = await sandbox.exec(
-            [
-                "sh",
-                "-c",
-                f"find {shlex.quote(session.home + '/.grok-ale/sessions')} -type d "
+            bash_command(
+                session.home,
+                f"find {shlex.quote(str(agent_path(session.home) / '.grok-ale/sessions'))} -type d "
                 f"-name {shlex.quote(continuation.native_session_id)} -print -quit | grep -q .",
-            ],
+                login=False,
+            ),
             identity=Identity.AGENT,
         )
         if not state.ok:
@@ -305,7 +316,7 @@ class GrokBuildHarness(AutonomousHarness):
         resume: bool,
         timeout_sec: float,
     ) -> AgentRun:
-        home = PurePosixPath(session.home)
+        home = agent_path(session.home)
         grok_home = home / ".grok-ale"
         prompt = grok_home / "prompt.txt"
         await sandbox.write_file(prompt, instruction.encode(), identity=Identity.AGENT)
@@ -335,7 +346,12 @@ class GrokBuildHarness(AutonomousHarness):
             flags.extend(["--reasoning-effort", self.settings.reasoning_effort])
         if isinstance(self.settings.max_turns, int):
             flags.extend(["--max-turns", str(self.settings.max_turns)])
-        binary = home / ".grok-build-install" / "bin" / "grok"
+        binary = (
+            home
+            / ".grok-build-install"
+            / "bin"
+            / ("grok.exe" if is_windows(session.home) else "grok")
+        )
         segment = grok_home / "segment.jsonl"
         transcript = home / TRANSCRIPT_NAME
         command = (
@@ -347,7 +363,7 @@ class GrokBuildHarness(AutonomousHarness):
             f">> {shlex.quote(str(transcript))}; exit $status"
         )
         env = {
-            **npm_env(session.home),
+            **await npm_env(sandbox, session.home),
             "GROK_HOME": str(grok_home),
             "GROK_MANAGED_BY_NPM": "1",
             "GROK_SANDBOX": "off",
@@ -367,7 +383,7 @@ class GrokBuildHarness(AutonomousHarness):
             "ALE_GATEWAY_TOKEN": session.token,
         }
         result = await sandbox.exec(
-            ["bash", "-lc", command],
+            bash_command(session.home, command),
             cwd=session.home,
             env=env,
             timeout_sec=timeout_sec,
@@ -407,17 +423,20 @@ class GrokBuildHarness(AutonomousHarness):
     async def _export_session(
         self, sandbox: Sandbox, session: HarnessSession, native_session_id: str
     ) -> None:
-        root = f"{session.home}/.grok-ale/sessions"
+        home = agent_path(session.home)
+        root = str(home / ".grok-ale/sessions")
         command = (
             f"dir=$(find {shlex.quote(root)} -type d -name "
             f"{shlex.quote(native_session_id)} -print -quit); "
             f'test -n "$dir" || exit 0; '
-            f'cp "$dir/chat_history.jsonl" {shlex.quote(session.home + "/" + CHAT_NAME)} '
+            f'cp "$dir/chat_history.jsonl" {shlex.quote(str(home / CHAT_NAME))} '
             "2>/dev/null || true; "
-            f'cp "$dir/updates.jsonl" {shlex.quote(session.home + "/" + UPDATES_NAME)} '
+            f'cp "$dir/updates.jsonl" {shlex.quote(str(home / UPDATES_NAME))} '
             "2>/dev/null || true"
         )
-        await sandbox.exec(["sh", "-c", command], identity=Identity.AGENT)
+        await sandbox.exec(
+            bash_command(session.home, command, login=False), identity=Identity.AGENT
+        )
 
     def parse_trajectory(self, context: TrajectoryParseContext) -> AtifTrajectory:
         chat = _jsonl(context.logs_dir / CHAT_NAME)

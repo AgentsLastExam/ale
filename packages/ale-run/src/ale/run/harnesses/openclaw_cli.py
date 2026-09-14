@@ -37,7 +37,7 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.run.agent_resources import continuation_fingerprint
-from ale.run.harnesses._npm import ensure_npm_cli, npm_env
+from ale.run.harnesses._npm import agent_path, bash_command, ensure_npm_cli, npm_env
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from ._diagnostics import error_text, failure_detail
@@ -134,7 +134,7 @@ class OpenClawCliHarness(AutonomousHarness):
         session: HarnessSession,
         resources: EffectiveAgentResources,
     ) -> None:
-        state = PurePosixPath(session.home) / ".openclaw-ale"
+        state = agent_path(session.home) / ".openclaw-ale"
         workspace = state / "workspace"
         skills_root = workspace / "skills"
         await sandbox.exec(
@@ -267,7 +267,7 @@ class OpenClawCliHarness(AutonomousHarness):
     ) -> AgentRun:
         self._check_continuation(continuation, session)
         transcript = (
-            PurePosixPath(session.home)
+            agent_path(session.home)
             / ".openclaw-ale"
             / "agents"
             / "main"
@@ -296,7 +296,7 @@ class OpenClawCliHarness(AutonomousHarness):
         native_session_id: str,
         timeout_sec: float,
     ) -> AgentRun:
-        home = PurePosixPath(session.home)
+        home = agent_path(session.home)
         state = home / ".openclaw-ale"
         prompt = state / "prompt.txt"
         await sandbox.write_file(prompt, instruction.encode(), identity=Identity.AGENT)
@@ -327,10 +327,10 @@ class OpenClawCliHarness(AutonomousHarness):
             f"2>> {shlex.quote(str(home / STDERR_NAME))}"
         )
         result = await sandbox.exec(
-            ["bash", "-lc", command],
+            bash_command(session.home, command),
             cwd=session.home,
             env={
-                **npm_env(session.home),
+                **await npm_env(sandbox, session.home),
                 "OPENCLAW_HOME": str(state),
                 "OPENCLAW_STATE_DIR": str(state),
                 "OPENCLAW_CONFIG_PATH": str(state / "openclaw.json"),

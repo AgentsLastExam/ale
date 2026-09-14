@@ -128,8 +128,24 @@ $taskPrincipal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interact
     -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Days 3650) `
     -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName "ALE Guestd" -Action $action -Trigger $trigger `
+Register-ScheduledTask -TaskName "ALE Guestd" -Action $action `
     -Principal $taskPrincipal -Settings $settings -Force | Out-Null
+
+# The Host marks image builds and Tasks requesting elevation through read-only SMBIOS.
+$session = "$env:ProgramData\ALE\start-session.ps1"
+@"
+if ((Get-CimInstance Win32_ComputerSystemProduct).IdentifyingNumber -eq "ale-sudo") {
+    & "$start"
+} else {
+    Start-ScheduledTask -TaskName "ALE Guestd"
+}
+"@ | Set-Content -Path $session -Encoding UTF8
+$sessionAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument `
+    "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$session`""
+$sessionPrincipal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive `
+    -RunLevel Highest
+Register-ScheduledTask -TaskName "ALE Guestd Session" -Action $sessionAction -Trigger $trigger `
+    -Principal $sessionPrincipal -Settings $settings -Force | Out-Null
 
 # The seed came from GCP, but the prepared disk runs behind ALE's QEMU runner.  Leaving
 # cloud agents enabled adds minute-long metadata timeouts to every cold boot.
@@ -153,6 +169,7 @@ Get-Process -Name "vmtoolsd", "vmwaretray" -ErrorAction SilentlyContinue | `
 if (-not (Test-Path "$env:ProgramData\ALE\debloat.done")) {
     throw "Windows base cleanup did not complete; inspect C:\ProgramData\ALE\debloat.log."
 }
+& "$PSScriptRoot\tools.ps1"
 
 # The screen, filesystem and timestamps must begin every episode in one predictable locale.
 $languageList = New-WinUserLanguageList "en-US"

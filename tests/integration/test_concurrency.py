@@ -15,11 +15,13 @@ import asyncio
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
+from ale.core.errors import AgentError
 from ale.core.harness import HarnessSession
-from ale.core.sandbox import SandboxRequest
+from ale.core.sandbox import ExecResult, Sandbox, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.verdict import Status
 from ale.run.assets import _repository_lock
@@ -101,7 +103,7 @@ async def test_each_sandbox_gets_the_resources_its_task_declared() -> None:
     assert all(value == str(512 * 1024 * 1024) for value in seen), seen
 
 
-def test_one_claude_definition_has_no_episode_mutable_paths_or_versions() -> None:
+async def test_one_claude_definition_has_no_episode_mutable_paths_or_versions() -> None:
     harness = ClaudeCodeHarness()
     base = HarnessSession(
         episode_id="base",
@@ -109,12 +111,17 @@ def test_one_claude_definition_has_no_episode_mutable_paths_or_versions() -> Non
         token="token",
         model="model",
     )
-    sessions = [
-        harness._env(
-            base.model_copy(update={"episode_id": str(index), "home": f"/home/agent-{index}"})
-        )
-        for index in range(20)
-    ]
+
+    async def launch_environment(index: int) -> dict[str, str]:
+        sandbox = AsyncMock(spec=Sandbox)
+        sandbox.exec.return_value = ExecResult(exit_code=1, stderr="native program failed")
+        sandbox.read_file.return_value = b""
+        session = base.model_copy(update={"episode_id": str(index), "home": f"/home/agent-{index}"})
+        with pytest.raises(AgentError):
+            await harness.launch("work", sandbox, session, timeout_sec=60)
+        return sandbox.exec.call_args.kwargs["env"]
+
+    sessions = await asyncio.gather(*(launch_environment(index) for index in range(20)))
     assert len({env["CLAUDE_CONFIG_DIR"] for env in sessions}) == 20
     assert len({env["PATH"] for env in sessions}) == 20
     assert not hasattr(harness, "_resolved_version")

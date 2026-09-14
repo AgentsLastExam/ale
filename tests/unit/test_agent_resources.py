@@ -13,7 +13,9 @@ from ale.core.taskspec import (
     McpSource,
     NetworkMode,
     NetworkPolicy,
+    OperatingSystem,
     SkillSource,
+    StdioMcpServer,
     TaskMcpSource,
     ToolProvision,
 )
@@ -306,7 +308,10 @@ url = "https://mcp.example.com/api"
     ).mcp_servers
 
 
-def test_builtin_cua_desktop_is_opt_in_and_deduplicates(tmp_path: Path) -> None:
+@pytest.mark.parametrize("operating_system", list(OperatingSystem))
+def test_builtin_cua_desktop_is_opt_in_and_deduplicates(
+    tmp_path: Path, operating_system: OperatingSystem
+) -> None:
     task = tmp_path / "task"
     task.mkdir()
     assert not resolve_mcp(task).mcp_servers
@@ -327,9 +332,15 @@ def test_builtin_cua_desktop_is_opt_in_and_deduplicates(tmp_path: Path) -> None:
         ),
         task_root=task,
         task_source=source(),
+        operating_system=operating_system,
     )
     assert [server.name for server in resources.mcp_servers] == ["cua-desktop"]
     assert resources.mcp_servers[0].source_layers == ("run", "cli")
+    server = resources.mcp_servers[0].server
+    assert isinstance(server, StdioMcpServer)
+    assert server.command == (
+        "python.exe" if operating_system is OperatingSystem.WINDOWS else "python3"
+    )
 
     with pytest.raises(AgentResourceError, match="unknown built-in"):
         resolve_agent_resources(
