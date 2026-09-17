@@ -38,6 +38,7 @@ __all__ = [
     "LLMJudgeConfig",
     "LoggingPolicy",
     "RunConfig",
+    "RunTimeouts",
     "SandboxRetentionConfig",
     "VerificationConfig",
     "ale_repo_path",
@@ -247,6 +248,15 @@ class VmProviderConfig(BaseModel):
     provider: Literal["qemu"] = "qemu"
 
 
+class RunTimeouts(BaseModel):
+    """Runtime overrides; omitted phases retain the Task's deadlines."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    agent: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None = None
+    verify: Annotated[float, Field(gt=0, allow_inf_nan=False)] | Literal["unlimited"] | None = None
+
+
 class RunConfig(BaseModel):
     """Everything one invocation needs, after all layers are merged."""
 
@@ -258,6 +268,7 @@ class RunConfig(BaseModel):
     agent: AgentConfig = AgentConfig()
     gateway: GatewayConfig = GatewayConfig()
     verification: VerificationConfig = VerificationConfig()
+    timeouts: RunTimeouts = RunTimeouts()
     sandbox_retention: SandboxRetentionConfig = SandboxRetentionConfig()
     logging: LoggingPolicy = LoggingPolicy()
     episodes: int = Field(default=1, ge=1)

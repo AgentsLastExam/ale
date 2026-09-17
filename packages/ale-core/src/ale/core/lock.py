@@ -17,6 +17,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ale.core.config import RunTimeouts
 from ale.core.errors import ProvenanceIncompleteError
 from ale.core.ids import TaskId
 from ale.core.result import SandboxOutcome
@@ -305,6 +306,7 @@ class RunLock(BaseModel):
     judges: tuple[JudgeProvenance, ...] = ()
     asset: AssetProvenance | None = None
     verification: VerificationProvenance = VerificationProvenance()
+    timeouts: RunTimeouts = RunTimeouts()
     sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
     termination: LimitTermination | None = None
 

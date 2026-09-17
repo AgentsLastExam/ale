@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 
+from ale.core.config import RunTimeouts, SandboxRetentionConfig
 from ale.core.errors import BudgetExceededError, HarnessLimitError
 from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession
 from ale.core.sandbox import Identity, Sandbox
@@ -23,7 +24,7 @@ from ale.core.trace import read_jsonl
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
-from ale.run.episode import run_episode
+from ale.run.episode import run_episode, run_episode_with_retries
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
@@ -93,6 +94,73 @@ async def test_a_hanging_agent_times_out_and_keeps_its_trace(
     assert trajectory.steps[0].source == "user"
     assert trajectory.extra["ale"]["incomplete"] is True
     assert any(phase.phase == "agent" for phase in result.record.phases)
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_budget_excludes_install_and_verification(
+    tmp_path: Path, write_repo: Callable[..., Path]
+) -> None:
+    task_root = write_repo(tmp_path / "repo")
+    verifier = task_root / "verify/run.sh"
+    verifier.write_text("sleep 3\n" + verifier.read_text())
+    set_timeout(task_root, "verify", 1)
+
+    class SlowInstallOracle(OracleHarness):
+        async def install(self, sandbox: Sandbox) -> str:
+            await asyncio.sleep(3)
+            return await super().install(sandbox)
+
+    result = await run_episode(
+        load_tasks(task_root)[0],
+        StandardEnvironment(SlowInstallOracle(), timeouts=RunTimeouts(agent=2, verify="unlimited")),
+        provider_registry(DockerProvider()),
+        run_dir=tmp_path / "runs",
+    )
+    assert result.record.status is Status.COMPLETED
+    durations = {phase.phase: phase.duration_ms for phase in result.record.phases}
+    assert durations["agent"] < 2000
+    assert durations["verify"] >= 3000
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_timeout_destroys_descendants_and_does_not_retry(
+    tmp_path: Path, write_repo: Callable[..., Path]
+) -> None:
+    task_root = write_repo(tmp_path / "repo")
+    (task_root / "oracle/run.sh").write_text("#!/usr/bin/env bash\nsleep 600 &\nwait\n")
+    calls = 0
+
+    async def execute():
+        nonlocal calls
+        calls += 1
+        return await run_episode(
+            load_tasks(task_root)[0],
+            StandardEnvironment(OracleHarness(), timeouts=RunTimeouts(agent=2, verify="unlimited")),
+            provider_registry(DockerProvider()),
+            run_dir=tmp_path / "runs",
+            sandbox_retention=SandboxRetentionConfig(solver="keep"),
+        )
+
+    started = time.monotonic()
+    result = await run_episode_with_retries(execute, retries=3)
+    assert calls == 1
+    assert result.record.status is Status.TIMEOUT
+    assert result.record.failure.phase == "agent"
+    assert "2" in result.record.failure.message
+    assert time.monotonic() - started < GRACE_SEC
+    assert result.record.sandboxes
+    assert all(outcome.outcome == "destroyed" for outcome in result.record.sandboxes)
+    proc = await asyncio.create_subprocess_exec(
+        "docker",
+        "ps",
+        "--filter",
+        f"label=ale.episode={result.episode_id}",
+        "--format",
+        "{{.Names}}",
+        stdout=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    assert not stdout.strip()
 
 
 @pytest.mark.asyncio

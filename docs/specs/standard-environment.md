@@ -24,9 +24,14 @@ provision -> setup -> agent/oracle -> Harness cleanup -> evidence capture
           -> shared or separate verify -> teardown/retention -> result
 ```
 
-Every phase is timed and attributed independently. Setup, agent, and verify use the
-deadlines from `TaskSpec.timeouts`. Teardown is cancellation-shielded and runs on every
-exit path.
+Every phase is timed and attributed independently. Setup, agent, and verify default to
+`TaskSpec.timeouts`. Run policy may override `timeouts.agent` with positive seconds and
+`timeouts.verify` with positive seconds or `"unlimited"`. These overrides are recorded in
+RunLock and the configuration hash without changing the Task identity. The Agent deadline
+starts at Harness launch (or policy rollout), after installation, resource staging, and
+network sealing. Evidence capture, verification, and cleanup do not consume it. An Agent
+timeout terminates execution, destroys its Sandbox even if retention was requested, and
+returns `timeout` without retry. Teardown is cancellation-shielded on every exit path.
 
 ### Provision
 

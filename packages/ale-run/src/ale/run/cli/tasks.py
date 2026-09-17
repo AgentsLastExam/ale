@@ -244,7 +244,9 @@ async def _run_one(
         async def execute() -> EpisodeResult:
             return await run_episode(
                 task,
-                StandardEnvironment(harness, max_steps=settings.agent.max_steps),
+                StandardEnvironment(
+                    harness, max_steps=settings.agent.max_steps, timeouts=settings.timeouts
+                ),
                 providers,
                 run_dir=run_dir,
                 gateway_url=gateway_url,
@@ -312,6 +314,7 @@ async def _run_one(
                 ),
                 gateway=gateway_provenance(settings),
                 config_hash=settings.config_hash,
+                timeouts=settings.timeouts,
             )
             if task.prepared_image is None:
                 raise TaskDefinitionError(f"solver image was not prepared for {task.spec.label}")
@@ -434,7 +437,8 @@ async def _reverify(
             source=resolved.source,
             agent=source_lock.agent,
             gateway=source_lock.gateway,
-            config_hash=source_lock.config_hash,
+            config_hash=settings.config_hash,
+            timeouts=settings.timeouts,
         )
         episode_id = f"{source_result.episode_id}-reverify-{uuid.uuid4().hex[:6]}"
 
@@ -450,7 +454,9 @@ async def _reverify(
             solver = await _attach_retained(handle, request, source_lock)
             return await run_episode(
                 task,
-                RetainedVerificationEnvironment(solver, source_dir, source_lock.sandbox),
+                RetainedVerificationEnvironment(
+                    solver, source_dir, source_lock.sandbox, timeouts=settings.timeouts
+                ),
                 providers,
                 run_dir=run_dir,
                 model=source_lock.agent.model,
@@ -599,6 +605,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                     ),
                     gateway=gateway_provenance(settings),
                     config_hash=settings.config_hash,
+                    timeouts=settings.timeouts,
                 )
                 identity = episode_identity(
                     spec,
@@ -626,7 +633,9 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                 ) -> EpisodeResult:
                     return await run_episode(
                         task,
-                        StandardEnvironment(harness, agent_enabled=agent_enabled),
+                        StandardEnvironment(
+                            harness, agent_enabled=agent_enabled, timeouts=settings.timeouts
+                        ),
                         providers,
                         run_dir=run_dir,
                         episode_id=episode_id,

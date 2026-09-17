@@ -99,7 +99,7 @@ async def run_episode_with_retries(
         result = await execute()
         failure = result.record.failure
         if (
-            result.record.status is Status.COMPLETED
+            result.record.status in {Status.COMPLETED, Status.TIMEOUT}
             or attempt == retries
             or (
                 failure is not None
@@ -586,6 +586,7 @@ async def run_episode(
         try:
             await lease.finalize(
                 allow_retention=verdict is not None
+                and verdict.status is not Status.TIMEOUT
                 and (verdict.status is Status.COMPLETED or not destroy_failed_sandboxes)
             )
         except RetentionFinalizationError as exc:

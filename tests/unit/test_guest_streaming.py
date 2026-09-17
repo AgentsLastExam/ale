@@ -85,6 +85,26 @@ def test_guest_timeout_drains_output_and_returns_a_typed_outcome() -> None:
     assert b"before timeout" in text
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group cleanup")
+def test_guest_timeout_reaps_children_after_launcher_exit() -> None:
+    started = time.monotonic()
+    result = Handler(lambda event: None).dispatch(
+        1,
+        "exec",
+        {
+            "argv": [
+                sys.executable,
+                "-c",
+                "import subprocess,sys; "
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'])",
+            ],
+            "timeout_sec": 0.2,
+        },
+    )
+    assert result["data"] == {"exit_code": None, "timed_out": True}
+    assert time.monotonic() - started < 2
+
+
 class FakeTransport:
     def __init__(self, messages: list[dict[str, Any]]) -> None:
         self.messages = list(messages)

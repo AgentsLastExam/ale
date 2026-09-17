@@ -55,7 +55,9 @@ def write_result(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [status for status in Status if status is not Status.COMPLETED])
+@pytest.mark.parametrize(
+    "failure", [status for status in Status if status not in {Status.COMPLETED, Status.TIMEOUT}]
+)
 async def test_retry_preserves_failed_evidence_and_stops_on_completed_zero(
     tmp_path: Path, failure: Status
 ) -> None:
@@ -78,6 +80,23 @@ async def test_retry_preserves_failed_evidence_and_stops_on_completed_zero(
     )
     assert previous.status is failure
     assert previous.episode_id == result.episode_id
+
+
+@pytest.mark.asyncio
+async def test_timeout_is_terminal_without_retry(tmp_path: Path) -> None:
+    calls = 0
+
+    async def execute() -> EpisodeResult:
+        nonlocal calls
+        calls += 1
+        return write_result(
+            tmp_path / "episode", Status.TIMEOUT, calls, failure_type="PhaseTimeoutError"
+        )
+
+    result = await run_episode_with_retries(execute, retries=3)
+    assert calls == 1
+    assert result.record.status is Status.TIMEOUT
+    assert not (result.run_dir / "attempts").exists()
 
 
 @pytest.mark.asyncio

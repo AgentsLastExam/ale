@@ -268,6 +268,16 @@ class TestConfigLayering:
         assert one.config_hash != two.config_hash
         assert one.config_hash == RunConfig().config_hash
 
+    def test_run_phase_timeouts_are_validated_and_part_of_provenance(self) -> None:
+        config = RunConfig(timeouts={"agent": 18000, "verify": "unlimited"})
+        assert config.config_hash != RunConfig().config_hash
+        lock = make_lock(timeouts=config.timeouts)
+        assert lock.timeouts.agent == 18000
+        assert lock.timeouts.verify == "unlimited"
+        for invalid in (0, -1, float("inf"), "never"):
+            with pytest.raises(ValueError):
+                RunConfig(timeouts={"agent": invalid})
+
     def test_gateway_ceilings_are_explicitly_unlimited_by_default(self) -> None:
         limits = RunConfig().gateway.limits
         assert limits.model_dump() == {

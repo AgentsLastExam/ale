@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Literal, cast
 
+from ale.core.config import RunTimeouts
 from ale.core.environment import Environment, EpisodeContext, Phase
 from ale.core.errors import (
     AgentError,
@@ -129,11 +130,13 @@ class StandardEnvironment(Environment):
         max_steps: int = DEFAULT_MAX_STEPS,
         stall_limit: int = DEFAULT_STALL_LIMIT,
         agent_enabled: bool = True,
+        timeouts: RunTimeouts | None = None,
     ) -> None:
         self.harness = harness
         self.max_steps = max_steps
         self.stall_limit = stall_limit
         self.agent_enabled = agent_enabled
+        self.timeouts = timeouts or RunTimeouts()
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
         spec = task.spec
@@ -146,9 +149,7 @@ class StandardEnvironment(Environment):
                 ctx, Phase.SETUP, spec.timeouts.setup, self._setup(task, ctx, sandbox)
             )
             if self.agent_enabled:
-                await self._with_deadline(
-                    ctx, Phase.AGENT, spec.timeouts.agent, self._agent(task, ctx, sandbox)
-                )
+                await self._agent(task, ctx, sandbox)
             try:
                 await self._capture_solver_evidence(ctx, sandbox)
             except BaseException:
@@ -168,7 +169,9 @@ class StandardEnvironment(Environment):
                     await self._sanitize_for_retention(ctx, verifier)
                     await ctx.sandboxes.release(verifier)
 
-            rewards = await self._with_deadline(ctx, Phase.VERIFY, spec.timeouts.verify, verify())
+            rewards = await self._with_deadline(
+                ctx, Phase.VERIFY, self._verify_timeout(ctx), verify()
+            )
         finally:
             # Teardown runs on every path, including cancellation.
             await asyncio.shield(self._timed(ctx, Phase.TEARDOWN, self._teardown(ctx, sandbox)))
@@ -261,10 +264,13 @@ class StandardEnvironment(Environment):
     async def _agent(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         spec = ctx.spec
         ctx.agent_started = True
+        timeout = self.timeouts.agent or spec.timeouts.agent
 
         harness = self.harness
         if isinstance(harness, PolicyHarness):
-            await self._rollout(harness, ctx, sandbox)
+            await self._with_deadline(
+                ctx, Phase.AGENT, timeout, self._rollout(harness, ctx, sandbox)
+            )
             return
 
         if harness.name == "oracle":
@@ -293,21 +299,25 @@ class StandardEnvironment(Environment):
         )
         await self._validate_stdio_mcp(ctx, sandbox)
         await self._seal(ctx, sandbox)
-        run = await harness.launch(
-            spec.instruction,
-            _RecordedSandbox(
-                ctx,
-                sandbox,
-                component="harness-launch",
-                actor="task" if harness.name == "oracle" else "framework",
-            ),
-            session,
-            timeout_sec=spec.timeouts.agent,
-        )
-        ctx.agent_run = run
-        if run.exit_code != 0:
-            detail = run.final_message or "no diagnostic output"
-            raise AgentError(f"{harness.name} exited {run.exit_code}: {detail}")
+
+        async def launch() -> None:
+            run = await harness.launch(
+                spec.instruction,
+                _RecordedSandbox(
+                    ctx,
+                    sandbox,
+                    component="harness-launch",
+                    actor="task" if harness.name == "oracle" else "framework",
+                ),
+                session,
+                timeout_sec=timeout,
+            )
+            ctx.agent_run = run
+            if run.exit_code != 0:
+                detail = run.final_message or "no diagnostic output"
+                raise AgentError(f"{harness.name} exited {run.exit_code}: {detail}")
+
+        await self._with_deadline(ctx, Phase.AGENT, timeout, launch())
 
     async def _stage_mcp_files(
         self, ctx: EpisodeContext, sandbox: Sandbox
@@ -1004,7 +1014,12 @@ class StandardEnvironment(Environment):
         rewards, _ = await self._read_verdict(sandbox, operating_system)
         return rewards
 
-    async def _with_deadline(self, ctx, phase: Phase, seconds: float, coro):  # type: ignore[no-untyped-def]
+    def _verify_timeout(self, ctx: EpisodeContext) -> float | None:
+        if self.timeouts.verify == "unlimited":
+            return None
+        return self.timeouts.verify or ctx.spec.timeouts.verify
+
+    async def _with_deadline(self, ctx, phase: Phase, seconds: float | None, coro):  # type: ignore[no-untyped-def]
         return await self._timed(ctx, phase, coro, timeout_sec=seconds)
 
     async def _timed(
@@ -1098,6 +1113,8 @@ class RetainedVerificationEnvironment(StandardEnvironment):
         solver: Sandbox,
         source_run_dir: Path,
         sandbox_identity: SandboxProvenance | None,
+        *,
+        timeouts: RunTimeouts | None = None,
     ) -> None:
         self.solver = solver
         self.source_run_dir = source_run_dir
@@ -1106,6 +1123,7 @@ class RetainedVerificationEnvironment(StandardEnvironment):
         self.max_steps = 0
         self.stall_limit = 0
         self.agent_enabled = False
+        self.timeouts = timeouts or RunTimeouts()
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
         ctx.resolved_image = self.solver.resolved_image
@@ -1126,7 +1144,7 @@ class RetainedVerificationEnvironment(StandardEnvironment):
                 rewards = await self._with_deadline(
                     ctx,
                     Phase.VERIFY,
-                    ctx.spec.timeouts.verify,
+                    self._verify_timeout(ctx),
                     self._verify(task, ctx, self.solver),
                 )
             finally:
@@ -1161,7 +1179,7 @@ class RetainedVerificationEnvironment(StandardEnvironment):
         rewards = await self._with_deadline(
             ctx,
             Phase.VERIFY,
-            ctx.spec.timeouts.verify,
+            self._verify_timeout(ctx),
             verify(),
         )
         ctx.verified_rewards = rewards
@@ -1312,4 +1330,6 @@ class _RecordedSandbox:
             )
             raise
         recorder.finish(result)
+        if result.timed_out and self._component == "harness-launch":
+            raise PhaseTimeoutError(Phase.AGENT.value, timeout_sec or 0)
         return result

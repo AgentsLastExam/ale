@@ -18,7 +18,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ale.core.config import RunConfig
+from ale.core.config import RunConfig, RunTimeouts
 from ale.core.harness import EffectiveAgentResources
 from ale.core.lock import (
     AgentProvenance,
@@ -196,6 +196,7 @@ class ProvenanceInputs:
     agent: AgentProvenance
     gateway: GatewayProvenance
     config_hash: str
+    timeouts: RunTimeouts = field(default_factory=RunTimeouts)
     judges: tuple[JudgeProvenance, ...] = ()
     framework: FrameworkProvenance = field(default_factory=framework_provenance)
 
@@ -234,6 +235,7 @@ def build_lock(
         gateway=inputs.gateway,
         sandbox=sandbox,
         config_hash=inputs.config_hash,
+        timeouts=inputs.timeouts,
         seed=seed,
         ale_verify=ale_verify,
         judges=inputs.judges,

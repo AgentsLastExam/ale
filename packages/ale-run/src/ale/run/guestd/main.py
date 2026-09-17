@@ -147,8 +147,9 @@ class Handler:
         timed_out = False
         open_streams = len(readers)
         while open_streams:
-            if deadline is not None and time.monotonic() >= deadline and proc.poll() is None:
+            if deadline is not None and time.monotonic() >= deadline and not timed_out:
                 timed_out = True
+                # Descendants can hold the pipes open after the launcher exits.
                 _terminate(proc)
             try:
                 name, block = chunks.get(timeout=0.1)
