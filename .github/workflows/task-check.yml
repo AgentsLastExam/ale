@@ -1,0 +1,34 @@
+name: task-check
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: task-repo
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: AgentsLastExam/ale
+          ref: main
+          path: ale-engine
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: ale-engine/uv.lock
+      - name: Lint Task structure
+        working-directory: task-repo
+        run: uv run --project ../ale-engine --frozen --no-dev ale lint .
+      - name: Guest code parses on Python 3.12
+        working-directory: task-repo
+        run: uv run --no-project --python 3.12 python -I -m compileall -q tasks

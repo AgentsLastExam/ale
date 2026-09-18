@@ -82,6 +82,22 @@ deliberately light:
   it borrows from an existing implementation, it says what was deliberately changed.
 - Run `just lint && just test` before pushing. That is the whole checklist.
 
+## Task repository CI
+
+Task repositories, including `ale-tasks-base`, call the public
+[`task-check.yml`](../../.github/workflows/task-check.yml) reusable workflow at `main`.
+Their `tasks` workflow keeps only `push`/`pull_request` triggers, read-only contents
+permission, and a `check` job using
+`AgentsLastExam/ale/.github/workflows/task-check.yml@main`. GitHub reports the nested
+check as `check / check`; required-check rules must use that name when enabled.
+Updating the shared workflow affects each caller's next run, not already recorded runs.
+
+The shared workflow statically lints Tasks and compiles Python source on Python 3.12.
+It does not execute Task code, pull images, download assets, or call models. Brew
+Workers own actual submitted-Task validation, beta review, and calibration against
+the recorded source/assets revisions. Engine integration and Judge regression tests
+remain in this repository's `ci` workflow. A passing static check is not build evidence.
+
 ## Conventions
 
 - Everything in this repository is written in standard English.
