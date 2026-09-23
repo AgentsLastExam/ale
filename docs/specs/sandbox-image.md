@@ -65,6 +65,12 @@ it is unsupported for Linux and separate verifier declarations. Without local bu
 instructions, the matching Provider resolves the declared ref. Container and VM refs are
 both supported and recorded immutably.
 
+A VM `ref` or Windows `base_ref` may also be an absolute host path to a standalone
+qcow2. Local disks are structurally checked and their actual file bytes are SHA-256
+hashed at preparation, without contacting a registry. Disks with backing files are
+rejected; flatten them first so the recorded identity covers the complete disk.
+The operator must keep prepared local disks unchanged while they are in use.
+
 The authored image source digest excludes `image/assets` so normal Task identity and
 asset provenance remain separate. Docker still consumes current asset bytes natively and
 BuildKit decides Linux cache reuse; Windows cache keys include the actual image asset
