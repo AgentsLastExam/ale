@@ -146,8 +146,8 @@ justification uses `metadata.network_justification`.
 ## image/
 
 The image is the reproducible initial computer state supplied to the agent. Start from the ALE GUI
-base matching `image.kind`, then add every stable dependency, service, file, permission, and piece
-of initial state required by the Task:
+base matching the Task OS and `image.kind`, then add every stable dependency, service, file,
+permission, and piece of initial state required by the Task. The Linux bases are:
 
 - container: `ghcr.io/agentslastexam/container-ubuntu22-base:latest` (Ubuntu 22.04);
 - VM: `ghcr.io/agentslastexam/vm-ubuntu24-base:0.1.0` (Ubuntu 24.04).
@@ -190,7 +190,7 @@ Copy-Item .\assets\input.txt "$env:ALE_HOME\input.txt"
 directory as cwd and `ALE_HOME` set to the agent home, then saves the configured qcow2.
 Scripts may use WinGet, Chocolatey, or
 local unattended installers; pin package versions where supported and check native command
-exit codes. Scripts must finish within 30 minutes; nonzero exits fail the build. Suppress
+exit codes. Scripts must finish within one hour; nonzero exits fail the build. Suppress
 installer reboots; builds requiring a mid-script restart are unsupported. ALE owns shutdown.
 Build-only materials are removed before saving; copy required files to their final locations.
 Only `image/` is staged.
@@ -199,6 +199,53 @@ To use a prepared image directly, declare `image.ref` and omit `image/run.ps1` a
 `image.base_ref`. `base_ref` is supported only for Windows solver builds and requires
 the script. Windows separate verification reuses the solver image or supplies
 `verify.image.ref`.
+
+### Windows software assets: author workflow
+
+For software that needs an interactive acquisition or a large download, acquire and package it
+once, then build Tasks unattended from the versioned offline asset. Each Task owns its deployment
+and configuration scripts in `image/`; each episode uses a fresh writable overlay of the locally
+cached Task image. Neither application installation nor vendor login belongs in `setup/` or the
+evaluated-agent phase.
+
+1. Inspect the supplied software library for a compatible version, architecture, Windows build,
+   deployment recipe, prerequisites, and validation evidence. Reuse a qualified asset when present;
+   do not repeat vendor login/download or inherit another Task's final image.
+2. Pin the software repository, immutable commit, package path, byte count, and SHA-256 in an
+   authored file such as `image/software.json`. This is Task-owned data, not a new `task.yaml`
+   field or an ALE-managed dependency manifest. Keep the reviewed deployment script in `image/`;
+   adapt its paths, settings and inputs for the Task.
+3. Have the Host acquire private assets using Host credentials. The image script checks the
+   expected bytes before deployment. Large software can be streamed from a builder-reachable
+   internal artifact endpoint; runtime must not depend on it. A software library is separate from
+   the Task asset datasets managed by `ale assets`. ALE currently supplies no shared-software
+   catalog, automatic HF fetch/mirror lifecycle, or software-publication command.
+4. Follow the asset's tested deployment mode: install/register a compatible MSIX for the actual
+   agent user, or deploy a qualified native payload with explicit dependencies and registration.
+   An MSIX archive alone is not proof that either mode works. VM overlays do not override package
+   protection, NTFS permissions, or executable restrictions. Grant writes to ordinary application
+   directories where needed; do not make WindowsApps writable. PSF and app attach are optional
+   compatibility/deployment tools, not prerequisites for Task images.
+5. If no compatible asset exists, acquire the software in a separate packaging VM, record the
+   acquisition and packaging recipe, create/sign the MSIX, and qualify its deployment on a fresh
+   base. Prepare a contribution containing the package, public certificate, manifest, scripts and
+   validation evidence. Contribute a new packaging revision when changing a shared payload or
+   compatibility recipe; Task-specific configuration stays in the Task. Publishing uses the
+   software-library maintainer's workflow and the author's existing permissions, not Task asset
+   publication or an implicit grant to push from Brew.
+6. Build with `ale prepare`, then test the required GUI and CLI workflows as the real agent user
+   in a fresh VM: new project/document creation, writes, subprocesses, save/reopen and normal exit.
+   Check cache reuse with the asset source unavailable and isolation between fresh overlays.
+   Keep complete RunLocks and perform normal Task validation and a visual-agent run; a successful
+   installer or an elevated-shell smoke test does not establish agent readiness.
+
+The [Windows Task image guide](../guides/windows-task-images.md) supplies the acquisition,
+deployment and contribution examples, plus the UE compatibility findings. In a Brew workspace
+where guidance is copied without its linked guides, read
+`.ale-brew/ale/docs/guides/windows-task-images.md` in the supplied ALE checkout. The operator must
+supply the actual base and software-library location; example repository names are not an
+already provisioned service. Packaging/login credentials and signing private keys never belong
+in contributed assets, Task source, or the final Task image.
 
 ## setup/
 

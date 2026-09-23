@@ -5,6 +5,14 @@ Task assets are the four separately managed `image/assets`, `setup/assets`,
 [Task authoring contract](task-authoring.md). Runtime stages consume their materialized
 files normally; running a Task never implicitly downloads assets.
 
+Shared software packages reused across Tasks are distinct from these four asset roots. The
+`ale assets` commands version and publish Task-local files; they do not discover or publish a
+central software library. A Task can pin a shared offline software asset and consume it during
+image construction through its own installation script. Keep the package reference and reviewed
+recipe in Task source; credentials remain on the Host. See the
+[Windows software workflow](task-authoring.md#windows-software-assets-author-workflow) and
+[reuse/contribution guide](../guides/windows-task-images.md).
+
 ## Repository and access
 
 Each Task source repository has one private Hugging Face dataset named

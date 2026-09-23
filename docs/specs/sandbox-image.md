@@ -119,6 +119,19 @@ Reuse covers the whole build and is keyed by base, builder, scripts, and asset b
 there is no per-command cache or new recipe language. Authoring details belong to
 [Task authoring](task-authoring.md#image).
 
+Software acquired once and distributed as an MSIX can be installed by that script. MSIX is
+not an ALE image kind, and app attach is not required: the configured software is saved into
+the Task qcow2. Each episode's overlay isolates disk changes but preserves Windows permissions
+and package execution rules. Software requiring ordinary writable installation files can use
+a qualified native deployment recipe instead of package registration; extracting an arbitrary
+MSIX does not reproduce its installation semantics. See the
+[Windows Task image guide](../guides/windows-task-images.md) for the tested UE example.
+
+For a software asset fetched by the image script, ALE hashes the authored pin/recipe, not
+remote bytes it has not seen. The script must verify an immutable expected digest before
+deploying; changing that pin changes the image context and invalidates build reuse. A moving
+download URL without a pinned digest does not provide reproducible image inputs.
+
 GUI image qualification includes a real visual agent completing a task whose decisive
 input exists only on screen, followed by inspection of its canonical trajectory,
 screenshots, desktop actions, artifact, and reward. Windows base qualification also checks
