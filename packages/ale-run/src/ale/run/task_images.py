@@ -477,8 +477,13 @@ async def _build_oci(*, context: Path, source_digest: str, source: str) -> _OciB
         except (OSError, json.JSONDecodeError) as exc:
             raise ProviderStartError(f"Buildx wrote invalid metadata: {exc}") from exc
 
+    built_identity = metadata.get("containerimage.config.digest") or metadata.get(
+        "containerimage.digest"
+    )
+    if not isinstance(built_identity, str) or not built_identity.startswith("sha256:"):
+        raise ProviderStartError("Buildx metadata has no immutable image digest")
     code, image_id, stderr = await _run(
-        "docker", "image", "inspect", "--format", "{{.Id}}", tag, timeout=30
+        "docker", "image", "inspect", "--format", "{{.Id}}", built_identity, timeout=30
     )
     image_id = image_id.strip()
     if code != 0 or not image_id.startswith("sha256:"):
@@ -488,7 +493,7 @@ async def _build_oci(*, context: Path, source_digest: str, source: str) -> _OciB
     return _OciBuild(
         input_identity=input_identity,
         image_source_identity=source_digest,
-        runtime_ref=tag,
+        runtime_ref=image_id,
         oci_identity=image_id,
         base_materials=_materials(metadata),
     )

@@ -71,11 +71,13 @@ class Task(ABC):
         task_digest: str,
         image_source_digest: str | None,
         verifier_image_source_digest: str | None = None,
+        non_verifier_digest: str | None = None,
     ) -> None:
         self.spec = spec
         self.folder = folder
         self.source = source or TaskSourceContext()
         self.task_digest = task_digest
+        self.non_verifier_digest = non_verifier_digest
         self.image_source_digest = image_source_digest
         self.verifier_image_source_digest = verifier_image_source_digest
         self.prepared_image: PreparedTaskImage | None = None

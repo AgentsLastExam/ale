@@ -187,6 +187,7 @@ class ManifestTask(Task):
             folder=folder,
             source=folder.source,
             task_digest=folder.content_digest,
+            non_verifier_digest=tree_digest(folder.root, exclude=("verify", ".ale-cache")),
             image_source_digest=folder.image_source_digest,
             verifier_image_source_digest=folder.verifier_image_source_digest,
         )
