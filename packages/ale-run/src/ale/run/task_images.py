@@ -422,7 +422,7 @@ async def _build_windows_image(
             ],
             cwd=target,
             env={"ALE_HOME": sandbox.agent_home},
-            timeout_sec=1800,
+            timeout_sec=3600,
         )
         if not result.ok:
             raise TaskDefinitionError(

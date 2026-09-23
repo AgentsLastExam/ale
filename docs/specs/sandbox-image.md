@@ -112,6 +112,8 @@ ready snapshot, warm pool, or environment server.
 
 Windows Task preparation boots a temporary VM from the resolved base, stages only
 `image/`, and executes `image/run.ps1` with network access for unattended installation.
+The installer has a one-hour budget; large offline software packages can exceed
+30 minutes for transfer, integrity checks and extraction on the build VM.
 ALE removes the build materials, shuts down the VM, and saves its configured qcow2.
 Reuse covers the whole build and is keyed by base, builder, scripts, and asset bytes;
 there is no per-command cache or new recipe language. Authoring details belong to
