@@ -87,7 +87,7 @@ async def test_every_provenance_field_is_populated(
     assert lock.image.input_identity.startswith("sha256:")
     assert lock.image.prepared_identity.startswith("sha256:")
     assert lock.image.observed_identity == lock.image.prepared_identity
-    assert lock.image.runtime_ref.startswith("ale-solver-local:")
+    assert lock.image.runtime_ref == lock.image.prepared_identity
     assert lock.image.observed_ref
     assert lock.task.name == task_root.name
     assert lock.task.spec_hash.startswith("sha256:")

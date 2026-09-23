@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import os
 import uuid
@@ -391,7 +392,6 @@ async def _reverify(
         resolved = resolve(task_reference.source)
         tasks = select_tasks(list(load_tasks(resolved.task_dir)), task_reference.variants)
         providers = ProviderRegistry(settings)
-        await _prepare_images(tasks, providers)
         by_id = {(str(task.spec.name), task.spec.variant): task for task in tasks}
         sources = _retained_source_episodes(source_run)
     except (AleError, OSError, ValueError) as error:
@@ -409,9 +409,44 @@ async def _reverify(
             )
             failures += 1
             continue
-        assert task.prepared_image is not None
-        if source_lock.image.prepared_identity != task.prepared_image.prepared_identity:
-            typer.echo(f"{task.spec.id}: solver image changed since the source episode", err=True)
+        if (
+            source_lock.task.non_verifier_digest is None
+            or task.non_verifier_digest != source_lock.task.non_verifier_digest
+        ):
+            typer.echo(
+                f"{task.spec.id}: content outside verify/ changed or source evidence is missing; "
+                "run the solver again",
+                err=True,
+            )
+            failures += 1
+            continue
+        # Reverification reuses an existing solver, not a freshly rebuilt image.
+        # Each source episode owns its exact prepared image and immutable provenance.
+        task = copy.copy(task)
+        image = source_lock.image
+        task.prepared_image = PreparedTaskImage(
+            kind=image.declaration.kind,
+            source="solver-local" if image.source == "local" else "external-ref",
+            input_identity=image.input_identity,
+            image_source_identity=image.image_source_identity,
+            runtime_ref=(
+                image.prepared_identity
+                if image.declaration.kind is ImageKind.CONTAINER
+                else image.runtime_ref
+            ),
+            prepared_identity=image.prepared_identity,
+            base_materials=image.base_materials,
+            resolved_reference=image.resolved_reference,
+            oci_identity=image.oci_identity,
+            materializer_identity=image.materializer_identity,
+            builder_identity=image.builder_identity,
+        )
+        try:
+            task.asset_observation = observe_task_assets(task)
+            prepared = await prepare_verifier_image_result(task, providers)
+            task.prepared_verifier_image = prepared.image if prepared is not None else None
+        except AleError as error:
+            typer.echo(str(error), err=True)
             failures += 1
             continue
         if source_lock.resources is None:

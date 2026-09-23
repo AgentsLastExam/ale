@@ -219,7 +219,12 @@ async def test_buildx_uses_fixed_context_and_observes_container_identity(
             return 0, "buildx", ""
         if argv[:3] == ("docker", "buildx", "build"):
             Path(argv[argv.index("--metadata-file") + 1]).write_text(
-                json.dumps({"materials": [{"uri": "pkg:docker/base"}]})
+                json.dumps(
+                    {
+                        "materials": [{"uri": "pkg:docker/base"}],
+                        "containerimage.config.digest": "sha256:" + "c" * 64,
+                    }
+                )
             )
             return 0, "", ""
         return 0, "sha256:" + "c" * 64 + "\n", ""
@@ -231,7 +236,9 @@ async def test_buildx_uses_fixed_context_and_observes_container_identity(
     assert build[-1] == str(task.folder.image_dir)  # type: ignore[attr-defined]
     assert prepared.kind is ImageKind.CONTAINER
     assert prepared.source == "solver-local"
-    assert prepared.runtime_ref.startswith("ale-solver-local:")
+    assert prepared.runtime_ref == prepared.prepared_identity
+    inspect = next(command for command in commands if command[:3] == ("docker", "image", "inspect"))
+    assert inspect[-1] == prepared.prepared_identity
     assert prepared.prepared_identity == "sha256:" + "c" * 64
     assert registry.get(ImageKind.CONTAINER).inputs == [prepared]
 
@@ -326,7 +333,9 @@ async def test_image_assets_do_not_change_the_local_source_identity(
         if argv[:3] == ("docker", "buildx", "version"):
             return 0, "", ""
         if argv[:3] == ("docker", "buildx", "build"):
-            Path(argv[argv.index("--metadata-file") + 1]).write_text("{}")
+            Path(argv[argv.index("--metadata-file") + 1]).write_text(
+                json.dumps({"containerimage.config.digest": "sha256:" + "c" * 64})
+            )
             return 0, "", ""
         return 0, "sha256:" + "c" * 64, ""
 

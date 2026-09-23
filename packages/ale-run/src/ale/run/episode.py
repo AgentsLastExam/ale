@@ -736,6 +736,7 @@ def _write_lock(
         resolved_image=ctx.resolved_image,
         allocation=ctx.resource_allocation,
         task_digest=task.task_digest,
+        non_verifier_digest=task.non_verifier_digest,
         prepared_image=ctx.prepared_image,
         sandbox=ctx.sandbox_identity,
         asset=asset,

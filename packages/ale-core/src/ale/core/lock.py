@@ -83,6 +83,7 @@ class TaskProvenance(BaseModel):
     spec_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     content_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     source: TaskSource
+    non_verifier_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class ImageProvenance(BaseModel):

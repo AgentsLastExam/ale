@@ -163,7 +163,7 @@ def test_debug_and_interruption_keep_native_logs(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["shared", "separate"])
 async def test_retained_episode_is_reverified_without_rerunning_agent(
-    tmp_path: Path, mode: str
+    tmp_path: Path, mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     task_path = scaffold_task(tmp_path / "reverify")
     if mode == "separate":
@@ -208,6 +208,12 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         "v.check('stale_removed', checks.file_missing('/opt/ale/verify/stale.txt'))\n"
         "v.write()\n"
     )
+    from ale.run.cli import tasks as task_cli
+
+    async def no_solver_build(*args, **kwargs):
+        raise AssertionError("reverification must not rebuild solver images")
+
+    monkeypatch.setattr(task_cli, "prepare_task_image_result", no_solver_build)
     try:
         assert await _reverify(str(task_path), first.run_dir, settings, tmp_path / "second") == 0
         result_path = next((tmp_path / "second").rglob("result.json"))

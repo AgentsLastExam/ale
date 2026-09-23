@@ -335,6 +335,7 @@ async def test_reverification_retries_only_with_fresh_verifiers(
                 update={
                     "name": task.spec.name,
                     "variant": task.spec.variant,
+                    "non_verifier_digest": task.non_verifier_digest,
                 }
             )
         }
@@ -364,7 +365,12 @@ async def test_reverification_retries_only_with_fresh_verifiers(
         )
 
     attach = AsyncMock(side_effect=[object(), object()])
-    monkeypatch.setattr(task_cli, "_prepare_images", prepare)
+    monkeypatch.setattr(
+        task_cli,
+        "_prepare_images",
+        AsyncMock(side_effect=AssertionError("must not rebuild solver")),
+    )
+    monkeypatch.setattr(task_cli, "prepare_verifier_image_result", AsyncMock(return_value=None))
     monkeypatch.setattr(task_cli, "_attach_retained", attach)
     monkeypatch.setattr(
         task_cli,

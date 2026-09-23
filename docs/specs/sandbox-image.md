@@ -73,6 +73,24 @@ RunLock schema 2 records declaration, preparation, Provider, and exact observed 
 it does not invent a whole-disk content digest. Local Linux VMs record OCI and materializer
 identities; local Windows VMs record builder identity and resolved base materials.
 
+## Reverification
+
+Image source identity describes the files under `image/`, separately from the exact
+built image recorded in RunLock. It is not the decision to reuse a solver's answer.
+A Task run records `task.non_verifier_digest`: a content hash of every Task file outside
+`verify/` (including image/setup/oracle assets, paths, executable bits and link targets;
+engine-owned `.ale-cache` is excluded). File timestamps do not enter this hash.
+Reverification requires this digest to match the source episode. Any outside change, or
+missing source evidence, requires a fresh solver run. This also protects direct CLI use.
+
+When only verification changed, ALE does not build or resolve the solver image again.
+It attaches the retained solver using the source RunLock's exact image identity, and
+prepares only a separate verifier image when needed. Provider attachment remains strict;
+missing retained resources are not replaced with a different sandbox. The new RunLock
+keeps the actual solver image and records the new verifier. No image-config or layer
+comparison is needed. New builds resolve immutable output digests from Buildx metadata,
+not mutable tags that concurrent builds can overwrite.
+
 ## VM preparation
 
 A Linux VM Task Dockerfile ends in `vm-ubuntu24-base`. ALE exports the final OCI rootfs and

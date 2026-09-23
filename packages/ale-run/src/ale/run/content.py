@@ -36,12 +36,19 @@ def tree_digest(root: Path, *, exclude: tuple[str, ...] = ()) -> str:
             continue
         if not path.is_file():
             raise TaskDefinitionError(f"unsupported filesystem entry: {path}")
-        data = path.read_bytes()
         _field(digest, b"file")
         _field(digest, relative.encode())
         _field(digest, b"1" if path.stat().st_mode & 0o111 else b"0")
-        _field(digest, len(data).to_bytes(8, "big"))
-        _field(digest, data)
+        size = path.stat().st_size
+        _field(digest, size.to_bytes(8, "big"))
+        digest.update(size.to_bytes(8, "big"))
+        observed = 0
+        with path.open("rb") as stream:
+            while block := stream.read(1024 * 1024):
+                observed += len(block)
+                digest.update(block)
+        if observed != size:
+            raise TaskDefinitionError(f"content changed while hashing: {path}")
     return f"sha256:{digest.hexdigest()}"
 
 
