@@ -202,50 +202,20 @@ the script. Windows separate verification reuses the solver image or supplies
 
 ### Windows software assets: author workflow
 
-For software that needs an interactive acquisition or a large download, acquire and package it
-once, then build Tasks unattended from the versioned offline asset. Each Task owns its deployment
-and configuration scripts in `image/`; each episode uses a fresh writable overlay of the locally
-cached Task image. Neither application installation nor vendor login belongs in `setup/` or the
-evaluated-agent phase.
+Reuse a compatible asset from the shared software library before acquiring software again.
+Pin its repository, immutable commit, package path, size and SHA-256 in Task source; keep the
+reviewed deployment recipe and Task-specific configuration in `image/`. Host credentials stay
+outside the Task and VM. Verify downloaded bytes before unattended deployment.
 
-1. Inspect the supplied software library for a compatible version, architecture, Windows build,
-   deployment recipe, prerequisites, and validation evidence. Reuse a qualified asset when present;
-   do not repeat vendor login/download or inherit another Task's final image.
-2. Pin the software repository, immutable commit, package path, byte count, and SHA-256 in an
-   authored file such as `image/software.json`. This is Task-owned data, not a new `task.yaml`
-   field or an ALE-managed dependency manifest. Keep the reviewed deployment script in `image/`;
-   adapt its paths, settings and inputs for the Task.
-3. Have the Host acquire private assets using Host credentials. The image script checks the
-   expected bytes before deployment. Large software can be streamed from a builder-reachable
-   internal artifact endpoint; runtime must not depend on it. A software library is separate from
-   the Task asset datasets managed by `ale assets`. ALE currently supplies no shared-software
-   catalog, automatic HF fetch/mirror lifecycle, or software-publication command.
-4. Follow the asset's tested deployment mode: install/register a compatible MSIX for the actual
-   agent user, or deploy a qualified native payload with explicit dependencies and registration.
-   An MSIX archive alone is not proof that either mode works. VM overlays do not override package
-   protection, NTFS permissions, or executable restrictions. Grant writes to ordinary application
-   directories where needed; do not make WindowsApps writable. PSF and app attach are optional
-   compatibility/deployment tools, not prerequisites for Task images.
-5. If no compatible asset exists, acquire the software in a separate packaging VM, record the
-   acquisition and packaging recipe, create/sign the MSIX, and qualify its deployment on a fresh
-   base. Prepare a contribution containing the package, public certificate, manifest, scripts and
-   validation evidence. Contribute a new packaging revision when changing a shared payload or
-   compatibility recipe; Task-specific configuration stays in the Task. Publishing uses the
-   software-library maintainer's workflow and the author's existing permissions, not Task asset
-   publication or an implicit grant to push from Brew.
-6. Build with `ale prepare`, then test the required GUI and CLI workflows as the real agent user
-   in a fresh VM: new project/document creation, writes, subprocesses, save/reopen and normal exit.
-   Check cache reuse with the asset source unavailable and isolation between fresh overlays.
-   Keep complete RunLocks and perform normal Task validation and a visual-agent run; a successful
-   installer or an elevated-shell smoke test does not establish agent readiness.
+If no compatible asset exists, acquire it in a packaging VM, create/sign an MSIX, and contribute
+the package, public certificate, metadata, packaging/deployment scripts and fresh-VM validation.
+Test the required workflows as the actual agent user, including writes, child tools and
+save/reopen. An overlay does not override package restrictions or Windows permissions.
 
-The [Windows Task image guide](../guides/windows-task-images.md) supplies the acquisition,
-deployment and contribution examples, plus the UE compatibility findings. In a Brew workspace
-where guidance is copied without its linked guides, read
-`.ale-brew/ale/docs/guides/windows-task-images.md` in the supplied ALE checkout. The operator must
-supply the actual base and software-library location; example repository names are not an
-already provisioned service. Packaging/login credentials and signing private keys never belong
-in contributed assets, Task source, or the final Task image.
+Follow the [Windows Task image guide](../guides/windows-task-images.md) for reuse, contribution
+and validation. Brew authors can read it at `.ale-brew/ale/docs/guides/windows-task-images.md`
+when copied guidance does not include linked guides. Library access and publication follow the
+operator's supplied configuration and existing permissions; ALE does not automate that workflow.
 
 ## setup/
 
