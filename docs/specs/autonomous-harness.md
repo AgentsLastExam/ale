@@ -240,6 +240,14 @@ the Gateway still drains the upstream response and commits usage. Chat streaming
 force `stream_options.include_usage=true`, and legacy `max_tokens` is normalized to
 `max_completion_tokens` before forwarding.
 
+A streaming response can stay silent for minutes when the provider buffers part of it (a
+`tool_use` input is held back until the whole parameter is generated). After 15 s of upstream
+silence the Gateway writes an SSE comment line to the client; comment lines are ignored by
+event-stream parsers, so the events, the accounted usage and any replayed body are unchanged.
+The Claude Code adapter also raises the CLI's HTTP idle timeout and stream watchdog to the
+Gateway's 1800 s upstream ceiling, so the CLI never abandons and re-issues a response the
+Gateway is still receiving.
+
 When an adapter exposes native reasoning or thinking settings, explicit non-default
 values must also declare any native model capability required by the pinned program.
 Unsupported model/version combinations must fail visibly; the adapter must not silently

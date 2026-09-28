@@ -45,6 +45,20 @@ __all__ = ["Gateway"]
 UPSTREAM_DEFAULT = "https://api.anthropic.com"
 _REQUEST_TIMEOUT = ClientTimeout(total=1800)
 
+#: Seconds of upstream silence after which a streaming client is sent an SSE comment.
+#:
+#: A provider that buffers part of a response — the Messages API holds back a tool_use
+#: input until the whole parameter is generated unless the tool asks for eager input
+#: streaming — can leave a stream with no bytes for as long as the model takes to write
+#: it. Every HTTP client has an idle timer that gives up before that: Bun's fetch, which
+#: Claude Code runs on, aborts after 300 s of silence; Node's undici uses the same 300 s
+#: for its body timeout. The agent then re-issues the request while the first upstream
+#: call keeps running and being billed. A comment line is the event-stream standard's
+#: heartbeat: every SSE parser discards it, so the client's timer is fed without the
+#: recorded response changing. Well under every known default; ``None`` disables it.
+SSE_KEEPALIVE_SEC = 15.0
+_SSE_KEEPALIVE = b": keep-alive\n\n"
+
 #: Hop-by-hop and auth headers never forwarded upstream: the gateway supplies its own.
 _STRIP = frozenset(
     {"host", "content-length", "authorization", "x-api-key", "connection", "accept-encoding"}
@@ -79,6 +93,7 @@ class Gateway:
         subscription: SubscriptionCredential | None = None,
         host: str = "0.0.0.0",
         port: int = 0,
+        sse_keepalive_sec: float | None = SSE_KEEPALIVE_SEC,
     ) -> None:
         if subscription is not None:
             upstream = subscription.upstream
@@ -93,6 +108,7 @@ class Gateway:
         self.upstream_path = subscription.upstream_path if subscription is not None else None
         self.host = host
         self.port = port
+        self.sse_keepalive_sec = sse_keepalive_sec
         self.sessions = SessionRegistry()
         self._traces: dict[str, EventSink] = {}
         self._app = self._build_app()
@@ -311,7 +327,17 @@ class Gateway:
 
         chunks: list[bytes] = []
         downstream_open = True
-        async for chunk in _iter_chunks(upstream):
+        async for chunk in _iter_chunks(upstream, keepalive_sec=self.sse_keepalive_sec):
+            if chunk is None:
+                # Upstream has gone quiet. The heartbeat goes to the connection only: the
+                # recorded body, the usage it is counted from and the bytes a coalesced
+                # retry is replayed are the provider's, untouched.
+                if downstream_open:
+                    try:
+                        await response.write(_SSE_KEEPALIVE)
+                    except ConnectionResetError:
+                        downstream_open = False
+                continue
             chunks.append(chunk)
             if downstream_open:
                 try:
@@ -606,9 +632,49 @@ class Gateway:
         )
 
 
-async def _iter_chunks(upstream: Any) -> AsyncIterator[bytes]:
-    async for chunk in upstream.content.iter_any():
-        yield chunk
+async def _iter_chunks(
+    upstream: Any, *, keepalive_sec: float | None = None
+) -> AsyncIterator[bytes | None]:
+    """Yield upstream bytes as they arrive; ``None`` marks ``keepalive_sec`` of silence.
+
+    The upstream iterator is driven by its own task and never cancelled mid-read: a wait
+    cut short by the keep-alive timer only interrupts ``Queue.get``, which asyncio
+    guarantees loses nothing.
+    """
+    if keepalive_sec is None:
+        async for chunk in upstream.content.iter_any():
+            yield chunk
+        return
+
+    queue: asyncio.Queue[bytes | BaseException | None] = asyncio.Queue()
+
+    async def pump() -> None:
+        try:
+            async for chunk in upstream.content.iter_any():
+                await queue.put(chunk)
+        except BaseException as exc:  # handed to the consumer, which re-raises it
+            await queue.put(exc)
+        else:
+            await queue.put(None)
+
+    task = asyncio.create_task(pump())
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), keepalive_sec)
+            except TimeoutError:
+                yield None
+                continue
+            if item is None:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
 
 
 def _elapsed_ms(started: float) -> int:
