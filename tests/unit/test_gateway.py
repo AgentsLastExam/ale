@@ -35,6 +35,7 @@ class Upstream:
         self.output_tokens = 20
         self.status = 200
         self.delay = 0.0
+        self.stream_gap = 0.0
         self.token_data: dict[str, object] | None = None
         self.seen_keys: list[str] = []
         self.seen_authorizations: list[str] = []
@@ -78,6 +79,8 @@ class Upstream:
         status = self.statuses.pop(0) if self.statuses else self.status
         if status != 200:
             return web.json_response({"type": "error"}, status=status, headers={"retry-after": "0"})
+        if payload.get("stream"):
+            return await self._stream(request, payload)
         body = {
             "type": "message",
             "content": [{"type": "text", "text": "ok"}],
@@ -90,6 +93,26 @@ class Upstream:
         if self.token_data is not None:
             body["ale_token_data"] = self.token_data
         return web.json_response(body)
+
+    async def _stream(self, request: web.Request, payload: dict) -> web.StreamResponse:
+        """An event stream that is silent for ``stream_gap`` seconds mid-message."""
+        response = web.StreamResponse(headers={"content-type": "text/event-stream"})
+        await response.prepare(request)
+        start = {
+            "type": "message_start",
+            "message": {"id": "msg_1", "usage": {"input_tokens": self.counted_input}},
+        }
+        await response.write(f"event: message_start\ndata: {json.dumps(start)}\n\n".encode())
+        await asyncio.sleep(self.stream_gap)
+        delta = {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": min(self.output_tokens, payload["max_tokens"])},
+        }
+        await response.write(f"event: message_delta\ndata: {json.dumps(delta)}\n\n".encode())
+        await response.write(b'event: message_stop\ndata: {"type": "message_stop"}\n\n')
+        await response.write_eof()
+        return response
 
     async def _count_tokens(self, request: web.Request) -> web.Response:
         self.count_calls += 1
@@ -129,6 +152,87 @@ async def call(gateway: Gateway, session: GatewaySession, **body: object) -> tup
         ) as response,
     ):
         return response.status, json.loads(await response.text())
+
+
+async def stream_call(
+    gateway: Gateway, session: GatewaySession, **body: object
+) -> tuple[int, list[tuple[float, bytes]]]:
+    """POST a streaming request and return every chunk with the moment it arrived."""
+    payload = {
+        "model": "whatever-the-agent-asked-for",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 100,
+        "stream": True,
+    }
+    payload.update(body)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    chunks: list[tuple[float, bytes]] = []
+    async with (
+        ClientSession() as client,
+        client.post(
+            f"{gateway.base_url}/v1/messages",
+            json=payload,
+            headers={"authorization": f"Bearer {session.token}"},
+        ) as response,
+    ):
+        async for chunk in response.content.iter_any():
+            chunks.append((loop.time() - started, chunk))
+        return response.status, chunks
+
+
+class TestStreaming:
+    async def test_a_stream_passes_through_and_is_accounted_to_its_end(self, stack) -> None:
+        gateway, _upstream, session, trace = stack
+        gateway.sse_keepalive_sec = None
+
+        status, chunks = await stream_call(gateway, session)
+
+        body = b"".join(chunk for _, chunk in chunks)
+        assert status == 200
+        assert b'"type": "message_stop"' in body
+        (record,) = read_jsonl(trace.path).records
+        assert record["disposition"] == "forwarded"
+        assert (record["input_tokens"], record["output_tokens"]) == (2, 20)
+        assert record["stop_reason"] == "end_turn"
+
+    async def test_a_quiet_upstream_is_bridged_with_sse_comments(self, stack) -> None:
+        """The provider may hold a response back for minutes (a buffered tool_use input);
+        the client's idle timer must see bytes anyway, and nothing else may change."""
+        gateway, upstream, session, trace = stack
+        gateway.sse_keepalive_sec = 0.05
+        upstream.stream_gap = 0.5
+
+        status, chunks = await stream_call(gateway, session)
+
+        assert status == 200
+        heartbeats = [at for at, chunk in chunks if chunk.startswith(b": keep-alive")]
+        assert heartbeats, "no heartbeat reached the client during the quiet half second"
+        assert heartbeats[0] < 0.5, "the first heartbeat must arrive before the upstream resumes"
+        assert len(heartbeats) >= 3
+        body = b"".join(chunk for _, chunk in chunks)
+        assert b'"type": "message_stop"' in body
+
+        # What is recorded and replayed is the provider's stream, comments excluded.
+        (record,) = read_jsonl(trace.path).records
+        assert (record["input_tokens"], record["output_tokens"]) == (2, 20)
+        upstream.stream_gap = 0.0
+        replay_status, replay_chunks = await stream_call(gateway, session)
+        replayed = b"".join(chunk for _, chunk in replay_chunks)
+        assert replay_status == 200
+        assert b": keep-alive" not in replayed
+        assert b'"type": "message_stop"' in replayed
+        assert upstream.calls == 1, "the identical retry was served from the cache"
+        assert record["response_digest"] == f"sha256:{GatewaySession.digest(replayed)}"
+
+    async def test_heartbeats_can_be_switched_off(self, stack) -> None:
+        gateway, upstream, session, _ = stack
+        gateway.sse_keepalive_sec = None
+        upstream.stream_gap = 0.3
+
+        _, chunks = await stream_call(gateway, session)
+
+        assert not any(chunk.startswith(b":") for _, chunk in chunks)
 
 
 class TestCredentialIsolation:
