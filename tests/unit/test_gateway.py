@@ -408,6 +408,38 @@ class TestRetryIdempotency:
         await call(gateway, session, messages=[{"role": "user", "content": "different"}])
         assert upstream.calls == 2
 
+    async def test_a_retry_after_a_provider_error_is_forwarded(self, stack) -> None:
+        """A 503 must not be replayed to the client's retries of the same request."""
+        gateway, upstream, session, _ = stack
+        upstream.statuses = [503]
+
+        first_status, _ = await call(gateway, session)
+        second_status, second = await call(gateway, session)
+        third_status, third = await call(gateway, session)
+
+        assert first_status == 503
+        assert second_status == 200
+        assert third == second and third_status == 200
+        assert upstream.calls == 2  # the error was retried upstream; the success is replayed
+
+    async def test_a_streamed_retry_after_a_provider_error_is_forwarded(self, stack) -> None:
+        gateway, upstream, session, _ = stack
+        upstream.statuses = [529]
+
+        first_status, _ = await call(gateway, session, stream=True)
+        second_status, _ = await call(gateway, session, stream=True)
+
+        assert (first_status, second_status) == (529, 200)
+        assert upstream.calls == 2
+
+    async def test_a_provider_rate_limit_is_not_replayed(self, stack) -> None:
+        gateway, upstream, session, _ = stack
+        upstream.statuses = [429]
+
+        assert (await call(gateway, session))[0] == 429
+        assert (await call(gateway, session))[0] == 200
+        assert upstream.calls == 2
+
 
 class TestRecording:
     async def test_every_call_lands_in_the_transport_trace(self, stack) -> None:

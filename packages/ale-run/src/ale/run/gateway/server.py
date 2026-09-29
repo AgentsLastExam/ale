@@ -270,7 +270,7 @@ class Gateway:
                     "streaming": False,
                     "call_id": call_id,
                 }
-                session.finish(key, cached)
+                session.finish(key, cached, replayable=_replayable(upstream.status))
                 return web.Response(
                     body=raw,
                     status=upstream.status,
@@ -345,6 +345,7 @@ class Gateway:
                 "streaming": True,
                 "call_id": call_id,
             },
+            replayable=_replayable(upstream.status),
         )
         return response
 
@@ -609,6 +610,15 @@ class Gateway:
 async def _iter_chunks(upstream: Any) -> AsyncIterator[bytes]:
     async for chunk in upstream.content.iter_any():
         yield chunk
+
+
+def _replayable(status: int) -> bool:
+    """Only a successful provider response is replayed to a retry of the same request.
+
+    Replaying an error (a 5xx, or a 429 from the provider) would answer every retry the
+    client makes with the first failure and never reach the provider again.
+    """
+    return 200 <= status < 300
 
 
 def _elapsed_ms(started: float) -> int:
