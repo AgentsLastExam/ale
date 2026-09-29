@@ -70,7 +70,9 @@ Only the Gateway writes `trace.transport.jsonl`. Every complete line has
 - `replay`: the original call ID, request digest, replay reason, and `charged=false`;
 - `trajectory_link`: call ID, trajectory ID, and ATIF step ID.
 
-Retries never double-charge. Failed and refused calls remain visible. Default records
+Retries never double-charge. Only a successful provider response (2xx) or a Gateway refusal is replayed
+to a retry of the same request; after a provider error (5xx, or a provider 429) the retry is forwarded
+and recorded as a new `call`. Failed and refused calls remain visible. Default records
 contain digests and accounting metadata, not provider request/response bodies or a second
 copy of the conversation.
 
