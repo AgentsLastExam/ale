@@ -244,9 +244,9 @@ A streaming response can stay silent for minutes when the provider buffers part 
 `tool_use` input is held back until the whole parameter is generated). After 15 s of upstream
 silence the Gateway writes an SSE comment line to the client; comment lines are ignored by
 event-stream parsers, so the events, the accounted usage and any replayed body are unchanged.
-The Claude Code adapter also raises the CLI's HTTP idle timeout and stream watchdog to the
-Gateway's 1800 s upstream ceiling, so the CLI never abandons and re-issues a response the
-Gateway is still receiving.
+The Claude Code adapter also raises the CLI's HTTP idle timeout and stream watchdog to
+600 s, well past the quiet spans this has caused, so the keep-alive is not the only thing
+standing between the CLI and a response the Gateway is still receiving.
 
 When an adapter exposes native reasoning or thinking settings, explicit non-default
 values must also declare any native model capability required by the pinned program.

@@ -530,8 +530,10 @@ class TestRetryIdempotency:
         gateway, upstream, session, _ = stack
         upstream.statuses = [529]
 
+        # The mock upstream only emits a real event stream for a 200; a non-200 body is
+        # plain JSON either way, so the first call can still use the non-streaming helper.
         first_status, _ = await call(gateway, session, stream=True)
-        second_status, _ = await call(gateway, session, stream=True)
+        second_status, _ = await stream_call(gateway, session)
 
         assert (first_status, second_status) == (529, 200)
         assert upstream.calls == 2

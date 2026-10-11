@@ -82,9 +82,13 @@ DEFAULT_CLI_VERSION = "2.1.227"
 CLI_PREFIX = ".local"
 
 #: How long the CLI's HTTP client may wait for the next byte of a model response. The
-#: gateway gives its upstream 1800 s in total, so a longer wait here could never be
-#: rewarded, and a shorter one abandons responses the gateway is still receiving.
-UPSTREAM_IDLE_TIMEOUT_SEC = 1800
+#: Gateway's own SSE keep-alive (``SSE_KEEPALIVE_SEC`` in ``gateway/server.py``) should
+#: keep a merely slow generation from ever reaching this, so it mainly bounds how long
+#: the CLI waits on a stream that is genuinely stuck before giving up and retrying. Ten
+#: minutes is headroom over the quiet spans a buffered tool_use input has been observed
+#: to cause, without matching the Gateway's own 1800 s upstream ceiling, which would
+#: leave a truly dead stream undetected for half an hour.
+UPSTREAM_IDLE_TIMEOUT_SEC = 600
 
 
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
