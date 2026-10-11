@@ -170,14 +170,27 @@ class GatewaySession:
         self._inflight[key] = future
         return future
 
-    def finish(self, key: str, response: Any, error: BaseException | None = None) -> None:
+    def finish(
+        self,
+        key: str,
+        response: Any,
+        error: BaseException | None = None,
+        *,
+        replayable: bool = True,
+    ) -> None:
+        """Settle an in-flight call; keep it for replay only when a retry must not resample it.
+
+        Waiters coalesced on the call always get its response. A response that is not
+        ``replayable`` (a provider error) is not kept, so the client's next retry of the
+        same request is forwarded instead of being answered with the old failure.
+        """
         future = self._inflight.pop(key, None)
         if future is not None and not future.done():
             if error is not None:
                 future.set_exception(error)
             else:
                 future.set_result(response)
-        if error is None:
+        if error is None and replayable:
             self.cache(key, response)
 
 
