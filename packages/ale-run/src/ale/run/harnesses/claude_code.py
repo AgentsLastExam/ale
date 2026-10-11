@@ -81,6 +81,11 @@ DEFAULT_CLI_VERSION = "2.1.227"
 #: the account that runs it owns it, so no privilege is needed and none is granted.
 CLI_PREFIX = ".local"
 
+#: How long the CLI's HTTP client may wait for the next byte of a model response. The
+#: gateway gives its upstream 1800 s in total, so a longer wait here could never be
+#: rewarded, and a shorter one abandons responses the gateway is still receiving.
+UPSTREAM_IDLE_TIMEOUT_SEC = 1800
+
 
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 PositiveFloat = Annotated[float, Field(gt=0, allow_inf_nan=False)]
@@ -792,6 +797,16 @@ class ClaudeCodeHarness(AutonomousHarness):
             # Without this the CLI refuses `bypassPermissions` outright in some
             # environments; it is the switch that says the isolation is the sandbox's job.
             "IS_SANDBOX": "1",
+            # Two five-minute idle timers sit between the CLI and a quiet stream, and a
+            # tool_use input the provider buffers until complete (about 24k tokens at
+            # 80 tok/s) is quiet for longer than that. Bun's HTTP client drops the socket
+            # after 300 s without a byte, which the CLI turns off only when it talks to
+            # api.anthropic.com; the CLI's own stream watchdog aborts at 300 s and ends the
+            # run. The first re-issues the request while the abandoned call keeps running
+            # and being billed; the second surfaces as `API Error: Stream idle timeout`.
+            # Match the gateway's upstream ceiling: nothing waits longer than the gateway.
+            "BUN_CONFIG_HTTP_IDLE_TIMEOUT": str(UPSTREAM_IDLE_TIMEOUT_SEC),
+            "CLAUDE_STREAM_IDLE_TIMEOUT_MS": str(UPSTREAM_IDLE_TIMEOUT_SEC * 1000),
             # Somewhere writable that belongs to the agent. Left unset, the CLI writes to a
             # home directory it may not own.
             "CLAUDE_CONFIG_DIR": str(config_dir),
