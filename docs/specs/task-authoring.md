@@ -203,9 +203,10 @@ the script. Windows separate verification reuses the solver image or supplies
 ### Windows software assets: author workflow
 
 Reuse a compatible asset from the shared software library before acquiring software again.
-Pin its repository, immutable commit, package path, size and SHA-256 in Task source; keep the
-reviewed deployment recipe and Task-specific configuration in `image/`. Host credentials stay
-outside the Task and VM. Verify downloaded bytes before unattended deployment.
+Pin its download location to an immutable commit and record its SHA-256 in Task source; keep the
+reviewed deployment recipe and Task-specific configuration in `image/`. Script constants suffice;
+no additional manifest is required. Download and verify bytes before unattended deployment.
+Private-asset credentials stay on the Host, which supplies the bytes to the builder.
 
 If no compatible asset exists, acquire it in a packaging VM, create/sign an MSIX, and contribute
 the package, public certificate, metadata, packaging/deployment scripts and fresh-VM validation.
@@ -215,7 +216,8 @@ save/reopen. An overlay does not override package restrictions or Windows permis
 Follow the [Windows Task image guide](../guides/windows-task-images.md) for reuse, contribution
 and validation. Brew authors can read it at `.ale-brew/ale/docs/guides/windows-task-images.md`
 when copied guidance does not include linked guides. Library access and publication follow the
-operator's supplied configuration and existing permissions; ALE does not automate that workflow.
+operator's supplied configuration and existing permissions. Ordinary scripts and HF tools handle
+software acquisition/publication; ALE owns image execution, caching and episode overlays.
 
 ## setup/
 

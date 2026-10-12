@@ -18,8 +18,8 @@ image:
 ```
 
 Keep installation scripts, pinned software references and Task configuration under `image/`.
-`run.ps1` is the entry point; helper scripts and a file such as `software.json` are ordinary
-Task-owned files, not additional ALE manifest fields.
+`run.ps1` is the entry point. Pins can be constants in the script; helper scripts and a separate
+manifest are optional. ALE requires no software-specific configuration format.
 
 `ale prepare TASK` boots a temporary base VM, executes the image script, removes build inputs,
 and exports a locally cached qcow2. Changes to the base, builder or image inputs invalidate
@@ -29,17 +29,20 @@ required permissions. See the [image contract](../specs/sandbox-image.md).
 
 ## Reuse software from the library
 
-1. Find an asset matching the software version, architecture, Windows version and required
-   workflow. Read its deployment recipe, dependencies and validation results.
-2. Pin the library repository, immutable commit, package path, size and SHA-256 in Task source.
-   Copy the reviewed deployment recipe into `image/` and adjust Task-specific settings there.
-3. Fetch private assets on the Host, keeping credentials outside the Task and VM. Use a private
-   Hugging Face dataset and `huggingface_hub.hf_hub_download` with the pinned revision, or an
-   equivalent versioned store. Deliver large files through a build-accessible artifact endpoint;
-   Windows context upload currently reads each file into Host memory.
-4. Have `run.ps1` verify the asset's size/hash, install dependencies, deploy the software, and
-   configure user access, launch entry points and initial Task files. Check command exit codes
-   and follow the [Windows build rules](../specs/task-authoring.md#image).
+1. Find a compatible software version in the library and read its deployment instructions.
+2. Copy the reviewed deployment script into `image/`, pin the package URL to an immutable HF
+   commit, and record its SHA-256. Adjust Task-specific settings locally.
+3. In `run.ps1`, download the package, verify the hash, run its deployment script, and apply
+   Task configuration. Check native command exit codes and follow the
+   [Windows build rules](../specs/task-authoring.md#image).
+
+For directly accessible assets, use an ordinary HF download URL:
+`https://huggingface.co/datasets/ORG/software-assets/resolve/COMMIT/APP/VERSION/Software.msix`.
+Replace the placeholders with the actual repository, commit and file path. A private repository
+requires authentication; the current builder does not inject HF credentials. For private assets,
+fetch on the Host with `huggingface_hub.hf_hub_download` and provide the bytes to the builder.
+Keep tokens out of Task source and images. Large files can use an existing internal download
+endpoint; Windows context upload currently reads each file into Host memory.
 
 Use the asset's tested deployment mode: MSIX installation/registration for the actual agent user,
 or a qualified native deployment recipe. Native deployment must reproduce any required registry,
@@ -54,14 +57,15 @@ changes but does not override Windows permissions or package restrictions.
    size/hash. Keep credentials and signing private keys out of the package.
 3. Supply an unattended deployment recipe and test it on a fresh base as the intended user.
    Record external dependencies, writable paths, launch methods and compatibility limits.
-4. Contribute the package, public certificate, manifest, packaging/deployment scripts and
-   validation evidence together. Use a new packaging revision for shared changes; keep
-   Task-specific settings in the consuming Task.
+4. Contribute the package, public certificate, packaging/deployment scripts and a README with
+   dependencies, hashes and validation results. Keep Task-specific settings in the consuming Task.
 
-Organize library entries by `software/version/architecture/packaging-revision/`. A private HF
-repository can hold these files and review contributions through PRs. Publish within the author's
-existing permissions, or hand the prepared contribution to the maintainer. Consumers pin the
-published commit. Software access and distribution must respect its license.
+Use one HF dataset with entries under `software/version/`. Record supported CPU architectures
+in the README; separate files or directories are needed only when multiple builds exist.
+An x64-only library can state that once. Use HF commits to version package/script changes;
+a separate packaging-revision number is unnecessary. Installed MSIX updates must still follow
+Windows package-version rules. Contribute through the repository's existing review/publication
+workflow, then pin the published commit in Tasks. Distribution must respect the software license.
 
 ## Validate and reuse
 
@@ -83,7 +87,8 @@ installation. Rebuild when the pinned assets or image recipe change.
 
 ## Integration boundary
 
-ALE implements Windows script builds, local image caching and episode overlays. Shared software
-library discovery, HF fetching and contribution publication are explicit author/operator steps;
-they are not automatically orchestrated by ALE. The operator supplies the base and library access.
+Authors use ordinary files, download/install scripts and HF tools. These steps can be automated
+without adding an ALE software catalog, dependency resolver or publication API. ALE executes the
+Task's image script, caches its image and starts episode overlays. The operator supplies the base
+and library access; private-asset delivery still needs to be arranged.
 `ale assets` manages [Task-local stage assets](../specs/task-assets.md), separately from this library.
