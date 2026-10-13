@@ -205,6 +205,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         "v.check('reverified', checks.text_equals("
         "'/home/user/output/result.txt', 'hello\\n'))\n"
         "v.check('stale_removed', checks.file_missing('/opt/ale/verify/stale.txt'))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     from ale.run.cli import tasks as task_cli
@@ -217,7 +218,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         assert await _reverify(str(task_path), first.run_dir, settings, tmp_path / "second") == 0
         result_path = next((tmp_path / "second").rglob("result.json"))
         result = json.loads(result_path.read_text())
-        assert result["rewards"] == {"reverified": 1.0, "stale_removed": 1.0}
+        assert result["rewards"] == {"reverified": 1.0, "stale_removed": 1.0, "overall": 1.0}
         if mode == "separate":
             assert result["sandboxes"][0]["roles"] == ["verifier"]
         assert retained.handle in {item["handle"] for item in await list_retained()}

@@ -59,7 +59,6 @@ verification.check(
     "content",
     checks.text_equals("/home/user/output/result.txt", expected),
 )
-verification.aggregate("overall")
 verification.write()
 """
 

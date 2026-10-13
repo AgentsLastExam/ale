@@ -68,11 +68,13 @@ class Verification:
         self._status = "in_progress"
         self._failure: str | None = None
         self._agent_judge_started = False
+        self._criteria_closed = False
         self._record_path = os.environ.get("ALE_VERIFICATION_PATH", "")
         self._verdict_path = os.environ.get("ALE_VERDICT_PATH", "")
 
     def check(self, name: str, result: CheckResult, *, weight: float = 1.0) -> float:
         self._assert_mutable()
+        self._assert_criteria_open()
         self._new_name(name)
         if not isinstance(result, CheckResult):
             raise TypeError("result must be a CheckResult")
@@ -91,9 +93,7 @@ class Verification:
 
     def stat(self, name: str, value: float) -> float:
         self._assert_mutable()
-        _name(name)
-        if name in self._criteria or name in self._aggregates:
-            raise ValueError(f"stat name collides with a reward: {name}")
+        self._new_name(name)
         number = float(value)
         if not math.isfinite(number):
             raise ValueError("stat values must be finite")
@@ -115,6 +115,7 @@ class Verification:
         weight: float = 1.0,
     ) -> float:
         self._assert_mutable()
+        self._assert_criteria_open()
         self._new_name(name)
         if kind not in {"llm", "agent"}:
             raise ValueError("Judge kind must be 'llm' or 'agent'")
@@ -247,6 +248,9 @@ class Verification:
             score=score,
         )
         self._aggregates[name] = aggregate
+        if inputs is None:
+            # Every criterion is now in this aggregate; a later one would silently be left out.
+            self._criteria_closed = True
         self._persist()
         return aggregate.score
 
@@ -254,6 +258,14 @@ class Verification:
         self._assert_terminal_mutation()
         if not self._criteria and not self._aggregates:
             raise ValueError("verification must contain at least one reward")
+        if "overall" in self._metrics:
+            raise ValueError('"overall" is the total reward; give the stat another name')
+        if "overall" not in self._aggregates and "overall" not in self._criteria:
+            # The total every report reads: unless the author defined it, the weighted mean
+            # of every criterion.
+            if not self._criteria:
+                raise ValueError('verification without criteria must define "overall" itself')
+            self.aggregate("overall")
         self._status = "completed"
         record = self._persist()
         if not self._verdict_path:
@@ -272,6 +284,13 @@ class Verification:
         self._assert_terminal_mutation()
         if self._agent_judge_started:
             raise RuntimeError("check and Judge calls are forbidden after an Agent Judge")
+
+    def _assert_criteria_open(self) -> None:
+        if self._criteria_closed:
+            raise RuntimeError(
+                "criteria cannot be added after an aggregate over all criteria; "
+                "add every check and Judge first"
+            )
 
     def _assert_terminal_mutation(self) -> None:
         if self._status != "in_progress":

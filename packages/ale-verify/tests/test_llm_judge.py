@@ -429,6 +429,7 @@ def test_public_judge_sends_media_bytes_and_records_original_evidence(
         )
         == 1
     )
+    verification.aggregate("overall")
     verification.write()
     record = VerificationRecord.from_json(record_path.read_bytes())
     assert record.criteria[0].evidence[0].sha256 == digest(raw)

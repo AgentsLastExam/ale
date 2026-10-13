@@ -19,7 +19,6 @@ from ale_verify import Verification
 
 verification = Verification()
 verification.check("correctness", content_result)
-verification.aggregate("overall")
 verification.write()
 ```
 
@@ -32,8 +31,12 @@ verification.write()
 - `write()` finalizes the record and writes the complete named reward map. It is required
   exactly once after at least one criterion or aggregate.
 
-A Task verifier must expose an explicit `overall` aggregate and retain the underlying named
-criteria as detailed evaluation evidence.
+Every reward map has an `overall` reward, the total that reports and leaderboards read.
+`write()` adds it as the weighted mean of every criterion unless the verifier defined its
+own `overall` aggregate; the named criteria remain as detailed evaluation evidence. A
+verifier with no criteria must define `overall` itself. An aggregate without
+`inputs` covers every criterion, so after one is added, a further `check()` or `judge()`
+fails instead of being silently left out. Explicit-`inputs` aggregates leave criteria open.
 
 Every accepted mutation atomically replaces `verification.json`. Names are non-empty and
 unique across criteria, stats, and aggregates. Scores are finite values from 0 through 1;

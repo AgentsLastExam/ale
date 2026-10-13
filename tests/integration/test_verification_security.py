@@ -119,6 +119,7 @@ async def test_record_containing_a_verify_credential_is_not_collected(
         "from ale_verify import CheckResult, Verification\n"
         "v = Verification()\n"
         "v.check('score', CheckResult(1.0, raw_value=os.environ['JUDGE_KEY']))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     (task_root / "setup" / "run.sh").chmod(0o755)

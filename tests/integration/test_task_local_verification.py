@@ -320,11 +320,12 @@ async def test_task_local_helper_and_framework_package_are_importable(tmp_path: 
         "from helper import result\n"
         "v = Verification()\n"
         "v.check('local', result())\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     result = await execute(task_path, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"local": 1.0}
+    assert result.verdict.rewards == {"local": 1.0, "overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -361,11 +362,12 @@ async def test_verify_assets_are_withheld_then_available_by_relative_path(
         "from ale_verify import Verification, checks\n"
         "v = Verification()\n"
         "v.check('reference', checks.text_equals('assets/reference.txt', 'withheld'))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"reference": 1.0}
+    assert result.verdict.rewards == {"reference": 1.0, "overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -376,10 +378,11 @@ async def test_no_assets_verifier_does_not_receive_a_synthetic_asset_root(tmp_pa
         "from ale_verify import CheckResult, Verification\n"
         "v = Verification()\n"
         "v.check('absent', CheckResult(float(not Path('assets').exists())))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     result = await execute(task, tmp_path / "runs")
-    assert result.verdict.rewards == {"absent": 1.0}
+    assert result.verdict.rewards == {"absent": 1.0, "overall": 1.0}
 
 
 @pytest.mark.asyncio

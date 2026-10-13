@@ -27,6 +27,7 @@ VERIFY_CHECK = textwrap.dedent("""
         "reward",
         checks.text_equals("/home/user/output/result.txt", "hello world"),
     )
+    verification.aggregate("overall")
     verification.write()
 """).strip()
 

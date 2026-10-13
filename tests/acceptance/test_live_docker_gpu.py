@@ -99,6 +99,7 @@ def _separate_gpu_task(root: Path) -> Path:
         "'nvidia-smi','--query-gpu=uuid','--format=csv,noheader'], text=True).strip()\n"
         "v = Verification()\n"
         "v.check('disjoint', CheckResult(float(solver != verifier)))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     return task
@@ -158,7 +159,7 @@ async def test_kept_solver_and_separate_verifier_receive_disjoint_gpus(tmp_path:
     )
     try:
         assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-        assert result.verdict.rewards == {"disjoint": 1.0}
+        assert result.verdict.rewards == {"disjoint": 1.0, "overall": 1.0}
         assert result.lock is not None
         solver = result.lock.resources
         verifier = result.lock.verification.resources

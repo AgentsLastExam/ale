@@ -123,9 +123,68 @@ def test_duplicate_invalid_and_terminal_mutations_fail(verify_env: tuple[Path, P
         verification.check("bad", CheckResult(2))
     with pytest.raises(ValueError, match="positive"):
         verification.aggregate("bad-weight", weights={"format": 0})
+    verification.stat("files", 1)
+    with pytest.raises(ValueError, match="duplicate"):
+        verification.stat("files", 2)
+    with pytest.raises(ValueError, match="duplicate"):
+        verification.stat("format", 2)
+    verification.aggregate("overall")
+    with pytest.raises(RuntimeError, match="after an aggregate over all criteria"):
+        verification.check("late-criterion", CheckResult(1))
+    verification.stat("late-stat", 1)
     verification.write()
     with pytest.raises(RuntimeError, match="terminal"):
         verification.stat("late", 1)
+
+
+def test_write_adds_overall_as_the_weighted_mean_of_every_criterion(
+    verify_env: tuple[Path, Path],
+) -> None:
+    verification = Verification()
+    verification.check("a", CheckResult(1), weight=3)
+    verification.check("b", CheckResult(0))
+    verification.aggregate("first", inputs=["a"])
+    verification.stat("files", 2)
+    verification.write()
+    record = VerificationRecord.from_json(verify_env[0].read_bytes())
+    assert record.rewards == {"a": 1.0, "b": 0.0, "first": 1.0, "overall": 0.75}
+
+
+def test_an_author_defined_overall_is_kept(verify_env: tuple[Path, Path]) -> None:
+    verification = Verification()
+    verification.check("a", CheckResult(1))
+    verification.check("b", CheckResult(0))
+    verification.aggregate("overall", inputs=["a"])
+    verification.write()
+    record = VerificationRecord.from_json(verify_env[0].read_bytes())
+    assert record.rewards["overall"] == 1.0
+
+
+def test_a_check_named_overall_is_the_total(verify_env: tuple[Path, Path]) -> None:
+    verification = Verification()
+    verification.check("overall", CheckResult(1))
+    verification.write()
+    record = VerificationRecord.from_json(verify_env[0].read_bytes())
+    assert record.rewards == {"overall": 1.0}
+
+
+def test_a_stat_cannot_take_the_name_of_the_total(verify_env: tuple[Path, Path]) -> None:
+    verification = Verification()
+    verification.check("a", CheckResult(1))
+    verification.stat("overall", 3)
+    with pytest.raises(ValueError, match="total reward"):
+        verification.write()
+
+
+def test_explicit_aggregates_leave_criteria_open(verify_env: tuple[Path, Path]) -> None:
+    verification = Verification()
+    verification.check("a", CheckResult(1))
+    verification.aggregate("first", inputs=["a"])
+    verification.check("b", CheckResult(0))
+    verification.aggregate("overall")
+    verification.write()
+    record = VerificationRecord.from_json(verify_env[0].read_bytes())
+    assert record.rewards == {"a": 1.0, "b": 0.0, "first": 1.0, "overall": 0.5}
 
 
 def test_agent_judge_is_the_last_mutating_operation(
