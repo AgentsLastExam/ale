@@ -72,7 +72,7 @@ def episode_identity(
     image_digest: str,
     agent: str,
     seed: int,
-    config_hash: str,
+    reuse_hash: str,
     resources_digest: str = "",
     assets: TaskAssetObservation | None = None,
 ) -> str:
@@ -83,7 +83,7 @@ def episode_identity(
             "image": image_digest,
             "agent": agent,
             "seed": seed,
-            "config": config_hash,
+            "config": reuse_hash,
             "resources": resources_digest,
             "assets": asdict(assets) if assets is not None else None,
         }

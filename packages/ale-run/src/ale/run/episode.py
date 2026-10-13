@@ -65,6 +65,11 @@ _STATUS_BY_ERROR: tuple[tuple[type[BaseException], Status], ...] = (
 )
 
 
+#: Outcomes another attempt must not replace. A completed zero is a score, and a limit
+#: termination is the measured agent's own result: retrying it would grant a fresh budget.
+_FINAL_STATUSES = frozenset({Status.COMPLETED, Status.TIMEOUT, Status.BUDGET_EXCEEDED})
+
+
 def status_for(error: BaseException) -> Status:
     """Map a raised error to the status a result should carry."""
     for error_type, status in _STATUS_BY_ERROR:
@@ -99,7 +104,7 @@ async def run_episode_with_retries(
         result = await execute()
         failure = result.record.failure
         if (
-            result.record.status in {Status.COMPLETED, Status.TIMEOUT}
+            result.record.status in _FINAL_STATUSES
             or attempt == retries
             or (
                 failure is not None

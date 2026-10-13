@@ -325,7 +325,7 @@ async def _run_one(
                 image_digest=task.prepared_image.prepared_identity,
                 agent=f"{inputs.agent.harness}@{inputs.agent.version}",
                 seed=settings.seed,
-                config_hash=settings.config_hash,
+                reuse_hash=settings.reuse_hash,
                 resources_digest=agent_resources.digest,
                 assets=task.asset_observation,
             )
@@ -648,7 +648,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                     image_digest=task.prepared_image.prepared_identity,
                     agent=f"validation-{pass_name}@{harness.version()}",
                     seed=settings.seed,
-                    config_hash=settings.config_hash,
+                    reuse_hash=settings.reuse_hash,
                     assets=task.asset_observation,
                 )
                 ledger.queue_episode(

@@ -136,14 +136,19 @@ creates new episode IDs for work that has no completed result.
 The reuse identity includes the observed asset repository, Task path, and fixed asset commit
 alongside Task, image, agent, and configuration identity. A changed asset revision cannot reuse
 an older completed episode. Dirty or unversioned assets disable completed-episode reuse.
+Its configuration identity is `RunConfig.reuse_hash`, which excludes the scheduling settings
+`episodes`, `concurrency`, `episode_retries`, and `resume`; resuming a Run with a larger count
+or another parallelism runs only the missing episodes. RunLock still records the complete
+`config_hash`.
 
 `RunConfig.episode_retries` sets the number of additional automatic attempts for an
 incomplete episode; its default is zero. `ale run --episode-retries N` and
 `--set episode_retries=N` override the run TOML. Each attempt runs in fresh Sandboxes
 with a new Gateway session and trajectory, preserving the logical episode ID and seed.
 Only `status=completed` stops retries successfully; a completed zero score is still a
-completed episode. `status=timeout` is terminal without retry, preserving the timed-out
-phase and its deadline in the failure details. Judge infrastructure failures stop without another episode attempt;
+completed episode. `status=timeout` and `status=budget_exceeded` are limit terminations
+and terminal without retry: the timed-out phase and its deadline, or the exhausted limit,
+remain in the failure details, and another attempt would grant a fresh limit. Judge infrastructure failures stop without another episode attempt;
 their internal retry budget is defined in [Verification](verification.md). Host cancellation
 interrupts the loop immediately. Missing results
 caused by a host interruption are not treated as an unlimited retry request.

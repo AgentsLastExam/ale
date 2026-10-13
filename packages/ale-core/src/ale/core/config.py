@@ -248,6 +248,9 @@ class VmProviderConfig(BaseModel):
     provider: Literal["qemu"] = "qemu"
 
 
+_SCHEDULING_FIELDS = frozenset({"episodes", "episode_retries", "resume", "concurrency"})
+
+
 class RunTimeouts(BaseModel):
     """Runtime overrides; omitted phases retain the Task's deadlines."""
 
@@ -287,6 +290,15 @@ class RunConfig(BaseModel):
     def config_hash(self) -> str:
         """Identity of the effective settings, recorded in provenance."""
         return content_hash(self.model_dump(mode="json"))
+
+    @property
+    def reuse_hash(self) -> str:
+        """Identity of the settings one episode runs under, for completed-episode reuse.
+
+        Scheduling settings decide how many episodes run and how, not what any one of them
+        does, so resuming with another count or parallelism reuses completed episodes.
+        """
+        return content_hash(self.model_dump(mode="json", exclude=set(_SCHEDULING_FIELDS)))
 
     @property
     def preset_name(self) -> str | None:

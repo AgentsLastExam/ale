@@ -35,7 +35,7 @@ def identity(task: TaskSpec, **overrides: object) -> str:
         "image_digest": "sha256:" + "2" * 64,
         "agent": "claude-code@2.1",
         "seed": 0,
-        "config_hash": "sha256:aa",
+        "reuse_hash": "sha256:aa",
     }
     return episode_identity(task, **(args | overrides))  # type: ignore[arg-type]
 
@@ -93,7 +93,7 @@ class TestEpisodeIdentity:
         assert identity(spec()) != identity(spec(), seed=1)
 
     def test_a_different_configuration_is_different_work(self) -> None:
-        assert identity(spec()) != identity(spec(), config_hash="sha256:bb")
+        assert identity(spec()) != identity(spec(), reuse_hash="sha256:bb")
 
     def test_different_effective_resources_are_different_work(self) -> None:
         assert identity(spec(), resources_digest="sha256:aa") != identity(
