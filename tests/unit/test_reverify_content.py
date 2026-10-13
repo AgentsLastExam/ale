@@ -15,8 +15,6 @@ pytestmark = pytest.mark.unit
         "instruction.md",
         "task.yaml",
         "image/Dockerfile",
-        "image/assets/input",
-        "setup/assets/input",
         "oracle/run.sh",
         "other.txt",
     ],
@@ -30,14 +28,38 @@ def test_non_verifier_change_requires_new_solver(tmp_path: Path, relative: str):
     assert load_tasks(root)[0].non_verifier_digest != before
 
 
-@pytest.mark.parametrize("relative", ["verify/run.sh", "verify/assets/input"])
-def test_only_verifier_changes_preserve_solver_identity(tmp_path: Path, relative: str):
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "verify/run.sh",
+        "verify/assets/input",
+        "image/assets/input",
+        "setup/assets/input",
+        "oracle/assets/input",
+    ],
+)
+def test_verifier_and_asset_changes_preserve_source_identity(tmp_path: Path, relative: str):
+    """Asset bytes are identified by their commit, which reverification compares separately."""
     root = scaffold_task(tmp_path / "task")
     before = load_tasks(root)[0].non_verifier_digest
     target = root / relative
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("new verifier material")
     assert load_tasks(root)[0].non_verifier_digest == before
+
+
+def test_loading_a_task_never_reads_asset_bytes(tmp_path: Path):
+    root = scaffold_task(tmp_path / "task")
+    unreadable = root / "image" / "assets" / "large.bin"
+    unreadable.parent.mkdir(parents=True)
+    unreadable.write_bytes(b"x")
+    unreadable.chmod(0)
+    try:
+        task = load_tasks(root)[0]
+        assert task.non_verifier_digest.startswith("sha256:")
+        assert task.task_digest.startswith("sha256:")
+    finally:
+        unreadable.chmod(0o600)
 
 
 def test_timestamps_do_not_change_content_identity(tmp_path: Path):
@@ -50,7 +72,7 @@ def test_timestamps_do_not_change_content_identity(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["outside", "missing_record"])
+@pytest.mark.parametrize("change", ["outside", "missing_record", "assets"])
 async def test_reverify_refuses_changed_or_unrecorded_inputs_before_attaching(
     tmp_path, monkeypatch, change
 ):
@@ -71,9 +93,9 @@ async def test_reverify_refuses_changed_or_unrecorded_inputs_before_attaching(
                 update={
                     "name": task.spec.name,
                     "variant": task.spec.variant,
-                    "non_verifier_digest": task.non_verifier_digest
-                    if change == "outside"
-                    else None,
+                    "non_verifier_digest": None
+                    if change == "missing_record"
+                    else task.non_verifier_digest,
                 }
             )
         }
@@ -81,6 +103,11 @@ async def test_reverify_refuses_changed_or_unrecorded_inputs_before_attaching(
     if change == "outside":
         instruction = root / "instruction.md"
         instruction.write_text(instruction.read_text() + "\nDifferent solver task")
+    if change == "assets":
+        # The source run had no assets; uncommitted ones cannot be proven unchanged.
+        asset = root / "setup" / "assets" / "seed.json"
+        asset.parent.mkdir(parents=True)
+        asset.write_text("{}")
     monkeypatch.setattr(
         task_cli,
         "_retained_source_episodes",
