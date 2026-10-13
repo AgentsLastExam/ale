@@ -2,7 +2,7 @@
 
 The unit tests cover the environment's logic with a fake sandbox; what these add is that
 it works against an actual X server — a real screenshot, real input dispatch through
-xdotool, real blobs on disk. The guards are verified in both places on purpose: they are
+the Cua Driver, real blobs on disk. The guards are verified in both places on purpose: they are
 the part an agent could otherwise walk past.
 """
 
