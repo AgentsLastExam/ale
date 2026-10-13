@@ -354,11 +354,6 @@ class TaskSpec(BaseModel):
         return self
 
     @property
-    def id(self) -> TaskId:
-        """Internal compatibility name; the authored/public field is ``name``."""
-        return self.name
-
-    @property
     def spec_hash(self) -> str:
         return content_hash(self.model_dump(mode="json"))
 

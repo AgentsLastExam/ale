@@ -205,21 +205,6 @@ class JudgeProvenance(BaseModel):
     placement: Literal["verify"] = "verify"
     attempts: int = Field(default=0, ge=0)
 
-    @model_validator(mode="before")
-    @classmethod
-    def _legacy_shape(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or "invocation_id" in value:
-            return value
-        prompt_hash = value.get("prompt_hash")
-        return {
-            **value,
-            "invocation_id": "legacy",
-            "kind": "llm",
-            "reasoning_effort": "unknown",
-            "endpoint_identity": "unknown",
-            "rubric_hash": prompt_hash,
-        }
-
 
 class AssetProvenance(BaseModel):
     model_config = _FROZEN
@@ -310,30 +295,6 @@ class RunLock(BaseModel):
     timeouts: RunTimeouts = RunTimeouts()
     sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
     termination: LimitTermination | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _legacy_judge(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        migrated = dict(value)
-        if "judge" in migrated:
-            judge = migrated.pop("judge")
-            if judge is not None and not migrated.get("judges"):
-                migrated["judges"] = [judge]
-        if "assets" in migrated:
-            legacy = migrated.pop("assets") or []
-            if legacy and not migrated.get("asset"):
-                first = legacy[0]
-                migrated["asset"] = {
-                    "repository": first.get("repository", ""),
-                    "task_path": first.get("task_path", ""),
-                    "commit": first.get("commit"),
-                    "dirty": any(item.get("state") != "clean" for item in legacy),
-                }
-        migrated.setdefault("verification", {"mode": "shared"})
-        migrated.setdefault("sandbox_outcomes", [])
-        return migrated
 
     def missing_for_report(self) -> list[str]:
         """Reasons this lock cannot back a reported result.

@@ -213,7 +213,7 @@ class Ledger:
                     episode_id,
                     run_id,
                     identity,
-                    str(spec.id),
+                    str(spec.name),
                     spec.variant,
                     episode_path or episode_id,
                     "queued",

@@ -57,11 +57,6 @@ class Usage:
     cost_usd: float = 0.0
 
     @property
-    def turns(self) -> int:
-        """Compatibility name for callers that predate ``max_model_calls``."""
-        return self.model_calls
-
-    @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 

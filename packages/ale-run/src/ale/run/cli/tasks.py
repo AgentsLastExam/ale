@@ -349,7 +349,7 @@ async def _run_one(
                 if index < done:
                     typer.echo(f"skip  {task.spec.label}: episode {index + 1} already complete")
                     continue
-                episode_id = f"{task.spec.id}-{uuid.uuid4().hex[:8]}"
+                episode_id = f"{task.spec.name}-{uuid.uuid4().hex[:8]}"
                 ledger.queue_episode(
                     episode_id=episode_id,
                     run_id=run_id,
@@ -414,7 +414,7 @@ async def _reverify(
             or task.non_verifier_digest != source_lock.task.non_verifier_digest
         ):
             typer.echo(
-                f"{task.spec.id}: content outside verify/ changed or source evidence is missing; "
+                f"{task.spec.name}: content outside verify/ changed or source evidence is missing; "
                 "run the solver again",
                 err=True,
             )
@@ -450,7 +450,7 @@ async def _reverify(
             failures += 1
             continue
         if source_lock.resources is None:
-            typer.echo(f"{task.spec.id}: source RunLock has no solver allocation", err=True)
+            typer.echo(f"{task.spec.name}: source RunLock has no solver allocation", err=True)
             failures += 1
             continue
 
@@ -518,7 +518,7 @@ async def _reverify(
                 execute, retries=retries, on_retry=_report_retry
             )
         except AleError as error:
-            typer.echo(f"{task.spec.id}: {error}", err=True)
+            typer.echo(f"{task.spec.name}: {error}", err=True)
             failures += 1
             continue
         _report(result)
@@ -629,7 +629,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                 ("untouched", NopHarness(), False),
                 ("oracle", OracleHarness(), True),
             ):
-                episode_id = f"{spec.id}-{pass_name}-{uuid.uuid4().hex[:8]}"
+                episode_id = f"{spec.name}-{pass_name}-{uuid.uuid4().hex[:8]}"
                 inputs = ProvenanceInputs(
                     source=resolved.source,
                     agent=agent_provenance(

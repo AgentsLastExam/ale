@@ -1,13 +1,7 @@
 """Task identifiers and canonical serialization.
 
-A task identifier is an **opaque label**: a flat slug derived once from the task's
-folder path (``tasks/demo/hello`` → ``demo-hello``) and never parsed afterwards.
-
-That rule is load-bearing. The previous framework encoded a task's path into data
-locations and into prompts, so renaming a domain or regrouping tasks rippled through
-sandbox layouts, cached data and instruction text. Here the domain, the variant and
-every storage location are their own fields; the identifier only has to be unique and
-readable.
+A Task identifier is the explicit ``name`` in ``task.yaml``: an opaque, unique, readable
+slug that is never derived from or parsed into a folder path.
 """
 
 from __future__ import annotations
@@ -20,7 +14,7 @@ from typing import Any, Self
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
 
-__all__ = ["TaskId", "canonical_json", "content_hash", "slugify_path"]
+__all__ = ["TaskId", "canonical_json", "content_hash"]
 
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
@@ -56,19 +50,6 @@ class TaskId(str):
             core_schema.str_schema(),
             serialization=core_schema.to_string_ser_schema(),
         )
-
-
-def slugify_path(relative_path: str) -> TaskId:
-    """Flatten a task folder path into an identifier.
-
-    ``demo/hello`` → ``demo-hello``; ``uav/control/drone_hover`` →
-    ``uav-control-drone_hover``. Directory depth stops mattering the moment the
-    identifier exists, so domains organise their folders however suits them.
-    """
-    parts = [part for part in relative_path.strip("/").split("/") if part]
-    if not parts:
-        raise ValueError("cannot derive a task id from an empty path")
-    return TaskId("-".join(parts))
 
 
 def canonical_json(value: Any) -> str:
