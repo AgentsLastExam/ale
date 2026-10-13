@@ -322,10 +322,16 @@ class OpenClawCliHarness(AutonomousHarness):
             argv.extend(["--timeout", "0"])
         elif isinstance(self.settings.timeout_seconds, int):
             argv.extend(["--timeout", str(self.settings.timeout_seconds)])
+        native_log = state / "agents" / "main" / "sessions" / f"{native_session_id}.jsonl"
+        # The native conversation is copied whether or not the turn succeeded: a failed
+        # run is exactly the one whose steps need explaining.
         command = (
             f"{' '.join(shlex.quote(part) for part in argv)} "
             f"> {shlex.quote(str(home / RESULT_NAME))} "
-            f"2>> {shlex.quote(str(home / STDERR_NAME))}"
+            f"2>> {shlex.quote(str(home / STDERR_NAME))}; "
+            "status=$?; "
+            f"cp -- {shlex.quote(str(native_log))} {shlex.quote(str(home / TRANSCRIPT_NAME))} "
+            '2>/dev/null; exit "$status"'
         )
         result = await sandbox.exec(
             bash_command(session.home, command),
@@ -363,9 +369,8 @@ class OpenClawCliHarness(AutonomousHarness):
             raise NativeContinuationError(
                 "OpenClaw did not confirm the requested native session ID"
             )
-        native_log = state / "agents" / "main" / "sessions" / f"{native_session_id}.jsonl"
         copied = await sandbox.exec(
-            ["cp", str(native_log), str(home / TRANSCRIPT_NAME)],
+            ["test", "-f", str(home / TRANSCRIPT_NAME)],
             identity=Identity.AGENT,
         )
         if not copied.ok:
