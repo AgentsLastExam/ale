@@ -481,7 +481,7 @@ async def run_episode(
         task.prepared_image = await prepare_task_image(task, providers)
     if task.prepared_verifier_image is None:
         task.prepared_verifier_image = await prepare_verifier_image(task, providers)
-    episode_id = episode_id or f"{task.spec.id}-{uuid.uuid4().hex[:8]}"
+    episode_id = episode_id or f"{task.spec.name}-{uuid.uuid4().hex[:8]}"
     trajectory_id = trajectory_id or f"trajectory-{uuid.uuid4().hex}"
     episode_dir = run_dir / episode_id
     recording = EpisodeRecording(episode_dir)

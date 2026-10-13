@@ -15,6 +15,11 @@ other files may carry only stable identifiers, references, or small run-level pr
 `events.jsonl`, `trace.semantic.jsonl`, per-episode ledger databases, scalar/primary
 rewards, and unconditional `agent-output-*.txt` files do not exist.
 
+Compatibility boundary: during early development a record is read only by the engine
+commit recorded in its RunLock (`framework.commit`). ALE ships no migrations or legacy
+readers; a record whose shape differs from the reading engine fails validation instead of
+being reinterpreted with values that were never observed.
+
 ## ATIF trajectory
 
 `trajectory.json` is a Harbor ATIF v1.7 document, not an ALE envelope. It is validated

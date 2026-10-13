@@ -278,7 +278,6 @@ class RunConfig(BaseModel):
     episode_retries: int = Field(default=0, ge=0, strict=True)
     seed: int = 0
     resume: bool = True
-    tasks_ref: str | None = Field(default=None, description="Override the registry pin")
     concurrency: int = Field(default=1, ge=1)
     _preset_name: str | None = PrivateAttr(default=None)
     _preset_digest: str | None = PrivateAttr(default=None)

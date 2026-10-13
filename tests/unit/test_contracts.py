@@ -43,7 +43,7 @@ def make_spec(**overrides: object) -> TaskSpec:
 def test_task_spec_is_strict_core_v1_and_path_independent() -> None:
     spec = make_spec()
     assert spec.spec_type == "core/v1"
-    assert spec.id == "demo-hello"
+    assert spec.name == "demo-hello"
     assert spec.label == "demo-hello"
     assert spec.network.mode is NetworkMode.BLOCK
     assert spec.image == ImageSpec(kind=ImageKind.CONTAINER)

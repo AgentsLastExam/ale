@@ -513,7 +513,7 @@ class TestRetryIdempotency:
         assert first == second
         assert upstream.calls == 1
         assert upstream.count_calls == 0
-        assert session.usage.turns == 1
+        assert session.usage.model_calls == 1
         records = read_jsonl(trace.path).records
         assert [record["kind"] for record in records] == ["call", "replay"]
         assert records[1]["charged"] is False
