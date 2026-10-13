@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -253,6 +254,39 @@ async def test_expired_grok_token_is_refreshed_under_the_profile_lock(
     assert headers["X-XAI-Token-Auth"] == "xai-grok-cli"
     assert json.loads(profile.read_text())["login"]["key"] != jwt(-1)
     assert profile.stat().st_mode & 0o777 == 0o600
+
+
+async def test_concurrent_refreshes_take_the_profile_lock_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = isolated_auth_root(tmp_path, monkeypatch) / "grok-build" / "auth.json"
+    grok_profile(profile, expires_in=-1)
+    resolved = resolve_authentication(AgentConfig(name="grok-build", authentication="subscription"))
+    credential = SubscriptionCredential(resolved, cli_version="0.2.112", dialect="openai-responses")
+    locks = 0
+    refreshes = 0
+    take_lock = credential._lock_profile
+
+    def counted_lock(path: Path) -> object:
+        nonlocal locks
+        locks += 1
+        return take_lock(path)
+
+    async def refreshed(payload: dict[str, object]) -> dict[str, object]:
+        nonlocal refreshes
+        refreshes += 1
+        await asyncio.sleep(0.05)
+        payload["login"]["key"] = jwt()  # type: ignore[index]
+        return payload
+
+    monkeypatch.setattr(credential, "_lock_profile", counted_lock)
+    monkeypatch.setattr(credential, "_refresh_payload", refreshed)
+    results = await asyncio.wait_for(
+        asyncio.gather(*(credential.refresh() for _ in range(8))), timeout=10
+    )
+
+    assert all(results)
+    assert (locks, refreshes) == (1, 1)
 
 
 async def test_profile_permissions_are_checked_before_use(

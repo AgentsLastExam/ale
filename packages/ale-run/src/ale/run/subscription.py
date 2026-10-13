@@ -185,6 +185,9 @@ class SubscriptionCredential:
         self._token = authentication.token
         self._headers: dict[str, str] = {}
         self._expires_at: datetime | None = None
+        # One refresh at a time per process: each waiter would otherwise park a worker
+        # thread in flock, starving the holder's own write and unlock of threads.
+        self._refresh_lock = asyncio.Lock()
 
     async def preflight(self) -> None:
         """Validate and, if necessary, refresh before provisioning a sandbox."""
@@ -206,22 +209,25 @@ class SubscriptionCredential:
         if profile is None:
             return False
         stale_token = self._token
-        lock = await asyncio.to_thread(self._lock_profile, profile)
-        try:
-            payload = self._read_profile(profile)
-            self._apply(payload)
+        async with self._refresh_lock:
             if self._token != stale_token and not self._needs_refresh():
                 return True
-            updated = await self._refresh_payload(payload)
-            await asyncio.to_thread(self._atomic_write, profile, updated)
-            self._apply(updated)
-            return True
-        except SubscriptionProfileError:
-            raise
-        except Exception:
-            return False
-        finally:
-            await asyncio.to_thread(self._unlock_profile, lock)
+            lock = await asyncio.to_thread(self._lock_profile, profile)
+            try:
+                payload = self._read_profile(profile)
+                self._apply(payload)
+                if self._token != stale_token and not self._needs_refresh():
+                    return True
+                updated = await self._refresh_payload(payload)
+                await asyncio.to_thread(self._atomic_write, profile, updated)
+                self._apply(updated)
+                return True
+            except SubscriptionProfileError:
+                raise
+            except Exception:
+                return False
+            finally:
+                await asyncio.to_thread(self._unlock_profile, lock)
 
     def _set_headers(self) -> None:
         if not self._token:
