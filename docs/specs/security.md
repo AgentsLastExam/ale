@@ -117,8 +117,16 @@ succeeds in an image with no `sudo` binary — and recorded in provenance, becau
 episode run that way was less isolated and the two should not be compared without that
 being visible.
 
+A VM guest service listens on TCP, which the agent can reach over loopback and every Host
+account can reach through the forwarded port. Each connection must therefore first present
+the sandbox's token, which the framework's first connection to the freshly booted guest
+claims; anything else is refused before an operation runs
+([ADR 0008](../adr/0008-claimed-guest-service.md)). Container guest services are `docker exec`
+sessions with no listener.
+
 Verified by `tests/integration/test_identity.py`: the agent cannot read the guest service,
-cannot write system paths, and cannot elevate unless its task asked.
+cannot write system paths, and cannot elevate unless its task asked; and by
+`tests/unit/test_guest_authentication.py` for the claimed TCP guest service.
 
 ## 5. Answers are absent, not hidden
 

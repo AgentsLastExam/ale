@@ -89,11 +89,17 @@ class StdioTransport:
 
 
 class TcpTransport:
-    """A socket to a guest service reached through a forwarded port."""
+    """An authenticated socket to a guest service reached through a forwarded port.
 
-    def __init__(self, host: str, port: int) -> None:
+    The forwarded port is reachable from inside the guest (loopback) and from the Host,
+    so every connection first presents the sandbox's framework token. The first token a
+    freshly booted guest receives claims it; see ``docs/adr/0008-claimed-guest-service.md``.
+    """
+
+    def __init__(self, host: str, port: int, *, token: str) -> None:
         self._host = host
         self._port = port
+        self._token = token
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
 
@@ -103,7 +109,8 @@ class TcpTransport:
         Connecting is not evidence that anyone is listening. When the port is published by
         a container runtime, its forwarder binds immediately and accepts long before the
         guest inside has booted — the connection succeeds and the first read is reset.
-        Readiness is therefore a request that came back, not a socket that opened.
+        Readiness is therefore a request that came back, not a socket that opened; the
+        request is the authentication every connection makes first.
         """
         deadline = asyncio.get_running_loop().time() + timeout_sec
         last: Exception | None = None
@@ -112,13 +119,27 @@ class TcpTransport:
                 self._reader, self._writer = await asyncio.open_connection(
                     self._host, self._port, limit=_READ_LIMIT
                 )
-                await self.send(json.dumps({"id": "ready", "op": "health", "params": {}}))
-                await asyncio.wait_for(self.recv(), timeout=interval_sec * 10)
-                return
-            except (OSError, GuestUnreachableError, TimeoutError) as exc:
+                await self.send(
+                    json.dumps({"id": 0, "op": "auth", "params": {"token": self._token}})
+                )
+                reply = json.loads(await asyncio.wait_for(self.recv(), timeout=interval_sec * 10))
+            except (OSError, GuestUnreachableError, TimeoutError, ValueError) as exc:
                 last = exc
                 await self.close()
                 await asyncio.sleep(interval_sec)
+                continue
+            if reply.get("ok"):
+                return
+            await self.close()
+            code = (reply.get("error") or {}).get("code")
+            if code == "unsupported":
+                raise ProviderStartError(
+                    f"guest service at {self._host}:{self._port} predates authenticated "
+                    "connections; rebuild the image from the current ALE base"
+                )
+            raise ProviderStartError(
+                f"guest service at {self._host}:{self._port} refused the framework token [{code}]"
+            )
         raise ProviderStartError(
             f"guest service at {self._host}:{self._port} did not answer within "
             f"{timeout_sec:g}s ({last})"

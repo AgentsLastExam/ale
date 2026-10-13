@@ -331,6 +331,7 @@ async def test_qemu_retained_solver_can_be_reattached(
 ) -> None:
     storage = tmp_path / "episode"
     storage.mkdir()
+    (storage / "guestd-token").write_text("retained-token\n")
     record = {
         "Name": "/ale-qemu-test",
         "Config": {
@@ -352,8 +353,8 @@ async def test_qemu_retained_solver_can_be_reattached(
         return 0, json.dumps([record]), ""
 
     class Transport:
-        def __init__(self, host: str, port: int) -> None:
-            assert (host, port) == ("127.0.0.1", 17411)
+        def __init__(self, host: str, port: int, *, token: str) -> None:
+            assert (host, port, token) == ("127.0.0.1", 17411, "retained-token")
 
         async def start(self, *, timeout_sec: float) -> None:
             assert timeout_sec > 0

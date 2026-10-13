@@ -137,6 +137,9 @@ The QEMU Provider sizes a fresh overlay from `storage_mb`, boots it over the pre
 qcow2, grows the guest root filesystem, waits for guestd and the declared desktop,
 and observes usable root capacity. The guest health contract reports its OS, agent user,
 agent home, and GUI readiness; a Task whose `os` disagrees with the image is rejected.
+Every TCP guest connection authenticates with the sandbox token claimed by the framework's
+first connection ([ADR 0008](../adr/0008-claimed-guest-service.md)); an image whose guest
+service predates authentication fails before provisioning completes and must be rebuilt.
 Tasks may install ordinary OS packages and services, including Docker; VM boot machinery
 stays engine-owned.
 
