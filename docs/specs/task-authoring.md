@@ -200,24 +200,30 @@ To use a prepared image directly, declare `image.ref` and omit `image/run.ps1` a
 the script. Windows separate verification reuses the solver image or supplies
 `verify.image.ref`.
 
-### Windows software assets: author workflow
+### Software assets
 
-Reuse a compatible asset from the shared software library before acquiring software again.
-Pin its download location to an immutable commit and record its SHA-256 in Task source; keep the
-reviewed deployment recipe and Task-specific configuration in `image/`. Script constants suffice;
-no additional manifest is required. Download and verify bytes before unattended deployment.
-Private-asset credentials stay on the Host, which supplies the bytes to the builder.
+On either OS, install software directly in the image recipe when a clean base can acquire the
+pinned version and deploy it unattended from declared inputs. Machine authentication is allowed;
+interactive login, verification codes, browser sessions and manual installer steps are not a
+repeatable build input. Version pins alone do not guarantee that an upstream keeps old files.
 
-If no compatible asset exists, acquire it in a packaging VM, create/sign an MSIX, and contribute
-the package, public certificate, metadata, packaging/deployment scripts and fresh-VM validation.
-Test the required workflows as the actual agent user, including writes, child tools and
-save/reopen. An overlay does not override package restrictions or Windows permissions.
+Otherwise, acquire and, if needed, install or compile the software once in a preparation
+environment. Keep the reusable offline materials as real files under
+`image/assets/softwares/<software_id>/`, for example `image/assets/softwares/editor_1/`.
+Use one directory per software/version, with underscores rather than nested version directories.
+Reuse a compatible existing package before preparing another. Slow acquisition or compilation
+can also justify an offline asset. Installed VM state alone is not a rebuildable asset.
 
-Follow the [Windows Task image guide](../guides/windows-task-images.md) for reuse, contribution
-and validation. Brew authors can read it at `.ale-brew/ale/docs/guides/windows-task-images.md`
-when copied guidance does not include linked guides. Library access and publication follow the
-operator's supplied configuration and existing permissions. Ordinary scripts and HF tools handle
-software acquisition/publication; ALE owns image execution, caching and episode overlays.
+Keep deployment scripts and Task-specific configuration in `image/`. Linux uses the Dockerfile;
+Windows uses `run.ps1`. Scripts consume Task-local materials, choose their own extraction or
+installation method, and declare external dependencies. Linux has no required package format.
+For Windows software requiring repackaging, prefer the
+[MSIX workflow](../guides/windows-task-images.md). No Task depends on another Task's files.
+
+Record the source, version, integrity hash, compatible base, and deployment requirements. Keep
+credentials out of assets. Validate from a clean base as the actual agent user, including required
+writes, child tools and save/reopen, without repeating the interactive acquisition process.
+The [asset contract](task-assets.md) owns synchronization and its current implementation limits.
 
 ## setup/
 

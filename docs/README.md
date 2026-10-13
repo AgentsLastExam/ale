@@ -10,7 +10,8 @@ lasting contract belongs here.
 | Canonical terms | [specs/lexicon.md](specs/lexicon.md) |
 | Task definition and quality standard | [specs/task-quality-standard.md](specs/task-quality-standard.md) |
 | Task engineering: directory, configuration, environment, visibility, and stage interfaces | [specs/task-authoring.md](specs/task-authoring.md) |
-| Build Windows Task images; reuse and contribute software MSIX assets | [guides/windows-task-images.md](guides/windows-task-images.md) |
+| When to prepare Task-local offline software on Linux or Windows | [specs/task-authoring.md#software-assets](specs/task-authoring.md#software-assets) |
+| Build Windows Task images and prepare reusable MSIX assets | [guides/windows-task-images.md](guides/windows-task-images.md) |
 | Task asset versions, local checkpoints, and Hugging Face publication | [specs/task-assets.md](specs/task-assets.md) |
 | `StandardEnvironment` episode flow | [specs/standard-environment.md](specs/standard-environment.md) |
 | Sandbox and image contract | [specs/sandbox-image.md](specs/sandbox-image.md) |
