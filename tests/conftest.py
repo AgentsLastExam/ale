@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import textwrap
 from collections.abc import Callable
@@ -7,6 +8,10 @@ from pathlib import Path
 
 import pytest
 import yaml
+
+# Typer forces Rich terminal styling whenever GITHUB_ACTIONS is set, which splits option
+# names in help text with escape codes. Tests read the same plain output everywhere.
+os.environ.setdefault("_TYPER_FORCE_DISABLE_TERMINAL", "1")
 
 
 @pytest.fixture(autouse=True)

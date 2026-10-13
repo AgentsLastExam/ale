@@ -4,12 +4,13 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from ale.core.errors import ArtifactTransferError
 from ale.core.sandbox import ExecResult, ImageRef, PreparedTaskImage
-from ale.core.taskspec import ImageKind, ImageSpec, VerifySpec
+from ale.core.taskspec import ImageKind, ImageSpec, OperatingSystem, VerifySpec
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import _artifact_tree_identity, _Artifacts, run_episode
@@ -205,6 +206,7 @@ class ArtifactSandbox:
         missing: bool = False,
         fail_read: bool = False,
     ) -> None:
+        self.request = SimpleNamespace(os=OperatingSystem.LINUX)
         self.kind = kind
         self.mode = mode
         self.data = data
