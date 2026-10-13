@@ -84,10 +84,13 @@ identities; local Windows VMs record builder identity and resolved base material
 Image source identity describes the files under `image/`, separately from the exact
 built image recorded in RunLock. It is not the decision to reuse a solver's answer.
 A Task run records `task.non_verifier_digest`: a content hash of every Task file outside
-`verify/` (including image/setup/oracle assets, paths, executable bits and link targets;
-engine-owned `.ale-cache` is excluded). File timestamps do not enter this hash.
-Reverification requires this digest to match the source episode. Any outside change, or
-missing source evidence, requires a fresh solver run. This also protects direct CLI use.
+`verify/` (paths, executable bits and link targets), computed once per Task folder. The four
+asset roots and engine-owned `.ale-cache` are excluded, so loading a Task never reads asset
+bytes. File timestamps do not enter this hash. Reverification requires this digest to match
+the source episode and the Task's asset observation to equal the source RunLock's: the same
+repository, Task path and commit, clean on both sides. Any outside change, any asset change
+(asset commits do not distinguish `verify/assets` from the other roots), or missing source
+evidence requires a fresh solver run. This also protects direct CLI use.
 
 When only verification changed, ALE does not build or resolve the solver image again.
 It attaches the retained solver using the source RunLock's exact image identity, and

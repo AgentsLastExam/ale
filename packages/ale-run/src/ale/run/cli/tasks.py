@@ -15,9 +15,10 @@ from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config, 
 from ale.core.errors import AleError, ConfigError, TaskDefinitionError
 from ale.core.harness import EffectiveAgentResources, Harness
 from ale.core.ids import content_hash
-from ale.core.lock import RunLock
+from ale.core.lock import AssetProvenance, RunLock
 from ale.core.result import ResultRecord
 from ale.core.sandbox import ImageKind, PreparedTaskImage, Sandbox, SandboxRequest, SandboxRole
+from ale.core.task import TaskAssetObservation
 from ale.core.taskspec import OperatingSystem, VerificationMode
 from ale.core.validation import (
     TaskValidationObservation,
@@ -420,6 +421,20 @@ async def _reverify(
             )
             failures += 1
             continue
+        try:
+            observed_assets = observe_task_assets(task)
+        except AleError as error:
+            typer.echo(f"{task.spec.name}: {error}", err=True)
+            failures += 1
+            continue
+        if not _same_assets(source_lock.asset, observed_assets):
+            typer.echo(
+                f"{task.spec.name}: Task assets differ from the source run or are not committed; "
+                "run the solver again",
+                err=True,
+            )
+            failures += 1
+            continue
         # Reverification reuses an existing solver, not a freshly rebuilt image.
         # Each source episode owns its exact prepared image and immutable provenance.
         task = copy.copy(task)
@@ -442,7 +457,7 @@ async def _reverify(
             builder_identity=image.builder_identity,
         )
         try:
-            task.asset_observation = observe_task_assets(task)
+            task.asset_observation = observed_assets
             prepared = await prepare_verifier_image_result(task, providers)
             task.prepared_verifier_image = prepared.image if prepared is not None else None
         except AleError as error:
@@ -579,6 +594,23 @@ async def _attach_retained(
 
         return await attach_retained(handle, request, lock.resources.effective)
     raise TaskDefinitionError(f"unsupported retained sandbox handle: {handle}")
+
+
+def _same_assets(recorded: AssetProvenance | None, current: TaskAssetObservation | None) -> bool:
+    """Whether a Task's assets are provably the committed version a source run used.
+
+    Asset bytes are identified by their commit rather than hashed, so any asset change,
+    even one only below verify/assets, needs a fresh solver run.
+    """
+    if recorded is None or current is None:
+        return recorded is None and current is None
+    return (
+        not recorded.dirty
+        and not current.dirty
+        and recorded.commit is not None
+        and (recorded.repository, recorded.task_path, recorded.commit)
+        == (current.repository, current.task_path, current.commit)
+    )
 
 
 def _check_reportable(result: EpisodeResult) -> bool:
