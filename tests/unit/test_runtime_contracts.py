@@ -348,7 +348,7 @@ class TestGuestProtocol:
     def test_health_reports_the_protocol_version(self) -> None:
         (reply,) = self._talk({"id": 1, "op": "health"})
         assert reply["ok"] is True
-        assert reply["data"]["proto"] == 2  # type: ignore[index]
+        assert reply["data"]["proto"] == 1  # type: ignore[index]
 
     def test_exec_streams_output_then_reports_exit_code(self) -> None:
         replies = self._talk({"id": 2, "op": "exec", "params": {"argv": ["echo", "hi"]}})

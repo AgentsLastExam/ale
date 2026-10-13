@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 1
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
 CHUNK_BYTES = 4 * 1024 * 1024
