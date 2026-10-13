@@ -234,6 +234,9 @@ refuses the next call once an output ceiling is reached.
 The Gateway does not pre-count input tokens or reserve worst-case token/cost budgets.
 It completes the current request, accounts provider-reported usage, and refuses the next
 request after an input-token, output-token, total-token, or cost ceiling is reached.
+Input tokens include prompt-cache reads and writes, so a cache-heavy agent cannot stay
+under an input or total ceiling by caching. A finite cost ceiling requires the run model to
+have a listed price.
 Model-call limits remain exact because they require no estimation. This policy applies
 equally to all three dialects.
 

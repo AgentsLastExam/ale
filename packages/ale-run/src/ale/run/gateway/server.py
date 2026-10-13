@@ -32,7 +32,9 @@ from ale.core.environment import EventSink
 from ale.core.errors import ConfigError
 from ale.core.trace import TransportCall, TransportReplay
 from ale.run.gateway import anthropic, openai_chat_completions, openai_responses
+from ale.run.gateway.pricing import estimate_cost, price_for
 from ale.run.gateway.session import (
+    CallUsage,
     GatewayReservation,
     GatewaySession,
     LimitReached,
@@ -145,10 +147,7 @@ class Gateway:
         self, session: GatewaySession, trace: EventSink | None = None
     ) -> GatewaySession:
         """Register an episode. Its token is valid until :meth:`close_session`."""
-        if (
-            session.limits.max_cost_usd is not None
-            and self._dialect.pricing_for(session.model) is None
-        ):
+        if session.limits.max_cost_usd is not None and price_for(session.model) is None:
             raise ConfigError(
                 f"finite max_cost_usd requires known pricing for model {session.model!r}"
             )
@@ -434,10 +433,10 @@ class Gateway:
             return
         self._retain_exact_tokens(session, call_id, payload, parsed)
         if streamed is not None:
-            input_tokens, output_tokens, stop_reason = self._dialect.usage_from_stream(streamed)
+            usage, stop_reason = self._dialect.usage_from_stream(streamed)
         else:
-            input_tokens, output_tokens, stop_reason = self._dialect.extract_usage(parsed)
-        cost = self._dialect.estimate_cost(session.model, input_tokens, output_tokens)
+            usage, stop_reason = self._dialect.extract_usage(parsed)
+        cost = estimate_cost(session.model, usage)
         self._record(
             session,
             call_id=call_id,
@@ -445,17 +444,16 @@ class Gateway:
             disposition="forwarded",
             response_digest=GatewaySession.digest(response_body) if response_body else None,
             provider_response_id=provider_response_id,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
+            usage=usage,
             cost_usd=cost,
             stop_reason=stop_reason,
             latency_ms=latency_ms,
         )
         await session.commit(
             reservation,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cost_usd=cost,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cost_usd=cost or 0.0,
         )
 
     async def _post(self, request: web.Request, payload: dict[str, Any]):  # type: ignore[no-untyped-def]
@@ -533,8 +531,7 @@ class Gateway:
         disposition: str | None = None,
         response_digest: str | None = None,
         provider_response_id: str | None = None,
-        input_tokens: int = 0,
-        output_tokens: int = 0,
+        usage: CallUsage | None = None,
         cost_usd: float | None = None,
         stop_reason: str | None = None,
         refused: str | None = None,
@@ -552,8 +549,10 @@ class Gateway:
                 request_digest=f"sha256:{request_digest}",
                 response_digest=(f"sha256:{response_digest}" if response_digest else None),
                 provider_response_id=provider_response_id,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                input_tokens=usage.input_tokens if usage else 0,
+                cache_read_tokens=usage.cache_read_tokens if usage else 0,
+                cache_write_tokens=usage.cache_write_tokens if usage else 0,
+                output_tokens=usage.output_tokens if usage else 0,
                 cost_usd=cost_usd,
                 stop_reason=stop_reason,
                 disposition=disposition or ("refused" if refused is not None else "forwarded"),  # type: ignore[arg-type]
