@@ -3,19 +3,31 @@
 from __future__ import annotations
 
 import base64
+import email.utils
+import http.client
 import json
 import os
-import socket
+import random
+import re
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from ._io import EvidenceError, JudgeError, digest, endpoint_identity, media_type, redact, sanitize
+from ._io import (
+    ConfigurationError,
+    EvidenceError,
+    JudgeError,
+    digest,
+    endpoint_identity,
+    media_type,
+    redact,
+    sanitize,
+)
 from ._records import (
     EvidenceReference,
     JudgeAttempt,
@@ -23,9 +35,30 @@ from ._records import (
     ScoredChoice,
 )
 
-ATTEMPTS = 4
-TIMEOUT_SECONDS = 180
+#: Invalid or refused verdicts get at most this many further attempts. Transient provider
+#: failures are retried without a count: a Judge decides a score and must finish, so only
+#: verification's own deadline (ALE_VERIFY_DEADLINE_SECONDS) stops them.
+REPAIRS = 3
+#: Silence on an open response stream after which the connection is treated as dropped.
+IDLE_TIMEOUT_SECONDS = 600
+_DEADLINE_MARGIN_SECONDS = 30
+_BACKOFF_CAP_SECONDS = 60
+_RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
+_ANTHROPIC_MAX_TOKENS = 128_000
 _EFFORTS = {"low", "medium", "high"}
+_STARTED = time.monotonic()
+_max_output: dict[tuple[str, str], int] = {}
+
+
+class _Transient(Exception):
+    """A provider or network failure worth retrying with the same request."""
+
+    def __init__(
+        self, message: str, retry_after: float | None = None, *, timed_out: bool = False
+    ) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+        self.timed_out = timed_out
 
 
 def resolve_protocol(config: Mapping[str, str]) -> str:
@@ -81,11 +114,13 @@ def run(
     attempts: list[JudgeAttempt] = []
     last_error = ""
     repair = False
-    for index in range(1, ATTEMPTS + 1):
+    repairs = 0
+    transient = 0
+    index = 0
+    while True:
+        index += 1
         attempt_mode = "initial" if index == 1 else "schema_repair" if repair else "retry"
-        request_prompt = (
-            _repair_prompt(rendered, rubric, last_error) if index > 1 and repair else rendered
-        )
+        request_prompt = _repair_prompt(rendered, rubric, last_error) if repair else rendered
         started = _now()
         request_id = None
         usage = None
@@ -96,16 +131,14 @@ def run(
             text = _response_text(protocol, payload)
             choice, reasoning = _verdict(text, rubric)
         except Exception as exc:
-            finished = _now()
             last_error = sanitize(exc, (secret,))
-            outcome, invalid_verdict = _outcome(exc)
-            repair = invalid_verdict or attempt_mode == "schema_repair"
+            outcome = _outcome(exc)
             attempts.append(
                 JudgeAttempt(
                     index=index,
                     mode=attempt_mode,
                     started_at=started,
-                    finished_at=finished,
+                    finished_at=_now(),
                     outcome=outcome,
                     model=config["model"],
                     reasoning_effort=effort,
@@ -117,10 +150,16 @@ def run(
                     error=last_error,
                 )
             )
-            if index < ATTEMPTS:
-                time.sleep(0.25 * index)
-            continue
-
+            if isinstance(exc, _Transient):
+                transient += 1
+                if not _wait_to_retry(transient, exc.retry_after):
+                    break
+                continue
+            if outcome in {"invalid", "refused"} and repairs < REPAIRS:
+                repairs += 1
+                repair = outcome == "invalid"
+                continue
+            break
         attempts.append(
             JudgeAttempt(
                 index=index,
@@ -149,7 +188,7 @@ def run(
             ),
         )
 
-    failure = f"LLM Judge produced no valid verdict after {ATTEMPTS} attempts: {last_error}"
+    failure = sanitize(f"LLM Judge produced no valid verdict after {index} attempts: {last_error}")
     invocation = JudgeInvocation(
         id=invocation_id,
         kind="llm",
@@ -168,30 +207,39 @@ def _request(
     secret: str,
     evidence: Sequence[tuple[str | bytes, EvidenceReference]] = (),
 ) -> dict[str, Any]:
+    """One Judge request, streamed, without an output ceiling of ALE's choosing.
+
+    Streaming keeps a long reasoning response alive on networks that drop idle
+    connections; the stream is read back into the provider's non-streaming shape.
+    Anthropic requires max_tokens, so it receives the model's own maximum.
+    """
     content = _content(protocol, prompt, evidence)
+    secrets = (
+        secret,
+        *(base64.b64encode(raw).decode("ascii") for raw, _ in evidence if isinstance(raw, bytes)),
+    )
     if protocol == "anthropic":
-        payload = {
-            "model": config["model"],
-            "max_tokens": 4096,
-            "output_config": {"effort": config["reasoning_effort"]},
-            "messages": [{"role": "user", "content": content}],
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": secret,
-            "anthropic-version": "2023-06-01",
-        }
-    elif protocol == "openai-chat-completions":
+        while True:
+            maximum = _anthropic_max_tokens(config, secret)
+            payload = {
+                "model": config["model"],
+                "max_tokens": maximum,
+                "output_config": {"effort": config["reasoning_effort"]},
+                "messages": [{"role": "user", "content": content}],
+                "stream": True,
+            }
+            try:
+                return _post(protocol, config, payload, _anthropic_headers(secret), secrets)
+            except _MaxTokensRejected as rejected:
+                _max_output[(config["base_url"], config["model"])] = rejected.supported(maximum)
+    if protocol == "openai-chat-completions":
         payload = {
             "model": config["model"],
             "messages": [{"role": "user", "content": content}],
             "reasoning_effort": config["reasoning_effort"],
-            "max_completion_tokens": 4096,
             "response_format": {"type": "json_object"},
-        }
-        headers = {
-            "Authorization": f"Bearer {secret}",
-            "Content-Type": "application/json",
+            "stream": True,
+            "stream_options": {"include_usage": True},
         }
     else:
         payload = {
@@ -200,35 +248,272 @@ def _request(
             if isinstance(content, str)
             else [{"role": "user", "content": content}],
             "reasoning": {"effort": config["reasoning_effort"]},
-            "max_output_tokens": 4096,
+            "stream": True,
         }
-        headers = {
-            "Authorization": f"Bearer {secret}",
-            "Content-Type": "application/json",
-        }
+    return _post(protocol, config, payload, _bearer_headers(secret), secrets)
+
+
+class _MaxTokensRejected(Exception):
+    """The provider refused max_tokens as above this model's output limit."""
+
+    def __init__(self, body: str) -> None:
+        super().__init__(body)
+        found = re.search(r"max_tokens:\s*\d+\s*>\s*(\d+)", body)
+        self.maximum = int(found.group(1)) if found else None
+
+    def supported(self, tried: int) -> int:
+        if self.maximum is not None and self.maximum < tried:
+            return self.maximum
+        if tried <= 4096:
+            raise RuntimeError(f"provider rejected max_tokens: {self.args[0][:500]}")
+        return max(4096, tried // 2)
+
+
+def _anthropic_headers(secret: str) -> dict[str, str]:
+    return {
+        "Content-Type": "application/json",
+        "x-api-key": secret,
+        "anthropic-version": "2023-06-01",
+    }
+
+
+def _bearer_headers(secret: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {secret}", "Content-Type": "application/json"}
+
+
+def _anthropic_max_tokens(config: Mapping[str, str], secret: str) -> int:
+    """The model's own output limit, from the Models API when the endpoint offers it."""
+    key = (config["base_url"], config["model"])
+    if key not in _max_output:
+        url = _endpoint(config["base_url"], "anthropic").removesuffix("/messages")
+        request = urllib.request.Request(
+            f"{url}/models/{config['model']}", headers=_anthropic_headers(secret), method="GET"
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                reported = json.load(response).get("max_tokens")
+        except Exception:
+            reported = None
+        _max_output[key] = (
+            reported if isinstance(reported, int) and reported > 0 else _ANTHROPIC_MAX_TOKENS
+        )
+    return _max_output[key]
+
+
+def _post(
+    protocol: str,
+    config: Mapping[str, str],
+    payload: Mapping[str, object],
+    headers: Mapping[str, str],
+    secrets: tuple[str, ...],
+) -> dict[str, Any]:
     request = urllib.request.Request(
         _endpoint(config["base_url"], protocol),
         data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        headers=headers,
+        headers=dict(headers),
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            loaded = json.load(response)
+        with urllib.request.urlopen(request, timeout=IDLE_TIMEOUT_SECONDS) as response:
+            content_type = getattr(response, "headers", {}).get("Content-Type", "") or ""
+            if "text/event-stream" in content_type:
+                loaded = _read_stream(protocol, response)
+            else:
+                loaded = json.load(response)
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        body = redact(
-            body,
-            tuple(
-                base64.b64encode(raw).decode("ascii")
-                for raw, _ in evidence
-                if isinstance(raw, bytes)
-            ),
+        body = redact(exc.read().decode("utf-8", errors="replace"), secrets)
+        message = f"provider returned HTTP {exc.code}: {body[:500]}"
+        if exc.code in _RETRYABLE_STATUS:
+            raise _Transient(message, _retry_after(exc.headers)) from exc
+        if protocol == "anthropic" and exc.code == 400 and "max_tokens" in body:
+            raise _MaxTokensRejected(body) from exc
+        raise RuntimeError(message) from exc
+    except (urllib.error.URLError, http.client.HTTPException, ConnectionError, TimeoutError) as exc:
+        timed_out = isinstance(exc, TimeoutError) or isinstance(
+            getattr(exc, "reason", None), TimeoutError
         )
-        raise RuntimeError(f"provider returned HTTP {exc.code}: {body[:500]}") from exc
+        raise _Transient(f"connection failed: {redact(exc, secrets)}", timed_out=timed_out) from exc
+    except json.JSONDecodeError as exc:
+        raise _Transient(f"provider sent a truncated or malformed response: {exc}") from exc
     if not isinstance(loaded, dict):
         raise RuntimeError("provider response must be a JSON object")
     return loaded
+
+
+def _events(lines: Iterable[bytes]) -> Iterable[dict[str, Any]]:
+    for raw in lines:
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line.startswith("data:"):
+            continue
+        data = line.removeprefix("data:").strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
+def _read_stream(protocol: str, lines: Iterable[bytes]) -> dict[str, Any]:
+    """Rebuild the provider's non-streaming response from its event stream."""
+    if protocol == "anthropic":
+        message: dict[str, Any] = {"content": [], "usage": {}}
+        blocks: dict[int, dict[str, Any]] = {}
+        for event in _events(lines):
+            kind = event.get("type")
+            if kind == "error":
+                raise _Transient(f"provider stream failed: {json.dumps(event.get('error'))[:500]}")
+            if kind == "message_start":
+                started = event.get("message") or {}
+                message["id"] = started.get("id")
+                message["usage"].update(started.get("usage") or {})
+            elif kind == "content_block_start":
+                block = dict(event.get("content_block") or {})
+                blocks[int(event.get("index", len(blocks)))] = block
+            elif kind == "content_block_delta":
+                delta = event.get("delta") or {}
+                block = blocks.setdefault(int(event.get("index", 0)), {"type": "text", "text": ""})
+                if delta.get("type") == "text_delta":
+                    block["text"] = block.get("text", "") + str(delta.get("text", ""))
+            elif kind == "message_delta":
+                message["stop_reason"] = (event.get("delta") or {}).get("stop_reason")
+                message["usage"].update(event.get("usage") or {})
+            elif kind == "message_stop":
+                message["content"] = [blocks[index] for index in sorted(blocks)]
+                return message
+        raise _Transient("provider stream ended before message_stop")
+    if protocol == "openai-chat-completions":
+        text, refusal, usage, finish, identifier = [], [], None, None, None
+        for event in _events(lines):
+            if event.get("error"):
+                raise _Transient(f"provider stream failed: {json.dumps(event['error'])[:500]}")
+            identifier = event.get("id") or identifier
+            usage = event.get("usage") or usage
+            for choice in event.get("choices") or ():
+                delta = choice.get("delta") or {}
+                text.append(str(delta.get("content") or ""))
+                refusal.append(str(delta.get("refusal") or ""))
+                finish = choice.get("finish_reason") or finish
+        if finish is None:
+            raise _Transient("provider stream ended without a finish reason")
+        message_body = {"role": "assistant", "content": "".join(text)}
+        if "".join(refusal):
+            message_body["refusal"] = "".join(refusal)
+        return {
+            "id": identifier,
+            "choices": [{"message": message_body, "finish_reason": finish}],
+            "usage": usage,
+        }
+    for event in _events(lines):
+        kind = event.get("type")
+        if kind == "error":
+            raise _Transient(f"provider stream failed: {json.dumps(event)[:500]}")
+        if kind == "response.failed":
+            error = (event.get("response") or {}).get("error")
+            raise _Transient(f"provider response failed: {json.dumps(error)[:500]}")
+        if kind in {"response.completed", "response.incomplete"}:
+            return dict(event.get("response") or {})
+    raise _Transient("provider stream ended before the response completed")
+
+
+def _retry_after(headers: object) -> float | None:
+    if headers is None:
+        return None
+    milliseconds = headers.get("retry-after-ms")  # type: ignore[attr-defined]
+    if milliseconds:
+        try:
+            return float(milliseconds) / 1000
+        except ValueError:
+            pass
+    value = headers.get("retry-after")  # type: ignore[attr-defined]
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        moment = email.utils.parsedate_to_datetime(value)
+        return max(0.0, (moment - datetime.now(UTC)).total_seconds()) if moment else None
+
+
+def _backoff(failures: int, retry_after: float | None) -> float:
+    if retry_after is not None:
+        return min(retry_after, 600.0)
+    return random.uniform(0.5, 1.0) * min(_BACKOFF_CAP_SECONDS, 2 ** min(failures, 6))
+
+
+def _wait_to_retry(failures: int, retry_after: float | None = None) -> bool:
+    """Sleep before another attempt; False when verification's budget cannot cover it."""
+    delay = _backoff(failures, retry_after)
+    left = _time_left()
+    if left is not None and left < delay:
+        return False
+    time.sleep(delay)
+    return True
+
+
+def _time_left() -> float | None:
+    """Seconds verification may still spend on retries, or None without a deadline."""
+    budget = os.environ.get("ALE_VERIFY_DEADLINE_SECONDS")
+    if not budget:
+        return None
+    elapsed = time.monotonic() - _STARTED
+    return float(budget) - elapsed - _DEADLINE_MARGIN_SECONDS
+
+
+def probe(config: Mapping[str, str], protocol: str | None = None) -> None:
+    """Prove a Judge endpoint, key and model answer one tiny request.
+
+    The reasoning effort is sent only when the config names one. Raises ConfigurationError
+    with a sanitized reason. Transient failures get a few retries: a probe is a gate run
+    before agents start, not a Judge that must finish.
+    """
+    protocol = protocol or resolve_protocol(config)
+    secret = os.environ.get(config["api_key_env"], "")
+    if not secret:
+        raise ConfigurationError(f"{config['api_key_env']} is not set for the Judge")
+    prompt = "Reply with the single word OK."
+    effort = config.get("reasoning_effort")
+    if protocol == "anthropic":
+        payload: dict[str, object] = {
+            "model": config["model"],
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if effort:
+            payload["output_config"] = {"effort": effort}
+        headers = _anthropic_headers(secret)
+    elif protocol == "openai-chat-completions":
+        payload = {
+            "model": config["model"],
+            "messages": [{"role": "user", "content": prompt}],
+            "max_completion_tokens": 64,
+        }
+        if effort:
+            payload["reasoning_effort"] = effort
+        headers = _bearer_headers(secret)
+    else:
+        payload = {"model": config["model"], "input": prompt, "max_output_tokens": 64}
+        if effort:
+            payload["reasoning"] = {"effort": effort}
+        headers = _bearer_headers(secret)
+    where = endpoint_identity(config["base_url"])
+    for attempt in range(1, 4):
+        try:
+            _post(protocol, config, payload, headers, (secret,))
+            return
+        except _Transient as exc:
+            if attempt == 3:
+                raise ConfigurationError(
+                    f"Judge endpoint {where} is unavailable: {sanitize(exc, (secret,))}"
+                ) from exc
+            time.sleep(_backoff(attempt, exc.retry_after))
+        except Exception as exc:
+            raise ConfigurationError(
+                f"Judge endpoint {where} rejected model {config['model']!r}: "
+                f"{sanitize(exc, (secret,))}"
+            ) from exc
 
 
 def _content(
@@ -357,25 +642,30 @@ def _response_text(protocol: str, payload: Mapping[str, Any]) -> str:
                 if isinstance(item, dict) and item.get("type") == "text"
             )
     else:
-        if payload.get("status") == "refused":
+        parts = [
+            part
+            for item in payload.get("output", ())
+            if isinstance(item, dict)
+            for part in item.get("content", ())
+            if isinstance(part, dict)
+        ]
+        if any(part.get("type") == "refusal" for part in parts):
             raise PermissionError("provider refused the Judge request")
-        text = payload.get("output_text", "")
-        if not text:
-            text = "".join(
-                part.get("text", "")
-                for item in payload.get("output", ())
-                if isinstance(item, dict)
-                for part in item.get("content", ())
-                if isinstance(part, dict) and part.get("type") == "output_text"
-            )
+        text = payload.get("output_text", "") or "".join(
+            part.get("text", "") for part in parts if part.get("type") == "output_text"
+        )
+        if not text and payload.get("status") == "incomplete":
+            reason = (payload.get("incomplete_details") or {}).get("reason")
+            raise ValueError(f"Judge response is incomplete ({reason})")
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Judge response contains no verdict text")
     return text
 
 
 def _verdict(text: str, rubric: Mapping[str, ScoredChoice]) -> tuple[str, str]:
+    fenced = re.fullmatch(r"\s*```(?:json)?\s*(.*?)\s*```\s*", text, flags=re.S)
     try:
-        loaded = json.loads(text)
+        loaded = json.loads(fenced.group(1) if fenced else text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"verdict is not valid JSON: {exc.msg}") from exc
     if not isinstance(loaded, dict) or set(loaded) != {"choice", "reasoning"}:
@@ -406,14 +696,14 @@ def _request_id(payload: Mapping[str, Any], secret: str) -> str | None:
     return sanitize(value, (secret,)) if value else None
 
 
-def _outcome(error: Exception) -> tuple[str, bool]:
+def _outcome(error: Exception) -> str:
     if isinstance(error, PermissionError):
-        return "refused", False
-    if isinstance(error, (TimeoutError, socket.timeout)):
-        return "timed_out", False
-    if isinstance(error, (ValueError, json.JSONDecodeError)):
-        return "invalid", True
-    return "failed", False
+        return "refused"
+    if isinstance(error, _Transient) and error.timed_out:
+        return "timed_out"
+    if isinstance(error, ValueError):
+        return "invalid"
+    return "failed"
 
 
 def _failed_preflight(

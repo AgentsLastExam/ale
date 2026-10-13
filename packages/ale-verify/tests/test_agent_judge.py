@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ale_verify import JudgeError, ScoredChoice, Verification, VerificationRecord, _agents
+from ale_verify import JudgeError, ScoredChoice, Verification, VerificationRecord, _agents, _llm
 from test_agent_adapters import codex_config, completed
 
 
@@ -28,7 +28,8 @@ def agent_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path
     monkeypatch.setenv("ALE_VERIFICATION_PATH", str(record))
     monkeypatch.setenv("JUDGE_KEY", "provider-secret")
     monkeypatch.setattr(_agents.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(_agents.time, "sleep", lambda _delay: None)
+    # Verification's budget allows three retries.
+    monkeypatch.setattr(_llm, "_wait_to_retry", lambda failures, _after=None: failures <= 3)
     return {"workspace": workspace, "log": log, "record": record, "instruction": instruction}
 
 
@@ -116,10 +117,11 @@ def test_timeout_after_schema_repair_keeps_latest_error_and_partial_native_evide
     assert "unknown choice" not in invocation.failure
     assert "provider-secret" not in invocation.failure
     logs = [json.loads(line) for line in agent_env["log"].read_text().splitlines()]
-    assert len(logs) == 4
+    assert len(logs) == 5
     assert [attempt.mode for attempt in invocation.attempts] == [
         "initial",
         "schema_repair",
+        "retry",
         "retry",
         "retry",
     ]

@@ -59,7 +59,8 @@ from ale.run.task_images import (
     prepare_task_image_result,
     prepare_verifier_image_result,
 )
-from ale.run.tasksets.manifest import ManifestTask, load_tasks
+from ale.run.tasksets.manifest import VERIFY_DIR, ManifestTask, load_tasks
+from ale.run.verification import preflight_judges
 
 EXIT_SOME_FAILED = 2
 EXIT_BAD_REFERENCE = 3
@@ -173,6 +174,7 @@ async def _run_one(
         )
         for task in tasks:
             harness.validate_os(task.spec.os)
+        await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
     except AleError as error:
         typer.echo(f"{error}", err=True)
@@ -395,6 +397,7 @@ async def _reverify(
         providers = ProviderRegistry(settings)
         by_id = {(str(task.spec.name), task.spec.variant): task for task in tasks}
         sources = _retained_source_episodes(source_run)
+        await preflight_judges(_verify_dirs(tasks), settings.verification)
     except (AleError, OSError, ValueError) as error:
         typer.echo(str(error), err=True)
         return EXIT_BAD_REFERENCE
@@ -641,6 +644,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
             list(load_tasks(resolved.task_dir)),
             task_reference.variants,
         )
+        await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
     except AleError as error:
         typer.echo(f"{error}", err=True)
@@ -791,6 +795,10 @@ async def _prepare_only(reference: str, settings: RunConfig) -> int:
             suffix = " ".join(value for value in (step.identity, step.detail) if value is not None)
             typer.echo(f"  {step.name:<20} {step.outcome:<8} {suffix}".rstrip())
     return 0
+
+
+def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
+    return [task.folder.root / VERIFY_DIR for task in tasks]
 
 
 async def _prepare_images(

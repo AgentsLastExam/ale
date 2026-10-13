@@ -112,12 +112,39 @@ validity are governed by the [Task quality standard](task-quality-standard.md#3-
 
 Both Judge types call the configured endpoint directly from the sandbox. The named API
 key is injected only into the verify command environment, redacted from captured output,
-and never written to Task configuration or records. A Judge makes one initial attempt and
-at most three retries, shared between service failures and invalid verdicts. Agent Judge
-retries launched CLI failures and timeouts with the same evidence in a fresh native session;
-invalid verdicts receive a schema-repair prompt in the existing session. Preflight failures
-and native session identity mismatches stop immediately. Judge infrastructure failures
-are terminal for the episode after this budget; outer episode retries do not repeat them.
+and never written to Task configuration or records.
+
+A Judge decides a score, so ALE sets no ceiling of its own on how long it thinks or how
+much it writes, and offers no setting for one. An LLM Judge streams its response and sends
+no output-token limit; Anthropic's protocol requires `max_tokens`, so it receives the
+model's own maximum as reported by the endpoint's Models API (128000 when the endpoint has
+none, lowered to the limit a provider names when it rejects that value). A stream that is
+silent for ten minutes is treated as a dropped connection.
+
+Transient provider failures (connection loss, timeouts, truncated streams, and HTTP 408,
+409, 425, 429, 5xx and 529) are retried with the same request and exponential backoff that
+honours `Retry-After`, without an attempt count. The only bound is verification's own
+budget: the engine passes the seconds left in the verify phase as
+`ALE_VERIFY_DEADLINE_SECONDS`, and a Judge stops retrying 30 seconds before it so that the
+failure is recorded rather than killed. Any other provider rejection fails at once. An
+invalid or refused verdict gets at most three further attempts; invalid verdicts receive a
+schema-repair prompt that names the error, and a verdict wrapped in a Markdown JSON fence
+is accepted. Agent Judge runs each CLI attempt with no timeout but that remaining budget,
+retries CLI failures and timeouts with the same evidence in a fresh native session, and
+repairs invalid verdicts in the existing session. Missing credentials and native session
+identity mismatches stop immediately. Judge infrastructure failures are terminal for the
+episode; outer episode retries do not repeat them.
+
+### Judge preflight
+
+`ale run`, `ale validate` and `ale reverify` scan every selected Task's `verify/` Python for
+`.judge(...)` calls before preparing images or starting any agent. A literal kind selects
+that Judge; a kind computed at run time counts as both. Each Judge kind found must be
+configured, and one tiny request through `ale_verify.probe_judge` must succeed with its
+endpoint, key and model (an LLM Judge also with its reasoning effort). Otherwise the command
+stops with the reason and nothing runs, so a configuration mistake cannot turn into a batch
+of paid agent episodes with no verdict. The probe runs from the host; it proves the Judge
+configuration, not the verifier sandbox's route to the endpoint.
 
 ## Records and failure
 
