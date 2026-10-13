@@ -93,6 +93,14 @@ def direct_llm_task(root: Path) -> Path:
         "import json\n"
         "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
         "class Handler(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        found = '/models/' in self.path\n"
+        "        body = json.dumps({'max_tokens': 32000} if found else {}).encode()\n"
+        "        self.send_response(200 if found else 404)\n"
+        "        self.send_header('content-type', 'application/json')\n"
+        "        self.send_header('content-length', str(len(body)))\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(body)\n"
         "    def do_POST(self):\n"
         "        length = int(self.headers.get('content-length', '0'))\n"
         "        self.rfile.read(length)\n"
@@ -115,7 +123,7 @@ def direct_llm_task(root: Path) -> Path:
         "        self.end_headers()\n"
         "        self.wfile.write(body)\n"
         "    def log_message(self, *_args): pass\n"
-        "HTTPServer(('127.0.0.1', 18765), Handler).handle_request()\n"
+        "HTTPServer(('127.0.0.1', 18765), Handler).serve_forever()\n"
     )
     (task / "image" / "Dockerfile").write_text(
         "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
