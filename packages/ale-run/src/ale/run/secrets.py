@@ -91,6 +91,12 @@ def provider_credentials(
     """
     load_env()
     default_key_var, default_base_url = DEFAULTS.get(dialect, DEFAULTS["anthropic"])
+    if not key_var and base_url and base_url.rstrip("/") != default_base_url:
+        raise ConfigError(
+            f"gateway.base_url {base_url!r} is not the {dialect} default endpoint; name the "
+            "variable holding its key with --api-key-env (gateway.api_key_env) so the default "
+            f"{default_key_var} is never sent to another provider"
+        )
     key_var = key_var or default_key_var
     key = os.environ.get(key_var, "")
     if not key:
