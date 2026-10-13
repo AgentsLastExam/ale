@@ -48,7 +48,11 @@ All ALE extensions live under `extra.ale`:
 - `attachments`: non-image BlobRefs;
 - `mcp`: logical MCP server and tool;
 - `normalized_action`: CUA action correlated with the same MCP call;
-- `incomplete` and `incomplete_reason`: valid observed prefix after interruption.
+- `incomplete` and `incomplete_reason`: valid observed prefix after interruption, or
+  `conversion_failed` when the Harness parser raised and only the instruction and final
+  message could be recorded;
+- `parse_issues`: bounded `{reason, detail}` records of native evidence the parser could not
+  convert.
 
 Images use ATIF image parts whose `source.path` is episode-relative. Subagents use
 embedded `subagent_trajectories` with unique `trajectory_id` values and resolvable
