@@ -96,6 +96,9 @@ class GatewaySession:
     exact_token_dir: Path | None = None
     """Temporary exact provider token evidence; absent unless explicitly requested."""
 
+    refusal: LimitReached | None = field(default=None, repr=False)
+    """The first limit that refused one of this session's calls, if any."""
+
     allowed_hosts: frozenset[str] = frozenset()
     """Hosts this episode may reach through the proxy, beyond the model endpoint.
 

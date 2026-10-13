@@ -404,6 +404,21 @@ class TestLimits:
         assert second == 429
         assert body["error"]["ale"]["limit"] == "max_model_calls"
         assert upstream.calls == 1, "the refused call must not reach the provider"
+        assert session.refusal is not None and session.refusal.limit == "max_model_calls"
+
+    async def test_a_refusal_tells_clients_not_to_retry(self, stack) -> None:
+        gateway, _, session, _ = stack
+        session.limits = Limits(max_model_calls=0)
+        async with (
+            ClientSession() as client,
+            client.post(
+                f"{gateway.base_url}/v1/messages",
+                json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+                headers={"authorization": f"Bearer {session.token}"},
+            ) as response,
+        ):
+            assert response.status == 429
+            assert response.headers["x-should-retry"] == "false"
 
     async def test_cost_ceiling_uses_recorded_usage(self, stack) -> None:
         gateway, _upstream, session, _ = stack
