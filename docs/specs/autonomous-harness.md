@@ -209,8 +209,8 @@ the MCP client contract may not.
 
 Keep ownership explicit:
 
-- Gateway limits own API-key-mode model calls, provider-reported input tokens, output
-  tokens, total tokens, and estimated provider cost.
+- Gateway limits own model calls, provider-reported input tokens, output tokens, total
+  tokens, and estimated provider cost in both API-key and subscription modes.
 - Harness settings own native controls such as Claude `max_turns` and
   `max_budget_usd`.
 - Environment timeouts own setup, agent, and verify wall time.
@@ -221,12 +221,12 @@ value, and observed value.
 
 The Gateway supports Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses
 for API-key mode. The preset supplies the default dialect and upstream provider endpoint;
-a Harness may accept a documented compatible override. Subscription mode instead uses
-the official CLI's native provider service. Codex and Grok use a staged provider profile
-and opaque provider egress, so Gateway limits and accounting do not apply. Claude uses the
-Gateway as a Bearer relay: the Run model remains authoritative and identical retries may
-be coalesced, while finite cost/token limits, provider billing, and retained Transport
-Trace remain unavailable.
+a Harness may accept a documented compatible override. Subscription mode uses the same
+Sandbox-side Gateway configuration; only the Host Gateway's upstream authentication changes
+([ADR 0007](../adr/0007-unified-subscription-gateway.md)), so model authority, limits,
+accounting, retry coalescing, and Transport Trace are common to both modes. The ChatGPT
+Codex backend rejects `max_output_tokens`, so ALE accounts the completed response and
+refuses the next call once an output ceiling is reached.
 
 The Gateway does not pre-count input tokens or reserve worst-case token/cost budgets.
 It completes the current request, accounts provider-reported usage, and refuses the next

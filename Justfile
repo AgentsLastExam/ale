@@ -69,6 +69,6 @@ fmt:
 images:
     @images/build.sh
 
-# The canonical smoke run: one command, one verdict.
-demo:
-    @uv run ale run demo/readfile_secret --agent claude-code
+# The canonical smoke run against a Task folder: one command, one verdict.
+demo task:
+    @uv run ale run {{ task }} --agent claude-code

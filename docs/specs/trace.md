@@ -78,11 +78,10 @@ without an in-band error; an interrupted or failed stream is forwarded again on 
 contain digests and accounting metadata, not provider request/response bodies or a second
 copy of the conversation.
 
-Subscription traffic is not recorded here. Codex/Grok use the native CONNECT proxy;
-Claude uses the Gateway without attaching this retained trace. In either case this
-artifact is absent and RunLock records that retained transport visibility, provider
-billing usage, and provider cost are unavailable. Absence never means zero model calls;
-the ATIF trajectory and native logs remain the available solver evidence.
+Subscription traffic takes the same path ([ADR 0007](../adr/0007-unified-subscription-gateway.md)):
+Claude Code, Codex CLI, and Grok Build send every model call to the Gateway, which only
+changes how it authenticates upstream, so those calls are recorded here like API-key calls.
+Provider billing remains external; `cost_usd` is an ALE estimate only when pricing is known.
 
 ## Execution trace
 
