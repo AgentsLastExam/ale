@@ -238,21 +238,17 @@ def test_judge_failure_persists_failed_state_and_cannot_be_caught_into_a_score(
         verification.check("fallback", CheckResult(1))
 
 
+RUBRIC = {
+    "no": {"score": 0, "description": "Wrong."},
+    "yes": {"score": 1, "description": "Correct."},
+}
+
+
 @pytest.mark.parametrize(
     "case",
-    [
-        "missing",
-        "directory",
-        "symlink",
-        "fifo",
-        "binary",
-        "large",
-        "total",
-        "reference",
-        "trajectory",
-    ],
+    ["missing", "directory", "symlink", "fifo", "binary", "large", "total", "no-trajectory"],
 )
-def test_evidence_failure_is_terminal_before_contacting_a_judge(
+def test_unusable_solver_evidence_scores_zero_without_contacting_a_judge(
     monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path], tmp_path: Path, case: str
 ) -> None:
     path = tmp_path / "evidence"
@@ -276,29 +272,58 @@ def test_evidence_failure_is_terminal_before_contacting_a_judge(
         path.write_text("content")
         monkeypatch.setattr("ale_verify.MAX_TOTAL_EVIDENCE_BYTES", 10)
         options["files"] = [str(path), str(path)]
-    elif case == "reference":
-        options = {"reference": "x" * (_io.MAX_REFERENCE_BYTES + 1)}
-    elif case == "trajectory":
-        monkeypatch.setenv("ALE_TRAJECTORY_PATH", str(path))
+    elif case == "no-trajectory":
+        monkeypatch.delenv("ALE_TRAJECTORY_PATH", raising=False)
         options = {"trajectory": True}
 
     monkeypatch.setattr("ale_verify._llm.run", lambda **_: pytest.fail("Judge was contacted"))
     verification = Verification()
+    score = verification.judge("llm", "content", prompt="Judge content.", rubric=RUBRIC, **options)
+    verification.check("format", CheckResult(1))
+    verification.aggregate("overall")
+    verification.write()
+
+    assert score == 0
+    record = VerificationRecord.from_json(verify_env[0].read_bytes())
+    assert record.status == "completed"
+    assert record.rewards == {"content": 0.0, "format": 1.0, "overall": 0.5}
+    (criterion,) = [item for item in record.criteria if item.name == "content"]
+    assert criterion.source == "check"
+    assert criterion.reasoning and criterion.reasoning.startswith("no llm Judge ran:")
+    assert record.judge_invocations == ()
+
+
+@pytest.mark.parametrize("case", ["relative", "reference"])
+def test_authored_evidence_errors_are_request_errors(
+    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path], case: str
+) -> None:
+    options: dict[str, object] = (
+        {"files": ["output/report.md"]}
+        if case == "relative"
+        else {"reference": "x" * (_io.MAX_REFERENCE_BYTES + 1)}
+    )
+    monkeypatch.setattr("ale_verify._llm.run", lambda **_: pytest.fail("Judge was contacted"))
+    verification = Verification()
+    with pytest.raises(ValueError):
+        verification.judge("llm", "content", prompt="Judge content.", rubric=RUBRIC, **options)
+    assert not verify_env[0].exists() or (
+        VerificationRecord.from_json(verify_env[0].read_bytes()).failure is None
+    )
+
+
+def test_a_staged_trajectory_that_cannot_be_read_is_an_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ALE_TRAJECTORY_PATH", str(tmp_path / "missing-trajectory.json"))
+    monkeypatch.setattr("ale_verify._llm.run", lambda **_: pytest.fail("Judge was contacted"))
+    verification = Verification()
     with pytest.raises(_io.VerificationError):
         verification.judge(
-            "llm",
-            "content",
-            prompt="Judge content.",
-            rubric={
-                "no": {"score": 0, "description": "Wrong."},
-                "yes": {"score": 1, "description": "Correct."},
-            },
-            **options,
+            "llm", "content", prompt="Judge content.", rubric=RUBRIC, trajectory=True
         )
     record = VerificationRecord.from_json(verify_env[0].read_bytes())
     assert record.status == "failed"
-    assert record.rewards == {}
-    assert record.failure
+    assert record.failure and record.failure.startswith("judge infrastructure:")
     assert not verify_env[1].exists()
     with pytest.raises(RuntimeError, match="terminal"):
         verification.check("fallback", CheckResult(1))

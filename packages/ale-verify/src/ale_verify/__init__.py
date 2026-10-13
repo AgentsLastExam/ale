@@ -124,33 +124,32 @@ class Verification:
             raise ValueError("Judge prompt must be non-empty")
         choices = _rubric(rubric)
         weight = _weight(weight)
+        if kind == "agent" and self._agent_judge_started:
+            raise RuntimeError("only one Agent Judge invocation is allowed")
+        if any(not os.path.isabs(os.fspath(path)) for path in files):
+            raise ValueError("Judge evidence paths must be absolute")
+        try:
+            authored = [] if reference is None else [inline_evidence(reference, kind="reference")]
+        except EvidenceError as exc:
+            raise ValueError(f"Judge reference is invalid: {exc}") from exc
+
+        try:
+            evidence = [*_solver_evidence(kind, files), *authored]
+            if sum(item.size_bytes for _, item in evidence) > MAX_TOTAL_EVIDENCE_BYTES:
+                raise _Unavailable(f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total")
+            if trajectory and not os.environ.get("ALE_TRAJECTORY_PATH"):
+                raise _Unavailable("no solver trajectory was recorded")
+        except _Unavailable as unavailable:
+            return self._unavailable(kind, name, weight, str(unavailable))
         if kind == "agent":
-            if self._agent_judge_started:
-                raise RuntimeError("only one Agent Judge invocation is allowed")
             self._agent_judge_started = True
 
-        evidence: list[tuple[str | bytes, EvidenceReference]] = []
         invocation_id = "judge-" + uuid.uuid4().hex
         try:
-            size = 0
-            for path in files:
-                raw, item = read_file_evidence(path)
-                size += item.size_bytes
-                if size > MAX_TOTAL_EVIDENCE_BYTES:
-                    raise EvidenceError(
-                        f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total"
-                    )
-                content = (
-                    evidence_text(raw, item) if kind == "llm" and media_type(raw) is None else raw
-                )
-                evidence.append((content, item))
-            if reference is not None:
-                evidence.append(inline_evidence(reference, kind="reference"))
             if trajectory:
-                path = os.environ.get("ALE_TRAJECTORY_PATH")
-                if not path:
-                    raise EvidenceError("ALE_TRAJECTORY_PATH is not configured")
-                evidence.append(read_text_evidence(path, kind="solver_trajectory"))
+                evidence.append(
+                    read_text_evidence(os.environ["ALE_TRAJECTORY_PATH"], kind="solver_trajectory")
+                )
             if sum(item.size_bytes for _, item in evidence) > MAX_TOTAL_EVIDENCE_BYTES:
                 raise EvidenceError(f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total")
             config = load_config().get(kind)
@@ -278,6 +277,25 @@ class Verification:
         if self._status != "in_progress":
             raise RuntimeError("verification is already terminal")
 
+    def _unavailable(self, kind: str, name: str, weight: float, reason: str) -> float:
+        """Score a Judge criterion zero because the solver left nothing valid to judge.
+
+        Missing or unusable solver output is the evaluated agent's outcome, not a scorer
+        failure, so it counts as zero instead of removing the episode from aggregates. No
+        Judge runs; an authored path that the oracle cannot satisfy fails validation.
+        """
+        criterion = CriterionResult(
+            name=name,
+            source="check",
+            score=0.0,
+            weight=weight,
+            reasoning=f"no {kind} Judge ran: {sanitize(reason)}",
+            raw_value={"judge": kind, "solver_evidence": "unavailable"},
+        )
+        self._criteria[name] = criterion
+        self._persist()
+        return criterion.score
+
     def _fail(self, message: str) -> Any:
         self._status = "failed"
         self._failure = message
@@ -338,6 +356,29 @@ def _rubric(
         else:
             raise ValueError("rubric choices must be mappings")
     return normalized
+
+
+class _Unavailable(Exception):
+    """The solver left no usable evidence for a Judge criterion."""
+
+
+def _solver_evidence(
+    kind: str, files: Sequence[str]
+) -> list[tuple[str | bytes, EvidenceReference]]:
+    """Read the solver files a Judge assesses; an unusable one is the solver's outcome."""
+    evidence: list[tuple[str | bytes, EvidenceReference]] = []
+    size = 0
+    for path in files:
+        try:
+            raw, item = read_file_evidence(path)
+            content = evidence_text(raw, item) if kind == "llm" and media_type(raw) is None else raw
+        except EvidenceError as exc:
+            raise _Unavailable(str(exc)) from exc
+        size += item.size_bytes
+        if size > MAX_TOTAL_EVIDENCE_BYTES:
+            raise _Unavailable(f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total")
+        evidence.append((content, item))
+    return evidence
 
 
 from . import checks  # noqa: E402
