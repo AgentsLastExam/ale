@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 from ale.core.config import LoggingPolicy, RunConfig, SandboxRetentionConfig
-from ale.core.errors import TrajectoryConversionError
 from ale.core.harness import AgentRun
 from ale.core.lock import TaskSource
 from ale.core.sandbox import (
@@ -122,7 +121,7 @@ def context(root: Path, policy: LoggingPolicy, run: AgentRun | None):
         episode_id=root.name,
         trajectory_id="trajectory",
         run_dir=root,
-        session=SimpleNamespace(model="model"),
+        session=SimpleNamespace(model="model", token="episode-token"),
         agent_version="1",
         spec=SimpleNamespace(instruction="instruction"),
         agent_run=run,
@@ -248,10 +247,13 @@ def test_conversion_failure_keeps_native_logs(tmp_path: Path) -> None:
         + "\n"
     )
 
-    with pytest.raises(TrajectoryConversionError):
-        StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
+    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
 
     assert transcript.is_file()
+    trajectory = json.loads((root / "trajectory.json").read_text())
+    assert trajectory["extra"]["ale"]["incomplete_reason"] == "conversion_failed"
+    (issue,) = trajectory["extra"]["ale"]["parse_issues"]
+    assert issue["detail"].startswith("TrajectoryReferenceError:")
 
 
 def test_minimal_retention_is_smaller_than_debug(tmp_path: Path) -> None:

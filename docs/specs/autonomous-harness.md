@@ -171,7 +171,10 @@ regardless of task artifact policy before releasing the sandbox.
 `parse_trajectory()` is pure host-side code. For identical collected bytes it returns an
 identical schema-valid ATIF v1.7 trajectory. It preserves valid events before malformed
 or truncated input, returns bounded parse issues under `extra.ale`, and never writes
-Gateway transport records.
+Gateway transport records. A parser that raises does not decide the episode: ALE records
+the minimal truthful trajectory with `incomplete_reason: conversion_failed` and a
+`parse_issues` entry, keeps the native logs regardless of retention policy, and continues to
+artifact capture and verification.
 
 MCP records correlate the native tool-use ID with its tool result and retain the logical
 server, tool, request arguments, and success result or error. A selected tool with no

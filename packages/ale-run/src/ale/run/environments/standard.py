@@ -22,7 +22,7 @@ import os
 import shutil
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Literal, cast
@@ -40,6 +40,7 @@ from ale.core.errors import (
 from ale.core.harness import (
     AutonomousHarness,
     EffectiveAgentResources,
+    Harness,
     PolicyHarness,
     TrajectoryParseContext,
 )
@@ -765,24 +766,41 @@ class StandardEnvironment(Environment):
         assert ctx.blobs is not None
         assert ctx.trajectory is not None
         run = ctx.agent_run
-        trajectory = self.harness.parse_trajectory(
-            TrajectoryParseContext(
-                episode_id=ctx.episode_id,
-                trajectory_id=ctx.trajectory_id,
-                instruction=ctx.spec.instruction,
-                logs_dir=ctx.run_dir / "logs" / self.harness.name,
-                model=ctx.session.model,
-                agent_version=ctx.agent_version or self.harness.version(),
-                blobs=ctx.blobs,
-                session_id=getattr(getattr(run, "continuation", None), "native_session_id", None),
-                final_message=getattr(run, "final_message", None),
-                incomplete=run is None,
-                incomplete_reason="agent_interrupted" if run is None else None,
-            )
+        context = TrajectoryParseContext(
+            episode_id=ctx.episode_id,
+            trajectory_id=ctx.trajectory_id,
+            instruction=ctx.spec.instruction,
+            logs_dir=ctx.run_dir / "logs" / self.harness.name,
+            model=ctx.session.model,
+            agent_version=ctx.agent_version or self.harness.version(),
+            blobs=ctx.blobs,
+            session_id=getattr(getattr(run, "continuation", None), "native_session_id", None),
+            final_message=getattr(run, "final_message", None),
+            incomplete=run is None,
+            incomplete_reason="agent_interrupted" if run is None else None,
         )
+        converted = True
+        try:
+            trajectory = self.harness.parse_trajectory(context)
+        except Exception as exc:
+            # The agent finished; a converter defect must not decide its score. Keep the
+            # minimal truthful trajectory, say why, and keep the native evidence.
+            converted = False
+            detail = Redactor((ctx.session.token,))(f"{type(exc).__name__}: {exc}")[:500]
+            logging.getLogger("ale.execution").warning(
+                "trajectory conversion failed",
+                extra={"ale_data": {"harness": self.harness.name, "error": detail}},
+            )
+            trajectory = _with_parse_issue(
+                Harness.parse_trajectory(
+                    self.harness,
+                    replace(context, incomplete=True, incomplete_reason="conversion_failed"),
+                ),
+                {"reason": "conversion_failed", "detail": detail},
+            )
         self._persist_trajectory(ctx, trajectory)
         ctx.trajectory_written = True
-        if run is not None and ctx.logging_policy.native_logs == "minimal":
+        if converted and run is not None and ctx.logging_policy.native_logs == "minimal":
             shutil.rmtree(ctx.run_dir / "logs" / self.harness.name, ignore_errors=True)
 
     def _persist_trajectory(self, ctx: EpisodeContext, trajectory: AtifTrajectory) -> None:
@@ -1189,6 +1207,14 @@ class RetainedVerificationEnvironment(StandardEnvironment):
 def _agent_user(sandbox: Sandbox) -> str:
     """The account this sandbox calls the agent, for a plain `chown`."""
     return getattr(sandbox, "agent_user", "user")
+
+
+def _with_parse_issue(trajectory: AtifTrajectory, issue: dict[str, object]) -> AtifTrajectory:
+    extra = dict(trajectory.extra or {})
+    ale = dict(extra.get("ale") or {})
+    ale["parse_issues"] = [*ale.get("parse_issues", ()), issue]
+    extra["ale"] = ale
+    return trajectory.model_copy(update={"extra": extra})
 
 
 def _exact_token_metrics(run_dir: Path, call_id: str) -> AtifMetrics | None:
