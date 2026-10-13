@@ -674,11 +674,13 @@ def _write_mcp_config(
         payload = {"mcpServers": {}}
         for name, server in normalized.items():
             if server["transport"] == "stdio":
-                payload["mcpServers"][name] = {  # type: ignore[index]
-                    key: value
-                    for key, value in server.items()
-                    if key in {"command", "args", "cwd", "environment"} and value is not None
-                }
+                # Claude Code reads a stdio server's variables from "env".
+                native: dict[str, object] = {"command": server["command"], "args": server["args"]}
+                if server["cwd"] is not None:
+                    native["cwd"] = server["cwd"]
+                if server["environment"]:
+                    native["env"] = server["environment"]
+                payload["mcpServers"][name] = native  # type: ignore[index]
             else:
                 payload["mcpServers"][name] = {"type": "http", "url": server["url"]}  # type: ignore[index]
         path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")

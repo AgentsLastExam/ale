@@ -348,17 +348,27 @@ def test_invocation_local_mcp_supports_stdio_and_http_without_solver_inheritance
             "command": "python3",
             "args": ["server.py"],
             "cwd": "/workspace",
+            "environment": {"MODE": "judge"},
         },
         {"name": "remote", "transport": "streamable-http", "url": "https://mcp.test"},
     ]
     claude = _agents._write_mcp_config("claude-code", home, servers)
     assert claude is not None
     payload = json.loads(claude.read_text())
-    assert set(payload["mcpServers"]) == {"local", "remote"}
+    assert payload["mcpServers"] == {
+        "local": {
+            "command": "python3",
+            "args": ["server.py"],
+            "cwd": "/workspace",
+            "env": {"MODE": "judge"},
+        },
+        "remote": {"type": "http", "url": "https://mcp.test"},
+    }
 
     assert _agents._write_mcp_config("codex-cli", home, servers) is None
     codex = (home / ".codex/config.toml").read_text()
     assert "[mcp_servers.local]" in codex
+    assert 'env = {"MODE" = "judge"}' in codex
     assert 'url = "https://mcp.test"' in codex
 
     with pytest.raises(JudgeError, match="unsupported transport"):

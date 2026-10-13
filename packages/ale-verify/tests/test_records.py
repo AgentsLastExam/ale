@@ -102,6 +102,22 @@ def test_record_rejects_collisions_unknown_judge_links_and_bad_terminal_state() 
         VerificationRecord(status="failed")
 
 
+@pytest.mark.parametrize("field", ["metrics", "diagnostics", "criterion_score"])
+def test_wrongly_typed_record_fields_are_malformed_records(field: str) -> None:
+    record = VerificationRecord(
+        status="completed",
+        criteria=(CriterionResult(name="c", source="check", score=1),),
+    ).to_dict()
+    if field == "metrics":
+        record["metrics"] = []
+    elif field == "diagnostics":
+        record["diagnostics"] = 5
+    else:
+        record["criteria"] = [{**record["criteria"][0], "score": None}]
+    with pytest.raises(ValueError, match="malformed verification record"):
+        VerificationRecord.from_json(json.dumps(record))
+
+
 def test_serialized_shape_matches_published_schema_top_level() -> None:
     schema = json.loads(
         (
