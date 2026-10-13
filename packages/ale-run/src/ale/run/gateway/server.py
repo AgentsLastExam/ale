@@ -220,6 +220,8 @@ class Gateway:
         try:
             reservation = await session.reserve()
         except LimitReached as limit:
+            if session.refusal is None:
+                session.refusal = limit
             self._record(
                 session,
                 call_id=call_id,
@@ -235,6 +237,8 @@ class Gateway:
                 "body": raw,
                 "streaming": False,
                 "call_id": call_id,
+                # A limit does not lift by waiting; SDKs that honor this stop retrying.
+                "headers": {"x-should-retry": "false"},
             }
             session.finish(key, cached)
             return self._replayed(cached)
@@ -375,7 +379,12 @@ class Gateway:
 
     def _replayed(self, cached: dict[str, Any]) -> web.Response:
         content_type = "text/event-stream" if cached["streaming"] else "application/json"
-        return web.Response(body=cached["body"], status=cached["status"], content_type=content_type)
+        return web.Response(
+            body=cached["body"],
+            status=cached["status"],
+            content_type=content_type,
+            headers=cached.get("headers"),
+        )
 
     # --- policy and accounting ---
 

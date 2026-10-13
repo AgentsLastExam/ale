@@ -72,7 +72,7 @@ def test_invalid_limit_values_fail(value: object) -> None:
         ClaudeCodeHarness(settings={"max_turns": value})
 
 
-def test_gateway_and_native_limit_exits_are_distinct() -> None:
+def test_native_limits_are_classified_and_gateway_refusals_left_to_the_gateway() -> None:
     gateway = ClaudeCodeHarness()._classify(
         '{"type":"ale_limit_reached","ale":{"limit":"max_total_tokens","value":400000}}',
         1,
@@ -82,10 +82,7 @@ def test_gateway_and_native_limit_exits_are_distinct() -> None:
         1,
     )
 
-    assert isinstance(gateway, BudgetExceededError)
-    assert gateway.layer == "gateway"
-    assert gateway.limit == "max_total_tokens"
-    assert gateway.value == 400000
+    assert not isinstance(gateway, BudgetExceededError)
     assert isinstance(native, HarnessLimitError)
     assert native.layer == "harness"
     assert native.limit == "max_turns"

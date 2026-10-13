@@ -222,6 +222,12 @@ Do not emulate a Gateway limit in an adapter or hide a native limit under a Gate
 field. Termination records and provenance name the enforcing layer, limit, configured
 value, and observed value.
 
+Adapters do not parse Gateway refusals. The Gateway session records the first limit that
+refused a call, and the Environment attributes an agent phase that then fails, whatever
+error the agent program reported, to that limit: the episode ends `budget_exceeded` with a
+`gateway` termination. Refusals carry `x-should-retry: false` so SDKs stop retrying them.
+Adapters classify only their native limits.
+
 The Gateway supports Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses
 for API-key mode. The preset supplies the default dialect and upstream provider endpoint;
 a Harness may accept a documented compatible override. Subscription mode uses the same

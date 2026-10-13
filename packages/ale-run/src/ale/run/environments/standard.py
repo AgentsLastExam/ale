@@ -21,7 +21,7 @@ import math
 import os
 import shutil
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
@@ -31,6 +31,8 @@ from ale.core.config import RunTimeouts
 from ale.core.environment import Environment, EpisodeContext, Phase
 from ale.core.errors import (
     AgentError,
+    BudgetExceededError,
+    EnvironmentError_,
     PhaseTimeoutError,
     TaskError,
     TrajectoryConversionError,
@@ -302,21 +304,22 @@ class StandardEnvironment(Environment):
         await self._seal(ctx, sandbox)
 
         async def launch() -> None:
-            run = await harness.launch(
-                spec.instruction,
-                _RecordedSandbox(
-                    ctx,
-                    sandbox,
-                    component="harness-launch",
-                    actor="task" if harness.name == "oracle" else "framework",
-                ),
-                session,
-                timeout_sec=timeout,
-            )
-            ctx.agent_run = run
-            if run.exit_code != 0:
-                detail = run.final_message or "no diagnostic output"
-                raise AgentError(f"{harness.name} exited {run.exit_code}: {detail}")
+            with _limit_terminated(ctx):
+                run = await harness.launch(
+                    spec.instruction,
+                    _RecordedSandbox(
+                        ctx,
+                        sandbox,
+                        component="harness-launch",
+                        actor="task" if harness.name == "oracle" else "framework",
+                    ),
+                    session,
+                    timeout_sec=timeout,
+                )
+                ctx.agent_run = run
+                if run.exit_code != 0:
+                    detail = run.final_message or "no diagnostic output"
+                    raise AgentError(f"{harness.name} exited {run.exit_code}: {detail}")
 
         await self._with_deadline(ctx, Phase.AGENT, timeout, launch())
 
@@ -389,7 +392,10 @@ class StandardEnvironment(Environment):
             max_steps=self.max_steps,
             stall_limit=self.stall_limit,
         ) as env:
-            closing = await harness.rollout(env, ctx.session.model_copy(update={"home": ctx.home}))
+            with _limit_terminated(ctx):
+                closing = await harness.rollout(
+                    env, ctx.session.model_copy(update={"home": ctx.home})
+                )
         if closing:
             builder.add(source="agent", message=closing)
         self._persist_trajectory(ctx, builder.build())
@@ -1202,6 +1208,25 @@ class RetainedVerificationEnvironment(StandardEnvironment):
         )
         ctx.verified_rewards = rewards
         return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
+
+
+@contextlib.contextmanager
+def _limit_terminated(ctx: EpisodeContext) -> Iterator[None]:
+    """Attribute an agent failure to the Gateway limit that caused it.
+
+    Agent programs report a refused call as their own error: an API error, a provider
+    limit, a failed turn. Whatever they say, an agent phase that fails after the Gateway
+    refused a call was stopped by that limit, which only the Gateway knows.
+    """
+    try:
+        yield
+    except (AgentError, EnvironmentError_) as error:
+        refusal = ctx.limit_refusal() if ctx.limit_refusal is not None else None
+        if refusal is None:
+            raise
+        raise BudgetExceededError(
+            refusal.name, float(refusal.configured_value), refusal.observed_value
+        ) from error
 
 
 def _agent_user(sandbox: Sandbox) -> str:

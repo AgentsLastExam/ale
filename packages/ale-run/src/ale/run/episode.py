@@ -553,6 +553,7 @@ async def run_episode(
         prepared_image=task.prepared_image,
         prepared_verifier_image=task.prepared_verifier_image,
         phase_callback=phase_callback,
+        limit_refusal=lambda: _gateway_refusal(session),
         logging_policy=logging_policy or LoggingPolicy(),
         verification_config=verification_config or VerificationConfig(),
     )
@@ -754,6 +755,19 @@ def _write_lock(
         seed=seed,
     )
     return lock
+
+
+def _gateway_refusal(session: GatewaySession | None) -> LimitTermination | None:
+    refusal = session.refusal if session is not None else None
+    if refusal is None:
+        return None
+    return LimitTermination(
+        layer="gateway",
+        name=refusal.limit,
+        configured_value=refusal.value,
+        observed_value=refusal.observed,
+        reason="the Gateway refused a model call",
+    )
 
 
 def _phase_of(error: BaseException, recorded_phase: object = None) -> str | None:

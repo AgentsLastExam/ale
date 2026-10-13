@@ -153,6 +153,8 @@ class EpisodeContext:
     trajectory: TrajectorySink | None = None
     result: ResultSink | None = None
     current_phase: Phase | None = None
+    limit_refusal: Callable[[], LimitTermination | None] | None = None
+    """Reports the Gateway limit that refused one of this episode's model calls, if any."""
     prepared_image: PreparedTaskImage | None = None
     """Validated solver image selected before provisioning."""
     prepared_verifier_image: PreparedTaskImage | None = None
