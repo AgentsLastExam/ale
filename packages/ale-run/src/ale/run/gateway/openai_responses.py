@@ -10,6 +10,7 @@ __all__ = [
     "extract_usage",
     "pricing_for",
     "refusal_body",
+    "stream_completed",
     "usage_from_stream",
 ]
 
@@ -58,6 +59,22 @@ def usage_from_stream(events: list[bytes]) -> tuple[int, int, str | None]:
             continue
         return extract_usage(event.get("response") or {})
     return 0, 0, None
+
+
+def stream_completed(events: list[bytes]) -> bool:
+    """Whether a stream reached a terminal response without an error or failure event."""
+    terminal = False
+    for line in b"".join(events).splitlines():
+        if not line.startswith(b"data:"):
+            continue
+        try:
+            event = json.loads(line[5:].strip() or b"{}")
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") in {"error", "response.failed"}:
+            return False
+        terminal = terminal or event.get("type") in {"response.completed", "response.incomplete"}
+    return terminal
 
 
 def refusal_body(

@@ -15,7 +15,12 @@ from aiohttp import ClientSession, web
 
 from ale.core.errors import ConfigError
 from ale.core.trace import read_jsonl
-from ale.run.gateway.anthropic import estimate_cost, refusal_body, usage_from_stream
+from ale.run.gateway.anthropic import (
+    estimate_cost,
+    refusal_body,
+    stream_completed,
+    usage_from_stream,
+)
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, Limits
 from ale.run.recording import EpisodeRecording
@@ -36,6 +41,7 @@ class Upstream:
         self.status = 200
         self.delay = 0.0
         self.stream_gap = 0.0
+        self.in_band_errors = 0
         self.token_data: dict[str, object] | None = None
         self.seen_keys: list[str] = []
         self.seen_authorizations: list[str] = []
@@ -103,6 +109,12 @@ class Upstream:
             "message": {"id": "msg_1", "usage": {"input_tokens": self.counted_input}},
         }
         await response.write(f"event: message_start\ndata: {json.dumps(start)}\n\n".encode())
+        if self.in_band_errors:
+            self.in_band_errors -= 1
+            error = {"type": "error", "error": {"type": "overloaded_error"}}
+            await response.write(f"event: error\ndata: {json.dumps(error)}\n\n".encode())
+            await response.write_eof()
+            return response
         await asyncio.sleep(self.stream_gap)
         delta = {
             "type": "message_delta",
@@ -538,6 +550,19 @@ class TestRetryIdempotency:
         assert (first_status, second_status) == (529, 200)
         assert upstream.calls == 2
 
+    async def test_a_streamed_in_band_error_is_not_replayed(self, stack) -> None:
+        """An error inside an HTTP 200 stream must reach the provider again on retry."""
+        gateway, upstream, session, _ = stack
+        upstream.in_band_errors = 1
+
+        first_status, first = await stream_call(gateway, session)
+        second_status, second = await stream_call(gateway, session)
+
+        assert (first_status, second_status) == (200, 200)
+        assert b"overloaded_error" in b"".join(chunk for _, chunk in first)
+        assert b"message_stop" in b"".join(chunk for _, chunk in second)
+        assert upstream.calls == 2
+
     async def test_a_provider_rate_limit_is_not_replayed(self, stack) -> None:
         gateway, upstream, session, _ = stack
         upstream.statuses = [429]
@@ -637,6 +662,14 @@ class TestDialect:
             b'"delta":{"stop_reason":"end_turn"}}\n\n',
         ]
         assert usage_from_stream(events) == (50, 12, "end_turn")
+
+    def test_only_a_stream_ending_in_message_stop_completed(self) -> None:
+        start = b'data: {"type":"message_start","message":{}}\n\n'
+        stop = b'data: {"type":"message_stop"}\n\n'
+        error = b'data: {"type":"error","error":{"type":"overloaded_error"}}\n\n'
+        assert stream_completed([start, stop])
+        assert not stream_completed([start])
+        assert not stream_completed([start, error, stop])
 
     def test_cost_scales_with_the_model_family(self) -> None:
         assert estimate_cost("claude-haiku-4-5", 1000, 1000) < estimate_cost(

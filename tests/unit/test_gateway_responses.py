@@ -8,7 +8,7 @@ import pytest
 from aiohttp import ClientSession, web
 
 from ale.core.trace import read_jsonl
-from ale.run.gateway.openai_responses import usage_from_stream
+from ale.run.gateway.openai_responses import stream_completed, usage_from_stream
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, Limits
 from ale.run.recording import EpisodeRecording
@@ -136,7 +136,21 @@ def test_chatgpt_backend_omits_unsupported_public_output_limit() -> None:
 
     gateway = Gateway(subscription=Credential())  # type: ignore[arg-type]
 
-    assert gateway._with_output_limit({"model": "gpt-5.6-luna"}, 4096) == {"model": "gpt-5.6-luna"}
+    assert gateway._normalized_output_limit({"model": "gpt-5.6-luna", "max_output_tokens": 9}) == {
+        "model": "gpt-5.6-luna"
+    }
+
+
+def test_an_absent_output_limit_is_not_invented() -> None:
+    responses = Gateway(api_key="key", dialect="openai-responses")
+    chat = Gateway(api_key="key", dialect="openai-chat-completions")
+
+    assert responses._normalized_output_limit({"model": "m"}) == {"model": "m"}
+    assert chat._normalized_output_limit({"model": "m"}) == {"model": "m"}
+    assert chat._normalized_output_limit({"model": "m", "max_tokens": 5}) == {
+        "model": "m",
+        "max_completion_tokens": 5,
+    }
 
 
 async def test_disconnected_downstream_does_not_cancel_upstream_accounting(
@@ -199,3 +213,14 @@ async def test_disconnected_downstream_does_not_cancel_upstream_accounting(
     assert session.usage.output_tokens == 4
     (record,) = read_jsonl(recording.transport.path).records
     assert record["disposition"] == "forwarded"
+
+
+def test_only_a_terminal_response_without_failure_completed() -> None:
+    created = b'data: {"type":"response.created","response":{}}\n\n'
+    completed = b'data: {"type":"response.completed","response":{}}\n\n'
+    failed = b'data: {"type":"response.failed","response":{}}\n\n'
+    error = b'data: {"type":"error","code":"server_error"}\n\n'
+    assert stream_completed([created, completed])
+    assert not stream_completed([created])
+    assert not stream_completed([created, failed])
+    assert not stream_completed([created, error, completed])

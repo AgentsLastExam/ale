@@ -16,6 +16,7 @@ __all__ = [
     "extract_usage",
     "pricing_for",
     "refusal_body",
+    "stream_completed",
     "usage_from_stream",
 ]
 
@@ -88,6 +89,26 @@ def usage_from_stream(events: list[bytes]) -> tuple[int, int, str | None]:
         input_tokens = max(input_tokens, int(usage.get("input_tokens") or 0))
         output_tokens = max(output_tokens, int(usage.get("output_tokens") or 0))
     return input_tokens, output_tokens, stop_reason
+
+
+def stream_completed(events: list[bytes]) -> bool:
+    """Whether a stream reached ``message_stop`` without an in-band ``error`` event.
+
+    A provider can fail inside an HTTP 200 stream (``overloaded_error``), and a stream can
+    be cut short. Neither is a response a retry of the same request may be replayed.
+    """
+    completed = False
+    for line in b"".join(events).splitlines():
+        if not line.startswith(b"data:"):
+            continue
+        try:
+            event = json.loads(line[5:].strip() or b"{}")
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "error":
+            return False
+        completed = completed or event.get("type") == "message_stop"
+    return completed
 
 
 def refusal_body(

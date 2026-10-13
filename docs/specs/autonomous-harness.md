@@ -238,7 +238,8 @@ It accounts for every upstream call made by the agent program, including CLI-own
 discovery or compaction calls. If the CLI disconnects from a streaming response early,
 the Gateway still drains the upstream response and commits usage. Chat streaming requests
 force `stream_options.include_usage=true`, and legacy `max_tokens` is normalized to
-`max_completion_tokens` before forwarding.
+`max_completion_tokens` before forwarding. A request without an output ceiling is forwarded
+without one; the Gateway never invents a default that would truncate reasoning or output.
 
 A streaming response can stay silent for minutes when the provider buffers part of it (a
 `tool_use` input is held back until the whole parameter is generated). After 15 s of upstream

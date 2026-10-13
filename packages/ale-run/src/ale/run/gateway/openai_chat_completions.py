@@ -12,6 +12,7 @@ __all__ = [
     "extract_usage",
     "pricing_for",
     "refusal_body",
+    "stream_completed",
     "usage_from_stream",
 ]
 
@@ -25,6 +26,25 @@ def extract_usage(payload: dict[str, Any]) -> tuple[int, int, str | None]:
         int(usage.get("completion_tokens") or 0),
         finish_reason,
     )
+
+
+def stream_completed(events: list[bytes]) -> bool:
+    """Whether a stream reached ``[DONE]`` without an in-band ``error`` object."""
+    done = False
+    for line in b"".join(events).splitlines():
+        if not line.startswith(b"data:"):
+            continue
+        raw = line[5:].strip()
+        if raw == b"[DONE]":
+            done = True
+            continue
+        try:
+            event = json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("error"):
+            return False
+    return done
 
 
 def usage_from_stream(events: list[bytes]) -> tuple[int, int, str | None]:

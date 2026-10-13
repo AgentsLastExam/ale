@@ -72,7 +72,9 @@ Only the Gateway writes `trace.transport.jsonl`. Every complete line has
 
 Retries never double-charge. Only a successful provider response (2xx) or a Gateway refusal is replayed
 to a retry of the same request; after a provider error (5xx, or a provider 429) the retry is forwarded
-and recorded as a new `call`. Failed and refused calls remain visible. Default records
+and recorded as a new `call`. A streamed 2xx response counts as successful only when it reached its
+dialect's terminal event (`message_stop`, a completed or incomplete Responses result, or `[DONE]`)
+without an in-band error; an interrupted or failed stream is forwarded again on retry. Failed and refused calls remain visible. Default records
 contain digests and accounting metadata, not provider request/response bodies or a second
 copy of the conversation.
 

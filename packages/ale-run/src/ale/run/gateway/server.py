@@ -218,7 +218,6 @@ class Gateway:
         started: float,
     ) -> web.StreamResponse:
         assert self._client is not None
-        requested_output = self._requested_output(payload)
         try:
             reservation = await session.reserve()
         except LimitReached as limit:
@@ -240,7 +239,7 @@ class Gateway:
             }
             session.finish(key, cached)
             return self._replayed(cached)
-        payload = self._with_output_limit(payload, requested_output)
+        payload = self._normalized_output_limit(payload)
         self._retain_payload(session, call_id, payload, None)
 
         streaming = bool(payload.get("stream"))
@@ -371,7 +370,7 @@ class Gateway:
                 "streaming": True,
                 "call_id": call_id,
             },
-            replayable=_replayable(upstream.status),
+            replayable=_replayable(upstream.status) and self._dialect.stream_completed(chunks),
         )
         return response
 
@@ -509,25 +508,20 @@ class Gateway:
     def _max_output_field(self) -> str:
         return _MAX_OUTPUT_FIELDS[self.dialect]
 
-    def _requested_output(self, payload: dict[str, Any]) -> int:
-        value = payload.get(self._max_output_field)
-        if value is None and self.dialect == "openai-chat-completions":
-            value = payload.get("max_tokens")
-        return int(value or 4096)
+    def _normalized_output_limit(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Forward the client's own output ceiling under the dialect's current field.
 
-    def _with_output_limit(
-        self,
-        payload: dict[str, Any],
-        output_tokens: int,
-    ) -> dict[str, Any]:
+        An absent ceiling stays absent: limits refuse the next call rather than truncate
+        this one, so inventing a value here would silently cut reasoning and output.
+        """
         limited = dict(payload)
         if self.subscription is not None and not self.subscription.supports_output_limit:
             # The ChatGPT Codex backend rejects the public Responses API field.
             limited.pop("max_output_tokens", None)
             return limited
-        if self.dialect == "openai-chat-completions":
-            limited.pop("max_tokens", None)
-        limited[self._max_output_field] = output_tokens
+        if self.dialect == "openai-chat-completions" and "max_tokens" in limited:
+            legacy = limited.pop("max_tokens")
+            limited.setdefault(self._max_output_field, legacy)
         return limited
 
     def _record(
