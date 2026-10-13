@@ -25,6 +25,7 @@ import asyncio
 import contextlib
 import json
 import os
+import secrets
 import shutil
 import uuid
 import zlib
@@ -74,6 +75,8 @@ __all__ = [
 
 #: Where the guest service listens inside the VM. Forwarded to an ephemeral host port.
 GUEST_PORT = 7411
+#: The sandbox's guest-service token, kept beside its overlay for reattachment.
+GUEST_TOKEN_FILE = "guestd-token"
 VM_STORAGE_OVERHEAD_MB = 1024
 
 #: The image that hosts the virtual machine (built by images/runtimes/qemu-runner). It is
@@ -254,7 +257,7 @@ async def attach_retained(
         raise ProviderCapabilityError(f"{handle!r} has no guest service port") from exc
 
     resolved = await resolve_prepared_vm_image(request.prepared_image)
-    transport = TcpTransport("127.0.0.1", host_port)
+    transport = TcpTransport("127.0.0.1", host_port, token=_read_guest_token(Path(storage)))
     await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
     client = GuestClient(transport)
     provider = QemuProvider()
@@ -732,6 +735,7 @@ class QemuProvider(Provider):
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         storage = self.overlay_dir / sandbox_id
         storage.mkdir(parents=True, exist_ok=True)
+        guest_token = _issue_guest_token(storage)
         await self._make_overlay(
             storage / "data.qcow2",
             base_image,
@@ -763,7 +767,7 @@ class QemuProvider(Provider):
 
         try:
             host_ip = await self._wire_network(container, request)
-            transport = TcpTransport("127.0.0.1", host_port)
+            transport = TcpTransport("127.0.0.1", host_port, token=guest_token)
             await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
             client = GuestClient(transport)
             agent_user, agent_home, has_desktop = await self._read_guest_contract(client, request)
@@ -1195,6 +1199,24 @@ def _port_of(url: str | None) -> str:
     host_port, _, _ = rest.partition("/")
     _, _, port = host_port.partition(":")
     return port
+
+
+def _issue_guest_token(storage: Path) -> str:
+    """A fresh token the booted guest's first connection claims; readable only by this account."""
+    token = secrets.token_urlsafe(32)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(storage / GUEST_TOKEN_FILE, flags, 0o600), "w") as handle:
+        handle.write(token)
+    return token
+
+
+def _read_guest_token(storage: Path) -> str:
+    try:
+        return (storage / GUEST_TOKEN_FILE).read_text().strip()
+    except FileNotFoundError as exc:
+        raise ProviderCapabilityError(
+            f"retained overlay {storage} has no guest service token"
+        ) from exc
 
 
 def _free_port() -> int:

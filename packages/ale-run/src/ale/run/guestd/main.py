@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import hmac
 import os
 import queue
 import shutil
@@ -39,6 +40,7 @@ from protocol import (
     ERR_INTERNAL,
     ERR_NOT_FOUND,
     ERR_PERMISSION,
+    ERR_UNAUTHORIZED,
     ERR_UNSUPPORTED,
     PROTOCOL_VERSION,
     ProtocolError,
@@ -50,6 +52,11 @@ from protocol import (
 )
 
 GUESTD_VERSION = "0.1.0"
+
+#: Where a claimed TCP token survives a service restart. /run is tmpfs: a reboot or a disk
+#: saved as an image carries no token forward. Windows keeps it in memory only, because
+#: its image builder saves a running guest's disk.
+DEFAULT_TOKEN_FILE = None if os.name == "nt" else Path("/run/ale/guestd-token")
 
 
 class Handler:
@@ -359,18 +366,94 @@ def _terminate(proc: subprocess.Popen[bytes]) -> None:
             os.killpg(proc.pid, 9)
 
 
-def serve_stream(reader: TextIO | BinaryIO, writer: TextIO) -> None:
-    """Serve requests from a line-oriented stream until it closes."""
+class Claim:
+    """The token of the framework's first TCP connection; later ones must present it.
+
+    No Task or agent code runs in a freshly booted guest before the framework connects,
+    so the first token offered is the framework's. Every later connection, whether from
+    the agent over loopback or from anything else that reaches the forwarded port, must
+    prove it holds the same token before a single operation runs.
+    """
+
+    def __init__(self, path: Path | None) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._token = self._load()
+
+    def admit(self, token: object) -> bool:
+        if not isinstance(token, str) or len(token) < 32:
+            return False
+        with self._lock:
+            if self._token is None:
+                try:
+                    self._store(token)
+                except OSError:
+                    return False  # an unpersisted claim could be retaken after a restart
+                self._token = token
+                return True
+            return hmac.compare_digest(self._token.encode("utf-8"), token.encode("utf-8"))
+
+    def _load(self) -> str | None:
+        if self._path is None:
+            return None
+        try:
+            return self._path.read_text(encoding="utf-8").strip() or None
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+
+    def _store(self, token: str) -> None:
+        if self._path is None:
+            return
+        self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(self._path, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(token)
+
+
+def _authenticate(line: str, claim: Claim, emit: Any) -> bool:
+    req_id = 0
+    try:
+        message = decode(line)
+        req_id = int(message.get("id", 0))
+        params = message.get("params") or {}
+        admitted = (
+            message.get("op") == "auth"
+            and isinstance(params, dict)
+            and claim.admit(params.get("token"))
+        )
+    except (ProtocolError, TypeError, ValueError):
+        admitted = False
+    if not admitted:
+        emit(err(req_id, ERR_UNAUTHORIZED, "authenticate with the framework token first"))
+        return False
+    emit(ok(req_id, protocol=PROTOCOL_VERSION))
+    return True
+
+
+def serve_stream(reader: TextIO | BinaryIO, writer: TextIO, claim: Claim | None = None) -> None:
+    """Serve requests from a line-oriented stream until it closes.
+
+    With a ``claim``, the first request must authenticate; anything else closes the
+    connection before an operation can run.
+    """
 
     def emit(payload: dict[str, Any]) -> None:
         writer.write(encode(payload) + "\n")
         writer.flush()
 
     handler = Handler(emit)
+    authenticated = claim is None
     while raw := reader.readline():
         line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
         line = line.strip()
         if not line:
+            continue
+        if not authenticated:
+            assert claim is not None
+            if not _authenticate(line, claim, emit):
+                return
+            authenticated = True
             continue
         req_id = 0
         try:
@@ -401,12 +484,21 @@ class _TCPHandler(socketserver.StreamRequestHandler):
             def flush() -> None:
                 writer.flush()
 
-        serve_stream(self.rfile, _TextWriter())  # type: ignore[arg-type]
+        serve_stream(self.rfile, _TextWriter(), self.server.claim)  # type: ignore[arg-type, attr-defined]
 
 
 class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        handler: type[socketserver.BaseRequestHandler],
+        claim: Claim | None = None,
+    ) -> None:
+        super().__init__(address, handler)
+        self.claim = claim if claim is not None else Claim(None)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -415,6 +507,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--stdio", action="store_true", help="serve one session over stdin/stdout")
     mode.add_argument("--tcp", metavar="HOST:PORT", help="serve over TCP")
     parser.add_argument("--ready-file", help="touch this path once serving")
+    parser.add_argument("--token-file", help="where a claimed TCP token is kept")
     args = parser.parse_args(argv)
 
     if args.ready_file:
@@ -426,7 +519,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     host, _, port = args.tcp.rpartition(":")
-    with _Server((host or "0.0.0.0", int(port)), _TCPHandler) as server:
+    claim = Claim(Path(args.token_file) if args.token_file else DEFAULT_TOKEN_FILE)
+    with _Server((host or "0.0.0.0", int(port)), _TCPHandler, claim) as server:
         server.serve_forever()
     return 0
 

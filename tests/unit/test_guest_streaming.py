@@ -26,9 +26,12 @@ def test_tcp_guest_replies_without_client_eof() -> None:
         try:
             with socket.create_connection(server.server_address, timeout=2) as client:
                 client.settimeout(2)
-                client.sendall(b'{"id":1,"op":"health","params":{}}\n')
-                response = client.makefile("rb").readline()
-                assert json.loads(response)["ok"] is True
+                replies = client.makefile("rb")
+                token = "t" * 43
+                client.sendall(b'{"id":1,"op":"auth","params":{"token":"%s"}}\n' % token.encode())
+                assert json.loads(replies.readline())["ok"] is True
+                client.sendall(b'{"id":2,"op":"health","params":{}}\n')
+                assert json.loads(replies.readline())["ok"] is True
         finally:
             server.shutdown()
             thread.join(timeout=2)
