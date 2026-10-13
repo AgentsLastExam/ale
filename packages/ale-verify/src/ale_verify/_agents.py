@@ -7,7 +7,6 @@ import os
 import re
 import shutil
 import subprocess
-import time
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -18,8 +17,8 @@ from . import _llm
 from ._io import JudgeError, digest, endpoint_identity, read_text_evidence, redact, sanitize
 from ._records import EvidenceReference, JudgeAttempt, JudgeInvocation, ScoredChoice
 
-ATTEMPTS = 4
-TIMEOUT_SECONDS = 600
+#: Installing an exact Judge CLI is setup rather than judging, so it keeps a bound.
+_INSTALL_TIMEOUT_SECONDS = 600
 
 
 def run(
@@ -99,13 +98,20 @@ def run(
     session_id: str | None = None
     repair_error = ""
     repair = False
-    for index in range(1, ATTEMPTS + 1):
+    repairs = 0
+    failures = 0
+    index = 0
+    while True:
+        index += 1
         mode: Literal["initial", "retry", "schema_repair"] = (
             "initial" if index == 1 else "schema_repair" if repair else "retry"
         )
         current_prompt = _repair_prompt(rendered, rubric, repair_error) if repair else rendered
-        if index > 1 and not repair:
-            time.sleep(0.25 * (index - 1))
+        # A Judge run is bounded only by what is left of verification, never by a
+        # per-attempt ceiling: a long, thorough inspection is exactly what it is for.
+        left = _llm._time_left()
+        if index > 1 and left is not None and left <= 0:
+            break
         if adapter == "claude-code" and session_id is None:
             session_id = str(uuid.uuid4())
         argv = _command(
@@ -125,7 +131,8 @@ def run(
                 env=environment,
                 capture_output=True,
                 text=True,
-                timeout=TIMEOUT_SECONDS,
+                # Never past the margin verification keeps for writing its verdict.
+                timeout=None if left is None else max(left, 1.0),
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
@@ -161,6 +168,9 @@ def run(
             )
             session_id = None
             repair = False
+            failures += 1
+            if not _llm._wait_to_retry(failures):
+                break
             continue
         except OSError as exc:
             error = repair_error = sanitize(f"Agent Judge could not start: {exc}", (secret,))
@@ -210,6 +220,9 @@ def run(
             )
             session_id = None
             repair = False
+            failures += 1
+            if not _llm._wait_to_retry(failures):
+                break
             continue
 
         if adapter == "codex-cli":
@@ -272,8 +285,9 @@ def run(
                     repair_error,
                 )
             )
-            if not session_id:
+            if not session_id or repairs >= _llm.REPAIRS:
                 break
+            repairs += 1
             repair = True
             continue
 
@@ -609,7 +623,7 @@ def _ensure_binary(adapter: str, expected: str, stage: Path) -> tuple[str, str]:
         [npm, "install", "--prefix", str(root), "--no-audit", "--no-fund", f"{package}@{expected}"],
         capture_output=True,
         text=True,
-        timeout=TIMEOUT_SECONDS,
+        timeout=_INSTALL_TIMEOUT_SECONDS,
         check=False,
     )
     installed = root / "node_modules" / ".bin" / binary_name

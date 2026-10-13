@@ -53,7 +53,36 @@ __all__ = [
     "VerificationError",
     "VerificationRecord",
     "checks",
+    "probe_judge",
 ]
+
+
+def probe_judge(kind: str, config: Mapping[str, str]) -> None:
+    """Prove one configured Judge can be reached before any agent runs.
+
+    ``config`` is that kind's section of the verification config. An LLM Judge is probed
+    with its own protocol and effort; an Agent Judge with the protocol its CLI speaks to
+    the same endpoint, key and model. Raises ConfigurationError when the Judge cannot
+    answer.
+    """
+    if kind == "llm":
+        if config.get("reasoning_effort") not in _llm._EFFORTS:
+            raise ConfigurationError(
+                f"LLM Judge reasoning_effort {config.get('reasoning_effort')!r} is unsupported"
+            )
+        try:
+            protocol = _llm.resolve_protocol(config)
+        except ValueError as exc:
+            raise ConfigurationError(str(exc)) from exc
+        _llm.probe(config, protocol)
+    elif kind == "agent":
+        protocol = "openai-responses" if config["adapter"] == "codex-cli" else "anthropic"
+        _llm.probe(
+            {key: value for key, value in config.items() if key != "reasoning_effort"},
+            protocol,
+        )
+    else:
+        raise ValueError("Judge kind must be 'llm' or 'agent'")
 
 
 class Verification:

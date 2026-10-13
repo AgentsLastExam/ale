@@ -881,6 +881,11 @@ class StandardEnvironment(Environment):
             )
             if (ctx.run_dir / "trajectory.json").is_file():
                 env["ALE_TRAJECTORY_PATH"] = str(layout.path("verify", "trajectory.json"))
+            # Judges retry provider failures until this budget runs out, so a verdict is
+            # recorded as failed before the phase deadline kills the verifier.
+            if ctx.phase_deadline is not None:
+                remaining = max(0, int(ctx.phase_deadline - time.monotonic()))
+                env["ALE_VERIFY_DEADLINE_SECONDS"] = str(remaining)
         await sandbox.write_file(
             str(directory / "params.json"), json.dumps(ctx.spec.params).encode("utf-8")
         )
@@ -1075,7 +1080,9 @@ class StandardEnvironment(Environment):
         )
         outcome = "succeeded"
         previous_timeout = ctx.phase_timeout_sec
+        previous_deadline = ctx.phase_deadline
         ctx.phase_timeout_sec = timeout_sec
+        ctx.phase_deadline = None if timeout_sec is None else started + timeout_sec
         try:
             with execution_logging(
                 ctx.execution,
@@ -1127,6 +1134,7 @@ class StandardEnvironment(Environment):
             )
             ctx.current_phase = None
             ctx.phase_timeout_sec = previous_timeout
+            ctx.phase_deadline = previous_deadline
 
 
 class RetainedVerificationEnvironment(StandardEnvironment):

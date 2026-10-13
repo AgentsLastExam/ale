@@ -201,6 +201,8 @@ class EpisodeContext:
     phase_callback: Callable[[Phase], None] | None = None
     failure_phase: Phase | None = None
     phase_timeout_sec: float | None = None
+    phase_deadline: float | None = None
+    """Monotonic time by which the current phase must finish, when it is bounded."""
 
     logging_policy: LoggingPolicy = field(default_factory=LoggingPolicy)
     verification_config: VerificationConfig = field(default_factory=VerificationConfig)

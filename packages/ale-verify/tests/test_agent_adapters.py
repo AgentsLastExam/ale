@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ale_verify import JudgeError, ScoredChoice, _agents
+from ale_verify import JudgeError, ScoredChoice, _agents, _llm
 
 
 def rubric() -> dict[str, ScoredChoice]:
@@ -29,7 +29,8 @@ def agent_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path
     monkeypatch.setenv("ALE_AGENT_JUDGE_LOG_PATH", str(log))
     monkeypatch.setenv("JUDGE_KEY", "provider-secret")
     monkeypatch.setattr(_agents.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(_agents.time, "sleep", lambda _delay: None)
+    # Verification's budget allows three retries.
+    monkeypatch.setattr(_llm, "_wait_to_retry", lambda failures, _after=None: failures <= 3)
     return {"workspace": workspace, "log": log}
 
 
@@ -377,3 +378,27 @@ def test_invocation_local_mcp_supports_stdio_and_http_without_solver_inheritance
             home,
             [{"name": "legacy", "transport": "sse", "url": "https://mcp.test"}],
         )
+
+
+def test_a_judge_run_is_bounded_only_by_what_is_left_of_verification(
+    monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
+) -> None:
+    config = codex_config()
+    monkeypatch.setattr(_agents, "_ensure_binary", lambda *_args: ("agent", config["version"]))
+    timeouts = []
+    verdict = json.dumps({"choice": "yes", "reasoning": "Checked."})
+
+    def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
+        timeouts.append(kwargs["timeout"])
+        return completed(
+            '{"type":"thread.started","thread_id":"thread-1"}\n'
+            + json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message", "text": verdict}}
+            )
+        )
+
+    monkeypatch.setattr(_agents.subprocess, "run", execute)
+    run(config)
+    monkeypatch.setattr(_llm, "_time_left", lambda: 5400.0)
+    run(config)
+    assert timeouts == [None, 5400.0]
