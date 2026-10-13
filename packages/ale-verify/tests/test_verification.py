@@ -123,9 +123,31 @@ def test_duplicate_invalid_and_terminal_mutations_fail(verify_env: tuple[Path, P
         verification.check("bad", CheckResult(2))
     with pytest.raises(ValueError, match="positive"):
         verification.aggregate("bad-weight", weights={"format": 0})
+    verification.stat("files", 1)
+    with pytest.raises(ValueError, match="duplicate"):
+        verification.stat("files", 2)
+    with pytest.raises(ValueError, match="duplicate"):
+        verification.stat("format", 2)
+    with pytest.raises(ValueError, match="overall"):
+        verification.write()
+    verification.aggregate("overall")
+    with pytest.raises(RuntimeError, match="after an aggregate over all criteria"):
+        verification.check("late-criterion", CheckResult(1))
+    verification.stat("late-stat", 1)
     verification.write()
     with pytest.raises(RuntimeError, match="terminal"):
         verification.stat("late", 1)
+
+
+def test_explicit_aggregates_leave_criteria_open(verify_env: tuple[Path, Path]) -> None:
+    verification = Verification()
+    verification.check("a", CheckResult(1))
+    verification.aggregate("first", inputs=["a"])
+    verification.check("b", CheckResult(0))
+    verification.aggregate("overall")
+    verification.write()
+    record = VerificationRecord.from_json(verify_env[0].read_bytes())
+    assert record.rewards == {"a": 1.0, "b": 0.0, "first": 1.0, "overall": 0.5}
 
 
 def test_agent_judge_is_the_last_mutating_operation(

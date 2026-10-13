@@ -57,6 +57,7 @@ async def test_record_and_envelope_mismatch_is_rejected_but_record_is_retained(
         "from ale_verify import CheckResult, Verification\n"
         "v = Verification()\n"
         "v.check('score', CheckResult(1.0))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
         "with open(os.environ['ALE_VERDICT_PATH'], 'w') as handle:\n"
         "    json.dump({'rewards': {'score': 0.0}, 'metrics': {}}, handle)\n"

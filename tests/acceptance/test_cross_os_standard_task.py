@@ -311,6 +311,7 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                 "setup_ran",
                 checks.text_equals(str(home / "input/setup-marker.txt"), "setup"),
             )
+            verification.aggregate("overall")
             verification.write()
             """
         )
@@ -381,6 +382,7 @@ def _write_windows_gui_task(root: Path) -> Path:
                 "desktop_answer",
                 checks.text_equals(str(home / "output/result.txt"), expected),
             )
+            verification.aggregate("overall")
             verification.write()
             """
         )
@@ -426,6 +428,7 @@ async def test_standard_task_assets_and_variants_across_operating_systems(
         "output": 1.0,
         "setup_asset": 1.0,
         "setup_ran": 1.0,
+        "overall": 1.0,
     }
     assert (result.run_dir / "artifacts/output/result.txt").read_text() == (
         f"{greeting} world verified"
@@ -472,7 +475,7 @@ async def test_real_llm_reads_and_edits_the_windows_desktop(tmp_path: Path) -> N
         await gateway.stop()
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"desktop_answer": 1.0}
+    assert result.verdict.rewards == {"desktop_answer": 1.0, "overall": 1.0}
     trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
     transport = [
         json.loads(line)

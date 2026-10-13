@@ -83,6 +83,7 @@ def test_agent_judge_freezes_later_checks_and_does_not_touch_solver_trajectory(
     )
     with pytest.raises(RuntimeError, match="after an Agent Judge"):
         verification.check("late", CheckResult(1))
+    verification.aggregate("overall")
     verification.write()
     assert trajectory.read_bytes() == before
 

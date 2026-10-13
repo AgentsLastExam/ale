@@ -33,7 +33,9 @@ verification.write()
   exactly once after at least one criterion or aggregate.
 
 A Task verifier must expose an explicit `overall` aggregate and retain the underlying named
-criteria as detailed evaluation evidence.
+criteria as detailed evaluation evidence; `write()` fails without one. An aggregate without
+`inputs` covers every criterion, so after one is added, a further `check()` or `judge()`
+fails instead of being silently left out. Explicit-`inputs` aggregates leave criteria open.
 
 Every accepted mutation atomically replaces `verification.json`. Names are non-empty and
 unique across criteria, stats, and aggregates. Scores are finite values from 0 through 1;
