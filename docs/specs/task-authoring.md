@@ -242,6 +242,8 @@ account the required ownership or permissions, for example with `chown` or `inst
 
 `instruction.md` is the evaluated-agent instruction. Its input and output paths refer to the
 declared initial environment and artifacts. Declared `${name}` placeholders are rendered from `params`.
+Only the braced form is a placeholder: other `$` text such as `$HOME`, `$5` or `$x^2$` is copied
+unchanged, and `$$` renders one `$`, so `$${HOME}` produces a literal `${HOME}`.
 Use literal sandbox paths: `/home/user/...` on Linux and `C:\Users\user\...` on
 Windows. ALE does not add or rewrite a workspace prefix.
 

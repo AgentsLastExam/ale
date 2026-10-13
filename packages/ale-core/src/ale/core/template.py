@@ -3,7 +3,9 @@
 Instructions carry `${param}` placeholders and nothing else. Three rules matter:
 
 1. ``${name}`` syntax (``string.Template``), not ``{name}`` — instructions routinely
-   contain JSON and code, and brace-based formatting mangles them.
+   contain JSON and code, and brace-based formatting mangles them. Only the braced form
+   is a placeholder: a bare ``$HOME``, ``$5`` or ``$x^2$`` is ordinary text, and ``$$``
+   writes a literal ``$`` (so ``$${HOME}`` renders ``${HOME}``).
 2. Rendering is strict in both directions: an unresolved placeholder *and* an unused
    declared parameter are errors. Converting a large legacy corpus produces both kinds
    of typo, and a silent one becomes a wrong prompt in a scored run.
@@ -40,7 +42,18 @@ _LEGACY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
-_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+class _ParameterTemplate(Template):
+    """``${name}`` placeholders and ``$$`` escapes; a ``${`` that is neither is malformed."""
+
+    pattern = r"""
+    \$(?:
+        (?P<escaped>\$) |
+        \{(?P<braced>(?a:[_a-z][_a-z0-9]*))\} |
+        (?P<invalid>\{) |
+        (?P<named>(?!))
+    )
+    """
 
 
 def find_legacy_patterns(text: str) -> list[str]:
@@ -62,7 +75,8 @@ def render_instruction(text: str, params: dict[str, Any], *, where: str = "instr
             f"(see docs/adr/0002-self-contained-task-contract.md)"
         )
 
-    used = set(_PLACEHOLDER.findall(text))
+    template = _ParameterTemplate(text)
+    used = set(template.get_identifiers())
     declared = set(params)
 
     if missing := sorted(used - declared):
@@ -75,6 +89,6 @@ def render_instruction(text: str, params: dict[str, Any], *, where: str = "instr
         )
 
     try:
-        return Template(text).substitute(params)
-    except ValueError as exc:  # malformed placeholder, e.g. a bare '$'
+        return template.substitute(params)
+    except ValueError as exc:  # malformed placeholder, e.g. an unterminated '${'
         raise TaskDefinitionError(f"{where} has malformed template syntax: {exc}") from exc

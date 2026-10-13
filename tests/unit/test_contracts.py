@@ -206,6 +206,15 @@ def test_instruction_template_is_strict() -> None:
         render_instruction("no placeholders", {"n": 3})
 
 
+def test_instruction_dollar_text_is_not_a_placeholder() -> None:
+    text = "Write $HOME/out.txt for $5, plot $x^2$ over ${n} runs, keep $${HOME} literal"
+    assert render_instruction(text, {"n": 2}) == (
+        "Write $HOME/out.txt for $5, plot $x^2$ over 2 runs, keep ${HOME} literal"
+    )
+    with pytest.raises(TaskDefinitionError, match="malformed"):
+        render_instruction("Solve ${n cases", {})
+
+
 def test_failed_verification_is_not_a_zero_reward() -> None:
     zero = Verdict.completed({"reward": 0.0})
     broken = Verdict.failed(Status.TASK_ERROR, ValueError("no rewards file"))
