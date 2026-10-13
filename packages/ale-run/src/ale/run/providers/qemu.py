@@ -278,6 +278,7 @@ async def attach_retained(
         allocation=allocation,
         agent_user=agent_user,
         agent_home=agent_home,
+        host_ip=await _runner_host_ip(container),
     )
 
 
@@ -536,10 +537,34 @@ class QemuSandbox(Sandbox):
         ]
         return await self._client.inject_input(payload)
 
+    def _seal_rules(self) -> tuple[str, ...]:
+        """Guest traffic the sealed runner forwards: replies, and the episode's own ports.
+
+        Only the Gateway and proxy ports are DNATed to the host, but a guest could dial the
+        host's address directly; every other forwarded packet is dropped.
+        """
+        ports = sorted(
+            {
+                port
+                for url in (self.request.gateway_url, self.request.proxy_url)
+                if (port := _port_of(url))
+            }
+        )
+        allowed = (
+            (f"-i {GUEST_BRIDGE} -d {self.host_ip} -p tcp -m multiport --dports {','.join(ports)}",)
+            if ports
+            else ()
+        )
+        return (
+            f"-i {GUEST_BRIDGE} -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY",
+            *allowed,
+        )
+
     async def open_egress(self) -> None:
         """Lift the runner firewall for the framework's own phases."""
         for rule in (
-            f"iptables -D FORWARD -i {GUEST_BRIDGE} ! -d {self.host_ip} -j DROP",
+            *(f"iptables -D FORWARD {match} -j ACCEPT" for match in self._seal_rules()),
+            f"iptables -D FORWARD -i {GUEST_BRIDGE} -j DROP",
             f"iptables -D INPUT -i {GUEST_BRIDGE} -j DROP",
         ):
             await _run("docker", "exec", self.container, "sh", "-c", rule, timeout=60)
@@ -549,8 +574,11 @@ class QemuSandbox(Sandbox):
         """Restore the runner firewall before the agent starts."""
         if self.request.network.mode is NetworkMode.OPEN:
             return
+        if not self.host_ip:
+            raise ProviderStartError("cannot seal a VM whose host address is unknown")
         for rule in (
-            f"iptables -I FORWARD -i {GUEST_BRIDGE} ! -d {self.host_ip} -j DROP",
+            f"iptables -I FORWARD 1 -i {GUEST_BRIDGE} -j DROP",
+            *(f"iptables -I FORWARD 1 {match} -j ACCEPT" for match in self._seal_rules()),
             f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -j DROP",
             f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -p udp --dport 67 -j ACCEPT",
         ):
@@ -1029,14 +1057,7 @@ class QemuProvider(Provider):
         here rather than in the guest means the host's address is discovered at run time
         instead of baked into a disk.
         """
-        code, route, _ = await _run(
-            "docker", "exec", container, "sh", "-c",
-            "ip route | awk '/^default/{print $3}'", timeout=60,
-        )  # fmt: skip
-        host_ip = route.strip()
-        if code != 0 or not host_ip:
-            raise ProviderStartError("could not find the host's address from inside the runner")
-
+        host_ip = await _runner_host_ip(container)
         rules: list[str] = []
         ports = {
             _port_of(request.gateway_url),
@@ -1189,6 +1210,18 @@ def _is_blank(png: bytes) -> bool:
         return len(set(zlib.decompress(bytes(data)))) <= 2
     except zlib.error:
         return False
+
+
+async def _runner_host_ip(container: str) -> str:
+    """The host's address as the runner container routes to it."""
+    code, route, _ = await _run(
+        "docker", "exec", container, "sh", "-c",
+        "ip route | awk '/^default/{print $3}'", timeout=60,
+    )  # fmt: skip
+    host_ip = route.strip()
+    if code != 0 or not host_ip:
+        raise ProviderStartError("could not find the host's address from inside the runner")
+    return host_ip
 
 
 def _port_of(url: str | None) -> str:

@@ -10,7 +10,6 @@ RUN apt-get update \
         initramfs-tools \
         iproute2 \
         linux-image-generic \
-        nftables \
         python3 \
         sudo \
         systemd \
@@ -47,7 +46,6 @@ COPY packages/ale-run/src/ale/run/guestd/ /opt/ale/guestd/
 COPY images/base/vm-ubuntu24/ale-guestd.service /etc/systemd/system/ale-guestd.service
 COPY images/base/vm-ubuntu24/20-wired.network /etc/systemd/network/20-wired.network
 COPY images/base/vm-ubuntu24/gdm-custom.conf /etc/gdm3/custom.conf
-COPY images/base/vm-ubuntu24/nftables.conf /etc/nftables.conf
 COPY images/base/vm-ubuntu24/image.json /etc/ale/image.json
 COPY images/builders/vm-materializer/10-root.conf /usr/lib/repart.d/10-ale-root.conf
 
@@ -67,7 +65,7 @@ RUN mkdir -p /efi /home/user/.config/autostart \
     && kernel_version="$(basename /usr/lib/modules/*)" \
     && cp "/boot/vmlinuz-${kernel_version}" "/usr/lib/modules/${kernel_version}/vmlinuz" \
     && systemctl enable ale-guestd.service systemd-networkd.service \
-        systemd-resolved.service nftables.service gdm3.service \
+        systemd-resolved.service gdm3.service \
     && systemctl set-default graphical.target \
     && : > /etc/machine-id
 

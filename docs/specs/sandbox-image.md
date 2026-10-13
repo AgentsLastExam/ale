@@ -8,7 +8,9 @@ directly, or builds `image/run.ps1` on `image.base_ref`.
 
 - `container-ubuntu22-base` provides an Ubuntu 22.04 desktop container.
 - `vm-ubuntu24-base` provides Ubuntu 24.04, systemd, full GNOME/GDM, the declared
-  unprivileged user, and ALE guest integration for QEMU.
+  unprivileged user, and ALE guest integration for QEMU. It has no firewall of its own:
+  network policy is enforced by the QEMU runner outside the guest
+  ([security.md](security.md#1-a-sandbox-has-only-declared-ways-out)).
 - The private Windows 10 BYOL base provides a logged-in desktop, system Python, guestd,
   Cua Driver, WinGet, Chocolatey, and the runtimes required by autonomous agents.
   Its licensed disk is not a public ALE artifact.
