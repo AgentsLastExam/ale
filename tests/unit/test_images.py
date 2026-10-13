@@ -131,12 +131,19 @@ async def test_vm_ref_resolution_rejects_wrong_kind(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_vm_ref_tracks_bytes_and_rejects_backing_disks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "dependency",
+    [
+        {"backing-filename": "base.qcow2"},
+        {"format-specific": {"data": {"data-file": "external.raw"}}},
+    ],
+)
+async def test_local_vm_ref_tracks_bytes_and_rejects_dependent_disks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dependency: dict[str, object]
 ) -> None:
     disk = tmp_path / "windows.qcow2"
     disk.write_bytes(b"first")
-    metadata = {"format": "qcow2"}
+    metadata: dict[str, object] = {"format": "qcow2"}
 
     async def fake_run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
         assert argv[0] == "qemu-img", "A local image must never reach Docker pull"
@@ -150,7 +157,7 @@ async def test_local_vm_ref_tracks_bytes_and_rejects_backing_disks(
     assert first.prepared_identity == "sha256:" + hashlib.sha256(b"first").hexdigest()
     disk.write_bytes(b"other")
     assert (await resolve_vm_image(ref)).prepared_identity != first.prepared_identity
-    metadata["backing-filename"] = "base.qcow2"
+    metadata.update(dependency)
     with pytest.raises(ProviderStartError, match="standalone qcow2"):
         await resolve_vm_image(ref)
     disk.unlink()

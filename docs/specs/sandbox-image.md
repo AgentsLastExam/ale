@@ -67,8 +67,8 @@ both supported and recorded immutably.
 
 A VM `ref` or Windows `base_ref` may also be an absolute host path to a standalone
 qcow2. Local disks are structurally checked and their actual file bytes are SHA-256
-hashed at preparation, without contacting a registry. Disks with backing files are
-rejected; flatten them first so the recorded identity covers the complete disk.
+hashed at preparation, without contacting a registry. Disks with backing or external data
+files are rejected; convert them to a standalone qcow2 so its identity covers the complete disk.
 The operator must keep prepared local disks unchanged while they are in use.
 
 The authored image source digest excludes `image/assets` so normal Task identity and
@@ -112,8 +112,8 @@ ready snapshot, warm pool, or environment server.
 
 Windows Task preparation boots a temporary VM from the resolved base, stages only
 `image/`, and executes `image/run.ps1` with network access for unattended installation.
-The installer has a one-hour budget; large offline software packages can exceed
-30 minutes for transfer, integrity checks and extraction on the build VM.
+The image script has a one-hour budget for installation, integrity checks and extraction;
+Host-to-VM staging happens before that timer starts.
 ALE removes the build materials, shuts down the VM, and saves its configured qcow2.
 Reuse covers the whole build and is keyed by base, builder, scripts, and asset bytes;
 there is no per-command cache or new recipe language. Authoring details belong to

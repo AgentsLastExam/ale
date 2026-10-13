@@ -170,8 +170,12 @@ async def resolve_vm_image(
             raise ProviderStartError(f"could not inspect local VM disk: {stderr.strip()}")
         try:
             info = json.loads(output)
-            if info.get("format") != "qcow2" or info.get("backing-filename"):
-                raise ProviderStartError("local VM image must be a standalone qcow2")
+            external_data = info.get("format-specific", {}).get("data", {}).get("data-file")
+            if info.get("format") != "qcow2" or info.get("backing-filename") or external_data:
+                raise ProviderStartError(
+                    "local VM image must be a standalone qcow2 "
+                    "without backing or external data files"
+                )
         except (ValueError, AttributeError) as exc:
             raise ProviderStartError(f"invalid local VM disk metadata: {disk}") from exc
         identity = await asyncio.to_thread(_local_disk_identity, disk)
