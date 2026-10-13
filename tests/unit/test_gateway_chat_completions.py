@@ -9,7 +9,7 @@ from aiohttp import ClientSession, web
 from ale.core.trace import read_jsonl
 from ale.run.gateway.openai_chat_completions import stream_completed, usage_from_stream
 from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession, Limits
+from ale.run.gateway.session import CallUsage, GatewaySession, Limits
 from ale.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
@@ -158,7 +158,10 @@ def test_chat_stream_usage_may_cross_network_chunk_boundaries() -> None:
         b'"usage":{"prompt_tokens":6,"completion_tokens":4}}\n\ndata: [DONE]\n\n'
     )
 
-    assert usage_from_stream([event[:31], event[31:79], event[79:]]) == (6, 4, "stop")
+    assert usage_from_stream([event[:31], event[31:79], event[79:]]) == (
+        CallUsage(input_tokens=6, output_tokens=4),
+        "stop",
+    )
 
 
 @pytest.mark.parametrize(

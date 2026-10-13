@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "CallUsage",
     "GatewayReservation",
     "GatewaySession",
     "LimitReached",
@@ -47,6 +48,20 @@ class LimitReached(Exception):
         self.limit = limit
         self.value = value
         self.observed = observed if observed is not None else value
+
+
+@dataclass(frozen=True)
+class CallUsage:
+    """Provider-reported tokens of one call, with one meaning in every dialect."""
+
+    input_tokens: int = 0
+    """Every input token the provider processed, cached or not."""
+    cache_read_tokens: int = 0
+    """Of ``input_tokens``, those read from the provider's prompt cache."""
+    cache_write_tokens: int = 0
+    """Of ``input_tokens``, those written to the provider's prompt cache."""
+    output_tokens: int = 0
+    """Every generated token, reasoning included."""
 
 
 @dataclass

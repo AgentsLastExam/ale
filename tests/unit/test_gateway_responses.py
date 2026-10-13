@@ -10,7 +10,7 @@ from aiohttp import ClientSession, web
 from ale.core.trace import read_jsonl
 from ale.run.gateway.openai_responses import stream_completed, usage_from_stream
 from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession, Limits
+from ale.run.gateway.session import CallUsage, GatewaySession, Limits
 from ale.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
@@ -110,7 +110,10 @@ def test_responses_stream_usage_may_cross_network_chunk_boundaries() -> None:
         b'"status":"completed","usage":{"input_tokens":6,"output_tokens":4}}}\n\n'
     )
 
-    assert usage_from_stream([event[:37], event[37:91], event[91:]]) == (6, 4, "completed")
+    assert usage_from_stream([event[:37], event[37:91], event[91:]]) == (
+        CallUsage(input_tokens=6, output_tokens=4),
+        "completed",
+    )
 
 
 def test_responses_stream_accounts_incomplete_terminal_events() -> None:
@@ -120,7 +123,10 @@ def test_responses_stream_accounts_incomplete_terminal_events() -> None:
         b'"usage":{"input_tokens":6,"output_tokens":4}}}\n\n'
     )
 
-    assert usage_from_stream([event]) == (6, 4, "max_output_tokens")
+    assert usage_from_stream([event]) == (
+        CallUsage(input_tokens=6, output_tokens=4),
+        "max_output_tokens",
+    )
 
 
 def test_chatgpt_backend_omits_unsupported_public_output_limit() -> None:

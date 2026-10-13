@@ -282,7 +282,7 @@ def _prime_call(record: dict[str, Any], node: int | None) -> dict[str, Any]:
         "max_tokens": "length",
         "tool_use": "tool_calls",
     }.get(record.get("stop_reason"))
-    cached = int(record.get("cached_tokens") or 0)
+    cached = int(record.get("cache_read_tokens") or 0)
     usage = None
     if record.get("disposition") == "forwarded":
         usage = {

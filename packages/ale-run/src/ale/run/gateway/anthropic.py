@@ -10,66 +10,59 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ale.run.gateway.session import CallUsage
+
 __all__ = [
-    "USD_PER_MTOK",
-    "estimate_cost",
     "extract_usage",
-    "pricing_for",
     "refusal_body",
     "stream_completed",
     "usage_from_stream",
 ]
 
-#: Rough per-million-token prices, used to stop completed runs rather than billing.
-#: Being approximately right stops a runaway run; being exactly right is the invoice's
-#: job, and pretending otherwise would mean tracking a price list we do not own.
-USD_PER_MTOK: dict[str, tuple[float, float]] = {
-    "default": (5.0, 25.0),
-    "haiku": (1.0, 5.0),
-    "sonnet": (3.0, 15.0),
-    "opus": (5.0, 25.0),
-}
+_USAGE_FIELDS = (
+    "input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "output_tokens",
+)
 
 
-def pricing_for(model: str) -> tuple[float, float] | None:
-    """Known input/output USD-per-million rates for a model family."""
-    lowered = model.lower()
-    return next(
-        (value for key, value in USD_PER_MTOK.items() if key != "default" and key in lowered),
-        None,
+def _call_usage(fields: dict[str, int]) -> CallUsage:
+    """Anthropic reports uncached input apart from cache reads and cache writes."""
+    read = fields["cache_read_input_tokens"]
+    write = fields["cache_creation_input_tokens"]
+    return CallUsage(
+        input_tokens=fields["input_tokens"] + read + write,
+        cache_read_tokens=read,
+        cache_write_tokens=write,
+        output_tokens=fields["output_tokens"],
     )
 
 
-def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Approximate the dollar cost of one call."""
-    rates = pricing_for(model) or USD_PER_MTOK["default"]
-    return (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
+def _fields(usage: object) -> dict[str, int]:
+    values = usage if isinstance(usage, dict) else {}
+    return {name: int(values.get(name) or 0) for name in _USAGE_FIELDS}
 
 
-def extract_usage(payload: dict[str, Any]) -> tuple[int, int, str | None]:
+def extract_usage(payload: dict[str, Any]) -> tuple[CallUsage, str | None]:
     """Read token counts and stop reason from a non-streaming response."""
-    usage = payload.get("usage") or {}
-    return (
-        int(usage.get("input_tokens") or 0),
-        int(usage.get("output_tokens") or 0),
-        payload.get("stop_reason"),
-    )
+    return _call_usage(_fields(payload.get("usage"))), payload.get("stop_reason")
 
 
-def usage_from_stream(events: list[bytes]) -> tuple[int, int, str | None]:
+def usage_from_stream(events: list[bytes]) -> tuple[CallUsage, str | None]:
     """Read token counts from a server-sent event stream.
 
-    Anthropic reports input tokens in ``message_start`` and the output total in
+    Anthropic reports input and cache tokens in ``message_start`` and the output total in
     ``message_delta``, so both have to be seen; a stream cut short still yields whatever
     was counted before it stopped.
 
     Not every Anthropic-compatible provider agrees on which event carries what. GLM sends
     zero in ``message_start`` and the real input count in ``message_delta``, so both
-    events are read for both numbers and the larger wins. Trusting one event meant
+    events are read for every field and the larger wins. Trusting one event meant
     recording zero input tokens for every streamed call — which reads as a free request
     rather than an unmeasured one.
     """
-    input_tokens = output_tokens = 0
+    observed = dict.fromkeys(_USAGE_FIELDS, 0)
     stop_reason: str | None = None
     for line in b"".join(events).splitlines():
         if not line.startswith(b"data:"):
@@ -79,16 +72,15 @@ def usage_from_stream(events: list[bytes]) -> tuple[int, int, str | None]:
         except json.JSONDecodeError:
             continue
         if event.get("type") == "message_start":
-            usage = (event.get("message") or {}).get("usage") or {}
+            usage = (event.get("message") or {}).get("usage")
         elif event.get("type") == "message_delta":
-            usage = event.get("usage") or {}
+            usage = event.get("usage")
             stop_reason = (event.get("delta") or {}).get("stop_reason") or stop_reason
         else:
             continue
-
-        input_tokens = max(input_tokens, int(usage.get("input_tokens") or 0))
-        output_tokens = max(output_tokens, int(usage.get("output_tokens") or 0))
-    return input_tokens, output_tokens, stop_reason
+        for name, value in _fields(usage).items():
+            observed[name] = max(observed[name], value)
+    return _call_usage(observed), stop_reason
 
 
 def stream_completed(events: list[bytes]) -> bool:

@@ -75,7 +75,11 @@ Only the Gateway writes `trace.transport.jsonl`. Every complete line has
 `schema_version`, monotonic `seq`, timestamp, episode ID, and one of:
 
 - `call`: stable `call_id`, model, request/response digests, provider response ID,
-  usage, cost, stop reason, latency, and `forwarded`/`failed`/`refused` disposition;
+  usage, cost, stop reason, latency, and `forwarded`/`failed`/`refused` disposition.
+  `input_tokens` counts every input token in every dialect, and `cache_read_tokens` and
+  `cache_write_tokens` say how many of them the provider's prompt cache served or stored.
+  `cost_usd` is a list-price estimate for an exact model ID, or `null` when that model has
+  no listed price; it is never a guessed or zero cost;
 - `replay`: the original call ID, request digest, replay reason, and `charged=false`;
 - `trajectory_link`: call ID, trajectory ID, and ATIF step ID.
 
