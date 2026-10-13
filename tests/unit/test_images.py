@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 from pathlib import Path
 
@@ -127,6 +128,41 @@ async def test_vm_ref_resolution_rejects_wrong_kind(tmp_path: Path) -> None:
             ImageRef(kind="container", reference="ghcr.io/acme/image:v1"),
             cache_dir=tmp_path,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "dependency",
+    [
+        {"backing-filename": "base.qcow2"},
+        {"format-specific": {"data": {"data-file": "external.raw"}}},
+    ],
+)
+async def test_local_vm_ref_tracks_bytes_and_rejects_dependent_disks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dependency: dict[str, object]
+) -> None:
+    disk = tmp_path / "windows.qcow2"
+    disk.write_bytes(b"first")
+    metadata: dict[str, object] = {"format": "qcow2"}
+
+    async def fake_run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
+        assert argv[0] == "qemu-img", "A local image must never reach Docker pull"
+        return 0, json.dumps(metadata), ""
+
+    monkeypatch.setattr("ale.run.images._run", fake_run)
+    ref = ImageRef(kind="vm", reference=str(disk))
+    first = await resolve_vm_image(ref)
+    assert first.runtime_ref == str(disk)
+    assert first.resolved_reference == disk.as_uri()
+    assert first.prepared_identity == "sha256:" + hashlib.sha256(b"first").hexdigest()
+    disk.write_bytes(b"other")
+    assert (await resolve_vm_image(ref)).prepared_identity != first.prepared_identity
+    metadata.update(dependency)
+    with pytest.raises(ProviderStartError, match="standalone qcow2"):
+        await resolve_vm_image(ref)
+    disk.unlink()
+    with pytest.raises(ProviderStartError, match="missing or invalid"):
+        await resolve_vm_image(ref)
 
 
 @pytest.mark.asyncio

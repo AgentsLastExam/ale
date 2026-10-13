@@ -146,8 +146,8 @@ justification uses `metadata.network_justification`.
 ## image/
 
 The image is the reproducible initial computer state supplied to the agent. Start from the ALE GUI
-base matching `image.kind`, then add every stable dependency, service, file, permission, and piece
-of initial state required by the Task:
+base matching the Task OS and `image.kind`, then add every stable dependency, service, file,
+permission, and piece of initial state required by the Task. The Linux bases are:
 
 - container: `ghcr.io/agentslastexam/container-ubuntu22-base:latest` (Ubuntu 22.04);
 - VM: `ghcr.io/agentslastexam/vm-ubuntu24-base:0.1.0` (Ubuntu 24.04).
@@ -190,7 +190,7 @@ Copy-Item .\assets\input.txt "$env:ALE_HOME\input.txt"
 directory as cwd and `ALE_HOME` set to the agent home, then saves the configured qcow2.
 Scripts may use WinGet, Chocolatey, or
 local unattended installers; pin package versions where supported and check native command
-exit codes. Scripts must finish within 30 minutes; nonzero exits fail the build. Suppress
+exit codes. Scripts must finish within one hour; nonzero exits fail the build. Suppress
 installer reboots; builds requiring a mid-script restart are unsupported. ALE owns shutdown.
 Build-only materials are removed before saving; copy required files to their final locations.
 Only `image/` is staged.
@@ -199,6 +199,31 @@ To use a prepared image directly, declare `image.ref` and omit `image/run.ps1` a
 `image.base_ref`. `base_ref` is supported only for Windows solver builds and requires
 the script. Windows separate verification reuses the solver image or supplies
 `verify.image.ref`.
+
+### Software assets
+
+On either OS, install software directly in the image recipe when a clean base can acquire the
+pinned version and deploy it unattended from declared inputs. Machine authentication is allowed;
+interactive login, verification codes, browser sessions and manual installer steps are not a
+repeatable build input. Version pins alone do not guarantee that an upstream keeps old files.
+
+Otherwise, acquire and, if needed, install or compile the software once in a preparation
+environment. Keep the reusable offline materials as real files under
+`image/assets/softwares/<software_id>/`, for example `image/assets/softwares/editor_1/`.
+Use one directory per software/version, with underscores rather than nested version directories.
+Reuse a compatible existing package before preparing another. Slow acquisition or compilation
+can also justify an offline asset. Installed VM state alone is not a rebuildable asset.
+
+Keep deployment scripts and Task-specific configuration in `image/`. Linux uses the Dockerfile;
+Windows uses `run.ps1`. Scripts consume Task-local materials, choose their own extraction or
+installation method, and declare external dependencies. Linux has no required package format.
+For Windows software requiring repackaging, prefer the
+[MSIX workflow](../guides/windows-task-images.md). No Task depends on another Task's files.
+
+Record the source, version, integrity hash, compatible base, and deployment requirements. Keep
+credentials out of assets. Validate from a clean base as the actual agent user, including required
+writes, child tools and save/reopen, without repeating the interactive acquisition process.
+The [asset contract](task-assets.md) owns synchronization and its current implementation limits.
 
 ## setup/
 

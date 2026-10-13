@@ -5,6 +5,13 @@ Task assets are the four separately managed `image/assets`, `setup/assets`,
 [Task authoring contract](task-authoring.md). Runtime stages consume their materialized
 files normally; running a Task never implicitly downloads assets.
 
+Offline software materials belong in each Task's `image/assets/softwares/<software_id>/`;
+see the [software authoring rules](task-authoring.md#software-assets). Current asset commands
+treat these as ordinary Task-local files and mirror their paths to HF. They do not yet consolidate
+software into a repository-level directory or support `image.softwares` declarations. The agreed
+[repository software publication design](../../specs/task-software-publication.md) describes that
+pending change; it is not the current CLI contract.
+
 ## Repository and access
 
 Each Task source repository has one private Hugging Face dataset named

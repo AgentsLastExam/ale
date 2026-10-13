@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -156,10 +157,36 @@ async def resolve_vm_image(
     *,
     cache_dir: Path | None = None,
 ) -> PreparedTaskImage:
-    """Acquire an OCI-carried qcow2 into a digest-keyed local cache."""
+    """Resolve a standalone local qcow2 or acquire a registry-carried disk."""
     if image.kind is not ImageKind.VM:
         raise ProviderStartError("VM image resolution requires kind=vm")
     declared = image.reference
+    if Path(declared).is_absolute():
+        disk = Path(declared).resolve()
+        if not await _valid_qcow2(disk):
+            raise ProviderStartError(f"local VM disk is missing or invalid: {disk}")
+        code, output, stderr = await _run("qemu-img", "info", "--output=json", str(disk))
+        if code != 0:
+            raise ProviderStartError(f"could not inspect local VM disk: {stderr.strip()}")
+        try:
+            info = json.loads(output)
+            external_data = info.get("format-specific", {}).get("data", {}).get("data-file")
+            if info.get("format") != "qcow2" or info.get("backing-filename") or external_data:
+                raise ProviderStartError(
+                    "local VM image must be a standalone qcow2 "
+                    "without backing or external data files"
+                )
+        except (ValueError, AttributeError) as exc:
+            raise ProviderStartError(f"invalid local VM disk metadata: {disk}") from exc
+        identity = await asyncio.to_thread(_local_disk_identity, disk)
+        return PreparedTaskImage(
+            kind=ImageKind.VM,
+            source="external-ref",
+            input_identity=identity,
+            runtime_ref=str(disk),
+            prepared_identity=identity,
+            resolved_reference=disk.as_uri(),
+        )
     code, _, stderr = await _run("docker", "pull", declared, timeout=900)
     if code != 0:
         raise ProviderStartError(f"could not pull VM image {declared}: {stderr.strip()}")
@@ -197,6 +224,21 @@ async def resolve_vm_image(
         prepared_identity=identity,
         resolved_reference=resolved_reference,
     )
+
+
+def _local_disk_identity(disk: Path) -> str:
+    before = disk.stat()
+    with disk.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    after = disk.stat()
+    if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ):
+        raise ProviderStartError(f"local VM disk changed while resolving it: {disk}")
+    return f"sha256:{digest}"
 
 
 async def publish_vm_image(disk: Path, reference: str) -> str:

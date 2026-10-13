@@ -65,6 +65,12 @@ it is unsupported for Linux and separate verifier declarations. Without local bu
 instructions, the matching Provider resolves the declared ref. Container and VM refs are
 both supported and recorded immutably.
 
+A VM `ref` or Windows `base_ref` may also be an absolute host path to a standalone
+qcow2. Local disks are structurally checked and their actual file bytes are SHA-256
+hashed at preparation, without contacting a registry. Disks with backing or external data
+files are rejected; convert them to a standalone qcow2 so its identity covers the complete disk.
+The operator must keep prepared local disks unchanged while they are in use.
+
 The authored image source digest excludes `image/assets` so normal Task identity and
 asset provenance remain separate. Docker still consumes current asset bytes natively and
 BuildKit decides Linux cache reuse; Windows cache keys include the actual image asset
@@ -106,10 +112,20 @@ ready snapshot, warm pool, or environment server.
 
 Windows Task preparation boots a temporary VM from the resolved base, stages only
 `image/`, and executes `image/run.ps1` with network access for unattended installation.
+The image script has a one-hour budget for installation, integrity checks and extraction;
+Host-to-VM staging happens before that timer starts.
 ALE removes the build materials, shuts down the VM, and saves its configured qcow2.
 Reuse covers the whole build and is keyed by base, builder, scripts, and asset bytes;
 there is no per-command cache or new recipe language. Authoring details belong to
 [Task authoring](task-authoring.md#image).
+
+Software assets are deployed during image construction and saved into the Task qcow2.
+An episode overlay isolates disk changes while preserving Windows permissions and package
+execution rules. Use each asset's qualified deployment recipe; see the
+[Windows Task image guide](../guides/windows-task-images.md).
+
+For assets downloaded by the image script, ALE hashes the authored reference, not unseen remote
+bytes. Pin and verify the expected digest before deployment; changing that pin invalidates reuse.
 
 GUI image qualification includes a real visual agent completing a task whose decisive
 input exists only on screen, followed by inspection of its canonical trajectory,
