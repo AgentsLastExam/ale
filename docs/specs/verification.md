@@ -90,8 +90,17 @@ from Judge inputs. A configured Agent Judge Task-instruction path must be readab
 
 Each file is limited to 20 MiB, with a combined evidence limit of 32 MiB per invocation.
 Inline references are limited to 256 KiB; LLM text files and selected trajectories are
-limited to 1 MiB each. Oversized, missing, non-regular, or unsupported evidence fails
-explicitly; evidence is never silently truncated. Symbolic-link evidence files are rejected.
+limited to 1 MiB each. Evidence is never silently truncated.
+
+A `files` entry is solver output. When one is missing, a symbolic link or other non-regular
+file, oversized, or (for an LLM Judge) neither UTF-8 text nor a supported image or PDF, or
+when the files exceed the combined limit, or when `trajectory=True` but no solver trajectory
+was recorded, the solver left nothing valid to judge: the criterion scores 0 with that
+reason, is recorded as a deterministic `check`, and no Judge runs. Excluding such an episode
+from aggregates would reward agents that produce nothing, and an authored path that the oracle
+cannot satisfy already fails validation. A relative evidence path or an invalid inline
+`reference` is an authoring error that raises before any Judge work. A staged trajectory that
+cannot be read is an infrastructure failure.
 Records retain paths, byte sizes, and SHA-256 hashes, not inline media payloads. Schema-repair
 and transport retries retain the same selected evidence.
 
@@ -116,8 +125,8 @@ its rewards and stats exactly match the reward envelope, and stores it at the ep
 root. A launched Agent Judge also produces sanitized `logs/agent-judge.jsonl`.
 
 Malformed output, missing configuration or credentials, endpoint/provider failure,
-timeout, refusal, invalid Judge schema, missing evidence, and verifier exceptions are
-verification or infrastructure failures. They never silently fall back to a zero score.
+timeout, refusal, invalid Judge schema, and verifier exceptions are verification or
+infrastructure failures. They never silently fall back to a zero score.
 
 Placement and artifact restoration are specified by
 [standard-environment.md](standard-environment.md); persistent record ownership is
