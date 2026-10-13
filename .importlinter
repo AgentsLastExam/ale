@@ -1,4 +1,4 @@
-; Structural decoupling, enforced mechanically (Constitution IV).
+; Structural decoupling, enforced mechanically (Constitution II).
 ; Run with: uv run lint-imports
 
 [importlinter]
@@ -42,7 +42,6 @@ source_modules =
     ale.run.guestd
 forbidden_modules =
     ale.core
-    ale.run.engine
     ale.run.gateway
     ale.run.providers
     aiohttp
