@@ -349,6 +349,9 @@ async def test_qemu_retained_solver_can_be_reattached(
     }
 
     async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        if argv[:2] == ("docker", "exec"):
+            assert "ip route" in argv[-1]
+            return 0, "172.17.0.1\n", ""
         assert argv[:2] == ("docker", "inspect")
         return 0, json.dumps([record]), ""
 
@@ -396,6 +399,7 @@ async def test_qemu_retained_solver_can_be_reattached(
 
     assert sandbox.storage == storage
     assert sandbox.host_port == 17411
+    assert sandbox.host_ip == "172.17.0.1"
     assert sandbox.request.role.value == "solver"
 
 
@@ -835,5 +839,10 @@ def test_allowlist_direct_bypass_is_dropped(monkeypatch: pytest.MonkeyPatch) -> 
     sandbox._sealed = False  # type: ignore[attr-defined]
 
     asyncio.run(sandbox.close_egress())
-    assert any("FORWARD -i docker ! -d 172.17.0.1 -j DROP" in rule for rule in rules)
+    assert "iptables -I FORWARD 1 -i docker -j DROP" in rules
+    accepted = [rule for rule in rules if "FORWARD" in rule and rule.endswith("-j ACCEPT")]
+    assert any("ESTABLISHED,RELATED" in rule for rule in accepted)
+    # The host is reachable only on the episode's own ports, never on every port.
+    assert all("ESTABLISHED" in rule or "--dports" in rule for rule in accepted)
+    assert not any("! -d" in rule for rule in rules)
     assert sandbox._sealed is True  # type: ignore[attr-defined]

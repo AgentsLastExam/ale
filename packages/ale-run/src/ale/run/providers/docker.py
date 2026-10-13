@@ -20,7 +20,7 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
@@ -57,6 +57,8 @@ __all__ = [
 ]
 
 GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
+#: Any image with iptables can apply a sandbox's host rules; ALE's QEMU runner is one.
+NETFILTER_IMAGE = "ghcr.io/agentslastexam/ale-qemu-runner:0.1.0"
 
 #: An image sets this to "true" when it starts a desktop, so provisioning waits for it.
 GUI_LABEL = "ale.gui"
@@ -663,6 +665,8 @@ class DockerProvider(Provider):
                     )
                 runtime_identity = f"docker-engine/{version.strip()}"
 
+            if network:
+                await self._restrict_host(container, network, request)
             agent_user = await self._agent_user(resolved_image.observed_ref)
             await self._install_guestd(container)
             if request.sudo:
@@ -760,6 +764,39 @@ class DockerProvider(Provider):
         if code != 0:
             raise ProviderStartError(f"could not create isolated network: {stderr.strip()}")
         return network
+
+    async def _restrict_host(self, container: str, network: str, request: SandboxRequest) -> None:
+        """Let an isolated sandbox reach only its own Gateway and proxy ports on the host.
+
+        An internal bridge has no route off the host, but the host's own address on it
+        answers on every port a host service binds to all interfaces: sshd, databases,
+        another run's Gateway. A short-lived helper with NET_ADMIN joins the sandbox's
+        network namespace and rejects every connection to that address except the
+        episode's ports. The sandbox itself never holds NET_ADMIN, so neither its agent
+        nor root inside it can lift the rules. Failure stops provisioning.
+        """
+        host_ip = await self._bridge_host_ip(network)
+        ports = sorted(
+            {port for url in (request.gateway_url, request.proxy_url) if (port := _url_port(url))}
+        )
+        rules = (
+            [
+                f"iptables -w -A OUTPUT -d {host_ip} -p tcp -m multiport "
+                f"--dports {','.join(ports)} -j ACCEPT"
+            ]
+            if ports
+            else []
+        )
+        rules.append(f"iptables -w -A OUTPUT -d {host_ip} -j REJECT")
+        code, _, stderr = await _docker(
+            "run", "--rm", "--network", f"container:{container}", "--cap-add", "NET_ADMIN",
+            "--entrypoint", "sh", NETFILTER_IMAGE, "-c", " && ".join(rules),
+            timeout=300,
+        )  # fmt: skip
+        if code != 0:
+            raise ProviderStartError(
+                f"could not restrict the sandbox's access to the host: {stderr.strip()}"
+            )
 
     async def _bridge_host_ip(self, network: str | None) -> str:
         """The host's address on a container's network.
@@ -967,6 +1004,11 @@ class DockerProvider(Provider):
             await client.close()
             raise ProviderStartError(f"guest service did not answer: {exc}") from exc
         return client
+
+
+def _url_port(url: str | None) -> str:
+    port = urlsplit(url).port if url else None
+    return str(port) if port else ""
 
 
 def _reachable(url: str | None, *, host: str = HOST_ALIAS) -> str | None:

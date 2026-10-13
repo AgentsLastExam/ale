@@ -18,6 +18,18 @@ Default is `network.mode: block`. Docker uses a per-episode `--internal` bridge 
 route off the host. QEMU enforces deny-all in the runner network namespace, outside the
 guest OS, and forwards only the episode's framework-owned service ports.
 
+No route off the host is not the same as no way out: the host's own address on the
+bridge answers on every port a host service binds to all interfaces, such as sshd, a
+database, or another run's Gateway. Both backends therefore admit only the episode's own
+Gateway and proxy ports on that address. Docker applies the rule in the sandbox's network
+namespace from a short-lived helper container holding `NET_ADMIN`, a capability the
+sandbox itself never has, so not even root inside it can lift the rule; provisioning fails
+if the rule cannot be applied. QEMU drops forwarded guest traffic in the runner while the
+sandbox is sealed and accepts only replies and the DNATed episode ports. The guest OS has
+no firewall of its own: enforcement lives where the agent cannot reach it, and the
+framework's `open_egress` for setup and verification is not undone by rules inside the
+guest.
+
 This is why the address is read from the network rather than assumed: Docker's
 `host-gateway` alias does not work on an internal bridge, and a wrong assumption here
 would look like a broken run rather than a broken guarantee.
@@ -34,9 +46,10 @@ egress policy.
 `open` is a deliberate escape hatch: an ordinary bridge with normal egress. A task must
 declare it, and the declaration is recorded in provenance.
 
-Verified by `tests/integration/test_gateway_isolation.py` and by the `demo-netprobe`
-task, which attempts DNS resolution and a raw TCP connection from inside a sandbox and
-fails admission if either succeeds.
+Verified by `tests/integration/test_gateway_isolation.py`, including that a sealed
+sandbox reaches no other host port, by the QEMU Provider unit tests for the runner rules,
+and by the `demo-netprobe` task, which attempts DNS resolution and a raw TCP connection
+from inside a sandbox and fails admission if either succeeds.
 
 ## 2. Egress is a decision made in our code
 
