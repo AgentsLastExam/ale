@@ -68,8 +68,12 @@ Harnesses use the base's native Node.js and Git Bash.
 
 ### Evidence capture
 
-After the solver stops, the Harness performs idempotent cleanup and ALE converts its
-observed evidence into `trajectory.json`. When run policy sets `artifacts.collect =
+After the solver stops, the Harness performs idempotent cleanup. On Linux, ALE then kills
+every agent-account process started since it snapshotted that account's processes just
+before the agent or oracle launched, and fails the episode as an infrastructure error if any
+survives. Processes that predate the agent, such as the desktop session and image services,
+keep running. Only then does ALE read evidence: it converts the observed native evidence
+into `trajectory.json`. When run policy sets `artifacts.collect =
 "host"`, every Task-declared artifact is captured as an immutable file or directory
 snapshot. Missing, overlapping, symlink, special-file, and transfer failures are explicit
 errors.

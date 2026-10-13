@@ -31,6 +31,7 @@ from ale.core.config import RunTimeouts
 from ale.core.environment import Environment, EpisodeContext, Phase
 from ale.core.errors import (
     AgentError,
+    EnvironmentError_,
     PhaseTimeoutError,
     TaskError,
     TrajectoryConversionError,
@@ -116,6 +117,61 @@ def _sandbox_path(operating_system: OperatingSystem, root: str, *parts: str) -> 
 
 def _python(operating_system: OperatingSystem) -> str:
     return "python.exe" if operating_system is OperatingSystem.WINDOWS else "python3"
+
+
+#: Run as root in a Linux Sandbox. ``snapshot`` records the agent account's live processes
+#: just before the agent starts; ``terminate`` kills every agent-account process started
+#: since, until none remains. Ownership is read from /proc/<pid>/status, which a process
+#: cannot disguise, and a PID is the same process only with the same start time.
+_AGENT_PROCESSES = r"""
+import json, os, pwd, signal, sys, time
+
+mode, user, baseline_path = sys.argv[1:4]
+proc = sys.argv[4] if len(sys.argv) > 4 else "/proc"
+uid = pwd.getpwnam(user).pw_uid
+
+
+def live():
+    found = {}
+    for pid in os.listdir(proc):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc, pid, "status"), encoding="utf-8") as handle:
+                status = dict(line.split(":", 1) for line in handle if ":" in line)
+            with open(os.path.join(proc, pid, "stat"), encoding="utf-8") as handle:
+                started = handle.read().rsplit(")", 1)[1].split()[19]
+            uids = {int(value) for value in status.get("Uid", "").split()}
+        except (OSError, IndexError, ValueError):
+            continue
+        if uid in uids and not status.get("State", "").strip().startswith("Z"):
+            found[pid] = started
+    return found
+
+
+if mode == "snapshot":
+    descriptor = os.open(baseline_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(live(), handle)
+    raise SystemExit(0)
+
+try:
+    with open(baseline_path, encoding="utf-8") as handle:
+        baseline = json.load(handle)
+except FileNotFoundError:
+    raise SystemExit(0)  # no agent phase ran in this Sandbox
+deadline = time.monotonic() + 10
+while started := {pid for pid, start in live().items() if baseline.get(pid) != start}:
+    if time.monotonic() > deadline:
+        print("agent processes survived: " + " ".join(sorted(started)), file=sys.stderr)
+        raise SystemExit(1)
+    for pid in started:
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    time.sleep(0.1)
+"""
 
 
 class StandardEnvironment(Environment):
@@ -299,6 +355,7 @@ class StandardEnvironment(Environment):
         )
         await self._validate_stdio_mcp(ctx, sandbox)
         await self._seal(ctx, sandbox)
+        await self._agent_processes(ctx, sandbox, "snapshot")
 
         async def launch() -> None:
             run = await harness.launch(
@@ -367,6 +424,7 @@ class StandardEnvironment(Environment):
             _RecordedSandbox(ctx, sandbox, component="harness-install")
         )
         await self._seal(ctx, sandbox)
+        await self._agent_processes(ctx, sandbox, "snapshot")
 
         assert ctx.blobs is not None
         assert ctx.trajectory is not None
@@ -663,6 +721,9 @@ class StandardEnvironment(Environment):
             if cleanup_error is not None:
                 raise cleanup_error
             logger.info("harness cleanup completed")
+        # Before any evidence is read: shared verification opens egress in this Sandbox,
+        # and a process the agent left behind could rewrite its output or fetch answers.
+        await self._agent_processes(ctx, sandbox, "terminate")
         # The harness's own logs, in their own place. What the agent produced and how the
         # harness went about producing it are different questions with different owners:
         # the task declares the first because only it knows what its output is, and the
@@ -706,6 +767,25 @@ class StandardEnvironment(Environment):
                 )
 
         ctx.solver_evidence_captured = True
+
+    async def _agent_processes(
+        self, ctx: EpisodeContext, sandbox: Sandbox, mode: Literal["snapshot", "terminate"]
+    ) -> None:
+        """Snapshot the agent account's processes, or kill those started since.
+
+        Processes that predate the agent, such as the desktop session and image services,
+        survive. Windows guestd shares the agent's session, so this is Linux only.
+        """
+        if ctx.spec.os is not OperatingSystem.LINUX:
+            return
+        baseline = _layout(ctx.spec.os).path("agent-processes.json")
+        result = await _RecordedSandbox(ctx, sandbox, component="agent-processes").exec(
+            ["python3", "-c", _AGENT_PROCESSES, mode, _agent_user(sandbox), str(baseline)],
+            timeout_sec=60,
+        )
+        if not result.ok:
+            detail = (result.stderr or result.stdout).strip()[-500:]
+            raise EnvironmentError_(f"could not {mode} agent processes: {detail}")
 
     async def _teardown(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         # Best-effort interrupted evidence does not replace the primary failure.

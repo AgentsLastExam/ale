@@ -128,6 +128,13 @@ Verified by `tests/integration/test_identity.py`: the agent cannot read the gues
 cannot write system paths, and cannot elevate unless its task asked; and by
 `tests/unit/test_guest_authentication.py` for the claimed TCP guest service.
 
+The agent also cannot act after its phase ends. On Linux, every process the agent account
+started during the agent phase is killed after Harness cleanup and before any evidence is
+read, so nothing it left running can rewrite its output or reach the network that shared
+verification opens; a survivor fails the episode. The Windows base runs guestd in the agent's
+own session, where this cleanup is not applied. Verified by
+`tests/unit/test_agent_processes.py`.
+
 ## 5. Answers are absent, not hidden
 
 `verify/` and `oracle/`, including their optional `assets/` directories, are copied into a sandbox

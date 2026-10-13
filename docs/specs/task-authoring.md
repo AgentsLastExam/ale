@@ -257,6 +257,9 @@ in `task.yaml`; never depend on ambient Host configuration.
 
 `verify/run.sh` (or Windows `verify/run.ps1`) evaluates the final outcome and writes the reward map. Verifier implementation
 conventionally lives in `verify/verify.py`; private references belong in `verify/assets/`.
+On Linux, processes the agent started are stopped before verification, so an outcome must
+be state the verifier can inspect, not a process the agent leaves running; a Task about a
+service has the verifier start or check it from the agent's files.
 ALE runs the stage with `verify/` as cwd. Stage code and assets use ordinary relative paths;
 solver outputs use literal absolute paths. The verification image must expose system Python 3.12
 or newer; ALE stages the `ale_verify` package into that interpreter's site-packages.
