@@ -20,9 +20,14 @@ from ale.run.providers import ProviderRegistry
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import sibling_checkout
 
-pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_kvm]
-
 TASK = sibling_checkout("ale-tasks-base") / "tasks/demo/docker_in_vm"
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.needs_docker,
+    pytest.mark.needs_kvm,
+    pytest.mark.skipif(not TASK.is_dir(), reason=f"no ale-tasks-base checkout at {TASK}"),
+]
 
 
 @pytest.mark.asyncio

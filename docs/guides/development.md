@@ -74,7 +74,9 @@ This repository is developed primarily by one maintainer, so the process is
 deliberately light:
 
 - **Commit straight to `main`.** No pull request is required for your own work; CI
-  runs on every push and is the safety net.
+  is the safety net. Every push to `main` runs everything; a pull request runs lint and
+  the unit suites, and the slow backend suites run on demand
+  (`gh workflow run ci.yml --ref BRANCH`).
 - Use a worktree (`just wt <name>`) when you want parallel tracks or a risky change,
   not as a ritual for every edit.
 - Keep the *substance* of the norms even where the ceremony is dropped: when a change

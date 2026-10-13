@@ -1,0 +1,15 @@
+spec_type: core/v1
+name: vm-smoke
+image:
+  kind: vm
+
+resources: {cpus: 2, memory_mb: 4096}
+network: {mode: block}
+timeouts: {setup: 300, agent: 600, verify: 300}
+artifacts: [/home/user/output]
+
+params:
+  greeting: hello
+
+metadata:
+  tags: []

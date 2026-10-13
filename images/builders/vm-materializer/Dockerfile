@@ -25,8 +25,13 @@ RUN apt-get update \
 COPY mkosi.conf /config/mkosi.conf
 COPY 10-root.conf /config/repart.d/10-root.conf
 COPY materialize.sh /usr/local/bin/ale-materialize-vm
+# Ubuntu 24.04+ hosts attach an AppArmor profile to the path /usr/bin/bwrap that strips
+# capabilities inside the sandbox mkosi builds in, so tar cannot restore root ownership and
+# every build fails. The container is already privileged; a copy earlier on PATH is not
+# matched by that host profile.
 RUN mkdir -p /config/extra/etc \
     && ln -s /run/systemd/resolve/stub-resolv.conf /config/extra/etc/resolv.conf \
-    && chmod 0755 /usr/local/bin/ale-materialize-vm
+    && chmod 0755 /usr/local/bin/ale-materialize-vm \
+    && cp /usr/bin/bwrap /usr/local/bin/bwrap
 
 ENTRYPOINT ["/usr/local/bin/ale-materialize-vm"]
