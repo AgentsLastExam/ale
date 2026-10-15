@@ -364,6 +364,23 @@ class TestGuestProtocol:
         assert target.read_bytes() == b"hello"
         assert any(r.get("event") == "chunk" for r in replies)
 
+    @pytest.mark.asyncio
+    async def test_a_file_larger_than_one_message_is_written_whole(self, tmp_path: Path) -> None:
+        from ale.run.transport import GuestClient, StdioTransport
+
+        transport = StdioTransport([sys.executable, str(GUESTD), "--stdio"])
+        await transport.start()
+        client = GuestClient(transport)
+        data = bytes(range(256)) * (40 * 1024)  # 10 MiB: past the 8 MiB message limit
+        target = tmp_path / "large.bin"
+        try:
+            await client.write_file(str(target), data)
+            await client.write_file(str(tmp_path / "empty"), b"")
+        finally:
+            await transport.close()
+        assert target.read_bytes() == data
+        assert (tmp_path / "empty").read_bytes() == b""
+
     def test_unknown_operation_is_reported_not_fatal(self) -> None:
         replies = self._talk({"id": 5, "op": "nope"}, {"id": 6, "op": "health"})
         assert replies[0]["error"]["code"] == "unsupported"  # type: ignore[index]
