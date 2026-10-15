@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import fcntl
 import json
 import os
@@ -28,13 +29,9 @@ from ale.core.taskspec import (
 )
 from ale.run import ale_image
 from ale.run.content import tree_digest
+from ale.run.framework import with_framework
 from ale.run.providers import ProviderRegistry
-from ale.run.providers.qemu import (
-    RUNNER_IMAGE,
-    QemuProvider,
-    guest_service_identity,
-    install_guest_service,
-)
+from ale.run.providers.qemu import RUNNER_IMAGE, QemuProvider
 from ale.run.sources import cache_root
 
 __all__ = [
@@ -155,16 +152,27 @@ async def prepare_task_image_result(
             "reference-resolution",
             provider.prepare_image(ImageRef(kind=spec.kind, reference=spec.ref)),
         )
-        return _result(
-            task,
-            "solver",
-            image,
+        steps = [
             ImagePreparationStep(
                 "reference-resolution",
                 "executed",
                 image.prepared_identity,
                 image.resolved_reference,
-            ),
+            )
+        ]
+        if spec.kind is ImageKind.CONTAINER:
+            image = await _stage(
+                "framework-layer",
+                _framed_reference(image, user=spec.user, sudo=task.spec.resources.sudo),
+            )
+            steps.append(
+                ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
+            )
+        return _result(
+            task,
+            "solver",
+            image,
+            *steps,
             ImagePreparationStep(
                 "artifact-check", "executed", image.prepared_identity, image.runtime_ref
             ),
@@ -182,6 +190,11 @@ async def prepare_task_image_result(
         ),
     )
     steps = [ImagePreparationStep("oci-build", "executed", build.oci_identity)]
+    build = await _stage(
+        "framework-layer",
+        _framed(build, user=spec.user, sudo=task.spec.resources.sudo, vm=spec.kind is ImageKind.VM),
+    )
+    steps.append(ImagePreparationStep("framework-layer", "executed", build.oci_identity))
     if spec.kind is ImageKind.CONTAINER:
         candidate = _local_container(build, source="solver-local")
     else:
@@ -244,16 +257,26 @@ async def prepare_verifier_image_result(
             "reference-resolution",
             provider.prepare_image(ImageRef(kind=verify.image.kind, reference=verify.image.ref)),
         )
-        return _result(
-            task,
-            "verifier",
-            image,
+        steps = [
             ImagePreparationStep(
                 "reference-resolution",
                 "executed",
                 image.prepared_identity,
                 image.resolved_reference,
-            ),
+            )
+        ]
+        if verify.image.kind is ImageKind.CONTAINER:
+            image = await _stage(
+                "framework-layer", _framed_reference(image, user=verify.image.user, sudo=False)
+            )
+            steps.append(
+                ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
+            )
+        return _result(
+            task,
+            "verifier",
+            image,
+            *steps,
             ImagePreparationStep(
                 "artifact-check", "executed", image.prepared_identity, image.runtime_ref
             ),
@@ -271,6 +294,11 @@ async def prepare_verifier_image_result(
         ),
     )
     steps = [ImagePreparationStep("oci-build", "executed", build.oci_identity)]
+    build = await _stage(
+        "framework-layer",
+        _framed(build, user=verify.image.user, sudo=False, vm=verify.image.kind is ImageKind.VM),
+    )
+    steps.append(ImagePreparationStep("framework-layer", "executed", build.oci_identity))
     if verify.image.kind is ImageKind.CONTAINER:
         candidate = _local_container(build, source="verifier-local")
     else:
@@ -308,6 +336,19 @@ def _result(
         image=image,
         steps=(ImagePreparationStep("lint", "executed"), *steps),
     )
+
+
+async def _framed(build: _OciBuild, *, user: str, sudo: bool, vm: bool) -> _OciBuild:
+    """The Task's own build with the engine's framework layer added on top."""
+    layered = await with_framework(build.runtime_ref, user=user, sudo=sudo, vm=vm)
+    return dataclasses.replace(build, runtime_ref=layered, oci_identity=layered)
+
+
+async def _framed_reference(
+    image: PreparedTaskImage, *, user: str, sudo: bool
+) -> PreparedTaskImage:
+    layered = await with_framework(image.runtime_ref, user=user, sudo=sudo)
+    return image.model_copy(update={"runtime_ref": layered, "prepared_identity": layered})
 
 
 def _local_container(build: _OciBuild, *, source: str) -> PreparedTaskImage:
@@ -508,7 +549,6 @@ def vm_materialization_identity(oci_identity: str, materializer_identity: str) -
             "output_contract": VM_OUTPUT_CONTRACT,
             "final_oci_identity": oci_identity,
             "materializer_identity": materializer_identity,
-            "guest_service_identity": guest_service_identity(),
         }
     )
 
@@ -604,8 +644,6 @@ async def _materialize(runtime_ref: str, disk: Path) -> None:
             input_dir / "rootfs.tar",
             input_dir / "initrd.img",
         )
-        user, gui = await _vm_account(runtime_ref)
-        await asyncio.to_thread(install_guest_service, input_dir / "rootfs.tar", user=user, gui=gui)
 
         code, _, stderr = await _run(
             "docker",
@@ -629,21 +667,6 @@ async def _materialize(runtime_ref: str, disk: Path) -> None:
         if container:
             await _run("docker", "rm", "-f", container, timeout=60)
         shutil.rmtree(temporary, ignore_errors=True)
-
-
-async def _vm_account(runtime_ref: str) -> tuple[str, bool]:
-    """The agent account and desktop a VM image declares, for its guest service."""
-    code, output, stderr = await _run(
-        "docker", "image", "inspect", "--format", "{{json .Config.Labels}}", runtime_ref,
-        timeout=30,
-    )  # fmt: skip
-    if code != 0:
-        raise ProviderStartError(f"could not inspect the VM image: {stderr.strip()}")
-    labels = json.loads(output or "null") or {}
-    user = labels.get("ale.user")
-    if not isinstance(user, str) or not user:
-        raise ProviderStartError("VM image declares no ale.user label for its agent account")
-    return user, labels.get("ale.gui") == "true"
 
 
 async def _valid_qcow2(path: Path) -> bool:

@@ -43,7 +43,9 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem
-from ale.run import ale_image, guestd
+from ale.run import ale_image
+from ale.run.framework import LABEL as FRAMEWORK_LABEL
+from ale.run.framework import with_framework
 from ale.run.gpu import GpuLease, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
 from ale.run.sources import cache_root
@@ -60,16 +62,6 @@ __all__ = [
 GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
 #: Any image with iptables can apply a sandbox's host rules; ALE's QEMU runner is one.
 NETFILTER_IMAGE = ale_image("ale-qemu-runner")
-
-#: An image sets this to "true" when it starts a desktop, so provisioning waits for it.
-GUI_LABEL = "ale.gui"
-
-#: The unprivileged account an image intends the agent to be. Read rather than assumed:
-#: the image chose the name, created the home directory and owns the desktop session.
-USER_LABEL = "ale.user"
-
-#: Used when an image declares nothing, so an image predating the contract still runs.
-DEFAULT_AGENT_USER = "user"
 
 LABEL = "ale.episode"
 MANAGED_LABEL = "ale.managed"
@@ -204,12 +196,9 @@ async def attach_retained(
     if len(networks) > 1:
         raise ProviderCapabilityError(f"{handle!r} has more than one ALE network")
     provider = DockerProvider()
-    agent_user = await provider._agent_user(resolved.observed_ref)
-    client = await provider._connect(
-        container,
-        agent_user,
-        await provider._has_desktop(resolved.observed_ref),
-    )
+    agent_user = request.user
+    client = await provider._connect(container, agent_user)
+    agent_home, _ = await provider._guest_contract(client)
     return DockerSandbox(
         sandbox_id=container.removeprefix("ale-"),
         request=request.model_copy(update={"role": SandboxRole(role)}),
@@ -219,6 +208,7 @@ async def attach_retained(
         resolved_image=resolved,
         allocation=allocation,
         agent_user=agent_user,
+        agent_home=agent_home,
     )
 
 
@@ -339,7 +329,8 @@ class DockerSandbox(Sandbox):
         resolved_image: ResolvedImage,
         allocation: ResourceAllocation,
         resource_lease: GpuLease | None = None,
-        agent_user: str = DEFAULT_AGENT_USER,
+        agent_user: str,
+        agent_home: str,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -352,6 +343,7 @@ class DockerSandbox(Sandbox):
         self.network = network
         self._client = client
         self.agent_user = agent_user
+        self.agent_home = agent_home
         self._sealed = False
         self.state = SandboxState.READY
 
@@ -519,11 +511,9 @@ class DockerProvider(Provider):
     def __init__(
         self,
         *,
-        guestd_source: Path | None = None,
         gpus: tuple[int, ...] = (),
         gpu_lock_dir: Path | None = None,
     ) -> None:
-        self._guestd_source = guestd_source or guestd.SOURCE
         self.gpus = gpus
         self.gpu_lock_dir = gpu_lock_dir or cache_root() / "gpu-locks" / self.name
         # An image's conformance cannot change while it is pinned to a digest, and the
@@ -581,6 +571,7 @@ class DockerProvider(Provider):
                 f"{'; '.join(problems)}. "
                 "See docs/specs/sandbox-image.md"
             )
+        resolved_image = await self._framed(resolved_image, request)
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         container = f"ale-{sandbox_id}"
@@ -668,12 +659,11 @@ class DockerProvider(Provider):
 
             if network:
                 await self._restrict_host(container, network, request)
-            agent_user = await self._agent_user(resolved_image.observed_ref)
-            await self._install_guestd(container)
+            agent_user = request.user
+            client = await self._connect(container, agent_user)
+            agent_home, has_desktop = await self._guest_contract(client)
             if request.sudo:
-                await self._grant_sudo(container, agent_user)
-            has_desktop = await self._has_desktop(resolved_image.observed_ref)
-            client = await self._connect(container, agent_user, has_desktop)
+                await self._verify_sudo(client, agent_user)
             observed_gpu = await self._container_gpus(client) if selected else ()
             if selected:
                 _verify_docker_gpu(selected, observed_gpu)
@@ -719,6 +709,7 @@ class DockerProvider(Provider):
             ),
             resource_lease=lease,
             agent_user=agent_user,
+            agent_home=agent_home,
         )
 
     async def _host_gpus(self) -> dict[int, GpuDevice]:
@@ -855,8 +846,7 @@ class DockerProvider(Provider):
             "-c",
             "if command -v python3 >/dev/null; then "
             "python3 -c 'import sys; raise SystemExit(sys.version_info < (3,12))' "
-            ">/dev/null 2>&1 || echo old-python3; else echo no-python3; fi; "
-            f"id -u {await self._agent_user(reference)} >/dev/null 2>&1 || echo no-agent-user",
+            ">/dev/null 2>&1 || echo old-python3; else echo no-python3; fi",
             timeout=120,
         )
         for line in probe[1].split():
@@ -864,68 +854,45 @@ class DockerProvider(Provider):
                 missing.append("no python3 on PATH: the guest service runs on it")
             elif line == "old-python3":
                 missing.append("python3 on PATH is older than 3.12: ale_verify cannot run on it")
-            elif line == "no-agent-user":
-                user = await self._agent_user(reference)
-                missing.append(
-                    f"no unprivileged account {user!r}: the agent would have to run as root, "
-                    "and could then change the conditions it is measured under"
-                )
 
         self._checked[reference] = missing
         return missing
 
-    async def _agent_user(self, reference: str) -> str:
-        """The account this image intends the agent to be.
+    async def _framed(self, resolved: ResolvedImage, request: SandboxRequest) -> ResolvedImage:
+        """Add the engine's framework layer to an image that was not prepared with it.
 
-        Asked of the image because the image is what created it, gave it a home and runs
-        the desktop session as it. Guessing here would mean the engine deciding who owns
-        files in somebody else's filesystem.
+        Task preparation adds the layer already; this covers an image handed straight to
+        the Provider, so any image can serve as a sandbox.
         """
-        return await self._label(reference, USER_LABEL) or DEFAULT_AGENT_USER
+        if await self._label(resolved.observed_ref, FRAMEWORK_LABEL):
+            return resolved
+        layered = await with_framework(
+            resolved.observed_identity, user=request.user, sudo=request.sudo
+        )
+        return resolved.model_copy(update={"observed_identity": layered, "observed_ref": layered})
 
-    async def _grant_sudo(self, container: str, agent_user: str) -> None:
-        """Let the agent elevate, because its task said it needs to.
+    async def _guest_contract(self, client: GuestClient) -> tuple[str, bool]:
+        """The agent's home and whether the image runs a desktop, as the guest reports."""
+        health = await client.health()
+        home = str(health.get("agent_home") or "")
+        if not home:
+            raise ProviderCapabilityError("guestd did not report the agent account's home")
+        return home, bool(health.get("gui"))
 
-        Granted at provisioning rather than left to the task's setup, so that the
-        privilege is something the run configured and recorded — not something a script
-        arranged where provenance would never see it.
+    async def _verify_sudo(self, client: GuestClient, agent_user: str) -> None:
+        """Prove the agent can elevate, as its Task requested.
+
+        The framework layer installs and grants sudo when the image is prepared; checked
+        here so provenance never records an elevation that did not apply.
         """
-        rule = f"{agent_user} ALL=(ALL) NOPASSWD: ALL"
-        code, _, stderr = await _docker(
-            "exec",
-            container,
-            "sh",
-            "-c",
-            f"mkdir -p /etc/sudoers.d && printf '%s\\n' '{rule}' > /etc/sudoers.d/ale-agent "
-            "&& chmod 0440 /etc/sudoers.d/ale-agent",
+        code, _, stderr, _ = await client.exec(
+            ["sudo", "-n", "true"], run_as=agent_user, timeout_sec=30
         )
         if code != 0:
-            raise ProviderStartError(
-                f"the task asked for elevated privileges and this image cannot grant them: "
-                f"{stderr.strip()}"
+            raise ProviderCapabilityError(
+                f"elevated privileges were requested but {agent_user} cannot elevate in "
+                f"this sandbox; prepare the image with resources.sudo: true: {stderr.strip()}"
             )
-
-        # Writing a sudoers rule succeeds in an image with no sudo at all, so the grant is
-        # confirmed by using it. Reporting a privilege that was never conferred is the
-        # failure this whole declaration exists to avoid — the task would run, fail on
-        # access, and provenance would record an isolation level that never applied.
-        code, _, stderr = await _docker("exec", "-u", agent_user, container, "sudo", "-n", "true")
-        if code != 0:
-            raise ProviderStartError(
-                f"elevated privileges were requested but {agent_user} still cannot elevate; "
-                f"this image does not support them: {stderr.strip()}"
-            )
-
-    async def _has_desktop(self, reference: str) -> bool:
-        """Whether this image brings a desktop up, and so must be waited for.
-
-        Asked of the image rather than derived from the harness. A task's own setup can
-        need the screen — this one opens a window on it — so a desktop image has to be
-        ready whichever agent is about to run, including one that never looks at it.
-        Deriving it from the harness made `--agent nop` skip the wait and fail in setup
-        with "Can't open display", while the same task passed under a stepwise agent.
-        """
-        return await self._label(reference, GUI_LABEL) == "true"
 
     async def _label(self, reference: str, name: str) -> str:
         code, out, _ = await _docker(
@@ -955,47 +922,17 @@ class DockerProvider(Provider):
             f"the desktop did not come up within {timeout_sec:g}s; last attempt: {last}"
         )
 
-    async def _install_guestd(self, container: str) -> None:
-        """Copy the guest service in.
-
-        Images carry none of their own, so the running code always matches this checkout.
-        It lives under a root-only directory so the agent cannot read the protocol that
-        drives its own sandbox.
-        """
-        code, _, stderr = await _docker(
-            "exec", "--user", "0", container, "mkdir", "-p", str(GUESTD_DIR)
-        )
-        if code != 0:
-            raise ProviderStartError(f"could not prepare guest directory: {stderr.strip()}")
-        for name in guestd.FILES:
-            source = self._guestd_source / name
-            code, _, stderr = await _docker(
-                "cp", str(source), f"{container}:{GUESTD_DIR}/{name}", timeout=60
-            )
-            if code != 0:
-                raise ProviderStartError(f"could not install {name}: {stderr.strip()}")
-        root = str(GUESTD_DIR.parent)
-        code, _, stderr = await _docker(
-            "exec", "--user", "0", container, "sh", "-c",
-            f"chown -R 0:0 {root} && chmod -R go-rwx {root}",
-        )  # fmt: skip
-        if code != 0:
-            raise ProviderStartError(f"could not restrict the guest service: {stderr.strip()}")
-
-    async def _connect(self, container: str, agent_user: str, has_desktop: bool) -> GuestClient:
+    async def _connect(self, container: str, agent_user: str) -> GuestClient:
         transport = StdioTransport(
             [
                 "docker",
                 "exec",
                 "-i",
+                # The guest service runs as root whatever user the image itself declares.
+                "--user",
+                "0",
                 "--env",
                 f"ALE_AGENT_USER={agent_user}",
-                "--env",
-                f"ALE_AGENT_HOME=/home/{agent_user}",
-                "--env",
-                f"ALE_GUI={'true' if has_desktop else 'false'}",
-                "--env",
-                "ALE_CUA_DRIVER_SOCKET=/tmp/ale-cua-driver.sock",
                 container,
                 # One interpreter, and it is the image's own. An image that needs the
                 # guest service to have Pillow installs it there; choosing between

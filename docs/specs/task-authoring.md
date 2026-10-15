@@ -66,13 +66,14 @@ os: linux                           # optional: linux | windows; default: linux
 image:                              # required initial sandbox image
   kind: container                   # required: container | vm
   # ref: registry.example/image:tag # use an existing image directly
+  user: user                        # optional agent account; must exist in the image
 
 resources:                          # optional solver allocation; defaults shown
   cpus: 1                           # integer >= 1
   memory_mb: 1024                   # integer >= 128
   storage_mb: null                  # null or integer >= 256; writable storage request
   gpus: 0                           # integer >= 0; GPU count, not physical indices
-  sudo: false                       # whether the evaluated agent receives sudo
+  sudo: false                       # true gives the agent account working sudo (admin on Windows)
 
 network:                            # optional evaluated-agent/oracle network policy
   mode: block                       # block | allowlist | open; default: block

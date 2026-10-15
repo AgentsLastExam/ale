@@ -245,6 +245,8 @@ class SandboxRequest(BaseModel):
 
     sudo: bool = False
     """Whether the agent user may elevate. Declared by the task, recorded in provenance."""
+    user: str = Field(default="user", pattern=r"^[a-z_][a-z0-9_-]{0,31}$")
+    """The agent account, named by the Task's ``image.user``."""
 
     @property
     def image_kind(self) -> ImageKind:

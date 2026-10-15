@@ -65,7 +65,7 @@ def make_lock(**overrides: object) -> RunLock:
             spec_hash=DIGEST,
             content_digest=DIGEST,
             source=TaskSource(
-                kind="registry",
+                kind="git",
                 repo="https://example.invalid/x.git",
                 commit="abc",
                 path="tasks/demo/hello",
@@ -127,7 +127,7 @@ class TestRunLock:
 
     def test_registry_source_requires_a_resolved_commit(self) -> None:
         with pytest.raises(ValidationError):
-            TaskSource(kind="registry", repo="https://example.invalid/x.git", path="tasks/x")
+            TaskSource(kind="git", repo="https://example.invalid/x.git", path="tasks/x")
 
     def test_local_source_is_not_reportable(self) -> None:
         lock = make_lock(
@@ -139,7 +139,7 @@ class TestRunLock:
                 source=TaskSource(kind="local", path="/home/dev/tasks/hello"),
             )
         )
-        with pytest.raises(ProvenanceIncompleteError, match="local path"):
+        with pytest.raises(ProvenanceIncompleteError, match="not in a git repository"):
             lock.require_reportable()
 
     def test_unresolved_framework_commit_is_not_reportable(self) -> None:
@@ -413,3 +413,63 @@ class TestFailedModelCalls:
         )
         assert record.upstream_status == 529
         assert record.input_tokens == 0  # a failed call bought nothing
+
+
+def test_a_task_source_is_read_from_its_git_checkout(tmp_path: Path) -> None:
+    import subprocess
+
+    from ale.run.sources import resolve
+
+    def git(*argv: str) -> None:
+        subprocess.run(["git", "-C", str(tmp_path), *argv], check=True, capture_output=True)
+
+    task = tmp_path / "tasks" / "demo"
+    task.mkdir(parents=True)
+    (task / "task.yaml").write_text("name: demo\n")
+    assert resolve(str(task)).source.kind == "local"
+    git("init", "-q")
+    git("remote", "add", "origin", "https://example.invalid/tasks.git")
+    git("add", "-A")
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "init")
+    clean = resolve(str(task)).source
+    assert (clean.kind, clean.repo, clean.path, clean.dirty) == (
+        "git",
+        "https://example.invalid/tasks.git",
+        "tasks/demo",
+        False,
+    )
+    assert clean.is_reproducible
+    (tmp_path / "unrelated.txt").write_text("outside the Task")
+    assert resolve(str(task)).source.is_reproducible
+    (task / "instruction.md").write_text("new")
+    dirty = resolve(str(task)).source
+    assert dirty.dirty and not dirty.is_reproducible
+
+
+def test_a_task_source_records_no_credentials_and_needs_no_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    from ale.run import sources
+    from ale.run.sources import resolve
+
+    def git(*argv: str) -> None:
+        subprocess.run(["git", "-C", str(tmp_path), *argv], check=True, capture_output=True)
+
+    task = tmp_path / "tasks" / "demo"
+    task.mkdir(parents=True)
+    (task / "task.yaml").write_text("name: demo\n")
+    git("init", "-q")
+    git("remote", "add", "origin", "https://user:ghp_secret@example.invalid/tasks.git")
+    git("add", "-A")
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "init")
+    clean = resolve(str(task)).source
+    assert clean.repo == "https://example.invalid/tasks.git"
+    assert not clean.dirty
+
+    def no_git(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(sources.subprocess, "run", no_git)
+    assert resolve(str(task)).source.kind == "local"

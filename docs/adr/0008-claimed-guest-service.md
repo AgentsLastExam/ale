@@ -31,7 +31,7 @@ must present is claimed by the framework:
   keeps it in memory, because its image builder saves a running guest's disk; its guest
   service already runs as the agent account.
 - A guest service that does not support authentication fails closed. Linux disks the
-  engine prepares carry its own guestd ([0009](0009-versioned-images-and-engine-installed-guest-service.md)),
+  engine prepares carry its own guestd ([0009](0009-versioned-images-and-framework-layer.md)),
   so only a disk prepared by an older engine, or an old Windows base, needs rebuilding.
 
 ## Alternatives considered

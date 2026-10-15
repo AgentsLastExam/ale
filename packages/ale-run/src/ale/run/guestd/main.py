@@ -74,10 +74,11 @@ class Handler:
     # --- introspection ------------------------------------------------------
 
     def op_health(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
-        from gui import available
+        from gui import available, has_desktop
 
         operating_system = "windows" if os.name == "nt" else "linux"
-        declared_gui = os.environ.get("ALE_GUI", "").lower() in {"1", "true", "yes"}
+        agent_user = os.environ.get("ALE_AGENT_USER") or _current_user()
+        desktop = has_desktop()
         return ok(
             req_id,
             proto=PROTOCOL_VERSION,
@@ -85,10 +86,10 @@ class Handler:
             os=operating_system,
             python=sys.version.split()[0],
             user=_current_user(),
-            agent_user=os.environ.get("ALE_AGENT_USER") or _current_user(),
-            agent_home=os.environ.get("ALE_AGENT_HOME") or str(Path.home()),
-            gui=declared_gui,
-            gui_ready=available() if declared_gui else False,
+            agent_user=agent_user,
+            agent_home=os.environ.get("ALE_AGENT_HOME") or _home_of(agent_user),
+            gui=desktop,
+            gui_ready=available() if desktop else False,
         )
 
     # --- execution ----------------------------------------------------------
@@ -328,6 +329,18 @@ def _drop_to(name: str | None, env: dict[str, str]) -> dict[str, Any]:
         os.setuid(account.pw_uid)
 
     return {"preexec_fn": preexec}
+
+
+def _home_of(name: str) -> str:
+    """The account's home directory, from the image's own account database."""
+    if os.name == "nt":
+        return str(Path.home())
+    import pwd
+
+    try:
+        return pwd.getpwnam(name).pw_dir
+    except KeyError:
+        return ""
 
 
 def _owner_of(name: str | None) -> tuple[int, int] | None:

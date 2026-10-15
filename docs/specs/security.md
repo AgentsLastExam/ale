@@ -186,8 +186,12 @@ observations, agent version and integrity, harness family, one optional Task-ass
 repository/path/commit/dirty observation, verification topology and image/resources,
 sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
 
-A run whose lock cannot back a reportable result says so. `--require-reportable` turns
-that statement into a non-zero exit for CI. Final Task-image publication is not part of
+A reportable result is one that can be published, such as on a leaderboard, because it can
+be reproduced exactly. Its Task must be committed in a git repository with no uncommitted
+changes under the Task path: the lock records the repository's origin URL without any
+credentials in it (or its path when it has none), the commit and the Task path. The engine commit, effective resources
+and committed assets must also be recorded. A run whose lock cannot back a reportable
+result says why; `--require-reportable` turns that into a non-zero exit for official runs. Final Task-image publication is not part of
 the current contract; future delivery may add it without changing the self-contained
 Task source contract.
 

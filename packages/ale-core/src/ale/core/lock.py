@@ -54,24 +54,27 @@ class TaskSource(BaseModel):
 
     model_config = _FROZEN
 
-    kind: Literal["registry", "local"]
-    repo: str | None = Field(default=None, description="Repository URL for registry sources")
+    kind: Literal["git", "local"]
+    repo: str | None = Field(
+        default=None, description="The repository's origin URL, or its path when it has none"
+    )
     commit: str | None = Field(default=None, description="Resolved commit, never a branch name")
-    path: str = Field(description="Task folder path within the repository, or an absolute path")
+    path: str = Field(description="Task path within the repository, or an absolute path")
+    dirty: bool = Field(default=False, description="Uncommitted changes under the Task path")
 
     @property
     def is_reproducible(self) -> bool:
-        """Local checkouts are fine for authoring, but they cannot be re-fetched."""
-        return self.kind == "registry"
+        """A committed, unmodified Task in a git repository can be run again exactly."""
+        return self.kind == "git" and not self.dirty
 
     # --- validation ---
 
     @model_validator(mode="after")
     def _check_kind(self) -> Self:
-        if self.kind == "registry" and not (self.repo and self.commit):
-            raise ValueError("a registry source must record both repo and resolved commit")
-        if self.kind == "local" and (self.repo or self.commit):
-            raise ValueError("a local source has neither repo nor commit")
+        if self.kind == "git" and not (self.repo and self.commit):
+            raise ValueError("a git source must record both repo and resolved commit")
+        if self.kind == "local" and (self.repo or self.commit or self.dirty):
+            raise ValueError("a local source has no repository, commit or dirty state")
         return self
 
 
@@ -304,7 +307,11 @@ class RunLock(BaseModel):
         """
         problems: list[str] = []
         if not self.task.source.is_reproducible:
-            problems.append("task came from a local path and cannot be re-fetched")
+            problems.append(
+                "task has uncommitted changes"
+                if self.task.source.dirty
+                else "task is not in a git repository and cannot be re-fetched"
+            )
         if self.framework.commit in {"", "unknown"}:
             problems.append("framework commit was not resolved")
         if self.resources is None:

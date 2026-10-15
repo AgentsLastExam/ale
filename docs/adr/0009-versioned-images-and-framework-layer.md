@@ -1,4 +1,4 @@
-# 0009 - Images are versioned releases and the engine installs the guest service
+# 0009 - Images are versioned and the engine adds its own layer to every Task image
 
 **Status:** Accepted
 
@@ -20,10 +20,13 @@ tags were already immutable but meant nothing to the people choosing them.
   version by pointing a new tag at the same manifest.
 - Tasks may build from any image. Task repositories maintained with ALE name an exact
   base version rather than a floating tag.
-- Images carry no guest service. Docker copies the engine's guestd into each sandbox, and
-  VM preparation writes it and its systemd unit into each disk, configured from the
-  image's `ale.user` and `ale.gui` labels. The guest service identity is part of a VM
-  disk's identity, so a guestd change rebuilds the disk, not the base.
+- Images carry nothing of ALE's own. When it prepares a Linux Task image the engine adds
+  a framework layer on top of the Task's build: guestd, a pinned Cua Driver, for a VM the
+  unit that starts guestd, a check that the Task's `image.user` account exists, and working
+  sudo when `resources.sudo` asks for it. A Task may therefore build from any image with
+  Python and its agent account. No image labels are read: the account comes from the Task
+  and a desktop is recognized from the programs the image ships. The layer is part of the
+  prepared image's identity, so a guestd change rebuilds Task images, not bases.
 
 ## Consequences
 

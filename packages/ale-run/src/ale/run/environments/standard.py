@@ -208,6 +208,7 @@ class StandardEnvironment(Environment):
             proxy_token=ctx.session.token,
             env={"ALE_EPISODE_ID": ctx.episode_id},
             sudo=spec.resources.sudo,
+            user=spec.image.user,
         )
         sandbox = await ctx.sandboxes.acquire(request)
         ctx.resolved_image = sandbox.resolved_image
@@ -234,6 +235,7 @@ class StandardEnvironment(Environment):
             network=NetworkPolicy(mode=NetworkMode.OPEN),
             env={"ALE_EPISODE_ID": ctx.episode_id},
             sudo=False,
+            user=(ctx.spec.verify.image or ctx.spec.image).user,
         )
         sandbox = await ctx.sandboxes.acquire(request)
         ctx.verifier_resolved_image = sandbox.resolved_image

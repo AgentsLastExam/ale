@@ -23,13 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import io
 import json
 import os
-import re
 import secrets
 import shutil
-import tarfile
 import uuid
 import zlib
 from collections.abc import Sequence
@@ -39,7 +36,6 @@ from typing import Literal
 from urllib.parse import quote
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
-from ale.core.ids import content_hash
 from ale.core.sandbox import (
     Capabilities,
     ExecOutputSink,
@@ -79,30 +75,9 @@ __all__ = [
 ]
 
 #: Where the guest service listens inside the VM. Forwarded to an ephemeral host port.
-GUEST_PORT = 7411
+GUEST_PORT = guestd.PORT
 #: The sandbox's guest-service token, kept beside its overlay for reattachment.
 GUEST_TOKEN_FILE = "guestd-token"
-#: How a prepared Linux disk starts the guest service the engine installs into it.
-_GUEST_UNIT = """\
-[Unit]
-Description=ALE guest service
-After=network.target
-
-[Service]
-Environment=ALE_AGENT_USER={user}
-Environment=ALE_AGENT_HOME=/home/{user}
-Environment=ALE_GUI={gui}
-Environment=ALE_CUA_DRIVER_SOCKET=/tmp/ale-cua-driver.sock
-ExecStart=/usr/bin/python3 /opt/ale/guestd/main.py --tcp 0.0.0.0:{port}
-Restart=always
-RestartSec=1
-
-[Install]
-WantedBy=multi-user.target
-"""
-_UNIT_PATH = "etc/systemd/system/ale-guestd.service"
-_UNIT_LINK = "etc/systemd/system/multi-user.target.wants/ale-guestd.service"
-_ACCOUNT = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 VM_STORAGE_OVERHEAD_MB = 1024
 
 #: The image that hosts the virtual machine (built by images/runtimes/qemu-runner). It is
@@ -131,11 +106,6 @@ GUEST_BRIDGE = "docker"
 
 #: Fixed address through which the guest reaches Host services exposed by the runner.
 HOST_IP = "172.30.0.1"
-
-#: Where the guest writes the same facts a container image puts in labels: which account
-#: is the agent's, and whether there is a screen. A disk image has nowhere to hang a label,
-#: so the contract of docs/specs/sandbox-image.md is carried in a file instead.
-DEFAULT_AGENT_USER = "user"
 
 #: A guest boots an operating system, so this is minutes rather than the seconds a
 #: container takes.
@@ -420,7 +390,7 @@ class QemuSandbox(Sandbox):
         resolved_image: ResolvedImage,
         allocation: ResourceAllocation,
         resource_lease: GpuLease | None = None,
-        agent_user: str = DEFAULT_AGENT_USER,
+        agent_user: str,
         agent_home: str = "/home/user",
         host_ip: str = "",
     ) -> None:
@@ -840,7 +810,7 @@ class QemuProvider(Provider):
                 # "not yet" equally, and only the image knows which.
                 await self._await_desktop(client)
             if request.sudo:
-                await self._grant_sudo(client, agent_user, request.os)
+                await self._verify_sudo(client, agent_user, request.os)
         except BaseException:
             with contextlib.suppress(BaseException):
                 await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))
@@ -1152,25 +1122,25 @@ class QemuProvider(Provider):
             )
         user = str(health.get("agent_user") or "")
         home = str(health.get("agent_home") or "")
-        if request.os is OperatingSystem.LINUX:
-            # Published pre-Windows Linux images predate these health fields but already
-            # implement the fixed base-image identity contract.
-            user = user or DEFAULT_AGENT_USER
-            home = home or f"/home/{user}"
+        if request.os is OperatingSystem.LINUX and user != request.user:
+            raise ProviderCapabilityError(
+                f"the VM disk was prepared for agent account {user!r}, but the Task names "
+                f"{request.user!r}"
+            )
         if not user or not home or not await client.exists(home):
             raise ProviderCapabilityError(
                 f"guestd names {user!r} at {home!r} as the agent account, but that home is absent"
             )
         return user, home, bool(health.get("gui"))
 
-    async def _grant_sudo(
+    async def _verify_sudo(
         self, client: GuestClient, agent_user: str, operating_system: OperatingSystem
     ) -> None:
-        """Elevate the agent, and prove it took.
+        """Prove the agent can elevate, as its Task requested.
 
-        Written and then checked, because a rule can land in a guest with no sudo binary
-        at all: the write succeeds, the run reports an elevated agent, and nothing can
-        actually elevate. Provenance would record an isolation level that never applied.
+        Linux disks get working sudo when they are prepared; a Windows agent is elevated by
+        the session its guest service runs in. Checked here so provenance never records an
+        elevation that did not apply.
         """
         if operating_system is OperatingSystem.WINDOWS:
             code, _, stderr, _ = await client.exec(
@@ -1192,18 +1162,13 @@ class QemuProvider(Provider):
                     f"{stderr.strip()}"
                 )
             return
-        await client.write_file(
-            f"/etc/sudoers.d/ale-{agent_user}",
-            f"{agent_user} ALL=(ALL) NOPASSWD: ALL\n".encode(),
-            mode="0440",
-        )
         code, _, stderr, _ = await client.exec(
             ["sudo", "-n", "true"], run_as=agent_user, timeout_sec=30
         )
         if code != 0:
             raise ProviderCapabilityError(
-                f"elevated privileges were requested but {agent_user} still cannot "
-                f"elevate in this guest: {stderr.strip()}"
+                f"elevated privileges were requested but {agent_user} cannot elevate in "
+                f"this guest; prepare the image with resources.sudo: true: {stderr.strip()}"
             )
 
 
@@ -1290,50 +1255,3 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
-
-
-def guest_service_identity() -> str:
-    """Identify the guest service :func:`install_guest_service` writes into a disk."""
-    return content_hash(
-        {
-            "files": {name: (guestd.SOURCE / name).read_text() for name in guestd.FILES},
-            "unit": _GUEST_UNIT,
-            "port": GUEST_PORT,
-        }
-    )
-
-
-def install_guest_service(rootfs: Path, *, user: str, gui: bool) -> None:
-    """Append this engine's guest service to an exported VM root filesystem.
-
-    Later archive members replace earlier ones when the disk is assembled, so a base that
-    still carries an older guestd boots this one instead. The service lives under a
-    root-only directory so the agent cannot read the protocol that drives its sandbox.
-    """
-    if not _ACCOUNT.fullmatch(user):
-        raise ProviderStartError(f"VM image names an invalid agent account {user!r}")
-    unit = _GUEST_UNIT.format(user=user, gui="true" if gui else "false", port=GUEST_PORT)
-    with tarfile.open(rootfs, "a") as archive:
-        for directory in ("opt/ale", "opt/ale/guestd"):
-            archive.addfile(_member(directory, tarfile.DIRTYPE, 0o700))
-        for name in guestd.FILES:
-            content = (guestd.SOURCE / name).read_bytes()
-            member = _member(f"opt/ale/guestd/{name}", tarfile.REGTYPE, 0o600)
-            member.size = len(content)
-            archive.addfile(member, io.BytesIO(content))
-        member = _member(_UNIT_PATH, tarfile.REGTYPE, 0o644)
-        member.size = len(unit.encode())
-        archive.addfile(member, io.BytesIO(unit.encode()))
-        link = _member(_UNIT_LINK, tarfile.SYMTYPE, 0o777)
-        link.linkname = "/" + _UNIT_PATH
-        archive.addfile(link)
-
-
-def _member(name: str, kind: bytes, mode: int) -> tarfile.TarInfo:
-    member = tarfile.TarInfo(name)
-    member.type = kind
-    member.mode = mode
-    member.uid = member.gid = 0
-    member.uname = member.gname = "root"
-    member.mtime = 0
-    return member

@@ -12,9 +12,10 @@ and verifier kinds.
 ## Decision
 
 ALE maintains foundational Linux CLI, GUI, Ubuntu VM GUI, and private Windows 10 BYOL
-bases. A conforming image declares its OS, agent user/home, and GUI capability through the
-Provider-visible contract, supplies system Python and guest integration, and owns its
-lifecycle. Tasks build from these bases rather than shared domain images.
+bases. A Task names its OS and agent account; the image supplies system Python and owns
+its lifecycle, and the engine adds its own guest integration when it prepares the image
+([0009](0009-versioned-images-and-framework-layer.md)). Tasks may build from these bases
+or any image with Python and their agent account.
 
 Every Task explicitly declares or defaults its OS and every solver and dedicated verifier
 declares `image.kind: container|vm` and may declare `image.ref`. A fixed local Dockerfile

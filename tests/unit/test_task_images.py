@@ -26,6 +26,21 @@ from ale.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
 
+#: What the framework layer was asked for, by the tests that look.
+LAYERED: list[tuple[str, str, bool, bool]] = []
+
+
+@pytest.fixture(autouse=True)
+def framework_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise the pipeline; the layer itself is tested in test_framework."""
+
+    async def layer(image: str, *, user: str, sudo: bool, vm: bool = False) -> str:
+        LAYERED.append((image, user, sudo, vm))
+        return image
+
+    LAYERED.clear()
+    monkeypatch.setattr("ale.run.task_images.with_framework", layer)
+
 
 def _task(write_task_repo, **kwargs: object) -> object:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("demo",), **kwargs)
@@ -241,6 +256,7 @@ async def test_buildx_uses_fixed_context_and_observes_container_identity(
     assert inspect[-1] == prepared.prepared_identity
     assert prepared.prepared_identity == "sha256:" + "c" * 64
     assert registry.get(ImageKind.CONTAINER).inputs == [prepared]
+    assert [(prepared.runtime_ref, "user", False, False)] == LAYERED
 
 
 @pytest.mark.asyncio
@@ -385,8 +401,7 @@ async def test_local_vm_candidate_is_materialized_before_provider_check(
     assert registry.get(ImageKind.VM).inputs == [vm]
 
 
-def test_vm_derivation_uses_oci_materializer_and_guest_service_identities_only() -> None:
-    from ale.run.providers.qemu import guest_service_identity
+def test_vm_derivation_uses_oci_and_materializer_identities_only() -> None:
     from ale.run.task_images import vm_materialization_identity
 
     oci = "sha256:" + "1" * 64
@@ -396,7 +411,6 @@ def test_vm_derivation_uses_oci_materializer_and_guest_service_identities_only()
             "output_contract": "ale-vm-qcow2/v1",
             "final_oci_identity": oci,
             "materializer_identity": materializer,
-            "guest_service_identity": guest_service_identity(),
         }
     )
     assert vm_materialization_identity(oci, materializer) == expected

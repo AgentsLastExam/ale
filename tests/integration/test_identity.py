@@ -25,7 +25,7 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers.docker import DEFAULT_AGENT_USER, DockerProvider
+from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
 
@@ -85,7 +85,7 @@ class TestWhoRunsWhat:
         result = await run_one(task_root, tmp_path / "runs")
 
         assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-        assert collected(result, "who") == DEFAULT_AGENT_USER
+        assert collected(result, "who") == "user"
 
     @pytest.mark.asyncio
     async def test_setup_runs_as_the_framework(
@@ -204,7 +204,7 @@ class TestPrivilegeDeclaration:
 
         settings = RunConfig()
         inputs = ProvenanceInputs(
-            source=TaskSource(kind="registry", repo="https://e/x.git", commit="a" * 40, path="t"),
+            source=TaskSource(kind="git", repo="https://e/x.git", commit="a" * 40, path="t"),
             agent=agent_provenance(OracleHarness(), "none"),
             gateway=gateway_provenance(settings),
             config_hash=settings.config_hash,
@@ -214,7 +214,7 @@ class TestPrivilegeDeclaration:
 
         assert result.lock is not None and result.lock.sandbox is not None
         assert result.lock.sandbox.sudo is True
-        assert result.lock.sandbox.user == DEFAULT_AGENT_USER
+        assert result.lock.sandbox.user == "user"
 
 
 class TestIdentityContract:

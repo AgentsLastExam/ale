@@ -533,18 +533,23 @@ def test_windows_guest_contract_is_read_from_guestd_health() -> None:
     assert observed == ("user", r"C:\Users\user", True)
 
 
-def test_legacy_linux_health_uses_the_fixed_base_identity() -> None:
+def test_a_linux_disk_must_be_prepared_for_the_tasks_agent_account() -> None:
     class Client:
+        def __init__(self, user: str) -> None:
+            self.user = user
+
         async def health(self) -> dict[str, object]:
-            return {"os": "linux", "gui": False}
+            return {"os": "linux", "gui": True, "agent_user": self.user, "agent_home": "/home/u"}
 
         async def exists(self, path: str) -> bool:
-            return path == "/home/user"
+            return path == "/home/u"
 
-    observed = asyncio.run(
-        QemuProvider()._read_guest_contract(Client(), request())  # type: ignore[arg-type]
+    contract = asyncio.run(
+        QemuProvider()._read_guest_contract(Client("user"), request())  # type: ignore[arg-type]
     )
-    assert observed == ("user", "/home/user", False)
+    assert contract == ("user", "/home/u", True)
+    with pytest.raises(ProviderCapabilityError, match="prepared for agent account 'app'"):
+        asyncio.run(QemuProvider()._read_guest_contract(Client("app"), request()))  # type: ignore[arg-type]
 
 
 def test_windows_health_must_declare_its_agent_identity() -> None:

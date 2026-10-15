@@ -49,7 +49,7 @@ async def test_task_and_run_skills_stage_once_without_ambient_host_state(
         agent_skills=(SkillSource(path=str(run_skill), origin="run", declared=str(run_skill)),),
         task_root=task_root,
         task_source=TaskSource(
-            kind="registry",
+            kind="git",
             repo="https://example.com/tasks.git",
             commit="a" * 40,
             path="tasks/demo/hello",

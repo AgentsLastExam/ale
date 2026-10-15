@@ -485,6 +485,7 @@ async def _reverify(
             resources=task.spec.resources,
             network=task.spec.network,
             sudo=task.spec.resources.sudo,
+            user=task.spec.image.user,
         )
         provenance = ProvenanceInputs(
             source=resolved.source,
@@ -817,6 +818,8 @@ async def _prepare_images(
                 "local": task.image_source_digest,
                 "ref": spec.ref,
                 "base_ref": spec.base_ref,
+                "user": spec.user,
+                "sudo": task.spec.resources.sudo,
             }
         )
         windows_build = (
@@ -852,6 +855,7 @@ async def _prepare_images(
                 "kind": verify.image.kind,
                 "local": task.verifier_image_source_digest,
                 "ref": verify.image.ref,
+                "user": verify.image.user,
             }
         )
         verifier = by_source.get(verifier_key)

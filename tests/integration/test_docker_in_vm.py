@@ -42,7 +42,7 @@ async def test_task_owned_docker_runs_a_nested_offline_container(tmp_path: Path)
         phase_callback=phases.append,
         provenance=ProvenanceInputs(
             source=TaskSource(
-                kind="registry",
+                kind="git",
                 repo="https://github.com/agents-last-exam/ale-tasks-base.git",
                 commit="a" * 40,
                 path="tasks/demo/docker_in_vm",

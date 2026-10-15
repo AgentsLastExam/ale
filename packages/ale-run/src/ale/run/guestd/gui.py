@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import shutil
@@ -11,6 +12,22 @@ import time
 from typing import Any
 
 COORDINATE_SPACE = 1000
+#: Where guestd's Cua Driver server listens on Linux.
+_LINUX_SOCKET = "/tmp/ale-cua-driver.sock"
+#: Programs that put a desktop on screen; an image with none of them is headless.
+_DISPLAY_SERVERS = ("Xvnc", "Xvfb", "Xorg", "Xwayland", "gnome-shell", "gdm3", "lightdm", "sddm")
+_PROGRAM_DIRS = ("/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/libexec", "/bin", "/sbin")
+#: What Cua Driver takes from the session it drives.
+_SESSION_KEYS = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_TYPE",
+    "XDG_CURRENT_DESKTOP",
+)
+_server: subprocess.Popen[bytes] | None = None
 
 
 class GuiUnavailable(RuntimeError):
@@ -25,9 +42,33 @@ def _binary() -> str:
     return found
 
 
+def has_desktop() -> bool:
+    """Whether this image can put a desktop on screen at all.
+
+    Decided from the programs the image ships, so a headless image is known to be headless
+    at once instead of after waiting for a screen that will never appear.
+    """
+    if os.name == "nt":
+        return True
+    return any(
+        os.path.exists(os.path.join(directory, name))
+        for directory in _PROGRAM_DIRS
+        for name in _DISPLAY_SERVERS
+    )
+
+
 def _call(tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        return _invoke(tool, arguments)
+    except GuiUnavailable:
+        if not _start_server():
+            raise
+        return _invoke(tool, arguments)
+
+
+def _invoke(tool: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     command = [_binary(), "call", tool, json.dumps(arguments or {}, separators=(",", ":"))]
-    if socket := os.environ.get("ALE_CUA_DRIVER_SOCKET"):
+    if socket := _socket():
         command += ["--socket", socket]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
@@ -45,6 +86,108 @@ def _call(tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise GuiUnavailable(f"cua-driver {tool} returned a non-object result")
     return payload
+
+
+def _socket() -> str | None:
+    configured = os.environ.get("ALE_CUA_DRIVER_SOCKET")
+    return configured or (None if os.name == "nt" else _LINUX_SOCKET)
+
+
+def _start_server() -> bool:
+    """Start Cua Driver inside the agent's desktop session; True if one was started.
+
+    The image only has to run a desktop: the engine installed Cua Driver, and guestd
+    starts it as the agent account with the environment of that account's session, so
+    capture and input reach the screen the agent sees. Windows starts it with the session.
+    """
+    global _server
+    if os.name == "nt" or os.environ.get("ALE_CUA_DRIVER_SOCKET"):
+        return False
+    if _server is not None and _server.poll() is None:
+        return False
+    import pwd
+
+    try:
+        account = pwd.getpwnam(os.environ.get("ALE_AGENT_USER") or "user")
+    except KeyError as exc:
+        raise GuiUnavailable("the agent account does not exist in this image") from exc
+    session = _session_environment(account.pw_uid)
+    if session is None:
+        raise GuiUnavailable("no desktop session is running for the agent account yet")
+    env = {key: session[key] for key in _SESSION_KEYS if key in session}
+    env.update(
+        HOME=account.pw_dir,
+        USER=account.pw_name,
+        LOGNAME=account.pw_name,
+        PATH=session.get("PATH") or "/usr/local/bin:/usr/bin:/bin",
+    )
+    if "DBUS_SESSION_BUS_ADDRESS" not in env:
+        try:
+            with open("/tmp/dbus-session-bus-address") as handle:
+                if address := handle.read().strip():
+                    env["DBUS_SESSION_BUS_ADDRESS"] = address
+        except OSError:
+            pass
+
+    def demote() -> None:
+        os.setgid(account.pw_gid)
+        os.initgroups(account.pw_name, account.pw_gid)
+        os.setuid(account.pw_uid)
+
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(_LINUX_SOCKET)
+    try:
+        log = open("/tmp/ale-cua-driver.log", "ab")  # noqa: SIM115 - handed to the child
+        _server = subprocess.Popen(
+            [
+                _binary(),
+                "serve",
+                "--socket",
+                _LINUX_SOCKET,
+                "--permission-mode",
+                "unrestricted",
+                "--dangerously-bypass-approvals",
+            ],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
+            preexec_fn=demote,
+        )
+        log.close()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GuiUnavailable(f"cua-driver could not be started: {exc}") from exc
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and _server.poll() is None:
+        if os.path.exists(_LINUX_SOCKET):
+            return True
+        time.sleep(0.2)
+    raise GuiUnavailable("cua-driver did not start in the desktop session")
+
+
+def _session_environment(uid: int) -> dict[str, str] | None:
+    """The environment of the account's desktop session, read from its own processes."""
+    best: tuple[int, dict[str, str]] | None = None
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != uid:
+                continue
+            with open(f"/proc/{entry.name}/environ", "rb") as handle:
+                raw = handle.read()
+        except OSError:
+            continue
+        env = dict(
+            item.split("=", 1) for item in raw.decode("utf-8", "replace").split("\0") if "=" in item
+        )
+        if not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
+            continue
+        score = sum(key in env for key in _SESSION_KEYS)
+        if best is None or score > best[0]:
+            best = (score, env)
+    return best[1] if best else None
 
 
 def available() -> bool:

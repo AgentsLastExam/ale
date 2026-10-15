@@ -43,10 +43,10 @@ from tests.support import provider_registry
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 
-def inputs_for(harness: object, *, kind: str = "registry") -> ProvenanceInputs:
+def inputs_for(harness: object, *, kind: str = "git") -> ProvenanceInputs:
     source = (
-        TaskSource(kind="registry", repo="https://example.com/tasks.git", commit="a" * 40, path="t")
-        if kind == "registry"
+        TaskSource(kind="git", repo="https://example.com/tasks.git", commit="a" * 40, path="t")
+        if kind == "git"
         else TaskSource(kind="local", path="/tmp/t")
     )
     settings = RunConfig()

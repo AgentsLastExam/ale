@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -38,15 +37,15 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
         "systemd",
         "ubuntu-desktop",
         "gdm3.service",
-        "CUA_DRIVER_VERSION=0.12.6",
-        "cua-driver serve",
         "sudo",
     ):
         assert required in dockerfile
-    # The engine installs guestd into every prepared disk; the base carries none.
+    # The engine adds guestd and Cua Driver to every prepared image; the base carries neither.
     for forbidden in (
         "/opt/ale",
         "ale-guestd.service",
+        "cua-driver",
+        "LABEL",
         "nftables",
         "docker.io",
         "docker-ce",
@@ -57,17 +56,6 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
         "xdotool",
     ):
         assert forbidden not in dockerfile
-
-    manifest = json.loads((vm_base / "image.json").read_text())
-    assert manifest == {
-        "schema": 1,
-        "os": "ubuntu",
-        "release": "24.04",
-        "user": "user",
-        "gui": True,
-        "port": 7411,
-        "guest_contract": "ale-guest/v1",
-    }
 
     materialize = (materializer / "materialize.sh").read_text()
     assert "truncate -s 40G" not in materialize
