@@ -17,10 +17,11 @@ import pytest
 from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import ImageRef
 from ale.run.providers.docker import DEFAULT_AGENT_USER, DockerProvider
+from tests.support import CONTAINER_BASE
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-CONFORMING = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+CONFORMING = CONTAINER_BASE
 
 #: A build environment, not a sandbox: no unprivileged account, and a command that exits
 #: at once. Referencing one directly is exactly what the contract rules out.

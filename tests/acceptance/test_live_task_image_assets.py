@@ -9,7 +9,7 @@ from ale.core.sandbox import SandboxRequest
 from ale.run.providers.docker import DockerProvider
 from ale.run.task_images import prepare_task_image
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import provider_registry
+from tests.support import CONTAINER_BASE, provider_registry
 
 pytestmark = [pytest.mark.needs_docker]
 
@@ -25,7 +25,7 @@ def write_task(repository: Path) -> Path:
     )
     (path / "instruction.md").write_text("Inspect /home/user/input/public.txt.\n")
     (path / "image" / "Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
+        f"FROM {CONTAINER_BASE}\n"
         "COPY assets/public.txt /home/user/input/public.txt\n"
         "RUN chown -R user:user /home/user/input\n"
     )

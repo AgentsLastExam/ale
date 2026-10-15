@@ -43,6 +43,7 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem
+from ale.run import ale_image, guestd
 from ale.run.gpu import GpuLease, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
 from ale.run.sources import cache_root
@@ -58,7 +59,7 @@ __all__ = [
 
 GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
 #: Any image with iptables can apply a sandbox's host rules; ALE's QEMU runner is one.
-NETFILTER_IMAGE = "ghcr.io/agentslastexam/ale-qemu-runner:0.1.0"
+NETFILTER_IMAGE = ale_image("ale-qemu-runner")
 
 #: An image sets this to "true" when it starts a desktop, so provisioning waits for it.
 GUI_LABEL = "ale.gui"
@@ -522,7 +523,7 @@ class DockerProvider(Provider):
         gpus: tuple[int, ...] = (),
         gpu_lock_dir: Path | None = None,
     ) -> None:
-        self._guestd_source = guestd_source or Path(__file__).resolve().parents[1] / "guestd"
+        self._guestd_source = guestd_source or guestd.SOURCE
         self.gpus = gpus
         self.gpu_lock_dir = gpu_lock_dir or cache_root() / "gpu-locks" / self.name
         # An image's conformance cannot change while it is pinned to a digest, and the
@@ -957,21 +958,29 @@ class DockerProvider(Provider):
     async def _install_guestd(self, container: str) -> None:
         """Copy the guest service in.
 
-        Base images bake it, but copying keeps the provider usable with any image and
-        guarantees the running code matches this checkout — worth the few milliseconds.
+        Images carry none of their own, so the running code always matches this checkout.
+        It lives under a root-only directory so the agent cannot read the protocol that
+        drives its own sandbox.
         """
-        code, _, stderr = await _docker("exec", container, "mkdir", "-p", str(GUESTD_DIR))
+        code, _, stderr = await _docker(
+            "exec", "--user", "0", container, "mkdir", "-p", str(GUESTD_DIR)
+        )
         if code != 0:
             raise ProviderStartError(f"could not prepare guest directory: {stderr.strip()}")
-        for name in ("main.py", "protocol.py", "gui.py"):
+        for name in guestd.FILES:
             source = self._guestd_source / name
-            if not source.exists():
-                continue
             code, _, stderr = await _docker(
                 "cp", str(source), f"{container}:{GUESTD_DIR}/{name}", timeout=60
             )
             if code != 0:
                 raise ProviderStartError(f"could not install {name}: {stderr.strip()}")
+        root = str(GUESTD_DIR.parent)
+        code, _, stderr = await _docker(
+            "exec", "--user", "0", container, "sh", "-c",
+            f"chown -R 0:0 {root} && chmod -R go-rwx {root}",
+        )  # fmt: skip
+        if code != 0:
+            raise ProviderStartError(f"could not restrict the guest service: {stderr.strip()}")
 
     async def _connect(self, container: str, agent_user: str, has_desktop: bool) -> GuestClient:
         transport = StdioTransport(

@@ -17,7 +17,7 @@ from ale.run.harnesses.builtin import OracleHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
 from ale_verify import ScoredChoice, _llm
-from tests.support import provider_registry
+from tests.support import CONTAINER_BASE, provider_registry
 
 pytestmark = pytest.mark.integration
 
@@ -126,7 +126,7 @@ def direct_llm_task(root: Path) -> Path:
         "HTTPServer(('127.0.0.1', 18765), Handler).serve_forever()\n"
     )
     (task / "image" / "Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
+        f"FROM {CONTAINER_BASE}\n"
         "COPY server.py /opt/task/server.py\n"
         "RUN mkdir -p /home/user/output && chown -R user:user /home/user/output\n"
     )

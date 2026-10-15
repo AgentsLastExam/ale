@@ -149,15 +149,19 @@ The image is the reproducible initial computer state supplied to the agent. Star
 base matching the Task OS and `image.kind`, then add every stable dependency, service, file,
 permission, and piece of initial state required by the Task. The Linux bases are:
 
-- container: `ghcr.io/agentslastexam/container-ubuntu22-base:latest` (Ubuntu 22.04);
-- VM: `ghcr.io/agentslastexam/vm-ubuntu24-base:0.1.0` (Ubuntu 24.04).
+- container: `ghcr.io/agentslastexam/container-ubuntu22-base` (Ubuntu 22.04);
+- VM: `ghcr.io/agentslastexam/vm-ubuntu24-base` (Ubuntu 24.04).
+
+Name an exact version, such as `:0.1.1`, never `latest`; `ale new-task` writes the
+engine's current version. A Task keeps building from the version it names until its
+author moves it ([Sandbox image](sandbox-image.md#versions)).
 
 The submitted initial environment must be reproducible from `image/`; an exploratory sandbox
 snapshot is not Task source. Large build inputs belong in `image/assets/` and are copied by the
 image build. Image-local scripts may implement non-trivial installation and configuration.
 
 ```dockerfile
-FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest
+FROM ghcr.io/agentslastexam/container-ubuntu22-base:0.1.1
 
 COPY install.sh /tmp/install.sh
 RUN /tmp/install.sh && rm /tmp/install.sh

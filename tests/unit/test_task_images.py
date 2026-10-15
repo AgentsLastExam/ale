@@ -385,7 +385,8 @@ async def test_local_vm_candidate_is_materialized_before_provider_check(
     assert registry.get(ImageKind.VM).inputs == [vm]
 
 
-def test_vm_derivation_uses_oci_and_materializer_identities_only() -> None:
+def test_vm_derivation_uses_oci_materializer_and_guest_service_identities_only() -> None:
+    from ale.run.providers.qemu import guest_service_identity
     from ale.run.task_images import vm_materialization_identity
 
     oci = "sha256:" + "1" * 64
@@ -395,9 +396,14 @@ def test_vm_derivation_uses_oci_and_materializer_identities_only() -> None:
             "output_contract": "ale-vm-qcow2/v1",
             "final_oci_identity": oci,
             "materializer_identity": materializer,
+            "guest_service_identity": guest_service_identity(),
         }
     )
     assert vm_materialization_identity(oci, materializer) == expected
+
+
+#: The labels a VM base declares, which configure the guest service the engine installs.
+VM_LABELS = '{"ale.user": "user", "ale.gui": "true"}'
 
 
 def _vm_build() -> _OciBuild:
@@ -459,6 +465,8 @@ async def test_vm_materialization_publishes_only_valid_output_and_cleans_tempora
         commands.append(argv)
         if argv[:2] == ("docker", "create"):
             return 0, "container-id\n", ""
+        if argv[:3] == ("docker", "image", "inspect"):
+            return 0, VM_LABELS, ""
         if argv[:2] == ("docker", "export"):
             _write_rootfs_tar(Path(argv[argv.index("--output") + 1]))
         if argv[:2] == ("docker", "run"):
@@ -487,6 +495,8 @@ async def test_failed_vm_materialization_leaves_no_reusable_artifact(
     async def run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
         if argv[:2] == ("docker", "create"):
             return 0, "container-id\n", ""
+        if argv[:3] == ("docker", "image", "inspect"):
+            return 0, VM_LABELS, ""
         if argv[:2] == ("docker", "export"):
             _write_rootfs_tar(Path(argv[argv.index("--output") + 1]))
             return 0, "", ""

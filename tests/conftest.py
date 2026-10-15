@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.support import CONTAINER_BASE
+
 # Typer forces Rich terminal styling whenever GITHUB_ACTIONS is set, which splits option
 # names in help text with escape codes. Tests read the same plain output everywhere.
 os.environ.setdefault("_TYPER_FORCE_DISABLE_TERMINAL", "1")
@@ -74,12 +76,12 @@ def write_task_repo(tmp_path: Path) -> Callable[..., Path]:
             (task / "instruction.md").write_text("Do the task.\n", encoding="utf-8")
             if with_image_dockerfile:
                 (task / "image" / "Dockerfile").write_text(
-                    "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n",
+                    f"FROM {CONTAINER_BASE}\n",
                     encoding="utf-8",
                 )
             if with_verifier_dockerfile:
                 (task / "verify" / "Dockerfile").write_text(
-                    "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n",
+                    f"FROM {CONTAINER_BASE}\n",
                     encoding="utf-8",
                 )
             for stage in ("verify", "oracle"):

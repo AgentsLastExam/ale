@@ -9,16 +9,17 @@ import pytest
 from ale.core.sandbox import SandboxRequest
 from ale.core.taskspec import NetworkPolicy, Resources
 from ale.run.providers.docker import DockerProvider
-from tests.support import prepare_reference
+from tests.support import CONTAINER_BASE, prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
 
-GUI_IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+GUI_IMAGE = CONTAINER_BASE
 
 PROBE = """
 import sys
 sys.path.insert(0, "/opt/ale/guestd")
 import gui
+from tests.support import CONTAINER_BASE
 png = gui.capture_screen()
 print(gui._binary(), len(png), png.startswith(bytes([137, 80, 78, 71])))
 """

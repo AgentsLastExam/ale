@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 
 [manifest]
@@ -134,7 +134,7 @@ wheels = [
 
 [[package]]
 name = "ale-core"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "packages/ale-core" }
 dependencies = [
     { name = "pydantic" },
@@ -145,7 +145,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.9" }]
 
 [[package]]
 name = "ale-run"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "packages/ale-run" }
 dependencies = [
     { name = "aiohttp" },
@@ -168,7 +168,7 @@ requires-dist = [
 
 [[package]]
 name = "ale-verify"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "packages/ale-verify" }
 
 [[package]]

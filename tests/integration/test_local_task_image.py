@@ -19,10 +19,11 @@ from ale.run.providers import ProviderRegistry
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import prepare_task_image, prepare_task_image_result
 from ale.run.tasksets.manifest import load_tasks
+from tests.support import VM_BASE
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-VM_BASE = "ghcr.io/agentslastexam/vm-ubuntu24-base:0.1.0"
+VM_BASE = VM_BASE
 IMAGE_ROOT = Path(__file__).resolve().parents[2] / "images"
 
 
@@ -40,10 +41,13 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
         "CUA_DRIVER_VERSION=0.12.6",
         "cua-driver serve",
         "sudo",
-        "ale-guestd.service",
     ):
         assert required in dockerfile
+    # The engine installs guestd into every prepared disk; the base carries none.
     for forbidden in (
+        "/opt/ale",
+        "ale-guestd.service",
+        "nftables",
         "docker.io",
         "docker-ce",
         "ros-",
@@ -63,7 +67,6 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
         "gui": True,
         "port": 7411,
         "guest_contract": "ale-guest/v1",
-        "base_release": "0.1.0",
     }
 
     materialize = (materializer / "materialize.sh").read_text()
@@ -71,10 +74,6 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
     assert "qemu-img convert" in materialize
     assert "qemu-img check" in materialize
     assert (materializer / "10-root.conf").read_text().find("GrowFileSystem=yes") >= 0
-
-    guestd_unit = (vm_base / "ale-guestd.service").read_text()
-    assert "After=network.target" in guestd_unit
-    assert "network-online.target" not in guestd_unit
 
     runner_entrypoint = (runner / "entrypoint.sh").read_text()
     assert (

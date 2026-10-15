@@ -31,12 +31,12 @@ from ale.run.harnesses.builtin import OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import prepare_reference, provider_registry
+from tests.support import CONTAINER_BASE, prepare_reference, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 #: Our own base image, which satisfies the sandbox contract; see tests/integration/conftest.
-IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+IMAGE = CONTAINER_BASE
 
 EPISODES = 4
 

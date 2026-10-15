@@ -18,11 +18,11 @@ from ale.core.taskspec import (
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.providers.docker import DockerProvider
-from tests.support import prepare_reference
+from tests.support import CONTAINER_BASE, prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+IMAGE = CONTAINER_BASE
 
 
 def write_skill(path: Path, text: str, *, executable: bool = False) -> None:

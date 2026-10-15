@@ -112,7 +112,10 @@ jobs:
       - run: uv sync --frozen --all-groups
       - name: Build Agent Judge acceptance image
         if: env.OPENAI_API_KEY != '' || env.ANTHROPIC_API_KEY != ''
-        run: docker build -f tests/acceptance/agent-judge.Dockerfile -t ale-agent-judge-live:local .
+        run: |
+          images/build.sh container-ubuntu22-base
+          docker build -f tests/acceptance/agent-judge.Dockerfile -t ale-agent-judge-live:local \
+            --build-arg "BASE=$(uv run python -c 'from ale.run import ale_image; print(ale_image("container-ubuntu22-base"))')" .
       - name: Run live judge acceptance
         if: env.OPENAI_API_KEY != '' || env.ANTHROPIC_API_KEY != ''
         env:
@@ -129,13 +132,16 @@ jobs:
       github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push' && needs.changes.outputs.code == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
       - run: uv sync --frozen --all-groups
+      # This engine version's images: pulled once published, built here while a new
+      # version is still under review.
+      - run: images/build.sh container-ubuntu22-base ale-qemu-runner
       # One -m, not two: a second `-m` replaces the first rather than intersecting, so
       # the earlier form silently ran every non-KVM test including the unit suite.
       # The desktop image is tens of gigabytes, so it stays out of hosted CI.
@@ -155,6 +161,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - run: uv sync --frozen --all-groups
+      - run: images/build.sh vm-ubuntu24-base ale-vm-materializer ale-qemu-runner
       # The QEMU suite needs a prepared disk; preparing the fixture VM Task builds or
       # reuses one in the runner's cache instead of letting the suite skip.
       - run: uv run ale prepare tests/fixtures/tasks/vm-smoke
@@ -174,4 +181,5 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - run: uv sync --frozen --all-groups
+      - run: images/build.sh container-ubuntu22-base ale-qemu-runner
       - run: uv run pytest -m needs_gui

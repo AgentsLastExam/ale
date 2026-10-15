@@ -42,8 +42,6 @@ RUN curl -fsSL https://cua.ai/driver/install.sh -o /tmp/install-cua-driver.sh \
 
 RUN id -u user >/dev/null 2>&1 || useradd --create-home --shell /bin/bash user
 
-COPY packages/ale-run/src/ale/run/guestd/ /opt/ale/guestd/
-COPY images/base/vm-ubuntu24/ale-guestd.service /etc/systemd/system/ale-guestd.service
 COPY images/base/vm-ubuntu24/20-wired.network /etc/systemd/network/20-wired.network
 COPY images/base/vm-ubuntu24/gdm-custom.conf /etc/gdm3/custom.conf
 COPY images/base/vm-ubuntu24/image.json /etc/ale/image.json
@@ -59,16 +57,13 @@ RUN mkdir -p /efi /home/user/.config/autostart \
         > /home/user/.config/autostart/ale-cua-driver.desktop \
     && touch /home/user/.config/gnome-initial-setup-done \
     && chown -R user:user /home/user \
-    && chown -R root:root /opt/ale \
-    && chmod -R go-rwx /opt/ale \
-    && chmod 0644 /etc/systemd/system/ale-guestd.service \
     && kernel_version="$(basename /usr/lib/modules/*)" \
     && cp "/boot/vmlinuz-${kernel_version}" "/usr/lib/modules/${kernel_version}/vmlinuz" \
-    && systemctl enable ale-guestd.service systemd-networkd.service \
-        systemd-resolved.service gdm3.service \
+    && systemctl enable systemd-networkd.service systemd-resolved.service gdm3.service \
     && systemctl set-default graphical.target \
     && : > /etc/machine-id
 
+# The engine installs its own guestd into every prepared disk and reads these to
+# configure it, so this image carries no guest service of its own.
 LABEL ale.user="user" \
-      ale.gui="true" \
-      ale.vm_base_release="0.1.0"
+      ale.gui="true"

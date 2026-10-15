@@ -30,8 +30,9 @@ must present is claimed by the framework:
   service stays claimed while a reboot or a saved disk carries no token forward. Windows
   keeps it in memory, because its image builder saves a running guest's disk; its guest
   service already runs as the agent account.
-- A guest service that does not support authentication fails closed: its image must be
-  rebuilt from the current ALE base.
+- A guest service that does not support authentication fails closed. Linux disks the
+  engine prepares carry its own guestd ([0009](0009-versioned-images-and-engine-installed-guest-service.md)),
+  so only a disk prepared by an older engine, or an old Windows base, needs rebuilding.
 
 ## Alternatives considered
 

@@ -23,10 +23,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import os
+import re
 import secrets
 import shutil
+import tarfile
 import uuid
 import zlib
 from collections.abc import Sequence
@@ -36,6 +39,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.core.ids import content_hash
 from ale.core.sandbox import (
     Capabilities,
     ExecOutputSink,
@@ -56,6 +60,7 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem
+from ale.run import ale_image, guestd
 from ale.run.gpu import GpuLease, normalize_pci_bdf, parse_nvidia_smi
 from ale.run.images import (
     resolve_local_vm_fixture,
@@ -77,6 +82,27 @@ __all__ = [
 GUEST_PORT = 7411
 #: The sandbox's guest-service token, kept beside its overlay for reattachment.
 GUEST_TOKEN_FILE = "guestd-token"
+#: How a prepared Linux disk starts the guest service the engine installs into it.
+_GUEST_UNIT = """\
+[Unit]
+Description=ALE guest service
+After=network.target
+
+[Service]
+Environment=ALE_AGENT_USER={user}
+Environment=ALE_AGENT_HOME=/home/{user}
+Environment=ALE_GUI={gui}
+Environment=ALE_CUA_DRIVER_SOCKET=/tmp/ale-cua-driver.sock
+ExecStart=/usr/bin/python3 /opt/ale/guestd/main.py --tcp 0.0.0.0:{port}
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+"""
+_UNIT_PATH = "etc/systemd/system/ale-guestd.service"
+_UNIT_LINK = "etc/systemd/system/multi-user.target.wants/ale-guestd.service"
+_ACCOUNT = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 VM_STORAGE_OVERHEAD_MB = 1024
 
 #: The image that hosts the virtual machine (built by images/runtimes/qemu-runner). It is
@@ -84,7 +110,7 @@ VM_STORAGE_OVERHEAD_MB = 1024
 #: permissions, guest bridge and signal handling a QEMU-in-a-container needs; ours is
 #: published under our own namespace so a run does not depend on an image someone else
 #: can move, and differs only in what its entrypoint checks and says.
-RUNNER_IMAGE = os.environ.get("ALE_QEMU_RUNNER", "ghcr.io/agentslastexam/ale-qemu-runner:0.1.0")
+RUNNER_IMAGE = os.environ.get("ALE_QEMU_RUNNER", ale_image("ale-qemu-runner"))
 
 #: Where the runner expects the disk to boot, and the address it presents the host at.
 #: Runner-side forwarding and the rewritten gateway URL both target the latter.
@@ -1264,3 +1290,50 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def guest_service_identity() -> str:
+    """Identify the guest service :func:`install_guest_service` writes into a disk."""
+    return content_hash(
+        {
+            "files": {name: (guestd.SOURCE / name).read_text() for name in guestd.FILES},
+            "unit": _GUEST_UNIT,
+            "port": GUEST_PORT,
+        }
+    )
+
+
+def install_guest_service(rootfs: Path, *, user: str, gui: bool) -> None:
+    """Append this engine's guest service to an exported VM root filesystem.
+
+    Later archive members replace earlier ones when the disk is assembled, so a base that
+    still carries an older guestd boots this one instead. The service lives under a
+    root-only directory so the agent cannot read the protocol that drives its sandbox.
+    """
+    if not _ACCOUNT.fullmatch(user):
+        raise ProviderStartError(f"VM image names an invalid agent account {user!r}")
+    unit = _GUEST_UNIT.format(user=user, gui="true" if gui else "false", port=GUEST_PORT)
+    with tarfile.open(rootfs, "a") as archive:
+        for directory in ("opt/ale", "opt/ale/guestd"):
+            archive.addfile(_member(directory, tarfile.DIRTYPE, 0o700))
+        for name in guestd.FILES:
+            content = (guestd.SOURCE / name).read_bytes()
+            member = _member(f"opt/ale/guestd/{name}", tarfile.REGTYPE, 0o600)
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+        member = _member(_UNIT_PATH, tarfile.REGTYPE, 0o644)
+        member.size = len(unit.encode())
+        archive.addfile(member, io.BytesIO(unit.encode()))
+        link = _member(_UNIT_LINK, tarfile.SYMTYPE, 0o777)
+        link.linkname = "/" + _UNIT_PATH
+        archive.addfile(link)
+
+
+def _member(name: str, kind: bytes, mode: int) -> tarfile.TarInfo:
+    member = tarfile.TarInfo(name)
+    member.type = kind
+    member.mode = mode
+    member.uid = member.gid = 0
+    member.uname = member.gname = "root"
+    member.mtime = 0
+    return member

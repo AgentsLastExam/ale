@@ -26,9 +26,15 @@ from ale.core.taskspec import (
     Resources,
     VerificationMode,
 )
+from ale.run import ale_image
 from ale.run.content import tree_digest
 from ale.run.providers import ProviderRegistry
-from ale.run.providers.qemu import RUNNER_IMAGE, QemuProvider
+from ale.run.providers.qemu import (
+    RUNNER_IMAGE,
+    QemuProvider,
+    guest_service_identity,
+    install_guest_service,
+)
 from ale.run.sources import cache_root
 
 __all__ = [
@@ -41,10 +47,7 @@ __all__ = [
     "vm_materialization_identity",
 ]
 
-MATERIALIZER_IMAGE = os.environ.get(
-    "ALE_VM_MATERIALIZER",
-    "ghcr.io/agentslastexam/ale-vm-materializer:0.1.0",
-)
+MATERIALIZER_IMAGE = os.environ.get("ALE_VM_MATERIALIZER", ale_image("ale-vm-materializer"))
 VM_OUTPUT_CONTRACT = "ale-vm-qcow2/v1"
 WINDOWS_BUILD_CONTRACT = "ale-windows-powershell/v1"
 
@@ -505,6 +508,7 @@ def vm_materialization_identity(oci_identity: str, materializer_identity: str) -
             "output_contract": VM_OUTPUT_CONTRACT,
             "final_oci_identity": oci_identity,
             "materializer_identity": materializer_identity,
+            "guest_service_identity": guest_service_identity(),
         }
     )
 
@@ -600,6 +604,8 @@ async def _materialize(runtime_ref: str, disk: Path) -> None:
             input_dir / "rootfs.tar",
             input_dir / "initrd.img",
         )
+        user, gui = await _vm_account(runtime_ref)
+        await asyncio.to_thread(install_guest_service, input_dir / "rootfs.tar", user=user, gui=gui)
 
         code, _, stderr = await _run(
             "docker",
@@ -623,6 +629,21 @@ async def _materialize(runtime_ref: str, disk: Path) -> None:
         if container:
             await _run("docker", "rm", "-f", container, timeout=60)
         shutil.rmtree(temporary, ignore_errors=True)
+
+
+async def _vm_account(runtime_ref: str) -> tuple[str, bool]:
+    """The agent account and desktop a VM image declares, for its guest service."""
+    code, output, stderr = await _run(
+        "docker", "image", "inspect", "--format", "{{json .Config.Labels}}", runtime_ref,
+        timeout=30,
+    )  # fmt: skip
+    if code != 0:
+        raise ProviderStartError(f"could not inspect the VM image: {stderr.strip()}")
+    labels = json.loads(output or "null") or {}
+    user = labels.get("ale.user")
+    if not isinstance(user, str) or not user:
+        raise ProviderStartError("VM image declares no ale.user label for its agent account")
+    return user, labels.get("ale.gui") == "true"
 
 
 async def _valid_qcow2(path: Path) -> bool:

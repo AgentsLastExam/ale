@@ -1,22 +1,40 @@
 name: images
 
+# Every ALE image is published under the engine's version (packages/ale-run/pyproject.toml)
+# once and never again: a version the registry already has is skipped, so an image never
+# changes under the engines and Tasks that use it. To publish a changed image, release a
+# new engine version.
+
 on:
   push:
     branches: [main]
     paths:
       - 'images/**'
-      - 'packages/ale-run/src/ale/run/guestd/**'
+      - 'packages/ale-run/pyproject.toml'
   pull_request:
     paths:
       - 'images/**'
-      - 'packages/ale-run/src/ale/run/guestd/**'
   workflow_dispatch:
+    inputs:
+      promote_repository:
+        description: Give an existing image a version (repository, e.g. container-ubuntu22-base)
+        required: false
+        default: ''
+      promote_source:
+        description: The existing image, as a tag or sha256 digest
+        required: false
+        default: ''
+      promote_version:
+        description: The version to publish it as (X.Y.Z, never already published)
+        required: false
+        default: ''
 
-env:
-  REGISTRY: ghcr.io
+permissions:
+  contents: read
 
 jobs:
   build:
+    if: github.event_name != 'workflow_dispatch' || inputs.promote_repository == ''
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -26,25 +44,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - path: images/base/container-ubuntu22
-            inputs: images/base/container-ubuntu22 packages/ale-run/src/ale/run/guestd
-            repository: container-ubuntu22-base
-            version: latest
+          - repository: container-ubuntu22-base
+            dockerfile: images/base/container-ubuntu22/Dockerfile
+            context: images/base/container-ubuntu22
+          - repository: vm-ubuntu24-base
+            dockerfile: images/base/vm-ubuntu24/Dockerfile
             context: .
-          - path: images/base/vm-ubuntu24
-            inputs: images/base/vm-ubuntu24 images/builders/vm-materializer/10-root.conf packages/ale-run/src/ale/run/guestd
-            repository: vm-ubuntu24-base
-            version: 0.1.0
-            context: .
-          - path: images/builders/vm-materializer
-            inputs: images/builders/vm-materializer
-            repository: ale-vm-materializer
-            version: 0.1.0
+          - repository: ale-vm-materializer
+            dockerfile: images/builders/vm-materializer/Dockerfile
             context: images/builders/vm-materializer
-          - path: images/runtimes/qemu-runner
-            inputs: images/runtimes/qemu-runner
-            repository: ale-qemu-runner
-            version: 0.1.0
+          - repository: ale-qemu-runner
+            dockerfile: images/runtimes/qemu-runner/Dockerfile
             context: images/runtimes/qemu-runner
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -55,25 +65,65 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute content tag
-        id: tag
+      - name: Check whether this version is published
+        id: release
         run: |
-          hash=$(git ls-files -s ${{ matrix.inputs }} \
-                 | sha256sum | cut -c1-12)
-          echo "content=$hash" >> "$GITHUB_OUTPUT"
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' packages/ale-run/pyproject.toml)
+          image="ghcr.io/agentslastexam/${{ matrix.repository }}:$version"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+            echo "$image is already published and stays as it is"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        if: steps.release.outputs.published == 'false'
         with:
           context: ${{ matrix.context }}
-          file: ${{ matrix.path }}/Dockerfile
+          file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.REGISTRY }}/agentslastexam/${{ matrix.repository }}:${{ matrix.version }}
-            ${{ env.REGISTRY }}/agentslastexam/${{ matrix.repository }}:${{ steps.tag.outputs.content }}
-          labels: ale.content_hash=${{ steps.tag.outputs.content }}
+          tags: ${{ steps.release.outputs.image }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Give an image that was published without a version (such as a floating tag's current
+  # target) a version, by pointing a new tag at the very same manifest. Nothing is rebuilt.
+  promote:
+    if: github.event_name == 'workflow_dispatch' && inputs.promote_repository != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REPOSITORY: ${{ inputs.promote_repository }}
+      SOURCE: ${{ inputs.promote_source }}
+      VERSION: ${{ inputs.promote_version }}
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the existing image under its version
+        run: |
+          [[ "$REPOSITORY" =~ ^[a-z0-9-]+$ ]] || { echo "::error::invalid repository"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must be X.Y.Z"; exit 1; }
+          image="ghcr.io/agentslastexam/$REPOSITORY"
+          case "$SOURCE" in
+            sha256:*) source="$image@$SOURCE" ;;
+            *) source="$image:$SOURCE" ;;
+          esac
+          if docker buildx imagetools inspect "$image:$VERSION" >/dev/null 2>&1; then
+            echo "::error::$image:$VERSION is already published; a version never changes"
+            exit 1
+          fi
+          docker buildx imagetools create --tag "$image:$VERSION" "$source"
+          docker buildx imagetools inspect "$image:$VERSION"

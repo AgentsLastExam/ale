@@ -22,7 +22,7 @@ from ale.run.task_images import (
     prepare_verifier_image_result,
 )
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import provider_registry
+from tests.support import CONTAINER_BASE, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -417,14 +417,12 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
     )
     (task / "instruction.md").write_text("Produce both declared outputs.\n")
     (task / "image/Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
+        f"FROM {CONTAINER_BASE}\n"
         "RUN mkdir -p /home/user/output /var/lib/ale-report "
         "&& printf '{}\\n' > /home/user/output/result.json "
         "&& chown -R user:user /home/user/output /var/lib/ale-report\n"
     )
-    (task / "verify/Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
-    )
+    (task / "verify/Dockerfile").write_text(f"FROM {CONTAINER_BASE}\n")
     (task / "oracle/run.sh").write_text(
         "#!/bin/sh\nset -eu\n"
         'printf \'{"status":"ok"}\\n\' > /home/user/output/result.json\n'
@@ -457,9 +455,7 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
     "image_line",
     [
         "",
-        "  image:\n"
-        "    kind: container\n"
-        "    ref: ghcr.io/agentslastexam/container-ubuntu22-base:latest\n",
+        f"  image:\n    kind: container\n    ref: {CONTAINER_BASE}\n",
     ],
     ids=["solver-image", "external-ref"],
 )

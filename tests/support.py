@@ -5,9 +5,13 @@ from pathlib import Path
 from ale.core.config import RunConfig
 from ale.core.sandbox import ImageRef, PreparedTaskImage, Provider
 from ale.core.taskspec import ImageKind
+from ale.run import ale_image
 from ale.run.providers import ProviderRegistry
 
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
+#: The ALE bases of this engine version, for images a test builds or runs.
+CONTAINER_BASE = ale_image("container-ubuntu22-base")
+VM_BASE = ale_image("vm-ubuntu24-base")
 
 
 def sibling_checkout(name: str) -> Path:

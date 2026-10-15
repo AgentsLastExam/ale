@@ -27,13 +27,13 @@ from ale.run.secrets import provider_credentials
 from ale.run.task_images import prepare_task_image_result
 from ale.run.tasksets.manifest import load_task_folder
 from ale.run.tools import resolved_cua_desktop, stage_cua_desktop
-from tests.support import provider_registry
+from tests.support import CONTAINER_BASE, provider_registry
 
 from .trajectory import LIVE, llm_audit_evidence
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-LINUX_IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+LINUX_IMAGE = CONTAINER_BASE
 
 
 @pytest.mark.needs_kvm

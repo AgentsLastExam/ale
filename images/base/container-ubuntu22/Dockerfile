@@ -10,14 +10,14 @@
 # somebody's exported VM rootfs.
 #
 # What we change is one thing. cua-lite bakes its own in-container server at
-# /opt/lite/stdio_server.py; we bake ours at /opt/ale/guestd instead. Ours speaks our
-# sandbox contract and, unlike theirs, also serves over TCP — a virtual machine has no
-# exec channel, so the same guest service has to be reachable both ways.
+# /opt/lite/stdio_server.py; this image bakes no guest service at all. The engine copies
+# its own guestd into /opt/ale when it creates a sandbox, so the guest service always
+# matches the engine driving it and an image release never has to follow a guestd change.
 #
-# Their isolation model for the guest service is worth keeping — it lives under a
-# root-owned directory the agent cannot read, so the agent cannot learn the protocol
-# driving its own sandbox. Their separate interpreter is not: we install what the guest
-# service needs into the system Python instead.
+# Their isolation model for the guest service is worth keeping — the engine installs it
+# under a root-owned directory the agent cannot read, so the agent cannot learn the
+# protocol driving its own sandbox. Their separate interpreter is not: what the guest
+# service needs is installed into the system Python instead.
 #
 # Rebuild with:
 #   docker build -f images/base/container-ubuntu22/Dockerfile -t ghcr.io/agentslastexam/container-ubuntu22-base .
@@ -813,16 +813,6 @@ RUN set -eux; \
         --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md; \
     rm /tmp/node.tar.xz; \
     node --version; npm --version
-
-# Bake the guest service. Every exec, file transfer, screenshot and input event in a
-# sandbox goes through this, over stdio for containers and TCP for virtual machines.
-# Stdlib-only by contract, so it runs on whatever interpreter an image happens to have.
-COPY packages/ale-run/src/ale/run/guestd/ /opt/ale/guestd/
-
-# [ISOLATION 5/5] Lock /opt/ale to root:700. Same reason cua-lite locks /opt/lite: the
-# agent should not be able to read the guest service's source and learn the protocol
-# that drives its own sandbox. Free, because the service runs as root.
-RUN chown -R root:root /opt/ale && chmod -R go-rwx /opt/ale
 
 
 # What this image is, so the engine reads rather than guesses. Its command starts the

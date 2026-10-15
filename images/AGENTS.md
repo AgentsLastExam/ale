@@ -7,8 +7,9 @@ Read [`README.md`](README.md) and `../docs/specs/sandbox-image.md` first.
 - Keep the image-declared agent user, GUI capability, guest integration and labels in
   sync with Provider checks and the image specification.
 - Never bake provider credentials, benchmark answers or Task-specific dependencies.
-- A changed image contract requires container/VM conformance coverage and a content-tag
-  review in `.github/workflows/images.yml`.
+- Images are published under the engine version and never overwritten; a changed image
+  ships with the next engine version. Bases carry no guestd: the engine installs it. A
+  changed image contract requires container/VM conformance coverage.
 - Avoid extra bootstrap mechanisms: long-lived fixed software belongs in the image,
   Task-specific software belongs in the Task Dockerfile.
 

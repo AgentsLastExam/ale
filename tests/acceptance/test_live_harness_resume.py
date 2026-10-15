@@ -18,7 +18,7 @@ from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
 from ale.run.secrets import provider_credentials
-from tests.support import prepare_reference
+from tests.support import CONTAINER_BASE, prepare_reference
 
 from .trajectory import LIVE, llm_audit_evidence
 
@@ -72,7 +72,7 @@ async def test_real_native_resume_keeps_exact_session_and_only_new_input(
             recording.transport,
         )
         provider = DockerProvider()
-        prepared = await prepare_reference(provider, "container-ubuntu22-base:latest")
+        prepared = await prepare_reference(provider, CONTAINER_BASE)
         sandbox = await provider.create(
             SandboxRequest(
                 episode_id=f"live-{harness.name}-resume",

@@ -15,7 +15,7 @@ from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
 from ale.run.secrets import provider_credentials
-from tests.support import prepare_reference
+from tests.support import CONTAINER_BASE, prepare_reference
 
 from .trajectory import LIVE, MODEL
 
@@ -36,7 +36,7 @@ async def test_real_claude_launch_and_two_resumes_share_one_native_session(tmp_p
             recording.transport,
         )
         provider = DockerProvider()
-        prepared = await prepare_reference(provider, "container-ubuntu22-base:latest")
+        prepared = await prepare_reference(provider, CONTAINER_BASE)
         sandbox = await provider.create(
             SandboxRequest(
                 episode_id="live-native-resume",

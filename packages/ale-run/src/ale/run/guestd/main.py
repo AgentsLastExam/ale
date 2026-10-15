@@ -51,7 +51,7 @@ from protocol import (
     ok,
 )
 
-GUESTD_VERSION = "0.1.0"
+GUESTD_VERSION = "0.1.1"
 
 #: Where a claimed TCP token survives a service restart. /run is tmpfs: a reboot or a disk
 #: saved as an image carries no token forward. Windows keeps it in memory only, because

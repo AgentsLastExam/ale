@@ -19,11 +19,11 @@ from ale.core.sandbox import Identity, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.run.providers.docker import DockerProvider
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
-from tests.support import prepare_reference
+from tests.support import CONTAINER_BASE, prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
 
-GUI_IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+GUI_IMAGE = CONTAINER_BASE
 WORK_DIR = "/home/user/work"
 
 

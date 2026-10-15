@@ -14,7 +14,7 @@ from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
 from ale_verify import CheckResult, JudgeAttempt, JudgeInvocation, Verification
-from tests.support import provider_registry
+from tests.support import CONTAINER_BASE, provider_registry
 
 pytestmark = pytest.mark.integration
 
@@ -144,7 +144,7 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         "'result':json.dumps(verdict)}))\n"
     )
     (task_root / "image" / "Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
+        f"FROM {CONTAINER_BASE}\n"
         f"COPY fake-agent.py /usr/local/bin/{binary_name}\n"
         f"RUN chmod 755 /usr/local/bin/{binary_name} "
         "&& mkdir -p /home/user/output && chown -R user:user /home/user/output\n"

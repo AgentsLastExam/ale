@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from tests.support import CONTAINER_BASE
 
 from ale.core.config import RunConfig
 from ale.core.sandbox import ImageRef, SandboxRequest
@@ -27,11 +28,11 @@ class TestDockerProvider(ProviderConformance):
     provider = DockerProvider()
     image = ImageRef(
         kind="container",
-        reference="ghcr.io/agentslastexam/container-ubuntu22-base:latest",
+        reference=CONTAINER_BASE,
     )
     gui_image = ImageRef(
         kind="container",
-        reference="ghcr.io/agentslastexam/container-ubuntu22-base:latest",
+        reference=CONTAINER_BASE,
     )
 
 
@@ -45,7 +46,7 @@ async def test_blocked_network_has_no_route_off_the_host() -> None:
     prepared = await provider.prepare_image(
         ImageRef(
             kind="container",
-            reference="ghcr.io/agentslastexam/container-ubuntu22-base:latest",
+            reference=CONTAINER_BASE,
         )
     )
     request = SandboxRequest(
@@ -73,7 +74,7 @@ async def test_proxy_only_sandbox_can_resolve_the_host_proxy() -> None:
     prepared = await provider.prepare_image(
         ImageRef(
             kind="container",
-            reference="ghcr.io/agentslastexam/container-ubuntu22-base:latest",
+            reference=CONTAINER_BASE,
         )
     )
     request = SandboxRequest(

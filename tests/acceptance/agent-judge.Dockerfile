@@ -1,4 +1,6 @@
-FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest
+# CI passes this engine version's container base as BASE.
+ARG BASE
+FROM ${BASE}
 
 RUN npm install -g \
         @openai/codex@0.146.0 \

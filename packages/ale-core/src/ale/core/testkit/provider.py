@@ -23,10 +23,8 @@ class ProviderConformance:
     """Assertions every :class:`~ale.core.sandbox.Provider` must satisfy."""
 
     provider: Provider
-    image = ImageRef(
-        kind="container",
-        reference="ghcr.io/agentslastexam/container-ubuntu22-base:latest",
-    )
+    image: ImageRef
+    """The image every assertion runs on; a backend's suite names a pinned release."""
 
     gui_image: ImageRef | None = None
     """An image that starts a desktop, if this backend has one to test with.

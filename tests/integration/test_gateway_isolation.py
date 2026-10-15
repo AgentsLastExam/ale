@@ -19,11 +19,11 @@ from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, SessionRegistry
 from ale.run.providers.docker import HOST_ALIAS, DockerProvider
-from tests.support import prepare_reference
+from tests.support import CONTAINER_BASE, prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+IMAGE = CONTAINER_BASE
 
 
 async def _stub_upstream() -> tuple[web.AppRunner, str]:
