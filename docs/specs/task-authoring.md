@@ -192,7 +192,8 @@ Copy-Item .\assets\input.txt "$env:ALE_HOME\input.txt"
 ```
 
 `ale prepare TASK` copies `image/` into a temporary Windows VM, runs `run.ps1` with that
-directory as cwd and `ALE_HOME` set to the agent home, then saves the configured qcow2.
+directory as cwd and `ALE_HOME` set to the agent home, installs ALE's current guestd and
+Cua Driver, then saves the configured qcow2.
 Scripts may use WinGet, Chocolatey, or
 local unattended installers; pin package versions where supported and check native command
 exit codes. Scripts must finish within one hour; nonzero exits fail the build. Suppress

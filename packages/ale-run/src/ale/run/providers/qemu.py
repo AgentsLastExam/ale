@@ -804,12 +804,9 @@ class QemuProvider(Provider):
             if selected:
                 _verify_qemu_gpu_count(request.resources.gpus, observed_gpu)
             if has_desktop:
-                # The one thing the manifest's `gui` flag decides. A guest that installs a
-                # desktop starts an X server, a display manager and a session after the
-                # guest service is already answering, so "the sandbox replied" is not
-                # "the sandbox has a screen". No probe can tell the difference on its own:
-                # a screenshot that fails at this instant means "no desktop here" and
-                # "not yet" equally, and only the image knows which.
+                # The guest decided from its own configuration that it shows a desktop. Its
+                # display manager and session start after the guest service is already
+                # answering, so "the sandbox replied" is not "the sandbox has a screen".
                 await self._await_desktop(client)
             if request.sudo:
                 await self._verify_sudo(client, agent_user, request.os)
@@ -1124,7 +1121,7 @@ class QemuProvider(Provider):
             )
         user = str(health.get("agent_user") or "")
         home = str(health.get("agent_home") or "")
-        if request.os is OperatingSystem.LINUX and user != request.user:
+        if user != request.user:
             raise ProviderCapabilityError(
                 f"the VM disk was prepared for agent account {user!r}, but the Task names "
                 f"{request.user!r}"

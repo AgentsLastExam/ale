@@ -28,6 +28,10 @@ tags were already immutable but meant nothing to the people choosing them.
   and a desktop is recognized from the image's own configuration (an enabled display
   manager, or a `DISPLAY` the image sets). The layer is part of the prepared image's
   identity, so a guestd change rebuilds Task images, not bases.
+- A Windows Task image is built in a running VM rather than by Docker, so the same pieces
+  are installed there after the Task's script, through the guestd the Windows base carries
+  as its bootstrap. That bootstrap must speak the current authentication handshake; any
+  newer guestd replaces it in every Task image built on the base.
 
 ## Consequences
 

@@ -15,6 +15,10 @@ from typing import Any
 COORDINATE_SPACE = 1000
 #: Where guestd's Cua Driver server listens on Linux.
 _LINUX_SOCKET = "/tmp/ale-cua-driver.sock"
+#: Where the framework installs Cua Driver on Windows; a Linux image has it on PATH.
+_WINDOWS_DRIVER = os.path.join(
+    os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "ALE", "cua-driver", "cua-driver.exe"
+)
 #: The alias systemd links when a display manager (GDM, LightDM, SDDM) is enabled.
 _DISPLAY_MANAGER = "/etc/systemd/system/display-manager.service"
 #: What Cua Driver takes from the session it drives.
@@ -36,6 +40,8 @@ class GuiUnavailable(RuntimeError):
 
 def _binary() -> str:
     configured = os.environ.get("ALE_CUA_DRIVER")
+    if not configured and os.name == "nt" and os.path.isfile(_WINDOWS_DRIVER):
+        configured = _WINDOWS_DRIVER
     found = configured or shutil.which("cua-driver") or shutil.which("cua-driver.exe")
     if not found:
         raise GuiUnavailable("cua-driver is not installed in this image")
@@ -48,10 +54,12 @@ def has_desktop() -> bool:
     A virtual machine has one when its systemd enables a display manager. A container has
     one when its image sets ``DISPLAY`` or ``WAYLAND_DISPLAY``: that is how a desktop image
     tells its processes where to draw, while an image that ships X only as a tool, such as
-    Xvfb for a headless browser, does not.
+    Xvfb for a headless browser, does not. Windows always draws one, and it is ALE's to
+    drive once the framework has installed Cua Driver, as in every Task image; the bare
+    base, booted only to build a Task image, has none to wait for.
     """
     if os.name == "nt":
-        return True
+        return os.path.isfile(_WINDOWS_DRIVER)
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) or os.path.lexists(
         _DISPLAY_MANAGER
     )

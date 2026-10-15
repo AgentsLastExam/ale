@@ -36,6 +36,24 @@ desktop never becomes ready; guestd starts Cua Driver inside the agent's desktop
 once its window manager or shell runs. A VM disk given directly as a qcow2 `ref` is not
 prepared by ALE and must carry a current guestd itself.
 
+## What a Windows image needs
+
+A Windows Task builds `image/run.ps1` on an ALE Windows base. The base signs its agent
+account in to a desktop and starts the guestd it carries at that logon; this bootstrap
+guestd is how the build reaches the VM. After the Task's script, ALE installs its own
+pieces through it:
+
+- the current guestd replaces the base's under `C:\ProgramData\ALE\guestd`;
+- Cua Driver at the pinned version under `C:\ProgramData\ALE\cua-driver`, started
+  elevated at the agent's logon so it can reach elevated windows;
+- a check that `image.user` names the account the base signs in.
+
+Elevation for `resources.sudo` is granted per boot by the Host, not built into the disk.
+A Windows sandbox has a desktop for ALE to drive exactly when its image carries the
+framework's Cua Driver, so the Provider waits for a screenshot in every Task image and
+not in the bare base booted to build one. A disk used directly as `image.ref` is not
+prepared by ALE and must carry a current guestd and Cua Driver itself.
+
 ## ALE base images
 
 - `container-ubuntu22-base` provides an Ubuntu 22.04 GNOME desktop container and the
@@ -44,12 +62,12 @@ prepared by ALE and must carry a current guestd itself.
   account for QEMU. It has no firewall of its own: network policy is enforced by the QEMU
   runner outside the guest ([security.md](security.md#1-a-sandbox-has-only-declared-ways-out)).
 - The private Windows 10 BYOL base provides a logged-in desktop, system Python, a bootstrap
-  guestd, Cua Driver, WinGet, Chocolatey, and the runtimes required by autonomous agents.
+  guestd, WinGet, Chocolatey, and the runtimes required by autonomous agents.
   Its licensed disk is not a public ALE artifact.
 
-The Linux bases carry neither guestd nor Cua Driver; the framework layer adds both. They do
-not contain domain stacks, benchmark data, databases, robotics suites, or Task-specific
-tools.
+No base carries Cua Driver, and only the Windows base carries guestd, as the bootstrap
+its Task builds talk to; ALE installs both when it prepares a Task image. The bases do not
+contain domain stacks, benchmark data, databases, robotics suites, or Task-specific tools.
 
 Repository sources are separated by responsibility: `images/base/` contains the three
 Task foundations, `images/builders/vm-materializer/` turns Linux VM OCI content into

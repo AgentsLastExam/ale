@@ -29,7 +29,7 @@ from ale.core.taskspec import (
 )
 from ale.run import ale_image
 from ale.run.content import tree_digest
-from ale.run.framework import with_framework
+from ale.run.framework import install_on_windows, windows_framework_identity, with_framework
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.qemu import RUNNER_IMAGE, QemuProvider
 from ale.run.sources import cache_root
@@ -376,10 +376,12 @@ async def _prepare_windows_image(
             raise TaskDefinitionError(f"Windows image inputs cannot be symlinks: {entry}")
     context_identity = _windows_context_identity(context)
     runner_identity = await _docker_image_identity(RUNNER_IMAGE)
+    user = task.spec.image.user
     builder_identity = content_hash(
         {
             "contract": WINDOWS_BUILD_CONTRACT,
             "runner": runner_identity,
+            "framework": windows_framework_identity(user=user),
         }
     )
     resources = Resources(cpus=2, memory_mb=4096, storage_mb=task.spec.resources.storage_mb)
@@ -401,7 +403,9 @@ async def _prepare_windows_image(
             if not reused:
                 with tempfile.TemporaryDirectory(prefix=f".{disk.stem}-", dir=root) as temporary:
                     output = Path(temporary) / "disk.qcow2"
-                    await _build_windows_image(base, context, output, resources, runner_identity)
+                    await _build_windows_image(
+                        base, context, output, resources, runner_identity, user=user
+                    )
                     if _windows_context_identity(context) != context_identity:
                         raise TaskDefinitionError("Windows image inputs changed during build")
                     if not await _valid_qcow2(output):
@@ -438,6 +442,8 @@ async def _build_windows_image(
     output: Path,
     resources: Resources,
     runner_identity: str,
+    *,
+    user: str,
 ) -> None:
     provider = QemuProvider(overlay_dir=output.parent / "vm", runner_image=runner_identity)
     sandbox = await provider.create(
@@ -448,6 +454,7 @@ async def _build_windows_image(
             resources=resources,
             network=NetworkPolicy(mode=NetworkMode.OPEN),
             sudo=True,
+            user=user,
         )
     )
     target = r"C:\ProgramData\ALE\image"
@@ -485,6 +492,8 @@ async def _build_windows_image(
         )
         if not result.ok:
             raise ProviderStartError(f"could not remove image build inputs: {result.stderr}")
+        # After the Task's script, so nothing it installs replaces the framework's pieces.
+        await install_on_windows(sandbox, user=user)
         await sandbox.save_image(output)
     finally:
         await asyncio.shield(sandbox.destroy())

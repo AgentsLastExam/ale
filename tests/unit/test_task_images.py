@@ -125,9 +125,10 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
     async def runner_identity(reference: str) -> str:
         return runner
 
-    async def build(base, context, output, resources, runner_identity):  # type: ignore[no-untyped-def]
+    async def build(base, context, output, resources, runner_identity, *, user):  # type: ignore[no-untyped-def]
         assert resources.cpus == 2 and resources.memory_mb == 4096
         assert runner_identity == runner
+        assert user == "user"
         builds.append(output)
         output.write_bytes(b"valid-disk")
 
@@ -198,7 +199,7 @@ async def test_failed_windows_build_does_not_publish_or_fall_back(
     async def runner_identity(reference: str) -> str:
         return "sha256:" + "e" * 64
 
-    async def build(base, context, output, resources, runner):  # type: ignore[no-untyped-def]
+    async def build(base, context, output, resources, runner, *, user):  # type: ignore[no-untyped-def]
         output.write_bytes(b"partial")
         if failure == "script":
             raise TaskDefinitionError("installer failed")
