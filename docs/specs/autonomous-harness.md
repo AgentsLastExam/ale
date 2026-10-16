@@ -231,8 +231,8 @@ Adapters classify only their native limits.
 The Gateway supports Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses
 for API-key mode. The preset supplies the default dialect and upstream provider endpoint;
 a Harness may accept a documented compatible override. Subscription mode uses the same
-Sandbox-side Gateway configuration; only the Host Gateway's upstream authentication changes
-([ADR 0007](../adr/0007-unified-subscription-gateway.md)), so model authority, limits,
+Sandbox-side Gateway configuration; only the Host Gateway's upstream authentication changes,
+so model authority, limits,
 accounting, retry coalescing, and Transport Trace are common to both modes. The ChatGPT
 Codex backend rejects `max_output_tokens`, so ALE accounts the completed response and
 refuses the next call once an output ceiling is reached.

@@ -1,6 +1,7 @@
 # Task authoring contract
 
-A Task is one self-contained folder. This document owns its directory, configuration,
+A Task is one self-contained folder: nothing outside it affects it, so it can be reviewed,
+moved, and exported on its own. This document owns its directory, configuration,
 environment, data visibility, and stage interfaces. Design and acceptance standards belong to
 the [Task quality standard](task-quality-standard.md); scoring and Judge APIs belong to
 [Verification](verification.md).

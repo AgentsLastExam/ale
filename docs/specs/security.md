@@ -133,9 +133,11 @@ being visible.
 A VM guest service listens on TCP, which the agent can reach over loopback and every Host
 account can reach through the forwarded port. Each connection must therefore first present
 the sandbox's token, which the framework's first connection to the freshly booted guest
-claims; anything else is refused before an operation runs
-([ADR 0008](../adr/0008-claimed-guest-service.md)). Container guest services are `docker exec`
-sessions with no listener.
+claims; anything else is refused before an operation runs. The claim is sound because
+nothing but trusted image services runs in a cold-booted guest before that connection.
+Linux keeps the claimed token in root-only `/run/ale/guestd-token`, so a restarted guest
+service stays claimed while a reboot or a saved disk carries none; Windows keeps it in
+memory. Container guest services are `docker exec` sessions with no listener.
 
 Verified by `tests/integration/test_identity.py`: the agent cannot read the guest service,
 cannot write system paths, and cannot elevate unless its task asked; and by

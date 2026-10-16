@@ -95,7 +95,7 @@ class TcpTransport:
 
     The forwarded port is reachable from inside the guest (loopback) and from the Host,
     so every connection first presents the sandbox's framework token. The first token a
-    freshly booted guest receives claims it; see ``docs/adr/0008-claimed-guest-service.md``.
+    freshly booted guest receives claims it; see ``docs/specs/security.md``.
     """
 
     def __init__(self, host: str, port: int, *, token: str) -> None:

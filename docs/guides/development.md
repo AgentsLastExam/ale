@@ -104,7 +104,6 @@ remain in this repository's `ci` workflow. A passing static check is not build e
 
 - Everything in this repository is written in standard English.
 - Names come from [the lexicon](../specs/lexicon.md); each has one meaning.
-- Start at [`docs/README.md`](../README.md), read the owning specification before
-  changing a contract, and update the relevant ADR when its architectural rationale
-  changes.
+- Start at [`docs/README.md`](../README.md) and read the owning specification before
+  changing a contract.
 - Commit per task or logical group; keep `uv.lock` committed and in sync.

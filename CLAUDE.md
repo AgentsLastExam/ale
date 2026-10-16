@@ -38,10 +38,9 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 
 ## Contracts and decisions
 
-- Normative specifications live in `docs/specs/`; current architectural rationale lives
-  in `docs/adr/`. Guides do not override either.
-- Changing a contract updates its spec in the same change and adds an ADR only for a new
-  cross-module decision.
+- Normative specifications live in `docs/specs/` and give, in a sentence or two, the
+  reason for each cross-module choice. Guides do not override them.
+- Changing a contract updates its spec in the same change.
 - Every reportable result carries a complete `RunLock`.
 - API-key and shipped subscription credentials, Judge keys included, remain on the Host
   Gateway; a sandbox only ever holds episode tokens. `verify/` and `oracle/` never appear
@@ -56,7 +55,7 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 - `packages/ale-run/src/ale/run/providers/AGENTS.md` — Docker and QEMU backends
 - `packages/ale-verify/AGENTS.md` — sandbox-local public verification API
 - `tests/AGENTS.md` — test taxonomy and infrastructure markers
-- `docs/AGENTS.md` — specifications, ADRs and guides
+- `docs/AGENTS.md` — specifications and guides
 - `images/AGENTS.md` — Sandbox bases, image builders and Provider runtimes
 
 ## Checks

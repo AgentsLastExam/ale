@@ -1,9 +1,9 @@
 # Verification
 
 ALE verification is one Task-owned program executed inside the active verification
-sandbox. The independent `ale_verify` package supplies deterministic checks, direct LLM
+sandbox. The independent `ale_verify` package supplies deterministic checks, LLM
 and Agent Judges, aggregation, and an atomic record. There is no Domain Kit,
-Verification Service, Judge Gateway, or Host callback.
+Verification Service, or Host callback.
 
 The Task's verification entry point, working directory, Python requirement, and private assets
 are defined in [Task authoring](task-authoring.md#verify). The persisted record follows
