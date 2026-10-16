@@ -38,8 +38,13 @@ def framework_layer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         LAYERED.append((image, user, sudo, vm))
         return image
 
+    async def frame(image: PreparedTaskImage, *, user: str, sudo: bool) -> tuple:
+        LAYERED.append((image.runtime_ref, user, sudo, True))
+        return image, "executed"
+
     LAYERED.clear()
     monkeypatch.setattr("ale.run.task_images.with_framework", layer)
+    monkeypatch.setattr("ale.run.task_images._framed_disk", frame)
     monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "ale-cache"))
 
 
@@ -361,8 +366,10 @@ async def test_preparation_result_orders_ref_and_artifact_stages(write_task_repo
     assert [step.name for step in result.steps] == [
         "lint",
         "reference-resolution",
+        "framework-layer",
         "artifact-check",
     ]
+    assert LAYERED == [("/cache/disk.qcow2", "user", False, True)]
     assert all(step.outcome == "executed" for step in result.steps)
 
 
@@ -451,6 +458,61 @@ async def test_local_vm_candidate_is_materialized_before_provider_check(
     registry = _Registry()
     assert await prepare_task_image(task, registry) == vm  # type: ignore[arg-type]
     assert registry.get(ImageKind.VM).inputs == [vm]
+
+
+@pytest.mark.asyncio
+async def test_a_vm_disk_ref_is_framed_once_and_a_framed_disk_is_used_as_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ale.run.task_images as images
+
+    monkeypatch.undo()  # the real _framed_disk, with Docker and libguestfs replaced below
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "cache"))
+    source = tmp_path / "input.qcow2"
+    source.write_bytes(b"disk")
+    framed: list[Path] = []
+    carried: dict[Path, str | None] = {}
+
+    async def materializer_identity() -> str:
+        return "sha256:" + "9" * 64
+
+    async def valid(path: Path) -> bool:
+        return path.is_file()
+
+    async def run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
+        assert argv[:2] == ("qemu-img", "convert")
+        Path(argv[-1]).write_bytes(Path(argv[-2]).read_bytes())
+        return 0, "", ""
+
+    async def frame(disk: Path, *, user: str, sudo: bool, builder: str) -> None:
+        framed.append(disk)
+
+    async def on_disk(disk: Path, *, builder: str) -> str | None:
+        return carried.get(disk)
+
+    monkeypatch.setattr(images, "_materializer_identity", materializer_identity)
+    monkeypatch.setattr(images, "_valid_qcow2", valid)
+    monkeypatch.setattr(images, "_run", run)
+    monkeypatch.setattr(images, "frame_disk", frame)
+    monkeypatch.setattr(images, "framework_on_disk", on_disk)
+    image = _prepared(ImageKind.VM, "external-ref").model_copy(update={"runtime_ref": str(source)})
+
+    first, outcome = await images._framed_disk(image, user="user", sudo=False)
+    assert outcome == "executed" and len(framed) == 1
+    assert first.runtime_ref != image.runtime_ref
+    assert first.resolved_reference == image.resolved_reference
+    assert first.prepared_identity != image.prepared_identity
+    second, outcome = await images._framed_disk(image, user="user", sudo=False)
+    assert (second, outcome) == (first, "reused") and len(framed) == 1
+    await images._framed_disk(image, user="user", sudo=True)
+    assert len(framed) == 2  # another framework is another copy
+
+    ready = image.model_copy(update={"prepared_identity": "sha256:" + "e" * 64})
+    carried[source] = images.framework_identity(user="user", sudo=False, vm=True)
+    assert await images._framed_disk(ready, user="user", sudo=False) == (ready, "reused")
+    carried.clear()  # recorded once, not looked at again
+    assert await images._framed_disk(ready, user="user", sudo=False) == (ready, "reused")
+    assert len(framed) == 2
 
 
 def test_vm_derivation_uses_oci_and_materializer_identities_only() -> None:

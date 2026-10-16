@@ -8,7 +8,7 @@ base/
 ├── vm-ubuntu24/         Ubuntu OCI source for a bootable VM
 └── vm-windows10/        private Windows seed preparation recipe
 builders/
-└── vm-materializer/     converts a VM OCI rootfs to qcow2
+└── vm-materializer/     converts a VM OCI rootfs to qcow2; frames a Linux qcow2 ref
 runtimes/
 └── qemu-runner/         container that runs a prepared qcow2 with QEMU/KVM
 ```

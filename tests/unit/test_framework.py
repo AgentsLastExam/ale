@@ -9,12 +9,15 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.errors import TaskDefinitionError
+from ale.core.errors import ProviderStartError, TaskDefinitionError
 from ale.core.sandbox import ExecResult
 from ale.run import framework, guestd
 from ale.run.framework import (
     LABEL,
+    MARKER,
+    frame_disk,
     framework_identity,
+    framework_on_disk,
     install_on_windows,
     windows_framework_identity,
     with_framework,
@@ -73,7 +76,8 @@ async def test_the_layer_is_built_on_the_task_image(
     assert dockerfile.startswith("FROM ale-framework-base:" + "1" * 64)
     assert "COPY guestd/ /opt/ale/guestd/" in dockerfile
     assert "COPY --chmod=0755 cua-driver /usr/local/bin/cua-driver" in dockerfile
-    assert json.dumps(["/bin/sh", "/opt/ale/setup.sh", "app", "true"]) in dockerfile
+    identity = framework_identity(user="app", sudo=True, vm=True)
+    assert json.dumps(["/bin/sh", "/opt/ale/setup.sh", "app", "true", identity]) in dockerfile
     assert dockerfile.rstrip().splitlines()[-2] == "USER app"
     assert set(guestd.FILES) <= set(built["files"])
     assert "Environment=ALE_AGENT_USER=app" in built["unit"]
@@ -81,6 +85,123 @@ async def test_the_layer_is_built_on_the_task_image(
     # The same layer again is a no-op.
     images["task"] = {**images["task"], "Labels": {}}
     assert await with_framework("task", user="app", sudo=True, vm=True) == layered
+
+
+@pytest.mark.asyncio
+async def test_a_vm_disk_gets_the_same_pieces_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    driver = tmp_path / "cua-driver-release"
+    driver.mkdir()
+    (driver / "cua-driver").write_bytes(b"driver")
+    monkeypatch.setattr(framework, "_cua_driver", lambda platform: driver)
+    seen: dict[str, object] = {}
+
+    async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
+        seen["argv"] = argv
+        context = Path(
+            next(a for a in argv if a.endswith(",dst=/framework,readonly")).split(",")[1][4:]
+        )
+        seen["files"] = sorted(path.name for path in context.rglob("*"))
+        seen["unit"] = (context / "ale-guestd.service").read_text()
+        return 0, "", ""
+
+    monkeypatch.setattr(framework, "_run", run)
+    disk = tmp_path / "disk.qcow2"
+    await frame_disk(disk, user="app", sudo=True, builder="builder:1")
+    argv = seen["argv"]
+    assert isinstance(argv, tuple)
+    assert argv[argv.index("--entrypoint") + 1] == "virt-customize"
+    assert f"type=bind,src={tmp_path},dst=/disk" in argv
+    assert argv[argv.index("--add") + 1] == "/disk/disk.qcow2"
+    identity = framework_identity(user="app", sudo=True, vm=True)
+    assert argv[-1] == f"/bin/sh /opt/ale/setup.sh app true {identity}"
+    assert "/framework/ale-guestd.service:/etc/systemd/system/ale-guestd.service" in argv
+    assert set(guestd.FILES) <= set(seen["files"])  # type: ignore[arg-type]
+    assert "Environment=ALE_AGENT_USER=app" in str(seen["unit"])
+
+
+@pytest.mark.asyncio
+async def test_a_disk_that_cannot_be_framed_fails_with_the_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(framework, "_cua_driver", lambda platform: tmp_path)
+    (tmp_path / "cua-driver").write_bytes(b"driver")
+    reason = "the agent account 'app' does not exist in this image"
+
+    async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
+        return 1, f"ALE: {reason}\n", "virt-customize: error: command failed"
+
+    monkeypatch.setattr(framework, "_run", run)
+    with pytest.raises(TaskDefinitionError) as failure:
+        await frame_disk(tmp_path / "disk.qcow2", user="app", sudo=False, builder="b")
+    assert str(failure.value).endswith(reason)
+
+
+@pytest.mark.asyncio
+async def test_the_framework_a_disk_carries_is_read_from_its_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identity = "sha256:" + "a" * 64
+    answers = iter([(1, f"{identity}\n", "path must start with /"), (1, "", "No such file")])
+
+    async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
+        assert argv[-1] == MARKER and "--network=none" in argv
+        return next(answers)
+
+    monkeypatch.setattr(framework, "_run", run)
+    assert await framework_on_disk(tmp_path / "d.qcow2", builder="b") == identity
+    assert await framework_on_disk(tmp_path / "d.qcow2", builder="b") is None
+
+
+@pytest.mark.asyncio
+async def test_a_framing_container_does_not_outlive_its_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[:2] == ("docker", "run"):
+            raise ProviderStartError("docker run --rm timed out after 1s")
+        return 0, "", ""
+
+    monkeypatch.setattr(framework, "_run", run)
+    with pytest.raises(ProviderStartError):
+        await framework._in_container("builder", timeout=1)
+    name = calls[0][calls[0].index("--name") + 1]
+    assert calls[1] == ("docker", "rm", "--force", name)
+
+
+@pytest.mark.asyncio
+async def test_docker_frames_an_image_unless_it_carries_exactly_this_framework(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from ale.core.sandbox import ResolvedImage
+    from ale.core.taskspec import ImageKind
+    from ale.run.providers import docker
+
+    original = "sha256:" + "1" * 64
+    framed = "sha256:" + "2" * 64
+    answers = iter([original, framed])
+
+    async def layer(image: str, *, user: str, sudo: bool) -> str:
+        return next(answers)
+
+    monkeypatch.setattr(docker, "with_framework", layer)
+    resolved = ResolvedImage(
+        kind=ImageKind.CONTAINER,
+        prepared_identity=original,
+        observed_identity=original,
+        observed_ref="ghcr.io/acme/task@sha256:" + "3" * 64,
+    )
+    request = SimpleNamespace(user="user", sudo=False)
+    provider = docker.DockerProvider()
+    assert await provider._framed(resolved, request) == resolved  # type: ignore[arg-type]
+    reframed = await provider._framed(resolved, request)  # type: ignore[arg-type]
+    assert (reframed.observed_identity, reframed.observed_ref) == (framed, framed)
 
 
 def _zip(files: dict[str, bytes]) -> bytes:

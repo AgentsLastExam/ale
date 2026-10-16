@@ -23,7 +23,14 @@ of the Task's own build or `image.ref` (the framework layer):
 - for a VM, the systemd unit that starts guestd at boot;
 - a check that the agent account exists, failing preparation if it does not;
 - working sudo for that account when the Task sets `resources.sudo: true`, installing sudo
-  with the image's package manager when the image lacks it.
+  with the image's package manager when the image lacks it;
+- `/opt/ale/framework`, recording which framework the image carries.
+
+A Linux VM disk named by a qcow2 `ref` gets the same pieces, installed offline into a copy
+of the disk by the VM builder's libguestfs. Its small appliance VM, not the Host, runs the
+disk's own programs that the setup calls. Each copy is made once per disk and framework
+and then used directly, and a disk that already carries this framework, such as one ALE
+prepared, is used as it is.
 
 There are no image labels to declare. Whether a sandbox has a desktop is decided from the
 image's own configuration before anything starts: a VM has one when its systemd enables a
@@ -33,8 +40,7 @@ draw. An image that ships X only as a tool, such as Xvfb for a headless browser,
 neither and is headless; a desktop base can be made headless with `ENV DISPLAY=`. With a
 desktop, the Provider waits until a screenshot succeeds and fails the sandbox if the
 desktop never becomes ready; guestd starts Cua Driver inside the agent's desktop session
-once its window manager or shell runs. A VM disk given directly as a qcow2 `ref` is not
-prepared by ALE and must carry a current guestd itself.
+once its window manager or shell runs.
 
 ## What a Windows image needs
 
@@ -71,7 +77,8 @@ contain domain stacks, benchmark data, databases, robotics suites, or Task-speci
 
 Repository sources are separated by responsibility: `images/base/` contains the three
 Task foundations, `images/builders/vm-materializer/` turns Linux VM OCI content into
-qcow2, and `images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM.
+qcow2 and installs the framework into a Linux qcow2 named by reference, and
+`images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM.
 
 ## Versions
 

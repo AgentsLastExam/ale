@@ -16,6 +16,11 @@ The result is an ordinary image built on the Task image, so Docker runs it and V
 preparation materializes it. A label records what it was built with, which makes adding
 the same layer twice a no-op.
 
+A Linux VM disk named by reference gets the same pieces installed into it offline, inside
+the VM builder's own small appliance VM, so the disk's programs never run on the Host.
+Both record what they installed in ``/opt/ale/framework``; a disk that already carries
+this framework is used as it is.
+
 A Windows image is built inside a running VM, so the same pieces arrive there through the
 guest service the base already runs, after the Task's own image script: the current
 guestd replaces the base's, and Cua Driver is installed and started at the agent's logon.
@@ -25,14 +30,18 @@ Elevation is not part of the image; the Host grants it per boot.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fcntl
 import hashlib
 import io
 import json
+import re
+import shlex
 import shutil
 import tarfile
 import tempfile
 import urllib.request
+import uuid
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path, PureWindowsPath
@@ -46,13 +55,18 @@ from ale.run.sources import cache_root
 __all__ = [
     "CUA_DRIVER_VERSION",
     "LABEL",
+    "MARKER",
+    "frame_disk",
     "framework_identity",
+    "framework_on_disk",
     "install_on_windows",
     "windows_framework_identity",
     "with_framework",
 ]
 
 LABEL = "ale.framework"
+#: Where a prepared Linux image records the framework identity it carries.
+MARKER = "/opt/ale/framework"
 CUA_DRIVER_VERSION = "0.12.6"
 #: Release asset and its published SHA-256, per guest platform.
 _CUA_DRIVER = {
@@ -87,6 +101,7 @@ WantedBy=multi-user.target
 _SETUP = r"""set -eu
 user="$1"
 sudo_requested="$2"
+identity="$3"
 if ! id -u "$user" >/dev/null 2>&1; then
     echo "ALE: the agent account '$user' does not exist in this image; create it in the" \
         "image or name an existing account with image.user in task.yaml" >&2
@@ -94,7 +109,10 @@ if ! id -u "$user" >/dev/null 2>&1; then
 fi
 chown -R 0:0 /opt/ale
 chmod -R go-rwx /opt/ale
+chown 0:0 /usr/local/bin/cua-driver
+chmod 0755 /usr/local/bin/cua-driver
 if [ -f /etc/systemd/system/ale-guestd.service ]; then
+    chown 0:0 /etc/systemd/system/ale-guestd.service
     chmod 0644 /etc/systemd/system/ale-guestd.service
     mkdir -p /etc/systemd/system/multi-user.target.wants
     ln -sf /etc/systemd/system/ale-guestd.service \
@@ -128,6 +146,7 @@ if [ "$sudo_requested" = true ]; then
         exit 1
     fi
 fi
+printf '%s\n' "$identity" > /opt/ale/framework
 """
 
 
@@ -263,6 +282,61 @@ async def with_framework(image: str, *, user: str, sudo: bool, vm: bool = False)
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+async def framework_on_disk(disk: Path, *, builder: str) -> str | None:
+    """The framework identity a Linux VM disk records, or None when it carries none.
+
+    Judged by what is printed: virt-cat can print the file and still exit non-zero over
+    an unrelated mount it could not follow.
+    """
+    _, output, _ = await _in_container(
+        "--device=/dev/kvm", "--network=none",
+        "--mount", f"type=bind,src={disk.parent.resolve()},dst=/disk,readonly",
+        "--entrypoint", "virt-cat", builder,
+        "--format", "qcow2", "--add", f"/disk/{disk.name}", MARKER,
+        timeout=300,
+    )  # fmt: skip
+    found = output.strip()
+    return found if re.fullmatch(r"sha256:[0-9a-f]{64}", found) else None
+
+
+async def frame_disk(disk: Path, *, user: str, sudo: bool, builder: str) -> None:
+    """Install the framework into a standalone Linux VM disk, in place, without booting it.
+
+    ``builder`` is the VM builder image. Its libguestfs edits the disk from a small
+    appliance VM of its own, which is also where the setup script and the image's programs
+    it calls run, never on the Host. Package installation for sudo uses its network.
+    """
+    identity = framework_identity(user=user, sudo=sudo, vm=True)
+    driver = await asyncio.to_thread(_cua_driver, "linux")
+    with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
+        context = Path(temporary)
+        _stage(context, driver, user=user, vm=True)
+        setup = shlex.join(["/bin/sh", "/opt/ale/setup.sh", user, _flag(sudo), identity])
+        code, output, stderr = await _in_container(
+            "--device=/dev/kvm",
+            "--mount", f"type=bind,src={disk.parent.resolve()},dst=/disk",
+            "--mount", f"type=bind,src={context},dst=/framework,readonly",
+            "--entrypoint", "virt-customize", builder,
+            "--format", "qcow2", "--add", f"/disk/{disk.name}", "--no-logfile",
+            "--delete", "/opt/ale/guestd",
+            "--mkdir", "/opt/ale",
+            "--copy-in", "/framework/guestd:/opt/ale",
+            "--upload", "/framework/setup.sh:/opt/ale/setup.sh",
+            "--upload", "/framework/cua-driver:/usr/local/bin/cua-driver",
+            "--upload", "/framework/ale-guestd.service:/etc/systemd/system/ale-guestd.service",
+            "--run-command", setup,
+            timeout=1800,
+        )  # fmt: skip
+    if code != 0:
+        explained = [
+            line.split("ALE: ", 1)[1]
+            for line in f"{stderr}\n{output}".splitlines()
+            if "ALE: " in line
+        ]
+        reason = " ".join(explained) if explained else stderr.strip()[-2000:]
+        raise TaskDefinitionError(f"could not add the ALE framework to the VM disk: {reason}")
+
+
 async def _build(base: dict, tag: str, identity: str, *, user: str, sudo: bool, vm: bool) -> None:
     driver = await asyncio.to_thread(_cua_driver, "linux")
     base_tag = f"ale-framework-base:{base['Id'].removeprefix('sha256:')}"
@@ -271,9 +345,7 @@ async def _build(base: dict, tag: str, identity: str, *, user: str, sudo: bool, 
         raise ProviderStartError(f"could not reference the Task image: {stderr.strip()}")
     with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
         context = Path(temporary)
-        shutil.copytree(guestd.SOURCE, context / "guestd", ignore=_only(guestd.FILES))
-        shutil.copy2(driver / "cua-driver", context / "cua-driver")
-        (context / "setup.sh").write_text(_SETUP)
+        _stage(context, driver, user=user, vm=vm)
         lines = [
             f"FROM {base_tag}",
             "USER root",
@@ -282,9 +354,8 @@ async def _build(base: dict, tag: str, identity: str, *, user: str, sudo: bool, 
             "COPY setup.sh /opt/ale/setup.sh",
         ]
         if vm:
-            (context / "ale-guestd.service").write_text(_GUEST_UNIT.format(user=user))
             lines.append("COPY ale-guestd.service /etc/systemd/system/ale-guestd.service")
-        lines.append(_json_run("/bin/sh", "/opt/ale/setup.sh", user, "true" if sudo else "false"))
+        lines.append(_json_run("/bin/sh", "/opt/ale/setup.sh", user, _flag(sudo), identity))
         if base.get("User"):
             lines.append(f"USER {base['User']}")
         lines.append(f"LABEL {LABEL}={json.dumps(identity)}")
@@ -300,6 +371,19 @@ async def _build(base: dict, tag: str, identity: str, *, user: str, sudo: bool, 
         raise TaskDefinitionError(
             f"could not add the ALE framework layer to the Task image: {reason}"
         )
+
+
+def _stage(context: Path, driver: Path, *, user: str, vm: bool) -> None:
+    """Lay out what the Linux framework installs, for either installation path."""
+    shutil.copytree(guestd.SOURCE, context / "guestd", ignore=_only(guestd.FILES))
+    shutil.copy2(driver / "cua-driver", context / "cua-driver")
+    (context / "setup.sh").write_text(_SETUP)
+    if vm:
+        (context / "ale-guestd.service").write_text(_GUEST_UNIT.format(user=user))
+
+
+def _flag(value: bool) -> str:
+    return "true" if value else "false"
 
 
 def _json_run(*argv: str) -> str:
@@ -384,16 +468,31 @@ async def _acquire(handle) -> None:  # type: ignore[no-untyped-def]
             await asyncio.sleep(0.1)
 
 
+async def _in_container(*argv: str, timeout: float) -> tuple[int, str, str]:
+    """``docker run --rm`` that ends with this call: killing the client alone would leave
+    the container running, still writing into files this process has given up."""
+    name = f"ale-framework-{uuid.uuid4().hex[:12]}"
+    try:
+        return await _run("docker", "run", "--rm", "--name", name, *argv, timeout=timeout)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            await asyncio.shield(_run("docker", "rm", "--force", name, timeout=60))
+        raise
+
+
 async def _run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
-    except TimeoutError:
-        process.kill()
+    except (TimeoutError, asyncio.CancelledError) as error:
+        if process.returncode is None:
+            process.kill()
         await process.wait()
-        raise ProviderStartError(f"{' '.join(argv[:3])} timed out after {timeout:g}s") from None
+        if isinstance(error, TimeoutError):
+            raise ProviderStartError(f"{' '.join(argv[:3])} timed out after {timeout:g}s") from None
+        raise
     return (
         process.returncode or 0,
         stdout.decode("utf-8", "replace"),

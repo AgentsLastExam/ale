@@ -44,7 +44,6 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem
 from ale.run import ale_image
-from ale.run.framework import LABEL as FRAMEWORK_LABEL
 from ale.run.framework import with_framework
 from ale.run.gpu import GpuLease, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
@@ -875,11 +874,11 @@ class DockerProvider(Provider):
         Task preparation adds the layer already; this covers an image handed straight to
         the Provider, so any image can serve as a sandbox.
         """
-        if await self._label(resolved.observed_ref, FRAMEWORK_LABEL):
-            return resolved
         layered = await with_framework(
             resolved.observed_identity, user=request.user, sudo=request.sudo
         )
+        if layered == resolved.observed_identity:
+            return resolved
         return resolved.model_copy(update={"observed_identity": layered, "observed_ref": layered})
 
     async def _guest_contract(self, client: GuestClient) -> tuple[str, bool]:
@@ -904,12 +903,6 @@ class DockerProvider(Provider):
                 f"elevated privileges were requested but {agent_user} cannot elevate in "
                 f"this sandbox; prepare the image with resources.sudo: true: {stderr.strip()}"
             )
-
-    async def _label(self, reference: str, name: str) -> str:
-        code, out, _ = await _docker(
-            "image", "inspect", "--format", f'{{{{index .Config.Labels "{name}"}}}}', reference
-        )
-        return out.strip() if code == 0 else ""
 
     async def _await_desktop(self, client: GuestClient, timeout_sec: float = 120) -> None:
         """Block until the screen can actually be captured.
