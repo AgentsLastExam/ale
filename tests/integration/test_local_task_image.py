@@ -11,6 +11,7 @@ from ale.core.config import RunConfig
 from ale.core.errors import ProviderStartError
 from ale.core.taskspec import ImageKind
 from ale.core.verdict import Status
+from ale.run import task_images
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
@@ -71,7 +72,9 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_container_build_reuse_and_input_boundaries(tmp_path: Path) -> None:
+async def test_local_container_build_reuse_and_input_boundaries(
+    tmp_path: Path, isolated_ale_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     task_path = scaffold_task(tmp_path / "task")
     registry = ProviderRegistry(RunConfig())
     first, second = await asyncio.gather(
@@ -80,6 +83,24 @@ async def test_local_container_build_reuse_and_input_boundaries(tmp_path: Path) 
     )
     assert second.input_identity == first.input_identity
     assert second.prepared_identity == first.prepared_identity
+
+    # An unchanged Task uses its prepared image directly; Docker is not asked to build.
+    commands: list[tuple[str, ...]] = []
+    run = task_images._run
+
+    async def recording_run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
+        commands.append(argv)
+        return await run(*argv, timeout=timeout)
+
+    monkeypatch.setattr(task_images, "_run", recording_run)
+    reused = await prepare_task_image_result(load_tasks(task_path)[0], registry)
+    monkeypatch.setattr(task_images, "_run", run)
+    assert reused.image == first
+    assert [(step.name, step.outcome) for step in reused.steps[1:3]] == [
+        ("oci-build", "reused"),
+        ("framework-layer", "reused"),
+    ]
+    assert not any(command[:2] == ("docker", "buildx") for command in commands)
 
     verifier = task_path / "verify" / "verify.py"
     verifier.write_text(verifier.read_text() + "\n# verifier-only edit\n")

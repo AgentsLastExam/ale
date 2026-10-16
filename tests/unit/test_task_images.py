@@ -31,7 +31,7 @@ LAYERED: list[tuple[str, str, bool, bool]] = []
 
 
 @pytest.fixture(autouse=True)
-def framework_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+def framework_layer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """These tests exercise the pipeline; the layer itself is tested in test_framework."""
 
     async def layer(image: str, *, user: str, sudo: bool, vm: bool = False) -> str:
@@ -40,6 +40,7 @@ def framework_layer(monkeypatch: pytest.MonkeyPatch) -> None:
 
     LAYERED.clear()
     monkeypatch.setattr("ale.run.task_images.with_framework", layer)
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "ale-cache"))
 
 
 def _task(write_task_repo, **kwargs: object) -> object:  # type: ignore[no-untyped-def]
@@ -258,6 +259,56 @@ async def test_buildx_uses_fixed_context_and_observes_container_identity(
     assert prepared.prepared_identity == "sha256:" + "c" * 64
     assert registry.get(ImageKind.CONTAINER).inputs == [prepared]
     assert [(prepared.runtime_ref, "user", False, False)] == LAYERED
+
+
+@pytest.mark.asyncio
+async def test_unchanged_task_uses_its_prepared_image_without_building(
+    write_task_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    task = _task(write_task_repo)
+    asset = task.folder.image_dir / "assets/data.txt"  # type: ignore[attr-defined]
+    asset.parent.mkdir()
+    asset.write_text("one")
+    builds: list[tuple[str, ...]] = []
+    images = {"sha256:" + "c" * 64}
+
+    async def fake_run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
+        if argv[:3] == ("docker", "buildx", "version"):
+            return 0, "", ""
+        if argv[:3] == ("docker", "buildx", "build"):
+            builds.append(argv)
+            images.add("sha256:" + "c" * 64)
+            Path(argv[argv.index("--metadata-file") + 1]).write_text(
+                json.dumps({"containerimage.config.digest": "sha256:" + "c" * 64})
+            )
+            return 0, "", ""
+        if argv[:3] == ("docker", "image", "inspect") and argv[-1] in images:
+            return 0, argv[-1], ""
+        return 1, "", "No such image"
+
+    monkeypatch.setattr("ale.run.task_images._run", fake_run)
+    first = await prepare_task_image_result(task, _Registry())  # type: ignore[arg-type]
+    second = await prepare_task_image_result(task, _Registry())  # type: ignore[arg-type]
+    assert len(builds) == 1
+    assert second.image == first.image
+    assert [(step.name, step.outcome) for step in second.steps[1:3]] == [
+        ("oci-build", "reused"),
+        ("framework-layer", "reused"),
+    ]
+
+    asset.write_text("three")
+    await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
+    assert len(builds) == 2
+
+    task.spec = task.spec.model_copy(
+        update={"resources": task.spec.resources.model_copy(update={"sudo": True})}
+    )
+    await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
+    assert len(builds) == 3
+
+    images.clear()
+    await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
+    assert len(builds) == 4
 
 
 @pytest.mark.asyncio

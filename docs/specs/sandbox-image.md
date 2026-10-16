@@ -130,9 +130,12 @@ files are rejected; convert them to a standalone qcow2 so its identity covers th
 The operator must keep prepared local disks unchanged while they are in use.
 
 The authored image source digest excludes `image/assets` so normal Task identity and
-asset provenance remain separate. Docker still consumes current asset bytes natively and
-BuildKit decides Linux cache reuse; Windows cache keys include the actual image asset
-bytes. Dirty or unsynchronized assets disable resume and reporting.
+asset provenance remain separate. A prepared Linux image is recorded under its build
+context's file contents, its asset inventory (path, size, modification time and mode, as
+for asset dirtiness) and the framework identity. An unchanged Task finds its image there
+and uses it directly, without asking Docker to build or check anything, so a base tag that
+moves is not followed: name exact base versions. Windows cache keys include the actual
+image asset bytes. Dirty or unsynchronized assets disable resume and reporting.
 RunLock schema 2 records declaration, preparation, Provider, and exact observed identity;
 it does not invent a whole-disk content digest. Local Linux VMs record OCI and materializer
 identities; local Windows VMs record builder identity and resolved base materials.
