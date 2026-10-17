@@ -226,17 +226,20 @@ class CodexCliHarness(AutonomousHarness):
     ) -> AgentRun:
         home = agent_path(session.home)
         prompt_var = f"ALE_PROMPT_{native_session_id or 'NEW'}".replace("-", "_")
-        argv = [
-            "codex",
-            "exec",
-            "--json",
-            "--model",
-            session.model,
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--skip-git-repo-check",
-        ]
+        argv = ["codex"]
         if self.settings.web_search:
+            # `--search` is a global Codex option, not an `exec` option.
             argv.append("--search")
+        argv.extend(
+            [
+                "exec",
+                "--json",
+                "--model",
+                session.model,
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
+            ]
+        )
         if native_session_id is not None:
             argv.extend(["resume", native_session_id])
         argv.append("-")

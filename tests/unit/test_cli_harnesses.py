@@ -415,6 +415,23 @@ async def test_subscription_config_uses_the_same_gateway_provider(
         assert '[model."test-model"]' in rendered
 
 
+@pytest.mark.parametrize("web_search", [False, True])
+async def test_codex_search_is_a_global_cli_option(web_search: bool) -> None:
+    sandbox = FakeSandbox()
+    sandbox.files["/home/agent/transcript.jsonl"] = (
+        b'{"type":"thread.started","thread_id":"thread-1"}\n'
+    )
+    await CodexCliHarness(settings={"web_search": web_search}).launch(
+        "test", sandbox, session(), timeout_sec=60
+    )
+    command = sandbox.commands[0][2]
+    if web_search:
+        assert "codex --search exec " in command
+    else:
+        assert "codex exec " in command
+        assert "--search" not in command
+
+
 async def test_codex_subscription_launch_drops_api_credentials() -> None:
     sandbox = FakeSandbox()
     sandbox.files["/home/agent/transcript.jsonl"] = (
