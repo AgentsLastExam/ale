@@ -83,7 +83,9 @@ than tighten it.
 
 ## 3. Provider credentials stay on the Host
 
-In API-key mode the provider key lives in the host's gitignored `.env`. The Sandbox
+In API-key mode the provider key lives in the host's gitignored `.env`, which `ale` reads
+once when it starts, for every command; a variable already set in the environment (an
+explicit `KEY=… ale run`, or a CI secret) takes precedence. The Sandbox
 receives a URL and a bearer token that is worthless anywhere else and is revoked when the
 episode ends — verified by `test_a_revoked_session_loses_its_egress`.
 

@@ -89,7 +89,6 @@ def provider_credentials(
     The key is named rather than passed. A value on the command line is in the shell's
     history and in every process listing on the machine; a variable name is not.
     """
-    load_env()
     default_key_var, default_base_url = DEFAULTS.get(dialect, DEFAULTS["anthropic"])
     if not key_var and base_url and base_url.rstrip("/") != default_base_url:
         raise ConfigError(

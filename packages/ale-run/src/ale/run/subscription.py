@@ -27,7 +27,7 @@ from ale.core.errors import (
     SubscriptionUnavailableError,
 )
 from ale.core.lock import AuthenticationProvenance
-from ale.run.secrets import find_env_file, load_env
+from ale.run.secrets import find_env_file
 
 __all__ = [
     "ResolvedAuthentication",
@@ -126,7 +126,6 @@ def resolve_authentication(agent: AgentConfig) -> ResolvedAuthentication:
     profile = auth_root() / agent.name / filename if filename else None
     token = ""
     if agent.name == "claude-code":
-        load_env()
         token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
     available = bool(token) if profile is None else profile.is_file()
 

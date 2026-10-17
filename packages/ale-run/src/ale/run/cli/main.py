@@ -53,6 +53,7 @@ from ale.run.providers.qemu import (
     list_retained as list_retained_qemu,
 )
 from ale.run.scaffold import scaffold_task
+from ale.run.secrets import load_env
 
 app = typer.Typer(
     name="ale",
@@ -85,6 +86,10 @@ def root(
     ] = False,
 ) -> None:
     """Run, validate and author ALE evaluation tasks."""
+    # Credentials come from the checkout's .env, read once here for every command. A
+    # variable already set in the environment, such as `KEY=... ale run` or a CI secret,
+    # takes precedence.
+    load_env()
 
 
 @app.command()

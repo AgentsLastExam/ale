@@ -50,7 +50,7 @@ from ale.run.provenance import (
 )
 from ale.run.providers import ProviderRegistry
 from ale.run.recording import atomic_write_json
-from ale.run.secrets import load_env, provider_credentials
+from ale.run.secrets import provider_credentials
 from ale.run.sources import parse_task_reference, resolve, select_tasks
 from ale.run.subscription import SubscriptionCredential, resolve_authentication
 from ale.run.task_images import (
@@ -391,7 +391,6 @@ async def _reverify(
     runs_dir: Path,
 ) -> int:
     """Reverify retained solver episodes without launching their Harness again."""
-    load_env()
     try:
         task_reference = parse_task_reference(reference)
         resolved = resolve(task_reference.source)
@@ -647,7 +646,6 @@ def _check_reportable(result: EpisodeResult) -> bool:
 
 
 async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
-    load_env()
     providers = ProviderRegistry(settings)
     try:
         task_reference = parse_task_reference(reference)

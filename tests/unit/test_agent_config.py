@@ -163,11 +163,8 @@ def test_preset_and_effective_settings_are_recorded() -> None:
 def test_a_custom_endpoint_must_name_its_own_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    environment = tmp_path / ".env"
-    environment.write_text("ANTHROPIC_API_KEY=default-key\nPROXY_KEY=proxy-key\n")
-    monkeypatch.setenv("ALE_ENV_FILE", str(environment))
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("PROXY_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "default-key")
+    monkeypatch.setenv("PROXY_KEY", "proxy-key")
 
     with pytest.raises(ConfigError, match="api-key-env"):
         provider_credentials("", "https://proxy.example/anthropic", "anthropic")
