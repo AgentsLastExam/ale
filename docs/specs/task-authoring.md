@@ -85,6 +85,8 @@ timeouts:                           # optional positive seconds; defaults shown
 
 artifacts:                          # optional outcome paths captured from the sandbox
   - /home/user/output               # absolute, unique, and non-overlapping
+artifact_excludes:                  # optional exact paths relative to each directory artifact
+  - .agent_runtime_env              # Linux container directory snapshots only
 
 tools:                              # optional; use only when the Task explicitly requires them
   skills:
@@ -123,6 +125,11 @@ extras:                             # optional namespaced extensions; no standar
 When the instruction requires deliverable files, every instructed destination must equal or be
 contained by a declared `artifacts` path. Commands and examples in `instruction.md` must write to
 that same destination; do not declare one path while instructing the agent to use another.
+`artifact_excludes` omits exact relative files or subtrees from every directory snapshot;
+paths must be normalized, unique and non-overlapping. Use exclusions only for content that
+verification does not need. They are available for Linux container Tasks only. Separate
+verification receives the filtered snapshot, while shared verification sees the original
+sandbox filesystem. The exclusions are recorded with each directory in `snapshot.json`.
 
 ### Verification topology
 

@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from ale.core.errors import ArtifactTransferError
-from ale.core.sandbox import ExecResult, ImageRef, PreparedTaskImage
-from ale.core.taskspec import ImageKind, ImageSpec, VerifySpec
+from ale.core.sandbox import ExecResult, ImageRef, PreparedTaskImage, SandboxRequest
+from ale.core.taskspec import ImageKind, ImageSpec, NetworkPolicy, Resources, VerifySpec
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import _artifact_tree_identity, _Artifacts, run_episode
@@ -205,6 +205,12 @@ class ArtifactSandbox:
         missing: bool = False,
         fail_read: bool = False,
     ) -> None:
+        self.request = SandboxRequest(
+            episode_id="artifact-test",
+            prepared_image=_prepared(ImageKind.CONTAINER),
+            resources=Resources(),
+            network=NetworkPolicy(),
+        )
         self.kind = kind
         self.mode = mode
         self.data = data
@@ -269,6 +275,65 @@ async def test_artifact_directory_snapshot_and_restore(tmp_path: Path) -> None:
 
     assert sandbox.uploads == [(str(tmp_path / "artifacts/ale-report"), "/var/lib/ale-report")]
     assert ["chmod", "750", "--", "/var/lib/ale-report"] in sandbox.commands
+
+
+@pytest.mark.asyncio
+async def test_filtered_artifacts_exclude_runtime_links_and_restore_deliverables(
+    tmp_path: Path,
+) -> None:
+    task = scaffold_task(tmp_path / "filtered")
+    manifest = task / "task.yaml"
+    manifest.write_text(manifest.read_text() + "artifact_excludes: [.agent_runtime_env]\n")
+    (task / "oracle/run.sh").write_text(
+        "#!/bin/sh\nset -eu\n"
+        "mkdir -p /home/user/output/.agent_runtime_env/bin\n"
+        "ln -s /usr/bin/python3 /home/user/output/.agent_runtime_env/bin/python\n"
+        "printf 'hello\\n' > /home/user/output/result.txt\n"
+    )
+    result = await execute(task, tmp_path / "runs")
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    root = result.run_dir / "artifacts"
+    assert (root / "output/result.txt").read_text() == "hello\n"
+    assert not (root / "output/.agent_runtime_env").exists()
+    entry = json.loads((root / "snapshot.json").read_text())["entries"][0]
+    assert entry["excludes"] == [".agent_runtime_env"]
+
+
+@pytest.mark.asyncio
+async def test_filtered_artifacts_still_reject_unexcluded_symlinks(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "bad-link")
+    manifest = task / "task.yaml"
+    manifest.write_text(manifest.read_text() + "artifact_excludes: [.agent_runtime_env]\n")
+    (task / "oracle/run.sh").write_text(
+        "#!/bin/sh\nset -eu\n"
+        "ln -s /etc/passwd /home/user/output/unexpected-link\n"
+        "printf 'hello\\n' > /home/user/output/result.txt\n"
+    )
+    result = await execute(task, tmp_path / "runs")
+    assert result.verdict.status is Status.TASK_ERROR
+    assert "symlink" in result.verdict.failure.message
+
+
+@pytest.mark.asyncio
+async def test_filtered_artifacts_restore_to_separate_verifier(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "filtered-separate")
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + "artifact_excludes: [.agent_runtime_env]\n"
+        + "verify:\n  environment_mode: separate\n"
+        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    )
+    (task / "oracle/run.sh").write_text(
+        "#!/bin/sh\nset -eu\n"
+        "mkdir -p /home/user/output/.agent_runtime_env\n"
+        "ln -s /etc/passwd /home/user/output/.agent_runtime_env/link\n"
+        "printf 'hello\\n' > /home/user/output/result.txt\n"
+    )
+    result = await execute(task, tmp_path / "runs")
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"content": 1.0, "overall": 1.0}
+    assert [outcome.roles for outcome in result.record.sandboxes] == [("solver",), ("verifier",)]
 
 
 @pytest.mark.asyncio

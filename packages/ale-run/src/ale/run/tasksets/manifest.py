@@ -347,6 +347,7 @@ def _effective_spec(
         network=manifest.network,
         timeouts=PhaseTimeouts.model_validate(timeouts),
         artifacts=manifest.artifacts,
+        artifact_excludes=manifest.artifact_excludes,
         tools=manifest.tools,
         params=params,
         verify=manifest.verify,
