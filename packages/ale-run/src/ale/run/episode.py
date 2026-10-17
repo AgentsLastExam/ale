@@ -298,7 +298,9 @@ class _Artifacts(ArtifactSink):
     def root(self) -> Path:
         return self.run_dir / "artifacts"
 
-    async def collect(self, sandbox: Sandbox, source: str, name: str) -> Path:
+    async def collect(
+        self, sandbox: Sandbox, source: str, name: str, *, excludes: tuple[str, ...] = ()
+    ) -> Path:
         if not self.enabled:
             raise ArtifactTransferError("artifact collection is disabled")
         probe = await sandbox.exec(
@@ -337,7 +339,10 @@ class _Artifacts(ArtifactSink):
                 size = len(data)
             else:
                 target.mkdir()
-                await sandbox.download_dir(source, str(target))
+                if excludes:
+                    await _download_filtered_artifact(sandbox, source, target, excludes)
+                else:
+                    await sandbox.download_dir(source, str(target))
                 identity, size = _artifact_tree_identity(target)
         except Exception as exc:
             raise ArtifactTransferError(f"could not capture artifact {source}: {exc}") from exc
@@ -349,6 +354,7 @@ class _Artifacts(ArtifactSink):
                 "mode": int(details["mode"]),
                 "content_identity": identity,
                 "size_bytes": size,
+                "excludes": list(excludes) if kind == "directory" else [],
             }
         )
         self.collected.append(name)
@@ -436,6 +442,75 @@ def _artifact_tree_identity(root: Path) -> tuple[str, int]:
         size += len(data)
         digest.update(relative.encode() + b"\0" + data)
     return f"sha256:{digest.hexdigest()}", size
+
+
+async def _download_filtered_artifact(
+    sandbox: Sandbox, source: str, target: Path, excludes: tuple[str, ...]
+) -> None:
+    """Capture regular files without traversing excluded paths or links."""
+    script = r"""
+import json, os, shutil, stat, sys, tempfile
+root, encoded = sys.argv[1:]
+excluded = set(json.loads(encoded))
+stage = tempfile.mkdtemp(prefix='ale-artifact-', dir='/tmp')
+flags = os.O_RDONLY | os.O_NOFOLLOW
+def walk(fd, destination, relative):
+    for entry in sorted(os.listdir(fd)):
+        name = relative + '/' + entry if relative else entry
+        if name in excluded:
+            continue
+        mode = os.stat(entry, dir_fd=fd, follow_symlinks=False).st_mode
+        if stat.S_ISLNK(mode):
+            raise ValueError('artifact directory contains a symlink: ' + name)
+        if stat.S_ISDIR(mode):
+            child = os.open(entry, flags | os.O_DIRECTORY, dir_fd=fd)
+            try:
+                path = os.path.join(destination, entry)
+                os.mkdir(path, stat.S_IMODE(mode))
+                walk(child, path, name)
+            finally:
+                os.close(child)
+        elif stat.S_ISREG(mode):
+            child = os.open(entry, flags | os.O_NONBLOCK, dir_fd=fd)
+            try:
+                info = os.fstat(child)
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError('artifact file changed type: ' + name)
+                path = os.path.join(destination, entry)
+                with os.fdopen(child, 'rb', closefd=False) as src, open(path, 'xb') as dst:
+                    shutil.copyfileobj(src, dst)
+                os.chmod(path, stat.S_IMODE(info.st_mode))
+            finally:
+                os.close(child)
+        else:
+            raise ValueError('artifact directory contains a special file: ' + name)
+try:
+    fd = os.open(root, flags | os.O_DIRECTORY)
+    try:
+        walk(fd, stage, '')
+    finally:
+        os.close(fd)
+except BaseException:
+    shutil.rmtree(stage)
+    raise
+print(json.dumps(stage))
+"""
+    result = await sandbox.exec(["python3", "-c", script, source, json.dumps(excludes)])
+    if not result.ok:
+        raise ArtifactTransferError(f"cannot stage artifact {source}: {result.stderr}")
+    try:
+        stage = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ArtifactTransferError(f"invalid artifact stage: {source}") from exc
+    if not isinstance(stage, str) or not stage.startswith("/tmp/ale-artifact-") or "/" in stage[5:]:
+        raise ArtifactTransferError(f"invalid artifact stage: {source}")
+    cleanup = None
+    try:
+        await sandbox.download_dir(stage, str(target))
+    finally:
+        cleanup = await sandbox.exec(["rm", "-rf", "--", stage])
+    if not cleanup.ok:
+        raise ArtifactTransferError(f"could not remove temporary artifact stage: {stage}")
 
 
 async def run_episode(

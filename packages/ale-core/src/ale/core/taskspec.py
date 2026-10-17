@@ -68,6 +68,42 @@ def _validate_artifact_paths(paths: tuple[str, ...], operating_system: Operating
                 raise ValueError(f"artifact paths overlap: {path} and {other}")
 
 
+def _validate_artifact_excludes(excludes: tuple[str, ...]) -> None:
+    if len(excludes) != len(set(excludes)):
+        raise ValueError("artifact excludes must be unique")
+    for value in excludes:
+        path = PurePosixPath(value)
+        if (
+            not value
+            or path.is_absolute()
+            or any(part in {".", ".."} for part in value.split("/"))
+            or "\\" in value
+            or str(path) != value
+        ):
+            raise ValueError(f"artifact exclude must be a normalized relative path: {value}")
+    paths = tuple(PurePosixPath(value) for value in excludes)
+    for index, path in enumerate(paths):
+        for other in paths[index + 1 :]:
+            if path in other.parents or other in path.parents:
+                raise ValueError(f"artifact excludes overlap: {path} and {other}")
+
+
+def _validate_artifact_selection(
+    paths: tuple[str, ...],
+    excludes: tuple[str, ...],
+    operating_system: OperatingSystem,
+    kind: ImageKind,
+) -> None:
+    _validate_artifact_paths(paths, operating_system)
+    _validate_artifact_excludes(excludes)
+    if excludes and not paths:
+        raise ValueError("artifact excludes require at least one artifact")
+    if excludes and (
+        operating_system is not OperatingSystem.LINUX or kind is not ImageKind.CONTAINER
+    ):
+        raise ValueError("artifact excludes require a Linux container")
+
+
 class ImageSpec(BaseModel):
     """Authored solver or dedicated-verifier image declaration."""
 
@@ -307,6 +343,7 @@ class TaskManifestV1(BaseModel):
     network: NetworkPolicy = NetworkPolicy()
     timeouts: PhaseTimeouts = PhaseTimeouts()
     artifacts: tuple[str, ...] = ()
+    artifact_excludes: tuple[str, ...] = ()
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
@@ -315,7 +352,9 @@ class TaskManifestV1(BaseModel):
     extras: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     def _check_artifacts(self) -> None:
-        _validate_artifact_paths(self.artifacts, self.os)
+        _validate_artifact_selection(
+            self.artifacts, self.artifact_excludes, self.os, self.image.kind
+        )
 
     @model_validator(mode="after")
     def _valid_manifest(self) -> Self:
@@ -342,6 +381,7 @@ class TaskSpec(BaseModel):
     network: NetworkPolicy = NetworkPolicy()
     timeouts: PhaseTimeouts = PhaseTimeouts()
     artifacts: tuple[str, ...] = ()
+    artifact_excludes: tuple[str, ...] = ()
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
@@ -350,7 +390,9 @@ class TaskSpec(BaseModel):
 
     @model_validator(mode="after")
     def _valid_artifacts(self) -> Self:
-        _validate_artifact_paths(self.artifacts, self.os)
+        _validate_artifact_selection(
+            self.artifacts, self.artifact_excludes, self.os, self.image.kind
+        )
         return self
 
     @property

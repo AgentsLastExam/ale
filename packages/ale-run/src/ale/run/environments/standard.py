@@ -699,7 +699,9 @@ class StandardEnvironment(Environment):
                     PureWindowsPath if ctx.spec.os is OperatingSystem.WINDOWS else PurePosixPath
                 )
                 name = path_type(path).name or f"artifact-{index}"
-                await ctx.artifacts.collect(sandbox, path, name)
+                await ctx.artifacts.collect(
+                    sandbox, path, name, excludes=ctx.spec.artifact_excludes
+                )
                 logger.info(
                     "artifact collected",
                     extra={"ale_data": {"source": path, "name": name}},

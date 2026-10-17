@@ -71,8 +71,11 @@ Harnesses use the base's native Node.js and Git Bash.
 After the solver stops, the Harness performs idempotent cleanup and ALE converts its
 observed evidence into `trajectory.json`. When run policy sets `artifacts.collect =
 "host"`, every Task-declared artifact is captured as an immutable file or directory
-snapshot. Missing, overlapping, symlink, special-file, and transfer failures are explicit
-errors.
+snapshot. Task-authored `artifact_excludes` omit exact relative files or subtrees from each
+directory snapshot. Excluded entries are never traversed; included symlinks and special
+files remain errors. Missing, overlapping and transfer failures are explicit errors.
+For Linux container Tasks, filtered collection stages an independent tree before transfer;
+the exclusion list is recorded in the snapshot manifest.
 
 With `artifacts.collect = "none"`, ALE does not inspect artifact paths, create a spool,
 copy bytes, or restore anything. A separate verifier that needs solver output therefore

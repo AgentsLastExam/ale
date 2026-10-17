@@ -143,6 +143,7 @@ def test_manifest_field_set_is_exact() -> None:
         "network",
         "timeouts",
         "artifacts",
+        "artifact_excludes",
         "tools",
         "params",
         "verify",
@@ -266,3 +267,44 @@ def test_artifacts_are_absolute_unique_and_non_overlapping(artifacts: tuple[str,
             image={"kind": "container"},
             artifacts=artifacts,
         )
+
+
+@pytest.mark.parametrize(
+    "excludes",
+    [
+        ("",),
+        ("../outside",),
+        ("/absolute",),
+        ("a//b",),
+        ("a/./b",),
+        ("a", "a/b"),
+        ("a", "a"),
+        ("a\\b",),
+    ],
+)
+def test_invalid_artifact_excludes_are_rejected(excludes: tuple[str, ...]) -> None:
+    with pytest.raises(ValidationError):
+        TaskManifestV1(
+            spec_type="core/v1",
+            name="demo",
+            image={"kind": "container"},
+            artifacts=("/output",),
+            artifact_excludes=excludes,
+        )
+
+
+def test_artifact_excludes_require_linux_container_artifacts() -> None:
+    values = {
+        "spec_type": "core/v1",
+        "name": "demo",
+        "image": {"kind": "container"},
+        "artifacts": ("/output",),
+        "artifact_excludes": (".agent_runtime_env",),
+    }
+    assert TaskManifestV1.model_validate(values).artifact_excludes == (".agent_runtime_env",)
+    with pytest.raises(ValidationError):
+        TaskManifestV1.model_validate(values | {"artifacts": ()})
+    with pytest.raises(ValidationError):
+        TaskManifestV1.model_validate(values | {"image": {"kind": "vm"}})
+    with pytest.raises(ValidationError):
+        TaskManifestV1.model_validate(values | {"os": "windows", "artifacts": (r"C:\\output",)})
