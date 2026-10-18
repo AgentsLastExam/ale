@@ -29,6 +29,7 @@ async def test_validation_records_selected_variants_and_rejects_partial_oracles(
         "    'reward',\n"
         "    CheckResult(0.5 if os.path.isfile('/home/user/output/result.txt') else 0.0),\n"
         ")\n"
+        "verification.aggregate('overall')\n"
         "verification.write()\n"
     )
 
@@ -39,8 +40,8 @@ async def test_validation_records_selected_variants_and_rejects_partial_oracles(
     assert [task["variant"] for task in observation["tasks"]] == ["base", "hard"]
     for item in observation["tasks"]:
         assert item["passed"] is False
-        assert item["untouched"]["rewards"] == {"reward": 0.0}
-        assert item["oracle"]["rewards"] == {"reward": 0.5}
+        assert item["untouched"]["rewards"] == {"reward": 0.0, "overall": 0.0}
+        assert item["oracle"]["rewards"] == {"reward": 0.5, "overall": 0.5}
         assert item["warnings"] == []
         assert item["failures"][0]["code"] == "oracle_not_full"
         assert item["untouched"]["lock_digest"].startswith("sha256:")

@@ -18,6 +18,18 @@ Default is `network.mode: block`. Docker uses a per-episode `--internal` bridge 
 route off the host. QEMU enforces deny-all in the runner network namespace, outside the
 guest OS, and forwards only the episode's framework-owned service ports.
 
+No route off the host is not the same as no way out: the host's own address on the
+bridge answers on every port a host service binds to all interfaces, such as sshd, a
+database, or another run's Gateway. Both backends therefore admit only the episode's own
+Gateway and proxy ports on that address. Docker applies the rule in the sandbox's network
+namespace from a short-lived helper container holding `NET_ADMIN`, a capability the
+sandbox itself never has, so not even root inside it can lift the rule; provisioning fails
+if the rule cannot be applied. QEMU drops forwarded guest traffic in the runner while the
+sandbox is sealed and accepts only replies and the DNATed episode ports. The guest OS has
+no firewall of its own: enforcement lives where the agent cannot reach it, and the
+framework's `open_egress` for setup and verification is not undone by rules inside the
+guest.
+
 This is why the address is read from the network rather than assumed: Docker's
 `host-gateway` alias does not work on an internal bridge, and a wrong assumption here
 would look like a broken run rather than a broken guarantee.
@@ -34,9 +46,10 @@ egress policy.
 `open` is a deliberate escape hatch: an ordinary bridge with normal egress. A task must
 declare it, and the declaration is recorded in provenance.
 
-Verified by `tests/integration/test_gateway_isolation.py` and by the `demo-netprobe`
-task, which attempts DNS resolution and a raw TCP connection from inside a sandbox and
-fails admission if either succeeds.
+Verified by `tests/integration/test_gateway_isolation.py`, including that a sealed
+sandbox reaches no other host port, by the QEMU Provider unit tests for the runner rules,
+and by the `demo-netprobe` task, which attempts DNS resolution and a raw TCP connection
+from inside a sandbox and fails admission if either succeeds.
 
 ## 2. Egress is a decision made in our code
 
@@ -70,7 +83,9 @@ than tighten it.
 
 ## 3. Provider credentials stay on the Host
 
-In API-key mode the provider key lives in the host's gitignored `.env`. The Sandbox
+In API-key mode the provider key lives in the host's gitignored `.env`, which `ale` reads
+once when it starts, for every command; a variable already set in the environment (an
+explicit `KEY=… ale run`, or a CI secret) takes precedence. The Sandbox
 receives a URL and a bearer token that is worthless anywhere else and is revoked when the
 episode ends — verified by `test_a_revoked_session_loses_its_egress`.
 
@@ -117,8 +132,18 @@ succeeds in an image with no `sudo` binary — and recorded in provenance, becau
 episode run that way was less isolated and the two should not be compared without that
 being visible.
 
+A VM guest service listens on TCP, which the agent can reach over loopback and every Host
+account can reach through the forwarded port. Each connection must therefore first present
+the sandbox's token, which the framework's first connection to the freshly booted guest
+claims; anything else is refused before an operation runs. The claim is sound because
+nothing but trusted image services runs in a cold-booted guest before that connection.
+Linux keeps the claimed token in root-only `/run/ale/guestd-token`, so a restarted guest
+service stays claimed while a reboot or a saved disk carries none; Windows keeps it in
+memory. Container guest services are `docker exec` sessions with no listener.
+
 Verified by `tests/integration/test_identity.py`: the agent cannot read the guest service,
-cannot write system paths, and cannot elevate unless its task asked.
+cannot write system paths, and cannot elevate unless its task asked; and by
+`tests/unit/test_guest_authentication.py` for the claimed TCP guest service.
 
 ## 5. Answers are absent, not hidden
 
@@ -137,7 +162,8 @@ non-zero if any scoring path exists during setup.
 ## 6. Limits end episodes rather than stalling them
 
 API-key and subscription token, cost and model-call ceilings are enforced by the Gateway
-refusing the next call with a 429. Some subscription endpoints expose less request-side
+refusing the next call with a 429, and an agent phase that fails after a refusal ends as
+`budget_exceeded` for every Harness and authentication mode. Some subscription endpoints expose less request-side
 control; in particular, Codex rejects `max_output_tokens`, so ALE accounts the completed
 response and refuses a later call after the ceiling. Harness-native limits and phase
 deadlines remain additional layers. Teardown is cancellation-shielded, so a killed phase
@@ -164,8 +190,12 @@ observations, agent version and integrity, harness family, one optional Task-ass
 repository/path/commit/dirty observation, verification topology and image/resources,
 sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
 
-A run whose lock cannot back a reportable result says so. `--require-reportable` turns
-that statement into a non-zero exit for CI. Final Task-image publication is not part of
+A reportable result is one that can be published, such as on a leaderboard, because it can
+be reproduced exactly. Its Task must be committed in a git repository with no uncommitted
+changes under the Task path: the lock records the repository's origin URL without any
+credentials in it (or its path when it has none), the commit and the Task path. The engine commit, effective resources
+and committed assets must also be recorded. A run whose lock cannot back a reportable
+result says why; `--require-reportable` turns that into a non-zero exit for official runs. Final Task-image publication is not part of
 the current contract; future delivery may add it without changing the self-contained
 Task source contract.
 
@@ -231,8 +261,8 @@ security claims rot.
 framework-controlled code, and a Task may declare `resources.sudo` for its agent. Tasks
 are reviewed content, not untrusted input; the identity model protects a result from its
 *agent*, not a host from its Task. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are
-aimed at *broken* Tasks, not hostile ones. A malicious verifier can also read and
-exfiltrate a Judge credential injected for its direct provider call.
+aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host Gateway; a
+malicious verifier can only spend its episode's Judge session while that episode runs.
 
 **Container escape.** A container sandbox uses Docker's default isolation. A kernel
 exploit reaches the host. Use the VM backend for stronger isolation, and still do not put
@@ -249,6 +279,13 @@ content. A Transport Trace proves routing and accounting; it is not a content po
 **A compromised image.** The exact locally built Task-image content is recorded in
 provenance, so a change is *detectable*. Nothing verifies that its base or authored
 Dockerfile was benign to begin with.
+
+**Processes the agent leaves running.** ALE does not stop processes the agent started,
+because a Task may ask the agent to deploy a service that verification then checks. In
+shared verification such a process keeps running while verification has open egress for
+its Judges, so it can still change the Sandbox before or during scoring. A Task that needs a
+strict boundary uses separate verification, which restores only the declared artifacts into
+a fresh Sandbox.
 
 **Resource exhaustion by a co-tenant.** CPU, memory, writable storage, and ALE-managed
 physical GPUs are admitted per sandbox or rejected. Network bandwidth and resources

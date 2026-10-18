@@ -23,11 +23,11 @@ from ale_verify import (
     JudgeInvocation,
     VerificationRecord,
 )
-from tests.support import provider_registry
+from tests.support import CONTAINER_BASE, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+IMAGE = CONTAINER_BASE
 HASH0 = "sha256:" + "0" * 64
 HASH1 = "sha256:" + "1" * 64
 
@@ -57,6 +57,7 @@ async def test_record_and_envelope_mismatch_is_rejected_but_record_is_retained(
         "from ale_verify import CheckResult, Verification\n"
         "v = Verification()\n"
         "v.check('score', CheckResult(1.0))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
         "with open(os.environ['ALE_VERDICT_PATH'], 'w') as handle:\n"
         "    json.dump({'rewards': {'score': 0.0}, 'metrics': {}}, handle)\n"

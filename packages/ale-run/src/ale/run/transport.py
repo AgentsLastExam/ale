@@ -24,6 +24,8 @@ from ale.core.sandbox import ExecOutputSink
 __all__ = ["GuestClient", "StdioTransport", "TcpTransport", "Transport"]
 
 _READ_LIMIT = 16 * 1024 * 1024  # generous: file chunks arrive base64-encoded
+#: Bytes per write_file message; base64 of this stays well under the guest's 8 MiB line.
+_WRITE_CHUNK_BYTES = 4 * 1024 * 1024
 _OUTPUT_PREVIEW_BYTES = 64 * 1024
 
 
@@ -89,11 +91,17 @@ class StdioTransport:
 
 
 class TcpTransport:
-    """A socket to a guest service reached through a forwarded port."""
+    """An authenticated socket to a guest service reached through a forwarded port.
 
-    def __init__(self, host: str, port: int) -> None:
+    The forwarded port is reachable from inside the guest (loopback) and from the Host,
+    so every connection first presents the sandbox's framework token. The first token a
+    freshly booted guest receives claims it; see ``docs/specs/security.md``.
+    """
+
+    def __init__(self, host: str, port: int, *, token: str) -> None:
         self._host = host
         self._port = port
+        self._token = token
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
 
@@ -103,7 +111,8 @@ class TcpTransport:
         Connecting is not evidence that anyone is listening. When the port is published by
         a container runtime, its forwarder binds immediately and accepts long before the
         guest inside has booted — the connection succeeds and the first read is reset.
-        Readiness is therefore a request that came back, not a socket that opened.
+        Readiness is therefore a request that came back, not a socket that opened; the
+        request is the authentication every connection makes first.
         """
         deadline = asyncio.get_running_loop().time() + timeout_sec
         last: Exception | None = None
@@ -112,13 +121,27 @@ class TcpTransport:
                 self._reader, self._writer = await asyncio.open_connection(
                     self._host, self._port, limit=_READ_LIMIT
                 )
-                await self.send(json.dumps({"id": "ready", "op": "health", "params": {}}))
-                await asyncio.wait_for(self.recv(), timeout=interval_sec * 10)
-                return
-            except (OSError, GuestUnreachableError, TimeoutError) as exc:
+                await self.send(
+                    json.dumps({"id": 0, "op": "auth", "params": {"token": self._token}})
+                )
+                reply = json.loads(await asyncio.wait_for(self.recv(), timeout=interval_sec * 10))
+            except (OSError, GuestUnreachableError, TimeoutError, ValueError) as exc:
                 last = exc
                 await self.close()
                 await asyncio.sleep(interval_sec)
+                continue
+            if reply.get("ok"):
+                return
+            await self.close()
+            code = (reply.get("error") or {}).get("code")
+            if code == "unsupported":
+                raise ProviderStartError(
+                    f"guest service at {self._host}:{self._port} predates authenticated "
+                    "connections; rebuild the image from the current ALE base"
+                )
+            raise ProviderStartError(
+                f"guest service at {self._host}:{self._port} refused the framework token [{code}]"
+            )
         raise ProviderStartError(
             f"guest service at {self._host}:{self._port} did not answer within "
             f"{timeout_sec:g}s ({last})"
@@ -274,12 +297,17 @@ class GuestClient:
     async def write_file(
         self, path: str, data: bytes, *, mode: str | None = None, run_as: str | None = None
     ) -> None:
-        params: dict[str, Any] = {"path": path, "b64": base64.b64encode(data).decode("ascii")}
-        if mode:
-            params["mode"] = mode
-        if run_as:
-            params["run_as"] = run_as
-        await self.call("write_file", params)
+        """Write ``data`` to ``path``, appending pieces that fit the guest's message limit."""
+        for offset in range(0, max(len(data), 1), _WRITE_CHUNK_BYTES):
+            piece = data[offset : offset + _WRITE_CHUNK_BYTES]
+            params: dict[str, Any] = {"path": path, "b64": base64.b64encode(piece).decode("ascii")}
+            if offset:
+                params["append"] = True
+            if mode:
+                params["mode"] = mode
+            if run_as:
+                params["run_as"] = run_as
+            await self.call("write_file", params)
 
     async def read_file(self, path: str) -> bytes:
         _, events = await self.call("read_file", {"path": path})

@@ -24,10 +24,10 @@ from ale.run.agent_resources import resolve_agent_resources
 pytestmark = pytest.mark.unit
 
 
-def source(kind: str = "registry") -> TaskSource:
-    if kind == "registry":
+def source(kind: str = "git") -> TaskSource:
+    if kind == "git":
         return TaskSource(
-            kind="registry",
+            kind="git",
             repo="https://example.com/tasks.git",
             commit="a" * 40,
             path="tasks/demo/hello",
@@ -41,7 +41,7 @@ def skill(path: Path, text: str = "name") -> Path:
     return path
 
 
-def resolve(task_root: Path, *paths: str, kind: str = "registry"):
+def resolve(task_root: Path, *paths: str, kind: str = "git"):
     return resolve_agent_resources(
         task=ToolProvision(
             skills=tuple(SkillSource(path=f"tools/skills/{path}") for path in paths)
@@ -165,7 +165,7 @@ def test_local_task_skill_is_visible_but_not_reportable(tmp_path: Path) -> None:
     skill(task / "tools/skills/local")
     resolved = resolve(task, "local", kind="local").skills[0]
     assert not resolved.reportable
-    assert "local task path" in (resolved.reportability_reason or "")
+    assert "not committed in a git repository" in (resolved.reportability_reason or "")
 
 
 def mcp(path: Path, body: str) -> Path:

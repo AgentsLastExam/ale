@@ -26,6 +26,27 @@ from ale.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
 
+#: What the framework layer was asked for, by the tests that look.
+LAYERED: list[tuple[str, str, bool, bool]] = []
+
+
+@pytest.fixture(autouse=True)
+def framework_layer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """These tests exercise the pipeline; the layer itself is tested in test_framework."""
+
+    async def layer(image: str, *, user: str, sudo: bool, vm: bool = False) -> str:
+        LAYERED.append((image, user, sudo, vm))
+        return image
+
+    async def frame(image: PreparedTaskImage, *, user: str, sudo: bool) -> tuple:
+        LAYERED.append((image.runtime_ref, user, sudo, True))
+        return image, "executed"
+
+    LAYERED.clear()
+    monkeypatch.setattr("ale.run.task_images.with_framework", layer)
+    monkeypatch.setattr("ale.run.task_images._framed_disk", frame)
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "ale-cache"))
+
 
 def _task(write_task_repo, **kwargs: object) -> object:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("demo",), **kwargs)
@@ -110,9 +131,10 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
     async def runner_identity(reference: str) -> str:
         return runner
 
-    async def build(base, context, output, resources, runner_identity):  # type: ignore[no-untyped-def]
+    async def build(base, context, output, resources, runner_identity, *, user):  # type: ignore[no-untyped-def]
         assert resources.cpus == 2 and resources.memory_mb == 4096
         assert runner_identity == runner
+        assert user == "user"
         builds.append(output)
         output.write_bytes(b"valid-disk")
 
@@ -183,7 +205,7 @@ async def test_failed_windows_build_does_not_publish_or_fall_back(
     async def runner_identity(reference: str) -> str:
         return "sha256:" + "e" * 64
 
-    async def build(base, context, output, resources, runner):  # type: ignore[no-untyped-def]
+    async def build(base, context, output, resources, runner, *, user):  # type: ignore[no-untyped-def]
         output.write_bytes(b"partial")
         if failure == "script":
             raise TaskDefinitionError("installer failed")
@@ -241,6 +263,57 @@ async def test_buildx_uses_fixed_context_and_observes_container_identity(
     assert inspect[-1] == prepared.prepared_identity
     assert prepared.prepared_identity == "sha256:" + "c" * 64
     assert registry.get(ImageKind.CONTAINER).inputs == [prepared]
+    assert [(prepared.runtime_ref, "user", False, False)] == LAYERED
+
+
+@pytest.mark.asyncio
+async def test_unchanged_task_uses_its_prepared_image_without_building(
+    write_task_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    task = _task(write_task_repo)
+    asset = task.folder.image_dir / "assets/data.txt"  # type: ignore[attr-defined]
+    asset.parent.mkdir()
+    asset.write_text("one")
+    builds: list[tuple[str, ...]] = []
+    images = {"sha256:" + "c" * 64}
+
+    async def fake_run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
+        if argv[:3] == ("docker", "buildx", "version"):
+            return 0, "", ""
+        if argv[:3] == ("docker", "buildx", "build"):
+            builds.append(argv)
+            images.add("sha256:" + "c" * 64)
+            Path(argv[argv.index("--metadata-file") + 1]).write_text(
+                json.dumps({"containerimage.config.digest": "sha256:" + "c" * 64})
+            )
+            return 0, "", ""
+        if argv[:3] == ("docker", "image", "inspect") and argv[-1] in images:
+            return 0, argv[-1], ""
+        return 1, "", "No such image"
+
+    monkeypatch.setattr("ale.run.task_images._run", fake_run)
+    first = await prepare_task_image_result(task, _Registry())  # type: ignore[arg-type]
+    second = await prepare_task_image_result(task, _Registry())  # type: ignore[arg-type]
+    assert len(builds) == 1
+    assert second.image == first.image
+    assert [(step.name, step.outcome) for step in second.steps[1:3]] == [
+        ("oci-build", "reused"),
+        ("framework-layer", "reused"),
+    ]
+
+    asset.write_text("three")
+    await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
+    assert len(builds) == 2
+
+    task.spec = task.spec.model_copy(
+        update={"resources": task.spec.resources.model_copy(update={"sudo": True})}
+    )
+    await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
+    assert len(builds) == 3
+
+    images.clear()
+    await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
+    assert len(builds) == 4
 
 
 @pytest.mark.asyncio
@@ -293,8 +366,10 @@ async def test_preparation_result_orders_ref_and_artifact_stages(write_task_repo
     assert [step.name for step in result.steps] == [
         "lint",
         "reference-resolution",
+        "framework-layer",
         "artifact-check",
     ]
+    assert LAYERED == [("/cache/disk.qcow2", "user", False, True)]
     assert all(step.outcome == "executed" for step in result.steps)
 
 
@@ -385,6 +460,61 @@ async def test_local_vm_candidate_is_materialized_before_provider_check(
     assert registry.get(ImageKind.VM).inputs == [vm]
 
 
+@pytest.mark.asyncio
+async def test_a_vm_disk_ref_is_framed_once_and_a_framed_disk_is_used_as_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ale.run.task_images as images
+
+    monkeypatch.undo()  # the real _framed_disk, with Docker and libguestfs replaced below
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "cache"))
+    source = tmp_path / "input.qcow2"
+    source.write_bytes(b"disk")
+    framed: list[Path] = []
+    carried: dict[Path, str | None] = {}
+
+    async def materializer_identity() -> str:
+        return "sha256:" + "9" * 64
+
+    async def valid(path: Path) -> bool:
+        return path.is_file()
+
+    async def run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
+        assert argv[:2] == ("qemu-img", "convert")
+        Path(argv[-1]).write_bytes(Path(argv[-2]).read_bytes())
+        return 0, "", ""
+
+    async def frame(disk: Path, *, user: str, sudo: bool, builder: str) -> None:
+        framed.append(disk)
+
+    async def on_disk(disk: Path, *, builder: str) -> str | None:
+        return carried.get(disk)
+
+    monkeypatch.setattr(images, "_materializer_identity", materializer_identity)
+    monkeypatch.setattr(images, "_valid_qcow2", valid)
+    monkeypatch.setattr(images, "_run", run)
+    monkeypatch.setattr(images, "frame_disk", frame)
+    monkeypatch.setattr(images, "framework_on_disk", on_disk)
+    image = _prepared(ImageKind.VM, "external-ref").model_copy(update={"runtime_ref": str(source)})
+
+    first, outcome = await images._framed_disk(image, user="user", sudo=False)
+    assert outcome == "executed" and len(framed) == 1
+    assert first.runtime_ref != image.runtime_ref
+    assert first.resolved_reference == image.resolved_reference
+    assert first.prepared_identity != image.prepared_identity
+    second, outcome = await images._framed_disk(image, user="user", sudo=False)
+    assert (second, outcome) == (first, "reused") and len(framed) == 1
+    await images._framed_disk(image, user="user", sudo=True)
+    assert len(framed) == 2  # another framework is another copy
+
+    ready = image.model_copy(update={"prepared_identity": "sha256:" + "e" * 64})
+    carried[source] = images.framework_identity(user="user", sudo=False, vm=True)
+    assert await images._framed_disk(ready, user="user", sudo=False) == (ready, "reused")
+    carried.clear()  # recorded once, not looked at again
+    assert await images._framed_disk(ready, user="user", sudo=False) == (ready, "reused")
+    assert len(framed) == 2
+
+
 def test_vm_derivation_uses_oci_and_materializer_identities_only() -> None:
     from ale.run.task_images import vm_materialization_identity
 
@@ -398,6 +528,10 @@ def test_vm_derivation_uses_oci_and_materializer_identities_only() -> None:
         }
     )
     assert vm_materialization_identity(oci, materializer) == expected
+
+
+#: The labels a VM base declares, which configure the guest service the engine installs.
+VM_LABELS = '{"ale.user": "user", "ale.gui": "true"}'
 
 
 def _vm_build() -> _OciBuild:
@@ -459,6 +593,8 @@ async def test_vm_materialization_publishes_only_valid_output_and_cleans_tempora
         commands.append(argv)
         if argv[:2] == ("docker", "create"):
             return 0, "container-id\n", ""
+        if argv[:3] == ("docker", "image", "inspect"):
+            return 0, VM_LABELS, ""
         if argv[:2] == ("docker", "export"):
             _write_rootfs_tar(Path(argv[argv.index("--output") + 1]))
         if argv[:2] == ("docker", "run"):
@@ -487,6 +623,8 @@ async def test_failed_vm_materialization_leaves_no_reusable_artifact(
     async def run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
         if argv[:2] == ("docker", "create"):
             return 0, "container-id\n", ""
+        if argv[:3] == ("docker", "image", "inspect"):
+            return 0, VM_LABELS, ""
         if argv[:2] == ("docker", "export"):
             _write_rootfs_tar(Path(argv[argv.index("--output") + 1]))
             return 0, "", ""

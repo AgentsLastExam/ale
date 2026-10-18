@@ -145,7 +145,7 @@ def _resolve_skill_source(
             )
         directories = children
 
-    reportable = origin == "task" and task_source.kind == "registry"
+    reportable = origin == "task" and task_source.is_reproducible
     version = task_source.commit if reportable else None
     reason = None if reportable else _reportability_reason(origin, task_source)
     return tuple(
@@ -291,7 +291,7 @@ def _resolve_mcp_source(
         staged_files = path.parent
 
     external = isinstance(server, StreamableHttpMcpServer)
-    reportable = origin == "task" and task_source.kind == "registry" and not external
+    reportable = origin == "task" and task_source.is_reproducible and not external
     version = task_source.commit if reportable else None
     reason = (
         "external Streamable HTTP service has no immutable identity"
@@ -363,6 +363,6 @@ def _inside(path: Path, root: Path, label: str) -> None:
 
 
 def _reportability_reason(origin: str, task_source: TaskSource) -> str:
-    if origin == "task" and task_source.kind == "local":
-        return "task resource came from a local task path"
+    if origin == "task" and not task_source.is_reproducible:
+        return "task resource came from a Task that is not committed in a git repository"
     return f"{origin} local resource cannot be re-fetched"

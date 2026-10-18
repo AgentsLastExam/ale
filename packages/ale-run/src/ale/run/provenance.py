@@ -15,6 +15,7 @@ which is the one moment provenance exists for.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -92,8 +93,15 @@ def gateway_provenance(settings: RunConfig, *, observable: bool = True) -> Gatew
     )
 
 
-def judge_provenance(record: VerificationRecord) -> tuple[JudgeProvenance, ...]:
-    """Project collected sandbox observations into the stable RunLock shape."""
+def judge_provenance(
+    record: VerificationRecord, endpoints: Mapping[str, str] | None = None
+) -> tuple[JudgeProvenance, ...]:
+    """Project collected sandbox observations into the stable RunLock shape.
+
+    ``endpoints`` names each Judge kind's real endpoint, which replaces the Gateway
+    address the verifier observed.
+    """
+    endpoints = endpoints or {}
     observed: list[JudgeProvenance] = []
     for invocation in record.judge_invocations:
         if not invocation.attempts:
@@ -105,7 +113,7 @@ def judge_provenance(record: VerificationRecord) -> tuple[JudgeProvenance, ...]:
                 kind=invocation.kind,
                 model=first.model,
                 reasoning_effort=first.reasoning_effort,
-                endpoint_identity=first.endpoint_identity,
+                endpoint_identity=endpoints.get(invocation.kind, first.endpoint_identity),
                 prompt_hash=first.prompt_hash,
                 rubric_hash=first.rubric_hash,
                 adapter=invocation.adapter,

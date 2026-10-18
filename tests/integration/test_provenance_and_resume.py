@@ -43,10 +43,10 @@ from tests.support import provider_registry
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 
-def inputs_for(harness: object, *, kind: str = "registry") -> ProvenanceInputs:
+def inputs_for(harness: object, *, kind: str = "git") -> ProvenanceInputs:
     source = (
-        TaskSource(kind="registry", repo="https://example.com/tasks.git", commit="a" * 40, path="t")
-        if kind == "registry"
+        TaskSource(kind="git", repo="https://example.com/tasks.git", commit="a" * 40, path="t")
+        if kind == "git"
         else TaskSource(kind="local", path="/tmp/t")
     )
     settings = RunConfig()
@@ -113,7 +113,7 @@ async def test_a_local_task_is_refused_for_reporting(
 
     assert result.lock is not None
     problems = result.lock.missing_for_report()
-    assert any("local path" in problem for problem in problems)
+    assert any("not in a git repository" in problem for problem in problems)
 
 
 @pytest.mark.asyncio
@@ -147,7 +147,7 @@ async def test_resume_skips_completed_work_and_loses_nothing(
         image_digest=task.prepared_image.prepared_identity,
         agent=f"{inputs.agent.harness}@{inputs.agent.version}",
         seed=0,
-        config_hash=inputs.config_hash,
+        reuse_hash=inputs.config_hash,
     )
 
     ledger = Ledger(run_dir)
@@ -172,7 +172,7 @@ async def test_resume_skips_completed_work_and_loses_nothing(
             image_digest=task.prepared_image.prepared_identity,
             agent=f"{inputs.agent.harness}@{inputs.agent.version}",
             seed=99,
-            config_hash=inputs.config_hash,
+            reuse_hash=inputs.config_hash,
         )
         assert other != identity
     finally:

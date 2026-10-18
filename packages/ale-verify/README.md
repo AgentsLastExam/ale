@@ -15,6 +15,9 @@ verification.check(
 verification.write()
 ```
 
+`write()` adds the `overall` reward as the weighted mean of every criterion unless the
+verifier defined its own `overall` aggregate or check. A stat cannot be named `overall`.
+
 Verification code runs from the Task's `verify/` directory. It writes
 `verification.json` and the final reward envelope through paths supplied by ALE; callers
 do not choose those framework paths.

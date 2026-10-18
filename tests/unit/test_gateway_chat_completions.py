@@ -7,9 +7,9 @@ import pytest
 from aiohttp import ClientSession, web
 
 from ale.core.trace import read_jsonl
-from ale.run.gateway.openai_chat_completions import usage_from_stream
+from ale.run.gateway.openai_chat_completions import stream_completed, usage_from_stream
 from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession, Limits
+from ale.run.gateway.session import CallUsage, GatewaySession, Limits
 from ale.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
@@ -158,7 +158,10 @@ def test_chat_stream_usage_may_cross_network_chunk_boundaries() -> None:
         b'"usage":{"prompt_tokens":6,"completion_tokens":4}}\n\ndata: [DONE]\n\n'
     )
 
-    assert usage_from_stream([event[:31], event[31:79], event[79:]]) == (6, 4, "stop")
+    assert usage_from_stream([event[:31], event[31:79], event[79:]]) == (
+        CallUsage(input_tokens=6, output_tokens=4),
+        "stop",
+    )
 
 
 @pytest.mark.parametrize(
@@ -214,3 +217,12 @@ async def test_chat_usage_limits_stop_the_call_after_the_threshold(
 
     assert body["error"]["ale"]["limit"] == expected_limit
     assert upstream.calls == 1
+
+
+def test_only_a_stream_ending_in_done_without_error_completed() -> None:
+    chunk = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+    error = b'data: {"error":{"message":"overloaded"}}\n\n'
+    done = b"data: [DONE]\n\n"
+    assert stream_completed([chunk, done])
+    assert not stream_completed([chunk])
+    assert not stream_completed([chunk, error, done])

@@ -155,6 +155,8 @@ class EpisodeContext:
     trajectory: TrajectorySink | None = None
     result: ResultSink | None = None
     current_phase: Phase | None = None
+    limit_refusal: Callable[[], LimitTermination | None] | None = None
+    """Reports the Gateway limit that refused one of this episode's model calls, if any."""
     prepared_image: PreparedTaskImage | None = None
     """Validated solver image selected before provisioning."""
     prepared_verifier_image: PreparedTaskImage | None = None
@@ -201,11 +203,15 @@ class EpisodeContext:
     phase_callback: Callable[[Phase], None] | None = None
     failure_phase: Phase | None = None
     phase_timeout_sec: float | None = None
+    phase_deadline: float | None = None
+    """Monotonic time by which the current phase must finish, when it is bounded."""
 
     logging_policy: LoggingPolicy = field(default_factory=LoggingPolicy)
     verification_config: VerificationConfig = field(default_factory=VerificationConfig)
     verification_command_env: dict[str, str] = field(default_factory=dict)
     verification_secrets: tuple[str, ...] = ()
+    judge_tokens: dict[str, str] = field(default_factory=dict)
+    """Gateway tokens of this episode's Judge sessions, by Judge kind."""
     verification_record: object | None = None
     ale_verify_provenance: AleVerifyProvenance | None = None
     verifier_resolved_image: ResolvedImage | None = None

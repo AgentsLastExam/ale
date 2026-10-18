@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.support import CONTAINER_BASE
 
 from ale.core.errors import TaskDefinitionError
 from ale.run.tasksets.manifest import load_tasks
@@ -25,9 +26,7 @@ def _task(tmp_path: Path, variants: str = "") -> Path:
         f"{variants}"
     )
     (task / "instruction.md").write_text("Write ${count} items")
-    (task / "image" / "Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
-    )
+    (task / "image" / "Dockerfile").write_text(f"FROM {CONTAINER_BASE}\n")
     for stage in ("verify", "oracle"):
         (task / stage / "run.sh").write_text("#!/bin/sh\n")
     return task

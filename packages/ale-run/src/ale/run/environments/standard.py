@@ -18,11 +18,10 @@ import contextlib
 import json
 import logging
 import math
-import os
 import shutil
 import time
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Literal, cast
@@ -31,6 +30,8 @@ from ale.core.config import RunTimeouts
 from ale.core.environment import Environment, EpisodeContext, Phase
 from ale.core.errors import (
     AgentError,
+    BudgetExceededError,
+    EnvironmentError_,
     PhaseTimeoutError,
     TaskError,
     TrajectoryConversionError,
@@ -40,6 +41,7 @@ from ale.core.errors import (
 from ale.core.harness import (
     AutonomousHarness,
     EffectiveAgentResources,
+    Harness,
     PolicyHarness,
     TrajectoryParseContext,
 )
@@ -79,7 +81,7 @@ from ale.run.recording import (
     atomic_write_json,
     execution_logging,
 )
-from ale.run.verification import installed_ale_verify
+from ale.run.verification import installed_ale_verify, verifier_judge_config
 from ale_verify import VerificationRecord
 
 __all__ = ["RetainedVerificationEnvironment", "StandardEnvironment"]
@@ -205,6 +207,7 @@ class StandardEnvironment(Environment):
             proxy_token=ctx.session.token,
             env={"ALE_EPISODE_ID": ctx.episode_id},
             sudo=spec.resources.sudo,
+            user=spec.image.user,
         )
         sandbox = await ctx.sandboxes.acquire(request)
         ctx.resolved_image = sandbox.resolved_image
@@ -229,8 +232,10 @@ class StandardEnvironment(Environment):
             prepared_image=ctx.prepared_verifier_image,
             resources=resources.as_resources(),
             network=NetworkPolicy(mode=NetworkMode.OPEN),
+            gateway_url=ctx.session.gateway_url or None,
             env={"ALE_EPISODE_ID": ctx.episode_id},
             sudo=False,
+            user=(ctx.spec.verify.image or ctx.spec.image).user,
         )
         sandbox = await ctx.sandboxes.acquire(request)
         ctx.verifier_resolved_image = sandbox.resolved_image
@@ -301,21 +306,22 @@ class StandardEnvironment(Environment):
         await self._seal(ctx, sandbox)
 
         async def launch() -> None:
-            run = await harness.launch(
-                spec.instruction,
-                _RecordedSandbox(
-                    ctx,
-                    sandbox,
-                    component="harness-launch",
-                    actor="task" if harness.name == "oracle" else "framework",
-                ),
-                session,
-                timeout_sec=timeout,
-            )
-            ctx.agent_run = run
-            if run.exit_code != 0:
-                detail = run.final_message or "no diagnostic output"
-                raise AgentError(f"{harness.name} exited {run.exit_code}: {detail}")
+            with _limit_terminated(ctx):
+                run = await harness.launch(
+                    spec.instruction,
+                    _RecordedSandbox(
+                        ctx,
+                        sandbox,
+                        component="harness-launch",
+                        actor="task" if harness.name == "oracle" else "framework",
+                    ),
+                    session,
+                    timeout_sec=timeout,
+                )
+                ctx.agent_run = run
+                if run.exit_code != 0:
+                    detail = run.final_message or "no diagnostic output"
+                    raise AgentError(f"{harness.name} exited {run.exit_code}: {detail}")
 
         await self._with_deadline(ctx, Phase.AGENT, timeout, launch())
 
@@ -388,7 +394,10 @@ class StandardEnvironment(Environment):
             max_steps=self.max_steps,
             stall_limit=self.stall_limit,
         ) as env:
-            closing = await harness.rollout(env, ctx.session.model_copy(update={"home": ctx.home}))
+            with _limit_terminated(ctx):
+                closing = await harness.rollout(
+                    env, ctx.session.model_copy(update={"home": ctx.home})
+                )
         if closing:
             builder.add(source="agent", message=closing)
         self._persist_trajectory(ctx, builder.build())
@@ -572,22 +581,20 @@ class StandardEnvironment(Environment):
         return rewards
 
     async def _stage_verification_config(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
-        payload = ctx.verification_config.model_dump(mode="json", exclude_none=True)
+        """Point the verifier's Judges at this episode's Gateway sessions.
+
+        The verifier gets the Gateway's address and a session token per Judge; the Judge's
+        own key stays on the Host, where the Gateway adds it to each forwarded call.
+        """
+        payload, command_env = verifier_judge_config(
+            ctx.verification_config, ctx.judge_tokens, sandbox.gateway_url
+        )
         await sandbox.write_file(
             str(_layout(ctx.spec.os).path("verify", "config.json")),
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
         )
-        command_env: dict[str, str] = {}
-        secrets: list[str] = []
-        for section in payload.values():
-            if not isinstance(section, dict):
-                continue
-            name = section.get("api_key_env")
-            if isinstance(name, str) and (value := os.environ.get(name)):
-                command_env[name] = value
-                secrets.append(value)
         ctx.verification_command_env = command_env
-        ctx.verification_secrets = tuple(secrets)
+        ctx.verification_secrets = tuple(command_env.values())
 
     async def _collect_verification_record(
         self, ctx: EpisodeContext, sandbox: Sandbox
@@ -767,24 +774,41 @@ class StandardEnvironment(Environment):
         assert ctx.blobs is not None
         assert ctx.trajectory is not None
         run = ctx.agent_run
-        trajectory = self.harness.parse_trajectory(
-            TrajectoryParseContext(
-                episode_id=ctx.episode_id,
-                trajectory_id=ctx.trajectory_id,
-                instruction=ctx.spec.instruction,
-                logs_dir=ctx.run_dir / "logs" / self.harness.name,
-                model=ctx.session.model,
-                agent_version=ctx.agent_version or self.harness.version(),
-                blobs=ctx.blobs,
-                session_id=getattr(getattr(run, "continuation", None), "native_session_id", None),
-                final_message=getattr(run, "final_message", None),
-                incomplete=run is None,
-                incomplete_reason="agent_interrupted" if run is None else None,
-            )
+        context = TrajectoryParseContext(
+            episode_id=ctx.episode_id,
+            trajectory_id=ctx.trajectory_id,
+            instruction=ctx.spec.instruction,
+            logs_dir=ctx.run_dir / "logs" / self.harness.name,
+            model=ctx.session.model,
+            agent_version=ctx.agent_version or self.harness.version(),
+            blobs=ctx.blobs,
+            session_id=getattr(getattr(run, "continuation", None), "native_session_id", None),
+            final_message=getattr(run, "final_message", None),
+            incomplete=run is None,
+            incomplete_reason="agent_interrupted" if run is None else None,
         )
+        converted = True
+        try:
+            trajectory = self.harness.parse_trajectory(context)
+        except Exception as exc:
+            # The agent finished; a converter defect must not decide its score. Keep the
+            # minimal truthful trajectory, say why, and keep the native evidence.
+            converted = False
+            detail = Redactor((ctx.session.token,))(f"{type(exc).__name__}: {exc}")[:500]
+            logging.getLogger("ale.execution").warning(
+                "trajectory conversion failed",
+                extra={"ale_data": {"harness": self.harness.name, "error": detail}},
+            )
+            trajectory = _with_parse_issue(
+                Harness.parse_trajectory(
+                    self.harness,
+                    replace(context, incomplete=True, incomplete_reason="conversion_failed"),
+                ),
+                {"reason": "conversion_failed", "detail": detail},
+            )
         self._persist_trajectory(ctx, trajectory)
         ctx.trajectory_written = True
-        if run is not None and ctx.logging_policy.native_logs == "minimal":
+        if converted and run is not None and ctx.logging_policy.native_logs == "minimal":
             shutil.rmtree(ctx.run_dir / "logs" / self.harness.name, ignore_errors=True)
 
     def _persist_trajectory(self, ctx: EpisodeContext, trajectory: AtifTrajectory) -> None:
@@ -794,6 +818,7 @@ class StandardEnvironment(Environment):
             record["provider_response_id"]: record["call_id"]
             for record in read_jsonl(ctx.run_dir / "trace.transport.jsonl").records
             if record.get("kind") == "call"
+            and record.get("purpose", "agent") == "agent"
             and record.get("provider_response_id")
             and record.get("call_id")
         }
@@ -859,6 +884,11 @@ class StandardEnvironment(Environment):
             )
             if (ctx.run_dir / "trajectory.json").is_file():
                 env["ALE_TRAJECTORY_PATH"] = str(layout.path("verify", "trajectory.json"))
+            # Judges retry provider failures until this budget runs out, so a verdict is
+            # recorded as failed before the phase deadline kills the verifier.
+            if ctx.phase_deadline is not None:
+                remaining = max(0, int(ctx.phase_deadline - time.monotonic()))
+                env["ALE_VERIFY_DEADLINE_SECONDS"] = str(remaining)
         await sandbox.write_file(
             str(directory / "params.json"), json.dumps(ctx.spec.params).encode("utf-8")
         )
@@ -1053,7 +1083,9 @@ class StandardEnvironment(Environment):
         )
         outcome = "succeeded"
         previous_timeout = ctx.phase_timeout_sec
+        previous_deadline = ctx.phase_deadline
         ctx.phase_timeout_sec = timeout_sec
+        ctx.phase_deadline = None if timeout_sec is None else started + timeout_sec
         try:
             with execution_logging(
                 ctx.execution,
@@ -1105,6 +1137,7 @@ class StandardEnvironment(Environment):
             )
             ctx.current_phase = None
             ctx.phase_timeout_sec = previous_timeout
+            ctx.phase_deadline = previous_deadline
 
 
 class RetainedVerificationEnvironment(StandardEnvironment):
@@ -1188,9 +1221,36 @@ class RetainedVerificationEnvironment(StandardEnvironment):
         return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
 
 
+@contextlib.contextmanager
+def _limit_terminated(ctx: EpisodeContext) -> Iterator[None]:
+    """Attribute an agent failure to the Gateway limit that caused it.
+
+    Agent programs report a refused call as their own error: an API error, a provider
+    limit, a failed turn. Whatever they say, an agent phase that fails after the Gateway
+    refused a call was stopped by that limit, which only the Gateway knows.
+    """
+    try:
+        yield
+    except (AgentError, EnvironmentError_) as error:
+        refusal = ctx.limit_refusal() if ctx.limit_refusal is not None else None
+        if refusal is None:
+            raise
+        raise BudgetExceededError(
+            refusal.name, float(refusal.configured_value), refusal.observed_value
+        ) from error
+
+
 def _agent_user(sandbox: Sandbox) -> str:
     """The account this sandbox calls the agent, for a plain `chown`."""
     return getattr(sandbox, "agent_user", "user")
+
+
+def _with_parse_issue(trajectory: AtifTrajectory, issue: dict[str, object]) -> AtifTrajectory:
+    extra = dict(trajectory.extra or {})
+    ale = dict(extra.get("ale") or {})
+    ale["parse_issues"] = [*ale.get("parse_issues", ()), issue]
+    extra["ale"] = ale
+    return trajectory.model_copy(update={"extra": extra})
 
 
 def _exact_token_metrics(run_dir: Path, call_id: str) -> AtifMetrics | None:

@@ -8,7 +8,7 @@ base/
 ├── vm-ubuntu24/         Ubuntu OCI source for a bootable VM
 └── vm-windows10/        private Windows seed preparation recipe
 builders/
-└── vm-materializer/     converts a VM OCI rootfs to qcow2
+└── vm-materializer/     converts a VM OCI rootfs to qcow2; frames a Linux qcow2 ref
 runtimes/
 └── qemu-runner/         container that runs a prepared qcow2 with QEMU/KVM
 ```
@@ -20,9 +20,14 @@ boots it. Windows preparation already produces qcow2, so it goes directly to the
 The image contract, identity rules and required labels are defined in
 [`../docs/specs/sandbox-image.md`](../docs/specs/sandbox-image.md).
 
+Every image is published under the engine version (`packages/ale-run/pyproject.toml`)
+once and never overwritten, so a changed image ships with the next engine version.
+
 ```bash
-just images
+just images                                  # pull published images, build unpublished ones
+images/build.sh vm-ubuntu24-base             # one image
 ```
 
-Publishing for buildable images is handled by `.github/workflows/images.yml`. The licensed
+`.github/workflows/images.yml` publishes each version once; its manual `promote` input
+gives an already-published image a version without rebuilding it. The licensed
 Windows disk remains private. Do not add Task content or Provider credentials here.

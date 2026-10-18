@@ -20,9 +20,14 @@ from ale.run.providers import ProviderRegistry
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import sibling_checkout
 
-pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_kvm]
-
 TASK = sibling_checkout("ale-tasks-base") / "tasks/demo/docker_in_vm"
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.needs_docker,
+    pytest.mark.needs_kvm,
+    pytest.mark.skipif(not TASK.is_dir(), reason=f"no ale-tasks-base checkout at {TASK}"),
+]
 
 
 @pytest.mark.asyncio
@@ -37,7 +42,7 @@ async def test_task_owned_docker_runs_a_nested_offline_container(tmp_path: Path)
         phase_callback=phases.append,
         provenance=ProvenanceInputs(
             source=TaskSource(
-                kind="registry",
+                kind="git",
                 repo="https://github.com/agents-last-exam/ale-tasks-base.git",
                 commit="a" * 40,
                 path="tasks/demo/docker_in_vm",

@@ -56,7 +56,12 @@ def write_result(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "failure", [status for status in Status if status not in {Status.COMPLETED, Status.TIMEOUT}]
+    "failure",
+    [
+        status
+        for status in Status
+        if status not in {Status.COMPLETED, Status.TIMEOUT, Status.BUDGET_EXCEEDED}
+    ],
 )
 async def test_retry_preserves_failed_evidence_and_stops_on_completed_zero(
     tmp_path: Path, failure: Status
@@ -83,19 +88,26 @@ async def test_retry_preserves_failed_evidence_and_stops_on_completed_zero(
 
 
 @pytest.mark.asyncio
-async def test_timeout_is_terminal_without_retry(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("status", "failure_type"),
+    [
+        (Status.TIMEOUT, "PhaseTimeoutError"),
+        (Status.BUDGET_EXCEEDED, "BudgetExceededError"),
+    ],
+)
+async def test_limit_termination_is_terminal_without_retry(
+    tmp_path: Path, status: Status, failure_type: str
+) -> None:
     calls = 0
 
     async def execute() -> EpisodeResult:
         nonlocal calls
         calls += 1
-        return write_result(
-            tmp_path / "episode", Status.TIMEOUT, calls, failure_type="PhaseTimeoutError"
-        )
+        return write_result(tmp_path / "episode", status, calls, failure_type=failure_type)
 
     result = await run_episode_with_retries(execute, retries=3)
     assert calls == 1
-    assert result.record.status is Status.TIMEOUT
+    assert result.record.status is status
     assert not (result.run_dir / "attempts").exists()
 
 
@@ -486,6 +498,54 @@ async def test_run_retries_each_episode_independently_and_resumes_only_final_suc
     ledger.close()
     assert await task_cli._run_one(str(task_path), settings, runs, "run") == 0
     assert sorted(calls.values()) == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_resume_with_new_scheduling_runs_only_missing_episodes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task_cli = import_module("ale.run.cli.tasks")
+    task_path = scaffold_task(tmp_path / "task")
+    digest = "sha256:" + "a" * 64
+    executed: list[str] = []
+
+    async def prepare(tasks, _providers):  # type: ignore[no-untyped-def]
+        for task in tasks:
+            task.prepared_image = PreparedTaskImage(
+                kind="container",
+                source="solver-local",
+                input_identity=digest,
+                runtime_ref="image@" + digest,
+                prepared_identity=digest,
+                image_source_identity=digest,
+            )
+
+    async def execute(_task, _environment, _providers, **kwargs):  # type: ignore[no-untyped-def]
+        executed.append(kwargs["episode_id"])
+        return write_result(kwargs["run_dir"] / kwargs["episode_id"], Status.COMPLETED, 1)
+
+    monkeypatch.setattr(task_cli, "_prepare_images", prepare)
+    monkeypatch.setattr(task_cli, "run_episode", execute)
+    runs = tmp_path / "runs"
+    first = RunConfig(episodes=2, agent={"name": "nop"})
+    assert await task_cli._run_one(str(task_path), first, runs, "run") == 0
+    more = RunConfig(episodes=3, concurrency=2, episode_retries=1, agent={"name": "nop"})
+    assert await task_cli._run_one(str(task_path), more, runs, "run") == 0
+
+    assert len(executed) == 3
+    assert len(list((runs / "run").glob("*/result.json"))) == 3
+    other_model = RunConfig(episodes=3, agent={"name": "nop", "model": "another-model"})
+    assert await task_cli._run_one(str(task_path), other_model, runs, "run") == 0
+    assert len(executed) == 6
+
+
+def test_reuse_hash_ignores_only_scheduling_settings() -> None:
+    base = RunConfig()
+    scheduled = RunConfig(episodes=5, concurrency=4, episode_retries=2, resume=False)
+    assert scheduled.reuse_hash == base.reuse_hash
+    assert scheduled.config_hash != base.config_hash
+    assert RunConfig(seed=1).reuse_hash != base.reuse_hash
+    assert RunConfig(timeouts={"agent": 60}).reuse_hash != base.reuse_hash
 
 
 @pytest.mark.parametrize("command", ["run", "reverify", "validate"])

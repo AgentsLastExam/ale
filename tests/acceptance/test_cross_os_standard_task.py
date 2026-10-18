@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from ale.core.config import LoggingPolicy
-from ale.core.sandbox import Identity, ImageRef, SandboxRequest
+from ale.core.sandbox import Identity, SandboxRequest
 from ale.core.taskspec import ImageKind, NetworkPolicy, OperatingSystem, Resources
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
@@ -27,23 +27,30 @@ from ale.run.secrets import provider_credentials
 from ale.run.task_images import prepare_task_image_result
 from ale.run.tasksets.manifest import load_task_folder
 from ale.run.tools import resolved_cua_desktop, stage_cua_desktop
-from tests.support import provider_registry
+from tests.support import CONTAINER_BASE, provider_registry
 
 from .trajectory import LIVE, llm_audit_evidence
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-LINUX_IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+LINUX_IMAGE = CONTAINER_BASE
 
 
 @pytest.mark.needs_kvm
 @pytest.mark.needs_gui
-async def test_windows_builtin_desktop_mcp_over_stdio(tmp_path: Path) -> None:
+async def test_windows_builtin_desktop_mcp_over_stdio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
         pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows qcow2")
+    monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
     provider = QemuProvider(image=image, overlay_dir=tmp_path / "qemu")
-    prepared = await provider.prepare_image(ImageRef(kind=ImageKind.VM, reference=str(image)))
+    # The base carries no Cua Driver; building a Task image on it installs one.
+    task = load_task_folder(_write_windows_gui_task(tmp_path / "tasks"))
+    prepared = (
+        await prepare_task_image_result(task, provider_registry(provider, kind=ImageKind.VM))
+    ).image
     sandbox = await provider.create(
         SandboxRequest(
             episode_id="windows-desktop-mcp",
@@ -311,6 +318,7 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                 "setup_ran",
                 checks.text_equals(str(home / "input/setup-marker.txt"), "setup"),
             )
+            verification.aggregate("overall")
             verification.write()
             """
         )
@@ -323,7 +331,11 @@ def _write_windows_gui_task(root: Path) -> Path:
     manifest = yaml.safe_load((task / "task.yaml").read_text())
     manifest.pop("params")
     manifest.pop("variants")
+    # Built on the base, so the image gets the framework's Cua Driver.
+    manifest["image"] = {"kind": "vm", "base_ref": "local/windows-base"}
     (task / "task.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
+    (task / "image").mkdir()
+    (task / "image" / "run.ps1").write_text("exit 0\n")
     (task / "instruction.md").write_text(
         "Use the visible Notepad window. Read the value after SCREEN_CODE=, type the "
         "same value after ANSWER=, and save the file. Do not change the first line.\n"
@@ -381,6 +393,7 @@ def _write_windows_gui_task(root: Path) -> Path:
                 "desktop_answer",
                 checks.text_equals(str(home / "output/result.txt"), expected),
             )
+            verification.aggregate("overall")
             verification.write()
             """
         )
@@ -426,6 +439,7 @@ async def test_standard_task_assets_and_variants_across_operating_systems(
         "output": 1.0,
         "setup_asset": 1.0,
         "setup_ran": 1.0,
+        "overall": 1.0,
     }
     assert (result.run_dir / "artifacts/output/result.txt").read_text() == (
         f"{greeting} world verified"
@@ -472,7 +486,7 @@ async def test_real_llm_reads_and_edits_the_windows_desktop(tmp_path: Path) -> N
         await gateway.stop()
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"desktop_answer": 1.0}
+    assert result.verdict.rewards == {"desktop_answer": 1.0, "overall": 1.0}
     trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
     transport = [
         json.loads(line)

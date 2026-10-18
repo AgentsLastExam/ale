@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 
 import pytest
 
@@ -18,11 +19,11 @@ from ale.core.sandbox import Identity, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.run.providers.docker import DockerProvider
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
-from tests.support import prepare_reference
+from tests.support import CONTAINER_BASE, prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
 
-GUI_IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+GUI_IMAGE = CONTAINER_BASE
 WORK_DIR = "/home/user/work"
 
 
@@ -158,20 +159,24 @@ async def test_actions_reach_the_desktop_and_are_described_back(desktop) -> None
                 "method": "tools/call",
                 "params": {"name": "get_screen_size", "arguments": {}},
             },
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "cursor_position", "arguments": {}},
+            },
         ],
     )
 
     assert "500" in replies[1]["result"]["content"][0]["text"]
     size = replies[2]["result"]["structuredContent"]
-
-    where = await desktop.exec(
-        ["sh", "-c", "xdotool getmouselocation --shell"], identity=Identity.AGENT
-    )
-    position = dict(line.split("=", 1) for line in where.stdout.strip().splitlines() if "=" in line)
-    width, height = size["width"], size["height"]
-    # Half of each axis, allowing for the rounding a normalised space costs.
-    assert abs(int(position["X"]) - width // 2) <= 2
-    assert abs(int(position["Y"]) - height // 2) <= 2
+    assert size["width"] > 0 and size["height"] > 0
+    # The desktop images ship Cua Driver rather than xdotool, so the pointer is read back
+    # from the X server through the driver. Allow for the rounding a normalised space costs.
+    where = replies[3]["result"]["content"][0]["text"]
+    x, y = (int(value) for value in re.findall(r"-?\d+", where))
+    assert abs(x - 500) <= 2
+    assert abs(y - 500) <= 2
 
 
 @pytest.mark.asyncio

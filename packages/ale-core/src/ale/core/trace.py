@@ -90,13 +90,21 @@ class TransportCall(_Event):
     response_digest: str | None = None
     provider_response_id: str | None = None
     input_tokens: int = Field(default=0, ge=0)
+    """Every input token, cached or not."""
+    cache_read_tokens: int = Field(default=0, ge=0)
+    """Of ``input_tokens``, those read from the provider's prompt cache."""
+    cache_write_tokens: int = Field(default=0, ge=0)
+    """Of ``input_tokens``, those written to the provider's prompt cache."""
     output_tokens: int = Field(default=0, ge=0)
     cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    """Estimated list-price cost, or ``None`` when the model has no listed price."""
     stop_reason: str | None = None
     latency_ms: int = Field(default=0, ge=0)
     disposition: Literal["forwarded", "refused", "failed"]
     refusal_limit: str | None = None
     upstream_status: int | None = None
+    purpose: Literal["agent", "judge"] = "agent"
+    """Whether the evaluated agent or a verification Judge made the call."""
 
     @model_validator(mode="after")
     def _disposition_fields(self) -> Self:

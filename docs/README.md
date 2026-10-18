@@ -21,11 +21,10 @@ lasting contract belongs here.
 | Trust boundaries and guarantees | [specs/security.md](specs/security.md) |
 | Develop the engine | [guides/development.md](guides/development.md) |
 | Configure subscription login | [guides/subscription-auth.md](guides/subscription-auth.md) |
-| Why current architectural choices exist | [adr/](adr/) |
 
-Living specifications describe what is true now. ADRs retain the rationale for current
-cross-module decisions; superseded alternatives remain in Git history rather than in the
-reading path. Guides explain how to use the contracts without redefining them.
+Living specifications describe what is true now and, briefly, why; superseded
+alternatives remain in Git history. Guides explain how to use the contracts without
+redefining them.
 
 When code and a living specification disagree, treat that as a defect and reconcile both
 in the same change. Tests and schemas enforce contracts, but they do not replace their

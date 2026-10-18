@@ -22,7 +22,7 @@ import base64
 import json
 from typing import Any
 
-from ale.core.env import Observation
+from ale.core.env import Observation, TaskEnv
 from ale.core.errors import AgentError
 from ale.core.harness import HarnessSession, StepwisePolicy
 from ale.core.taskspec import OperatingSystem
@@ -154,6 +154,15 @@ class ComputerUseHarness(StepwisePolicy):
 
     def integrity(self) -> str:
         return f"model:{self.model}"
+
+    async def rollout(self, env: TaskEnv, session: HarnessSession) -> str | None:
+        """Drive one episode on its own copy.
+
+        One harness instance serves every concurrent episode of a run, while the
+        conversation and the pending tool call belong to a single episode.
+        """
+        episode = ComputerUseHarness(model=self.model, max_tokens=self.max_tokens)
+        return await StepwisePolicy.rollout(episode, env, session)
 
     async def start(self, session: HarnessSession) -> None:
         self._session = session

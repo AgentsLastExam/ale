@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -81,6 +83,34 @@ def test_loopback_http_and_trajectory_checks(
     assert checks.trajectory_turn_count(minimum=1, maximum=1).score == 1
     with pytest.raises(ValueError, match="local"):
         checks.http("https://example.com")
+
+
+def test_http_check_compares_real_non_success_statuses() -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            found = self.path == "/health"
+            body = b"ready" if found else b"missing"
+            self.send_response(200 if found else 404)
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        missing = checks.http(f"{base}/missing", status=404, contains="missing")
+        assert missing.score == 1
+        assert missing.raw_value == {"status": 404, "body": "missing"}
+        assert checks.http(f"{base}/missing").score == 0
+        assert checks.http(f"{base}/health", contains="ready").score == 1
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 @pytest.mark.parametrize("path", ["", ".bad", "bad.", "a..b", "a[0]"])

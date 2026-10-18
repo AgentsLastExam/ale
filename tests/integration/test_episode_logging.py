@@ -293,7 +293,7 @@ async def test_complete_episode_has_one_authoritative_home_per_fact(
             image_digest=DIGEST,
             agent="fake-autonomous@1",
             seed=0,
-            config_hash=DIGEST,
+            reuse_hash=DIGEST,
         ),
         spec=task.spec,
     )

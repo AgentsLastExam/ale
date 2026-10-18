@@ -3,14 +3,35 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from typing import Any
 
 COORDINATE_SPACE = 1000
+#: Where guestd's Cua Driver server listens on Linux.
+_LINUX_SOCKET = "/tmp/ale-cua-driver.sock"
+#: Where the framework installs Cua Driver on Windows; a Linux image has it on PATH.
+_WINDOWS_DRIVER = os.path.join(
+    os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "ALE", "cua-driver", "cua-driver.exe"
+)
+#: The alias systemd links when a display manager (GDM, LightDM, SDDM) is enabled.
+_DISPLAY_MANAGER = "/etc/systemd/system/display-manager.service"
+#: What Cua Driver takes from the session it drives.
+_SESSION_KEYS = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_TYPE",
+    "XDG_CURRENT_DESKTOP",
+)
+_server: subprocess.Popen[bytes] | None = None
 
 
 class GuiUnavailable(RuntimeError):
@@ -19,15 +40,43 @@ class GuiUnavailable(RuntimeError):
 
 def _binary() -> str:
     configured = os.environ.get("ALE_CUA_DRIVER")
+    if not configured and os.name == "nt" and os.path.isfile(_WINDOWS_DRIVER):
+        configured = _WINDOWS_DRIVER
     found = configured or shutil.which("cua-driver") or shutil.which("cua-driver.exe")
     if not found:
         raise GuiUnavailable("cua-driver is not installed in this image")
     return found
 
 
+def has_desktop() -> bool:
+    """Whether this sandbox is configured to show a desktop, decided before anything starts.
+
+    A virtual machine has one when its systemd enables a display manager. A container has
+    one when its image sets ``DISPLAY`` or ``WAYLAND_DISPLAY``: that is how a desktop image
+    tells its processes where to draw, while an image that ships X only as a tool, such as
+    Xvfb for a headless browser, does not. Windows always draws one, and it is ALE's to
+    drive once the framework has installed Cua Driver, as in every Task image; the bare
+    base, booted only to build a Task image, has none to wait for.
+    """
+    if os.name == "nt":
+        return os.path.isfile(_WINDOWS_DRIVER)
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) or os.path.lexists(
+        _DISPLAY_MANAGER
+    )
+
+
 def _call(tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        return _invoke(tool, arguments)
+    except GuiUnavailable:
+        if not _start_server():
+            raise
+        return _invoke(tool, arguments)
+
+
+def _invoke(tool: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     command = [_binary(), "call", tool, json.dumps(arguments or {}, separators=(",", ":"))]
-    if socket := os.environ.get("ALE_CUA_DRIVER_SOCKET"):
+    if socket := _socket():
         command += ["--socket", socket]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
@@ -45,6 +94,157 @@ def _call(tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise GuiUnavailable(f"cua-driver {tool} returned a non-object result")
     return payload
+
+
+def _socket() -> str | None:
+    configured = os.environ.get("ALE_CUA_DRIVER_SOCKET")
+    return configured or (None if os.name == "nt" else _LINUX_SOCKET)
+
+
+def _start_server() -> bool:
+    """Start Cua Driver inside the agent's desktop session; True if one was started.
+
+    The image only has to run a desktop: the engine installed Cua Driver, and guestd
+    starts it as the agent account with the environment of that account's session, so
+    capture and input reach the screen the agent sees. Windows starts it with the session.
+    """
+    global _server
+    if os.name == "nt" or os.environ.get("ALE_CUA_DRIVER_SOCKET"):
+        return False
+    if _server is not None and _server.poll() is None:
+        return False
+    import pwd
+
+    try:
+        account = pwd.getpwnam(os.environ.get("ALE_AGENT_USER") or "user")
+    except KeyError as exc:
+        raise GuiUnavailable("the agent account does not exist in this image") from exc
+    session = _session_environment(account)
+    if session is None:
+        raise GuiUnavailable("the agent account's desktop session is still starting")
+    env = {key: session[key] for key in _SESSION_KEYS if key in session}
+    env.update(
+        HOME=account.pw_dir,
+        USER=account.pw_name,
+        LOGNAME=account.pw_name,
+        PATH=session.get("PATH") or "/usr/local/bin:/usr/bin:/bin",
+    )
+    if "DBUS_SESSION_BUS_ADDRESS" not in env:
+        try:
+            with open("/tmp/dbus-session-bus-address") as handle:
+                if address := handle.read().strip():
+                    env["DBUS_SESSION_BUS_ADDRESS"] = address
+        except OSError:
+            pass
+
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(_LINUX_SOCKET)
+    try:
+        log = open("/tmp/ale-cua-driver.log", "ab")  # noqa: SIM115 - handed to the child
+        _server = subprocess.Popen(
+            [
+                _binary(),
+                "serve",
+                "--socket",
+                _LINUX_SOCKET,
+                "--permission-mode",
+                "unrestricted",
+                "--dangerously-bypass-approvals",
+            ],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
+            preexec_fn=_demote(account),
+        )
+        log.close()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GuiUnavailable(f"cua-driver could not be started: {exc}") from exc
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and _server.poll() is None:
+        if os.path.exists(_LINUX_SOCKET):
+            return True
+        time.sleep(0.2)
+    raise GuiUnavailable("cua-driver did not start in the desktop session")
+
+
+#: Run as the agent account: reading another account's process environment needs
+#: CAP_SYS_PTRACE, which a container's root does not have, but an account reads its own.
+#: It also reports whether the session has reached its window manager or shell, because an
+#: X server answers screenshots long before the desktop the agent will use is drawn.
+_SESSION_SCAN = """
+import json, os, sys
+shells = set(sys.argv[1].split(","))
+keys = set(sys.argv[2:])
+best, shell = None, False
+for name in os.listdir("/proc"):
+    if not name.isdigit():
+        continue
+    try:
+        if os.stat("/proc/" + name).st_uid != os.getuid():
+            continue
+        with open("/proc/" + name + "/comm") as handle:
+            shell = shell or handle.read().strip() in shells
+        with open("/proc/" + name + "/environ", "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        continue
+    env = dict(i.split("=", 1) for i in raw.decode("utf-8", "replace").split("\\0") if "=" in i)
+    if not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
+        continue
+    score = sum(key in env for key in keys)
+    if best is None or score > best[0]:
+        best = (score, env)
+print(json.dumps(best[1] if best and shell else None))
+"""
+#: Window managers and desktop shells; one of them running means the desktop is drawn.
+_SHELLS = (
+    "gnome-shell",
+    "mutter",
+    "xfwm4",
+    "xfce4-session",
+    "kwin_x11",
+    "kwin_wayland",
+    "plasmashell",
+    "openbox",
+    "fluxbox",
+    "i3",
+    "sway",
+    "marco",
+    "metacity",
+    "muffin",
+    "cinnamon",
+    "budgie-wm",
+    "icewm",
+    "fvwm",
+)
+
+
+def _session_environment(account: Any) -> dict[str, str] | None:
+    """The environment of the account's desktop session, read from its own processes."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _SESSION_SCAN, ",".join(_SHELLS), *_SESSION_KEYS],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            preexec_fn=_demote(account),
+        )
+        found = json.loads(result.stdout or "null")
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+    return found if isinstance(found, dict) else None
+
+
+def _demote(account: Any):  # type: ignore[no-untyped-def]
+    def demote() -> None:
+        os.setgid(account.pw_gid)
+        os.initgroups(account.pw_name, account.pw_gid)
+        os.setuid(account.pw_uid)
+
+    return demote
 
 
 def available() -> bool:

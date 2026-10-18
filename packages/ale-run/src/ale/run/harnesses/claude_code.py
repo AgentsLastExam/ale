@@ -27,7 +27,6 @@ from ale.core.blob import InlineText
 from ale.core.errors import (
     AgentError,
     AgentRefusalError,
-    BudgetExceededError,
     ConfigError,
     HarnessLimitError,
     NativeContinuationError,
@@ -872,15 +871,7 @@ class ClaudeCodeHarness(AutonomousHarness):
         return " ".join(parts)
 
     def _classify(self, stderr: str, exit_code: int) -> Exception:
-        if "ale_limit_reached" in stderr:
-            limit = _match(stderr, r'"limit"\s*:\s*"([^"]+)"') or "unknown"
-            value = float(_match(stderr, r'"value"\s*:\s*([0-9.eE+-]+)') or 0)
-            observed = _match(stderr, r'"observed_value"\s*:\s*([0-9.eE+-]+)')
-            return BudgetExceededError(
-                limit,
-                value,
-                float(observed) if observed is not None else None,
-            )
+        # Gateway refusals are attributed by the Environment from the Gateway session.
         lowered = stderr.lower()
         if isinstance(self.settings.max_turns, int) and any(
             marker in lowered for marker in ("max turns", "error_max_turns")
@@ -1192,8 +1183,3 @@ def _cua_action(tool: str, arguments: dict[str, Any]) -> DesktopAction | None:
         amount=arguments.get("amount"),
         duration_ms=round(float(duration) * 1000) if duration is not None else None,
     )
-
-
-def _match(text: str, pattern: str) -> str | None:
-    match = re.search(pattern, text)
-    return match.group(1) if match else None

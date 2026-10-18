@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ale.core.errors import TaskDefinitionError
 from ale.core.ids import TaskId
+from ale.run import ale_image
 
 __all__ = ["scaffold_task"]
 
@@ -32,8 +33,8 @@ INSTRUCTION_MD = """\
 Write the word ${greeting} into /home/user/output/result.txt
 """
 
-DOCKERFILE = """\
-FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest
+DOCKERFILE = f"""\
+FROM {ale_image("container-ubuntu22-base")}
 
 RUN mkdir -p /home/user/output && chown -R user:user /home/user/output
 """
@@ -59,7 +60,6 @@ verification.check(
     "content",
     checks.text_equals("/home/user/output/result.txt", expected),
 )
-verification.aggregate("overall")
 verification.write()
 """
 

@@ -15,14 +15,14 @@ the licensed Windows bytes remain in private storage.
 .\prepare.ps1 -AgentUser user -GuestdSource .\guestd -Compact
 ```
 
-The recipe installs pinned Python, Cua Driver, WinGet, Chocolatey, Node.js/npm and Git Bash.
-It stages guestd under `C:\ProgramData\ALE`, registers the interactive-login services,
+The recipe installs pinned Python, WinGet, Chocolatey, Node.js/npm and Git Bash.
+It stages a bootstrap guestd under `C:\ProgramData\ALE`, registers its interactive-login tasks,
 opens guestd only to the QEMU runner, removes GCP/VMware integration and inherited domain
 applications, cleans their stale data and uninstall inventory, cleans stable system state, and optionally
 zeroes free space. The recipe fixes the system at en-US and UTC; disables update,
 rollback, recovery, sleep, hibernation, automatic maintenance and background prompt paths;
 and clears the seed user's credentials, profiles, history, stale startup tasks and window
-placement. Reboot once and verify both services before requesting shutdown.
+placement. Reboot once and verify guestd answers before requesting shutdown.
 
 Back on the Host, compact the prepared disk with qcow2's zstd compression:
 
@@ -35,8 +35,8 @@ Every episode cold-boots a fresh qcow2 overlay; ALE does not create ready snapsh
 warm pool.
 
 ```bash
-uv run ale vm-image push output.qcow2 ghcr.io/agentslastexam/vm-windows10-base:0.1.0
-uv run ale vm-image pull ghcr.io/agentslastexam/vm-windows10-base:0.1.0 output.qcow2
+uv run ale vm-image push output.qcow2 ghcr.io/agentslastexam/vm-windows10-base:0.1.1
+uv run ale vm-image pull ghcr.io/agentslastexam/vm-windows10-base:0.1.1 output.qcow2
 ```
 
 A GUI base is not qualified by an oracle-only Task. Before publication, run a real visual
@@ -51,7 +51,12 @@ see or control the desktop.
 - Stage entries: `setup/run.ps1`, `oracle/run.ps1`, and `verify/run.ps1`.
 - Framework root: `C:\ProgramData\ALE`; agent home: `C:\Users\user`.
 - guestd provides exec, file transfer, health, lifecycle, and the shared Sandbox protocol.
-- Cua Driver 0.12.6 exclusively provides screenshots and desktop input.
+  The base's copy is a bootstrap: building a Task image replaces it with the engine's own,
+  so it only has to speak the current authentication handshake.
+- Image builds and `resources.sudo` need the elevated `ALE Guestd Session` logon task.
+- This engine needs `vm-windows10-base:0.1.1`, which has both.
+- Cua Driver exclusively provides screenshots and desktop input. ALE installs its pinned
+  version when it builds a Task image; the base carries none.
 
 Autonomous CLI Harnesses use native Windows Node.js and Git Bash; their CLI packages are
 installed per run, and model credentials stay on the Host Gateway.

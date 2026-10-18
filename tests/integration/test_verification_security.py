@@ -8,6 +8,7 @@ from ale.core.config import LLMJudgeConfig, VerificationConfig
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
+from ale.run.gateway.server import Gateway
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import Redactor
@@ -48,7 +49,7 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "mkdir -p /home/user/output\n"
-        'test -z "${JUDGE_KEY-}"\n'
+        'test -z "${JUDGE_KEY-}${ALE_LLM_JUDGE_TOKEN-}"\n'
         "printf absent > /home/user/output/setup-key\n"
     )
     (task_root / "oracle" / "run.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
@@ -60,30 +61,38 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
         "from ale_verify import CheckResult, Verification, checks\n"
         "v = Verification()\n"
         "v.check('setup_scope', checks.text_equals('/home/user/output/setup-key', 'absent'))\n"
-        "v.check('verify_scope', CheckResult(float(bool(os.environ.get('JUDGE_KEY')))))\n"
+        "v.check('verify_scope', CheckResult(float(bool(os.environ.get('ALE_LLM_JUDGE_TOKEN'))"
+        " and 'JUDGE_KEY' not in os.environ)))\n"
         "v.check('no_host_callback', CheckResult(float(not any(name in os.environ for name in "
         "('ALE_VERIFICATION_URL', 'ALE_VERIFICATION_TOKEN')))))\n"
-        "sys.stderr.write(os.environ['JUDGE_KEY'])\n"
+        "sys.stderr.write(os.environ['ALE_LLM_JUDGE_TOKEN'])\n"
         "v.aggregate('overall')\n"
         "v.write()\n"
     )
     (task_root / "setup" / "run.sh").chmod(0o755)
 
     task = load_tasks(task_root)[0]
-    result = await run_episode(
-        task,
-        StandardEnvironment(OracleHarness()),
-        provider_registry(DockerProvider()),
-        run_dir=tmp_path / "runs",
-        verification_config=VerificationConfig(
-            llm=LLMJudgeConfig(
-                model="gpt-5-mini",
-                reasoning_effort="medium",
-                base_url="https://api.openai.com",
-                api_key_env="JUDGE_KEY",
-            )
-        ),
-    )
+    gateway = Gateway()
+    gateway_url = await gateway.start()
+    try:
+        result = await run_episode(
+            task,
+            StandardEnvironment(OracleHarness()),
+            provider_registry(DockerProvider()),
+            run_dir=tmp_path / "runs",
+            gateway=gateway,
+            gateway_url=gateway_url,
+            verification_config=VerificationConfig(
+                llm=LLMJudgeConfig(
+                    model="gpt-5-mini",
+                    reasoning_effort="medium",
+                    base_url="https://api.openai.com",
+                    api_key_env="JUDGE_KEY",
+                )
+            ),
+        )
+    finally:
+        await gateway.stop()
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {
@@ -119,6 +128,7 @@ async def test_record_containing_a_verify_credential_is_not_collected(
         "from ale_verify import CheckResult, Verification\n"
         "v = Verification()\n"
         "v.check('score', CheckResult(1.0, raw_value=os.environ['JUDGE_KEY']))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     (task_root / "setup" / "run.sh").chmod(0o755)

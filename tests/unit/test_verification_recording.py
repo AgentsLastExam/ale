@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError
 from test_runtime_contracts import make_lock
 
 from ale.core.lock import AleVerifyProvenance, JudgeProvenance
@@ -80,16 +81,20 @@ def test_judge_provenance_is_derived_from_the_collected_record() -> None:
     )
     observed = judge_provenance(record)
     assert observed[0].invocation_id == "judge-1"
+    assert observed[0].endpoint_identity == "https://example.test/v1"
+    # The verifier saw the Gateway; the RunLock names the Judge's configured endpoint.
+    real = judge_provenance(record, {"llm": "https://api.provider.test/v1"})
+    assert real[0].endpoint_identity == "https://api.provider.test/v1"
     assert observed[0].attempts == 1
     assert "credential" not in json.dumps(observed[0].model_dump(mode="json"))
 
 
-def test_legacy_singular_judge_lock_is_still_loaded() -> None:
+def test_a_lock_in_another_shape_is_rejected_not_reinterpreted() -> None:
     payload = make_lock().model_dump(mode="json")
     payload.pop("judges", None)
     payload["judge"] = {
         "model": "legacy-model",
         "prompt_hash": HASH0,
     }
-    restored = type(make_lock()).model_validate(payload)
-    assert restored.judges[0].model == "legacy-model"
+    with pytest.raises(ValidationError):
+        type(make_lock()).model_validate(payload)

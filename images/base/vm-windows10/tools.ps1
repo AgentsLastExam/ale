@@ -25,7 +25,11 @@ if (-not $CheckOnly) {
             throw "Chocolatey package checksum does not match."
         }
         Expand-Archive $archive "$work\chocolatey" -Force
-        & "$work\chocolatey\tools\chocolateyInstall.ps1"
+        # In its own process: the installer loads a module DLL from $work, which would
+        # otherwise stay locked in this session and keep $work from being removed.
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File "$work\chocolatey\tools\chocolateyInstall.ps1"
+        if ($LASTEXITCODE -ne 0) { throw "Chocolatey bootstrap exited $LASTEXITCODE." }
     }
     foreach ($package in @(
         @{ Name = "chocolatey"; Version = "2.4.3" },

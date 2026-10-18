@@ -64,7 +64,8 @@ the validation oracle both run as the image's agent account. Windows autonomous 
 Harnesses use the base's native Node.js and Git Bash.
 
 `oracle/` is uploaded only for an oracle episode and is absent for an evaluated solver.
-`verify/` is also absent throughout this phase.
+`verify/` is also absent throughout this phase. Answers are withheld by when they are
+staged, not by a conventional path or a flag a Task must remember.
 
 ### Evidence capture
 

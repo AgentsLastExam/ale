@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 from ale.core.config import LoggingPolicy, RunConfig, SandboxRetentionConfig
-from ale.core.errors import TrajectoryConversionError
 from ale.core.harness import AgentRun
 from ale.core.lock import TaskSource
 from ale.core.sandbox import (
@@ -122,7 +121,7 @@ def context(root: Path, policy: LoggingPolicy, run: AgentRun | None):
         episode_id=root.name,
         trajectory_id="trajectory",
         run_dir=root,
-        session=SimpleNamespace(model="model"),
+        session=SimpleNamespace(model="model", token="episode-token"),
         agent_version="1",
         spec=SimpleNamespace(instruction="instruction"),
         agent_run=run,
@@ -176,8 +175,6 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         )
     stale = task_path / "verify/stale.txt"
     stale.write_text("must not survive a verifier revision\n")
-    dockerfile = task_path / "image/Dockerfile"
-    dockerfile.write_text(dockerfile.read_text() + "\nLABEL ale.gui=false\n")
     registry = provider_registry(DockerProvider())
     task = load_tasks(task_path)[0]
     settings = RunConfig()
@@ -206,6 +203,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         "v.check('reverified', checks.text_equals("
         "'/home/user/output/result.txt', 'hello\\n'))\n"
         "v.check('stale_removed', checks.file_missing('/opt/ale/verify/stale.txt'))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     from ale.run.cli import tasks as task_cli
@@ -218,7 +216,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         assert await _reverify(str(task_path), first.run_dir, settings, tmp_path / "second") == 0
         result_path = next((tmp_path / "second").rglob("result.json"))
         result = json.loads(result_path.read_text())
-        assert result["rewards"] == {"reverified": 1.0, "stale_removed": 1.0}
+        assert result["rewards"] == {"reverified": 1.0, "stale_removed": 1.0, "overall": 1.0}
         if mode == "separate":
             assert result["sandboxes"][0]["roles"] == ["verifier"]
         assert retained.handle in {item["handle"] for item in await list_retained()}
@@ -248,10 +246,13 @@ def test_conversion_failure_keeps_native_logs(tmp_path: Path) -> None:
         + "\n"
     )
 
-    with pytest.raises(TrajectoryConversionError):
-        StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
+    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
 
     assert transcript.is_file()
+    trajectory = json.loads((root / "trajectory.json").read_text())
+    assert trajectory["extra"]["ale"]["incomplete_reason"] == "conversion_failed"
+    (issue,) = trajectory["extra"]["ale"]["parse_issues"]
+    assert issue["detail"].startswith("TrajectoryReferenceError:")
 
 
 def test_minimal_retention_is_smaller_than_debug(tmp_path: Path) -> None:

@@ -331,6 +331,7 @@ async def test_qemu_retained_solver_can_be_reattached(
 ) -> None:
     storage = tmp_path / "episode"
     storage.mkdir()
+    (storage / "guestd-token").write_text("retained-token\n")
     record = {
         "Name": "/ale-qemu-test",
         "Config": {
@@ -348,12 +349,20 @@ async def test_qemu_retained_solver_can_be_reattached(
     }
 
     async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        if argv[:2] == ("docker", "exec"):
+            if "ip route" in argv[-1]:
+                return 0, "172.17.0.1\n", ""
+            # The reattaching run's own Gateway port is routed in.
+            assert "--dport 8931 -j DNAT --to-destination 172.17.0.1:8931" in argv[-1] or (
+                "MASQUERADE" in argv[-1]
+            )
+            return 0, "", ""
         assert argv[:2] == ("docker", "inspect")
         return 0, json.dumps([record]), ""
 
     class Transport:
-        def __init__(self, host: str, port: int) -> None:
-            assert (host, port) == ("127.0.0.1", 17411)
+        def __init__(self, host: str, port: int, *, token: str) -> None:
+            assert (host, port, token) == ("127.0.0.1", 17411, "retained-token")
 
         async def start(self, *, timeout_sec: float) -> None:
             assert timeout_sec > 0
@@ -395,6 +404,7 @@ async def test_qemu_retained_solver_can_be_reattached(
 
     assert sandbox.storage == storage
     assert sandbox.host_port == 17411
+    assert sandbox.host_ip == "172.17.0.1"
     assert sandbox.request.role.value == "solver"
 
 
@@ -528,18 +538,23 @@ def test_windows_guest_contract_is_read_from_guestd_health() -> None:
     assert observed == ("user", r"C:\Users\user", True)
 
 
-def test_legacy_linux_health_uses_the_fixed_base_identity() -> None:
+def test_a_linux_disk_must_be_prepared_for_the_tasks_agent_account() -> None:
     class Client:
+        def __init__(self, user: str) -> None:
+            self.user = user
+
         async def health(self) -> dict[str, object]:
-            return {"os": "linux", "gui": False}
+            return {"os": "linux", "gui": True, "agent_user": self.user, "agent_home": "/home/u"}
 
         async def exists(self, path: str) -> bool:
-            return path == "/home/user"
+            return path == "/home/u"
 
-    observed = asyncio.run(
-        QemuProvider()._read_guest_contract(Client(), request())  # type: ignore[arg-type]
+    contract = asyncio.run(
+        QemuProvider()._read_guest_contract(Client("user"), request())  # type: ignore[arg-type]
     )
-    assert observed == ("user", "/home/user", False)
+    assert contract == ("user", "/home/u", True)
+    with pytest.raises(ProviderCapabilityError, match="prepared for agent account 'app'"):
+        asyncio.run(QemuProvider()._read_guest_contract(Client("app"), request()))  # type: ignore[arg-type]
 
 
 def test_windows_health_must_declare_its_agent_identity() -> None:
@@ -834,5 +849,10 @@ def test_allowlist_direct_bypass_is_dropped(monkeypatch: pytest.MonkeyPatch) -> 
     sandbox._sealed = False  # type: ignore[attr-defined]
 
     asyncio.run(sandbox.close_egress())
-    assert any("FORWARD -i docker ! -d 172.17.0.1 -j DROP" in rule for rule in rules)
+    assert "iptables -I FORWARD 1 -i docker -j DROP" in rules
+    accepted = [rule for rule in rules if "FORWARD" in rule and rule.endswith("-j ACCEPT")]
+    assert any("ESTABLISHED,RELATED --ctdir REPLY" in rule for rule in accepted)
+    # The host is reachable only on the episode's own ports, never on every port.
+    assert all("ESTABLISHED" in rule or "--dports" in rule for rule in accepted)
+    assert not any("! -d" in rule for rule in rules)
     assert sandbox._sealed is True  # type: ignore[attr-defined]

@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pytest
 
-IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+from tests.support import CONTAINER_BASE
+
+IMAGE = CONTAINER_BASE
 
 VERIFY_DEFAULT = textwrap.dedent("""
     #!/usr/bin/env bash
@@ -27,6 +29,7 @@ VERIFY_CHECK = textwrap.dedent("""
         "reward",
         checks.text_equals("/home/user/output/result.txt", "hello world"),
     )
+    verification.aggregate("overall")
     verification.write()
 """).strip()
 

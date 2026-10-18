@@ -6,7 +6,7 @@ other files may carry only stable identifiers, references, or small run-level pr
 | Artifact | Owns | Does not own |
 |---|---|---|
 | `trajectory.json` | agent-visible messages, reasoning actually exposed, tool calls/results, images, subagents | setup/verify commands, rewards, aggregate usage |
-| `trace.transport.jsonl` | solver Gateway calls in API-key and subscription modes, retries, refusals, usage, cost when price is known, call-to-step links | full conversation messages or verification Judge calls |
+| `trace.transport.jsonl` | Gateway calls in API-key and subscription modes (verification Judge calls marked `purpose: judge`), retries, refusals, usage, cost when price is known, call-to-step links | full conversation messages |
 | `trace.execution.jsonl` | framework phases, task/framework commands, output, policy, cleanup failures | agent-owned tool calls, rewards |
 | `result.json` | terminal status, all named rewards, failure, phase timings | conversation, provenance |
 | `verification.json` | criterion diagnostics, metrics, aggregates, and Judge invocations/attempts | terminal status, solver trajectory, native Agent transcript |
@@ -14,6 +14,11 @@ other files may carry only stable identifiers, references, or small run-level pr
 
 `events.jsonl`, `trace.semantic.jsonl`, per-episode ledger databases, scalar/primary
 rewards, and unconditional `agent-output-*.txt` files do not exist.
+
+Compatibility boundary: during early development a record is read only by the engine
+commit recorded in its RunLock (`framework.commit`). ALE ships no migrations or legacy
+readers; a record whose shape differs from the reading engine fails validation instead of
+being reinterpreted with values that were never observed.
 
 ## ATIF trajectory
 
@@ -48,7 +53,11 @@ All ALE extensions live under `extra.ale`:
 - `attachments`: non-image BlobRefs;
 - `mcp`: logical MCP server and tool;
 - `normalized_action`: CUA action correlated with the same MCP call;
-- `incomplete` and `incomplete_reason`: valid observed prefix after interruption.
+- `incomplete` and `incomplete_reason`: valid observed prefix after interruption, or
+  `conversion_failed` when the Harness parser raised and only the instruction and final
+  message could be recorded;
+- `parse_issues`: bounded `{reason, detail}` records of native evidence the parser could not
+  convert.
 
 Images use ATIF image parts whose `source.path` is episode-relative. Subagents use
 embedded `subagent_trajectories` with unique `trajectory_id` values and resolvable
@@ -66,21 +75,26 @@ Only the Gateway writes `trace.transport.jsonl`. Every complete line has
 `schema_version`, monotonic `seq`, timestamp, episode ID, and one of:
 
 - `call`: stable `call_id`, model, request/response digests, provider response ID,
-  usage, cost, stop reason, latency, and `forwarded`/`failed`/`refused` disposition;
+  usage, cost, stop reason, latency, and `forwarded`/`failed`/`refused` disposition.
+  `input_tokens` counts every input token in every dialect, and `cache_read_tokens` and
+  `cache_write_tokens` say how many of them the provider's prompt cache served or stored.
+  `cost_usd` is a list-price estimate for an exact model ID, or `null` when that model has
+  no listed price; it is never a guessed or zero cost;
 - `replay`: the original call ID, request digest, replay reason, and `charged=false`;
 - `trajectory_link`: call ID, trajectory ID, and ATIF step ID.
 
 Retries never double-charge. Only a successful provider response (2xx) or a Gateway refusal is replayed
 to a retry of the same request; after a provider error (5xx, or a provider 429) the retry is forwarded
-and recorded as a new `call`. Failed and refused calls remain visible. Default records
+and recorded as a new `call`. A streamed 2xx response counts as successful only when it reached its
+dialect's terminal event (`message_stop`, a completed or incomplete Responses result, or `[DONE]`)
+without an in-band error; an interrupted or failed stream is forwarded again on retry. Failed and refused calls remain visible. Default records
 contain digests and accounting metadata, not provider request/response bodies or a second
 copy of the conversation.
 
-Subscription traffic is not recorded here. Codex/Grok use the native CONNECT proxy;
-Claude uses the Gateway without attaching this retained trace. In either case this
-artifact is absent and RunLock records that retained transport visibility, provider
-billing usage, and provider cost are unavailable. Absence never means zero model calls;
-the ATIF trajectory and native logs remain the available solver evidence.
+Subscription traffic takes the same path:
+Claude Code, Codex CLI, and Grok Build send every model call to the Gateway, which only
+changes how it authenticates upstream, so those calls are recorded here like API-key calls.
+Provider billing remains external; `cost_usd` is an ALE estimate only when pricing is known.
 
 ## Execution trace
 
@@ -136,14 +150,19 @@ creates new episode IDs for work that has no completed result.
 The reuse identity includes the observed asset repository, Task path, and fixed asset commit
 alongside Task, image, agent, and configuration identity. A changed asset revision cannot reuse
 an older completed episode. Dirty or unversioned assets disable completed-episode reuse.
+Its configuration identity is `RunConfig.reuse_hash`, which excludes the scheduling settings
+`episodes`, `concurrency`, `episode_retries`, and `resume`; resuming a Run with a larger count
+or another parallelism runs only the missing episodes. RunLock still records the complete
+`config_hash`.
 
 `RunConfig.episode_retries` sets the number of additional automatic attempts for an
 incomplete episode; its default is zero. `ale run --episode-retries N` and
 `--set episode_retries=N` override the run TOML. Each attempt runs in fresh Sandboxes
 with a new Gateway session and trajectory, preserving the logical episode ID and seed.
 Only `status=completed` stops retries successfully; a completed zero score is still a
-completed episode. `status=timeout` is terminal without retry, preserving the timed-out
-phase and its deadline in the failure details. Judge infrastructure failures stop without another episode attempt;
+completed episode. `status=timeout` and `status=budget_exceeded` are limit terminations
+and terminal without retry: the timed-out phase and its deadline, or the exhausted limit,
+remain in the failure details, and another attempt would grant a fresh limit. Judge infrastructure failures stop without another episode attempt;
 their internal retry budget is defined in [Verification](verification.md). Host cancellation
 interrupts the loop immediately. Missing results
 caused by a host interruption are not treated as an unlimited retry request.

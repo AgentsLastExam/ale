@@ -111,6 +111,15 @@ class TaskFolder:
         return tree_digest(self.root, exclude=_SOURCE_EXCLUDES)
 
     @cached_property
+    def non_verifier_digest(self) -> str:
+        """Identity of everything a solver depends on, read once per folder.
+
+        Asset bytes are left to their own commit identity rather than hashed on every load;
+        reverification compares that commit separately.
+        """
+        return tree_digest(self.root, exclude=(VERIFY_DIR, *_SOURCE_EXCLUDES))
+
+    @cached_property
     def image_source_digest(self) -> str | None:
         if self.image_dockerfile is None and self.image_script is None:
             return None
@@ -187,7 +196,7 @@ class ManifestTask(Task):
             folder=folder,
             source=folder.source,
             task_digest=folder.content_digest,
-            non_verifier_digest=tree_digest(folder.root, exclude=("verify", ".ale-cache")),
+            non_verifier_digest=folder.non_verifier_digest,
             image_source_digest=folder.image_source_digest,
             verifier_image_source_digest=folder.verifier_image_source_digest,
         )

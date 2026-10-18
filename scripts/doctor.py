@@ -236,7 +236,7 @@ def check_sandbox_backends() -> list[Result]:
                 WARN,
                 "kvm",
                 "/dev/kvm missing — the qemu backend is unavailable",
-                "enable virtualisation in BIOS, or use --provider docker",
+                "enable virtualisation in BIOS; container Tasks still run without it",
             )
         )
     elif not os.access(kvm, os.R_OK | os.W_OK):

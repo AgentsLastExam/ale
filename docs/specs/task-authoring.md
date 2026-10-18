@@ -1,6 +1,7 @@
 # Task authoring contract
 
-A Task is one self-contained folder. This document owns its directory, configuration,
+A Task is one self-contained folder: nothing outside it affects it, so it can be reviewed,
+moved, and exported on its own. This document owns its directory, configuration,
 environment, data visibility, and stage interfaces. Design and acceptance standards belong to
 the [Task quality standard](task-quality-standard.md); scoring and Judge APIs belong to
 [Verification](verification.md).
@@ -66,13 +67,14 @@ os: linux                           # optional: linux | windows; default: linux
 image:                              # required initial sandbox image
   kind: container                   # required: container | vm
   # ref: registry.example/image:tag # use an existing image directly
+  user: user                        # optional agent account; must exist in the image
 
 resources:                          # optional solver allocation; defaults shown
   cpus: 1                           # integer >= 1
   memory_mb: 1024                   # integer >= 128
   storage_mb: null                  # null or integer >= 256; writable storage request
   gpus: 0                           # integer >= 0; GPU count, not physical indices
-  sudo: false                       # whether the evaluated agent receives sudo
+  sudo: false                       # true gives the agent account working sudo (admin on Windows)
 
 network:                            # optional evaluated-agent/oracle network policy
   mode: block                       # block | allowlist | open; default: block
@@ -156,15 +158,19 @@ The image is the reproducible initial computer state supplied to the agent. Star
 base matching the Task OS and `image.kind`, then add every stable dependency, service, file,
 permission, and piece of initial state required by the Task. The Linux bases are:
 
-- container: `ghcr.io/agentslastexam/container-ubuntu22-base:latest` (Ubuntu 22.04);
-- VM: `ghcr.io/agentslastexam/vm-ubuntu24-base:0.1.0` (Ubuntu 24.04).
+- container: `ghcr.io/agentslastexam/container-ubuntu22-base` (Ubuntu 22.04);
+- VM: `ghcr.io/agentslastexam/vm-ubuntu24-base` (Ubuntu 24.04).
+
+Name an exact version, such as `:0.1.1`, never `latest`; `ale new-task` writes the
+engine's current version. A Task keeps building from the version it names until its
+author moves it ([Sandbox image](sandbox-image.md#versions)).
 
 The submitted initial environment must be reproducible from `image/`; an exploratory sandbox
 snapshot is not Task source. Large build inputs belong in `image/assets/` and are copied by the
 image build. Image-local scripts may implement non-trivial installation and configuration.
 
 ```dockerfile
-FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest
+FROM ghcr.io/agentslastexam/container-ubuntu22-base:0.1.1
 
 COPY install.sh /tmp/install.sh
 RUN /tmp/install.sh && rm /tmp/install.sh
@@ -194,7 +200,8 @@ Copy-Item .\assets\input.txt "$env:ALE_HOME\input.txt"
 ```
 
 `ale prepare TASK` copies `image/` into a temporary Windows VM, runs `run.ps1` with that
-directory as cwd and `ALE_HOME` set to the agent home, then saves the configured qcow2.
+directory as cwd and `ALE_HOME` set to the agent home, installs ALE's current guestd and
+Cua Driver, then saves the configured qcow2.
 Scripts may use WinGet, Chocolatey, or
 local unattended installers; pin package versions where supported and check native command
 exit codes. Scripts must finish within one hour; nonzero exits fail the build. Suppress
@@ -249,6 +256,8 @@ account the required ownership or permissions, for example with `chown` or `inst
 
 `instruction.md` is the evaluated-agent instruction. Its input and output paths refer to the
 declared initial environment and artifacts. Declared `${name}` placeholders are rendered from `params`.
+Only the braced form is a placeholder: other `$` text such as `$HOME`, `$5` or `$x^2$` is copied
+unchanged, and `$$` renders one `$`, so `$${HOME}` produces a literal `${HOME}`.
 Use literal sandbox paths: `/home/user/...` on Linux and `C:\Users\user\...` on
 Windows. ALE does not add or rewrite a workspace prefix.
 
