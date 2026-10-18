@@ -19,7 +19,6 @@ from ale.run.cli.main import app
 from ale.run.cli.tasks import (
     _is_full_reward_map,
     _is_zero_reward_map,
-    _validate,
     _validation_notices,
     _validation_outcome,
 )
@@ -144,8 +143,7 @@ def test_validate_accepts_run_level_judge_config(
     assert observed["runs_dir"] == tmp_path / "runs"
 
 
-@pytest.mark.asyncio
-async def test_validation_loads_the_selected_credential_file_before_preparing_tasks(
+def test_every_command_reads_the_selected_credential_file_first(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     task_cli = import_module("ale.run.cli.tasks")
@@ -160,10 +158,11 @@ async def test_validation_loads_the_selected_credential_file_before_preparing_ta
 
     monkeypatch.setattr(task_cli, "ProviderRegistry", inspect_environment)
     try:
-        with pytest.raises(RuntimeError, match="credential loading verified"):
-            await _validate("task", RunConfig(), tmp_path / "runs")
+        result = CliRunner().invoke(app, ["validate", str(tmp_path / "task")])
     finally:
         os.environ.pop("TEST_VALIDATION_JUDGE_KEY", None)
+    assert isinstance(result.exception, RuntimeError), result.output
+    assert "credential loading verified" in str(result.exception)
 
 
 def test_prepare_uses_selection_and_starts_no_runtime_services(

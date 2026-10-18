@@ -49,6 +49,7 @@ from ale.run.provenance import ProvenanceInputs, build_lock, judge_provenance
 from ale.run.providers import ProviderRegistry
 from ale.run.recording import EpisodeRecording
 from ale.run.task_images import prepare_task_image, prepare_verifier_image
+from ale.run.verification import judge_endpoints, open_judge_sessions
 from ale_verify import VerificationRecord
 
 __all__ = ["EpisodeResult", "run_episode", "run_episode_with_retries"]
@@ -63,6 +64,11 @@ _STATUS_BY_ERROR: tuple[tuple[type[BaseException], Status], ...] = (
     (TaskError, Status.TASK_ERROR),
     (EnvironmentError_, Status.ENV_ERROR),
 )
+
+
+#: Outcomes another attempt must not replace. A completed zero is a score, and a limit
+#: termination is the measured agent's own result: retrying it would grant a fresh budget.
+_FINAL_STATUSES = frozenset({Status.COMPLETED, Status.TIMEOUT, Status.BUDGET_EXCEEDED})
 
 
 def status_for(error: BaseException) -> Status:
@@ -99,7 +105,7 @@ async def run_episode_with_retries(
         result = await execute()
         failure = result.record.failure
         if (
-            result.record.status in {Status.COMPLETED, Status.TIMEOUT}
+            result.record.status in _FINAL_STATUSES
             or attempt == retries
             or (
                 failure is not None
@@ -476,7 +482,7 @@ async def run_episode(
         task.prepared_image = await prepare_task_image(task, providers)
     if task.prepared_verifier_image is None:
         task.prepared_verifier_image = await prepare_verifier_image(task, providers)
-    episode_id = episode_id or f"{task.spec.id}-{uuid.uuid4().hex[:8]}"
+    episode_id = episode_id or f"{task.spec.name}-{uuid.uuid4().hex[:8]}"
     trajectory_id = trajectory_id or f"trajectory-{uuid.uuid4().hex}"
     episode_dir = run_dir / episode_id
     recording = EpisodeRecording(episode_dir)
@@ -512,6 +518,16 @@ async def run_episode(
             else session_registry.open(candidate)  # type: ignore[union-attr]
         )
         session_token = session.token
+    judge_sessions = (
+        open_judge_sessions(
+            gateway,
+            verification_config,
+            episode_id=episode_id,
+            trace=recording.transport,
+        )
+        if gateway is not None and verification_config is not None
+        else {}
+    )
 
     sink = _Artifacts(episode_dir, enabled=collect_artifacts)
     lease = _Lease(providers, sandbox_retention or SandboxRetentionConfig())
@@ -548,8 +564,10 @@ async def run_episode(
         prepared_image=task.prepared_image,
         prepared_verifier_image=task.prepared_verifier_image,
         phase_callback=phase_callback,
+        limit_refusal=lambda: _gateway_refusal(session),
         logging_policy=logging_policy or LoggingPolicy(),
         verification_config=verification_config or VerificationConfig(),
+        judge_tokens={kind: opened.token for kind, opened in judge_sessions.items()},
     )
     verdict: Verdict | None = None
     try:
@@ -577,9 +595,11 @@ async def run_episode(
             durable=True,
         )
     finally:
-        if gateway is not None and session is not None:
+        if gateway is not None:
             # Tokens die with their episode, so a leaked one is not a standing grant.
-            gateway.close_session(session)
+            for opened in (session, *judge_sessions.values()):
+                if opened is not None:
+                    gateway.close_session(opened)
         elif session_registry is not None and session is not None:
             session_registry.close(session)
         finalization_error: RetentionFinalizationError | None = None
@@ -718,7 +738,8 @@ def _write_lock(
         )
     record = ctx.verification_record
     if isinstance(record, VerificationRecord):
-        inputs = replace(inputs, judges=judge_provenance(record))
+        endpoints = judge_endpoints(ctx.verification_config)
+        inputs = replace(inputs, judges=judge_provenance(record, endpoints))
     observed_asset = task.asset_observation
     asset = (
         AssetProvenance(
@@ -749,6 +770,19 @@ def _write_lock(
         seed=seed,
     )
     return lock
+
+
+def _gateway_refusal(session: GatewaySession | None) -> LimitTermination | None:
+    refusal = session.refusal if session is not None else None
+    if refusal is None:
+        return None
+    return LimitTermination(
+        layer="gateway",
+        name=refusal.limit,
+        configured_value=refusal.value,
+        observed_value=refusal.observed,
+        reason="the Gateway refused a model call",
+    )
 
 
 def _phase_of(error: BaseException, recorded_phase: object = None) -> str | None:

@@ -4,38 +4,103 @@ Normative for standard container and VM Tasks. Every solver and dedicated verifi
 declares `image.kind`. Linux uses a Dockerfile or `image.ref`; Windows uses `image.ref`
 directly, or builds `image/run.ps1` on `image.base_ref`.
 
+## What a Linux image needs
+
+A Linux Task may build from any image that has:
+
+- system Python 3.12 or newer as `python3`, which the guest service and `ale_verify` run on;
+- the agent account the Task names with `image.user` (default `user`), with a home;
+- for a container, a long-lived command that ALE does not replace;
+- for a VM, a bootable systemd system (the VM base provides one);
+- for GUI work, a running desktop session, such as an X server with a window manager.
+
+Everything ALE itself needs it adds when it prepares the image, as one more layer on top
+of the Task's own build or `image.ref` (the framework layer):
+
+- guestd, the guest service every sandbox operation goes through, under root-only
+  `/opt/ale`, so it always speaks the protocol of the engine driving it;
+- Cua Driver at a pinned version, the one desktop capture and input implementation;
+- for a VM, the systemd unit that starts guestd at boot;
+- a check that the agent account exists, failing preparation if it does not;
+- working sudo for that account when the Task sets `resources.sudo: true`, installing sudo
+  with the image's package manager when the image lacks it;
+- `/opt/ale/framework`, recording which framework the image carries.
+
+A Linux VM disk named by a qcow2 `ref` gets the same pieces, installed offline into a copy
+of the disk by the VM builder's libguestfs. Its small appliance VM, not the Host, runs the
+disk's own programs that the setup calls. Each copy is made once per disk and framework
+and then used directly, and a disk that already carries this framework, such as one ALE
+prepared, is used as it is.
+
+There are no image labels to declare. Whether a sandbox has a desktop is decided from the
+image's own configuration before anything starts: a VM has one when its systemd enables a
+display manager (`display-manager.service`), and a container has one when its image sets
+`DISPLAY` or `WAYLAND_DISPLAY`, which is how a desktop image tells its processes where to
+draw. An image that ships X only as a tool, such as Xvfb for a headless browser, sets
+neither and is headless; a desktop base can be made headless with `ENV DISPLAY=`. With a
+desktop, the Provider waits until a screenshot succeeds and fails the sandbox if the
+desktop never becomes ready; guestd starts Cua Driver inside the agent's desktop session
+once its window manager or shell runs.
+
+## What a Windows image needs
+
+A Windows Task builds `image/run.ps1` on an ALE Windows base. The base signs its agent
+account in to a desktop and starts the guestd it carries at that logon; this bootstrap
+guestd is how the build reaches the VM. After the Task's script, ALE installs its own
+pieces through it:
+
+- the current guestd replaces the base's under `C:\ProgramData\ALE\guestd`;
+- Cua Driver at the pinned version under `C:\ProgramData\ALE\cua-driver`, started
+  elevated at the agent's logon so it can reach elevated windows;
+- a check that `image.user` names the account the base signs in.
+
+Elevation for `resources.sudo` is granted per boot by the Host, not built into the disk.
+A Windows sandbox has a desktop for ALE to drive exactly when its image carries the
+framework's Cua Driver, so the Provider waits for a screenshot in every Task image and
+not in the bare base booted to build one. A disk used directly as `image.ref` is not
+prepared by ALE and must carry a current guestd and Cua Driver itself.
+
 ## ALE base images
 
-- `container-ubuntu22-base` provides an Ubuntu 22.04 desktop container.
-- `vm-ubuntu24-base` provides Ubuntu 24.04, systemd, full GNOME/GDM, the declared
-  unprivileged user, and ALE guest integration for QEMU.
-- The private Windows 10 BYOL base provides a logged-in desktop, system Python, guestd,
-  Cua Driver, WinGet, Chocolatey, and the runtimes required by autonomous agents.
+- `container-ubuntu22-base` provides an Ubuntu 22.04 GNOME desktop container and the
+  `user` account.
+- `vm-ubuntu24-base` provides Ubuntu 24.04, systemd, full GNOME/GDM and the `user`
+  account for QEMU. It has no firewall of its own: network policy is enforced by the QEMU
+  runner outside the guest ([security.md](security.md#1-a-sandbox-has-only-declared-ways-out)).
+- The private Windows 10 BYOL base provides a logged-in desktop, system Python, a bootstrap
+  guestd, WinGet, Chocolatey, and the runtimes required by autonomous agents.
   Its licensed disk is not a public ALE artifact.
 
-The bases provide framework integration that should not be recreated per Task:
-
-- system Python 3.12 or newer (`python3` on Linux, `python.exe` on Windows);
-- an unprivileged account with a real home, exposed by the Provider contract;
-- the guest service and dependencies needed by the Providers;
-- a long-lived image command that ALE does not replace;
-- `sudo` where Tasks requesting solver elevation are supported;
-- Cua Driver and a ready graphical session for GUI bases. All guestd screenshot and input
-  operations go through Cua Driver on both Linux and Windows.
-
-They do not contain domain stacks, benchmark data, databases, robotics suites, or
-Task-specific tools.
+No base carries Cua Driver, and only the Windows base carries guestd, as the bootstrap
+its Task builds talk to; ALE installs both when it prepares a Task image. The bases do not
+contain domain stacks, benchmark data, databases, robotics suites, or Task-specific tools.
 
 Repository sources are separated by responsibility: `images/base/` contains the three
 Task foundations, `images/builders/vm-materializer/` turns Linux VM OCI content into
-qcow2, and `images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM.
+qcow2 and installs the framework into a Linux qcow2 named by reference, and
+`images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM.
+
+## Versions
+
+Every ALE image is published under the engine's version, such as `0.1.1`, once and never
+overwritten: the publishing workflow skips a version the registry already has, and no
+`latest` tag is published. An engine runs exactly the images of its own version, so a
+checkout that stays on one engine version keeps the same images whatever later versions
+publish. Publishing a changed image therefore means releasing a new engine version.
+A tag that every change overwrote would carry one engine's change into every checkout's
+next build, including checkouts whose engine does not speak the new guest protocol.
+
+A Task may build from any image. Task repositories maintained with ALE name an exact
+version of an ALE base, such as `container-ubuntu22-base:0.1.1`, so that a Task keeps
+building from the same base until its author moves it; `ale new-task` writes the
+engine's current version.
 
 ## Task image
 
 For a local Linux image, `image/` is the sole ordinary Docker build context:
 
 ```dockerfile
-FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest
+FROM ghcr.io/agentslastexam/container-ubuntu22-base:0.1.1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends sqlite3 \
@@ -72,9 +137,12 @@ files are rejected; convert them to a standalone qcow2 so its identity covers th
 The operator must keep prepared local disks unchanged while they are in use.
 
 The authored image source digest excludes `image/assets` so normal Task identity and
-asset provenance remain separate. Docker still consumes current asset bytes natively and
-BuildKit decides Linux cache reuse; Windows cache keys include the actual image asset
-bytes. Dirty or unsynchronized assets disable resume and reporting.
+asset provenance remain separate. A prepared Linux image is recorded under its build
+context's file contents, its asset inventory (path, size, modification time and mode, as
+for asset dirtiness) and the framework identity. An unchanged Task finds its image there
+and uses it directly, without asking Docker to build or check anything, so a base tag that
+moves is not followed: name exact base versions. Windows cache keys include the actual
+image asset bytes. Dirty or unsynchronized assets disable resume and reporting.
 RunLock schema 2 records declaration, preparation, Provider, and exact observed identity;
 it does not invent a whole-disk content digest. Local Linux VMs record OCI and materializer
 identities; local Windows VMs record builder identity and resolved base materials.
@@ -84,10 +152,13 @@ identities; local Windows VMs record builder identity and resolved base material
 Image source identity describes the files under `image/`, separately from the exact
 built image recorded in RunLock. It is not the decision to reuse a solver's answer.
 A Task run records `task.non_verifier_digest`: a content hash of every Task file outside
-`verify/` (including image/setup/oracle assets, paths, executable bits and link targets;
-engine-owned `.ale-cache` is excluded). File timestamps do not enter this hash.
-Reverification requires this digest to match the source episode. Any outside change, or
-missing source evidence, requires a fresh solver run. This also protects direct CLI use.
+`verify/` (paths, executable bits and link targets), computed once per Task folder. The four
+asset roots and engine-owned `.ale-cache` are excluded, so loading a Task never reads asset
+bytes. File timestamps do not enter this hash. Reverification requires this digest to match
+the source episode and the Task's asset observation to equal the source RunLock's: the same
+repository, Task path and commit, clean on both sides. Any outside change, any asset change
+(asset commits do not distinguish `verify/assets` from the other roots), or missing source
+evidence requires a fresh solver run. This also protects direct CLI use.
 
 When only verification changed, ALE does not build or resolve the solver image again.
 It attaches the retained solver using the source RunLock's exact image identity, and
@@ -99,10 +170,11 @@ not mutable tags that concurrent builds can overwrite.
 
 ## VM preparation
 
-A Linux VM Task Dockerfile ends in `vm-ubuntu24-base`. ALE exports the final OCI rootfs and
-runs its pinned materializer, which owns initramfs, boot, partition assembly, and the
-minimal bootable qcow2 template. Reuse is keyed by final OCI plus materializer identities
-and validated structurally without hashing the whole disk.
+A Linux VM Task Dockerfile usually ends in `vm-ubuntu24-base`. ALE adds the framework
+layer, exports the resulting OCI rootfs and runs its pinned materializer, which owns
+initramfs, boot, partition assembly, and the minimal bootable qcow2 template. Reuse is
+keyed by the layered OCI and materializer identities and validated structurally without
+hashing the whole disk.
 
 Windows 10 has no public ISO build path in ALE. The current private BYOL base starts from
 the GCP image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
@@ -136,7 +208,11 @@ plumbing but does not establish agent readiness.
 The QEMU Provider sizes a fresh overlay from `storage_mb`, boots it over the prepared
 qcow2, grows the guest root filesystem, waits for guestd and the declared desktop,
 and observes usable root capacity. The guest health contract reports its OS, agent user,
-agent home, and GUI readiness; a Task whose `os` disagrees with the image is rejected.
+agent home, and whether it has a desktop; a Task whose `os` disagrees with the image is
+rejected.
+Every TCP guest connection authenticates with the sandbox token claimed by the framework's
+first connection ([security](security.md)); an image whose guest
+service predates authentication fails before provisioning completes and must be rebuilt.
 Tasks may install ordinary OS packages and services, including Docker; VM boot machinery
 stays engine-owned.
 
@@ -179,8 +255,9 @@ Task code.
 
 Given a conforming image, the Docker Provider:
 
-- starts the exact prepared content without replacing its command;
-- verifies the declared agent user and optional desktop readiness;
+- starts the exact prepared content without replacing its command, adding the framework
+  layer first to an image that was not prepared with it;
+- uses the Task's agent account and waits for the desktop when the image has one;
 - applies CPU, memory, writable storage, network, sudo, and GPU requests or rejects them;
 - injects only selected NVIDIA devices through the configured runtime/CDI path;
 - observes the resulting image and resource allocation;
@@ -211,8 +288,8 @@ current Windows guestd runs in the interactive agent session so Cua Driver and p
 execution share one desktop; stage directories are withheld by lifecycle rather than a
 second Windows account. The Windows base starts with a limited token by default; only
 Host-provided SMBIOS `ale-sudo` for `request.sudo` selects an administrator session, and
-image builds explicitly request it. A requested solver sudo/admin grant is verified before
-use and recorded. ALE does not pre-create declared artifacts or silently repair Task filesystem
+image builds explicitly request it. On Linux the framework layer configures sudo when the
+image is prepared. A requested solver sudo/admin grant is verified before use and recorded. ALE does not pre-create declared artifacts or silently repair Task filesystem
 ownership: the image/setup/agent owns the type and existence of each output.
 
 ## Base-image changes

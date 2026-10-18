@@ -32,15 +32,18 @@ from ale.core.environment import EventSink
 from ale.core.errors import ConfigError
 from ale.core.trace import TransportCall, TransportReplay
 from ale.run.gateway import anthropic, openai_chat_completions, openai_responses
+from ale.run.gateway.pricing import estimate_cost, price_for
 from ale.run.gateway.session import (
+    CallUsage,
     GatewayReservation,
     GatewaySession,
     LimitReached,
     SessionRegistry,
+    Upstream,
 )
 from ale.run.subscription import SubscriptionCredential
 
-__all__ = ["Gateway"]
+__all__ = ["REQUEST_PATHS", "Gateway"]
 
 UPSTREAM_DEFAULT = "https://api.anthropic.com"
 _REQUEST_TIMEOUT = ClientTimeout(total=1800)
@@ -68,7 +71,7 @@ _DIALECTS = {
     "openai-chat-completions": openai_chat_completions,
     "openai-responses": openai_responses,
 }
-_REQUEST_PATHS = {
+REQUEST_PATHS = {
     "anthropic": "/v1/messages",
     "openai-chat-completions": "/v1/chat/completions",
     "openai-responses": "/v1/responses",
@@ -145,10 +148,7 @@ class Gateway:
         self, session: GatewaySession, trace: EventSink | None = None
     ) -> GatewaySession:
         """Register an episode. Its token is valid until :meth:`close_session`."""
-        if (
-            session.limits.max_cost_usd is not None
-            and self._dialect.pricing_for(session.model) is None
-        ):
+        if session.limits.max_cost_usd is not None and price_for(session.model) is None:
             raise ConfigError(
                 f"finite max_cost_usd requires known pricing for model {session.model!r}"
             )
@@ -165,7 +165,8 @@ class Gateway:
     def _build_app(self) -> web.Application:
         app = web.Application(client_max_size=64 * 1024 * 1024)
         app.router.add_get("/healthz", self._healthz)
-        app.router.add_post(self._request_path, self._messages)
+        for path in REQUEST_PATHS.values():
+            app.router.add_post(path, self._messages)
         return app
 
     async def _healthz(self, request: web.Request) -> web.Response:
@@ -173,13 +174,19 @@ class Gateway:
 
     async def _messages(self, request: web.Request) -> web.StreamResponse:
         session = self._authenticate(request)
+        if request.path != REQUEST_PATHS[self._dialect_name(session)]:
+            raise web.HTTPNotFound(
+                text=json.dumps({"type": "error", "error": {"type": "ale_wrong_dialect"}}),
+                content_type="application/json",
+            )
         started = asyncio.get_running_loop().time()
         body = await request.read()
         payload = self._authoritative(json.loads(body or b"{}"), session)
         key = GatewaySession.digest(json.dumps(payload, sort_keys=True).encode())
         request_digest = f"sha256:{key}"
 
-        if (cached := session.cached(key)) is not None:
+        replays = session.purpose == "agent"
+        if replays and (cached := session.cached(key)) is not None:
             self._record_replay(
                 session,
                 call_id=cached["call_id"],
@@ -187,7 +194,7 @@ class Gateway:
                 reason="completed-cache",
             )
             return self._replayed(cached)  # a retry must not sample twice
-        if (pending := session.inflight(key)) is not None:
+        if replays and (pending := session.inflight(key)) is not None:
             cached = await pending
             self._record_replay(
                 session,
@@ -218,10 +225,11 @@ class Gateway:
         started: float,
     ) -> web.StreamResponse:
         assert self._client is not None
-        requested_output = self._requested_output(payload)
         try:
             reservation = await session.reserve()
         except LimitReached as limit:
+            if session.refusal is None:
+                session.refusal = limit
             self._record(
                 session,
                 call_id=call_id,
@@ -229,7 +237,7 @@ class Gateway:
                 refused=limit.limit,
             )
             raw = json.dumps(
-                self._dialect.refusal_body(limit.limit, limit.value, limit.observed)
+                self._dialect(session).refusal_body(limit.limit, limit.value, limit.observed)
             ).encode()
             self._retain_payload(session, call_id, payload, raw)
             cached = {
@@ -237,16 +245,18 @@ class Gateway:
                 "body": raw,
                 "streaming": False,
                 "call_id": call_id,
+                # A limit does not lift by waiting; SDKs that honor this stop retrying.
+                "headers": {"x-should-retry": "false"},
             }
             session.finish(key, cached)
             return self._replayed(cached)
-        payload = self._with_output_limit(payload, requested_output)
+        payload = self._normalized_output_limit(payload, session)
         self._retain_payload(session, call_id, payload, None)
 
         streaming = bool(payload.get("stream"))
         committed = False
         try:
-            upstream = await self._post(request, payload)
+            upstream = await self._post(request, payload, session)
             try:
                 if streaming:
                     response = await self._stream(
@@ -320,8 +330,11 @@ class Gateway:
         started: float,
     ) -> web.StreamResponse:
         """Pass the event stream straight through, counting usage as it goes."""
+        # The upstream's own type: one that answers a streamed request with plain JSON
+        # must not reach the client labelled as an event stream.
         response = web.StreamResponse(
-            status=upstream.status, headers={"content-type": "text/event-stream"}
+            status=upstream.status,
+            headers={"content-type": upstream.headers.get("content-type", "text/event-stream")},
         )
         await response.prepare(request)
 
@@ -371,13 +384,19 @@ class Gateway:
                 "streaming": True,
                 "call_id": call_id,
             },
-            replayable=_replayable(upstream.status),
+            replayable=_replayable(upstream.status)
+            and self._dialect(session).stream_completed(chunks),
         )
         return response
 
     def _replayed(self, cached: dict[str, Any]) -> web.Response:
         content_type = "text/event-stream" if cached["streaming"] else "application/json"
-        return web.Response(body=cached["body"], status=cached["status"], content_type=content_type)
+        return web.Response(
+            body=cached["body"],
+            status=cached["status"],
+            content_type=content_type,
+            headers=cached.get("headers"),
+        )
 
     # --- policy and accounting ---
 
@@ -395,7 +414,7 @@ class Gateway:
     def _authoritative(self, payload: dict[str, Any], session: GatewaySession) -> dict[str, Any]:
         """Impose the run's model rather than trusting the agent's request."""
         authoritative = {**payload, "model": session.model}
-        if self.dialect == "openai-chat-completions" and authoritative.get("stream"):
+        if self._dialect_name(session) == "openai-chat-completions" and authoritative.get("stream"):
             authoritative["stream_options"] = {
                 **(authoritative.get("stream_options") or {}),
                 "include_usage": True,
@@ -435,10 +454,10 @@ class Gateway:
             return
         self._retain_exact_tokens(session, call_id, payload, parsed)
         if streamed is not None:
-            input_tokens, output_tokens, stop_reason = self._dialect.usage_from_stream(streamed)
+            usage, stop_reason = self._dialect(session).usage_from_stream(streamed)
         else:
-            input_tokens, output_tokens, stop_reason = self._dialect.extract_usage(parsed)
-        cost = self._dialect.estimate_cost(session.model, input_tokens, output_tokens)
+            usage, stop_reason = self._dialect(session).extract_usage(parsed)
+        cost = estimate_cost(session.model, usage)
         self._record(
             session,
             call_id=call_id,
@@ -446,24 +465,31 @@ class Gateway:
             disposition="forwarded",
             response_digest=GatewaySession.digest(response_body) if response_body else None,
             provider_response_id=provider_response_id,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
+            usage=usage,
             cost_usd=cost,
             stop_reason=stop_reason,
             latency_ms=latency_ms,
         )
         await session.commit(
             reservation,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cost_usd=cost,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cost_usd=cost or 0.0,
         )
 
-    async def _post(self, request: web.Request, payload: dict[str, Any]):  # type: ignore[no-untyped-def]
+    async def _post(  # type: ignore[no-untyped-def]
+        self, request: web.Request, payload: dict[str, Any], session: GatewaySession
+    ):
         assert self._client is not None
+        if session.upstream is not None:
+            return await self._client.post(
+                session.upstream.endpoint,
+                json=payload,
+                headers=self._own_headers(request, session.upstream),
+            )
         for attempt in range(2):
             upstream = await self._client.post(
-                f"{self.upstream}{self.upstream_path or self._request_path}",
+                f"{self.upstream}{self.upstream_path or REQUEST_PATHS[self.dialect]}",
                 json=payload,
                 headers=await self._upstream_headers(request),
             )
@@ -497,37 +523,44 @@ class Gateway:
             headers["authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    @property
-    def _dialect(self):  # type: ignore[no-untyped-def]
-        return _DIALECTS[self.dialect]
+    def _own_headers(self, request: web.Request, upstream: Upstream) -> dict[str, str]:
+        headers = {
+            name: value for name, value in request.headers.items() if name.lower() not in _STRIP
+        }
+        if upstream.dialect == "anthropic":
+            headers["x-api-key"] = upstream.api_key
+            headers.setdefault("anthropic-version", "2023-06-01")
+        else:
+            headers["authorization"] = f"Bearer {upstream.api_key}"
+        return headers
 
-    @property
-    def _request_path(self) -> str:
-        return _REQUEST_PATHS[self.dialect]
+    def _dialect_name(self, session: GatewaySession) -> str:
+        return session.upstream.dialect if session.upstream is not None else self.dialect
 
-    @property
-    def _max_output_field(self) -> str:
-        return _MAX_OUTPUT_FIELDS[self.dialect]
+    def _dialect(self, session: GatewaySession):  # type: ignore[no-untyped-def]
+        return _DIALECTS[self._dialect_name(session)]
 
-    def _requested_output(self, payload: dict[str, Any]) -> int:
-        value = payload.get(self._max_output_field)
-        if value is None and self.dialect == "openai-chat-completions":
-            value = payload.get("max_tokens")
-        return int(value or 4096)
-
-    def _with_output_limit(
-        self,
-        payload: dict[str, Any],
-        output_tokens: int,
+    def _normalized_output_limit(
+        self, payload: dict[str, Any], session: GatewaySession
     ) -> dict[str, Any]:
+        """Forward the client's own output ceiling under the dialect's current field.
+
+        An absent ceiling stays absent: limits refuse the next call rather than truncate
+        this one, so inventing a value here would silently cut reasoning and output.
+        """
         limited = dict(payload)
-        if self.subscription is not None and not self.subscription.supports_output_limit:
+        dialect = self._dialect_name(session)
+        if (
+            session.upstream is None
+            and self.subscription is not None
+            and not self.subscription.supports_output_limit
+        ):
             # The ChatGPT Codex backend rejects the public Responses API field.
             limited.pop("max_output_tokens", None)
             return limited
-        if self.dialect == "openai-chat-completions":
-            limited.pop("max_tokens", None)
-        limited[self._max_output_field] = output_tokens
+        if dialect == "openai-chat-completions" and "max_tokens" in limited:
+            legacy = limited.pop("max_tokens")
+            limited.setdefault(_MAX_OUTPUT_FIELDS[dialect], legacy)
         return limited
 
     def _record(
@@ -539,8 +572,7 @@ class Gateway:
         disposition: str | None = None,
         response_digest: str | None = None,
         provider_response_id: str | None = None,
-        input_tokens: int = 0,
-        output_tokens: int = 0,
+        usage: CallUsage | None = None,
         cost_usd: float | None = None,
         stop_reason: str | None = None,
         refused: str | None = None,
@@ -558,14 +590,17 @@ class Gateway:
                 request_digest=f"sha256:{request_digest}",
                 response_digest=(f"sha256:{response_digest}" if response_digest else None),
                 provider_response_id=provider_response_id,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                input_tokens=usage.input_tokens if usage else 0,
+                cache_read_tokens=usage.cache_read_tokens if usage else 0,
+                cache_write_tokens=usage.cache_write_tokens if usage else 0,
+                output_tokens=usage.output_tokens if usage else 0,
                 cost_usd=cost_usd,
                 stop_reason=stop_reason,
                 disposition=disposition or ("refused" if refused is not None else "forwarded"),  # type: ignore[arg-type]
                 refusal_limit=refused,
                 upstream_status=upstream_status,
                 latency_ms=latency_ms,
+                purpose=session.purpose,
             )
         )
 

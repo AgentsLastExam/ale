@@ -15,9 +15,15 @@ from aiohttp import ClientSession, web
 
 from ale.core.errors import ConfigError
 from ale.core.trace import read_jsonl
-from ale.run.gateway.anthropic import estimate_cost, refusal_body, usage_from_stream
+from ale.run.gateway.anthropic import (
+    extract_usage,
+    refusal_body,
+    stream_completed,
+    usage_from_stream,
+)
+from ale.run.gateway.pricing import estimate_cost, price_for
 from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession, Limits
+from ale.run.gateway.session import CallUsage, GatewaySession, Limits
 from ale.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
@@ -36,6 +42,7 @@ class Upstream:
         self.status = 200
         self.delay = 0.0
         self.stream_gap = 0.0
+        self.in_band_errors = 0
         self.token_data: dict[str, object] | None = None
         self.seen_keys: list[str] = []
         self.seen_authorizations: list[str] = []
@@ -103,6 +110,12 @@ class Upstream:
             "message": {"id": "msg_1", "usage": {"input_tokens": self.counted_input}},
         }
         await response.write(f"event: message_start\ndata: {json.dumps(start)}\n\n".encode())
+        if self.in_band_errors:
+            self.in_band_errors -= 1
+            error = {"type": "error", "error": {"type": "overloaded_error"}}
+            await response.write(f"event: error\ndata: {json.dumps(error)}\n\n".encode())
+            await response.write_eof()
+            return response
         await asyncio.sleep(self.stream_gap)
         delta = {
             "type": "message_delta",
@@ -391,6 +404,21 @@ class TestLimits:
         assert second == 429
         assert body["error"]["ale"]["limit"] == "max_model_calls"
         assert upstream.calls == 1, "the refused call must not reach the provider"
+        assert session.refusal is not None and session.refusal.limit == "max_model_calls"
+
+    async def test_a_refusal_tells_clients_not_to_retry(self, stack) -> None:
+        gateway, _, session, _ = stack
+        session.limits = Limits(max_model_calls=0)
+        async with (
+            ClientSession() as client,
+            client.post(
+                f"{gateway.base_url}/v1/messages",
+                json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+                headers={"authorization": f"Bearer {session.token}"},
+            ) as response,
+        ):
+            assert response.status == 429
+            assert response.headers["x-should-retry"] == "false"
 
     async def test_cost_ceiling_uses_recorded_usage(self, stack) -> None:
         gateway, _upstream, session, _ = stack
@@ -501,7 +529,7 @@ class TestRetryIdempotency:
         assert first == second
         assert upstream.calls == 1
         assert upstream.count_calls == 0
-        assert session.usage.turns == 1
+        assert session.usage.model_calls == 1
         records = read_jsonl(trace.path).records
         assert [record["kind"] for record in records] == ["call", "replay"]
         assert records[1]["charged"] is False
@@ -536,6 +564,19 @@ class TestRetryIdempotency:
         second_status, _ = await stream_call(gateway, session)
 
         assert (first_status, second_status) == (529, 200)
+        assert upstream.calls == 2
+
+    async def test_a_streamed_in_band_error_is_not_replayed(self, stack) -> None:
+        """An error inside an HTTP 200 stream must reach the provider again on retry."""
+        gateway, upstream, session, _ = stack
+        upstream.in_band_errors = 1
+
+        first_status, first = await stream_call(gateway, session)
+        second_status, second = await stream_call(gateway, session)
+
+        assert (first_status, second_status) == (200, 200)
+        assert b"overloaded_error" in b"".join(chunk for _, chunk in first)
+        assert b"message_stop" in b"".join(chunk for _, chunk in second)
         assert upstream.calls == 2
 
     async def test_a_provider_rate_limit_is_not_replayed(self, stack) -> None:
@@ -624,11 +665,14 @@ class TestDialect:
             b'data: {"type":"message_delta","usage":{"output_tokens":12},'
             b'"delta":{"stop_reason":"end_turn"}}\n\n',
         ]
-        assert usage_from_stream(events) == (50, 12, "end_turn")
+        assert usage_from_stream(events) == (
+            CallUsage(input_tokens=50, output_tokens=12),
+            "end_turn",
+        )
 
     def test_truncated_stream_still_reports_what_it_saw(self) -> None:
         events = [b'data: {"type":"message_start","message":{"usage":{"input_tokens":50}}}\n\n']
-        assert usage_from_stream(events) == (50, 0, None)
+        assert usage_from_stream(events) == (CallUsage(input_tokens=50), None)
 
     def test_stream_events_may_cross_network_chunk_boundaries(self) -> None:
         events = [
@@ -636,12 +680,64 @@ class TestDialect:
             b'tokens":50}}}\n\ndata: {"type":"message_delta","usage":{"output_tokens":12},',
             b'"delta":{"stop_reason":"end_turn"}}\n\n',
         ]
-        assert usage_from_stream(events) == (50, 12, "end_turn")
-
-    def test_cost_scales_with_the_model_family(self) -> None:
-        assert estimate_cost("claude-haiku-4-5", 1000, 1000) < estimate_cost(
-            "claude-opus-4-8", 1000, 1000
+        assert usage_from_stream(events) == (
+            CallUsage(input_tokens=50, output_tokens=12),
+            "end_turn",
         )
+
+    def test_only_a_stream_ending_in_message_stop_completed(self) -> None:
+        start = b'data: {"type":"message_start","message":{}}\n\n'
+        stop = b'data: {"type":"message_stop"}\n\n'
+        error = b'data: {"type":"error","error":{"type":"overloaded_error"}}\n\n'
+        assert stream_completed([start, stop])
+        assert not stream_completed([start])
+        assert not stream_completed([start, error, stop])
+
+    def test_cache_tokens_count_as_input_and_are_priced_separately(self) -> None:
+        usage, stop_reason = extract_usage(
+            {
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 100,
+                    "cache_read_input_tokens": 9_000,
+                    "cache_creation_input_tokens": 900,
+                    "output_tokens": 50,
+                },
+            }
+        )
+        assert stop_reason == "end_turn"
+        assert usage == CallUsage(
+            input_tokens=10_000, cache_read_tokens=9_000, cache_write_tokens=900, output_tokens=50
+        )
+        # claude-opus-4-8: $5 input, $0.50 cache read, $6.25 cache write, $25 output per MTok
+        expected = (100 * 5 + 9_000 * 0.50 + 900 * 6.25 + 50 * 25) / 1_000_000
+        assert estimate_cost("claude-opus-4-8", usage) == pytest.approx(expected)
+
+    def test_streamed_cache_tokens_are_read_from_message_start(self) -> None:
+        events = [
+            b'data: {"type":"message_start","message":{"usage":{"input_tokens":3,'
+            b'"cache_read_input_tokens":40,"cache_creation_input_tokens":7}}}\n\n',
+            b'data: {"type":"message_delta","usage":{"output_tokens":5},'
+            b'"delta":{"stop_reason":"end_turn"}}\n\n',
+        ]
+        assert usage_from_stream(events) == (
+            CallUsage(input_tokens=50, cache_read_tokens=40, cache_write_tokens=7, output_tokens=5),
+            "end_turn",
+        )
+
+    def test_prices_are_exact_model_ids_and_unknown_is_not_free(self) -> None:
+        usage = CallUsage(input_tokens=1_000, output_tokens=1_000)
+        assert estimate_cost("claude-haiku-4-5", usage) < estimate_cost("claude-opus-4-8", usage)
+        assert price_for("claude-haiku-4-5-20251001") == price_for("claude-haiku-4-5")
+        assert price_for("gpt-5-mini-2025-08-07") == price_for("gpt-5-mini")
+        assert price_for("claude-opus-4-8-custom") is None
+        assert estimate_cost("my-proxy-opus", usage) is None
+
+    def test_long_prompts_use_the_long_context_tier(self) -> None:
+        short = estimate_cost("claude-haiku-5-5", CallUsage(input_tokens=100_000))
+        long = estimate_cost("claude-haiku-5-5", CallUsage(input_tokens=100_001))
+        assert short == pytest.approx(0.01)
+        assert long == pytest.approx(100_001 * 0.50 / 1_000_000)
 
     def test_refusal_looks_like_a_provider_error(self) -> None:
         """Harnesses stop on provider errors already; none should need to know about ALE."""

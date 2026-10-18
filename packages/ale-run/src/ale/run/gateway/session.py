@@ -17,15 +17,30 @@ import hashlib
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 __all__ = [
+    "CallUsage",
     "GatewayReservation",
     "GatewaySession",
     "LimitReached",
     "Limits",
     "SessionRegistry",
+    "Upstream",
 ]
+
+
+@dataclass(frozen=True)
+class Upstream:
+    """Where one session's calls go instead of the Gateway's own upstream.
+
+    A Judge session carries one: its calls reach the Judge's own endpoint with the Judge's
+    own key, which never leaves the Host.
+    """
+
+    dialect: str
+    endpoint: str
+    api_key: str = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -49,17 +64,26 @@ class LimitReached(Exception):
         self.observed = observed if observed is not None else value
 
 
+@dataclass(frozen=True)
+class CallUsage:
+    """Provider-reported tokens of one call, with one meaning in every dialect."""
+
+    input_tokens: int = 0
+    """Every input token the provider processed, cached or not."""
+    cache_read_tokens: int = 0
+    """Of ``input_tokens``, those read from the provider's prompt cache."""
+    cache_write_tokens: int = 0
+    """Of ``input_tokens``, those written to the provider's prompt cache."""
+    output_tokens: int = 0
+    """Every generated token, reasoning included."""
+
+
 @dataclass
 class Usage:
     model_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
-
-    @property
-    def turns(self) -> int:
-        """Compatibility name for callers that predate ``max_model_calls``."""
-        return self.model_calls
 
     @property
     def total_tokens(self) -> int:
@@ -85,6 +109,14 @@ class GatewaySession:
     """Explicit debug destination for raw provider payloads; absent by default."""
     exact_token_dir: Path | None = None
     """Temporary exact provider token evidence; absent unless explicitly requested."""
+
+    refusal: LimitReached | None = field(default=None, repr=False)
+    """The first limit that refused one of this session's calls, if any."""
+
+    purpose: Literal["agent", "judge"] = "agent"
+    """A Judge session is unlimited and never replays: a retried verdict must sample again."""
+    upstream: Upstream | None = field(default=None, repr=False)
+    """The session's own upstream, or ``None`` for the Gateway's."""
 
     allowed_hosts: frozenset[str] = frozenset()
     """Hosts this episode may reach through the proxy, beyond the model endpoint.

@@ -25,7 +25,6 @@ Stage = Literal["image", "setup", "verify", "oracle"]
 STAGES: tuple[Stage, ...] = ("image", "setup", "verify", "oracle")
 
 __all__ = [
-    "AssetObservation",
     "AssetRepositorySelection",
     "AssetSyncResult",
     "asset_status",
@@ -34,9 +33,6 @@ __all__ = [
     "push_assets",
     "select_asset_repositories",
 ]
-
-
-AssetObservation = TaskAssetObservation
 
 
 @dataclass(frozen=True)
@@ -61,7 +57,7 @@ class AssetSyncResult:
     remote_repo_id: str
     collection_slug: str
     commit: str
-    tasks: tuple[AssetObservation, ...]
+    tasks: tuple[TaskAssetObservation, ...]
 
 
 def _asset_roots(task: Task | AssetLocation) -> tuple[Path, ...]:
@@ -77,13 +73,13 @@ def _task_path(task: AssetLocation) -> str:
     return task.source.task_relative_path
 
 
-def observe_task_assets(task: Task | AssetLocation) -> AssetObservation | None:
+def observe_task_assets(task: Task | AssetLocation) -> TaskAssetObservation | None:
     if task.folder is None:
         return None
     roots = _asset_roots(task)
     source = task.source
     if not source.repository_root or not source.repository_name or not source.task_relative_path:
-        return AssetObservation("", str(task.folder.root), None, True) if roots else None
+        return TaskAssetObservation("", str(task.folder.root), None, True) if roots else None
     with _repository_lock(source.repository_root, exclusive=True):
         state = _read_state(source.repository_root, source.repository_name)
         markers = state["tasks"]
@@ -94,7 +90,7 @@ def observe_task_assets(task: Task | AssetLocation) -> AssetObservation | None:
         inventory = _asset_inventory(task)
         dirty = not isinstance(marker, dict) or marker.get("inventory") != inventory
         commit = marker.get("commit") if isinstance(marker, dict) else None
-        observation = AssetObservation(
+        observation = TaskAssetObservation(
             source.repository_name,
             source.task_relative_path,
             commit if isinstance(commit, str) else None,
@@ -106,7 +102,7 @@ def observe_task_assets(task: Task | AssetLocation) -> AssetObservation | None:
         return observation
 
 
-def asset_status(paths: Sequence[Path]) -> tuple[AssetObservation, ...]:
+def asset_status(paths: Sequence[Path]) -> tuple[TaskAssetObservation, ...]:
     return tuple(
         observation
         for selection in select_asset_repositories(paths)
@@ -308,11 +304,13 @@ def _replace_selected_assets(tasks: Sequence[AssetLocation], downloaded: Path) -
         shutil.rmtree(backup, ignore_errors=True)
 
 
-def _mark_clean(selection: AssetRepositorySelection, commit: str) -> tuple[AssetObservation, ...]:
+def _mark_clean(
+    selection: AssetRepositorySelection, commit: str
+) -> tuple[TaskAssetObservation, ...]:
     state = _read_state(selection.repository_root, selection.repository_name)
     markers = state["tasks"]
     assert isinstance(markers, dict)
-    observations: list[AssetObservation] = []
+    observations: list[TaskAssetObservation] = []
     for task in selection.tasks:
         task_path = _task_path(task)
         if _asset_roots(task):
@@ -322,7 +320,7 @@ def _mark_clean(selection: AssetRepositorySelection, commit: str) -> tuple[Asset
                 "inventory": _asset_inventory(task),
             }
             observations.append(
-                AssetObservation(selection.repository_name, task_path, commit, False)
+                TaskAssetObservation(selection.repository_name, task_path, commit, False)
             )
         else:
             markers.pop(task_path, None)

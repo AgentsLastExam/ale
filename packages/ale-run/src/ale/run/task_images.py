@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import fcntl
 import json
 import os
@@ -26,7 +27,16 @@ from ale.core.taskspec import (
     Resources,
     VerificationMode,
 )
+from ale.run import ale_image
 from ale.run.content import tree_digest
+from ale.run.framework import (
+    frame_disk,
+    framework_identity,
+    framework_on_disk,
+    install_on_windows,
+    windows_framework_identity,
+    with_framework,
+)
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.qemu import RUNNER_IMAGE, QemuProvider
 from ale.run.sources import cache_root
@@ -41,10 +51,7 @@ __all__ = [
     "vm_materialization_identity",
 ]
 
-MATERIALIZER_IMAGE = os.environ.get(
-    "ALE_VM_MATERIALIZER",
-    "ghcr.io/agentslastexam/ale-vm-materializer:0.1.0",
-)
+MATERIALIZER_IMAGE = os.environ.get("ALE_VM_MATERIALIZER", ale_image("ale-vm-materializer"))
 VM_OUTPUT_CONTRACT = "ale-vm-qcow2/v1"
 WINDOWS_BUILD_CONTRACT = "ale-windows-powershell/v1"
 
@@ -152,16 +159,37 @@ async def prepare_task_image_result(
             "reference-resolution",
             provider.prepare_image(ImageRef(kind=spec.kind, reference=spec.ref)),
         )
-        return _result(
-            task,
-            "solver",
-            image,
+        steps = [
             ImagePreparationStep(
                 "reference-resolution",
                 "executed",
                 image.prepared_identity,
                 image.resolved_reference,
-            ),
+            )
+        ]
+        if spec.kind is ImageKind.CONTAINER:
+            image = await _stage(
+                "framework-layer",
+                _framed_reference(image, user=spec.user, sudo=task.spec.resources.sudo),
+            )
+            steps.append(
+                ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
+            )
+        elif task.spec.os is OperatingSystem.LINUX:
+            image, outcome = await _stage(
+                "framework-layer",
+                _framed_disk(image, user=spec.user, sudo=task.spec.resources.sudo),
+            )
+            steps.append(
+                ImagePreparationStep(
+                    "framework-layer", outcome, image.prepared_identity, image.runtime_ref
+                )
+            )
+        return _result(
+            task,
+            "solver",
+            image,
+            *steps,
             ImagePreparationStep(
                 "artifact-check", "executed", image.prepared_identity, image.runtime_ref
             ),
@@ -170,30 +198,14 @@ async def prepare_task_image_result(
     source_identity = task.image_source_digest
     if source_identity is None:
         raise TaskDefinitionError("local solver image has no source identity")
-    build = await _stage(
-        "oci-build",
-        _build_oci(
-            context=dockerfile.parent,
-            source_digest=source_identity,
-            source="solver-local",
-        ),
+    candidate, steps = await _prepare_local(
+        context=dockerfile.parent,
+        source_digest=source_identity,
+        source="solver-local",
+        kind=spec.kind,
+        user=spec.user,
+        sudo=task.spec.resources.sudo,
     )
-    steps = [ImagePreparationStep("oci-build", "executed", build.oci_identity)]
-    if spec.kind is ImageKind.CONTAINER:
-        candidate = _local_container(build, source="solver-local")
-    else:
-        candidate, reused = await _stage(
-            "vm-materialization",
-            _materialize_vm_with_status(build, source="solver-local"),
-        )
-        steps.append(
-            ImagePreparationStep(
-                "vm-materialization",
-                "reused" if reused else "executed",
-                candidate.prepared_identity,
-                f"materializer={candidate.materializer_identity} disk={candidate.runtime_ref}",
-            )
-        )
     image = await _stage("artifact-check", provider.prepare_image(candidate))
     steps.append(
         ImagePreparationStep(
@@ -241,16 +253,35 @@ async def prepare_verifier_image_result(
             "reference-resolution",
             provider.prepare_image(ImageRef(kind=verify.image.kind, reference=verify.image.ref)),
         )
-        return _result(
-            task,
-            "verifier",
-            image,
+        steps = [
             ImagePreparationStep(
                 "reference-resolution",
                 "executed",
                 image.prepared_identity,
                 image.resolved_reference,
-            ),
+            )
+        ]
+        if verify.image.kind is ImageKind.CONTAINER:
+            image = await _stage(
+                "framework-layer", _framed_reference(image, user=verify.image.user, sudo=False)
+            )
+            steps.append(
+                ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
+            )
+        elif task.spec.os is OperatingSystem.LINUX:
+            image, outcome = await _stage(
+                "framework-layer", _framed_disk(image, user=verify.image.user, sudo=False)
+            )
+            steps.append(
+                ImagePreparationStep(
+                    "framework-layer", outcome, image.prepared_identity, image.runtime_ref
+                )
+            )
+        return _result(
+            task,
+            "verifier",
+            image,
+            *steps,
             ImagePreparationStep(
                 "artifact-check", "executed", image.prepared_identity, image.runtime_ref
             ),
@@ -259,30 +290,14 @@ async def prepare_verifier_image_result(
     source_identity = task.verifier_image_source_digest
     if source_identity is None:
         raise TaskDefinitionError("local verifier image has no source identity")
-    build = await _stage(
-        "oci-build",
-        _build_oci(
-            context=dockerfile.parent,
-            source_digest=source_identity,
-            source="verifier-local",
-        ),
+    candidate, steps = await _prepare_local(
+        context=dockerfile.parent,
+        source_digest=source_identity,
+        source="verifier-local",
+        kind=verify.image.kind,
+        user=verify.image.user,
+        sudo=False,
     )
-    steps = [ImagePreparationStep("oci-build", "executed", build.oci_identity)]
-    if verify.image.kind is ImageKind.CONTAINER:
-        candidate = _local_container(build, source="verifier-local")
-    else:
-        candidate, reused = await _stage(
-            "vm-materialization",
-            _materialize_vm_with_status(build, source="verifier-local"),
-        )
-        steps.append(
-            ImagePreparationStep(
-                "vm-materialization",
-                "reused" if reused else "executed",
-                candidate.prepared_identity,
-                f"materializer={candidate.materializer_identity} disk={candidate.runtime_ref}",
-            )
-        )
     image = await _stage("artifact-check", provider.prepare_image(candidate))
     steps.append(
         ImagePreparationStep(
@@ -304,6 +319,208 @@ def _result(
         role=role,
         image=image,
         steps=(ImagePreparationStep("lint", "executed"), *steps),
+    )
+
+
+async def _prepare_local(
+    *,
+    context: Path,
+    source_digest: str,
+    source: str,
+    kind: ImageKind,
+    user: str,
+    sudo: bool,
+) -> tuple[PreparedTaskImage, list[ImagePreparationStep]]:
+    """The Task's own build with the framework layer on top, built once per input.
+
+    The result is recorded under everything that goes into it: the build context, its
+    asset inventory and the framework. An unchanged Task finds its image there and uses it
+    directly, without asking Docker to build or check anything.
+    """
+    vm = kind is ImageKind.VM
+    key = content_hash(
+        {
+            "source": source,
+            "context": _context_identity(context),
+            "framework": framework_identity(user=user, sudo=sudo, vm=vm),
+        }
+    )
+    root = cache_root() / "images"
+    root.mkdir(parents=True, exist_ok=True)
+    record = root / f"{key.removeprefix('sha256:')}.json"
+    with record.with_suffix(".lock").open("a") as lock:
+        await _acquire_lock(lock)
+        try:
+            found = await _recorded(record, source=source, source_digest=source_digest)
+            reused = found is not None
+            if found is None:
+                build = await _stage(
+                    "oci-build",
+                    _build_oci(context=context, source_digest=source_digest, source=source),
+                )
+                layered = await _stage(
+                    "framework-layer",
+                    with_framework(build.runtime_ref, user=user, sudo=sudo, vm=vm),
+                )
+                found = (
+                    build.oci_identity,
+                    dataclasses.replace(build, runtime_ref=layered, oci_identity=layered),
+                )
+                _record(record, *found)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+    built, build = found
+    outcome = "reused" if reused else "executed"
+    steps = [
+        ImagePreparationStep("oci-build", outcome, built),
+        ImagePreparationStep("framework-layer", outcome, build.oci_identity),
+    ]
+    if not vm:
+        return _local_container(build, source=source), steps
+    candidate, materialized = await _stage(
+        "vm-materialization", _materialize_vm_with_status(build, source=source)
+    )
+    steps.append(
+        ImagePreparationStep(
+            "vm-materialization",
+            "reused" if materialized else "executed",
+            candidate.prepared_identity,
+            f"materializer={candidate.materializer_identity} disk={candidate.runtime_ref}",
+        )
+    )
+    return candidate, steps
+
+
+def _context_identity(context: Path) -> str:
+    """What a build reads from its context.
+
+    File contents are hashed. Assets are observed by path, size, modification time and
+    mode, as asset dirtiness is, so finding an unchanged Task's image never re-reads them.
+    """
+    assets = context / "assets"
+    return content_hash(
+        {
+            "files": tree_digest(context, exclude=("assets",)),
+            "directories": sorted(
+                str(entry.relative_to(context)) for entry in context.rglob("*") if entry.is_dir()
+            ),
+            "assets": [
+                [
+                    str(entry.relative_to(assets)),
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                    stat.st_mode & 0o111,
+                ]
+                for entry in sorted(assets.rglob("*"))
+                if entry.is_file() and (stat := entry.stat())
+            ],
+        }
+    )
+
+
+async def _recorded(
+    record: Path, *, source: str, source_digest: str
+) -> tuple[str, _OciBuild] | None:
+    """The Task's own build and its framed image an earlier preparation recorded, if Docker
+    still has the framed image."""
+    try:
+        recorded = json.loads(record.read_text(encoding="utf-8"))
+        built = recorded["built"]
+        image = recorded["image"]
+        materials = tuple(recorded["materials"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    code, observed, _ = await _run(
+        "docker", "image", "inspect", "--format", "{{.Id}}", image, timeout=30
+    )
+    if code != 0 or observed.strip() != image:
+        return None
+    return built, _OciBuild(
+        input_identity=_input_identity(source, source_digest),
+        image_source_identity=source_digest,
+        runtime_ref=image,
+        oci_identity=image,
+        base_materials=materials,
+    )
+
+
+def _record(record: Path, built: str, build: _OciBuild) -> None:
+    partial = record.with_suffix(".partial")
+    partial.write_text(
+        json.dumps(
+            {"built": built, "image": build.oci_identity, "materials": list(build.base_materials)}
+        ),
+        encoding="utf-8",
+    )
+    os.replace(partial, record)
+
+
+async def _framed_reference(
+    image: PreparedTaskImage, *, user: str, sudo: bool
+) -> PreparedTaskImage:
+    layered = await with_framework(image.runtime_ref, user=user, sudo=sudo)
+    return image.model_copy(update={"runtime_ref": layered, "prepared_identity": layered})
+
+
+async def _framed_disk(
+    image: PreparedTaskImage, *, user: str, sudo: bool
+) -> tuple[PreparedTaskImage, str]:
+    """A Linux VM disk named by reference, with the framework installed.
+
+    A copy of the disk is framed once per disk, framework and builder, and then used
+    directly. A disk that already carries this exact framework, such as one ALE prepared,
+    is used as it is.
+    """
+    identity = framework_identity(user=user, sudo=sudo, vm=True)
+    key = content_hash(
+        {
+            "disk": image.prepared_identity,
+            "framework": identity,
+            "builder": await _materializer_identity(),
+        }
+    )
+    root = cache_root() / "vm-builds"
+    root.mkdir(parents=True, exist_ok=True)
+    disk = root / f"{key.removeprefix('sha256:')}.qcow2"
+    # Names the input disk when it already carried this framework, so it is checked once.
+    carried = disk.with_suffix(".json")
+    source = Path(image.runtime_ref)
+    with disk.with_suffix(".lock").open("a") as lock:
+        await _acquire_lock(lock)
+        try:
+            if await _valid_qcow2(disk):
+                return _with_disk(image, disk, key), "reused"
+            if _carried(carried) == str(source):
+                return image, "reused"
+            if await framework_on_disk(source, builder=MATERIALIZER_IMAGE) == identity:
+                carried.write_text(json.dumps({"disk": str(source)}), encoding="utf-8")
+                return image, "reused"
+            with tempfile.TemporaryDirectory(prefix=f".{disk.stem}-", dir=root) as temporary:
+                output = Path(temporary) / "disk.qcow2"
+                code, _, stderr = await _run(
+                    "qemu-img", "convert", "-O", "qcow2", str(source), str(output)
+                )
+                if code != 0:
+                    raise ProviderStartError(f"could not copy the VM disk: {stderr.strip()}")
+                await frame_disk(output, user=user, sudo=sudo, builder=MATERIALIZER_IMAGE)
+                if not await _valid_qcow2(output):
+                    raise ProviderStartError("framing produced no valid qcow2")
+                os.replace(output, disk)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+    return _with_disk(image, disk, key), "executed"
+
+
+def _carried(record: Path) -> str | None:
+    try:
+        return str(json.loads(record.read_text(encoding="utf-8"))["disk"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _with_disk(image: PreparedTaskImage, disk: Path, identity: str) -> PreparedTaskImage:
+    return image.model_copy(
+        update={"runtime_ref": str(disk.resolve()), "prepared_identity": identity}
     )
 
 
@@ -332,10 +549,12 @@ async def _prepare_windows_image(
             raise TaskDefinitionError(f"Windows image inputs cannot be symlinks: {entry}")
     context_identity = _windows_context_identity(context)
     runner_identity = await _docker_image_identity(RUNNER_IMAGE)
+    user = task.spec.image.user
     builder_identity = content_hash(
         {
             "contract": WINDOWS_BUILD_CONTRACT,
             "runner": runner_identity,
+            "framework": windows_framework_identity(user=user),
         }
     )
     resources = Resources(cpus=2, memory_mb=4096, storage_mb=task.spec.resources.storage_mb)
@@ -357,7 +576,9 @@ async def _prepare_windows_image(
             if not reused:
                 with tempfile.TemporaryDirectory(prefix=f".{disk.stem}-", dir=root) as temporary:
                     output = Path(temporary) / "disk.qcow2"
-                    await _build_windows_image(base, context, output, resources, runner_identity)
+                    await _build_windows_image(
+                        base, context, output, resources, runner_identity, user=user
+                    )
                     if _windows_context_identity(context) != context_identity:
                         raise TaskDefinitionError("Windows image inputs changed during build")
                     if not await _valid_qcow2(output):
@@ -394,6 +615,8 @@ async def _build_windows_image(
     output: Path,
     resources: Resources,
     runner_identity: str,
+    *,
+    user: str,
 ) -> None:
     provider = QemuProvider(overlay_dir=output.parent / "vm", runner_image=runner_identity)
     sandbox = await provider.create(
@@ -404,6 +627,7 @@ async def _build_windows_image(
             resources=resources,
             network=NetworkPolicy(mode=NetworkMode.OPEN),
             sudo=True,
+            user=user,
         )
     )
     target = r"C:\ProgramData\ALE\image"
@@ -441,6 +665,8 @@ async def _build_windows_image(
         )
         if not result.ok:
             raise ProviderStartError(f"could not remove image build inputs: {result.stderr}")
+        # After the Task's script, so nothing it installs replaces the framework's pieces.
+        await install_on_windows(sandbox, user=user)
         await sandbox.save_image(output)
     finally:
         await asyncio.shield(sandbox.destroy())
@@ -451,9 +677,7 @@ async def _build_oci(*, context: Path, source_digest: str, source: str) -> _OciB
     if code != 0:
         raise ProviderStartError(f"Docker Buildx is unavailable: {stderr.strip()}")
 
-    input_identity = content_hash(
-        {"source": source, "source_identity": source_digest, "build": {"load": True}}
-    )
+    input_identity = _input_identity(source, source_digest)
     tag = f"ale-{source}:{input_identity.removeprefix('sha256:')}"
     with tempfile.TemporaryDirectory(prefix="ale-image-") as temporary:
         metadata_file = Path(temporary) / "metadata.json"
@@ -496,6 +720,12 @@ async def _build_oci(*, context: Path, source_digest: str, source: str) -> _OciB
         runtime_ref=image_id,
         oci_identity=image_id,
         base_materials=_materials(metadata),
+    )
+
+
+def _input_identity(source: str, source_digest: str) -> str:
+    return content_hash(
+        {"source": source, "source_identity": source_digest, "build": {"load": True}}
     )
 
 

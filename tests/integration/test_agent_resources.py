@@ -18,11 +18,11 @@ from ale.core.taskspec import (
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.providers.docker import DockerProvider
-from tests.support import prepare_reference
+from tests.support import CONTAINER_BASE, prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-IMAGE = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+IMAGE = CONTAINER_BASE
 
 
 def write_skill(path: Path, text: str, *, executable: bool = False) -> None:
@@ -49,7 +49,7 @@ async def test_task_and_run_skills_stage_once_without_ambient_host_state(
         agent_skills=(SkillSource(path=str(run_skill), origin="run", declared=str(run_skill)),),
         task_root=task_root,
         task_source=TaskSource(
-            kind="registry",
+            kind="git",
             repo="https://example.com/tasks.git",
             commit="a" * 40,
             path="tasks/demo/hello",

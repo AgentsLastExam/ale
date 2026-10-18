@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Any, Literal, Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -66,13 +66,6 @@ class ResultRecord(BaseModel):
     finished_at: datetime
     phases: tuple[PhaseTiming, ...] = ()
     sandboxes: tuple[SandboxOutcome, ...] = ()
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_v1(cls, value: Any) -> Any:
-        if isinstance(value, dict) and value.get("schema_version", 1) == 1:
-            return {**value, "schema_version": 2, "sandboxes": value.get("sandboxes", ())}
-        return value
 
     @field_validator("rewards")
     @classmethod

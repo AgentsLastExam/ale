@@ -461,7 +461,11 @@ class VerificationRecord:
             raise ValueError(f"malformed verification JSON: {exc}") from exc
         if not isinstance(loaded, dict):
             raise ValueError("verification record must be a JSON object")
-        return cls.from_dict(loaded)
+        try:
+            return cls.from_dict(loaded)
+        except (TypeError, AttributeError, KeyError) as exc:
+            # Wrongly typed fields are as malformed as wrong JSON; callers rely on ValueError.
+            raise ValueError(f"malformed verification record: {exc}") from exc
 
 
 def _keys(value: dict[str, Any], expected: set[str]) -> None:

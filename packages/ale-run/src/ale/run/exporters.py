@@ -101,7 +101,8 @@ def prime_verifiers_record(
     calls = [
         _prime_call(record, step_nodes.get(links.get(record.get("call_id"))))
         for record in transport
-        if record.get("kind") == "call"
+        # A Judge's calls are verification, not part of the agent's trajectory.
+        if record.get("kind") == "call" and record.get("purpose", "agent") == "agent"
     ]
     prompt = next(
         (_text(step.message) for step in trajectory.steps if step.source == "user"),
@@ -282,7 +283,7 @@ def _prime_call(record: dict[str, Any], node: int | None) -> dict[str, Any]:
         "max_tokens": "length",
         "tool_use": "tool_calls",
     }.get(record.get("stop_reason"))
-    cached = int(record.get("cached_tokens") or 0)
+    cached = int(record.get("cache_read_tokens") or 0)
     usage = None
     if record.get("disposition") == "forwarded":
         usage = {

@@ -1,7 +1,8 @@
 """Agent harnesses.
 
 Two families, distinguished by who owns the interaction loop — not by where the agent
-process runs (see ``docs/adr/0004-harness-loop-and-resources.md``):
+process runs, which proved an unstable line, and so that no existing agent has its
+control flow inverted to fit:
 
 * :class:`AutonomousHarness` — the agent owns its loop. We hand over a prompt and take
   the result; what happens in between is the agent's business. It may run inside the

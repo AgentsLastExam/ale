@@ -53,10 +53,11 @@ async def test_setup_runs_relative_entry_as_root(tmp_path: Path) -> None:
         "from ale_verify import Verification, checks\n"
         "v = Verification()\n"
         "v.check('root', checks.text_equals('/home/user/output/setup-uid', '0\\n'))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     result = await execute(task, tmp_path / "runs")
-    assert result.verdict.rewards == {"root": 1.0}
+    assert result.verdict.rewards == {"root": 1.0, "overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -114,8 +115,9 @@ async def test_setup_assets_are_uploaded_with_the_complete_stage(
         "from ale_verify import Verification, checks\n"
         "v = Verification()\n"
         "v.check('setup', checks.text_equals('/home/user/output/setup-ready', 'ready'))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"setup": 1.0}
+    assert result.verdict.rewards == {"setup": 1.0, "overall": 1.0}

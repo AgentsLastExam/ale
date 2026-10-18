@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -182,16 +183,22 @@ def http(
     ):
         raise ValueError("HTTP checks are limited to local URLs")
     try:
-        with urllib.request.urlopen(url, timeout=float(timeout_seconds)) as response:
+        try:
+            response = urllib.request.urlopen(url, timeout=float(timeout_seconds))
+        except urllib.error.HTTPError as error:
+            # A non-2xx status is still a response, and may be the one the Task expects.
+            response = error
+        with response:
+            observed = response.status
             body = response.read(1024 * 1024).decode("utf-8")
-            matched = response.status == status and (contains is None or contains in body)
-            return CheckResult(
-                float(matched),
-                "HTTP response matched" if matched else "HTTP response differed",
-                {"status": response.status, "body": _bounded(body)},
-            )
     except (OSError, UnicodeDecodeError) as exc:
         return CheckResult(0.0, f"HTTP check failed: {exc}")
+    matched = observed == status and (contains is None or contains in body)
+    return CheckResult(
+        float(matched),
+        "HTTP response matched" if matched else "HTTP response differed",
+        {"status": observed, "body": _bounded(body)},
+    )
 
 
 def trajectory_tool_used(name: str) -> CheckResult:

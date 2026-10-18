@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from tests.support import CONTAINER_BASE
 
 from ale.core.sandbox import Identity, ImageRef, Sandbox, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
@@ -106,11 +107,7 @@ class TestQemuProvider(ProviderConformance):
 async def test_cli_manages_multiple_mixed_retained_sandboxes() -> None:
     docker = DockerProvider()
     qemu = QemuProvider(image=IMAGE)
-    docker_image = await docker.prepare_image(
-        ImageRef(
-            kind="container", reference="ghcr.io/agentslastexam/container-ubuntu22-base:latest"
-        )
-    )
+    docker_image = await docker.prepare_image(ImageRef(kind="container", reference=CONTAINER_BASE))
     qemu_image = await qemu.prepare_image(
         ImageRef(kind="vm", reference="ale-guest-ubuntu-desktop:24.04")
     )

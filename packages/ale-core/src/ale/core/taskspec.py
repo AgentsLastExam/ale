@@ -76,6 +76,8 @@ class ImageSpec(BaseModel):
     kind: ImageKind
     ref: str | None = Field(default=None, min_length=1)
     base_ref: str | None = Field(default=None, min_length=1)
+    user: str = Field(default="user", pattern=r"^[a-z_][a-z0-9_-]{0,31}$")
+    """The agent account. It must exist in the image; preparation fails if it does not."""
 
     # --- validation ---
 
@@ -352,11 +354,6 @@ class TaskSpec(BaseModel):
     def _valid_artifacts(self) -> Self:
         _validate_artifact_paths(self.artifacts, self.os)
         return self
-
-    @property
-    def id(self) -> TaskId:
-        """Internal compatibility name; the authored/public field is ``name``."""
-        return self.name
 
     @property
     def spec_hash(self) -> str:

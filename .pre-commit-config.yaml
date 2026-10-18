@@ -27,7 +27,7 @@ repos:
         files: (pyproject\.toml|uv\.lock)$
 
       - id: import-boundaries
-        name: import boundaries (Constitution IV)
+        name: import boundaries (Constitution II)
         entry: uv run lint-imports
         language: system
         pass_filenames: false

@@ -6,11 +6,17 @@ happened, so each case here pins one shape of the computer-use tool's vocabulary
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Sequence
+from typing import Any
+
 import pytest
 from aiohttp import web
 
+from ale.core.env import Observation, StepResult, TaskEnv
 from ale.core.errors import AgentError
 from ale.core.harness import HarnessSession
+from ale.core.trace import DesktopAction
 from ale.run.harnesses.computer_use import (
     GRID,
     ComputerUseHarness,
@@ -51,6 +57,37 @@ async def test_model_error_keeps_native_cause_and_redacts_gateway_token(status: 
         assert "secret-episode-key" not in str(caught.value)
     finally:
         await runner.cleanup()
+
+
+async def test_concurrent_rollouts_keep_their_own_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, str, int]] = []
+
+    async def ask(self: ComputerUseHarness) -> dict[str, Any]:
+        assert self._session is not None
+        asked_for = self._session.episode_id
+        await asyncio.sleep(0.01)
+        seen.append((asked_for, self._session.episode_id, len(self._messages)))
+        return {"content": [{"type": "text", "text": "finished"}]}
+
+    class Env(TaskEnv):
+        async def reset(self) -> Observation:
+            return Observation(step=0, instruction="do the task")
+
+        async def step(self, actions: Sequence[DesktopAction]) -> StepResult:
+            return StepResult(observation=Observation(step=1), terminated=not actions)
+
+    monkeypatch.setattr(ComputerUseHarness, "_ask", ask)
+    harness = ComputerUseHarness()
+    sessions = [
+        HarnessSession(episode_id=name, model="m", gateway_url="http://gateway", token=name)
+        for name in ("a", "b")
+    ]
+
+    await asyncio.gather(*(harness.rollout(Env(), session) for session in sessions))
+
+    assert sorted(seen) == [("a", "a", 1), ("b", "b", 1)]
 
 
 def test_computer_tool_uses_native_claude_and_generic_compatible_schemas() -> None:

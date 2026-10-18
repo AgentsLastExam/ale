@@ -17,7 +17,7 @@ import pytest
 from aiohttp import web
 
 from ale.core.config import RunTimeouts, SandboxRetentionConfig
-from ale.core.errors import BudgetExceededError, HarnessLimitError
+from ale.core.errors import AgentError, HarnessLimitError
 from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.trace import read_jsonl
@@ -273,7 +273,8 @@ class GatewayLimitedHarness(NativeLimitedHarness):
                 timeout_sec=timeout_sec,
             )
             if result.exit_code == 42:
-                raise BudgetExceededError("max_model_calls", 1, 2)
+                # Like a real agent program: it reports a failed API call, not a limit.
+                raise AgentError(f"API Error: 429 {result.stdout.strip()}")
         return AgentRun(exit_code=0)
 
 

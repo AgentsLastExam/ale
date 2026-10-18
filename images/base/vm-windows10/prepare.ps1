@@ -2,7 +2,6 @@ param(
     [string]$AgentUser = "user",
     [string]$GuestdSource = "$PSScriptRoot\guestd",
     [string]$PythonVersion = "3.12.10",
-    [string]$CuaDriverVersion = "0.12.6",
     [switch]$Compact
 )
 
@@ -21,7 +20,7 @@ if (-not (Get-LocalUser -Name $AgentUser -ErrorAction SilentlyContinue)) {
 }
 $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name.Split("\\")[-1]
 if ($currentUser -ne $AgentUser) {
-    throw "Run prepare.ps1 as '$AgentUser' so Cua Driver is installed for its desktop session."
+    throw "Run prepare.ps1 as '$AgentUser' so its logon tasks run in that desktop session."
 }
 
 $work = "$env:ProgramData\ALE\install"
@@ -66,6 +65,8 @@ if (-not (Test-Path $python)) {
 }
 & $python -c "import sys; assert sys.version_info >= (3, 12), sys.version"
 
+# Replace, not merge: a re-run must not keep modules an older guestd shipped.
+Get-ChildItem $guestd -Force | Remove-Item -Recurse -Force
 Copy-Item "$GuestdSource\*.py" $guestd -Force
 icacls "$env:ProgramData\ALE" /inheritance:r /grant:r `
     "SYSTEM:(OI)(CI)(F)" "Administrators:(OI)(CI)(F)" "${AgentUser}:(OI)(CI)(RX)" | Out-Null
@@ -74,49 +75,12 @@ foreach ($stage in $setup, $verify) {
         "SYSTEM:(OI)(CI)(F)" "Administrators:(OI)(CI)(F)" "${AgentUser}:(OI)(CI)(M)" | Out-Null
 }
 
-$driver = "$env:LOCALAPPDATA\Programs\Cua\cua-driver\bin\cua-driver.exe"
-$installedDriver = if (Test-Path $driver) {
-    (& $driver --version 2>$null) -join " "
-} else {
-    ""
-}
-if ($installedDriver -notmatch [regex]::Escape($CuaDriverVersion)) {
-    $driverInstaller = "$work\install-cua-driver.ps1"
-    Invoke-WebRequest "https://cua.ai/driver/install.ps1" -OutFile $driverInstaller
-    $env:CUA_DRIVER_RS_VERSION = $CuaDriverVersion
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $driverInstaller `
-        -Release $CuaDriverVersion -AutoStart
-    if ($LASTEXITCODE -ne 0) {
-        throw "Cua Driver installer exited $LASTEXITCODE."
-    }
-}
-if (-not (Test-Path $driver) -or ((& $driver --version) -join " ") -notmatch $CuaDriverVersion) {
-    throw "Cua Driver binary is missing after installation: $driver"
-}
-Unregister-ScheduledTask -TaskName "cua-driver-serve" -Confirm:$false `
-    -ErrorAction SilentlyContinue
-$driverEscaped = $driver.Replace("'", "''")
-$driverAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
-    "-NoProfile -WindowStyle Hidden -NonInteractive -Command `"" +
-    "Start-Process -FilePath '$driverEscaped' -ArgumentList " +
-    "'serve --permission-mode unrestricted --dangerously-bypass-approvals' " +
-    "-WindowStyle Hidden`""
-)
-$driverTrigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:COMPUTERNAME\$AgentUser"
-$driverPrincipal = New-ScheduledTaskPrincipal `
-    -UserId "$env:COMPUTERNAME\$AgentUser" -LogonType Interactive -RunLevel Highest
-$driverSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 999 `
-    -RestartInterval (New-TimeSpan -Minutes 1) `
-    -ExecutionTimeLimit (New-TimeSpan -Days 3650)
-Register-ScheduledTask -TaskName "ALE Cua Driver" -Action $driverAction `
-    -Trigger $driverTrigger -Principal $driverPrincipal -Settings $driverSettings `
-    -Force | Out-Null
-
+# ALE installs Cua Driver and refreshes guestd whenever it builds a Task image from this
+# base; the guestd staged above is what that build talks to.
 $start = "$env:ProgramData\ALE\start-guestd.ps1"
 @"
 `$env:ALE_AGENT_USER = "$AgentUser"
 `$env:ALE_AGENT_HOME = "C:\Users\$AgentUser"
-`$env:ALE_GUI = "true"
 & "$python" "$guestd\main.py" --tcp 0.0.0.0:7411
 "@ | Set-Content -Path $start -Encoding UTF8
 
@@ -301,4 +265,4 @@ if ($Compact) {
 }
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Host "ALE Windows base preparation completed. Reboot once, test guestd and Cua Driver, then shut down."
+Write-Host "ALE Windows base preparation completed. Reboot once, test guestd, then shut down."

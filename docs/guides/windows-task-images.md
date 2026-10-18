@@ -26,7 +26,7 @@ Task, a Host installation or a browser session. HF acquisition happens on the Ho
 Check native command exit codes and follow the [Windows build rules](../specs/task-authoring.md#image).
 
 `ale prepare TASK` boots a temporary base VM, stages `image/`, executes the script, removes build
-inputs and exports a cached qcow2. Stable installation belongs here; only per-episode initialization
+inputs, installs ALE's guestd and Cua Driver, and exports a cached qcow2. Stable installation belongs here; only per-episode initialization
 belongs in `setup/`. Subsequent runs reuse the image. Base, builder or image input changes invalidate
 reuse. The current Windows upload and input hashing read whole files into Host memory; very large
 assets still require bounded-memory transport and hashing work.

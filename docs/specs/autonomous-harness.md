@@ -171,7 +171,10 @@ regardless of task artifact policy before releasing the sandbox.
 `parse_trajectory()` is pure host-side code. For identical collected bytes it returns an
 identical schema-valid ATIF v1.7 trajectory. It preserves valid events before malformed
 or truncated input, returns bounded parse issues under `extra.ale`, and never writes
-Gateway transport records.
+Gateway transport records. A parser that raises does not decide the episode: ALE records
+the minimal truthful trajectory with `incomplete_reason: conversion_failed` and a
+`parse_issues` entry, keeps the native logs regardless of retention policy, and continues to
+artifact capture and verification.
 
 MCP records correlate the native tool-use ID with its tool result and retain the logical
 server, tool, request arguments, and success result or error. A selected tool with no
@@ -209,8 +212,8 @@ the MCP client contract may not.
 
 Keep ownership explicit:
 
-- Gateway limits own API-key-mode model calls, provider-reported input tokens, output
-  tokens, total tokens, and estimated provider cost.
+- Gateway limits own model calls, provider-reported input tokens, output tokens, total
+  tokens, and estimated provider cost in both API-key and subscription modes.
 - Harness settings own native controls such as Claude `max_turns` and
   `max_budget_usd`.
 - Environment timeouts own setup, agent, and verify wall time.
@@ -219,18 +222,27 @@ Do not emulate a Gateway limit in an adapter or hide a native limit under a Gate
 field. Termination records and provenance name the enforcing layer, limit, configured
 value, and observed value.
 
+Adapters do not parse Gateway refusals. The Gateway session records the first limit that
+refused a call, and the Environment attributes an agent phase that then fails, whatever
+error the agent program reported, to that limit: the episode ends `budget_exceeded` with a
+`gateway` termination. Refusals carry `x-should-retry: false` so SDKs stop retrying them.
+Adapters classify only their native limits.
+
 The Gateway supports Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses
 for API-key mode. The preset supplies the default dialect and upstream provider endpoint;
-a Harness may accept a documented compatible override. Subscription mode instead uses
-the official CLI's native provider service. Codex and Grok use a staged provider profile
-and opaque provider egress, so Gateway limits and accounting do not apply. Claude uses the
-Gateway as a Bearer relay: the Run model remains authoritative and identical retries may
-be coalesced, while finite cost/token limits, provider billing, and retained Transport
-Trace remain unavailable.
+a Harness may accept a documented compatible override. Subscription mode uses the same
+Sandbox-side Gateway configuration; only the Host Gateway's upstream authentication changes,
+so model authority, limits,
+accounting, retry coalescing, and Transport Trace are common to both modes. The ChatGPT
+Codex backend rejects `max_output_tokens`, so ALE accounts the completed response and
+refuses the next call once an output ceiling is reached.
 
 The Gateway does not pre-count input tokens or reserve worst-case token/cost budgets.
 It completes the current request, accounts provider-reported usage, and refuses the next
 request after an input-token, output-token, total-token, or cost ceiling is reached.
+Input tokens include prompt-cache reads and writes, so a cache-heavy agent cannot stay
+under an input or total ceiling by caching. A finite cost ceiling requires the run model to
+have a listed price.
 Model-call limits remain exact because they require no estimation. This policy applies
 equally to all three dialects.
 
@@ -238,7 +250,8 @@ It accounts for every upstream call made by the agent program, including CLI-own
 discovery or compaction calls. If the CLI disconnects from a streaming response early,
 the Gateway still drains the upstream response and commits usage. Chat streaming requests
 force `stream_options.include_usage=true`, and legacy `max_tokens` is normalized to
-`max_completion_tokens` before forwarding.
+`max_completion_tokens` before forwarding. A request without an output ceiling is forwarded
+without one; the Gateway never invents a default that would truncate reasoning or output.
 
 A streaming response can stay silent for minutes when the provider buffers part of it (a
 `tool_use` input is held back until the whole parameter is generated). After 15 s of upstream

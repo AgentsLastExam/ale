@@ -17,6 +17,7 @@ from ._io import (
     JudgeError,
     VerificationError,
     atomic_json,
+    endpoint_identity,
     evidence_text,
     inline_evidence,
     load_config,
@@ -36,7 +37,7 @@ from ._records import (
     VerificationRecord,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "AggregateResult",
@@ -53,7 +54,57 @@ __all__ = [
     "VerificationError",
     "VerificationRecord",
     "checks",
+    "endpoint_identity",
+    "judge_route",
+    "probe_judge",
 ]
+
+
+def judge_route(kind: str, config: Mapping[str, str]) -> tuple[str, str]:
+    """The protocol a configured Judge speaks and the exact URL its requests go to.
+
+    The engine forwards Judge traffic through its Gateway, so it needs the same answer the
+    Judge itself would reach: an LLM Judge's protocol from its endpoint and model, an Agent
+    Judge's from its CLI (Codex speaks Responses, Claude Code speaks Messages).
+    """
+    if kind == "llm":
+        try:
+            protocol = _llm.resolve_protocol(config)
+        except ValueError as exc:
+            raise ConfigurationError(str(exc)) from exc
+    elif kind == "agent":
+        protocol = "openai-responses" if config["adapter"] == "codex-cli" else "anthropic"
+    else:
+        raise ValueError("Judge kind must be 'llm' or 'agent'")
+    return protocol, _llm._endpoint(config["base_url"], protocol)
+
+
+def probe_judge(kind: str, config: Mapping[str, str]) -> None:
+    """Prove one configured Judge can be reached before any agent runs.
+
+    ``config`` is that kind's section of the verification config. An LLM Judge is probed
+    with its own protocol and effort; an Agent Judge with the protocol its CLI speaks to
+    the same endpoint, key and model. Raises ConfigurationError when the Judge cannot
+    answer.
+    """
+    if kind == "llm":
+        if config.get("reasoning_effort") not in _llm._EFFORTS:
+            raise ConfigurationError(
+                f"LLM Judge reasoning_effort {config.get('reasoning_effort')!r} is unsupported"
+            )
+        try:
+            protocol = _llm.resolve_protocol(config)
+        except ValueError as exc:
+            raise ConfigurationError(str(exc)) from exc
+        _llm.probe(config, protocol)
+    elif kind == "agent":
+        protocol = "openai-responses" if config["adapter"] == "codex-cli" else "anthropic"
+        _llm.probe(
+            {key: value for key, value in config.items() if key != "reasoning_effort"},
+            protocol,
+        )
+    else:
+        raise ValueError("Judge kind must be 'llm' or 'agent'")
 
 
 class Verification:
@@ -68,11 +119,13 @@ class Verification:
         self._status = "in_progress"
         self._failure: str | None = None
         self._agent_judge_started = False
+        self._criteria_closed = False
         self._record_path = os.environ.get("ALE_VERIFICATION_PATH", "")
         self._verdict_path = os.environ.get("ALE_VERDICT_PATH", "")
 
     def check(self, name: str, result: CheckResult, *, weight: float = 1.0) -> float:
         self._assert_mutable()
+        self._assert_criteria_open()
         self._new_name(name)
         if not isinstance(result, CheckResult):
             raise TypeError("result must be a CheckResult")
@@ -91,9 +144,7 @@ class Verification:
 
     def stat(self, name: str, value: float) -> float:
         self._assert_mutable()
-        _name(name)
-        if name in self._criteria or name in self._aggregates:
-            raise ValueError(f"stat name collides with a reward: {name}")
+        self._new_name(name)
         number = float(value)
         if not math.isfinite(number):
             raise ValueError("stat values must be finite")
@@ -115,6 +166,7 @@ class Verification:
         weight: float = 1.0,
     ) -> float:
         self._assert_mutable()
+        self._assert_criteria_open()
         self._new_name(name)
         if kind not in {"llm", "agent"}:
             raise ValueError("Judge kind must be 'llm' or 'agent'")
@@ -124,33 +176,32 @@ class Verification:
             raise ValueError("Judge prompt must be non-empty")
         choices = _rubric(rubric)
         weight = _weight(weight)
+        if kind == "agent" and self._agent_judge_started:
+            raise RuntimeError("only one Agent Judge invocation is allowed")
+        if any(not os.path.isabs(os.fspath(path)) for path in files):
+            raise ValueError("Judge evidence paths must be absolute")
+        try:
+            authored = [] if reference is None else [inline_evidence(reference, kind="reference")]
+        except EvidenceError as exc:
+            raise ValueError(f"Judge reference is invalid: {exc}") from exc
+
+        try:
+            evidence = [*_solver_evidence(kind, files), *authored]
+            if sum(item.size_bytes for _, item in evidence) > MAX_TOTAL_EVIDENCE_BYTES:
+                raise _Unavailable(f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total")
+            if trajectory and not os.environ.get("ALE_TRAJECTORY_PATH"):
+                raise _Unavailable("no solver trajectory was recorded")
+        except _Unavailable as unavailable:
+            return self._unavailable(kind, name, weight, str(unavailable))
         if kind == "agent":
-            if self._agent_judge_started:
-                raise RuntimeError("only one Agent Judge invocation is allowed")
             self._agent_judge_started = True
 
-        evidence: list[tuple[str | bytes, EvidenceReference]] = []
         invocation_id = "judge-" + uuid.uuid4().hex
         try:
-            size = 0
-            for path in files:
-                raw, item = read_file_evidence(path)
-                size += item.size_bytes
-                if size > MAX_TOTAL_EVIDENCE_BYTES:
-                    raise EvidenceError(
-                        f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total"
-                    )
-                content = (
-                    evidence_text(raw, item) if kind == "llm" and media_type(raw) is None else raw
-                )
-                evidence.append((content, item))
-            if reference is not None:
-                evidence.append(inline_evidence(reference, kind="reference"))
             if trajectory:
-                path = os.environ.get("ALE_TRAJECTORY_PATH")
-                if not path:
-                    raise EvidenceError("ALE_TRAJECTORY_PATH is not configured")
-                evidence.append(read_text_evidence(path, kind="solver_trajectory"))
+                evidence.append(
+                    read_text_evidence(os.environ["ALE_TRAJECTORY_PATH"], kind="solver_trajectory")
+                )
             if sum(item.size_bytes for _, item in evidence) > MAX_TOTAL_EVIDENCE_BYTES:
                 raise EvidenceError(f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total")
             config = load_config().get(kind)
@@ -248,6 +299,9 @@ class Verification:
             score=score,
         )
         self._aggregates[name] = aggregate
+        if inputs is None:
+            # Every criterion is now in this aggregate; a later one would silently be left out.
+            self._criteria_closed = True
         self._persist()
         return aggregate.score
 
@@ -255,6 +309,14 @@ class Verification:
         self._assert_terminal_mutation()
         if not self._criteria and not self._aggregates:
             raise ValueError("verification must contain at least one reward")
+        if "overall" in self._metrics:
+            raise ValueError('"overall" is the total reward; give the stat another name')
+        if "overall" not in self._aggregates and "overall" not in self._criteria:
+            # The total every report reads: unless the author defined it, the weighted mean
+            # of every criterion.
+            if not self._criteria:
+                raise ValueError('verification without criteria must define "overall" itself')
+            self.aggregate("overall")
         self._status = "completed"
         record = self._persist()
         if not self._verdict_path:
@@ -274,9 +336,35 @@ class Verification:
         if self._agent_judge_started:
             raise RuntimeError("check and Judge calls are forbidden after an Agent Judge")
 
+    def _assert_criteria_open(self) -> None:
+        if self._criteria_closed:
+            raise RuntimeError(
+                "criteria cannot be added after an aggregate over all criteria; "
+                "add every check and Judge first"
+            )
+
     def _assert_terminal_mutation(self) -> None:
         if self._status != "in_progress":
             raise RuntimeError("verification is already terminal")
+
+    def _unavailable(self, kind: str, name: str, weight: float, reason: str) -> float:
+        """Score a Judge criterion zero because the solver left nothing valid to judge.
+
+        Missing or unusable solver output is the evaluated agent's outcome, not a scorer
+        failure, so it counts as zero instead of removing the episode from aggregates. No
+        Judge runs; an authored path that the oracle cannot satisfy fails validation.
+        """
+        criterion = CriterionResult(
+            name=name,
+            source="check",
+            score=0.0,
+            weight=weight,
+            reasoning=f"no {kind} Judge ran: {sanitize(reason)}",
+            raw_value={"judge": kind, "solver_evidence": "unavailable"},
+        )
+        self._criteria[name] = criterion
+        self._persist()
+        return criterion.score
 
     def _fail(self, message: str) -> Any:
         self._status = "failed"
@@ -338,6 +426,29 @@ def _rubric(
         else:
             raise ValueError("rubric choices must be mappings")
     return normalized
+
+
+class _Unavailable(Exception):
+    """The solver left no usable evidence for a Judge criterion."""
+
+
+def _solver_evidence(
+    kind: str, files: Sequence[str]
+) -> list[tuple[str | bytes, EvidenceReference]]:
+    """Read the solver files a Judge assesses; an unusable one is the solver's outcome."""
+    evidence: list[tuple[str | bytes, EvidenceReference]] = []
+    size = 0
+    for path in files:
+        try:
+            raw, item = read_file_evidence(path)
+            content = evidence_text(raw, item) if kind == "llm" and media_type(raw) is None else raw
+        except EvidenceError as exc:
+            raise _Unavailable(str(exc)) from exc
+        size += item.size_bytes
+        if size > MAX_TOTAL_EVIDENCE_BYTES:
+            raise _Unavailable(f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total")
+        evidence.append((content, item))
+    return evidence
 
 
 from . import checks  # noqa: E402

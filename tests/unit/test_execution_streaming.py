@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,13 +12,13 @@ import pytest
 from ale.core.environment import Phase
 from ale.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
 from ale.core.sandbox import ExecResult
-from ale.core.taskspec import NetworkPolicy
+from ale.core.taskspec import NetworkPolicy, OperatingSystem
 from ale.core.trace import read_jsonl
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.harnesses.builtin import NopHarness
 from ale.run.recording import EpisodeRecording
 
-pytestmark = pytest.mark.integration
+pytestmark = pytest.mark.unit
 
 
 class StageSandbox:
@@ -38,6 +39,7 @@ class StageSandbox:
         return None
 
     async def exec(self, *args, output_sink=None, **kwargs):  # type: ignore[no-untyped-def]
+        self.env = kwargs.get("env")
         for stream, data in self.chunks:
             if output_sink is not None:
                 await output_sink(stream, data)
@@ -61,10 +63,12 @@ def context(tmp_path: Path):
         episode_id=tmp_path.name,
         home="/home/user",
         session=SimpleNamespace(token=""),
-        spec=SimpleNamespace(params={}, network=NetworkPolicy()),
+        spec=SimpleNamespace(params={}, network=NetworkPolicy(), os=OperatingSystem.LINUX),
         verification_command_env={},
         verification_secrets=(),
         phase_timeout_sec=1.0,
+        phase_deadline=None,
+        run_dir=tmp_path,
         phases=[],
     )
 
@@ -131,6 +135,19 @@ async def test_malformed_verifier_and_network_failure_are_explicit(
     policy = read_jsonl(tmp_path / "trace.execution.jsonl").records[-1]
     assert policy["kind"] == "policy_applied"
     assert policy["succeeded"] is False
+
+
+@pytest.mark.asyncio
+async def test_verifier_learns_how_much_of_its_phase_is_left(tmp_path: Path) -> None:
+    ctx = context(tmp_path)
+    sandbox = StageSandbox(ExecResult(exit_code=0))
+    environment = StandardEnvironment(NopHarness())
+    await environment._run_stage(ctx, sandbox, Path("/opt/ale/verify"), Phase.VERIFY)  # type: ignore[arg-type]
+    assert "ALE_VERIFY_DEADLINE_SECONDS" not in sandbox.env
+
+    ctx.phase_deadline = time.monotonic() + 100
+    await environment._run_stage(ctx, sandbox, Path("/opt/ale/verify"), Phase.VERIFY)  # type: ignore[arg-type]
+    assert 98 <= int(sandbox.env["ALE_VERIFY_DEADLINE_SECONDS"]) <= 100
 
 
 @pytest.mark.asyncio

@@ -4,12 +4,13 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from ale.core.errors import ArtifactTransferError
 from ale.core.sandbox import ExecResult, ImageRef, PreparedTaskImage
-from ale.core.taskspec import ImageKind, ImageSpec, VerifySpec
+from ale.core.taskspec import ImageKind, ImageSpec, OperatingSystem, VerifySpec
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import _artifact_tree_identity, _Artifacts, run_episode
@@ -21,9 +22,20 @@ from ale.run.task_images import (
     prepare_verifier_image_result,
 )
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import provider_registry
+from tests.support import CONTAINER_BASE, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
+
+
+@pytest.fixture
+def framework_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fake image identities are not Docker images; the layer is tested on real ones."""
+
+    async def layer(image: str, *, user: str, sudo: bool, vm: bool = False) -> str:
+        return image if image.startswith("sha256:") else DIGEST
+
+    monkeypatch.setattr("ale.run.task_images.with_framework", layer)
+
 
 DIGEST = "sha256:" + "d" * 64
 
@@ -123,7 +135,7 @@ async def test_separate_verifier_reuses_solver_prepared_kind(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", tuple(ImageKind))
 async def test_external_separate_verifier_uses_matching_provider(
-    tmp_path: Path, kind: ImageKind
+    tmp_path: Path, kind: ImageKind, framework_layer: None
 ) -> None:
     task = load_tasks(scaffold_task(tmp_path / f"external-{kind}"))[0]
     task.spec = task.spec.model_copy(
@@ -152,7 +164,7 @@ async def test_external_separate_verifier_uses_matching_provider(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", tuple(ImageKind))
 async def test_local_separate_verifier_builds_declared_kind(
-    tmp_path: Path, kind: ImageKind, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, kind: ImageKind, monkeypatch: pytest.MonkeyPatch, framework_layer: None
 ) -> None:
     task = load_tasks(scaffold_task(tmp_path / f"local-{kind}"))[0]
     (task.folder.root / "verify/Dockerfile").write_text("FROM fixture\n")
@@ -205,6 +217,7 @@ class ArtifactSandbox:
         missing: bool = False,
         fail_read: bool = False,
     ) -> None:
+        self.request = SimpleNamespace(os=OperatingSystem.LINUX)
         self.kind = kind
         self.mode = mode
         self.data = data
@@ -318,11 +331,12 @@ async def test_task_local_helper_and_framework_package_are_importable(tmp_path: 
         "from helper import result\n"
         "v = Verification()\n"
         "v.check('local', result())\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     result = await execute(task_path, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"local": 1.0}
+    assert result.verdict.rewards == {"local": 1.0, "overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -359,11 +373,12 @@ async def test_verify_assets_are_withheld_then_available_by_relative_path(
         "from ale_verify import Verification, checks\n"
         "v = Verification()\n"
         "v.check('reference', checks.text_equals('assets/reference.txt', 'withheld'))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"reference": 1.0}
+    assert result.verdict.rewards == {"reference": 1.0, "overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -374,10 +389,11 @@ async def test_no_assets_verifier_does_not_receive_a_synthetic_asset_root(tmp_pa
         "from ale_verify import CheckResult, Verification\n"
         "v = Verification()\n"
         "v.check('absent', CheckResult(float(not Path('assets').exists())))\n"
+        "v.aggregate('overall')\n"
         "v.write()\n"
     )
     result = await execute(task, tmp_path / "runs")
-    assert result.verdict.rewards == {"absent": 1.0}
+    assert result.verdict.rewards == {"absent": 1.0, "overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -412,14 +428,12 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
     )
     (task / "instruction.md").write_text("Produce both declared outputs.\n")
     (task / "image/Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
+        f"FROM {CONTAINER_BASE}\n"
         "RUN mkdir -p /home/user/output /var/lib/ale-report "
         "&& printf '{}\\n' > /home/user/output/result.json "
         "&& chown -R user:user /home/user/output /var/lib/ale-report\n"
     )
-    (task / "verify/Dockerfile").write_text(
-        "FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n"
-    )
+    (task / "verify/Dockerfile").write_text(f"FROM {CONTAINER_BASE}\n")
     (task / "oracle/run.sh").write_text(
         "#!/bin/sh\nset -eu\n"
         'printf \'{"status":"ok"}\\n\' > /home/user/output/result.json\n'
@@ -452,9 +466,7 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
     "image_line",
     [
         "",
-        "  image:\n"
-        "    kind: container\n"
-        "    ref: ghcr.io/agentslastexam/container-ubuntu22-base:latest\n",
+        f"  image:\n    kind: container\n    ref: {CONTAINER_BASE}\n",
     ],
     ids=["solver-image", "external-ref"],
 )

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -12,6 +11,7 @@ from ale.core.config import RunConfig
 from ale.core.errors import ProviderStartError
 from ale.core.taskspec import ImageKind
 from ale.core.verdict import Status
+from ale.run import task_images
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
@@ -19,10 +19,11 @@ from ale.run.providers import ProviderRegistry
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import prepare_task_image, prepare_task_image_result
 from ale.run.tasksets.manifest import load_tasks
+from tests.support import VM_BASE
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
-VM_BASE = "ghcr.io/agentslastexam/vm-ubuntu24-base:0.1.0"
+VM_BASE = VM_BASE
 IMAGE_ROOT = Path(__file__).resolve().parents[2] / "images"
 
 
@@ -37,13 +38,16 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
         "systemd",
         "ubuntu-desktop",
         "gdm3.service",
-        "CUA_DRIVER_VERSION=0.12.6",
-        "cua-driver serve",
         "sudo",
-        "ale-guestd.service",
     ):
         assert required in dockerfile
+    # The engine adds guestd and Cua Driver to every prepared image; the base carries neither.
     for forbidden in (
+        "/opt/ale",
+        "ale-guestd.service",
+        "cua-driver",
+        "LABEL",
+        "nftables",
         "docker.io",
         "docker-ce",
         "ros-",
@@ -54,27 +58,11 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
     ):
         assert forbidden not in dockerfile
 
-    manifest = json.loads((vm_base / "image.json").read_text())
-    assert manifest == {
-        "schema": 1,
-        "os": "ubuntu",
-        "release": "24.04",
-        "user": "user",
-        "gui": True,
-        "port": 7411,
-        "guest_contract": "ale-guest/v1",
-        "base_release": "0.1.0",
-    }
-
     materialize = (materializer / "materialize.sh").read_text()
     assert "truncate -s 40G" not in materialize
     assert "qemu-img convert" in materialize
     assert "qemu-img check" in materialize
     assert (materializer / "10-root.conf").read_text().find("GrowFileSystem=yes") >= 0
-
-    guestd_unit = (vm_base / "ale-guestd.service").read_text()
-    assert "After=network.target" in guestd_unit
-    assert "network-online.target" not in guestd_unit
 
     runner_entrypoint = (runner / "entrypoint.sh").read_text()
     assert (
@@ -84,7 +72,9 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_container_build_reuse_and_input_boundaries(tmp_path: Path) -> None:
+async def test_local_container_build_reuse_and_input_boundaries(
+    tmp_path: Path, isolated_ale_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     task_path = scaffold_task(tmp_path / "task")
     registry = ProviderRegistry(RunConfig())
     first, second = await asyncio.gather(
@@ -93,6 +83,24 @@ async def test_local_container_build_reuse_and_input_boundaries(tmp_path: Path) 
     )
     assert second.input_identity == first.input_identity
     assert second.prepared_identity == first.prepared_identity
+
+    # An unchanged Task uses its prepared image directly; Docker is not asked to build.
+    commands: list[tuple[str, ...]] = []
+    run = task_images._run
+
+    async def recording_run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
+        commands.append(argv)
+        return await run(*argv, timeout=timeout)
+
+    monkeypatch.setattr(task_images, "_run", recording_run)
+    reused = await prepare_task_image_result(load_tasks(task_path)[0], registry)
+    monkeypatch.setattr(task_images, "_run", run)
+    assert reused.image == first
+    assert [(step.name, step.outcome) for step in reused.steps[1:3]] == [
+        ("oci-build", "reused"),
+        ("framework-layer", "reused"),
+    ]
+    assert not any(command[:2] == ("docker", "buildx") for command in commands)
 
     verifier = task_path / "verify" / "verify.py"
     verifier.write_text(verifier.read_text() + "\n# verifier-only edit\n")
@@ -114,7 +122,7 @@ async def test_local_vm_materialization_reuse_and_late_layer_invalidation(
 ) -> None:
     task_path = write_repo(tmp_path / "repo", image={"kind": "vm"})
     dockerfile = task_path / "image" / "Dockerfile"
-    dockerfile.write_text(f"FROM {VM_BASE}\nRUN printf first > /etc/ale/task-layer\n")
+    dockerfile.write_text(f"FROM {VM_BASE}\nRUN printf first > /etc/task-layer\n")
     registry = ProviderRegistry(RunConfig())
 
     first, second = await asyncio.gather(
@@ -137,7 +145,7 @@ async def test_local_vm_materialization_reuse_and_late_layer_invalidation(
     verifier.write_text(verifier.read_text() + "\n# unrelated edit\n")
     assert await prepare_task_image(load_tasks(task_path)[0], registry) == first
 
-    dockerfile.write_text(f"FROM {VM_BASE}\nRUN printf second > /etc/ale/task-layer\n")
+    dockerfile.write_text(f"FROM {VM_BASE}\nRUN printf second > /etc/task-layer\n")
     changed = await prepare_task_image(load_tasks(task_path)[0], registry)
     assert changed.oci_identity != first.oci_identity
     assert changed.prepared_identity != first.prepared_identity
@@ -151,7 +159,8 @@ async def test_failed_local_vm_build_leaves_no_partial_disk(
     docker_buildx: None,
 ) -> None:
     task_path = write_repo(tmp_path / "repo", image={"kind": "vm"})
-    (task_path / "image" / "Dockerfile").write_text("FROM ubuntu:24.04\n")
+    # It has the agent account, so the framework layer succeeds and materialization fails.
+    (task_path / "image" / "Dockerfile").write_text("FROM ubuntu:24.04\nRUN useradd -m user\n")
     with pytest.raises(ProviderStartError, match="no initramfs"):
         await prepare_task_image(
             load_tasks(task_path)[0],

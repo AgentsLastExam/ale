@@ -9,8 +9,8 @@ prescribe a concrete transport, provider, package or directory layout, model-rou
 mechanism, credential-delivery mechanism, runtime version, storage path, external
 registry, or exact validation algorithm.
 
-Concrete designs MUST live in versioned specifications or architecture decision
-records. They MAY change without a constitutional amendment when the principles below
+Concrete designs, and the reasons for them, MUST live in versioned specifications.
+They MAY change without a constitutional amendment when the principles below
 remain satisfied.
 
 ## Core Principles
@@ -100,7 +100,8 @@ is valuable only after repeated evidence reveals what is actually shared.
 
 Changes to public contracts, trust boundaries, persisted artifacts, or cross-component
 behavior MUST update the relevant normative specification in the same change. New
-architectural decisions or reversals MUST be recorded in an ADR. Implementation details
+architectural decisions or reversals MUST record their reason in the owning
+specification. Implementation details
 MUST NOT be promoted into this constitution merely to make a current design harder to
 change.
 
@@ -118,11 +119,11 @@ at the correct level of authority.
 ## Governance
 
 - Authority: this constitution supersedes ad-hoc practice across ALE engine and task
-  repositories. Normative specifications and ADRs MAY impose stronger local
+  repositories. Normative specifications MAY impose stronger local
   requirements but MUST NOT weaken these principles.
 - Amendments: a constitutional amendment MUST change a durable project-wide principle,
   the scope rule, or governance itself. Concrete implementation decisions MUST instead
-  update their owning specification or ADR. Every amendment MUST include a Sync Impact
+  update their owning specification. Every amendment MUST include a Sync Impact
   Report and approval from the central maintainer.
 - Versioning: MAJOR removes or redefines a principle or governance guarantee; MINOR
   adds a principle or materially expands governance; PATCH clarifies wording without
@@ -134,4 +135,4 @@ at the correct level of authority.
   current normative specs independently. Compliance with one does not imply compliance
   with the other.
 
-**Version**: 4.0.0 | **Ratified**: 2026-07-24 | **Last Amended**: 2026-08-11
+**Version**: 4.0.1 | **Ratified**: 2026-07-24 | **Last Amended**: 2026-10-15

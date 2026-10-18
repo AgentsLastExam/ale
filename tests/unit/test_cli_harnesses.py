@@ -167,6 +167,18 @@ async def test_native_failures_keep_the_cause_exit_code_and_stderr(
     assert len(detail) < 3000
 
 
+async def test_openclaw_keeps_its_native_conversation_when_the_turn_fails() -> None:
+    sandbox = FakeSandbox(17)
+    sandbox.files["/home/agent/result.json"] = b'{"payloads": [{"isError": true, "text": "x"}]}'
+    with pytest.raises(AgentError):
+        await OpenClawCliHarness().launch("work", sandbox, session(), timeout_sec=60)
+    run = next(argv[-1] for argv in sandbox.commands if "openclaw agent" in argv[-1])
+    _, _, after = run.partition("status=$?; ")
+    assert "/home/agent/.openclaw-ale/agents/main/sessions/" in after
+    assert "/home/agent/transcript.jsonl" in after
+    assert after.startswith("cp -- ") and after.endswith('exit "$status"')
+
+
 @pytest.mark.parametrize(
     "harness", [CodexCliHarness(), GrokBuildHarness(), ClaudeCodeHarness(), OpenClawCliHarness()]
 )

@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.support import VM_BASE
 from typer.testing import CliRunner
 
 from ale.core.errors import TaskDefinitionError
@@ -90,21 +91,22 @@ def test_fixed_installation_in_setup_is_reported(tmp_path: Path) -> None:
     assert "belongs in image/Dockerfile" in messages(task)
 
 
-def test_final_stage_must_be_ale_base(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "base", ["python:3.12", "ghcr.io/agentslastexam/container-ubuntu22-base:latest", "debian"]
+)
+def test_any_base_image_is_accepted(tmp_path: Path, base: str) -> None:
     task = scaffold_task(tmp_path / "fresh")
-    (task / "image" / "Dockerfile").write_text("FROM python:3.12\n")
-    assert "final stage" in messages(task)
+    (task / "image" / "Dockerfile").write_text(f"FROM {base}\n")
+    assert messages(task) == ""
 
 
-def test_vm_final_stage_matches_kind_and_owns_no_boot_contract(tmp_path: Path) -> None:
+def test_vm_final_stage_owns_no_boot_contract(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "fresh")
     manifest = task / "task.yaml"
     manifest.write_text(manifest.read_text().replace("kind: container", "kind: vm"))
     dockerfile = task / "image" / "Dockerfile"
-    dockerfile.write_text('FROM ghcr.io/agentslastexam/vm-ubuntu24-base:24.04\nCMD ["bash"]\n')
+    dockerfile.write_text(f'FROM {VM_BASE}\nCMD ["bash"]\n')
     assert "CMD" in messages(task)
-    dockerfile.write_text("FROM ghcr.io/agentslastexam/container-ubuntu22-base:latest\n")
-    assert "declared vm" in messages(task)
 
 
 def test_ref_only_assets_are_rejected(tmp_path: Path) -> None:

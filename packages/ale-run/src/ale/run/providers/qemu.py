@@ -25,6 +25,7 @@ import asyncio
 import contextlib
 import json
 import os
+import secrets
 import shutil
 import uuid
 import zlib
@@ -55,6 +56,7 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem
+from ale.run import ale_image, guestd
 from ale.run.gpu import GpuLease, normalize_pci_bdf, parse_nvidia_smi
 from ale.run.images import (
     resolve_local_vm_fixture,
@@ -73,7 +75,9 @@ __all__ = [
 ]
 
 #: Where the guest service listens inside the VM. Forwarded to an ephemeral host port.
-GUEST_PORT = 7411
+GUEST_PORT = guestd.PORT
+#: The sandbox's guest-service token, kept beside its overlay for reattachment.
+GUEST_TOKEN_FILE = "guestd-token"
 VM_STORAGE_OVERHEAD_MB = 1024
 
 #: The image that hosts the virtual machine (built by images/runtimes/qemu-runner). It is
@@ -81,7 +85,7 @@ VM_STORAGE_OVERHEAD_MB = 1024
 #: permissions, guest bridge and signal handling a QEMU-in-a-container needs; ours is
 #: published under our own namespace so a run does not depend on an image someone else
 #: can move, and differs only in what its entrypoint checks and says.
-RUNNER_IMAGE = os.environ.get("ALE_QEMU_RUNNER", "ghcr.io/agentslastexam/ale-qemu-runner:0.1.0")
+RUNNER_IMAGE = os.environ.get("ALE_QEMU_RUNNER", ale_image("ale-qemu-runner"))
 
 #: Where the runner expects the disk to boot, and the address it presents the host at.
 #: Runner-side forwarding and the rewritten gateway URL both target the latter.
@@ -102,11 +106,6 @@ GUEST_BRIDGE = "docker"
 
 #: Fixed address through which the guest reaches Host services exposed by the runner.
 HOST_IP = "172.30.0.1"
-
-#: Where the guest writes the same facts a container image puts in labels: which account
-#: is the agent's, and whether there is a screen. A disk image has nowhere to hang a label,
-#: so the contract of docs/specs/sandbox-image.md is carried in a file instead.
-DEFAULT_AGENT_USER = "user"
 
 #: A guest boots an operating system, so this is minutes rather than the seconds a
 #: container takes.
@@ -254,13 +253,15 @@ async def attach_retained(
         raise ProviderCapabilityError(f"{handle!r} has no guest service port") from exc
 
     resolved = await resolve_prepared_vm_image(request.prepared_image)
-    transport = TcpTransport("127.0.0.1", host_port)
+    transport = TcpTransport("127.0.0.1", host_port, token=_read_guest_token(Path(storage)))
     await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
     client = GuestClient(transport)
     provider = QemuProvider()
     attached_request = request.model_copy(update={"role": SandboxRole(role)})
     try:
         agent_user, agent_home, _ = await provider._read_guest_contract(client, attached_request)
+        # A later run reaches its own Gateway, so its port is routed in as well.
+        host_ip = await provider._wire_network(container, attached_request)
     except BaseException:
         await client.close()
         raise
@@ -275,6 +276,7 @@ async def attach_retained(
         allocation=allocation,
         agent_user=agent_user,
         agent_home=agent_home,
+        host_ip=host_ip,
     )
 
 
@@ -390,7 +392,7 @@ class QemuSandbox(Sandbox):
         resolved_image: ResolvedImage,
         allocation: ResourceAllocation,
         resource_lease: GpuLease | None = None,
-        agent_user: str = DEFAULT_AGENT_USER,
+        agent_user: str,
         agent_home: str = "/home/user",
         host_ip: str = "",
     ) -> None:
@@ -533,10 +535,34 @@ class QemuSandbox(Sandbox):
         ]
         return await self._client.inject_input(payload)
 
+    def _seal_rules(self) -> tuple[str, ...]:
+        """Guest traffic the sealed runner forwards: replies, and the episode's own ports.
+
+        Only the Gateway and proxy ports are DNATed to the host, but a guest could dial the
+        host's address directly; every other forwarded packet is dropped.
+        """
+        ports = sorted(
+            {
+                port
+                for url in (self.request.gateway_url, self.request.proxy_url)
+                if (port := _port_of(url))
+            }
+        )
+        allowed = (
+            (f"-i {GUEST_BRIDGE} -d {self.host_ip} -p tcp -m multiport --dports {','.join(ports)}",)
+            if ports
+            else ()
+        )
+        return (
+            f"-i {GUEST_BRIDGE} -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY",
+            *allowed,
+        )
+
     async def open_egress(self) -> None:
         """Lift the runner firewall for the framework's own phases."""
         for rule in (
-            f"iptables -D FORWARD -i {GUEST_BRIDGE} ! -d {self.host_ip} -j DROP",
+            *(f"iptables -D FORWARD {match} -j ACCEPT" for match in self._seal_rules()),
+            f"iptables -D FORWARD -i {GUEST_BRIDGE} -j DROP",
             f"iptables -D INPUT -i {GUEST_BRIDGE} -j DROP",
         ):
             await _run("docker", "exec", self.container, "sh", "-c", rule, timeout=60)
@@ -546,8 +572,11 @@ class QemuSandbox(Sandbox):
         """Restore the runner firewall before the agent starts."""
         if self.request.network.mode is NetworkMode.OPEN:
             return
+        if not self.host_ip:
+            raise ProviderStartError("cannot seal a VM whose host address is unknown")
         for rule in (
-            f"iptables -I FORWARD -i {GUEST_BRIDGE} ! -d {self.host_ip} -j DROP",
+            f"iptables -I FORWARD 1 -i {GUEST_BRIDGE} -j DROP",
+            *(f"iptables -I FORWARD 1 {match} -j ACCEPT" for match in self._seal_rules()),
             f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -j DROP",
             f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -p udp --dport 67 -j ACCEPT",
         ):
@@ -732,6 +761,7 @@ class QemuProvider(Provider):
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         storage = self.overlay_dir / sandbox_id
         storage.mkdir(parents=True, exist_ok=True)
+        guest_token = _issue_guest_token(storage)
         await self._make_overlay(
             storage / "data.qcow2",
             base_image,
@@ -763,7 +793,7 @@ class QemuProvider(Provider):
 
         try:
             host_ip = await self._wire_network(container, request)
-            transport = TcpTransport("127.0.0.1", host_port)
+            transport = TcpTransport("127.0.0.1", host_port, token=guest_token)
             await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
             client = GuestClient(transport)
             agent_user, agent_home, has_desktop = await self._read_guest_contract(client, request)
@@ -774,15 +804,12 @@ class QemuProvider(Provider):
             if selected:
                 _verify_qemu_gpu_count(request.resources.gpus, observed_gpu)
             if has_desktop:
-                # The one thing the manifest's `gui` flag decides. A guest that installs a
-                # desktop starts an X server, a display manager and a session after the
-                # guest service is already answering, so "the sandbox replied" is not
-                # "the sandbox has a screen". No probe can tell the difference on its own:
-                # a screenshot that fails at this instant means "no desktop here" and
-                # "not yet" equally, and only the image knows which.
+                # The guest decided from its own configuration that it shows a desktop. Its
+                # display manager and session start after the guest service is already
+                # answering, so "the sandbox replied" is not "the sandbox has a screen".
                 await self._await_desktop(client)
             if request.sudo:
-                await self._grant_sudo(client, agent_user, request.os)
+                await self._verify_sudo(client, agent_user, request.os)
         except BaseException:
             with contextlib.suppress(BaseException):
                 await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))
@@ -1025,14 +1052,7 @@ class QemuProvider(Provider):
         here rather than in the guest means the host's address is discovered at run time
         instead of baked into a disk.
         """
-        code, route, _ = await _run(
-            "docker", "exec", container, "sh", "-c",
-            "ip route | awk '/^default/{print $3}'", timeout=60,
-        )  # fmt: skip
-        host_ip = route.strip()
-        if code != 0 or not host_ip:
-            raise ProviderStartError("could not find the host's address from inside the runner")
-
+        host_ip = await _runner_host_ip(container)
         rules: list[str] = []
         ports = {
             _port_of(request.gateway_url),
@@ -1101,25 +1121,25 @@ class QemuProvider(Provider):
             )
         user = str(health.get("agent_user") or "")
         home = str(health.get("agent_home") or "")
-        if request.os is OperatingSystem.LINUX:
-            # Published pre-Windows Linux images predate these health fields but already
-            # implement the fixed base-image identity contract.
-            user = user or DEFAULT_AGENT_USER
-            home = home or f"/home/{user}"
+        if user != request.user:
+            raise ProviderCapabilityError(
+                f"the VM disk was prepared for agent account {user!r}, but the Task names "
+                f"{request.user!r}"
+            )
         if not user or not home or not await client.exists(home):
             raise ProviderCapabilityError(
                 f"guestd names {user!r} at {home!r} as the agent account, but that home is absent"
             )
         return user, home, bool(health.get("gui"))
 
-    async def _grant_sudo(
+    async def _verify_sudo(
         self, client: GuestClient, agent_user: str, operating_system: OperatingSystem
     ) -> None:
-        """Elevate the agent, and prove it took.
+        """Prove the agent can elevate, as its Task requested.
 
-        Written and then checked, because a rule can land in a guest with no sudo binary
-        at all: the write succeeds, the run reports an elevated agent, and nothing can
-        actually elevate. Provenance would record an isolation level that never applied.
+        Linux disks get working sudo when they are prepared; a Windows agent is elevated by
+        the session its guest service runs in. Checked here so provenance never records an
+        elevation that did not apply.
         """
         if operating_system is OperatingSystem.WINDOWS:
             code, _, stderr, _ = await client.exec(
@@ -1141,18 +1161,13 @@ class QemuProvider(Provider):
                     f"{stderr.strip()}"
                 )
             return
-        await client.write_file(
-            f"/etc/sudoers.d/ale-{agent_user}",
-            f"{agent_user} ALL=(ALL) NOPASSWD: ALL\n".encode(),
-            mode="0440",
-        )
         code, _, stderr, _ = await client.exec(
             ["sudo", "-n", "true"], run_as=agent_user, timeout_sec=30
         )
         if code != 0:
             raise ProviderCapabilityError(
-                f"elevated privileges were requested but {agent_user} still cannot "
-                f"elevate in this guest: {stderr.strip()}"
+                f"elevated privileges were requested but {agent_user} cannot elevate in "
+                f"this guest; prepare the image with resources.sudo: true: {stderr.strip()}"
             )
 
 
@@ -1187,6 +1202,18 @@ def _is_blank(png: bytes) -> bool:
         return False
 
 
+async def _runner_host_ip(container: str) -> str:
+    """The host's address as the runner container routes to it."""
+    code, route, _ = await _run(
+        "docker", "exec", container, "sh", "-c",
+        "ip route | awk '/^default/{print $3}'", timeout=60,
+    )  # fmt: skip
+    host_ip = route.strip()
+    if code != 0 or not host_ip:
+        raise ProviderStartError("could not find the host's address from inside the runner")
+    return host_ip
+
+
 def _port_of(url: str | None) -> str:
     """The port a gateway URL names, or empty when a run has no gateway at all."""
     if not url:
@@ -1195,6 +1222,24 @@ def _port_of(url: str | None) -> str:
     host_port, _, _ = rest.partition("/")
     _, _, port = host_port.partition(":")
     return port
+
+
+def _issue_guest_token(storage: Path) -> str:
+    """A fresh token the booted guest's first connection claims; readable only by this account."""
+    token = secrets.token_urlsafe(32)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(storage / GUEST_TOKEN_FILE, flags, 0o600), "w") as handle:
+        handle.write(token)
+    return token
+
+
+def _read_guest_token(storage: Path) -> str:
+    try:
+        return (storage / GUEST_TOKEN_FILE).read_text().strip()
+    except FileNotFoundError as exc:
+        raise ProviderCapabilityError(
+            f"retained overlay {storage} has no guest service token"
+        ) from exc
 
 
 def _free_port() -> int:

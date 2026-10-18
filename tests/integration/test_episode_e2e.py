@@ -48,7 +48,7 @@ async def test_oracle_solves_the_task(tmp_path: Path, write_repo: Callable[..., 
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"reward": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0, "overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -60,7 +60,7 @@ async def test_idle_agent_scores_zero_but_completes(
     result = await run_one(task_root, tmp_path / "runs", NopHarness())
 
     assert result.verdict.status is Status.COMPLETED
-    assert result.verdict.rewards == {"reward": 0.0}
+    assert result.verdict.rewards == {"reward": 0.0, "overall": 0.0}
 
 
 @pytest.mark.asyncio
@@ -146,9 +146,8 @@ async def test_failed_episode_retries_in_a_new_sandbox_and_preserves_records(
     task_root = write_repo(tmp_path / "repo")
     dockerfile = task_root / "image/Dockerfile"
     # This lifecycle check needs a shell, not the base image's desktop services.
-    dockerfile.write_text(
-        dockerfile.read_text() + '\nLABEL ale.gui="false"\nCMD ["sleep", "infinity"]\n'
-    )
+    # An empty DISPLAY is how an image says it shows no desktop.
+    dockerfile.write_text(dockerfile.read_text() + '\nENV DISPLAY=\nCMD ["sleep", "infinity"]\n')
     task = load_tasks(task_root)[0]
     harness = FailsOnceOracle()
     providers = provider_registry(DockerProvider())
@@ -169,7 +168,7 @@ async def test_failed_episode_retries_in_a_new_sandbox_and_preserves_records(
     result = await run_episode_with_retries(execute, retries=1)
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"reward": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0, "overall": 1.0}
     assert len(harness.sandbox_ids) == len(set(harness.sandbox_ids)) == 2
     failed = ResultRecord.model_validate_json(
         (result.run_dir / "attempts/1/result.json").read_text()

@@ -24,6 +24,7 @@ ERR_PERMISSION = "permission"
 ERR_TIMEOUT = "timeout"
 ERR_UNSUPPORTED = "unsupported"
 ERR_INTERNAL = "internal"
+ERR_UNAUTHORIZED = "unauthorized"
 
 
 class ProtocolError(Exception):

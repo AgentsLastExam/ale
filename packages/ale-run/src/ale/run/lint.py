@@ -26,8 +26,6 @@ _FIXED_SETUP = re.compile(
     r"Invoke-WebRequest|Invoke-RestMethod)",
     re.IGNORECASE,
 )
-_CONTAINER_BASE = re.compile(r"^ghcr\.io/agentslastexam/container-ubuntu22-base:[^ ]+$")
-_VM_BASE = re.compile(r"^ghcr\.io/agentslastexam/vm-ubuntu24-base:(?!latest$)[^ ]+$")
 _VM_RESERVED_NAMES = {
     "ale-guestd.service",
     "autoinstall.yaml",
@@ -157,17 +155,7 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
                 Finding(folder.image_dir / "assets", "image/assets requires image/run.ps1")
             )
     elif dockerfile.is_file():
-        final = _final_from(dockerfile)
-        expected = _VM_BASE if kind == "vm" else _CONTAINER_BASE
-        if final is None or not expected.fullmatch(final):
-            label = "vm-ubuntu24-base" if kind == "vm" else "container-ubuntu22-base"
-            findings.append(
-                Finding(
-                    dockerfile,
-                    f"final stage for declared {kind or 'unknown'} kind must derive directly "
-                    f"from an ALE {label} image",
-                )
-            )
+        # Any base image is accepted; the engine adds what it needs when it prepares one.
         if kind == "vm" and _vm_boot_override(dockerfile):
             findings.append(
                 Finding(dockerfile, "VM final stage must not declare CMD or ENTRYPOINT")
@@ -204,15 +192,6 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
             )
         )
     return findings
-
-
-def _final_from(path: Path) -> str | None:
-    images: list[str] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        match = re.match(r"^\s*FROM\s+([^\s]+)", line, flags=re.IGNORECASE)
-        if match:
-            images.append(match.group(1))
-    return images[-1] if images else None
 
 
 def _vm_boot_override(path: Path) -> bool:
