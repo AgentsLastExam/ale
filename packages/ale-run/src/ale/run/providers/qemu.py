@@ -1123,7 +1123,12 @@ class QemuProvider(Provider):
             )
         user = str(health.get("agent_user") or "")
         home = str(health.get("agent_home") or "")
-        if user != request.user:
+        same_account = (
+            user.casefold() == request.user.casefold()
+            if observed_os is OperatingSystem.WINDOWS
+            else user == request.user
+        )
+        if not same_account:
             raise ProviderCapabilityError(
                 f"the VM disk was prepared for agent account {user!r}, but the Task names "
                 f"{request.user!r}"

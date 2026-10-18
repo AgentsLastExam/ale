@@ -538,6 +538,36 @@ def test_windows_guest_contract_is_read_from_guestd_health() -> None:
     assert observed == ("user", r"C:\Users\user", True)
 
 
+def test_windows_guest_account_comparison_is_case_insensitive() -> None:
+    class Client:
+        def __init__(self, user: str) -> None:
+            self.user = user
+
+        async def health(self) -> dict[str, object]:
+            return {
+                "os": "windows",
+                "agent_user": self.user,
+                "agent_home": r"C:\Users\User",
+                "gui": True,
+            }
+
+        async def exists(self, path: str) -> bool:
+            return path == r"C:\Users\User"
+
+    observed = asyncio.run(
+        QemuProvider()._read_guest_contract(  # type: ignore[arg-type]
+            Client("User"), request(os=OperatingSystem.WINDOWS)
+        )
+    )
+    assert observed == ("User", r"C:\Users\User", True)
+    with pytest.raises(ProviderCapabilityError, match="prepared for agent account 'other'"):
+        asyncio.run(
+            QemuProvider()._read_guest_contract(  # type: ignore[arg-type]
+                Client("other"), request(os=OperatingSystem.WINDOWS)
+            )
+        )
+
+
 def test_a_linux_disk_must_be_prepared_for_the_tasks_agent_account() -> None:
     class Client:
         def __init__(self, user: str) -> None:
@@ -555,6 +585,8 @@ def test_a_linux_disk_must_be_prepared_for_the_tasks_agent_account() -> None:
     assert contract == ("user", "/home/u", True)
     with pytest.raises(ProviderCapabilityError, match="prepared for agent account 'app'"):
         asyncio.run(QemuProvider()._read_guest_contract(Client("app"), request()))  # type: ignore[arg-type]
+    with pytest.raises(ProviderCapabilityError, match="prepared for agent account 'User'"):
+        asyncio.run(QemuProvider()._read_guest_contract(Client("User"), request()))  # type: ignore[arg-type]
 
 
 def test_windows_health_must_declare_its_agent_identity() -> None:
