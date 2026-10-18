@@ -18,7 +18,6 @@ import contextlib
 import json
 import logging
 import math
-import os
 import shutil
 import time
 from collections.abc import Iterator, Sequence
@@ -82,7 +81,7 @@ from ale.run.recording import (
     atomic_write_json,
     execution_logging,
 )
-from ale.run.verification import installed_ale_verify
+from ale.run.verification import installed_ale_verify, verifier_judge_config
 from ale_verify import VerificationRecord
 
 __all__ = ["RetainedVerificationEnvironment", "StandardEnvironment"]
@@ -233,6 +232,7 @@ class StandardEnvironment(Environment):
             prepared_image=ctx.prepared_verifier_image,
             resources=resources.as_resources(),
             network=NetworkPolicy(mode=NetworkMode.OPEN),
+            gateway_url=ctx.session.gateway_url or None,
             env={"ALE_EPISODE_ID": ctx.episode_id},
             sudo=False,
             user=(ctx.spec.verify.image or ctx.spec.image).user,
@@ -581,22 +581,20 @@ class StandardEnvironment(Environment):
         return rewards
 
     async def _stage_verification_config(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
-        payload = ctx.verification_config.model_dump(mode="json", exclude_none=True)
+        """Point the verifier's Judges at this episode's Gateway sessions.
+
+        The verifier gets the Gateway's address and a session token per Judge; the Judge's
+        own key stays on the Host, where the Gateway adds it to each forwarded call.
+        """
+        payload, command_env = verifier_judge_config(
+            ctx.verification_config, ctx.judge_tokens, sandbox.gateway_url
+        )
         await sandbox.write_file(
             str(_layout(ctx.spec.os).path("verify", "config.json")),
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
         )
-        command_env: dict[str, str] = {}
-        secrets: list[str] = []
-        for section in payload.values():
-            if not isinstance(section, dict):
-                continue
-            name = section.get("api_key_env")
-            if isinstance(name, str) and (value := os.environ.get(name)):
-                command_env[name] = value
-                secrets.append(value)
         ctx.verification_command_env = command_env
-        ctx.verification_secrets = tuple(secrets)
+        ctx.verification_secrets = tuple(command_env.values())
 
     async def _collect_verification_record(
         self, ctx: EpisodeContext, sandbox: Sandbox
@@ -818,6 +816,7 @@ class StandardEnvironment(Environment):
             record["provider_response_id"]: record["call_id"]
             for record in read_jsonl(ctx.run_dir / "trace.transport.jsonl").records
             if record.get("kind") == "call"
+            and record.get("purpose", "agent") == "agent"
             and record.get("provider_response_id")
             and record.get("call_id")
         }

@@ -257,8 +257,8 @@ security claims rot.
 framework-controlled code, and a Task may declare `resources.sudo` for its agent. Tasks
 are reviewed content, not untrusted input; the identity model protects a result from its
 *agent*, not a host from its Task. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are
-aimed at *broken* Tasks, not hostile ones. A malicious verifier can also read and
-exfiltrate a Judge credential injected for its direct provider call.
+aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host Gateway; a
+malicious verifier can only spend its episode's Judge session while that episode runs.
 
 **Container escape.** A container sandbox uses Docker's default isolation. A kernel
 exploit reaches the host. Use the VM backend for stronger isolation, and still do not put

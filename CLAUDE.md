@@ -43,10 +43,9 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 - Changing a contract updates its spec in the same change and adds an ADR only for a new
   cross-module decision.
 - Every reportable result carries a complete `RunLock`.
-- During the evaluated solver phase, API-key and shipped subscription credentials remain
-  on the Host Gateway. Trusted verification may receive only its configured Judge
-  credential for that verifier process. `verify/` and `oracle/` never appear during the
-  evaluated agent phase.
+- API-key and shipped subscription credentials, Judge keys included, remain on the Host
+  Gateway; a sandbox only ever holds episode tokens. `verify/` and `oracle/` never appear
+  during the evaluated agent phase.
 
 ## Local guides
 

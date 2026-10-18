@@ -350,8 +350,13 @@ async def test_qemu_retained_solver_can_be_reattached(
 
     async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
         if argv[:2] == ("docker", "exec"):
-            assert "ip route" in argv[-1]
-            return 0, "172.17.0.1\n", ""
+            if "ip route" in argv[-1]:
+                return 0, "172.17.0.1\n", ""
+            # The reattaching run's own Gateway port is routed in.
+            assert "--dport 8931 -j DNAT --to-destination 172.17.0.1:8931" in argv[-1] or (
+                "MASQUERADE" in argv[-1]
+            )
+            return 0, "", ""
         assert argv[:2] == ("docker", "inspect")
         return 0, json.dumps([record]), ""
 

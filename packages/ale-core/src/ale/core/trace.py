@@ -103,6 +103,8 @@ class TransportCall(_Event):
     disposition: Literal["forwarded", "refused", "failed"]
     refusal_limit: str | None = None
     upstream_status: int | None = None
+    purpose: Literal["agent", "judge"] = "agent"
+    """Whether the evaluated agent or a verification Judge made the call."""
 
     @model_validator(mode="after")
     def _disposition_fields(self) -> Self:

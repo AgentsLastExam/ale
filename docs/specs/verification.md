@@ -111,9 +111,15 @@ LLM Judge transmits selected files; it does not render documents or extract addi
 Agent Judge can inspect the supplied files with its configured harness tools. Evidence and rubric
 validity are governed by the [Task quality standard](task-quality-standard.md#3-evaluate-evidence-fairly).
 
-Both Judge types call the configured endpoint directly from the sandbox. The named API
-key is injected only into the verify command environment, redacted from captured output,
-and never written to Task configuration or records.
+Both Judge types reach their configured endpoint through the Host Gateway, as the agent
+reaches its model. Each episode opens one Gateway session per configured Judge that holds
+the Judge's endpoint, protocol and key; the verifier receives only the Gateway's address
+and that session's token (`ALE_LLM_JUDGE_TOKEN`, `ALE_AGENT_JUDGE_TOKEN`), so code the solver
+wrote cannot read a credential it could spend elsewhere. Judge sessions have no limits and
+never replay a cached response, so a retried verdict samples again; their calls appear in
+the transport trace with `purpose: judge` and are left out of the agent's trajectory and
+usage. A Judge whose key is not set on the Host gets no session. The RunLock records each
+Judge's configured endpoint, not the Gateway address the verifier saw.
 
 A Judge decides a score, so ALE sets no ceiling of its own on how long it thinks or how
 much it writes, and offers no setting for one. An LLM Judge streams its response and sends

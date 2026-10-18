@@ -9,6 +9,7 @@ from ale.core.config import AgentJudgeConfig, VerificationConfig
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
+from ale.run.gateway.server import Gateway
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
@@ -170,22 +171,29 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
     )
     task = load_tasks(task_root)[0]
 
-    result = await run_episode(
-        task,
-        StandardEnvironment(OracleHarness()),
-        provider_registry(DockerProvider()),
-        run_dir=tmp_path / "runs",
-        verification_config=VerificationConfig(
-            agent=AgentJudgeConfig(
-                adapter=adapter,  # type: ignore[arg-type]
-                version="1.0.0",
-                model=model,
-                reasoning_effort="high",
-                base_url=base_url,
-                api_key_env="JUDGE_KEY",
-            )
-        ),
-    )
+    gateway = Gateway()
+    gateway_url = await gateway.start()
+    try:
+        result = await run_episode(
+            task,
+            StandardEnvironment(OracleHarness()),
+            provider_registry(DockerProvider()),
+            run_dir=tmp_path / "runs",
+            gateway=gateway,
+            gateway_url=gateway_url,
+            verification_config=VerificationConfig(
+                agent=AgentJudgeConfig(
+                    adapter=adapter,  # type: ignore[arg-type]
+                    version="1.0.0",
+                    model=model,
+                    reasoning_effort="high",
+                    base_url=base_url,
+                    api_key_env="JUDGE_KEY",
+                )
+            ),
+        )
+    finally:
+        await gateway.stop()
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     record = json.loads((result.run_dir / "verification.json").read_text())

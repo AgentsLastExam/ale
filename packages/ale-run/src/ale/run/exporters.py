@@ -101,7 +101,8 @@ def prime_verifiers_record(
     calls = [
         _prime_call(record, step_nodes.get(links.get(record.get("call_id"))))
         for record in transport
-        if record.get("kind") == "call"
+        # A Judge's calls are verification, not part of the agent's trajectory.
+        if record.get("kind") == "call" and record.get("purpose", "agent") == "agent"
     ]
     prompt = next(
         (_text(step.message) for step in trajectory.steps if step.source == "user"),

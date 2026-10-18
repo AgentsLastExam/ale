@@ -208,6 +208,8 @@ class EpisodeContext:
     verification_config: VerificationConfig = field(default_factory=VerificationConfig)
     verification_command_env: dict[str, str] = field(default_factory=dict)
     verification_secrets: tuple[str, ...] = ()
+    judge_tokens: dict[str, str] = field(default_factory=dict)
+    """Gateway tokens of this episode's Judge sessions, by Judge kind."""
     verification_record: object | None = None
     ale_verify_provenance: AleVerifyProvenance | None = None
     verifier_resolved_image: ResolvedImage | None = None

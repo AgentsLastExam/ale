@@ -260,6 +260,8 @@ async def attach_retained(
     attached_request = request.model_copy(update={"role": SandboxRole(role)})
     try:
         agent_user, agent_home, _ = await provider._read_guest_contract(client, attached_request)
+        # A later run reaches its own Gateway, so its port is routed in as well.
+        host_ip = await provider._wire_network(container, attached_request)
     except BaseException:
         await client.close()
         raise
@@ -274,7 +276,7 @@ async def attach_retained(
         allocation=allocation,
         agent_user=agent_user,
         agent_home=agent_home,
-        host_ip=await _runner_host_ip(container),
+        host_ip=host_ip,
     )
 
 

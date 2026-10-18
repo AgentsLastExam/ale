@@ -81,6 +81,10 @@ def test_judge_provenance_is_derived_from_the_collected_record() -> None:
     )
     observed = judge_provenance(record)
     assert observed[0].invocation_id == "judge-1"
+    assert observed[0].endpoint_identity == "https://example.test/v1"
+    # The verifier saw the Gateway; the RunLock names the Judge's configured endpoint.
+    real = judge_provenance(record, {"llm": "https://api.provider.test/v1"})
+    assert real[0].endpoint_identity == "https://api.provider.test/v1"
     assert observed[0].attempts == 1
     assert "credential" not in json.dumps(observed[0].model_dump(mode="json"))
 

@@ -196,6 +196,8 @@ async def attach_retained(
     if len(networks) > 1:
         raise ProviderCapabilityError(f"{handle!r} has more than one ALE network")
     provider = DockerProvider()
+    if networks:
+        await provider._restrict_host(container, networks[0], request, reattached=True)
     agent_user = request.user
     client = await provider._connect(container, agent_user)
     agent_home, _ = await provider._guest_contract(client)
@@ -757,7 +759,9 @@ class DockerProvider(Provider):
             raise ProviderStartError(f"could not create isolated network: {stderr.strip()}")
         return network
 
-    async def _restrict_host(self, container: str, network: str, request: SandboxRequest) -> None:
+    async def _restrict_host(
+        self, container: str, network: str, request: SandboxRequest, *, reattached: bool = False
+    ) -> None:
         """Let an isolated sandbox reach only its own Gateway and proxy ports on the host.
 
         An internal bridge has no route off the host, but the host's own address on it
@@ -766,20 +770,27 @@ class DockerProvider(Provider):
         network namespace and rejects every connection to that address except the
         episode's ports. The sandbox itself never holds NET_ADMIN, so neither its agent
         nor root inside it can lift the rules. Failure stops provisioning.
+
+        A retained sandbox reattached by a later run keeps its rules and gains that run's
+        ports, inserted ahead of the rejection.
         """
         host_ip = await self._bridge_host_ip(network)
         ports = sorted(
             {port for url in (request.gateway_url, request.proxy_url) if (port := _url_port(url))}
         )
+        if reattached and not ports:
+            return
+        position = "-I OUTPUT 1" if reattached else "-A OUTPUT"
         rules = (
             [
-                f"iptables -w -A OUTPUT -d {host_ip} -p tcp -m multiport "
+                f"iptables -w {position} -d {host_ip} -p tcp -m multiport "
                 f"--dports {','.join(ports)} -j ACCEPT"
             ]
             if ports
             else []
         )
-        rules.append(f"iptables -w -A OUTPUT -d {host_ip} -j REJECT")
+        if not reattached:
+            rules.append(f"iptables -w -A OUTPUT -d {host_ip} -j REJECT")
         code, _, stderr = await _docker(
             "run", "--rm", "--network", f"container:{container}", "--cap-add", "NET_ADMIN",
             "--entrypoint", "sh", NETFILTER_IMAGE, "-c", " && ".join(rules),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from aiohttp import ClientSession, web
@@ -142,18 +143,20 @@ def test_chatgpt_backend_omits_unsupported_public_output_limit() -> None:
 
     gateway = Gateway(subscription=Credential())  # type: ignore[arg-type]
 
-    assert gateway._normalized_output_limit({"model": "gpt-5.6-luna", "max_output_tokens": 9}) == {
-        "model": "gpt-5.6-luna"
-    }
+    session = GatewaySession(episode_id="e", model="gpt-5.6-luna")
+    assert gateway._normalized_output_limit(
+        {"model": "gpt-5.6-luna", "max_output_tokens": 9}, session
+    ) == {"model": "gpt-5.6-luna"}
 
 
 def test_an_absent_output_limit_is_not_invented() -> None:
     responses = Gateway(api_key="key", dialect="openai-responses")
     chat = Gateway(api_key="key", dialect="openai-chat-completions")
+    session = GatewaySession(episode_id="e", model="m")
 
-    assert responses._normalized_output_limit({"model": "m"}) == {"model": "m"}
-    assert chat._normalized_output_limit({"model": "m"}) == {"model": "m"}
-    assert chat._normalized_output_limit({"model": "m", "max_tokens": 5}) == {
+    assert responses._normalized_output_limit({"model": "m"}, session) == {"model": "m"}
+    assert chat._normalized_output_limit({"model": "m"}, session) == {"model": "m"}
+    assert chat._normalized_output_limit({"model": "m", "max_tokens": 5}, session) == {
         "model": "m",
         "max_completion_tokens": 5,
     }
@@ -174,6 +177,7 @@ async def test_disconnected_downstream_does_not_cancel_upstream_accounting(
             yield event[49:]
 
     class Upstream:
+        headers: ClassVar[dict[str, str]] = {"content-type": "text/event-stream"}
         status = 200
         content = Content()
 

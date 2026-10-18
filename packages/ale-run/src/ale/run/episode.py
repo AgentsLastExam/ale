@@ -49,6 +49,7 @@ from ale.run.provenance import ProvenanceInputs, build_lock, judge_provenance
 from ale.run.providers import ProviderRegistry
 from ale.run.recording import EpisodeRecording
 from ale.run.task_images import prepare_task_image, prepare_verifier_image
+from ale.run.verification import judge_endpoints, open_judge_sessions
 from ale_verify import VerificationRecord
 
 __all__ = ["EpisodeResult", "run_episode", "run_episode_with_retries"]
@@ -517,6 +518,16 @@ async def run_episode(
             else session_registry.open(candidate)  # type: ignore[union-attr]
         )
         session_token = session.token
+    judge_sessions = (
+        open_judge_sessions(
+            gateway,
+            verification_config,
+            episode_id=episode_id,
+            trace=recording.transport,
+        )
+        if gateway is not None and verification_config is not None
+        else {}
+    )
 
     sink = _Artifacts(episode_dir, enabled=collect_artifacts)
     lease = _Lease(providers, sandbox_retention or SandboxRetentionConfig())
@@ -556,6 +567,7 @@ async def run_episode(
         limit_refusal=lambda: _gateway_refusal(session),
         logging_policy=logging_policy or LoggingPolicy(),
         verification_config=verification_config or VerificationConfig(),
+        judge_tokens={kind: opened.token for kind, opened in judge_sessions.items()},
     )
     verdict: Verdict | None = None
     try:
@@ -583,9 +595,11 @@ async def run_episode(
             durable=True,
         )
     finally:
-        if gateway is not None and session is not None:
+        if gateway is not None:
             # Tokens die with their episode, so a leaked one is not a standing grant.
-            gateway.close_session(session)
+            for opened in (session, *judge_sessions.values()):
+                if opened is not None:
+                    gateway.close_session(opened)
         elif session_registry is not None and session is not None:
             session_registry.close(session)
         finalization_error: RetentionFinalizationError | None = None
@@ -724,7 +738,8 @@ def _write_lock(
         )
     record = ctx.verification_record
     if isinstance(record, VerificationRecord):
-        inputs = replace(inputs, judges=judge_provenance(record))
+        endpoints = judge_endpoints(ctx.verification_config)
+        inputs = replace(inputs, judges=judge_provenance(record, endpoints))
     observed_asset = task.asset_observation
     asset = (
         AssetProvenance(

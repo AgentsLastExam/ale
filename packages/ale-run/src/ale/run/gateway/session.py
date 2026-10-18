@@ -17,7 +17,7 @@ import hashlib
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 __all__ = [
     "CallUsage",
@@ -26,7 +26,21 @@ __all__ = [
     "LimitReached",
     "Limits",
     "SessionRegistry",
+    "Upstream",
 ]
+
+
+@dataclass(frozen=True)
+class Upstream:
+    """Where one session's calls go instead of the Gateway's own upstream.
+
+    A Judge session carries one: its calls reach the Judge's own endpoint with the Judge's
+    own key, which never leaves the Host.
+    """
+
+    dialect: str
+    endpoint: str
+    api_key: str = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -98,6 +112,11 @@ class GatewaySession:
 
     refusal: LimitReached | None = field(default=None, repr=False)
     """The first limit that refused one of this session's calls, if any."""
+
+    purpose: Literal["agent", "judge"] = "agent"
+    """A Judge session is unlimited and never replays: a retried verdict must sample again."""
+    upstream: Upstream | None = field(default=None, repr=False)
+    """The session's own upstream, or ``None`` for the Gateway's."""
 
     allowed_hosts: frozenset[str] = frozenset()
     """Hosts this episode may reach through the proxy, beyond the model endpoint.

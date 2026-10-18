@@ -218,6 +218,8 @@ async def _run_one(
         if any(task.spec.network.allowed_hosts for task in tasks):
             proxy = EgressProxy(gateway.sessions, host=_gateway_host())
             proxy_url = await proxy.start()
+    elif (gateway := await _judge_gateway(settings)) is not None:
+        gateway_url = gateway.base_url
 
     profile = authentication.profile_slot_id or "none"
     typer.echo(
@@ -402,149 +404,158 @@ async def _reverify(
         typer.echo(str(error), err=True)
         return EXIT_BAD_REFERENCE
 
-    run_dir = runs_dir / f"reverify-{uuid.uuid4().hex[:8]}"
-    failures = 0
-    for source_dir, source_result, source_lock, handle in sources:
-        task = by_id.get((str(source_lock.task.name), source_lock.task.variant))
-        if task is None:
-            typer.echo(
-                f"source episode {source_result.episode_id} does not match the selected Task",
-                err=True,
-            )
-            failures += 1
-            continue
-        if (
-            source_lock.task.non_verifier_digest is None
-            or task.non_verifier_digest != source_lock.task.non_verifier_digest
-        ):
-            typer.echo(
-                f"{task.spec.name}: content outside verify/ changed or source evidence is missing; "
-                "run the solver again",
-                err=True,
-            )
-            failures += 1
-            continue
-        try:
-            observed_assets = observe_task_assets(task)
-        except AleError as error:
-            typer.echo(f"{task.spec.name}: {error}", err=True)
-            failures += 1
-            continue
-        if not _same_assets(source_lock.asset, observed_assets):
-            typer.echo(
-                f"{task.spec.name}: Task assets differ from the source run or are not committed; "
-                "run the solver again",
-                err=True,
-            )
-            failures += 1
-            continue
-        # Reverification reuses an existing solver, not a freshly rebuilt image.
-        # Each source episode owns its exact prepared image and immutable provenance.
-        task = copy.copy(task)
-        image = source_lock.image
-        task.prepared_image = PreparedTaskImage(
-            kind=image.declaration.kind,
-            source="solver-local" if image.source == "local" else "external-ref",
-            input_identity=image.input_identity,
-            image_source_identity=image.image_source_identity,
-            runtime_ref=(
-                image.prepared_identity
-                if image.declaration.kind is ImageKind.CONTAINER
-                else image.runtime_ref
-            ),
-            prepared_identity=image.prepared_identity,
-            base_materials=image.base_materials,
-            resolved_reference=image.resolved_reference,
-            oci_identity=image.oci_identity,
-            materializer_identity=image.materializer_identity,
-            builder_identity=image.builder_identity,
-        )
-        try:
-            task.asset_observation = observed_assets
-            prepared = await prepare_verifier_image_result(task, providers)
-            task.prepared_verifier_image = prepared.image if prepared is not None else None
-        except AleError as error:
-            typer.echo(str(error), err=True)
-            failures += 1
-            continue
-        if source_lock.resources is None:
-            typer.echo(f"{task.spec.name}: source RunLock has no solver allocation", err=True)
-            failures += 1
-            continue
-
-        request = SandboxRequest(
-            episode_id=source_result.episode_id,
-            os=task.spec.os,
-            role=(
-                SandboxRole.SHARED
-                if task.spec.verify.environment_mode is VerificationMode.SHARED
-                else SandboxRole.SOLVER
-            ),
-            retention="keep",
-            prepared_image=task.prepared_image,
-            resources=task.spec.resources,
-            network=task.spec.network,
-            sudo=task.spec.resources.sudo,
-            user=task.spec.image.user,
-        )
-        provenance = ProvenanceInputs(
-            source=resolved.source,
-            agent=source_lock.agent,
-            gateway=source_lock.gateway,
-            config_hash=settings.config_hash,
-            timeouts=settings.timeouts,
-        )
-        episode_id = f"{source_result.episode_id}-reverify-{uuid.uuid4().hex[:6]}"
-
-        async def execute(
-            task: ManifestTask = task,
-            handle: str = handle,
-            request: SandboxRequest = request,
-            source_lock: RunLock = source_lock,
-            source_dir: Path = source_dir,
-            provenance: ProvenanceInputs = provenance,
-            episode_id: str = episode_id,
-        ) -> EpisodeResult:
-            solver = await _attach_retained(handle, request, source_lock)
-            return await run_episode(
-                task,
-                RetainedVerificationEnvironment(
-                    solver, source_dir, source_lock.sandbox, timeouts=settings.timeouts
+    gateway = await _judge_gateway(settings)
+    gateway_url = gateway.base_url if gateway is not None else ""
+    try:
+        run_dir = runs_dir / f"reverify-{uuid.uuid4().hex[:8]}"
+        failures = 0
+        for source_dir, source_result, source_lock, handle in sources:
+            task = by_id.get((str(source_lock.task.name), source_lock.task.variant))
+            if task is None:
+                typer.echo(
+                    f"source episode {source_result.episode_id} does not match the selected Task",
+                    err=True,
+                )
+                failures += 1
+                continue
+            if (
+                source_lock.task.non_verifier_digest is None
+                or task.non_verifier_digest != source_lock.task.non_verifier_digest
+            ):
+                typer.echo(
+                    f"{task.spec.name}: content outside verify/ changed or source evidence is "
+                    "missing; run the solver again",
+                    err=True,
+                )
+                failures += 1
+                continue
+            try:
+                observed_assets = observe_task_assets(task)
+            except AleError as error:
+                typer.echo(f"{task.spec.name}: {error}", err=True)
+                failures += 1
+                continue
+            if not _same_assets(source_lock.asset, observed_assets):
+                typer.echo(
+                    f"{task.spec.name}: Task assets differ from the source run or are not "
+                    "committed; run the solver again",
+                    err=True,
+                )
+                failures += 1
+                continue
+            # Reverification reuses an existing solver, not a freshly rebuilt image.
+            # Each source episode owns its exact prepared image and immutable provenance.
+            task = copy.copy(task)
+            image = source_lock.image
+            task.prepared_image = PreparedTaskImage(
+                kind=image.declaration.kind,
+                source="solver-local" if image.source == "local" else "external-ref",
+                input_identity=image.input_identity,
+                image_source_identity=image.image_source_identity,
+                runtime_ref=(
+                    image.prepared_identity
+                    if image.declaration.kind is ImageKind.CONTAINER
+                    else image.runtime_ref
                 ),
-                providers,
-                run_dir=run_dir,
-                model=source_lock.agent.model,
-                seed=source_lock.seed,
-                collect_artifacts=True,
-                provenance=provenance,
-                episode_id=episode_id,
-                verification_config=settings.verification,
-                sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
-                destroy_failed_sandboxes=True,
-                authentication=source_lock.agent.authentication.effective,
-                profile_slot_id=source_lock.agent.authentication.profile_slot_id,
+                prepared_identity=image.prepared_identity,
+                base_materials=image.base_materials,
+                resolved_reference=image.resolved_reference,
+                oci_identity=image.oci_identity,
+                materializer_identity=image.materializer_identity,
+                builder_identity=image.builder_identity,
             )
+            try:
+                task.asset_observation = observed_assets
+                prepared = await prepare_verifier_image_result(task, providers)
+                task.prepared_verifier_image = prepared.image if prepared is not None else None
+            except AleError as error:
+                typer.echo(str(error), err=True)
+                failures += 1
+                continue
+            if source_lock.resources is None:
+                typer.echo(f"{task.spec.name}: source RunLock has no solver allocation", err=True)
+                failures += 1
+                continue
 
-        # Shared verification mutates its source; only separate verification has a
-        # fresh verifier Sandbox on every attempt.
-        retries = (
-            settings.episode_retries
-            if task.spec.verify.environment_mode is VerificationMode.SEPARATE
-            else 0
-        )
-        try:
-            result = await run_episode_with_retries(
-                execute, retries=retries, on_retry=_report_retry
+            request = SandboxRequest(
+                episode_id=source_result.episode_id,
+                os=task.spec.os,
+                role=(
+                    SandboxRole.SHARED
+                    if task.spec.verify.environment_mode is VerificationMode.SHARED
+                    else SandboxRole.SOLVER
+                ),
+                retention="keep",
+                prepared_image=task.prepared_image,
+                resources=task.spec.resources,
+                network=task.spec.network,
+                gateway_url=gateway_url or None,
+                sudo=task.spec.resources.sudo,
+                user=task.spec.image.user,
             )
-        except AleError as error:
-            typer.echo(f"{task.spec.name}: {error}", err=True)
-            failures += 1
-            continue
-        _report(result)
-        if result.verdict.status is not Status.COMPLETED:
-            failures += 1
-    typer.echo(f"reverification run: {run_dir}")
-    return 0 if failures == 0 else EXIT_SOME_FAILED
+            provenance = ProvenanceInputs(
+                source=resolved.source,
+                agent=source_lock.agent,
+                gateway=source_lock.gateway,
+                config_hash=settings.config_hash,
+                timeouts=settings.timeouts,
+            )
+            episode_id = f"{source_result.episode_id}-reverify-{uuid.uuid4().hex[:6]}"
+
+            async def execute(
+                task: ManifestTask = task,
+                handle: str = handle,
+                request: SandboxRequest = request,
+                source_lock: RunLock = source_lock,
+                source_dir: Path = source_dir,
+                provenance: ProvenanceInputs = provenance,
+                episode_id: str = episode_id,
+            ) -> EpisodeResult:
+                solver = await _attach_retained(handle, request, source_lock)
+                return await run_episode(
+                    task,
+                    RetainedVerificationEnvironment(
+                        solver, source_dir, source_lock.sandbox, timeouts=settings.timeouts
+                    ),
+                    providers,
+                    run_dir=run_dir,
+                    model=source_lock.agent.model,
+                    seed=source_lock.seed,
+                    collect_artifacts=True,
+                    provenance=provenance,
+                    episode_id=episode_id,
+                    gateway=gateway,
+                    gateway_url=gateway_url,
+                    verification_config=settings.verification,
+                    sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
+                    destroy_failed_sandboxes=True,
+                    authentication=source_lock.agent.authentication.effective,
+                    profile_slot_id=source_lock.agent.authentication.profile_slot_id,
+                )
+
+            # Shared verification mutates its source; only separate verification has a
+            # fresh verifier Sandbox on every attempt.
+            retries = (
+                settings.episode_retries
+                if task.spec.verify.environment_mode is VerificationMode.SEPARATE
+                else 0
+            )
+            try:
+                result = await run_episode_with_retries(
+                    execute, retries=retries, on_retry=_report_retry
+                )
+            except AleError as error:
+                typer.echo(f"{task.spec.name}: {error}", err=True)
+                failures += 1
+                continue
+            _report(result)
+            if result.verdict.status is not Status.COMPLETED:
+                failures += 1
+        typer.echo(f"reverification run: {run_dir}")
+        return 0 if failures == 0 else EXIT_SOME_FAILED
+    finally:
+        if gateway is not None:
+            await gateway.stop()
 
 
 def _retained_source_episodes(
@@ -651,120 +662,128 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
         typer.echo(f"{error}", err=True)
         return EXIT_BAD_REFERENCE
 
-    run_id = f"validate-{uuid.uuid4().hex[:8]}"
-    run_dir = runs_dir / run_id
-    ledger = Ledger(run_dir)
-    ledger.open_run(run_id, settings.config_hash)
-    resources = EffectiveAgentResources()
-    failures = 0
-    observations: list[TaskValidationObservation] = []
+    gateway = await _judge_gateway(settings)
+    gateway_url = gateway.base_url if gateway is not None else ""
     try:
-        for task in tasks:
-            spec = task.spec
-            results = {}
-            for pass_name, harness, agent_enabled in (
-                ("untouched", NopHarness(), False),
-                ("oracle", OracleHarness(), True),
-            ):
-                episode_id = f"{spec.name}-{pass_name}-{uuid.uuid4().hex[:8]}"
-                inputs = ProvenanceInputs(
-                    source=resolved.source,
-                    agent=agent_provenance(
-                        harness,
-                        "",
-                        settings,
-                        resources,
-                    ),
-                    gateway=gateway_provenance(settings),
-                    config_hash=settings.config_hash,
-                    timeouts=settings.timeouts,
-                )
-                identity = episode_identity(
-                    spec,
-                    task_digest=task.task_digest,
-                    image_digest=task.prepared_image.prepared_identity,
-                    agent=f"validation-{pass_name}@{harness.version()}",
-                    seed=settings.seed,
-                    reuse_hash=settings.reuse_hash,
-                    assets=task.asset_observation,
-                )
-                ledger.queue_episode(
-                    episode_id=episode_id,
-                    run_id=run_id,
-                    identity=identity,
-                    spec=spec,
-                )
-                ledger.mark_running(episode_id)
-
-                async def execute(
-                    task: ManifestTask = task,
-                    harness: Harness = harness,
-                    agent_enabled: bool = agent_enabled,
-                    episode_id: str = episode_id,
-                    inputs: ProvenanceInputs = inputs,
-                ) -> EpisodeResult:
-                    return await run_episode(
-                        task,
-                        StandardEnvironment(
-                            harness, agent_enabled=agent_enabled, timeouts=settings.timeouts
+        run_id = f"validate-{uuid.uuid4().hex[:8]}"
+        run_dir = runs_dir / run_id
+        ledger = Ledger(run_dir)
+        ledger.open_run(run_id, settings.config_hash)
+        resources = EffectiveAgentResources()
+        failures = 0
+        observations: list[TaskValidationObservation] = []
+        try:
+            for task in tasks:
+                spec = task.spec
+                results = {}
+                for pass_name, harness, agent_enabled in (
+                    ("untouched", NopHarness(), False),
+                    ("oracle", OracleHarness(), True),
+                ):
+                    episode_id = f"{spec.name}-{pass_name}-{uuid.uuid4().hex[:8]}"
+                    inputs = ProvenanceInputs(
+                        source=resolved.source,
+                        agent=agent_provenance(
+                            harness,
+                            "",
+                            settings,
+                            resources,
                         ),
-                        providers,
-                        run_dir=run_dir,
-                        episode_id=episode_id,
-                        provenance=inputs,
-                        phase_callback=lambda phase, current=episode_id: ledger.update_phase(
-                            current, phase.value
-                        ),
-                        logging_policy=settings.logging,
-                        verification_config=settings.verification,
-                        sandbox_retention=settings.sandbox_retention,
-                        destroy_failed_sandboxes=settings.episode_retries > 0,
+                        gateway=gateway_provenance(settings),
+                        config_hash=settings.config_hash,
+                        timeouts=settings.timeouts,
                     )
+                    identity = episode_identity(
+                        spec,
+                        task_digest=task.task_digest,
+                        image_digest=task.prepared_image.prepared_identity,
+                        agent=f"validation-{pass_name}@{harness.version()}",
+                        seed=settings.seed,
+                        reuse_hash=settings.reuse_hash,
+                        assets=task.asset_observation,
+                    )
+                    ledger.queue_episode(
+                        episode_id=episode_id,
+                        run_id=run_id,
+                        identity=identity,
+                        spec=spec,
+                    )
+                    ledger.mark_running(episode_id)
 
-                result = await run_episode_with_retries(
-                    execute, retries=settings.episode_retries, on_retry=_report_retry
-                )
-                ledger.finish_episode(episode_id, result.record)
-                results[pass_name] = result
+                    async def execute(
+                        task: ManifestTask = task,
+                        harness: Harness = harness,
+                        agent_enabled: bool = agent_enabled,
+                        episode_id: str = episode_id,
+                        inputs: ProvenanceInputs = inputs,
+                    ) -> EpisodeResult:
+                        return await run_episode(
+                            task,
+                            StandardEnvironment(
+                                harness, agent_enabled=agent_enabled, timeouts=settings.timeouts
+                            ),
+                            providers,
+                            run_dir=run_dir,
+                            episode_id=episode_id,
+                            provenance=inputs,
+                            phase_callback=lambda phase, current=episode_id: ledger.update_phase(
+                                current, phase.value
+                            ),
+                            logging_policy=settings.logging,
+                            gateway=gateway,
+                            gateway_url=gateway_url,
+                            verification_config=settings.verification,
+                            sandbox_retention=settings.sandbox_retention,
+                            destroy_failed_sandboxes=settings.episode_retries > 0,
+                        )
 
-            zero_result = results["untouched"]
-            one_result = results["oracle"]
-            reward_names, warnings, task_failures = _validation_notices(
-                zero_result.verdict,
-                one_result.verdict,
-            )
-            passed = not task_failures
-            observations.append(
-                TaskValidationObservation(
-                    name=str(spec.name),
-                    variant=spec.variant,
-                    spec_hash=spec.spec_hash,
-                    untouched=_validation_attempt(zero_result, run_dir),
-                    oracle=_validation_attempt(one_result, run_dir),
-                    reward_names=reward_names,
-                    warnings=warnings,
-                    failures=task_failures,
-                    passed=passed,
+                    result = await run_episode_with_retries(
+                        execute, retries=settings.episode_retries, on_retry=_report_retry
+                    )
+                    ledger.finish_episode(episode_id, result.record)
+                    results[pass_name] = result
+
+                zero_result = results["untouched"]
+                one_result = results["oracle"]
+                reward_names, warnings, task_failures = _validation_notices(
+                    zero_result.verdict,
+                    one_result.verdict,
                 )
-            )
-            failures += 0 if passed else 1
-            mark = "WARN" if warnings else ("ok  " if passed else "FAIL")
-            typer.echo(
-                f"{mark}  {spec.label}: untouched={_validation_outcome(zero_result.verdict)}, "
-                f"oracle={_validation_outcome(one_result.verdict)}"
-            )
+                passed = not task_failures
+                observations.append(
+                    TaskValidationObservation(
+                        name=str(spec.name),
+                        variant=spec.variant,
+                        spec_hash=spec.spec_hash,
+                        untouched=_validation_attempt(zero_result, run_dir),
+                        oracle=_validation_attempt(one_result, run_dir),
+                        reward_names=reward_names,
+                        warnings=warnings,
+                        failures=task_failures,
+                        passed=passed,
+                    )
+                )
+                failures += 0 if passed else 1
+                mark = "WARN" if warnings else ("ok  " if passed else "FAIL")
+                typer.echo(
+                    f"{mark}  {spec.label}: untouched={_validation_outcome(zero_result.verdict)}, "
+                    f"oracle={_validation_outcome(one_result.verdict)}"
+                )
+        finally:
+            ledger.close()
+
+        framework = framework_provenance()
+        observation = ValidationObservation(
+            run_id=run_id,
+            engine=ValidationEngine(version=framework.version, commit=framework.commit),
+            tasks=tuple(observations),
+        )
+        atomic_write_json(run_dir / "validation.json", observation.model_dump(mode="json"))
+        typer.echo(f"validation run: {run_dir}")
+        return 0 if failures == 0 else EXIT_SOME_FAILED
     finally:
-        ledger.close()
-
-    framework = framework_provenance()
-    observation = ValidationObservation(
-        run_id=run_id,
-        engine=ValidationEngine(version=framework.version, commit=framework.commit),
-        tasks=tuple(observations),
-    )
-    atomic_write_json(run_dir / "validation.json", observation.model_dump(mode="json"))
-    typer.echo(f"validation run: {run_dir}")
-    return 0 if failures == 0 else EXIT_SOME_FAILED
+        if gateway is not None:
+            await gateway.stop()
 
 
 async def _prepare_only(reference: str, settings: RunConfig) -> int:
@@ -796,6 +815,19 @@ async def _prepare_only(reference: str, settings: RunConfig) -> int:
             suffix = " ".join(value for value in (step.identity, step.detail) if value is not None)
             typer.echo(f"  {step.name:<20} {step.outcome:<8} {suffix}".rstrip())
     return 0
+
+
+async def _judge_gateway(settings: RunConfig) -> Gateway | None:
+    """A Gateway for Judge sessions when no agent needs one, as for oracle runs.
+
+    Judges always reach their endpoint through the Gateway, so their keys stay on the
+    Host; a Gateway without an agent upstream serves only their sessions.
+    """
+    if settings.verification.llm is None and settings.verification.agent is None:
+        return None
+    gateway = Gateway(host=_gateway_host())
+    await gateway.start()
+    return gateway
 
 
 def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
