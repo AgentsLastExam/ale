@@ -506,7 +506,7 @@ try:
         for name in included:
             path = os.path.join(root, name)
             try:
-                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                fd = os.open(path, os.O_PATH)
             except OSError as exc:
                 if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
                     continue
@@ -517,8 +517,16 @@ try:
                     continue
                 destination = os.path.join(stage, name)
                 os.makedirs(os.path.dirname(destination), exist_ok=True)
-                with os.fdopen(fd, 'rb', closefd=False) as src, open(destination, 'xb') as dst:
-                    shutil.copyfileobj(src, dst)
+                # Pin the checked inode before opening it for reading. Opening
+                # a socket directly can fail, while a FIFO could block; O_PATH
+                # lets us skip both without a type-check/open race.
+                read_fd = os.open('/proc/self/fd/' + str(fd), os.O_RDONLY | os.O_NONBLOCK)
+                try:
+                    with os.fdopen(read_fd, 'rb', closefd=False) as src:
+                        with open(destination, 'xb') as dst:
+                            shutil.copyfileobj(src, dst)
+                finally:
+                    os.close(read_fd)
                 os.chmod(destination, stat.S_IMODE(info.st_mode))
             finally:
                 os.close(fd)

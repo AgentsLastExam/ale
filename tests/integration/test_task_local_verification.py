@@ -342,7 +342,7 @@ async def test_selected_files_restore_link_contents_without_unrelated_links(tmp_
     manifest = task / "task.yaml"
     manifest.write_text(
         manifest.read_text()
-        + "artifact_include_files: [result.txt, absent.txt, sub/missing.txt, pipe]\n"
+        + "artifact_include_files: [result.txt, absent.txt, sub/missing.txt, pipe, socket]\n"
         + "verify:\n  environment_mode: separate\n"
         + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
     )
@@ -353,6 +353,8 @@ async def test_selected_files_restore_link_contents_without_unrelated_links(tmp_
         "ln -s /etc/passwd /home/user/output/unrelated\n"
         "ln -s /missing /home/user/output/sub\n"
         "mkfifo /home/user/output/pipe\n"
+        "python3 -c 'import socket; s = socket.socket(socket.AF_UNIX); "
+        's.bind("/home/user/output/socket"); s.close()\'\n'
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
@@ -362,7 +364,13 @@ async def test_selected_files_restore_link_contents_without_unrelated_links(tmp_
     assert not (root / "output/result.txt").is_symlink()
     assert sorted(p.name for p in (root / "output").iterdir()) == ["result.txt"]
     entry = json.loads((root / "snapshot.json").read_text())["entries"][0]
-    assert entry["include_files"] == ["result.txt", "absent.txt", "sub/missing.txt", "pipe"]
+    assert entry["include_files"] == [
+        "result.txt",
+        "absent.txt",
+        "sub/missing.txt",
+        "pipe",
+        "socket",
+    ]
 
 
 @pytest.mark.asyncio
