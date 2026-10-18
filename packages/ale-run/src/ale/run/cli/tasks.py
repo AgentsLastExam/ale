@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import math
 import os
 import uuid
 from pathlib import Path
@@ -852,7 +853,13 @@ def _reused_result(
 
 
 def _is_full_reward_map(rewards: dict[str, float] | None) -> bool:
-    return bool(rewards) and all(value == 1.0 for value in rewards.values())
+    # Numerical reward formulas can fall one or two floating-point ULPs short
+    # of their mathematical maximum. Preserve the score; tolerate only that
+    # rounding in the validation decision.
+    return bool(rewards) and all(
+        0.0 <= value <= 1.0 and math.isclose(value, 1.0, rel_tol=0.0, abs_tol=1e-15)
+        for value in rewards.values()
+    )
 
 
 def _is_zero_reward_map(rewards: dict[str, float] | None) -> bool:
@@ -894,7 +901,7 @@ def _validation_notices(
         failures.append(
             ValidationNotice(
                 code="oracle_not_full",
-                message=f"oracle rewards must all be one, got {oracle.rewards}",
+                message=f"oracle rewards must all be within 1e-15 of one, got {oracle.rewards}",
             )
         )
 

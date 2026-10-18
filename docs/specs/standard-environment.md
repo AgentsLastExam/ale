@@ -175,10 +175,11 @@ is still allowed when the retry configuration is nonzero.
 
 - untouched must complete with a non-empty all-zero reward map;
 - oracle must complete with the same reward names;
-- every oracle reward must equal one;
+- every oracle reward must be between zero and one and within `1e-15` of one;
 - setup, image, resource, artifact, verifier, Judge, timeout, and infrastructure failures
   fail validation rather than becoming scores.
 
+The tolerance applies only to validation; recorded rewards are never rounded or changed.
 Validation tests Task feasibility and verifier behavior. It is separate from ordinary
 run admission and from endpoint availability checks. The persisted `validation.json`
 contract is [schema version 1](schemas/validation-observation-v1.json).
