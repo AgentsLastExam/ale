@@ -74,11 +74,10 @@ class Handler:
     # --- introspection ------------------------------------------------------
 
     def op_health(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
-        from gui import available, has_desktop
+        from gui import has_desktop
 
         operating_system = "windows" if os.name == "nt" else "linux"
         agent_user = os.environ.get("ALE_AGENT_USER") or _current_user()
-        desktop = has_desktop()
         return ok(
             req_id,
             proto=PROTOCOL_VERSION,
@@ -88,8 +87,7 @@ class Handler:
             user=_current_user(),
             agent_user=agent_user,
             agent_home=os.environ.get("ALE_AGENT_HOME") or _home_of(agent_user),
-            gui=desktop,
-            gui_ready=available() if desktop else False,
+            gui=has_desktop(),
         )
 
     # --- execution ----------------------------------------------------------

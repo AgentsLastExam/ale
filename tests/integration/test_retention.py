@@ -175,8 +175,6 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         )
     stale = task_path / "verify/stale.txt"
     stale.write_text("must not survive a verifier revision\n")
-    dockerfile = task_path / "image/Dockerfile"
-    dockerfile.write_text(dockerfile.read_text() + "\nLABEL ale.gui=false\n")
     registry = provider_registry(DockerProvider())
     task = load_tasks(task_path)[0]
     settings = RunConfig()

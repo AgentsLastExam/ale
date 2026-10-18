@@ -101,7 +101,7 @@ async def test_local_vm_materialization_reuse_and_late_layer_invalidation(
 ) -> None:
     task_path = write_repo(tmp_path / "repo", image={"kind": "vm"})
     dockerfile = task_path / "image" / "Dockerfile"
-    dockerfile.write_text(f"FROM {VM_BASE}\nRUN printf first > /etc/ale/task-layer\n")
+    dockerfile.write_text(f"FROM {VM_BASE}\nRUN printf first > /etc/task-layer\n")
     registry = ProviderRegistry(RunConfig())
 
     first, second = await asyncio.gather(
@@ -124,7 +124,7 @@ async def test_local_vm_materialization_reuse_and_late_layer_invalidation(
     verifier.write_text(verifier.read_text() + "\n# unrelated edit\n")
     assert await prepare_task_image(load_tasks(task_path)[0], registry) == first
 
-    dockerfile.write_text(f"FROM {VM_BASE}\nRUN printf second > /etc/ale/task-layer\n")
+    dockerfile.write_text(f"FROM {VM_BASE}\nRUN printf second > /etc/task-layer\n")
     changed = await prepare_task_image(load_tasks(task_path)[0], registry)
     assert changed.oci_identity != first.oci_identity
     assert changed.prepared_identity != first.prepared_identity
@@ -138,7 +138,8 @@ async def test_failed_local_vm_build_leaves_no_partial_disk(
     docker_buildx: None,
 ) -> None:
     task_path = write_repo(tmp_path / "repo", image={"kind": "vm"})
-    (task_path / "image" / "Dockerfile").write_text("FROM ubuntu:24.04\n")
+    # It has the agent account, so the framework layer succeeds and materialization fails.
+    (task_path / "image" / "Dockerfile").write_text("FROM ubuntu:24.04\nRUN useradd -m user\n")
     with pytest.raises(ProviderStartError, match="no initramfs"):
         await prepare_task_image(
             load_tasks(task_path)[0],

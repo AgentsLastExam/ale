@@ -70,13 +70,19 @@ async def test_the_layer_is_built_on_the_task_image(
     assert await with_framework("task", user="app", sudo=True, vm=True) == layered
 
 
-def test_a_desktop_is_recognized_by_its_programs(
+def test_a_desktop_is_decided_by_the_images_own_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(gui, "_PROGRAM_DIRS", (str(tmp_path),))
-    assert not gui.has_desktop()
-    (tmp_path / "Xvnc").write_text("")
-    assert gui.has_desktop()
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    manager = tmp_path / "display-manager.service"
+    monkeypatch.setattr(gui, "_DISPLAY_MANAGER", str(manager))
+    assert not gui.has_desktop()  # e.g. an image that only ships Xvfb as a tool
+    monkeypatch.setenv("DISPLAY", ":1")
+    assert gui.has_desktop()  # a container image that points its processes at a display
+    monkeypatch.delenv("DISPLAY")
+    manager.symlink_to("/lib/systemd/system/gdm3.service")
+    assert gui.has_desktop()  # a VM whose systemd enables a display manager
 
 
 def test_a_failed_call_starts_the_driver_once_and_retries(monkeypatch: pytest.MonkeyPatch) -> None:

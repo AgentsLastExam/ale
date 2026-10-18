@@ -113,7 +113,7 @@ async def test_a_local_task_is_refused_for_reporting(
 
     assert result.lock is not None
     problems = result.lock.missing_for_report()
-    assert any("local path" in problem for problem in problems)
+    assert any("not in a git repository" in problem for problem in problems)
 
 
 @pytest.mark.asyncio

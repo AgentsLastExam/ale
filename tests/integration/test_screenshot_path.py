@@ -19,7 +19,6 @@ PROBE = """
 import sys
 sys.path.insert(0, "/opt/ale/guestd")
 import gui
-from tests.support import CONTAINER_BASE
 png = gui.capture_screen()
 print(gui._binary(), len(png), png.startswith(bytes([137, 80, 78, 71])))
 """

@@ -146,9 +146,8 @@ async def test_failed_episode_retries_in_a_new_sandbox_and_preserves_records(
     task_root = write_repo(tmp_path / "repo")
     dockerfile = task_root / "image/Dockerfile"
     # This lifecycle check needs a shell, not the base image's desktop services.
-    dockerfile.write_text(
-        dockerfile.read_text() + '\nLABEL ale.gui="false"\nCMD ["sleep", "infinity"]\n'
-    )
+    # An empty DISPLAY is how an image says it shows no desktop.
+    dockerfile.write_text(dockerfile.read_text() + '\nENV DISPLAY=\nCMD ["sleep", "infinity"]\n')
     task = load_tasks(task_root)[0]
     harness = FailsOnceOracle()
     providers = provider_registry(DockerProvider())

@@ -26,6 +26,17 @@ from tests.support import CONTAINER_BASE, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
+
+@pytest.fixture
+def framework_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fake image identities are not Docker images; the layer is tested on real ones."""
+
+    async def layer(image: str, *, user: str, sudo: bool, vm: bool = False) -> str:
+        return image if image.startswith("sha256:") else DIGEST
+
+    monkeypatch.setattr("ale.run.task_images.with_framework", layer)
+
+
 DIGEST = "sha256:" + "d" * 64
 
 
@@ -124,7 +135,7 @@ async def test_separate_verifier_reuses_solver_prepared_kind(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", tuple(ImageKind))
 async def test_external_separate_verifier_uses_matching_provider(
-    tmp_path: Path, kind: ImageKind
+    tmp_path: Path, kind: ImageKind, framework_layer: None
 ) -> None:
     task = load_tasks(scaffold_task(tmp_path / f"external-{kind}"))[0]
     task.spec = task.spec.model_copy(
@@ -153,7 +164,7 @@ async def test_external_separate_verifier_uses_matching_provider(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", tuple(ImageKind))
 async def test_local_separate_verifier_builds_declared_kind(
-    tmp_path: Path, kind: ImageKind, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, kind: ImageKind, monkeypatch: pytest.MonkeyPatch, framework_layer: None
 ) -> None:
     task = load_tasks(scaffold_task(tmp_path / f"local-{kind}"))[0]
     (task.folder.root / "verify/Dockerfile").write_text("FROM fixture\n")

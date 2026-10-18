@@ -26,10 +26,15 @@ of the Task's own build or `image.ref` (the framework layer):
   with the image's package manager when the image lacks it.
 
 There are no image labels to declare. Whether a sandbox has a desktop is decided from the
-programs the image ships (an X server, Wayland compositor or display manager): when it has
-one, the Provider waits until a screenshot succeeds, and guestd starts Cua Driver inside
-the agent's desktop session; a headless image skips both. A VM disk given directly as a
-qcow2 `ref` is not prepared by ALE and must carry a current guestd itself.
+image's own configuration before anything starts: a VM has one when its systemd enables a
+display manager (`display-manager.service`), and a container has one when its image sets
+`DISPLAY` or `WAYLAND_DISPLAY`, which is how a desktop image tells its processes where to
+draw. An image that ships X only as a tool, such as Xvfb for a headless browser, sets
+neither and is headless; a desktop base can be made headless with `ENV DISPLAY=`. With a
+desktop, the Provider waits until a screenshot succeeds and fails the sandbox if the
+desktop never becomes ready; guestd starts Cua Driver inside the agent's desktop session
+once its window manager or shell runs. A VM disk given directly as a qcow2 `ref` is not
+prepared by ALE and must carry a current guestd itself.
 
 ## ALE base images
 
