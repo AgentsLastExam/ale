@@ -258,6 +258,13 @@ content. A Transport Trace proves routing and accounting; it is not a content po
 provenance, so a change is *detectable*. Nothing verifies that its base or authored
 Dockerfile was benign to begin with.
 
+**Processes the agent leaves running.** ALE does not stop processes the agent started,
+because a Task may ask the agent to deploy a service that verification then checks. In
+shared verification such a process keeps running while verification has open egress for
+its Judges, so it can still change the Sandbox before or during scoring. A Task that needs a
+strict boundary uses separate verification, which restores only the declared artifacts into
+a fresh Sandbox.
+
 **Resource exhaustion by a co-tenant.** CPU, memory, writable storage, and ALE-managed
 physical GPUs are admitted per sandbox or rejected. Network bandwidth and resources
 consumed by processes outside ALE are not reserved; concurrent workloads can still starve
