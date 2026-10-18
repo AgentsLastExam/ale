@@ -79,6 +79,7 @@ def test_image_spec_is_explicit_strict_and_nonblank() -> None:
 def test_task_spec_hash_tracks_rendered_semantics() -> None:
     assert make_spec().spec_hash == make_spec().spec_hash
     assert make_spec().spec_hash != make_spec(instruction="different").spec_hash
+    assert make_spec().spec_hash != make_spec(verify={"oracle_tolerance": 0.0002}).spec_hash
     hard = make_spec(variant="hard", params={"n": 10})
     assert hard.label == "demo-hello@hard"
     assert hard.spec_hash != make_spec(params={"n": 3}).spec_hash
@@ -224,6 +225,8 @@ def test_failed_verification_is_not_a_zero_reward() -> None:
 
 def test_shared_and_separate_verification_contracts_are_strict() -> None:
     assert VerifySpec().environment_mode is VerificationMode.SHARED
+    assert VerifySpec().oracle_tolerance == 0.0
+    assert VerifySpec(oracle_tolerance=0.0002).oracle_tolerance == 0.0002
     resources = VerifierResources(cpus=1, memory_mb=512, storage_mb=None, gpus=0)
     separate = VerifySpec(environment_mode="separate", resources=resources)
     assert separate.resources == resources
@@ -257,6 +260,12 @@ def test_shared_and_separate_verification_contracts_are_strict() -> None:
                 "resources": resources.model_dump(),
             }
         )
+
+
+@pytest.mark.parametrize("tolerance", [-0.001, 0.011, float("nan"), float("inf")])
+def test_oracle_tolerance_must_be_finite_and_small(tolerance: float) -> None:
+    with pytest.raises(ValidationError):
+        VerifySpec(oracle_tolerance=tolerance)
 
 
 @pytest.mark.parametrize(

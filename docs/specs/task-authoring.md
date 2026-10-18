@@ -98,6 +98,7 @@ params:                             # optional instruction template values
   count: 3                          # instruction.md may reference this as ${count}
 
 verify:                             # optional; shared verification is the default
+  oracle_tolerance: 0.0002          # optional absolute tolerance from 1, at most 0.01
   environment_mode: separate        # shared | separate
   image:                            # optional separate-verifier image
     kind: container                 # container | vm

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import math
 import os
 import uuid
 from pathlib import Path
@@ -746,6 +747,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                 reward_names, warnings, task_failures = _validation_notices(
                     zero_result.verdict,
                     one_result.verdict,
+                    oracle_tolerance=spec.verify.oracle_tolerance,
                 )
                 passed = not task_failures
                 observations.append(
@@ -762,7 +764,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                     )
                 )
                 failures += 0 if passed else 1
-                mark = "WARN" if warnings else ("ok  " if passed else "FAIL")
+                mark = "FAIL" if not passed else ("WARN" if warnings else "ok  ")
                 typer.echo(
                     f"{mark}  {spec.label}: untouched={_validation_outcome(zero_result.verdict)}, "
                     f"oracle={_validation_outcome(one_result.verdict)}"
@@ -925,8 +927,10 @@ def _reused_result(
     )
 
 
-def _is_full_reward_map(rewards: dict[str, float] | None) -> bool:
-    return bool(rewards) and all(value == 1.0 for value in rewards.values())
+def _is_full_reward_map(rewards: dict[str, float] | None, tolerance: float = 0.0) -> bool:
+    return bool(rewards) and all(
+        math.isclose(value, 1.0, rel_tol=0.0, abs_tol=tolerance) for value in rewards.values()
+    )
 
 
 def _is_zero_reward_map(rewards: dict[str, float] | None) -> bool:
@@ -936,12 +940,22 @@ def _is_zero_reward_map(rewards: dict[str, float] | None) -> bool:
 def _validation_notices(
     untouched: Verdict,
     oracle: Verdict,
+    *,
+    oracle_tolerance: float = 0.0,
 ) -> tuple[
     tuple[str, ...],
     tuple[ValidationNotice, ...],
     tuple[ValidationNotice, ...],
 ]:
     failures: list[ValidationNotice] = []
+    warnings: list[ValidationNotice] = []
+    if oracle_tolerance:
+        warnings.append(
+            ValidationNotice(
+                code="oracle_tolerance",
+                message=f"oracle rewards use an absolute tolerance of {oracle_tolerance} from one",
+            )
+        )
     if untouched.status is not Status.COMPLETED:
         failures.append(
             ValidationNotice(
@@ -964,11 +978,14 @@ def _validation_notices(
                 message=f"oracle episode ended with {oracle.status.value}",
             )
         )
-    elif not _is_full_reward_map(oracle.rewards):
+    elif not _is_full_reward_map(oracle.rewards, tolerance=oracle_tolerance):
         failures.append(
             ValidationNotice(
                 code="oracle_not_full",
-                message=f"oracle rewards must all be one, got {oracle.rewards}",
+                message=(
+                    f"oracle rewards must all be within {oracle_tolerance} of one, "
+                    f"got {oracle.rewards}"
+                ),
             )
         )
 
@@ -989,7 +1006,7 @@ def _validation_notices(
             )
         )
 
-    return untouched_names or oracle_names, (), tuple(failures)
+    return untouched_names or oracle_names, tuple(warnings), tuple(failures)
 
 
 def _validation_attempt(result: EpisodeResult, run_dir: Path) -> ValidationAttempt:

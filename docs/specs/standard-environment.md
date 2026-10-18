@@ -129,13 +129,20 @@ is still allowed when the retry configuration is nonzero.
 
 - untouched must complete with a non-empty all-zero reward map;
 - oracle must complete with the same reward names;
-- every oracle reward must equal one;
+- every oracle reward must equal one, unless the Task explicitly declares
+  `verify.oracle_tolerance`, in which case each reward must be within that absolute distance
+  of one and validation records a warning; the finite tolerance is capped at 0.01;
 - setup, image, resource, artifact, verifier, Judge, timeout, and infrastructure failures
   fail validation rather than becoming scores.
 
 Validation tests Task feasibility and verifier behavior. It is separate from ordinary
 run admission and from endpoint availability checks. The persisted `validation.json`
 contract is [schema version 1](schemas/validation-observation-v1.json).
+
+The opt-in tolerance accommodates small rendering or numerical differences for Tasks whose
+reference outcome does not reproducibly score exactly one. It changes only validation, never
+the raw rewards; Task authors must still independently establish that the oracle is a correct,
+complete solution. The untouched check remains exact.
 
 Validation honors `episode_retries` independently for untouched and oracle episodes.
 Every retry starts the complete protocol in fresh Sandboxes. Only each episode's last

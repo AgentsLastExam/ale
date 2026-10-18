@@ -264,6 +264,9 @@ class VerifySpec(BaseModel):
     environment_mode: VerificationMode = VerificationMode.SHARED
     image: ImageSpec | None = None
     resources: VerifierResources | None = None
+    oracle_tolerance: float = Field(default=0.0, ge=0.0, le=0.01, allow_inf_nan=False)
+
+    # --- validation ---
 
     @model_validator(mode="after")
     def _valid_topology(self) -> Self:

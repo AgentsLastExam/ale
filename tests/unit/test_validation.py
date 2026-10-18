@@ -1,4 +1,4 @@
-"""The task-admission rule has one exact reward policy."""
+"""Validation requires a complete reference outcome and an untouched zero."""
 
 from __future__ import annotations
 
@@ -237,6 +237,43 @@ def test_partial_oracle_is_a_hard_failure() -> None:
     assert names == ("correctness",)
     assert warnings == ()
     assert [notice.code for notice in failures] == ["oracle_not_full"]
+
+    _, _, failures = _validation_notices(
+        Verdict.completed({"correctness": 0.0}),
+        Verdict.completed({"correctness": 0.9998492667446177}),
+    )
+    assert [notice.code for notice in failures] == ["oracle_not_full"]
+
+
+@pytest.mark.parametrize(
+    ("oracle_score", "expected_failure"),
+    [(0.9998492667446177, False), (1.0, False), (0.9997, True), (0.8, True)],
+)
+def test_declared_oracle_tolerance_checks_raw_rewards(
+    oracle_score: float, expected_failure: bool
+) -> None:
+    _, warnings, failures = _validation_notices(
+        Verdict.completed({"overall": 0.0, "score": 0.0}),
+        Verdict.completed({"overall": oracle_score, "score": oracle_score}),
+        oracle_tolerance=0.0002,
+    )
+    assert [notice.code for notice in warnings] == ["oracle_tolerance"]
+    assert bool(failures) is expected_failure
+
+
+def test_tolerance_does_not_hide_untouched_name_or_infrastructure_failures() -> None:
+    _, _, failures = _validation_notices(
+        Verdict.completed({"one": 0.001}),
+        Verdict.completed({"other": 0.9999}),
+        oracle_tolerance=0.0002,
+    )
+    assert {notice.code for notice in failures} == {"untouched_nonzero", "reward_name_mismatch"}
+    _, _, failures = _validation_notices(
+        Verdict.completed({"one": 0.0}),
+        Verdict.failed(Status.ENV_ERROR, RuntimeError("judge unavailable"), phase="verify"),
+        oracle_tolerance=0.0002,
+    )
+    assert [notice.code for notice in failures] == ["oracle_not_completed"]
 
 
 def test_nonzero_untouched_and_name_mismatch_are_hard_failures() -> None:
