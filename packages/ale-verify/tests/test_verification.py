@@ -106,6 +106,165 @@ def test_verification_has_no_stage_asset_resolver() -> None:
     assert not hasattr(Verification, "asset_path")
 
 
+def test_structured_judge_returns_one_response_and_records_the_invocation(
+    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from ale_verify import _llm
+
+    record_path, verdict_path = verify_env
+    config = Path(os.environ["ALE_VERIFY_CONFIG_PATH"])
+    settings = json.loads(config.read_text())
+    settings["llm"]["model"] = "gpt-5-mini"
+    config.write_text(json.dumps(settings))
+    image = tmp_path / "image.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nexample")
+    calls = []
+
+    def request(protocol, config, prompt, secret, evidence):  # type: ignore[no-untyped-def]
+        calls.append((prompt, evidence))
+        return {"id": "response-1", "output_text": '{"answers":{"Q1":"B","Q2":"A"}}'}
+
+    monkeypatch.setattr(_llm, "_request", request)
+    verification = Verification()
+    answers = verification.judge_json(
+        "document_answers",
+        prompt="Return answers as JSON.",
+        files=[str(image)],
+        score=lambda answers: CheckResult(1, raw_value=answers),
+    )
+    assert answers == {"answers": {"Q1": "B", "Q2": "A"}}
+    assert len(calls) == 1
+    assert calls[0][0].startswith("Return answers as JSON.")
+    assert calls[0][1][0][1].location == str(image)
+    verification.write()
+
+    record = VerificationRecord.from_json(record_path.read_bytes())
+    assert record.judge_invocations[0].criterion_name == "document_answers"
+    assert record.judge_invocations[0].attempts[0].request_id == "response-1"
+    assert record.criteria[0].judge_invocation_id == record.judge_invocations[0].id
+    assert record.criteria[0].raw_value == answers
+    assert record.criteria[0].evidence[0].location == str(image)
+    assert json.loads(verdict_path.read_text())["rewards"]["overall"] == 1
+    assert "secret" not in record_path.read_text()
+
+
+def test_structured_judge_repairs_invalid_json_and_rejects_credentials(
+    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path]
+) -> None:
+    from ale_verify import _llm
+
+    record_path, _ = verify_env
+    config = Path(os.environ["ALE_VERIFY_CONFIG_PATH"])
+    settings = json.loads(config.read_text())
+    settings["llm"]["model"] = "gpt-5-mini"
+    config.write_text(json.dumps(settings))
+    responses = iter(["not json", '{"message":"secret"}', '{"answers":{"Q1":"B"}}'])
+    prompts = []
+
+    def request(protocol, config, prompt, secret, evidence):  # type: ignore[no-untyped-def]
+        prompts.append(prompt)
+        return {"output_text": next(responses)}
+
+    monkeypatch.setattr(_llm, "_request", request)
+    verification = Verification()
+    result = verification.judge_json(
+        "answers", prompt="Original prompt", score=lambda _: CheckResult(1)
+    )
+    assert result == {"answers": {"Q1": "B"}}
+    assert prompts[0] == "Original prompt"
+    assert all("previous response was rejected" in prompt for prompt in prompts[1:])
+    verification.write()
+    record = VerificationRecord.from_json(record_path.read_bytes())
+    assert [item.outcome for item in record.judge_invocations[0].attempts] == [
+        "invalid",
+        "invalid",
+        "completed",
+    ]
+    assert "secret" not in record_path.read_text()
+
+
+def test_structured_judge_failure_is_not_a_score(
+    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path]
+) -> None:
+    from ale_verify import VerificationError, _llm
+
+    record_path, _ = verify_env
+    config = Path(os.environ["ALE_VERIFY_CONFIG_PATH"])
+    settings = json.loads(config.read_text())
+    settings["llm"]["model"] = "gpt-5-mini"
+    config.write_text(json.dumps(settings))
+    monkeypatch.setattr(_llm, "_request", lambda *_args: {"output_text": "[]"})
+    verification = Verification()
+    with pytest.raises(VerificationError, match="judge infrastructure"):
+        verification.judge_json(
+            "answers", prompt="Return an object", score=lambda _: CheckResult(0)
+        )
+    with pytest.raises(RuntimeError, match="terminal"):
+        verification.check("correctness", CheckResult(0))
+    record = VerificationRecord.from_json(record_path.read_bytes())
+    assert record.status == "failed"
+    assert record.judge_invocations[0].status == "failed"
+
+
+def test_structured_judge_scores_missing_solver_evidence_without_a_model_call(
+    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from ale_verify import _llm
+
+    monkeypatch.setattr(_llm, "_request", lambda *_args: pytest.fail("Judge was contacted"))
+    verification = Verification()
+    result = verification.judge_json(
+        "answers",
+        prompt="Return an object",
+        files=[str(tmp_path / "missing")],
+        score=lambda _: pytest.fail("No response was returned"),
+    )
+    assert result == {}
+    verification.write()
+    record = VerificationRecord.from_json(verify_env[0].read_bytes())
+    assert record.rewards["answers"] == 0
+    assert not record.judge_invocations
+
+
+def test_structured_judge_preserves_invocation_if_task_scoring_fails(
+    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path]
+) -> None:
+    from ale_verify import VerificationError, _llm
+
+    config = Path(os.environ["ALE_VERIFY_CONFIG_PATH"])
+    settings = json.loads(config.read_text())
+    settings["llm"]["model"] = "gpt-5-mini"
+    config.write_text(json.dumps(settings))
+    monkeypatch.setattr(_llm, "_request", lambda *_args: {"output_text": '{"answers":{}}'})
+    verification = Verification()
+    with pytest.raises(VerificationError, match="judge infrastructure"):
+        verification.judge_json(
+            "answers", prompt="Return an object", score=lambda data: data["missing"]
+        )
+    record = VerificationRecord.from_json(verify_env[0].read_bytes())
+    assert record.status == "failed"
+    assert record.judge_invocations[0].status == "completed"
+
+
+def test_structured_judge_redacts_credentials_from_scoring_errors(
+    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path]
+) -> None:
+    from ale_verify import VerificationError, _llm
+
+    config = Path(os.environ["ALE_VERIFY_CONFIG_PATH"])
+    settings = json.loads(config.read_text())
+    settings["llm"]["model"] = "gpt-5-mini"
+    config.write_text(json.dumps(settings))
+    monkeypatch.setattr(_llm, "_request", lambda *_args: {"output_text": "{}"})
+
+    def reject(_data: dict) -> CheckResult:
+        raise ValueError("failed with " + os.environ["JUDGE_KEY"])
+
+    with pytest.raises(VerificationError, match="REDACTED"):
+        Verification().judge_json("answers", prompt="Return an object", score=reject)
+    assert "secret" not in verify_env[0].read_text()
+
+
 def test_windows_skips_unsupported_directory_fsync(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

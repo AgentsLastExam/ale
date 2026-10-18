@@ -6,7 +6,7 @@ import math
 import os
 import uuid
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from . import _agents, _llm
@@ -17,6 +17,7 @@ from ._io import (
     JudgeError,
     VerificationError,
     atomic_json,
+    configured_secrets,
     endpoint_identity,
     evidence_text,
     inline_evidence,
@@ -252,6 +253,82 @@ class Verification:
         self._criteria[name] = criterion
         self._persist()
         return criterion.score
+
+    def judge_json(
+        self,
+        name: str,
+        *,
+        prompt: str,
+        score: Callable[[dict[str, Any]], CheckResult],
+        files: Sequence[str] = (),
+        reference: str | None = None,
+        weight: float = 1.0,
+    ) -> dict[str, Any]:
+        """Score one structured LLM response and return its task-owned fields."""
+        self._assert_mutable()
+        self._assert_criteria_open()
+        self._new_name(name)
+        if any(invocation.criterion_name == name for invocation in self._invocations):
+            raise ValueError(f"duplicate Judge name: {name}")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("Judge prompt must be non-empty")
+        if not callable(score):
+            raise TypeError("score must be callable")
+        weight = _weight(weight)
+        if any(not os.path.isabs(os.fspath(path)) for path in files):
+            raise ValueError("Judge evidence paths must be absolute")
+        try:
+            authored = [] if reference is None else [inline_evidence(reference, kind="reference")]
+        except EvidenceError as exc:
+            raise ValueError(f"Judge reference is invalid: {exc}") from exc
+        try:
+            evidence = [*_solver_evidence("llm", files), *authored]
+            if sum(item.size_bytes for _, item in evidence) > MAX_TOTAL_EVIDENCE_BYTES:
+                raise _Unavailable(f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total")
+        except _Unavailable as unavailable:
+            self._unavailable("llm", name, weight, str(unavailable))
+            return {}
+        invocation: JudgeInvocation | None = None
+        secrets: tuple[str, ...] = ()
+        try:
+            configs = load_config()
+            secrets = configured_secrets(configs)
+            config = configs.get("llm")
+            if config is None:
+                raise ConfigurationError("verification llm configuration is missing")
+            result, invocation = _llm.run_json(
+                invocation_id="judge-" + uuid.uuid4().hex,
+                name=name,
+                prompt=prompt,
+                evidence=tuple(evidence),
+                config=config,
+            )
+            if not isinstance(invocation, JudgeInvocation) or not isinstance(result, dict):
+                raise RuntimeError("Judge returned a malformed response")
+            scored = score(result)
+            if not isinstance(scored, CheckResult):
+                raise TypeError("score must return a CheckResult")
+        except Exception as exc:
+            failed_invocation = getattr(exc, "invocation", None)
+            if isinstance(failed_invocation, JudgeInvocation):
+                self._invocations.append(failed_invocation)
+            elif invocation is not None:
+                self._invocations.append(invocation)
+            return self._fail(f"judge infrastructure: {sanitize(exc, secrets)}")
+
+        self._invocations.append(invocation)
+        self._criteria[name] = CriterionResult(
+            name=name,
+            source="llm_judge",
+            score=scored.score,
+            weight=weight,
+            reasoning=scored.diagnostic or None,
+            raw_value=scored.raw_value,
+            evidence=tuple(reference for _, reference in evidence),
+            judge_invocation_id=invocation.id,
+        )
+        self._persist()
+        return result
 
     def aggregate(
         self,

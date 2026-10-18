@@ -129,11 +129,15 @@ def judged_task(root: Path) -> Path:
     return task
 
 
-async def run_judged_task(tmp_path: Path, provider, *, path: str) -> None:  # type: ignore[no-untyped-def]
+async def run_judged_task(tmp_path: Path, provider, *, path: str, structured: bool = False) -> None:  # type: ignore[no-untyped-def]
     """A Judge in the verifier reaches a Host endpoint through the Gateway, keyless."""
     secret = "sandbox-direct-secret"
     seen: list[str] = []
-    verdict = '{"choice":"yes","reasoning":"The answer is correct."}'
+    verdict = (
+        '{"answers":{"Q1":"B","Q2":"A"}}'
+        if structured
+        else '{"choice":"yes","reasoning":"The answer is correct."}'
+    )
 
     async def respond(request: web.Request) -> web.Response:
         seen.append(request.headers.get("x-api-key") or request.headers.get("authorization", ""))
@@ -168,7 +172,21 @@ async def run_judged_task(tmp_path: Path, provider, *, path: str) -> None:  # ty
     os.environ["JUDGE_KEY"] = secret
     gateway = Gateway()
     gateway_url = await gateway.start()
-    task = load_tasks(judged_task(tmp_path / "repo"))[0]
+    task_path = judged_task(tmp_path / "repo")
+    if structured:
+        (task_path / "verify" / "verify.py").write_text(
+            "import os\n"
+            "from ale_verify import CheckResult, Verification, checks\n"
+            "v = Verification()\n"
+            "v.check('credential_scope', "
+            "checks.text_equals('/home/user/output/setup-key', 'absent'))\n"
+            "v.check('key_withheld', CheckResult(0.0 if 'JUDGE_KEY' in os.environ else 1.0))\n"
+            "v.judge_json('correctness', prompt='Return answers as JSON.', "
+            "score=lambda data: CheckResult(float(data['answers'] == {'Q1': 'B', 'Q2': 'A'})), "
+            "files=['/home/user/output/answer.txt'])\n"
+            "v.write()\n"
+        )
+    task = load_tasks(task_path)[0]
     try:
         result = await run_episode(
             task,
@@ -233,3 +251,10 @@ async def test_chat_completions_judge_runs_through_the_gateway(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_anthropic_messages_judge_runs_through_the_gateway(tmp_path: Path) -> None:
     await run_judged_task(tmp_path, DockerProvider(), path="/v1/messages")
+
+
+@pytest.mark.needs_docker
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/v1/chat/completions", "/v1/messages"])
+async def test_structured_judge_runs_through_the_gateway(tmp_path: Path, path: str) -> None:
+    await run_judged_task(tmp_path, DockerProvider(), path=path, structured=True)

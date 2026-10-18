@@ -31,6 +31,9 @@ multimodal input; Agent Judge inspects files through its harness. Both receive i
 `reference` text. See the verification specification for evidence formats, limits, and
 failure behavior.
 
+For an LLM response whose multiple fields a Task scores deterministically, use
+`verification.judge_json(...)` with a function that returns a `CheckResult`.
+
 ```bash
 uv run pytest packages/ale-verify/tests
 ```

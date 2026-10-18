@@ -24,6 +24,8 @@ verification.write()
 
 - `check(name, CheckResult, weight=1.0)` adds a deterministic reward criterion.
 - `judge(kind, name, ..., weight=1.0)` adds an `llm` or `agent` reward criterion.
+- `judge_json(name, prompt=..., score=..., files=(), reference=None, weight=1.0)`
+  obtains an LLM Judge JSON object and passes it to a Task-owned scoring function.
 - `stat(name, value)` records a finite observation that is not a reward.
 - `aggregate(name, inputs=None, weights=None)` adds a reward equal to the mean of selected
   criteria. Stored criterion weights are used by default; explicit weights must match the
@@ -69,6 +71,23 @@ Task code owns the Judge kind, prompt, rubric, evidence paths, optional referenc
 solver trajectory, and invocation-local Agent Judge MCP servers. It does not select a model,
 reasoning effort, endpoint, credential, harness, or harness version. These are execution
 configuration supplied by the runtime, outside the Task and the `judge()` API.
+
+Some Tasks require one LLM response with several answers before applying a deterministic
+score, such as a document review with independent completeness and layout fields. For
+these, `judge_json` sends the Task's prompt through the same configured LLM Judge and
+returns a JSON object. The Task's `score` function validates its fields and returns a
+`CheckResult`; its score becomes the Judge criterion. The invocation, attempts and evidence
+are retained in the verification record. The response is limited to 64 KiB of finite JSON and must
+not contain the configured credential. When solver evidence is missing or unusable, no
+Judge is called, the criterion scores zero, and the method returns an empty object. A
+transport or JSON-format failure fails verification; it is never converted into a score.
+
+```python
+answers = verification.judge_json(
+    "correctness", prompt="Return a JSON object ...", score=score_answers
+)
+verification.write()
+```
 
 LLM Judge protocol is inferred from the endpoint and supports Anthropic Messages, OpenAI
 Chat Completions, and OpenAI Responses. Agent Judge supports the small package-owned
@@ -147,8 +166,9 @@ episode; outer episode retries do not repeat them.
 ### Judge preflight
 
 `ale run`, `ale validate` and `ale reverify` scan every selected Task's `verify/` Python for
-`.judge(...)` calls before preparing images or starting any agent. A literal kind selects
-that Judge; a kind computed at run time counts as both. Each Judge kind found must be
+`.judge(...)` and `.judge_json(...)` calls before preparing images or starting any agent.
+`judge_json` selects the LLM Judge; a literal `judge` kind selects that Judge, while a
+kind computed at run time counts as both. Each Judge kind found must be
 configured, and one tiny request through `ale_verify.probe_judge` must succeed with its
 endpoint, key and model (an LLM Judge also with its reasoning effort). Otherwise the command
 stops with the reason and nothing runs, so a configuration mistake cannot turn into a batch

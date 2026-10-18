@@ -12,7 +12,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,7 @@ from ._io import (
     sanitize,
 )
 from ._records import (
+    MAX_RAW_JSON_BYTES,
     EvidenceReference,
     JudgeAttempt,
     JudgeInvocation,
@@ -92,13 +93,64 @@ def run(
     evidence: Sequence[tuple[str | bytes, EvidenceReference]],
     config: Mapping[str, str],
 ) -> tuple[str, str, JudgeInvocation]:
+    result, invocation = _run_response(
+        invocation_id=invocation_id,
+        name=name,
+        rendered=_prompt(name, prompt, rubric, evidence),
+        rubric_hash=digest(_rubric_json(rubric)),
+        evidence=evidence,
+        config=config,
+        parse=lambda text: _verdict(text, rubric),
+        repair_prompt=lambda rendered, error: _repair_prompt(rendered, rubric, error),
+        reject_secret=False,
+    )
+    choice, reasoning = result
+    return choice, sanitize(reasoning, (os.environ.get(config["api_key_env"], ""),)), invocation
+
+
+def run_json(
+    *,
+    invocation_id: str,
+    name: str,
+    prompt: str,
+    evidence: Sequence[tuple[str | bytes, EvidenceReference]],
+    config: Mapping[str, str],
+) -> tuple[dict[str, Any], JudgeInvocation]:
+    """Request one task-defined JSON object through the normal LLM Judge transport."""
+    rendered = _json_prompt(prompt, evidence)
+    return _run_response(
+        invocation_id=invocation_id,
+        name=name,
+        rendered=rendered,
+        rubric_hash=digest('{"format":"json_object"}'),
+        evidence=evidence,
+        config=config,
+        parse=_json_object,
+        repair_prompt=lambda original, error: (
+            f"{original}\n\nYour previous response was rejected: {error}\n"
+            "Return one valid JSON object, with no Markdown."
+        ),
+        reject_secret=True,
+    )
+
+
+def _run_response(
+    *,
+    invocation_id: str,
+    name: str,
+    rendered: str,
+    rubric_hash: str,
+    evidence: Sequence[tuple[str | bytes, EvidenceReference]],
+    config: Mapping[str, str],
+    parse: Callable[[str], Any],
+    repair_prompt: Callable[[str, str], str],
+    reject_secret: bool,
+) -> tuple[Any, JudgeInvocation]:
     protocol = resolve_protocol(config)
     effort = config["reasoning_effort"]
     if effort not in _EFFORTS:
         raise ValueError(f"reasoning_effort {effort!r} is unsupported")
-    rendered = _prompt(name, prompt, rubric, evidence)
     prompt_hash = digest(rendered)
-    rubric_hash = digest(_rubric_json(rubric))
     endpoint = endpoint_identity(config["base_url"])
     secret = os.environ.get(config["api_key_env"], "")
     if not secret:
@@ -122,7 +174,7 @@ def run(
     while True:
         index += 1
         attempt_mode = "initial" if index == 1 else "schema_repair" if repair else "retry"
-        request_prompt = _repair_prompt(rendered, rubric, last_error) if repair else rendered
+        request_prompt = repair_prompt(rendered, last_error) if repair else rendered
         started = _now()
         request_id = None
         usage = None
@@ -131,7 +183,9 @@ def run(
             request_id = _request_id(payload, secret)
             usage = _usage(payload)
             text = _response_text(protocol, payload)
-            choice, reasoning = _verdict(text, rubric)
+            result = parse(text)
+            if reject_secret and secret and _contains_secret(result, secret):
+                raise ValueError("Judge response contains a credential")
         except Exception as exc:
             last_error = sanitize(exc, (secret,))
             outcome = _outcome(exc)
@@ -179,8 +233,7 @@ def run(
             )
         )
         return (
-            choice,
-            sanitize(reasoning, (secret,)),
+            result,
             JudgeInvocation(
                 id=invocation_id,
                 kind="llm",
@@ -602,6 +655,53 @@ def _prompt(
             )
         )
     return "\n\n".join(sections)
+
+
+def _json_prompt(
+    prompt: str,
+    evidence: Sequence[tuple[str | bytes, EvidenceReference]],
+) -> str:
+    sections = [prompt]
+    if evidence:
+        sections.append(
+            "Evidence:\n"
+            + "\n\n".join(
+                f"{reference.kind.upper()} {reference.location or ''} ({reference.sha256})\n"
+                + (text if isinstance(text, str) else "Binary content is attached to this request.")
+                for text, reference in evidence
+            )
+        )
+    return "\n\n".join(sections)
+
+
+def _json_object(text: str) -> dict[str, Any]:
+    fenced = re.fullmatch(r"\s*```(?:json)?\s*(.*?)\s*```\s*", text, flags=re.S)
+    try:
+        loaded = json.loads(fenced.group(1) if fenced else text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"response is not valid JSON: {exc.msg}") from exc
+    if not isinstance(loaded, dict):
+        raise ValueError("response must be a JSON object")
+    try:
+        encoded = json.dumps(loaded, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("response must contain finite JSON values") from exc
+    if len(encoded) > MAX_RAW_JSON_BYTES:
+        raise ValueError(f"response exceeds {MAX_RAW_JSON_BYTES} bytes")
+    return loaded
+
+
+def _contains_secret(value: Any, secret: str) -> bool:
+    if isinstance(value, str):
+        return secret in value
+    if isinstance(value, dict):
+        return any(
+            _contains_secret(key, secret) or _contains_secret(item, secret)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_secret(item, secret) for item in value)
+    return False
 
 
 def _repair_prompt(

@@ -58,7 +58,8 @@ def judge_kinds(verify_dirs: Iterable[Path]) -> frozenset[str]:
     """The Judge kinds these verifiers call, from a syntax scan of their Python files.
 
     A ``.judge(...)`` call whose kind is not a string literal could be either kind and
-    counts as both. A file that does not parse is left for the verifier to report.
+    counts as both. ``.judge_json(...)`` uses the LLM Judge. A file that does not parse
+    is left for the verifier to report.
     """
     kinds: set[str] = set()
     for directory in verify_dirs:
@@ -71,8 +72,11 @@ def judge_kinds(verify_dirs: Iterable[Path]) -> frozenset[str]:
                 if not (
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "judge"
+                    and node.func.attr in {"judge", "judge_json"}
                 ):
+                    continue
+                if node.func.attr == "judge_json":
+                    kinds.add("llm")
                     continue
                 kind = node.args[0] if node.args else None
                 for keyword in node.keywords:

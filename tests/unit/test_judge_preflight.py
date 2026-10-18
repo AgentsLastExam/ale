@@ -45,6 +45,11 @@ def test_a_judge_kind_chosen_at_run_time_counts_as_both(tmp_path: Path) -> None:
     assert judge_kinds([dynamic]) == {"llm", "agent"}
 
 
+def test_structured_judge_requires_only_the_llm_judge(tmp_path: Path) -> None:
+    directory = verifier(tmp_path, 'v.judge_json("answers", prompt="p")\n')
+    assert judge_kinds([directory]) == {"llm"}
+
+
 @pytest.mark.asyncio
 async def test_preflight_probes_each_used_kind_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
