@@ -348,6 +348,7 @@ def _effective_spec(
         timeouts=PhaseTimeouts.model_validate(timeouts),
         artifacts=manifest.artifacts,
         artifact_excludes=manifest.artifact_excludes,
+        artifact_include_files=manifest.artifact_include_files,
         tools=manifest.tools,
         params=params,
         verify=manifest.verify,

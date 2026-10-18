@@ -144,6 +144,7 @@ def test_manifest_field_set_is_exact() -> None:
         "timeouts",
         "artifacts",
         "artifact_excludes",
+        "artifact_include_files",
         "tools",
         "params",
         "verify",
@@ -308,3 +309,37 @@ def test_artifact_excludes_require_linux_container_artifacts() -> None:
         TaskManifestV1.model_validate(values | {"image": {"kind": "vm"}})
     with pytest.raises(ValidationError):
         TaskManifestV1.model_validate(values | {"os": "windows", "artifacts": (r"C:\\output",)})
+
+
+@pytest.mark.parametrize(
+    "includes",
+    [("",), ("../x",), ("/x",), ("a//b",), ("a/./b",), ("a", "a/b"), ("a", "a")],
+)
+def test_invalid_artifact_include_files_are_rejected(includes: tuple[str, ...]) -> None:
+    with pytest.raises(ValidationError):
+        TaskManifestV1(
+            spec_type="core/v1",
+            name="demo",
+            image={"kind": "container"},
+            artifacts=("/output",),
+            artifact_include_files=includes,
+        )
+
+
+def test_artifact_include_files_require_linux_container_and_no_excludes() -> None:
+    values = {
+        "spec_type": "core/v1",
+        "name": "demo",
+        "image": {"kind": "container"},
+        "artifacts": ("/output",),
+        "artifact_include_files": ("a/file",),
+    }
+    assert TaskManifestV1.model_validate(values).artifact_include_files == ("a/file",)
+    for extra in (
+        {"artifacts": ()},
+        {"image": {"kind": "vm"}},
+        {"os": "windows", "artifacts": (r"C:\\output",)},
+        {"artifact_excludes": ("other",)},
+    ):
+        with pytest.raises(ValidationError):
+            TaskManifestV1.model_validate(values | extra)

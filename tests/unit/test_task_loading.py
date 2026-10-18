@@ -44,6 +44,13 @@ def test_copy_preserves_effective_spec_and_digests(tmp_path: Path) -> None:
     assert one.image_source_digest == two.image_source_digest
 
 
+def test_artifact_include_files_reaches_the_rendered_spec(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    manifest = task / "task.yaml"
+    manifest.write_text(manifest.read_text() + "artifact_include_files: [result.txt]\n")
+    assert load_tasks(task)[0].spec.artifact_include_files == ("result.txt",)
+
+
 def test_all_stage_asset_roots_are_excluded_from_task_identity(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     before = load_tasks(task)[0].task_digest

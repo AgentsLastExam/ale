@@ -700,7 +700,11 @@ class StandardEnvironment(Environment):
                 )
                 name = path_type(path).name or f"artifact-{index}"
                 await ctx.artifacts.collect(
-                    sandbox, path, name, excludes=ctx.spec.artifact_excludes
+                    sandbox,
+                    path,
+                    name,
+                    excludes=ctx.spec.artifact_excludes,
+                    includes=ctx.spec.artifact_include_files,
                 )
                 logger.info(
                     "artifact collected",

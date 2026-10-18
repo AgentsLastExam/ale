@@ -68,10 +68,10 @@ def _validate_artifact_paths(paths: tuple[str, ...], operating_system: Operating
                 raise ValueError(f"artifact paths overlap: {path} and {other}")
 
 
-def _validate_artifact_excludes(excludes: tuple[str, ...]) -> None:
-    if len(excludes) != len(set(excludes)):
-        raise ValueError("artifact excludes must be unique")
-    for value in excludes:
+def _validate_artifact_relative_paths(paths: tuple[str, ...], label: str) -> None:
+    if len(paths) != len(set(paths)):
+        raise ValueError(f"artifact {label} must be unique")
+    for value in paths:
         path = PurePosixPath(value)
         if (
             not value
@@ -80,28 +80,32 @@ def _validate_artifact_excludes(excludes: tuple[str, ...]) -> None:
             or "\\" in value
             or str(path) != value
         ):
-            raise ValueError(f"artifact exclude must be a normalized relative path: {value}")
-    paths = tuple(PurePosixPath(value) for value in excludes)
-    for index, path in enumerate(paths):
-        for other in paths[index + 1 :]:
+            raise ValueError(f"artifact {label} must be normalized relative paths: {value}")
+    parsed = tuple(PurePosixPath(value) for value in paths)
+    for index, path in enumerate(parsed):
+        for other in parsed[index + 1 :]:
             if path in other.parents or other in path.parents:
-                raise ValueError(f"artifact excludes overlap: {path} and {other}")
+                raise ValueError(f"artifact {label} overlap: {path} and {other}")
 
 
 def _validate_artifact_selection(
     paths: tuple[str, ...],
     excludes: tuple[str, ...],
+    includes: tuple[str, ...],
     operating_system: OperatingSystem,
     kind: ImageKind,
 ) -> None:
     _validate_artifact_paths(paths, operating_system)
-    _validate_artifact_excludes(excludes)
-    if excludes and not paths:
-        raise ValueError("artifact excludes require at least one artifact")
-    if excludes and (
+    _validate_artifact_relative_paths(excludes, "excludes")
+    _validate_artifact_relative_paths(includes, "include files")
+    if excludes and includes:
+        raise ValueError("artifact excludes and include files cannot be combined")
+    if (excludes or includes) and not paths:
+        raise ValueError("artifact selection requires at least one artifact")
+    if (excludes or includes) and (
         operating_system is not OperatingSystem.LINUX or kind is not ImageKind.CONTAINER
     ):
-        raise ValueError("artifact excludes require a Linux container")
+        raise ValueError("artifact selection requires a Linux container")
 
 
 class ImageSpec(BaseModel):
@@ -344,6 +348,7 @@ class TaskManifestV1(BaseModel):
     timeouts: PhaseTimeouts = PhaseTimeouts()
     artifacts: tuple[str, ...] = ()
     artifact_excludes: tuple[str, ...] = ()
+    artifact_include_files: tuple[str, ...] = ()
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
@@ -353,7 +358,11 @@ class TaskManifestV1(BaseModel):
 
     def _check_artifacts(self) -> None:
         _validate_artifact_selection(
-            self.artifacts, self.artifact_excludes, self.os, self.image.kind
+            self.artifacts,
+            self.artifact_excludes,
+            self.artifact_include_files,
+            self.os,
+            self.image.kind,
         )
 
     @model_validator(mode="after")
@@ -382,6 +391,7 @@ class TaskSpec(BaseModel):
     timeouts: PhaseTimeouts = PhaseTimeouts()
     artifacts: tuple[str, ...] = ()
     artifact_excludes: tuple[str, ...] = ()
+    artifact_include_files: tuple[str, ...] = ()
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
@@ -391,7 +401,11 @@ class TaskSpec(BaseModel):
     @model_validator(mode="after")
     def _valid_artifacts(self) -> Self:
         _validate_artifact_selection(
-            self.artifacts, self.artifact_excludes, self.os, self.image.kind
+            self.artifacts,
+            self.artifact_excludes,
+            self.artifact_include_files,
+            self.os,
+            self.image.kind,
         )
         return self
 

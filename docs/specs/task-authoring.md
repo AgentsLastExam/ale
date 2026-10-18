@@ -87,6 +87,8 @@ artifacts:                          # optional outcome paths captured from the s
   - /home/user/output               # absolute, unique, and non-overlapping
 artifact_excludes:                  # optional exact paths relative to each directory artifact
   - .agent_runtime_env              # Linux container directory snapshots only
+# artifact_include_files:           # alternative to excludes; exact file paths only
+#   - silicon/bandstructure.dat     # relative to each directory artifact
 
 tools:                              # optional; use only when the Task explicitly requires them
   skills:
@@ -130,6 +132,17 @@ paths must be normalized, unique and non-overlapping. Use exclusions only for co
 verification does not need. They are available for Linux container Tasks only. Separate
 verification receives the filtered snapshot, while shared verification sees the original
 sandbox filesystem. The exclusions are recorded with each directory in `snapshot.json`.
+
+Alternatively, `artifact_include_files` captures only the listed normalized, unique,
+non-overlapping paths relative to each directory artifact. List every file the verifier
+needs; an absent or non-regular file is omitted so the verifier can grade a missing
+deliverable. ALE reads the contents of selected files inside the solver sandbox as the
+agent account, using ordinary filesystem semantics, including following symlinks, and
+snapshots regular bytes rather than links. Unreadable files fail capture explicitly.
+Unlisted paths are not traversed. This is useful for outputs
+that contain arbitrary runtime links or bulky intermediates. It is available for Linux
+container Tasks only, cannot be combined with `artifact_excludes`, and each selected
+artifact must be a directory. The selected paths are recorded in `snapshot.json`.
 
 ### Verification topology
 

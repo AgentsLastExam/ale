@@ -37,7 +37,7 @@ from ale.core.harness import EffectiveAgentResources, HarnessSession
 from ale.core.lock import AssetProvenance, LimitTermination, RunLock
 from ale.core.result import FailureInfo as ResultFailureInfo
 from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
-from ale.core.sandbox import RetainedSandbox, Sandbox, SandboxRequest, SandboxRole
+from ale.core.sandbox import Identity, RetainedSandbox, Sandbox, SandboxRequest, SandboxRole
 from ale.core.task import Task
 from ale.core.taskspec import OperatingSystem
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
@@ -299,7 +299,13 @@ class _Artifacts(ArtifactSink):
         return self.run_dir / "artifacts"
 
     async def collect(
-        self, sandbox: Sandbox, source: str, name: str, *, excludes: tuple[str, ...] = ()
+        self,
+        sandbox: Sandbox,
+        source: str,
+        name: str,
+        *,
+        excludes: tuple[str, ...] = (),
+        includes: tuple[str, ...] = (),
     ) -> Path:
         if not self.enabled:
             raise ArtifactTransferError("artifact collection is disabled")
@@ -325,6 +331,8 @@ class _Artifacts(ArtifactSink):
         kind = details.get("kind")
         if kind not in {"file", "directory"}:
             raise ArtifactTransferError(f"artifact {source} is an unsupported {kind}")
+        if includes and kind != "directory":
+            raise ArtifactTransferError(f"artifact include files require a directory: {source}")
 
         stored = name
         if (self.root / stored).exists():
@@ -339,24 +347,25 @@ class _Artifacts(ArtifactSink):
                 size = len(data)
             else:
                 target.mkdir()
-                if excludes:
-                    await _download_filtered_artifact(sandbox, source, target, excludes)
+                if excludes or includes:
+                    await _download_filtered_artifact(sandbox, source, target, excludes, includes)
                 else:
                     await sandbox.download_dir(source, str(target))
                 identity, size = _artifact_tree_identity(target)
         except Exception as exc:
             raise ArtifactTransferError(f"could not capture artifact {source}: {exc}") from exc
-        self.entries.append(
-            {
-                "source": source,
-                "kind": kind,
-                "stored_path": stored,
-                "mode": int(details["mode"]),
-                "content_identity": identity,
-                "size_bytes": size,
-                "excludes": list(excludes) if kind == "directory" else [],
-            }
-        )
+        entry: dict[str, object] = {
+            "source": source,
+            "kind": kind,
+            "stored_path": stored,
+            "mode": int(details["mode"]),
+            "content_identity": identity,
+            "size_bytes": size,
+            "excludes": list(excludes) if kind == "directory" else [],
+        }
+        if includes:
+            entry["include_files"] = list(includes)
+        self.entries.append(entry)
         self.collected.append(name)
         self._write_manifest()
         return target
@@ -445,13 +454,18 @@ def _artifact_tree_identity(root: Path) -> tuple[str, int]:
 
 
 async def _download_filtered_artifact(
-    sandbox: Sandbox, source: str, target: Path, excludes: tuple[str, ...]
+    sandbox: Sandbox,
+    source: str,
+    target: Path,
+    excludes: tuple[str, ...],
+    includes: tuple[str, ...],
 ) -> None:
-    """Capture regular files without traversing excluded paths or links."""
+    """Stage either a filtered tree or explicitly selected file contents."""
     script = r"""
-import json, os, shutil, stat, sys, tempfile
-root, encoded = sys.argv[1:]
-excluded = set(json.loads(encoded))
+import errno, json, os, shutil, stat, sys, tempfile
+root, encoded_excludes, encoded_includes = sys.argv[1:]
+excluded = set(json.loads(encoded_excludes))
+included = json.loads(encoded_includes)
 stage = tempfile.mkdtemp(prefix='ale-artifact-', dir='/tmp')
 flags = os.O_RDONLY | os.O_NOFOLLOW
 def walk(fd, destination, relative):
@@ -485,17 +499,44 @@ def walk(fd, destination, relative):
         else:
             raise ValueError('artifact directory contains a special file: ' + name)
 try:
-    fd = os.open(root, flags | os.O_DIRECTORY)
-    try:
-        walk(fd, stage, '')
-    finally:
-        os.close(fd)
+    if included:
+        # Open only declared file paths inside the sandbox. Like a verifier's
+        # normal file read, this follows links, but the snapshot stores bytes,
+        # never the links or unselected files.
+        for name in included:
+            path = os.path.join(root, name)
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            except OSError as exc:
+                if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                    continue
+                raise
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                destination = os.path.join(stage, name)
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                with os.fdopen(fd, 'rb', closefd=False) as src, open(destination, 'xb') as dst:
+                    shutil.copyfileobj(src, dst)
+                os.chmod(destination, stat.S_IMODE(info.st_mode))
+            finally:
+                os.close(fd)
+    else:
+        fd = os.open(root, flags | os.O_DIRECTORY)
+        try:
+            walk(fd, stage, '')
+        finally:
+            os.close(fd)
 except BaseException:
     shutil.rmtree(stage)
     raise
 print(json.dumps(stage))
 """
-    result = await sandbox.exec(["python3", "-c", script, source, json.dumps(excludes)])
+    result = await sandbox.exec(
+        ["python3", "-c", script, source, json.dumps(excludes), json.dumps(includes)],
+        identity=Identity.AGENT if includes else Identity.FRAMEWORK,
+    )
     if not result.ok:
         raise ArtifactTransferError(f"cannot stage artifact {source}: {result.stderr}")
     try:

@@ -337,6 +337,67 @@ async def test_filtered_artifacts_restore_to_separate_verifier(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_selected_files_restore_link_contents_without_unrelated_links(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "selected-separate")
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + "artifact_include_files: [result.txt, absent.txt, sub/missing.txt, pipe]\n"
+        + "verify:\n  environment_mode: separate\n"
+        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    )
+    (task / "oracle/run.sh").write_text(
+        "#!/bin/sh\nset -eu\n"
+        "printf 'hello\\n' > /home/user/actual.txt\n"
+        "ln -s /home/user/actual.txt /home/user/output/result.txt\n"
+        "ln -s /etc/passwd /home/user/output/unrelated\n"
+        "ln -s /missing /home/user/output/sub\n"
+        "mkfifo /home/user/output/pipe\n"
+    )
+    result = await execute(task, tmp_path / "runs")
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"content": 1.0, "overall": 1.0}
+    root = result.run_dir / "artifacts"
+    assert (root / "output/result.txt").read_text() == "hello\n"
+    assert not (root / "output/result.txt").is_symlink()
+    assert sorted(p.name for p in (root / "output").iterdir()) == ["result.txt"]
+    entry = json.loads((root / "snapshot.json").read_text())["entries"][0]
+    assert entry["include_files"] == ["result.txt", "absent.txt", "sub/missing.txt", "pipe"]
+
+
+@pytest.mark.asyncio
+async def test_selected_missing_file_reaches_verifier_as_missing(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "selected-missing")
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + "artifact_include_files: [result.txt]\n"
+        + "verify:\n  environment_mode: separate\n"
+        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    )
+    (task / "oracle/run.sh").write_text("#!/bin/sh\nexit 0\n")
+    result = await execute(task, tmp_path / "runs")
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"content": 0.0, "overall": 0.0}
+
+
+@pytest.mark.asyncio
+async def test_selected_symlink_cannot_read_framework_only_file(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "selected-private")
+    manifest = task / "task.yaml"
+    manifest.write_text(manifest.read_text() + "artifact_include_files: [result.txt]\n")
+    with (task / "image/Dockerfile").open("a") as dockerfile:
+        dockerfile.write("\nRUN echo secret > /root/private && chmod 600 /root/private\n")
+    (task / "oracle/run.sh").write_text(
+        "#!/bin/sh\nln -s /root/private /home/user/output/result.txt\n"
+    )
+    result = await execute(task, tmp_path / "runs")
+    assert result.verdict.status is Status.TASK_ERROR
+    assert "Permission denied" in result.verdict.failure.message
+    assert not (result.run_dir / "artifacts/output/result.txt").exists()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("sandbox", "message"),
     [

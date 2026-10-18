@@ -82,7 +82,13 @@ class ArtifactSink(Protocol):
     enabled: bool
 
     async def collect(
-        self, sandbox: Sandbox, source: str, name: str, *, excludes: tuple[str, ...] = ()
+        self,
+        sandbox: Sandbox,
+        source: str,
+        name: str,
+        *,
+        excludes: tuple[str, ...] = (),
+        includes: tuple[str, ...] = (),
     ) -> Path: ...
 
     async def collect_file(self, sandbox: Sandbox, source: str, name: str) -> Path: ...
