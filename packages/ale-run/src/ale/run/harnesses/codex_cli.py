@@ -107,7 +107,12 @@ class CodexCliHarness(AutonomousHarness):
     ) -> None:
         codex_home = agent_path(session.home) / ".codex-ale"
         skills_root = codex_home / "skills"
-        await sandbox.exec(["mkdir", "-p", str(skills_root)], identity=Identity.AGENT)
+        result = await sandbox.exec(
+            bash_command(session.home, f"mkdir -p -- {shlex.quote(str(skills_root))}"),
+            identity=Identity.AGENT,
+        )
+        if not result.ok:
+            raise AgentError(f"could not create Codex skills directory: {result.stderr[-800:]}")
         for skill in resources.skills:
             target = skills_root / skill.name
             await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
