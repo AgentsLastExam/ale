@@ -447,9 +447,11 @@ def _artifact_tree_identity(root: Path) -> tuple[str, int]:
             continue
         if not path.is_file():
             raise ArtifactTransferError(f"artifact directory contains a special file: {relative}")
-        data = path.read_bytes()
-        size += len(data)
-        digest.update(relative.encode() + b"\0" + data)
+        digest.update(relative.encode() + b"\0")
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                size += len(chunk)
+                digest.update(chunk)
     return f"sha256:{digest.hexdigest()}", size
 
 

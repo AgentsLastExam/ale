@@ -439,6 +439,28 @@ def test_artifact_directory_rejects_inner_symlinks_and_special_files(tmp_path: P
         _artifact_tree_identity(special_root)
 
 
+def test_artifact_tree_identity_streams_large_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+
+    tree = tmp_path / "output"
+    tree.mkdir()
+    first = b"x" * (1024 * 1024 + 17)
+    second = b"small"
+    (tree / "big.wav").write_bytes(first)
+    (tree / "result.txt").write_bytes(second)
+
+    def fail_read_bytes(self: Path) -> bytes:
+        raise AssertionError(f"artifact contents must be streamed: {self}")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+    identity, size = _artifact_tree_identity(tree)
+    expected = hashlib.sha256(b"big.wav\0" + first + b"result.txt\0" + second).hexdigest()
+    assert identity == f"sha256:{expected}"
+    assert size == len(first) + len(second)
+
+
 @pytest.mark.asyncio
 async def test_task_local_helper_and_framework_package_are_importable(tmp_path: Path) -> None:
     task_path = scaffold_task(tmp_path / "local-helper")
