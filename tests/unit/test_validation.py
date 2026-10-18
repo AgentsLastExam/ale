@@ -1,4 +1,4 @@
-"""The task-admission rule has one exact reward policy."""
+"""Validation requires zero untouched rewards and full oracle rewards."""
 
 from __future__ import annotations
 
@@ -45,6 +45,10 @@ class RewardsSandbox:
     ("rewards", "expected"),
     [
         ({"correctness": 1.0}, True),
+        ({"correctness": 0.9999999999999999}, True),
+        ({"correctness": 1.0 - 2e-15}, False),
+        ({"correctness": 1.0000000000000002}, False),
+        ({"correctness": float("nan")}, False),
         ({"correctness": 1.0, "format": 1.0}, True),
         ({"correctness": 0.0}, False),
         ({"correctness": 0.5}, False),
