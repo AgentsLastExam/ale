@@ -92,17 +92,18 @@ def _validate_artifact_selection(
     paths: tuple[str, ...],
     excludes: tuple[str, ...],
     includes: tuple[str, ...],
+    include_directories: tuple[str, ...],
     operating_system: OperatingSystem,
     kind: ImageKind,
 ) -> None:
     _validate_artifact_paths(paths, operating_system)
     _validate_artifact_relative_paths(excludes, "excludes")
-    _validate_artifact_relative_paths(includes, "include files")
-    if excludes and includes:
-        raise ValueError("artifact excludes and include files cannot be combined")
-    if (excludes or includes) and not paths:
+    _validate_artifact_relative_paths(includes + include_directories, "included paths")
+    if excludes and (includes or include_directories):
+        raise ValueError("artifact excludes and included paths cannot be combined")
+    if (excludes or includes or include_directories) and not paths:
         raise ValueError("artifact selection requires at least one artifact")
-    if (excludes or includes) and (
+    if (excludes or includes or include_directories) and (
         operating_system is not OperatingSystem.LINUX or kind is not ImageKind.CONTAINER
     ):
         raise ValueError("artifact selection requires a Linux container")
@@ -349,6 +350,7 @@ class TaskManifestV1(BaseModel):
     artifacts: tuple[str, ...] = ()
     artifact_excludes: tuple[str, ...] = ()
     artifact_include_files: tuple[str, ...] = ()
+    artifact_include_directories: tuple[str, ...] = ()
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
@@ -361,6 +363,7 @@ class TaskManifestV1(BaseModel):
             self.artifacts,
             self.artifact_excludes,
             self.artifact_include_files,
+            self.artifact_include_directories,
             self.os,
             self.image.kind,
         )
@@ -392,6 +395,7 @@ class TaskSpec(BaseModel):
     artifacts: tuple[str, ...] = ()
     artifact_excludes: tuple[str, ...] = ()
     artifact_include_files: tuple[str, ...] = ()
+    artifact_include_directories: tuple[str, ...] = ()
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
@@ -404,6 +408,7 @@ class TaskSpec(BaseModel):
             self.artifacts,
             self.artifact_excludes,
             self.artifact_include_files,
+            self.artifact_include_directories,
             self.os,
             self.image.kind,
         )

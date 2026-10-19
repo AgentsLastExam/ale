@@ -145,6 +145,7 @@ def test_manifest_field_set_is_exact() -> None:
         "artifacts",
         "artifact_excludes",
         "artifact_include_files",
+        "artifact_include_directories",
         "tools",
         "params",
         "verify",
@@ -340,6 +341,32 @@ def test_artifact_include_files_require_linux_container_and_no_excludes() -> Non
         {"image": {"kind": "vm"}},
         {"os": "windows", "artifacts": (r"C:\\output",)},
         {"artifact_excludes": ("other",)},
+    ):
+        with pytest.raises(ValidationError):
+            TaskManifestV1.model_validate(values | extra)
+
+
+def test_artifact_included_directories_are_normalized_and_disjoint() -> None:
+    values = {
+        "spec_type": "core/v1",
+        "name": "demo",
+        "image": {"kind": "container"},
+        "artifacts": ("/base",),
+        "artifact_include_files": ("output/result.txt",),
+        "artifact_include_directories": ("input",),
+    }
+    manifest = TaskManifestV1.model_validate(values)
+    assert manifest.artifact_include_directories == ("input",)
+    for extra in (
+        {"artifact_include_directories": ("../input",)},
+        {"artifact_include_directories": ("input/",)},
+        {"artifact_include_directories": ("output",)},
+        {"artifact_include_directories": ("input", "input/sub")},
+        {"artifact_include_directories": ("output/result.txt",)},
+        {"artifact_excludes": ("other",)},
+        {"artifacts": ()},
+        {"image": {"kind": "vm"}},
+        {"os": "windows", "artifacts": (r"C:\\base",)},
     ):
         with pytest.raises(ValidationError):
             TaskManifestV1.model_validate(values | extra)

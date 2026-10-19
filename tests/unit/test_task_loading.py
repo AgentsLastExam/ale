@@ -51,6 +51,19 @@ def test_artifact_include_files_reaches_the_rendered_spec(tmp_path: Path) -> Non
     assert load_tasks(task)[0].spec.artifact_include_files == ("result.txt",)
 
 
+def test_artifact_include_directories_reaches_the_rendered_spec(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + "artifact_include_files: [result.txt]\n"
+        + "artifact_include_directories: [input]\n"
+    )
+    spec = load_tasks(task)[0].spec
+    assert spec.artifact_include_files == ("result.txt",)
+    assert spec.artifact_include_directories == ("input",)
+
+
 def test_all_stage_asset_roots_are_excluded_from_task_identity(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     before = load_tasks(task)[0].task_digest

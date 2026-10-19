@@ -349,6 +349,7 @@ def _effective_spec(
         artifacts=manifest.artifacts,
         artifact_excludes=manifest.artifact_excludes,
         artifact_include_files=manifest.artifact_include_files,
+        artifact_include_directories=manifest.artifact_include_directories,
         tools=manifest.tools,
         params=params,
         verify=manifest.verify,

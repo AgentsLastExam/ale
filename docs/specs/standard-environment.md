@@ -80,10 +80,12 @@ the exclusion list is recorded in the snapshot manifest.
 Alternatively, Task-authored `artifact_include_files` selects exact relative file paths
 from directory artifacts. The solver sandbox resolves selected paths as the agent
 account, including links, and ALE stores their regular-file contents rather than links.
-Unreadable files fail capture. Missing and non-regular
-selected paths are omitted; unselected paths are never traversed. The selection is
-recorded in the snapshot manifest. This policy is limited to Linux containers and cannot
-be combined with exclusions.
+`artifact_include_directories` may select entire relative subtrees in the same snapshot;
+links inside those subtrees are followed as the agent and their contents are stored.
+Unreadable files, dangling links and special files within a selected subtree fail capture.
+Missing paths and paths of the wrong type are omitted. Unselected paths are never
+traversed. Both selections are recorded in the snapshot manifest. This policy is limited
+to Linux containers and cannot be combined with exclusions.
 
 With `artifacts.collect = "none"`, ALE does not inspect artifact paths, create a spool,
 copy bytes, or restore anything. A separate verifier that needs solver output therefore

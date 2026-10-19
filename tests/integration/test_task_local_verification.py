@@ -390,6 +390,73 @@ async def test_selected_missing_file_reaches_verifier_as_missing(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_selected_directory_preserves_solver_files_for_separate_verifier(
+    tmp_path: Path,
+) -> None:
+    task = scaffold_task(tmp_path / "selected-tree")
+    dockerfile = task / "image/Dockerfile"
+    dockerfile.write_text(dockerfile.read_text().replace("-base:latest", "-base:0.1.0"))
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + "artifact_include_files: [result.txt]\n"
+        + "artifact_include_directories: [input, absent, not_a_directory]\n"
+        + "verify:\n  environment_mode: separate\n"
+        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    )
+    (task / "oracle/run.sh").write_text(
+        "#!/bin/sh\nset -eu\n"
+        "mkdir -p /home/user/output/input/nested /home/user/output/input/empty\n"
+        "printf 'hello\\n' > /home/user/output/result.txt\n"
+        "printf 'solver changed this\\n' > /home/user/output/input/nested/source.txt\n"
+        "ln -s nested/source.txt /home/user/output/input/link.txt\n"
+        "printf 'not a directory\\n' > /home/user/output/not_a_directory\n"
+        "printf 'unselected\\n' > /home/user/output/other.txt\n"
+    )
+    verifier = task / "verify/verify.py"
+    verifier.write_text(
+        verifier.read_text().replace(
+            'verification.aggregate("overall")',
+            'verification.check("input", checks.text_equals('
+            '"/home/user/output/input/link.txt", "solver changed this\\n"))\n'
+            'verification.aggregate("overall")',
+        )
+    )
+    result = await execute(task, tmp_path / "runs")
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"content": 1.0, "input": 1.0, "overall": 1.0}
+    root = result.run_dir / "artifacts/output"
+    assert (root / "input/nested/source.txt").read_text() == "solver changed this\n"
+    assert (root / "input/link.txt").read_text() == "solver changed this\n"
+    assert not (root / "input/link.txt").is_symlink()
+    assert (root / "input/empty").is_dir()
+    assert not (root / "absent").exists()
+    assert not (root / "not_a_directory").exists()
+    assert not (root / "other.txt").exists()
+    entry = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"][0]
+    assert entry["include_directories"] == ["input", "absent", "not_a_directory"]
+
+
+@pytest.mark.asyncio
+async def test_selected_directory_cannot_read_framework_only_file(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "selected-tree-private")
+    dockerfile = task / "image/Dockerfile"
+    dockerfile.write_text(dockerfile.read_text().replace("-base:latest", "-base:0.1.0"))
+    manifest = task / "task.yaml"
+    manifest.write_text(manifest.read_text() + "artifact_include_directories: [input]\n")
+    with (task / "image/Dockerfile").open("a") as dockerfile:
+        dockerfile.write("\nRUN echo secret > /root/private && chmod 600 /root/private\n")
+    (task / "oracle/run.sh").write_text(
+        "#!/bin/sh\nmkdir -p /home/user/output/input\n"
+        "ln -s /root/private /home/user/output/input/link\n"
+    )
+    result = await execute(task, tmp_path / "runs")
+    assert result.verdict.status is Status.TASK_ERROR
+    assert "Permission denied" in result.verdict.failure.message
+    assert not (result.run_dir / "artifacts/output/input/link").exists()
+
+
+@pytest.mark.asyncio
 async def test_selected_symlink_cannot_read_framework_only_file(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "selected-private")
     manifest = task / "task.yaml"

@@ -89,6 +89,8 @@ artifact_excludes:                  # optional exact paths relative to each dire
   - .agent_runtime_env              # Linux container directory snapshots only
 # artifact_include_files:           # alternative to excludes; exact file paths only
 #   - silicon/bandstructure.dat     # relative to each directory artifact
+# artifact_include_directories:     # optionally capture entire subtrees as well
+#   - input                         # relative to each directory artifact
 
 tools:                              # optional; use only when the Task explicitly requires them
   skills:
@@ -143,6 +145,15 @@ Unlisted paths are not traversed. This is useful for outputs
 that contain arbitrary runtime links or bulky intermediates. It is available for Linux
 container Tasks only, cannot be combined with `artifact_excludes`, and each selected
 artifact must be a directory. The selected paths are recorded in `snapshot.json`.
+
+`artifact_include_directories` adds whole selected subtrees to this file selection.
+Paths in both lists must be normalized, unique and non-overlapping. ALE follows links
+within each selected subtree as the agent, snapshots file contents rather than links,
+and preserves empty directories. A missing path or a path that is not a directory is
+omitted; an unreadable file, dangling link or special file inside a selected subtree
+fails capture. This selection can be used without `artifact_include_files`, follows
+the same Linux container and exclusion restrictions, and is recorded in
+`snapshot.json`.
 
 ### Verification topology
 

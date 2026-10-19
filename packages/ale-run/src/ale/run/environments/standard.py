@@ -705,6 +705,7 @@ class StandardEnvironment(Environment):
                     name,
                     excludes=ctx.spec.artifact_excludes,
                     includes=ctx.spec.artifact_include_files,
+                    include_directories=ctx.spec.artifact_include_directories,
                 )
                 logger.info(
                     "artifact collected",

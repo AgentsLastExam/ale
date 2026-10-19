@@ -306,6 +306,7 @@ class _Artifacts(ArtifactSink):
         *,
         excludes: tuple[str, ...] = (),
         includes: tuple[str, ...] = (),
+        include_directories: tuple[str, ...] = (),
     ) -> Path:
         if not self.enabled:
             raise ArtifactTransferError("artifact collection is disabled")
@@ -331,8 +332,8 @@ class _Artifacts(ArtifactSink):
         kind = details.get("kind")
         if kind not in {"file", "directory"}:
             raise ArtifactTransferError(f"artifact {source} is an unsupported {kind}")
-        if includes and kind != "directory":
-            raise ArtifactTransferError(f"artifact include files require a directory: {source}")
+        if (includes or include_directories) and kind != "directory":
+            raise ArtifactTransferError(f"artifact included paths require a directory: {source}")
 
         stored = name
         if (self.root / stored).exists():
@@ -347,8 +348,10 @@ class _Artifacts(ArtifactSink):
                 size = len(data)
             else:
                 target.mkdir()
-                if excludes or includes:
-                    await _download_filtered_artifact(sandbox, source, target, excludes, includes)
+                if excludes or includes or include_directories:
+                    await _download_filtered_artifact(
+                        sandbox, source, target, excludes, includes, include_directories
+                    )
                 else:
                     await sandbox.download_dir(source, str(target))
                 identity, size = _artifact_tree_identity(target)
@@ -365,6 +368,8 @@ class _Artifacts(ArtifactSink):
         }
         if includes:
             entry["include_files"] = list(includes)
+        if include_directories:
+            entry["include_directories"] = list(include_directories)
         self.entries.append(entry)
         self.collected.append(name)
         self._write_manifest()
@@ -459,13 +464,15 @@ async def _download_filtered_artifact(
     target: Path,
     excludes: tuple[str, ...],
     includes: tuple[str, ...],
+    include_directories: tuple[str, ...],
 ) -> None:
-    """Stage either a filtered tree or explicitly selected file contents."""
+    """Stage a filtered tree or explicitly selected file and directory contents."""
     script = r"""
 import errno, json, os, shutil, stat, sys, tempfile
-root, encoded_excludes, encoded_includes = sys.argv[1:]
+root, encoded_excludes, encoded_includes, encoded_directories = sys.argv[1:]
 excluded = set(json.loads(encoded_excludes))
 included = json.loads(encoded_includes)
+directories = json.loads(encoded_directories)
 stage = tempfile.mkdtemp(prefix='ale-artifact-', dir='/tmp')
 flags = os.O_RDONLY | os.O_NOFOLLOW
 def walk(fd, destination, relative):
@@ -499,7 +506,7 @@ def walk(fd, destination, relative):
         else:
             raise ValueError('artifact directory contains a special file: ' + name)
 try:
-    if included:
+    if included or directories:
         # Open only declared file paths inside the sandbox. Like a verifier's
         # normal file read, this follows links, but the snapshot stores bytes,
         # never the links or unselected files.
@@ -530,6 +537,24 @@ try:
                 os.chmod(destination, stat.S_IMODE(info.st_mode))
             finally:
                 os.close(fd)
+        # Resolve selected directories as the agent too. Copying follows links,
+        # but writes their contents rather than links into the snapshot.
+        for name in directories:
+            path = os.path.join(root, name)
+            try:
+                fd = os.open(path, os.O_PATH)
+            except OSError as exc:
+                if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                    continue
+                raise
+            try:
+                if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                    continue
+                destination = os.path.join(stage, name)
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                shutil.copytree('/proc/self/fd/' + str(fd), destination)
+            finally:
+                os.close(fd)
     else:
         fd = os.open(root, flags | os.O_DIRECTORY)
         try:
@@ -542,8 +567,16 @@ except BaseException:
 print(json.dumps(stage))
 """
     result = await sandbox.exec(
-        ["python3", "-c", script, source, json.dumps(excludes), json.dumps(includes)],
-        identity=Identity.AGENT if includes else Identity.FRAMEWORK,
+        [
+            "python3",
+            "-c",
+            script,
+            source,
+            json.dumps(excludes),
+            json.dumps(includes),
+            json.dumps(include_directories),
+        ],
+        identity=Identity.AGENT if includes or include_directories else Identity.FRAMEWORK,
     )
     if not result.ok:
         raise ArtifactTransferError(f"cannot stage artifact {source}: {result.stderr}")
