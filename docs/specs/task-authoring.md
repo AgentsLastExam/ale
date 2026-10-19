@@ -144,7 +144,10 @@ snapshots regular bytes rather than links. Unreadable files fail capture explici
 Unlisted paths are not traversed. This is useful for outputs
 that contain arbitrary runtime links or bulky intermediates. It is available for Linux
 container Tasks only, cannot be combined with `artifact_excludes`, and each selected
-artifact must be a directory. The selected paths are recorded in `snapshot.json`.
+artifact must be a directory when it exists. If the artifact itself is absent, its
+snapshot records `kind: missing`; separate verification removes the corresponding
+path so the verifier sees it as absent. A missing artifact remains an error without
+file or directory selection. The selected paths are recorded in `snapshot.json`.
 
 `artifact_include_directories` adds whole selected subtrees to this file selection.
 Paths in both lists must be normalized, unique and non-overlapping. ALE follows links

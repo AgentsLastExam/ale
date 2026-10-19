@@ -315,10 +315,15 @@ class _Artifacts(ArtifactSink):
                 "python.exe" if sandbox.request.os is OperatingSystem.WINDOWS else "python3",
                 "-c",
                 (
-                    "import json,os,stat,sys; s=os.lstat(sys.argv[1]); "
-                    "print(json.dumps({'kind':'symlink' if stat.S_ISLNK(s.st_mode) else "
+                    "import json,os,stat,sys\n"
+                    "try:\n"
+                    " s=os.lstat(sys.argv[1])\n"
+                    "except FileNotFoundError:\n"
+                    " print(json.dumps({'kind':'missing'}))\n"
+                    "else:\n"
+                    " print(json.dumps({'kind':'symlink' if stat.S_ISLNK(s.st_mode) else "
                     "'file' if stat.S_ISREG(s.st_mode) else 'directory' if "
-                    "stat.S_ISDIR(s.st_mode) else 'special','mode':stat.S_IMODE(s.st_mode)}))"
+                    "stat.S_ISDIR(s.st_mode) else 'special','mode':stat.S_IMODE(s.st_mode)}))\n"
                 ),
                 source,
             ]
@@ -330,18 +335,26 @@ class _Artifacts(ArtifactSink):
         except json.JSONDecodeError as exc:
             raise ArtifactTransferError(f"could not inspect artifact {source}") from exc
         kind = details.get("kind")
-        if kind not in {"file", "directory"}:
+        selected = bool(includes or include_directories)
+        if kind == "missing" and (not selected or sandbox.request.os is not OperatingSystem.LINUX):
+            raise ArtifactTransferError(f"declared artifact is missing: {source}")
+        if kind not in {"file", "directory", "missing"}:
             raise ArtifactTransferError(f"artifact {source} is an unsupported {kind}")
-        if (includes or include_directories) and kind != "directory":
+        if selected and kind not in {"directory", "missing"}:
             raise ArtifactTransferError(f"artifact included paths require a directory: {source}")
 
         stored = name
-        if (self.root / stored).exists():
+        if (self.root / stored).exists() or any(
+            entry["stored_path"] == stored for entry in self.entries
+        ):
             stored = f"{len(self.entries):04d}-{name}"
         target = self.root / stored
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            if kind == "file":
+            if kind == "missing":
+                identity = None
+                size = 0
+            elif kind == "file":
                 data = await sandbox.read_file(source)
                 target.write_bytes(data)
                 identity = f"sha256:{hashlib.sha256(data).hexdigest()}"
@@ -361,7 +374,7 @@ class _Artifacts(ArtifactSink):
             "source": source,
             "kind": kind,
             "stored_path": stored,
-            "mode": int(details["mode"]),
+            "mode": int(details["mode"]) if kind != "missing" else None,
             "content_identity": identity,
             "size_bytes": size,
             "excludes": list(excludes) if kind == "directory" else [],
@@ -394,6 +407,11 @@ class _Artifacts(ArtifactSink):
         for entry in self.entries:
             source = str(entry["source"])
             target = self.root / str(entry["stored_path"])
+            if entry["kind"] == "missing":
+                removed = await sandbox.exec(["rm", "-rf", "--", source])
+                if not removed.ok:
+                    raise ArtifactTransferError(f"could not restore missing artifact: {source}")
+                continue
             if sandbox.request.os is OperatingSystem.WINDOWS:
                 quoted = source.replace("'", "''")
                 parent = str(PureWindowsPath(source).parent)

@@ -73,7 +73,8 @@ observed evidence into `trajectory.json`. When run policy sets `artifacts.collec
 "host"`, every Task-declared artifact is captured as an immutable file or directory
 snapshot. Task-authored `artifact_excludes` omit exact relative files or subtrees from each
 directory snapshot. Excluded entries are never traversed; included symlinks and special
-files remain errors. Missing, overlapping and transfer failures are explicit errors.
+files remain errors. Missing, overlapping and transfer failures are explicit errors,
+except for a missing artifact with file or directory selection as described below.
 For Linux container Tasks, filtered collection stages an independent tree before transfer;
 the exclusion list is recorded in the snapshot manifest.
 
@@ -84,8 +85,10 @@ account, including links, and ALE stores their regular-file contents rather than
 links inside those subtrees are followed as the agent and their contents are stored.
 Unreadable files, dangling links and special files within a selected subtree fail capture.
 Missing paths and paths of the wrong type are omitted. Unselected paths are never
-traversed. Both selections are recorded in the snapshot manifest. This policy is limited
-to Linux containers and cannot be combined with exclusions.
+traversed. If a selected artifact root is missing, its snapshot has `kind: missing`;
+restoration removes the corresponding verifier path so it remains missing. Both
+selections are recorded in the snapshot manifest. This policy is limited to Linux
+containers and cannot be combined with exclusions.
 
 With `artifacts.collect = "none"`, ALE does not inspect artifact paths, create a spool,
 copy bytes, or restore anything. A separate verifier that needs solver output therefore

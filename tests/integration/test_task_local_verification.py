@@ -390,6 +390,35 @@ async def test_selected_missing_file_reaches_verifier_as_missing(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("separate", [False, True])
+async def test_selected_missing_root_reaches_verifier_as_missing(
+    tmp_path: Path, separate: bool
+) -> None:
+    task = scaffold_task(tmp_path / "selected-missing-root")
+    dockerfile = task / "image/Dockerfile"
+    dockerfile.write_text(
+        dockerfile.read_text().replace("-base:latest", "-base:0.1.0")
+        + "\nRUN printf 'hello\\n' > /home/user/output/result.txt\n"
+    )
+    manifest = task / "task.yaml"
+    configuration = "artifact_include_files: [result.txt]\n"
+    if separate:
+        configuration += (
+            "verify:\n  environment_mode: separate\n"
+            "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+        )
+    manifest.write_text(manifest.read_text() + configuration)
+    (task / "oracle/run.sh").write_text("#!/bin/sh\nset -eu\nrm -rf /home/user/output\n")
+
+    result = await execute(task, tmp_path / "runs")
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"content": 0.0, "overall": 0.0}
+    entry = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"][0]
+    assert entry["kind"] == "missing"
+
+
+@pytest.mark.asyncio
 async def test_selected_directory_preserves_solver_files_for_separate_verifier(
     tmp_path: Path,
 ) -> None:
