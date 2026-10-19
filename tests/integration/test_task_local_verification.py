@@ -321,6 +321,7 @@ async def test_filtered_artifacts_restore_to_separate_verifier(tmp_path: Path) -
     manifest.write_text(
         manifest.read_text()
         + "artifact_excludes: [.agent_runtime_env]\n"
+        + "artifact_allow_missing: true\n"
         + "verify:\n  environment_mode: separate\n"
         + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
     )
@@ -334,6 +335,8 @@ async def test_filtered_artifacts_restore_to_separate_verifier(tmp_path: Path) -
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"content": 1.0, "overall": 1.0}
     assert [outcome.roles for outcome in result.record.sandboxes] == [("solver",), ("verifier",)]
+    entry = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"][0]
+    assert entry["allow_missing"] is True and entry["excludes"] == [".agent_runtime_env"]
 
 
 @pytest.mark.asyncio
@@ -501,6 +504,35 @@ async def test_selected_missing_root_reaches_verifier_as_missing(
     assert result.verdict.rewards == {"content": 0.0, "overall": 0.0}
     entry = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"][0]
     assert entry["kind"] == "missing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("separate", [False, True])
+async def test_missing_excluded_root_reaches_verifier_when_opted_in(
+    tmp_path: Path, separate: bool
+) -> None:
+    task = scaffold_task(tmp_path / "missing-excluded-root")
+    dockerfile = task / "image/Dockerfile"
+    dockerfile.write_text(
+        dockerfile.read_text().replace("-base:latest", "-base:0.1.0")
+        + "\nRUN printf 'hello\\n' > /home/user/output/result.txt\n"
+    )
+    manifest = task / "task.yaml"
+    configuration = "artifact_excludes: [.venv]\nartifact_allow_missing: true\n"
+    if separate:
+        configuration += (
+            "verify:\n  environment_mode: separate\n"
+            "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+        )
+    manifest.write_text(manifest.read_text() + configuration)
+    (task / "oracle/run.sh").write_text("#!/bin/sh\nset -eu\nrm -rf /home/user/output\n")
+
+    result = await execute(task, tmp_path / "runs")
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"content": 0.0, "overall": 0.0}
+    entry = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"][0]
+    assert entry["kind"] == "missing" and entry["allow_missing"] is True
 
 
 @pytest.mark.asyncio

@@ -72,6 +72,50 @@ async def test_missing_root_remains_an_error_without_selection(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_missing_excluded_root_can_be_opted_in_and_restored(tmp_path: Path) -> None:
+    source = tmp_path / "solver/output"
+    sandbox = LocalSandbox()
+    with pytest.raises(ArtifactTransferError, match="declared artifact is missing"):
+        await _Artifacts(tmp_path / "default").collect(
+            sandbox,
+            str(source),
+            "output",
+            excludes=(".venv",),  # type: ignore[arg-type]
+        )
+    sink = _Artifacts(tmp_path / "opted-in")
+    await sink.collect(
+        sandbox,
+        str(source),
+        "output",
+        excludes=(".venv",),
+        allow_missing=True,  # type: ignore[arg-type]
+    )
+    entry = json.loads((sink.root / "snapshot.json").read_text())["entries"][0]
+    assert entry["kind"] == "missing"
+    assert entry["allow_missing"] is True
+    assert entry["content_identity"] is None
+    source.mkdir(parents=True)
+    (source / "stale").write_text("from the verifier image")
+    await sink.restore(sandbox)  # type: ignore[arg-type]
+    assert not source.exists()
+
+
+@pytest.mark.asyncio
+async def test_allow_missing_does_not_hide_inspection_errors(tmp_path: Path) -> None:
+    class FailedInspection(LocalSandbox):
+        async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            return ExecResult(exit_code=1, stderr="permission denied")
+
+    with pytest.raises(ArtifactTransferError, match="declared artifact is missing"):
+        await _Artifacts(tmp_path).collect(
+            FailedInspection(),
+            "/unreadable",
+            "output",
+            allow_missing=True,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
 async def test_missing_roots_with_the_same_name_have_distinct_entries(tmp_path: Path) -> None:
     sink = _Artifacts(tmp_path / "run")
     sandbox = LocalSandbox()

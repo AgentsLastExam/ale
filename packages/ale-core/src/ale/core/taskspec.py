@@ -105,6 +105,7 @@ def _validate_artifact_selection(
     include_directories: tuple[str, ...],
     regular_files: tuple[ArtifactRegularFiles, ...],
     preserve_file_directories: bool,
+    allow_missing: bool,
     operating_system: OperatingSystem,
     kind: ImageKind,
 ) -> None:
@@ -125,9 +126,10 @@ def _validate_artifact_selection(
         raise ValueError("preserving selected file directories requires included files")
     if excludes and (includes or include_directories or regular_files):
         raise ValueError("artifact excludes and included paths cannot be combined")
-    if (excludes or includes or include_directories or regular_files) and not paths:
+    selection = excludes or includes or include_directories or regular_files or allow_missing
+    if selection and not paths:
         raise ValueError("artifact selection requires at least one artifact")
-    if (excludes or includes or include_directories or regular_files) and (
+    if selection and (
         operating_system is not OperatingSystem.LINUX or kind is not ImageKind.CONTAINER
     ):
         raise ValueError("artifact selection requires a Linux container")
@@ -377,6 +379,7 @@ class TaskManifestV1(BaseModel):
     artifact_include_directories: tuple[str, ...] = ()
     artifact_include_regular_files: tuple[ArtifactRegularFiles, ...] = ()
     artifact_preserve_file_directories: bool = False
+    artifact_allow_missing: bool = False
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
@@ -392,6 +395,7 @@ class TaskManifestV1(BaseModel):
             self.artifact_include_directories,
             self.artifact_include_regular_files,
             self.artifact_preserve_file_directories,
+            self.artifact_allow_missing,
             self.os,
             self.image.kind,
         )
@@ -426,6 +430,7 @@ class TaskSpec(BaseModel):
     artifact_include_directories: tuple[str, ...] = ()
     artifact_include_regular_files: tuple[ArtifactRegularFiles, ...] = ()
     artifact_preserve_file_directories: bool = False
+    artifact_allow_missing: bool = False
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
@@ -441,6 +446,7 @@ class TaskSpec(BaseModel):
             self.artifact_include_directories,
             self.artifact_include_regular_files,
             self.artifact_preserve_file_directories,
+            self.artifact_allow_missing,
             self.os,
             self.image.kind,
         )

@@ -148,6 +148,7 @@ def test_manifest_field_set_is_exact() -> None:
         "artifact_include_directories",
         "artifact_include_regular_files",
         "artifact_preserve_file_directories",
+        "artifact_allow_missing",
         "tools",
         "params",
         "verify",
@@ -312,6 +313,27 @@ def test_artifact_excludes_require_linux_container_artifacts() -> None:
         TaskManifestV1.model_validate(values | {"image": {"kind": "vm"}})
     with pytest.raises(ValidationError):
         TaskManifestV1.model_validate(values | {"os": "windows", "artifacts": (r"C:\\output",)})
+
+
+def test_allow_missing_artifacts_requires_linux_container_artifacts() -> None:
+    values = {
+        "spec_type": "core/v1",
+        "name": "demo",
+        "image": {"kind": "container"},
+        "artifacts": ("/output",),
+        "artifact_excludes": (".venv",),
+        "artifact_allow_missing": True,
+    }
+    assert TaskManifestV1.model_validate(values).artifact_allow_missing is True
+    default = TaskManifestV1.model_validate(values | {"artifact_allow_missing": False})
+    assert default.artifact_allow_missing is False
+    for invalid in (
+        {"artifacts": ()},
+        {"image": {"kind": "vm"}},
+        {"os": "windows", "artifacts": (r"C:\\output",)},
+    ):
+        with pytest.raises(ValidationError):
+            TaskManifestV1.model_validate(values | invalid)
 
 
 @pytest.mark.parametrize(

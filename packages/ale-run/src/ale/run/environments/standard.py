@@ -708,6 +708,7 @@ class StandardEnvironment(Environment):
                     include_directories=ctx.spec.artifact_include_directories,
                     regular_files=ctx.spec.artifact_include_regular_files,
                     preserve_file_directories=ctx.spec.artifact_preserve_file_directories,
+                    allow_missing=ctx.spec.artifact_allow_missing,
                 )
                 logger.info(
                     "artifact collected",

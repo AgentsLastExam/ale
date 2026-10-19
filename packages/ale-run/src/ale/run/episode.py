@@ -309,6 +309,7 @@ class _Artifacts(ArtifactSink):
         include_directories: tuple[str, ...] = (),
         regular_files: tuple[ArtifactRegularFiles, ...] = (),
         preserve_file_directories: bool = False,
+        allow_missing: bool = False,
     ) -> Path:
         if not self.enabled:
             raise ArtifactTransferError("artifact collection is disabled")
@@ -338,7 +339,9 @@ class _Artifacts(ArtifactSink):
             raise ArtifactTransferError(f"could not inspect artifact {source}") from exc
         kind = details.get("kind")
         selected = bool(includes or include_directories or regular_files)
-        if kind == "missing" and (not selected or sandbox.request.os is not OperatingSystem.LINUX):
+        if kind == "missing" and (
+            not (selected or allow_missing) or sandbox.request.os is not OperatingSystem.LINUX
+        ):
             raise ArtifactTransferError(f"declared artifact is missing: {source}")
         if kind not in {"file", "directory", "missing"}:
             raise ArtifactTransferError(f"artifact {source} is an unsupported {kind}")
@@ -396,6 +399,8 @@ class _Artifacts(ArtifactSink):
             entry["regular_files"] = [selection.model_dump() for selection in regular_files]
         if preserve_file_directories:
             entry["preserve_file_directories"] = True
+        if allow_missing:
+            entry["allow_missing"] = True
         self.entries.append(entry)
         self.collected.append(name)
         self._write_manifest()

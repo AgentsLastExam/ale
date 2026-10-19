@@ -87,6 +87,7 @@ artifacts:                          # optional outcome paths captured from the s
   - /home/user/output               # absolute, unique, and non-overlapping
 artifact_excludes:                  # optional exact paths relative to each directory artifact
   - .agent_runtime_env              # Linux container directory snapshots only
+# artifact_allow_missing: true      # opt in to recording absent artifact roots
 # artifact_include_files:           # alternative to excludes; exact file paths only
 #   - silicon/bandstructure.dat     # relative to each directory artifact
 # artifact_include_directories:     # optionally capture entire subtrees as well
@@ -153,7 +154,7 @@ container Tasks only, cannot be combined with `artifact_excludes`, and each sele
 artifact must be a directory when it exists. If the artifact itself is absent, its
 snapshot records `kind: missing`; separate verification removes the corresponding
 path so the verifier sees it as absent. A missing artifact remains an error without
-file or directory selection. The selected paths are recorded in `snapshot.json`.
+selection or `artifact_allow_missing`. The selected paths are recorded in `snapshot.json`.
 
 `artifact_include_directories` adds whole selected subtrees to this file selection.
 Paths in both lists must be normalized, unique and non-overlapping. ALE follows links
@@ -174,6 +175,14 @@ those explicit paths still follow links and their selected bytes are retained. R
 selections may not overlap each other or an `artifact_include_directories` subtree.
 The same Linux container and exclusion restrictions apply, and each selection is
 recorded in `snapshot.json`.
+
+`artifact_allow_missing: true` records an absent artifact root as `kind: missing`,
+including when directory exclusions are configured. Separate verification removes
+the corresponding path from its sandbox, even if its image contains stale files.
+This option applies to all declared artifacts, requires at least one artifact, and is
+available only for Linux container Tasks. Existing roots are collected normally;
+inspection, permission and transfer failures remain errors. The opt-in is recorded in
+each snapshot entry.
 
 ### Verification topology
 
