@@ -129,10 +129,12 @@ def _validate_artifact_selection(
     selection = excludes or includes or include_directories or regular_files or allow_missing
     if selection and not paths:
         raise ValueError("artifact selection requires at least one artifact")
-    if selection and (
-        operating_system is not OperatingSystem.LINUX or kind is not ImageKind.CONTAINER
-    ):
-        raise ValueError("artifact selection requires a Linux container")
+    if selection and operating_system is not OperatingSystem.LINUX:
+        raise ValueError("artifact selection and missing-root support require Linux")
+    if (
+        excludes or includes or include_directories or regular_files
+    ) and kind is not ImageKind.CONTAINER:
+        raise ValueError("artifact path filtering requires a Linux container")
 
 
 class ImageSpec(BaseModel):

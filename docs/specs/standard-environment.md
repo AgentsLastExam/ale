@@ -95,8 +95,9 @@ containers and cannot be combined with exclusions.
 
 `artifact_allow_missing: true` also records absent artifact roots as missing, with or
 without exclusions or selection. Separate restoration removes those paths from the
-verifier. The option applies to all declared artifact paths and is limited to Linux
-container Tasks. It does not suppress inspection or transfer errors, and its use is
+verifier. The option applies to all declared artifact paths on Linux containers and VMs.
+Path filtering remains limited to Linux containers. The option does not suppress
+inspection or transfer errors, and its use is
 recorded in each snapshot entry.
 
 `artifact_include_regular_files` instead selects direct regular-file entries from

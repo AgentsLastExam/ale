@@ -180,7 +180,8 @@ recorded in `snapshot.json`.
 including when directory exclusions are configured. Separate verification removes
 the corresponding path from its sandbox, even if its image contains stale files.
 This option applies to all declared artifacts, requires at least one artifact, and is
-available only for Linux container Tasks. Existing roots are collected normally;
+available for Linux container and VM Tasks. Path filtering remains limited to Linux
+containers. Existing roots are collected normally;
 inspection, permission and transfer failures remain errors. The opt-in is recorded in
 each snapshot entry.
 

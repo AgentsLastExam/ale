@@ -315,7 +315,7 @@ def test_artifact_excludes_require_linux_container_artifacts() -> None:
         TaskManifestV1.model_validate(values | {"os": "windows", "artifacts": (r"C:\\output",)})
 
 
-def test_allow_missing_artifacts_requires_linux_container_artifacts() -> None:
+def test_allow_missing_artifacts_requires_linux_artifacts() -> None:
     values = {
         "spec_type": "core/v1",
         "name": "demo",
@@ -327,10 +327,20 @@ def test_allow_missing_artifacts_requires_linux_container_artifacts() -> None:
     assert TaskManifestV1.model_validate(values).artifact_allow_missing is True
     default = TaskManifestV1.model_validate(values | {"artifact_allow_missing": False})
     assert default.artifact_allow_missing is False
+    linux_vm = values | {"image": {"kind": "vm"}, "artifact_excludes": ()}
+    assert TaskManifestV1.model_validate(linux_vm).artifact_allow_missing is True
+    # Missing-root support does not enable path filtering for VMs.
+    with pytest.raises(ValidationError, match="filtering requires a Linux container"):
+        TaskManifestV1.model_validate(values | {"image": {"kind": "vm"}})
     for invalid in (
         {"artifacts": ()},
-        {"image": {"kind": "vm"}},
         {"os": "windows", "artifacts": (r"C:\\output",)},
+        {
+            "os": "windows",
+            "image": {"kind": "vm"},
+            "artifact_excludes": (),
+            "artifacts": (r"C:\\output",),
+        },
     ):
         with pytest.raises(ValidationError):
             TaskManifestV1.model_validate(values | invalid)
