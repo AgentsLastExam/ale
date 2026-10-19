@@ -146,6 +146,7 @@ def test_manifest_field_set_is_exact() -> None:
         "artifact_excludes",
         "artifact_include_files",
         "artifact_include_directories",
+        "artifact_preserve_file_directories",
         "tools",
         "params",
         "verify",
@@ -336,6 +337,13 @@ def test_artifact_include_files_require_linux_container_and_no_excludes() -> Non
         "artifact_include_files": ("a/file",),
     }
     assert TaskManifestV1.model_validate(values).artifact_include_files == ("a/file",)
+    assert TaskManifestV1.model_validate(
+        values | {"artifact_preserve_file_directories": True}
+    ).artifact_preserve_file_directories
+    with pytest.raises(ValidationError, match="requires included files"):
+        TaskManifestV1.model_validate(
+            values | {"artifact_include_files": (), "artifact_preserve_file_directories": True}
+        )
     for extra in (
         {"artifacts": ()},
         {"image": {"kind": "vm"}},

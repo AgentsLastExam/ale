@@ -84,8 +84,11 @@ account, including links, and ALE stores their regular-file contents rather than
 `artifact_include_directories` may select entire relative subtrees in the same snapshot;
 links inside those subtrees are followed as the agent and their contents are stored.
 Unreadable files, dangling links and special files within a selected subtree fail capture.
-Missing paths and paths of the wrong type are omitted. Unselected paths are never
-traversed. If a selected artifact root is missing, its snapshot has `kind: missing`;
+Missing paths and paths of the wrong type are omitted by default. With
+`artifact_preserve_file_directories: true`, a selected file path resolving to a directory
+becomes an empty directory without traversing its contents. Unselected paths are never
+traversed. If a selected
+artifact root is missing, its snapshot has `kind: missing`;
 restoration removes the corresponding verifier path so it remains missing. Both
 selections are recorded in the snapshot manifest. This policy is limited to Linux
 containers and cannot be combined with exclusions.

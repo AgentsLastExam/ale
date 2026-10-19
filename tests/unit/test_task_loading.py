@@ -47,8 +47,14 @@ def test_copy_preserves_effective_spec_and_digests(tmp_path: Path) -> None:
 def test_artifact_include_files_reaches_the_rendered_spec(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     manifest = task / "task.yaml"
-    manifest.write_text(manifest.read_text() + "artifact_include_files: [result.txt]\n")
-    assert load_tasks(task)[0].spec.artifact_include_files == ("result.txt",)
+    manifest.write_text(
+        manifest.read_text()
+        + "artifact_include_files: [result.txt]\n"
+        + "artifact_preserve_file_directories: true\n"
+    )
+    spec = load_tasks(task)[0].spec
+    assert spec.artifact_include_files == ("result.txt",)
+    assert spec.artifact_preserve_file_directories is True
 
 
 def test_artifact_include_directories_reaches_the_rendered_spec(tmp_path: Path) -> None:

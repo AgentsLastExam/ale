@@ -390,6 +390,43 @@ async def test_selected_missing_file_reaches_verifier_as_missing(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_selected_file_directory_reaches_separate_verifier_without_contents(
+    tmp_path: Path,
+) -> None:
+    task = scaffold_task(tmp_path / "selected-directory-as-file")
+    dockerfile = task / "image/Dockerfile"
+    dockerfile.write_text(dockerfile.read_text().replace("-base:latest", "-base:0.1.0"))
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + "artifact_include_files: [result.txt]\n"
+        + "artifact_preserve_file_directories: true\n"
+        + "verify:\n  environment_mode: separate\n"
+        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    )
+    (task / "oracle/run.sh").write_text(
+        "#!/bin/sh\nset -eu\n"
+        "mkdir -p /home/user/output/result.txt\n"
+        "printf 'not selected' > /home/user/output/result.txt/unselected\n"
+        "ln -s /missing /home/user/output/result.txt/broken-link\n"
+    )
+    (task / "verify/verify.py").write_text(
+        "from pathlib import Path\n"
+        "from ale_verify import CheckResult, Verification\n"
+        "p = Path('/home/user/output/result.txt')\n"
+        "v = Verification()\n"
+        "v.check('directory', CheckResult(float(p.is_dir() and not any(p.iterdir()))))\n"
+        "v.aggregate('overall')\n"
+        "v.write()\n"
+    )
+    result = await execute(task, tmp_path / "runs")
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"directory": 1.0, "overall": 1.0}
+    stored = result.run_dir / "artifacts/output/result.txt"
+    assert stored.is_dir() and not list(stored.iterdir())
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("separate", [False, True])
 async def test_selected_missing_root_reaches_verifier_as_missing(
     tmp_path: Path, separate: bool

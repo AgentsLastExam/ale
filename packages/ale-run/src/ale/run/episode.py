@@ -307,6 +307,7 @@ class _Artifacts(ArtifactSink):
         excludes: tuple[str, ...] = (),
         includes: tuple[str, ...] = (),
         include_directories: tuple[str, ...] = (),
+        preserve_file_directories: bool = False,
     ) -> Path:
         if not self.enabled:
             raise ArtifactTransferError("artifact collection is disabled")
@@ -363,7 +364,13 @@ class _Artifacts(ArtifactSink):
                 target.mkdir()
                 if excludes or includes or include_directories:
                     await _download_filtered_artifact(
-                        sandbox, source, target, excludes, includes, include_directories
+                        sandbox,
+                        source,
+                        target,
+                        excludes,
+                        includes,
+                        include_directories,
+                        preserve_file_directories,
                     )
                 else:
                     await sandbox.download_dir(source, str(target))
@@ -383,6 +390,8 @@ class _Artifacts(ArtifactSink):
             entry["include_files"] = list(includes)
         if include_directories:
             entry["include_directories"] = list(include_directories)
+        if preserve_file_directories:
+            entry["preserve_file_directories"] = True
         self.entries.append(entry)
         self.collected.append(name)
         self._write_manifest()
@@ -461,18 +470,26 @@ class _Artifacts(ArtifactSink):
 
 def _artifact_tree_identity(root: Path) -> tuple[str, int]:
     digest = hashlib.sha256()
+    directories = hashlib.sha256()
+    has_directories = False
     size = 0
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
         if path.is_symlink():
             raise ArtifactTransferError(f"artifact directory contains a symlink: {relative}")
         if path.is_dir():
+            # Empty directories can affect verification and must contribute
+            # to the snapshot identity as well as regular file contents.
+            directories.update(relative.encode() + b"\0")
+            has_directories = True
             continue
         if not path.is_file():
             raise ArtifactTransferError(f"artifact directory contains a special file: {relative}")
         data = path.read_bytes()
         size += len(data)
         digest.update(relative.encode() + b"\0" + data)
+    if has_directories:
+        digest = hashlib.sha256(b"ale:directory-v1\0" + digest.digest() + directories.digest())
     return f"sha256:{digest.hexdigest()}", size
 
 
@@ -483,14 +500,16 @@ async def _download_filtered_artifact(
     excludes: tuple[str, ...],
     includes: tuple[str, ...],
     include_directories: tuple[str, ...],
+    preserve_file_directories: bool,
 ) -> None:
     """Stage a filtered tree or explicitly selected file and directory contents."""
     script = r"""
 import errno, json, os, shutil, stat, sys, tempfile
-root, encoded_excludes, encoded_includes, encoded_directories = sys.argv[1:]
+root, encoded_excludes, encoded_includes, encoded_directories, encoded_preserve = sys.argv[1:]
 excluded = set(json.loads(encoded_excludes))
 included = json.loads(encoded_includes)
 directories = json.loads(encoded_directories)
+preserve = json.loads(encoded_preserve)
 stage = tempfile.mkdtemp(prefix='ale-artifact-', dir='/tmp')
 flags = os.O_RDONLY | os.O_NOFOLLOW
 def walk(fd, destination, relative):
@@ -538,6 +557,12 @@ try:
                 raise
             try:
                 info = os.fstat(fd)
+                if preserve and stat.S_ISDIR(info.st_mode):
+                    # Preserve the wrong type without traversing agent-created
+                    # content. Some verifiers distinguish a directory from a
+                    # missing file when checking a selected path.
+                    os.makedirs(os.path.join(stage, name), exist_ok=True)
+                    continue
                 if not stat.S_ISREG(info.st_mode):
                     continue
                 destination = os.path.join(stage, name)
@@ -593,6 +618,7 @@ print(json.dumps(stage))
             json.dumps(excludes),
             json.dumps(includes),
             json.dumps(include_directories),
+            json.dumps(preserve_file_directories),
         ],
         identity=Identity.AGENT if includes or include_directories else Identity.FRAMEWORK,
     )

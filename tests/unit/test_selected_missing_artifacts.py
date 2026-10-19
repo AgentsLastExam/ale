@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +27,12 @@ class LocalSandbox:
         return ExecResult(
             exit_code=process.returncode, stdout=stdout.decode(), stderr=stderr.decode()
         )
+
+    async def download_dir(self, source: str, destination: str) -> None:
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+
+    async def upload_dir(self, source: str, destination: str) -> None:
+        shutil.copytree(source, destination, dirs_exist_ok=True)
 
 
 @pytest.mark.asyncio
@@ -105,3 +112,63 @@ async def test_failed_removal_is_an_artifact_error(tmp_path: Path) -> None:
     )
     with pytest.raises(ArtifactTransferError, match="could not restore missing artifact"):
         await sink.restore(sandbox)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symlink", [False, True])
+async def test_selected_file_directory_is_restored_without_its_contents(
+    tmp_path: Path, symlink: bool
+) -> None:
+    sandbox = LocalSandbox()
+    root = tmp_path / "solver/base"
+    selected = root / "input/expected.txt"
+    selected.parent.mkdir(parents=True)
+    directory = tmp_path / "elsewhere" if symlink else selected
+    directory.mkdir()
+    (directory / "unselected.txt").write_text("do not collect")
+    (directory / "broken-link").symlink_to("missing")
+    if symlink:
+        selected.symlink_to(directory, target_is_directory=True)
+    (root / "other.txt").write_text("unselected")
+    (root / "result.txt").write_text("selected")
+    sink = _Artifacts(tmp_path / "run")
+    await sink.collect(
+        sandbox,
+        str(root),
+        "base",
+        includes=("input/expected.txt", "result.txt"),
+        preserve_file_directories=True,
+    )  # type: ignore[arg-type]
+    stored = sink.root / "base"
+    assert (stored / "input/expected.txt").is_dir()
+    assert not list((stored / "input/expected.txt").iterdir())
+    assert (stored / "result.txt").read_text() == "selected"
+    assert not (stored / "other.txt").exists()
+    shutil.rmtree(root)
+    await sink.restore(sandbox)  # type: ignore[arg-type]
+    assert selected.is_dir() and not selected.is_symlink()
+    assert not list(selected.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_empty_selected_directory_changes_snapshot_identity(tmp_path: Path) -> None:
+    sandbox = LocalSandbox()
+    root = tmp_path / "base"
+    root.mkdir()
+    missing = _Artifacts(tmp_path / "missing")
+    await missing.collect(sandbox, str(root), "base", includes=("result",))  # type: ignore[arg-type]
+    (root / "result").mkdir()
+    present = _Artifacts(tmp_path / "present")
+    await present.collect(
+        sandbox, str(root), "base", includes=("result",), preserve_file_directories=True
+    )  # type: ignore[arg-type]
+    assert missing.entries[0]["content_identity"] != present.entries[0]["content_identity"]
+
+
+@pytest.mark.asyncio
+async def test_selected_file_directory_is_omitted_by_default(tmp_path: Path) -> None:
+    root = tmp_path / "base"
+    (root / "result").mkdir(parents=True)
+    sink = _Artifacts(tmp_path / "run")
+    await sink.collect(LocalSandbox(), str(root), "base", includes=("result",))  # type: ignore[arg-type]
+    assert not (sink.root / "base/result").exists()
