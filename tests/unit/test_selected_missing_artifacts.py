@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ import pytest
 
 from ale.core.errors import ArtifactTransferError
 from ale.core.sandbox import ExecResult, OperatingSystem
+from ale.core.taskspec import ArtifactRegularFiles
 from ale.run.episode import _Artifacts
 
 
@@ -172,3 +174,104 @@ async def test_selected_file_directory_is_omitted_by_default(tmp_path: Path) -> 
     sink = _Artifacts(tmp_path / "run")
     await sink.collect(LocalSandbox(), str(root), "base", includes=("result",))  # type: ignore[arg-type]
     assert not (sink.root / "base/result").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recursive", [False, True])
+async def test_regular_file_selection_ignores_links_and_special_files(
+    tmp_path: Path, recursive: bool
+) -> None:
+    root = tmp_path / "solver/base"
+    output = root / "output"
+    nested = output / "nested"
+    nested.mkdir(parents=True)
+    (output / "answer.txt").write_text("answer")
+    (nested / "result.txt").write_text("nested")
+    (nested / "empty").mkdir()
+    (output / "linked.txt").symlink_to("answer.txt")
+    (output / "dangling").symlink_to("missing")
+    (output / "linked-directory").symlink_to(nested, target_is_directory=True)
+    os.mkfifo(output / "fifo")
+    (root / "unselected").write_text("do not collect")
+    sink = _Artifacts(tmp_path / "run")
+    selection = ArtifactRegularFiles(path="output", recursive=recursive)
+    sandbox = LocalSandbox()
+    await sink.collect(sandbox, str(root), "base", regular_files=(selection,))  # type: ignore[arg-type]
+
+    stored = sink.root / "base"
+    assert (stored / "output/answer.txt").read_text() == "answer"
+    assert (stored / "output/nested/result.txt").exists() is recursive
+    for name in ("linked.txt", "dangling", "linked-directory", "fifo", "nested/empty"):
+        path = stored / "output" / name
+        assert not path.exists() and not path.is_symlink()
+    assert not (stored / "unselected").exists()
+    entry = json.loads((sink.root / "snapshot.json").read_text())["entries"][0]
+    assert entry["regular_files"] == [{"path": "output", "recursive": recursive}]
+
+    shutil.rmtree(root)
+    await sink.restore(sandbox)  # type: ignore[arg-type]
+    assert (output / "answer.txt").read_text() == "answer"
+    assert (output / "nested/result.txt").exists() is recursive
+    assert not (output / "linked.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_explicit_file_may_overlap_regular_files_and_follow_a_link(tmp_path: Path) -> None:
+    root = tmp_path / "base"
+    output = root / "output"
+    output.mkdir(parents=True)
+    (root / "external.txt").write_text("linked answer")
+    (output / "answer.txt").symlink_to(root / "external.txt")
+    (output / "ordinary.txt").write_text("ordinary answer")
+    sink = _Artifacts(tmp_path / "run")
+    await sink.collect(
+        LocalSandbox(),
+        str(root),
+        "base",
+        includes=("output/answer.txt", "output/ordinary.txt"),
+        regular_files=(ArtifactRegularFiles(path="output", recursive=True),),  # type: ignore[arg-type]
+    )
+    stored = sink.root / "base/output"
+    assert (stored / "answer.txt").read_text() == "linked answer"
+    assert not (stored / "answer.txt").is_symlink()
+    assert (stored / "ordinary.txt").read_text() == "ordinary answer"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["missing", "file", "link"])
+async def test_regular_file_selection_omits_non_directories(tmp_path: Path, kind: str) -> None:
+    root = tmp_path / "base"
+    root.mkdir()
+    selected = root / "output"
+    if kind == "file":
+        selected.write_text("not a directory")
+    elif kind == "link":
+        other = root / "elsewhere"
+        other.mkdir()
+        (other / "answer").write_text("do not follow")
+        selected.symlink_to(other, target_is_directory=True)
+    sink = _Artifacts(tmp_path / "run")
+    await sink.collect(
+        LocalSandbox(),
+        str(root),
+        "base",
+        regular_files=(ArtifactRegularFiles(path="output"),),  # type: ignore[arg-type]
+    )
+    assert not (sink.root / "base/output").exists()
+
+
+@pytest.mark.asyncio
+async def test_missing_regular_selection_root_is_restored_as_missing(tmp_path: Path) -> None:
+    root = tmp_path / "base"
+    sink = _Artifacts(tmp_path / "run")
+    sandbox = LocalSandbox()
+    await sink.collect(
+        sandbox,
+        str(root),
+        "base",
+        regular_files=(ArtifactRegularFiles(path="output"),),  # type: ignore[arg-type]
+    )
+    root.mkdir()
+    (root / "stale").write_text("must disappear")
+    await sink.restore(sandbox)  # type: ignore[arg-type]
+    assert not root.exists()

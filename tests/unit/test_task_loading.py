@@ -70,6 +70,21 @@ def test_artifact_include_directories_reaches_the_rendered_spec(tmp_path: Path) 
     assert spec.artifact_include_directories == ("input",)
 
 
+def test_artifact_regular_files_reaches_the_rendered_spec(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + "artifact_include_regular_files:\n"
+        + "  - path: output\n"
+        + "    recursive: true\n"
+    )
+    spec = load_tasks(task)[0].spec
+    assert len(spec.artifact_include_regular_files) == 1
+    assert spec.artifact_include_regular_files[0].path == "output"
+    assert spec.artifact_include_regular_files[0].recursive is True
+
+
 def test_all_stage_asset_roots_are_excluded_from_task_identity(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     before = load_tasks(task)[0].task_digest

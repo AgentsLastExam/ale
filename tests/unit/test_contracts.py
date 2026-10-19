@@ -146,6 +146,7 @@ def test_manifest_field_set_is_exact() -> None:
         "artifact_excludes",
         "artifact_include_files",
         "artifact_include_directories",
+        "artifact_include_regular_files",
         "artifact_preserve_file_directories",
         "tools",
         "params",
@@ -371,6 +372,35 @@ def test_artifact_included_directories_are_normalized_and_disjoint() -> None:
         {"artifact_include_directories": ("output",)},
         {"artifact_include_directories": ("input", "input/sub")},
         {"artifact_include_directories": ("output/result.txt",)},
+        {"artifact_excludes": ("other",)},
+        {"artifacts": ()},
+        {"image": {"kind": "vm"}},
+        {"os": "windows", "artifacts": (r"C:\\base",)},
+    ):
+        with pytest.raises(ValidationError):
+            TaskManifestV1.model_validate(values | extra)
+
+
+def test_artifact_regular_file_directories_are_validated() -> None:
+    values = {
+        "spec_type": "core/v1",
+        "name": "demo",
+        "image": {"kind": "container"},
+        "artifacts": ("/base",),
+        "artifact_include_files": ("output/model.obj",),
+        "artifact_include_regular_files": ({"path": "output", "recursive": True},),
+    }
+    manifest = TaskManifestV1.model_validate(values)
+    assert manifest.artifact_include_regular_files[0].path == "output"
+    assert manifest.artifact_include_regular_files[0].recursive is True
+    for extra in (
+        {"artifact_include_regular_files": ({"path": "../output"},)},
+        {"artifact_include_regular_files": ({"path": "output/"},)},
+        {"artifact_include_regular_files": ({"path": "/output"},)},
+        {"artifact_include_regular_files": ({"path": "output"}, {"path": "output/sub"})},
+        {"artifact_include_regular_files": ({"path": "output", "unknown": True},)},
+        {"artifact_include_directories": ("output",)},
+        {"artifact_include_files": ("output",)},
         {"artifact_excludes": ("other",)},
         {"artifacts": ()},
         {"image": {"kind": "vm"}},

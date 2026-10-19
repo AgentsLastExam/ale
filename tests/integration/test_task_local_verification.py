@@ -390,6 +390,54 @@ async def test_selected_missing_file_reaches_verifier_as_missing(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_regular_file_selection_restores_only_real_top_level_files(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "selected-regular-files")
+    dockerfile = task / "image/Dockerfile"
+    dockerfile.write_text(
+        dockerfile.read_text().replace("-base:latest", "-base:0.1.0")
+        + "\nRUN mkdir -p /home/user/output/deliverables/nested "
+        + "&& printf stale > /home/user/output/deliverables/nested/stale "
+        + "&& chown -R user:user /home/user/output/deliverables\n"
+    )
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + "artifact_include_regular_files: [{path: deliverables}]\n"
+        + "verify:\n  environment_mode: separate\n"
+        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    )
+    (task / "oracle/run.sh").write_text(
+        "#!/bin/sh\nset -eu\n"
+        "mkdir -p /home/user/output/deliverables/nested\n"
+        "printf answer > /home/user/output/deliverables/answer.txt\n"
+        "printf unscored > /home/user/output/deliverables/nested/cache\n"
+        "ln -s answer.txt /home/user/output/deliverables/link.txt\n"
+        "ln -s /missing /home/user/output/deliverables/dangling\n"
+        "mkfifo /home/user/output/deliverables/fifo\n"
+    )
+    (task / "verify/verify.py").write_text(
+        "from pathlib import Path\n"
+        "from ale_verify import CheckResult, Verification\n"
+        "root = Path('/home/user/output/deliverables')\n"
+        "correct = ((root / 'answer.txt').read_text() == 'answer' and "
+        "{p.name for p in root.iterdir()} == {'answer.txt'})\n"
+        "v = Verification()\n"
+        "v.check('selection', CheckResult(float(correct)))\n"
+        "v.aggregate('overall')\n"
+        "v.write()\n"
+    )
+
+    result = await execute(task, tmp_path / "runs")
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"selection": 1.0, "overall": 1.0}
+    stored = result.run_dir / "artifacts/output/deliverables"
+    assert {path.name for path in stored.iterdir()} == {"answer.txt"}
+    entry = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"][0]
+    assert entry["regular_files"] == [{"path": "deliverables", "recursive": False}]
+
+
+@pytest.mark.asyncio
 async def test_selected_file_directory_reaches_separate_verifier_without_contents(
     tmp_path: Path,
 ) -> None:

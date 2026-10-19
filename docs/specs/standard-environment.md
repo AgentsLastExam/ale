@@ -93,6 +93,14 @@ restoration removes the corresponding verifier path so it remains missing. Both
 selections are recorded in the snapshot manifest. This policy is limited to Linux
 containers and cannot be combined with exclusions.
 
+`artifact_include_regular_files` instead selects direct regular-file entries from
+each declared relative directory, optionally recursing into real subdirectories.
+It skips symbolic links and special files and omits empty descendant directories.
+Explicit selected files can overlap and retain their ordinary link-following behavior.
+Missing or non-directory selections are omitted; unreadable selected entries fail
+capture. This selection has the same Linux container and exclusion restrictions and
+is recorded in the snapshot manifest.
+
 With `artifacts.collect = "none"`, ALE does not inspect artifact paths, create a spool,
 copy bytes, or restore anything. A separate verifier that needs solver output therefore
 requires host artifact collection.

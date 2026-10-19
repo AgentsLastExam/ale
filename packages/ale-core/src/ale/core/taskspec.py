@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from ale.core.ids import TaskId, content_hash
 
 __all__ = [
+    "ArtifactRegularFiles",
     "ImageKind",
     "ImageSpec",
     "McpServer",
@@ -46,6 +47,15 @@ class ImageKind(StrEnum):
 class OperatingSystem(StrEnum):
     LINUX = "linux"
     WINDOWS = "windows"
+
+
+class ArtifactRegularFiles(BaseModel):
+    """Regular files found under one relative artifact directory."""
+
+    model_config = _FROZEN
+
+    path: str
+    recursive: bool = False
 
 
 def _task_path(path: str, operating_system: OperatingSystem) -> PurePosixPath | PureWindowsPath:
@@ -93,6 +103,7 @@ def _validate_artifact_selection(
     excludes: tuple[str, ...],
     includes: tuple[str, ...],
     include_directories: tuple[str, ...],
+    regular_files: tuple[ArtifactRegularFiles, ...],
     preserve_file_directories: bool,
     operating_system: OperatingSystem,
     kind: ImageKind,
@@ -100,13 +111,23 @@ def _validate_artifact_selection(
     _validate_artifact_paths(paths, operating_system)
     _validate_artifact_relative_paths(excludes, "excludes")
     _validate_artifact_relative_paths(includes + include_directories, "included paths")
+    regular_paths = tuple(selection.path for selection in regular_files)
+    _validate_artifact_relative_paths(regular_paths, "regular-file directories")
+    for value in regular_paths:
+        regular = PurePosixPath(value)
+        for directory in map(PurePosixPath, include_directories):
+            if regular == directory or regular in directory.parents or directory in regular.parents:
+                raise ValueError(f"artifact regular-file directory overlaps directory: {value}")
+        for file in map(PurePosixPath, includes):
+            if regular == file or file in regular.parents:
+                raise ValueError(f"artifact regular-file directory overlaps file: {value}")
     if preserve_file_directories and not includes:
         raise ValueError("preserving selected file directories requires included files")
-    if excludes and (includes or include_directories):
+    if excludes and (includes or include_directories or regular_files):
         raise ValueError("artifact excludes and included paths cannot be combined")
-    if (excludes or includes or include_directories) and not paths:
+    if (excludes or includes or include_directories or regular_files) and not paths:
         raise ValueError("artifact selection requires at least one artifact")
-    if (excludes or includes or include_directories) and (
+    if (excludes or includes or include_directories or regular_files) and (
         operating_system is not OperatingSystem.LINUX or kind is not ImageKind.CONTAINER
     ):
         raise ValueError("artifact selection requires a Linux container")
@@ -354,6 +375,7 @@ class TaskManifestV1(BaseModel):
     artifact_excludes: tuple[str, ...] = ()
     artifact_include_files: tuple[str, ...] = ()
     artifact_include_directories: tuple[str, ...] = ()
+    artifact_include_regular_files: tuple[ArtifactRegularFiles, ...] = ()
     artifact_preserve_file_directories: bool = False
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
@@ -368,6 +390,7 @@ class TaskManifestV1(BaseModel):
             self.artifact_excludes,
             self.artifact_include_files,
             self.artifact_include_directories,
+            self.artifact_include_regular_files,
             self.artifact_preserve_file_directories,
             self.os,
             self.image.kind,
@@ -401,6 +424,7 @@ class TaskSpec(BaseModel):
     artifact_excludes: tuple[str, ...] = ()
     artifact_include_files: tuple[str, ...] = ()
     artifact_include_directories: tuple[str, ...] = ()
+    artifact_include_regular_files: tuple[ArtifactRegularFiles, ...] = ()
     artifact_preserve_file_directories: bool = False
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
@@ -415,6 +439,7 @@ class TaskSpec(BaseModel):
             self.artifact_excludes,
             self.artifact_include_files,
             self.artifact_include_directories,
+            self.artifact_include_regular_files,
             self.artifact_preserve_file_directories,
             self.os,
             self.image.kind,

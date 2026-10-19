@@ -91,6 +91,8 @@ artifact_excludes:                  # optional exact paths relative to each dire
 #   - silicon/bandstructure.dat     # relative to each directory artifact
 # artifact_include_directories:     # optionally capture entire subtrees as well
 #   - input                         # relative to each directory artifact
+# artifact_include_regular_files:   # optionally collect regular directory entries
+#   - {path: output, recursive: false}
 # artifact_preserve_file_directories: true  # preserve selected files' directory type
 
 tools:                              # optional; use only when the Task explicitly requires them
@@ -161,6 +163,17 @@ omitted; an unreadable file, dangling link or special file inside a selected sub
 fails capture. This selection can be used without `artifact_include_files`, follows
 the same Linux container and exclusion restrictions, and is recorded in
 `snapshot.json`.
+
+`artifact_include_regular_files` selects regular files under each specified relative
+directory, without following symbolic links and without copying special files. By
+default it inspects only immediate entries; `recursive: true` also inspects real
+subdirectories. It does not copy empty descendant directories. A missing path, link,
+or non-directory is omitted. An unreadable selected regular file or directory fails
+capture. Exact `artifact_include_files` paths may lie under a regular-file selection:
+those explicit paths still follow links and their selected bytes are retained. Regular
+selections may not overlap each other or an `artifact_include_directories` subtree.
+The same Linux container and exclusion restrictions apply, and each selection is
+recorded in `snapshot.json`.
 
 ### Verification topology
 

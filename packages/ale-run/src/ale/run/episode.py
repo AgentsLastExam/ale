@@ -39,7 +39,7 @@ from ale.core.result import FailureInfo as ResultFailureInfo
 from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
 from ale.core.sandbox import Identity, RetainedSandbox, Sandbox, SandboxRequest, SandboxRole
 from ale.core.task import Task
-from ale.core.taskspec import OperatingSystem
+from ale.core.taskspec import ArtifactRegularFiles, OperatingSystem
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import Status, Verdict
 from ale.run.assets import observe_task_assets
@@ -307,6 +307,7 @@ class _Artifacts(ArtifactSink):
         excludes: tuple[str, ...] = (),
         includes: tuple[str, ...] = (),
         include_directories: tuple[str, ...] = (),
+        regular_files: tuple[ArtifactRegularFiles, ...] = (),
         preserve_file_directories: bool = False,
     ) -> Path:
         if not self.enabled:
@@ -336,7 +337,7 @@ class _Artifacts(ArtifactSink):
         except json.JSONDecodeError as exc:
             raise ArtifactTransferError(f"could not inspect artifact {source}") from exc
         kind = details.get("kind")
-        selected = bool(includes or include_directories)
+        selected = bool(includes or include_directories or regular_files)
         if kind == "missing" and (not selected or sandbox.request.os is not OperatingSystem.LINUX):
             raise ArtifactTransferError(f"declared artifact is missing: {source}")
         if kind not in {"file", "directory", "missing"}:
@@ -362,7 +363,7 @@ class _Artifacts(ArtifactSink):
                 size = len(data)
             else:
                 target.mkdir()
-                if excludes or includes or include_directories:
+                if excludes or includes or include_directories or regular_files:
                     await _download_filtered_artifact(
                         sandbox,
                         source,
@@ -370,6 +371,7 @@ class _Artifacts(ArtifactSink):
                         excludes,
                         includes,
                         include_directories,
+                        regular_files,
                         preserve_file_directories,
                     )
                 else:
@@ -390,6 +392,8 @@ class _Artifacts(ArtifactSink):
             entry["include_files"] = list(includes)
         if include_directories:
             entry["include_directories"] = list(include_directories)
+        if regular_files:
+            entry["regular_files"] = [selection.model_dump() for selection in regular_files]
         if preserve_file_directories:
             entry["preserve_file_directories"] = True
         self.entries.append(entry)
@@ -500,15 +504,19 @@ async def _download_filtered_artifact(
     excludes: tuple[str, ...],
     includes: tuple[str, ...],
     include_directories: tuple[str, ...],
+    regular_files: tuple[ArtifactRegularFiles, ...],
     preserve_file_directories: bool,
 ) -> None:
     """Stage a filtered tree or explicitly selected file and directory contents."""
     script = r"""
 import errno, json, os, shutil, stat, sys, tempfile
-root, encoded_excludes, encoded_includes, encoded_directories, encoded_preserve = sys.argv[1:]
+root, encoded_excludes, encoded_includes, encoded_directories, encoded_regular, encoded_preserve = (
+    sys.argv[1:]
+)
 excluded = set(json.loads(encoded_excludes))
 included = json.loads(encoded_includes)
 directories = json.loads(encoded_directories)
+regular_files = json.loads(encoded_regular)
 preserve = json.loads(encoded_preserve)
 stage = tempfile.mkdtemp(prefix='ale-artifact-', dir='/tmp')
 flags = os.O_RDONLY | os.O_NOFOLLOW
@@ -543,7 +551,7 @@ def walk(fd, destination, relative):
         else:
             raise ValueError('artifact directory contains a special file: ' + name)
 try:
-    if included or directories:
+    if included or directories or regular_files:
         # Open only declared file paths inside the sandbox. Like a verifier's
         # normal file read, this follows links, but the snapshot stores bytes,
         # never the links or unselected files.
@@ -598,6 +606,51 @@ try:
                 shutil.copytree('/proc/self/fd/' + str(fd), destination)
             finally:
                 os.close(fd)
+        # Preserve the regular-file view of each directory without following
+        # links or copying unrelated subtrees. Explicit files may overlap this
+        # selection, so a file already copied through that route is retained.
+        def copy_regular(fd, destination, recursive):
+            for entry in sorted(os.listdir(fd)):
+                mode = os.stat(entry, dir_fd=fd, follow_symlinks=False).st_mode
+                if stat.S_ISREG(mode):
+                    child = os.open(entry, flags | os.O_NONBLOCK, dir_fd=fd)
+                    try:
+                        info = os.fstat(child)
+                        if not stat.S_ISREG(info.st_mode):
+                            raise ValueError('artifact file changed type: ' + entry)
+                        path = os.path.join(destination, entry)
+                        os.makedirs(destination, exist_ok=True)
+                        if not os.path.exists(path):
+                            with os.fdopen(child, 'rb', closefd=False) as src:
+                                with open(path, 'xb') as dst:
+                                    shutil.copyfileobj(src, dst)
+                            os.chmod(path, stat.S_IMODE(info.st_mode))
+                        elif not os.path.isfile(path):
+                            raise ValueError('artifact selection changed type: ' + entry)
+                    finally:
+                        os.close(child)
+                elif recursive and stat.S_ISDIR(mode):
+                    child = os.open(entry, flags | os.O_DIRECTORY, dir_fd=fd)
+                    try:
+                        copy_regular(child, os.path.join(destination, entry), recursive)
+                    finally:
+                        os.close(child)
+
+        for selection in regular_files:
+            name = selection['path']
+            path = os.path.join(root, name)
+            try:
+                fd = os.open(path, flags | os.O_DIRECTORY)
+            except OSError as exc:
+                if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                    continue
+                raise
+            try:
+                destination = os.path.join(stage, name)
+                os.makedirs(destination, exist_ok=True)
+                copy_regular(fd, destination, selection['recursive'])
+            finally:
+                os.close(fd)
     else:
         fd = os.open(root, flags | os.O_DIRECTORY)
         try:
@@ -618,9 +671,14 @@ print(json.dumps(stage))
             json.dumps(excludes),
             json.dumps(includes),
             json.dumps(include_directories),
+            json.dumps([selection.model_dump() for selection in regular_files]),
             json.dumps(preserve_file_directories),
         ],
-        identity=Identity.AGENT if includes or include_directories else Identity.FRAMEWORK,
+        identity=(
+            Identity.AGENT
+            if includes or include_directories or regular_files
+            else Identity.FRAMEWORK
+        ),
     )
     if not result.ok:
         raise ArtifactTransferError(f"cannot stage artifact {source}: {result.stderr}")

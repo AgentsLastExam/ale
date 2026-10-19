@@ -33,7 +33,7 @@ from ale.core.sandbox import (
     SandboxRequest,
 )
 from ale.core.task import Task, TaskSourceContext
-from ale.core.taskspec import TaskSpec
+from ale.core.taskspec import ArtifactRegularFiles, TaskSpec
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Rewards, Verdict
 
@@ -90,6 +90,7 @@ class ArtifactSink(Protocol):
         excludes: tuple[str, ...] = (),
         includes: tuple[str, ...] = (),
         include_directories: tuple[str, ...] = (),
+        regular_files: tuple[ArtifactRegularFiles, ...] = (),
         preserve_file_directories: bool = False,
     ) -> Path: ...
 
