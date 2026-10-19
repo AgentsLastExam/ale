@@ -135,6 +135,8 @@ paths must be normalized, unique and non-overlapping. Use exclusions only for co
 verification does not need. They are available for Linux container Tasks only. Separate
 verification receives the filtered snapshot, while shared verification sees the original
 sandbox filesystem. The exclusions are recorded with each directory in `snapshot.json`.
+If an artifact with exclusions is absent, its snapshot records `kind: missing` and the
+exclusions; separate verification removes the corresponding path so it remains absent.
 
 Alternatively, `artifact_include_files` captures only the listed normalized, unique,
 non-overlapping paths relative to each directory artifact. List every file the verifier
@@ -151,7 +153,7 @@ container Tasks only, cannot be combined with `artifact_excludes`, and each sele
 artifact must be a directory when it exists. If the artifact itself is absent, its
 snapshot records `kind: missing`; separate verification removes the corresponding
 path so the verifier sees it as absent. A missing artifact remains an error without
-file or directory selection. The selected paths are recorded in `snapshot.json`.
+filtering. The selected paths are recorded in `snapshot.json`.
 
 `artifact_include_directories` adds whole selected subtrees to this file selection.
 Paths in both lists must be normalized, unique and non-overlapping. ALE follows links

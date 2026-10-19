@@ -428,8 +428,11 @@ async def test_selected_file_directory_reaches_separate_verifier_without_content
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("separate", [False, True])
-async def test_selected_missing_root_reaches_verifier_as_missing(
-    tmp_path: Path, separate: bool
+@pytest.mark.parametrize(
+    "filtering", ["artifact_include_files: [result.txt]", "artifact_excludes: [.cache]"]
+)
+async def test_filtered_missing_root_reaches_verifier_as_missing(
+    tmp_path: Path, separate: bool, filtering: str
 ) -> None:
     task = scaffold_task(tmp_path / "selected-missing-root")
     dockerfile = task / "image/Dockerfile"
@@ -438,7 +441,7 @@ async def test_selected_missing_root_reaches_verifier_as_missing(
         + "\nRUN printf 'hello\\n' > /home/user/output/result.txt\n"
     )
     manifest = task / "task.yaml"
-    configuration = "artifact_include_files: [result.txt]\n"
+    configuration = filtering + "\n"
     if separate:
         configuration += (
             "verify:\n  environment_mode: separate\n"

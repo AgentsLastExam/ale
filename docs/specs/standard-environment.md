@@ -74,9 +74,11 @@ observed evidence into `trajectory.json`. When run policy sets `artifacts.collec
 snapshot. Task-authored `artifact_excludes` omit exact relative files or subtrees from each
 directory snapshot. Excluded entries are never traversed; included symlinks and special
 files remain errors. Missing, overlapping and transfer failures are explicit errors,
-except for a missing artifact with file or directory selection as described below.
+except for a missing filtered artifact as described below.
 For Linux container Tasks, filtered collection stages an independent tree before transfer;
-the exclusion list is recorded in the snapshot manifest.
+the exclusion list is recorded in the snapshot manifest. If an artifact root with
+exclusions is missing, its snapshot has `kind: missing` and restoration removes the
+corresponding verifier path so it remains missing.
 
 Alternatively, Task-authored `artifact_include_files` selects exact relative file paths
 from directory artifacts. The solver sandbox resolves selected paths as the agent

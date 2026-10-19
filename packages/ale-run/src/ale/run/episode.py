@@ -337,7 +337,8 @@ class _Artifacts(ArtifactSink):
             raise ArtifactTransferError(f"could not inspect artifact {source}") from exc
         kind = details.get("kind")
         selected = bool(includes or include_directories)
-        if kind == "missing" and (not selected or sandbox.request.os is not OperatingSystem.LINUX):
+        filtered = selected or bool(excludes)
+        if kind == "missing" and (not filtered or sandbox.request.os is not OperatingSystem.LINUX):
             raise ArtifactTransferError(f"declared artifact is missing: {source}")
         if kind not in {"file", "directory", "missing"}:
             raise ArtifactTransferError(f"artifact {source} is an unsupported {kind}")
@@ -384,7 +385,7 @@ class _Artifacts(ArtifactSink):
             "mode": int(details["mode"]) if kind != "missing" else None,
             "content_identity": identity,
             "size_bytes": size,
-            "excludes": list(excludes) if kind == "directory" else [],
+            "excludes": list(excludes) if kind in {"directory", "missing"} else [],
         }
         if includes:
             entry["include_files"] = list(includes)

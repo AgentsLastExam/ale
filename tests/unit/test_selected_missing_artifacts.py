@@ -1,4 +1,4 @@
-"""A missing selected root must reach verification as missing."""
+"""A missing filtered root must reach verification as missing."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ import pytest
 from ale.core.errors import ArtifactTransferError
 from ale.core.sandbox import ExecResult, OperatingSystem
 from ale.run.episode import _Artifacts
+
+pytestmark = pytest.mark.unit
 
 
 class LocalSandbox:
@@ -34,12 +36,20 @@ class LocalSandbox:
     async def upload_dir(self, source: str, destination: str) -> None:
         shutil.copytree(source, destination, dirs_exist_ok=True)
 
+    async def read_file(self, source: str) -> bytes:
+        return Path(source).read_bytes()
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "selection", [{"includes": ("output/result.txt",)}, {"include_directories": ("input",)}]
+    "selection",
+    [
+        {"includes": ("output/result.txt",)},
+        {"include_directories": ("input",)},
+        {"excludes": (".runtime_env",)},
+    ],
 )
-async def test_missing_selected_root_is_removed_from_verifier(
+async def test_missing_filtered_root_is_removed_from_verifier(
     tmp_path: Path, selection: dict[str, tuple[str, ...]]
 ) -> None:
     source = tmp_path / "solver/base"
@@ -50,6 +60,7 @@ async def test_missing_selected_root_is_removed_from_verifier(
     entry = json.loads((sink.root / "snapshot.json").read_text())["entries"][0]
     assert entry["kind"] == "missing"
     assert entry["content_identity"] is None
+    assert entry["excludes"] == list(selection.get("excludes", ()))
     assert not (sink.root / entry["stored_path"]).exists()
 
     # Simulate the verifier image containing stale files at the original path.
@@ -60,13 +71,24 @@ async def test_missing_selected_root_is_removed_from_verifier(
 
 
 @pytest.mark.asyncio
-async def test_missing_root_remains_an_error_without_selection(tmp_path: Path) -> None:
+async def test_missing_root_remains_an_error_without_filtering(tmp_path: Path) -> None:
     with pytest.raises(ArtifactTransferError, match="declared artifact is missing"):
         await _Artifacts(tmp_path).collect(
             LocalSandbox(),
             str(tmp_path / "missing"),
             "missing",  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.asyncio
+async def test_exclusions_do_not_change_file_artifacts(tmp_path: Path) -> None:
+    source = tmp_path / "result.txt"
+    source.write_text("result")
+    sink = _Artifacts(tmp_path / "run")
+    await sink.collect(LocalSandbox(), str(source), "result.txt", excludes=(".cache",))  # type: ignore[arg-type]
+    assert (sink.root / "result.txt").read_text() == "result"
+    assert sink.entries[0]["kind"] == "file"
+    assert sink.entries[0]["excludes"] == []
 
 
 @pytest.mark.asyncio
@@ -80,7 +102,10 @@ async def test_missing_roots_with_the_same_name_have_distinct_entries(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_inspection_failure_is_not_treated_as_a_missing_root(tmp_path: Path) -> None:
+@pytest.mark.parametrize("filtering", [{"includes": ("result",)}, {"excludes": (".cache",)}])
+async def test_inspection_failure_is_not_treated_as_a_missing_root(
+    tmp_path: Path, filtering: dict[str, tuple[str, ...]]
+) -> None:
     class FailedInspection(LocalSandbox):
         async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
             return ExecResult(exit_code=1, stderr="permission denied")
@@ -90,12 +115,15 @@ async def test_inspection_failure_is_not_treated_as_a_missing_root(tmp_path: Pat
             FailedInspection(),
             "/unreadable",
             "output",
-            includes=("result",),  # type: ignore[arg-type]
+            **filtering,  # type: ignore[arg-type]
         )
 
 
 @pytest.mark.asyncio
-async def test_failed_removal_is_an_artifact_error(tmp_path: Path) -> None:
+@pytest.mark.parametrize("filtering", [{"includes": ("result",)}, {"excludes": (".cache",)}])
+async def test_failed_removal_is_an_artifact_error(
+    tmp_path: Path, filtering: dict[str, tuple[str, ...]]
+) -> None:
     class FailedRemoval(LocalSandbox):
         async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
             if argv[0] == "rm":
@@ -108,10 +136,27 @@ async def test_failed_removal_is_an_artifact_error(tmp_path: Path) -> None:
         sandbox,
         str(tmp_path / "missing"),
         "missing",
-        includes=("result",),  # type: ignore[arg-type]
+        **filtering,  # type: ignore[arg-type]
     )
     with pytest.raises(ArtifactTransferError, match="could not restore missing artifact"):
         await sink.restore(sandbox)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_windows_missing_filtered_root_remains_an_error(tmp_path: Path) -> None:
+    class WindowsSandbox(LocalSandbox):
+        request = SimpleNamespace(os=OperatingSystem.WINDOWS)
+
+        async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            return ExecResult(exit_code=0, stdout='{"kind":"missing"}')
+
+    with pytest.raises(ArtifactTransferError, match="declared artifact is missing"):
+        await _Artifacts(tmp_path).collect(
+            WindowsSandbox(),
+            r"C:\\output",
+            "output",
+            excludes=(".cache",),  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.asyncio
