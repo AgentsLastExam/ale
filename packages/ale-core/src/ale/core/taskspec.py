@@ -94,6 +94,8 @@ def _validate_artifact_selection(
     includes: tuple[str, ...],
     include_directories: tuple[str, ...],
     preserve_file_directories: bool,
+    omit_unreadable_files: bool,
+    separate_verifier: bool,
     operating_system: OperatingSystem,
     kind: ImageKind,
 ) -> None:
@@ -102,6 +104,10 @@ def _validate_artifact_selection(
     _validate_artifact_relative_paths(includes + include_directories, "included paths")
     if preserve_file_directories and not includes:
         raise ValueError("preserving selected file directories requires included files")
+    if omit_unreadable_files and (not includes or not separate_verifier):
+        raise ValueError(
+            "omitting unreadable selected files requires files and separate verification"
+        )
     if excludes and (includes or include_directories):
         raise ValueError("artifact excludes and included paths cannot be combined")
     if (excludes or includes or include_directories) and not paths:
@@ -355,6 +361,7 @@ class TaskManifestV1(BaseModel):
     artifact_include_files: tuple[str, ...] = ()
     artifact_include_directories: tuple[str, ...] = ()
     artifact_preserve_file_directories: bool = False
+    artifact_omit_unreadable_files: bool = False
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
@@ -369,6 +376,8 @@ class TaskManifestV1(BaseModel):
             self.artifact_include_files,
             self.artifact_include_directories,
             self.artifact_preserve_file_directories,
+            self.artifact_omit_unreadable_files,
+            self.verify.environment_mode is VerificationMode.SEPARATE,
             self.os,
             self.image.kind,
         )
@@ -402,6 +411,7 @@ class TaskSpec(BaseModel):
     artifact_include_files: tuple[str, ...] = ()
     artifact_include_directories: tuple[str, ...] = ()
     artifact_preserve_file_directories: bool = False
+    artifact_omit_unreadable_files: bool = False
     tools: ToolProvision = ToolProvision()
     params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
@@ -416,6 +426,8 @@ class TaskSpec(BaseModel):
             self.artifact_include_files,
             self.artifact_include_directories,
             self.artifact_preserve_file_directories,
+            self.artifact_omit_unreadable_files,
+            self.verify.environment_mode is VerificationMode.SEPARATE,
             self.os,
             self.image.kind,
         )

@@ -308,9 +308,12 @@ class _Artifacts(ArtifactSink):
         includes: tuple[str, ...] = (),
         include_directories: tuple[str, ...] = (),
         preserve_file_directories: bool = False,
+        omit_unreadable_files: bool = False,
     ) -> Path:
         if not self.enabled:
             raise ArtifactTransferError("artifact collection is disabled")
+        if omit_unreadable_files and not includes:
+            raise ArtifactTransferError("omitting unreadable files requires selected files")
         probe = await sandbox.exec(
             [
                 "python.exe" if sandbox.request.os is OperatingSystem.WINDOWS else "python3",
@@ -351,6 +354,7 @@ class _Artifacts(ArtifactSink):
             stored = f"{len(self.entries):04d}-{name}"
         target = self.root / stored
         target.parent.mkdir(parents=True, exist_ok=True)
+        unreadable_files: tuple[str, ...] = ()
         try:
             if kind == "missing":
                 identity = None
@@ -363,7 +367,7 @@ class _Artifacts(ArtifactSink):
             else:
                 target.mkdir()
                 if excludes or includes or include_directories:
-                    await _download_filtered_artifact(
+                    unreadable_files = await _download_filtered_artifact(
                         sandbox,
                         source,
                         target,
@@ -371,6 +375,7 @@ class _Artifacts(ArtifactSink):
                         includes,
                         include_directories,
                         preserve_file_directories,
+                        omit_unreadable_files,
                     )
                 else:
                     await sandbox.download_dir(source, str(target))
@@ -392,6 +397,9 @@ class _Artifacts(ArtifactSink):
             entry["include_directories"] = list(include_directories)
         if preserve_file_directories:
             entry["preserve_file_directories"] = True
+        if omit_unreadable_files:
+            entry["omit_unreadable_files"] = True
+            entry["unreadable_files"] = list(unreadable_files)
         self.entries.append(entry)
         self.collected.append(name)
         self._write_manifest()
@@ -501,15 +509,20 @@ async def _download_filtered_artifact(
     includes: tuple[str, ...],
     include_directories: tuple[str, ...],
     preserve_file_directories: bool,
-) -> None:
+    omit_unreadable_files: bool,
+) -> tuple[str, ...]:
     """Stage a filtered tree or explicitly selected file and directory contents."""
     script = r"""
 import errno, json, os, shutil, stat, sys, tempfile
-root, encoded_excludes, encoded_includes, encoded_directories, encoded_preserve = sys.argv[1:]
+root, encoded_excludes, encoded_includes, encoded_directories, encoded_preserve, encoded_omit = (
+    sys.argv[1:]
+)
 excluded = set(json.loads(encoded_excludes))
 included = json.loads(encoded_includes)
 directories = json.loads(encoded_directories)
 preserve = json.loads(encoded_preserve)
+omit_unreadable = json.loads(encoded_omit)
+unreadable = []
 stage = tempfile.mkdtemp(prefix='ale-artifact-', dir='/tmp')
 flags = os.O_RDONLY | os.O_NOFOLLOW
 def walk(fd, destination, relative):
@@ -554,6 +567,9 @@ try:
             except OSError as exc:
                 if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
                     continue
+                if omit_unreadable and exc.errno in (errno.EACCES, errno.EPERM):
+                    unreadable.append(name)
+                    continue
                 raise
             try:
                 info = os.fstat(fd)
@@ -570,7 +586,13 @@ try:
                 # Pin the checked inode before opening it for reading. Opening
                 # a socket directly can fail, while a FIFO could block; O_PATH
                 # lets us skip both without a type-check/open race.
-                read_fd = os.open('/proc/self/fd/' + str(fd), os.O_RDONLY | os.O_NONBLOCK)
+                try:
+                    read_fd = os.open('/proc/self/fd/' + str(fd), os.O_RDONLY | os.O_NONBLOCK)
+                except OSError as exc:
+                    if omit_unreadable and exc.errno in (errno.EACCES, errno.EPERM):
+                        unreadable.append(name)
+                        continue
+                    raise
                 try:
                     with os.fdopen(read_fd, 'rb', closefd=False) as src:
                         with open(destination, 'xb') as dst:
@@ -607,7 +629,7 @@ try:
 except BaseException:
     shutil.rmtree(stage)
     raise
-print(json.dumps(stage))
+print(json.dumps({'stage': stage, 'unreadable_files': unreadable}))
 """
     result = await sandbox.exec(
         [
@@ -619,17 +641,27 @@ print(json.dumps(stage))
             json.dumps(includes),
             json.dumps(include_directories),
             json.dumps(preserve_file_directories),
+            json.dumps(omit_unreadable_files),
         ],
         identity=Identity.AGENT if includes or include_directories else Identity.FRAMEWORK,
     )
     if not result.ok:
         raise ArtifactTransferError(f"cannot stage artifact {source}: {result.stderr}")
     try:
-        stage = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
+        staged = json.loads(result.stdout)
+        stage = staged["stage"]
+        unreadable_files = staged["unreadable_files"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise ArtifactTransferError(f"invalid artifact stage: {source}") from exc
     if not isinstance(stage, str) or not stage.startswith("/tmp/ale-artifact-") or "/" in stage[5:]:
         raise ArtifactTransferError(f"invalid artifact stage: {source}")
+    if (
+        not isinstance(unreadable_files, list)
+        or any(not isinstance(name, str) or name not in includes for name in unreadable_files)
+        or len(unreadable_files) != len(set(unreadable_files))
+        or (unreadable_files and not omit_unreadable_files)
+    ):
+        raise ArtifactTransferError(f"invalid unreadable artifact files: {source}")
     cleanup = None
     try:
         await sandbox.download_dir(stage, str(target))
@@ -637,6 +669,7 @@ print(json.dumps(stage))
         cleanup = await sandbox.exec(["rm", "-rf", "--", stage])
     if not cleanup.ok:
         raise ArtifactTransferError(f"could not remove temporary artifact stage: {stage}")
+    return tuple(unreadable_files)
 
 
 async def run_episode(

@@ -172,3 +172,135 @@ async def test_selected_file_directory_is_omitted_by_default(tmp_path: Path) -> 
     sink = _Artifacts(tmp_path / "run")
     await sink.collect(LocalSandbox(), str(root), "base", includes=("result",))  # type: ignore[arg-type]
     assert not (sink.root / "base/result").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("link", [False, True])
+async def test_unreadable_selected_file_can_be_omitted_for_separate_verification(
+    tmp_path: Path, link: bool
+) -> None:
+    root = tmp_path / "base"
+    root.mkdir()
+    secret = tmp_path / "unreadable" if link else root / "private"
+    secret.write_text("not captured")
+    secret.chmod(0)
+    selected = root / "private"
+    if link:
+        selected.symlink_to(secret)
+    (root / "public").write_text("captured")
+    try:
+        try:
+            secret.read_bytes()
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("the test account can read a mode-000 file")
+
+        sandbox = LocalSandbox()
+        with pytest.raises(ArtifactTransferError, match="cannot stage artifact"):
+            await _Artifacts(tmp_path / "strict").collect(
+                sandbox, str(root), "base", includes=("private", "public")
+            )  # type: ignore[arg-type]
+
+        sink = _Artifacts(tmp_path / "omitted")
+        await sink.collect(
+            sandbox,
+            str(root),
+            "base",
+            includes=("private", "public"),
+            omit_unreadable_files=True,
+        )  # type: ignore[arg-type]
+        entry = json.loads((sink.root / "snapshot.json").read_text())["entries"][0]
+        assert entry["omit_unreadable_files"] is True
+        assert entry["unreadable_files"] == ["private"]
+        assert not (sink.root / "base/private").exists()
+        assert (sink.root / "base/public").read_text() == "captured"
+        # A separate verifier must not retain a stale copy from its image.
+        secret.chmod(0o600)
+        shutil.rmtree(root)
+        root.mkdir()
+        (root / "private").write_text("stale")
+        await sink.restore(sandbox)  # type: ignore[arg-type]
+        assert not (root / "private").exists()
+        assert (root / "public").read_text() == "captured"
+    finally:
+        if secret.exists():
+            secret.chmod(0o600)
+
+
+@pytest.mark.asyncio
+async def test_omitting_an_unreadable_selected_file_does_not_hide_directory_failures(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "base"
+    selected = root / "input/private"
+    selected.parent.mkdir(parents=True)
+    selected.write_text("unreadable")
+    selected.chmod(0)
+    try:
+        try:
+            selected.read_bytes()
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("the test account can read a mode-000 file")
+        with pytest.raises(ArtifactTransferError, match="cannot stage artifact"):
+            await _Artifacts(tmp_path / "run").collect(
+                LocalSandbox(),
+                str(root),
+                "base",
+                includes=("other",),
+                include_directories=("input",),
+                omit_unreadable_files=True,
+            )  # type: ignore[arg-type]
+    finally:
+        selected.chmod(0o600)
+
+
+@pytest.mark.asyncio
+async def test_selected_file_beneath_unsearchable_directory_is_omitted(tmp_path: Path) -> None:
+    root = tmp_path / "base"
+    directory = root / "locked"
+    directory.mkdir(parents=True)
+    selected = directory / "result"
+    selected.write_text("hidden")
+    directory.chmod(0)
+    try:
+        try:
+            selected.read_bytes()
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("the test account can search a mode-000 directory")
+        sink = _Artifacts(tmp_path / "run")
+        await sink.collect(
+            LocalSandbox(),
+            str(root),
+            "base",
+            includes=("locked/result",),
+            omit_unreadable_files=True,
+        )  # type: ignore[arg-type]
+        assert sink.entries[0]["unreadable_files"] == ["locked/result"]
+        assert not (sink.root / "base/locked/result").exists()
+    finally:
+        directory.chmod(0o700)
+
+
+@pytest.mark.asyncio
+async def test_omitting_unreadable_files_does_not_hide_staging_errors(tmp_path: Path) -> None:
+    class FailedStage(LocalSandbox):
+        async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            if argv[0] == "python3" and "ale-artifact-" in argv[2]:
+                return ExecResult(exit_code=1, stderr="simulated I/O error")
+            return await super().exec(argv, **kwargs)
+
+    root = tmp_path / "base"
+    root.mkdir()
+    with pytest.raises(ArtifactTransferError, match="simulated I/O error"):
+        await _Artifacts(tmp_path / "run").collect(
+            FailedStage(),
+            str(root),
+            "base",
+            includes=("result",),
+            omit_unreadable_files=True,
+        )  # type: ignore[arg-type]

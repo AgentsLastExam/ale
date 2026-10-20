@@ -390,6 +390,35 @@ async def test_selected_missing_file_reaches_verifier_as_missing(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("linked", [False, True])
+async def test_unreadable_selected_file_is_omitted_for_separate_verification(
+    tmp_path: Path, linked: bool
+) -> None:
+    task = scaffold_task(tmp_path / "selected-unreadable")
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + "artifact_include_files: [result.txt]\n"
+        + "artifact_omit_unreadable_files: true\n"
+        + "verify:\n  environment_mode: separate\n"
+        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    )
+    target = "/home/user/hidden.txt" if linked else "/home/user/output/result.txt"
+    script = f"#!/bin/sh\nset -eu\nprintf 'hello\\n' > {target}\nchmod 000 {target}\n"
+    if linked:
+        script += f"ln -s {target} /home/user/output/result.txt\n"
+    (task / "oracle/run.sh").write_text(script)
+    result = await execute(task, tmp_path / "runs")
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"content": 0.0, "overall": 0.0}
+    root = result.run_dir / "artifacts"
+    entry = json.loads((root / "snapshot.json").read_text())["entries"][0]
+    assert entry["omit_unreadable_files"] is True
+    assert entry["unreadable_files"] == ["result.txt"]
+    assert not (root / "output/result.txt").exists()
+
+
+@pytest.mark.asyncio
 async def test_selected_file_directory_reaches_separate_verifier_without_contents(
     tmp_path: Path,
 ) -> None:

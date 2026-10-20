@@ -57,6 +57,20 @@ def test_artifact_include_files_reaches_the_rendered_spec(tmp_path: Path) -> Non
     assert spec.artifact_preserve_file_directories is True
 
 
+def test_omitting_unreadable_files_reaches_the_rendered_spec(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + "artifact_include_files: [result.txt]\n"
+        + "artifact_omit_unreadable_files: true\n"
+        + "verify:\n  environment_mode: separate\n"
+        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    )
+    spec = load_tasks(task)[0].spec
+    assert spec.artifact_omit_unreadable_files is True
+
+
 def test_artifact_include_directories_reaches_the_rendered_spec(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     manifest = task / "task.yaml"

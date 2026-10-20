@@ -92,6 +92,7 @@ artifact_excludes:                  # optional exact paths relative to each dire
 # artifact_include_directories:     # optionally capture entire subtrees as well
 #   - input                         # relative to each directory artifact
 # artifact_preserve_file_directories: true  # preserve selected files' directory type
+# artifact_omit_unreadable_files: true      # separate verification only
 
 tools:                              # optional; use only when the Task explicitly requires them
   skills:
@@ -144,7 +145,11 @@ is preserved as an empty directory without traversing its contents; use this onl
 the verifier needs the type but not the directory contents. This option requires
 `artifact_include_files`. ALE reads selected files inside the solver sandbox as the agent account,
 using ordinary filesystem semantics, including following symlinks, and snapshots regular
-bytes rather than links. Unreadable files fail capture explicitly.
+bytes rather than links. Unreadable files fail capture explicitly by default.
+With separate verification, `artifact_omit_unreadable_files: true` omits selected
+files when the agent cannot access them and records their paths in `snapshot.json`.
+Use this only when the verifier should treat an unreadable output as missing. It
+does not apply to selected subtrees or suppress other capture errors.
 Unlisted paths are not traversed. This is useful for outputs
 that contain arbitrary runtime links or bulky intermediates. It is available for Linux
 container Tasks only, cannot be combined with `artifact_excludes`, and each selected
