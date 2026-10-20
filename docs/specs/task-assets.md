@@ -23,9 +23,10 @@ mirror source paths, for example `tasks/example/verify/assets/expected.json`.
 The first asset checkpoint may create the missing private dataset and empty collection.
 It does not upload Task files. An existing public dataset is rejected. Commands use the
 operator's HF authentication, including `HF_TOKEN`; credentials never enter a remote
-Git URL or the Task definition. Git and Git LFS must be installed for local checkpoints
-and uploads. `ALE_ASSETS_COLLECTION` or `--collection`, when supplied for manual sync,
-must identify the organization's collection titled `assets`; otherwise it is discovered.
+Git URL or the Task definition. Git must be installed for pulls, local checkpoints and
+uploads; checkpoints and uploads also require Git LFS. `ALE_ASSETS_COLLECTION` or
+`--collection`, when supplied for manual sync, must identify the organization's collection
+titled `assets`; otherwise it is discovered.
 
 ## Local versions
 
@@ -92,6 +93,9 @@ ale assets push TASK                       # explicit manual sync to main
 
 Pull replaces only the selected Task's asset roots and refuses dirty files unless
 `--force` is supplied. A revision is resolved to an immutable SHA before downloading.
+The downloaded file set and executable bits must match that revision's Git tree before
+any local asset roots are replaced. As in Git, file modes preserve executability, not
+arbitrary permission bits.
 Recovery, verification, and export from a recorded version must use that fixed SHA or
 the saved local checkpoint, never a moving branch name. The accepted asset commit also
 participates in completed-episode reuse identity; dirty assets cannot reuse an episode.

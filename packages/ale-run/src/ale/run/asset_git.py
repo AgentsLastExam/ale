@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -103,6 +104,55 @@ def _git(root: Path, *args: str) -> str:
             detail = detail.replace(token, "[redacted]")
         raise AssetError(f"git {args[0]} failed: {detail}")
     return process.stdout.strip()
+
+
+def remote_asset_modes(repo_id: str, commit: str, task_paths: tuple[str, ...]) -> dict[str, bool]:
+    """Read selected file executable bits from the immutable dataset Git tree."""
+    if not re.fullmatch(r"agents-last-exam/[A-Za-z0-9_.-]+", repo_id):
+        raise AssetError("invalid asset dataset identifier")
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise AssetError("invalid asset dataset commit")
+    roots: list[str] = []
+    for task in task_paths:
+        path = PurePosixPath(task)
+        if path.is_absolute() or not path.parts or ".." in path.parts:
+            raise AssetError("invalid Task path in asset dataset")
+        roots.extend(f"{path}/{stage}/assets" for stage in STAGES)
+    if not roots:
+        return {}
+    with tempfile.TemporaryDirectory(prefix="ale-assets-git-tree-") as directory:
+        root = Path(directory)
+        _git(root, "init", "--bare", "--quiet")
+        _git(
+            root,
+            "fetch",
+            "--no-tags",
+            "--depth=1",
+            "--filter=blob:none",
+            f"https://huggingface.co/datasets/{repo_id}",
+            commit,
+        )
+        tree = _git(
+            root, "--literal-pathspecs", "ls-tree", "-rz", "--full-tree", "FETCH_HEAD", "--", *roots
+        )
+    modes: dict[str, bool] = {}
+    for entry in tree.split("\0"):
+        if not entry:
+            continue
+        try:
+            details, name = entry.split("\t", 1)
+            mode, kind, _object_id = details.split(" ")
+        except ValueError as exc:
+            raise AssetError("invalid asset Git tree entry") from exc
+        if (
+            kind != "blob"
+            or mode not in {"100644", "100755"}
+            or not any(name.startswith(f"{path}/") for path in roots)
+            or name in modes
+        ):
+            raise AssetError(f"unsupported asset Git tree entry: {name}")
+        modes[name] = mode == "100755"
+    return modes
 
 
 def _selection(task: Path) -> AssetRepositorySelection:

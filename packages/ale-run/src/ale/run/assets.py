@@ -152,6 +152,8 @@ def pull_assets(
 ) -> tuple[AssetSyncResult, ...]:
     from huggingface_hub import HfApi, snapshot_download
 
+    from ale.run.asset_git import remote_asset_modes
+
     api = HfApi()
     results: list[AssetSyncResult] = []
     for selection in select_asset_repositories(paths):
@@ -175,6 +177,9 @@ def pull_assets(
         with tempfile.TemporaryDirectory(prefix="ale-assets-pull-") as temporary:
             downloaded = Path(temporary)
             try:
+                modes = remote_asset_modes(
+                    remote_repo_id, commit, tuple(_task_path(task) for task in selection.tasks)
+                )
                 snapshot_download(
                     repo_id=remote_repo_id,
                     repo_type="dataset",
@@ -182,6 +187,7 @@ def pull_assets(
                     allow_patterns=[f"{_task_path(task)}/*/assets/**" for task in selection.tasks],
                     local_dir=downloaded,
                 )
+                _restore_executable_modes(selection.tasks, downloaded, modes)
                 with _repository_lock(selection.repository_root, exclusive=True):
                     _replace_selected_assets(selection.tasks, downloaded)
                     observations = _mark_clean(selection, commit)
@@ -201,6 +207,23 @@ def pull_assets(
             )
         )
     return tuple(results)
+
+
+def _restore_executable_modes(
+    tasks: Sequence[AssetLocation], downloaded: Path, modes: dict[str, bool]
+) -> None:
+    files: dict[str, Path] = {}
+    for task in tasks:
+        task_root = downloaded / _task_path(task)
+        validate_asset_paths(task_root)
+        for stage in STAGES:
+            for path in _regular_files(task_root / stage / "assets"):
+                files[path.relative_to(downloaded).as_posix()] = path
+    if files.keys() != modes.keys():
+        raise AssetError("downloaded Task assets do not match the resolved Git tree")
+    for name, path in files.items():
+        mode = path.stat().st_mode & ~0o111
+        path.chmod(mode | (0o111 if modes[name] else 0))
 
 
 def push_assets(

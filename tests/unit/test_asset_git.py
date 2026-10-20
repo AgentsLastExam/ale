@@ -19,6 +19,7 @@ from ale.run.asset_git import (
     diff_assets,
     materialize_assets,
     publish_assets,
+    remote_asset_modes,
     restore_assets,
     write_record,
 )
@@ -214,6 +215,50 @@ def test_repository_name_uses_origin_and_main_worktree(write_task_repo, tmp_path
     assert select_asset_repositories([linked])[0].repository_name == "actual-tasks"
     git(repository, "remote", "add", "origin", "git@github.com:AgentsLastExam/canonical-tasks.git")
     assert select_asset_repositories([linked])[0].repository_name == "canonical-tasks"
+
+
+@pytest.mark.parametrize("unsafe_link", [False, True])
+def test_remote_asset_modes_reads_the_selected_immutable_tree(
+    asset_remote: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unsafe_link: bool
+) -> None:
+    from ale.run import asset_git
+
+    seed = tmp_path / "hf-seed"
+    root = seed / "tasks/one/image/assets"
+    root.mkdir(parents=True)
+    (root / "data.txt").write_text("data")
+    executable = root / "工具\nrun.sh"
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+    other = seed / "tasks/two/verify/assets/other.txt"
+    other.parent.mkdir(parents=True)
+    other.write_text("other")
+    if unsafe_link:
+        (root / "link").symlink_to("data.txt")
+    git(seed, "add", ".")
+    git(seed, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Assets")
+    git(seed, "push", str(asset_remote), "HEAD:main")
+    commit = git(seed, "rev-parse", "HEAD")
+    original = asset_git._git
+
+    def redirected(root: Path, *args: str) -> str:
+        return original(
+            root,
+            *(
+                str(asset_remote) if value.startswith("https://huggingface.co/") else value
+                for value in args
+            ),
+        )
+
+    monkeypatch.setattr(asset_git, "_git", redirected)
+    if unsafe_link:
+        with pytest.raises(AssetError, match="unsupported asset Git tree entry"):
+            remote_asset_modes("agents-last-exam/tasks-example", commit, ("tasks/one",))
+    else:
+        assert remote_asset_modes("agents-last-exam/tasks-example", commit, ("tasks/one",)) == {
+            "tasks/one/image/assets/data.txt": False,
+            "tasks/one/image/assets/工具\nrun.sh": True,
+        }
 
 
 def test_private_org_repository_and_collection_are_enforced(

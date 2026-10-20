@@ -45,9 +45,19 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
         target = Path(str(kwargs["local_dir"])) / "tasks/one/image/assets"
         target.mkdir(parents=True)
         (target / "remote.txt").write_text("remote")
+        (target / "remote.txt").chmod(0o755)
+        (target / "tool.sh").write_text("#!/bin/sh\n")
+        (target / "tool.sh").chmod(0o644)
         return str(target)
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
+    monkeypatch.setattr(
+        "ale.run.asset_git.remote_asset_modes",
+        lambda repo, commit, paths: {
+            "tasks/one/image/assets/remote.txt": False,
+            "tasks/one/image/assets/tool.sh": True,
+        },
+    )
     (result,) = pull_assets(
         [repository / "tasks/one"],
         collection="agents-last-exam/assets-123",
@@ -56,8 +66,12 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
     assert result.commit == "a" * 40
     assert api.revision == "a" * 40
     assert (repository / "tasks/one/image/assets/remote.txt").read_text() == "remote"
+    assert not (repository / "tasks/one/image/assets/remote.txt").stat().st_mode & 0o111
+    assert (repository / "tasks/one/image/assets/tool.sh").stat().st_mode & 0o111 == 0o111
     assert preserved.read_text() == "keep"
     assert all(not item.dirty for item in asset_status([repository / "tasks/one"]))
+    (repository / "tasks/one/image/assets/tool.sh").chmod(0o644)
+    assert asset_status([repository / "tasks/one"])[0].dirty
 
 
 def test_pull_rolls_back_every_selected_root_when_replacement_fails(
@@ -83,6 +97,12 @@ def test_pull_rolls_back_every_selected_root_when_replacement_fails(
         return str(downloaded)
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
+    monkeypatch.setattr(
+        "ale.run.asset_git.remote_asset_modes",
+        lambda repo, commit, paths: {
+            f"tasks/one/{stage}/assets/remote.txt": False for stage in ("image", "setup", "oracle")
+        },
+    )
     original_copytree = shutil.copytree
     calls = 0
 
@@ -102,6 +122,37 @@ def test_pull_rolls_back_every_selected_root_when_replacement_fails(
     assert (task / "setup/assets/original.txt").read_text() == "setup"
     assert (task / "oracle/assets/original.txt").read_text() == "oracle"
     assert not (task / "image/assets/remote.txt").exists()
+
+
+def test_pull_rejects_incomplete_download_before_replacing_assets(
+    write_task_repo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    repository = write_task_repo("ale-tasks-demo", tasks=("one",))
+    task = repository / "tasks/one"
+    original = task / "image/assets/original.txt"
+    original.parent.mkdir(parents=True)
+    original.write_text("keep")
+    monkeypatch.setattr("huggingface_hub.HfApi", FakeApi)
+
+    def incomplete(**kwargs: object) -> str:
+        root = Path(str(kwargs["local_dir"])) / "tasks/one/image/assets"
+        root.mkdir(parents=True)
+        (root / "only-one.txt").write_text("incomplete")
+        return str(root)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", incomplete)
+    monkeypatch.setattr(
+        "ale.run.asset_git.remote_asset_modes",
+        lambda repo, commit, paths: {
+            "tasks/one/image/assets/only-one.txt": False,
+            "tasks/one/image/assets/missing-tool": True,
+        },
+    )
+    with pytest.raises(AssetError, match="do not match the resolved Git tree"):
+        pull_assets([task], collection="agents-last-exam/assets-123", force=True)
+    assert original.read_text() == "keep"
+    assert not (original.parent / "only-one.txt").exists()
 
 
 def test_pull_rejects_public_dataset(
