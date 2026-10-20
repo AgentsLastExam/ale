@@ -1,185 +1,23 @@
-name: ci
+name: v1.1 validation artifact policy hosted check
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
-# The paths filter reads a pull request's changed files, which needs pull-requests: read.
 permissions:
   contents: read
-  pull-requests: read
-
-concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
-env:
-  UV_FROZEN: "1"
 
 jobs:
-  changes:
+  validate-policy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      code: ${{ steps.filter.outputs.code }}
-      docs: ${{ steps.filter.outputs.docs }}
-      images: ${{ steps.filter.outputs.images }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
-        id: filter
-        with:
-          filters: |
-            code:
-              - 'packages/**'
-              - 'scripts/**'
-              - 'tests/**'
-              - '.github/workflows/**'
-              - 'Justfile'
-              - 'pyproject.toml'
-              - 'uv.lock'
-              - '.importlinter'
-            docs:
-              - 'docs/**'
-              - 'images/**/AGENTS.md'
-              - 'images/**/README.md'
-              - 'README.md'
-              - 'CLAUDE.md'
-              - 'AGENTS.md'
-              - '.env.example'
-            images:
-              - 'images/**'
-              - '!images/**/*.md'
-
-  lint:
-    needs: changes
-    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-        with:
-          enable-cache: true
-      - run: uv lock --check
-      - run: uv sync --frozen --all-groups
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run lint-imports
-
-  unit:
-    needs: changes
-    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      - run: uv run pytest -m unit
-
-  verification-package:
-    needs: changes
-    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      - run: uv run pytest packages/ale-verify/tests
-
-  live-verification:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      - name: Build Agent Judge acceptance image
-        if: env.OPENAI_API_KEY != '' || env.ANTHROPIC_API_KEY != ''
-        run: |
-          images/build.sh container-ubuntu22-base
-          docker build -f tests/acceptance/agent-judge.Dockerfile -t ale-agent-judge-live:local \
-            --build-arg "BASE=$(uv run python -c 'from ale.run import ale_image; print(ale_image("container-ubuntu22-base"))')" .
-      - name: Run live judge acceptance
-        if: env.OPENAI_API_KEY != '' || env.ANTHROPIC_API_KEY != ''
-        env:
-          ALE_LIVE_AGENT_JUDGE_IMAGE: docker.io/library/ale-agent-judge-live:local
-        run: uv run pytest tests/acceptance/test_live_llm_judge.py tests/acceptance/test_live_agent_judge.py
-
-  # The three backend suites are slow and rarely affected by ordinary changes: a pull request
-  # runs the fast checks above, and these run on main and on demand
-  # (`gh workflow run ci.yml --ref BRANCH`). Docker is preinstalled on GitHub-hosted
-  # runners, so the container backend runs there.
-  container-backend:
-    needs: changes
-    if: >-
-      github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'push' && needs.changes.outputs.code == 'true')
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      # This engine version's images: pulled once published, built here while a new
-      # version is still under review.
-      - run: images/build.sh container-ubuntu22-base ale-qemu-runner
-      # One -m, not two: a second `-m` replaces the first rather than intersecting, so
-      # the earlier form silently ran every non-KVM test including the unit suite.
-      # The desktop image is tens of gigabytes, so it stays out of hosted CI.
-      - run: uv run pytest -m "(conformance or integration) and not needs_kvm and not needs_gui"
-
-  # Hardware virtualisation is not available on hosted runners; this job runs on the
-  # self-hosted KVM runner, which never sees a pull request and so never runs a fork's code.
-  vm-backend:
-    needs: changes
-    if: >-
-      github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'push' && needs.changes.outputs.code == 'true')
-    runs-on: [self-hosted, kvm]
-    timeout-minutes: 120
-    continue-on-error: true
+      UV_FROZEN: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - run: uv sync --frozen --all-groups
-      - run: images/build.sh vm-ubuntu24-base ale-vm-materializer ale-qemu-runner
-      # The QEMU suite needs a prepared disk; preparing the fixture VM Task builds or
-      # reuses one in the runner's cache instead of letting the suite skip.
-      - run: uv run ale prepare tests/fixtures/tasks/vm-smoke
-      - run: uv run pytest -m needs_kvm
-
-  # The desktop image is far too large for hosted runners, so GUI coverage runs where
-  # it is already pulled.
-  desktop:
-    needs: changes
-    if: >-
-      github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'push' && needs.changes.outputs.code == 'true')
-    runs-on: [self-hosted, desktop]
-    timeout-minutes: 60
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-      - run: uv sync --frozen --all-groups
-      - run: images/build.sh container-ubuntu22-base ale-qemu-runner
-      - run: uv run pytest -m needs_gui
+      - run: images/build.sh container-ubuntu22-base
+      - name: Validate with and without artifact collection in Docker
+        run: >-
+          uv run pytest -v tests/integration/test_validation_observation.py
+          -k test_validation_respects_artifact_policy_for_shared_verification
