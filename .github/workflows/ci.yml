@@ -1,158 +1,54 @@
-name: ci
+name: v1.1 uv release shared-layer experiment
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
+    branches: [validation/v11-uv-release-layer-4f646e2-20261020]
 
-# No pull_request trigger: development goes straight to main during the initial build-out.
-# It also removes a failure mode — the paths filter calls the PR files API, which needs a
-# `pull-requests: read` grant this repository does not give, so PR runs failed on
-# permissions rather than on anything about the code.
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  UV_FROZEN: "1"
+permissions:
+  contents: read
 
 jobs:
-  changes:
+  uv-layer:
     runs-on: ubuntu-latest
-    outputs:
-      code: ${{ steps.filter.outputs.code }}
-      docs: ${{ steps.filter.outputs.docs }}
-      images: ${{ steps.filter.outputs.images }}
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            code:
-              - 'packages/**'
-              - 'scripts/**'
-              - 'tests/**'
-              - '.github/workflows/**'
-              - 'Justfile'
-              - 'pyproject.toml'
-              - 'uv.lock'
-              - '.importlinter'
-            docs:
-              - 'docs/**'
-              - 'images/**/AGENTS.md'
-              - 'images/**/README.md'
-              - 'README.md'
-              - 'CLAUDE.md'
-              - 'AGENTS.md'
-              - '.env.example'
-            images:
-              - 'images/**'
-              - '!images/**/*.md'
-
-  lint:
-    needs: changes
-    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run lint-imports
-
-  unit:
-    needs: changes
-    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      - run: uv run pytest -m unit
-
-  verification-package:
-    needs: changes
-    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      - run: uv run pytest packages/ale-verify/tests
-
-  live-verification:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      - name: Build Agent Judge acceptance image
-        if: env.OPENAI_API_KEY != '' || env.ANTHROPIC_API_KEY != ''
-        run: docker build -f tests/acceptance/agent-judge.Dockerfile -t ale-agent-judge-live:local .
-      - name: Run live judge acceptance
-        if: env.OPENAI_API_KEY != '' || env.ANTHROPIC_API_KEY != ''
-        env:
-          ALE_LIVE_AGENT_JUDGE_IMAGE: docker.io/library/ale-agent-judge-live:local
-        run: uv run pytest tests/acceptance/test_live_llm_judge.py tests/acceptance/test_live_agent_judge.py
-
-  # Docker is preinstalled on GitHub-hosted runners, so the container backend is
-  # exercised on every code change.
-  container-backend:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      # One -m, not two: a second `-m` replaces the first rather than intersecting, so
-      # the earlier form silently ran every non-KVM test including the unit suite.
-      # The desktop image is tens of gigabytes, so it stays out of hosted CI.
-      - run: uv run pytest -m "(conformance or integration) and not needs_kvm and not needs_gui"
-
-  # Hardware virtualisation is not available on hosted runners; this job only runs
-  # where a self-hosted runner advertises KVM.
-  vm-backend:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: [self-hosted, kvm]
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --frozen --all-groups
-      # The runner reuses a qcow2 produced by `ale prepare` or ALE_QEMU_IMAGE. Building a
-      # multi-gigabyte guest here would test image production rather than Provider code.
-      # Tests skip honestly when neither source is available.
-      - run: uv run pytest -m needs_kvm
-
-  # The desktop image is far too large for hosted runners, so GUI coverage runs where
-  # it is already pulled.
-  desktop:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: [self-hosted, desktop]
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --frozen --all-groups
-      - run: uv run pytest -m needs_gui
+      - name: Build two synthetic images from the pinned release binary
+        run: |
+          mkdir -p "$RUNNER_TEMP/uv-a" "$RUNNER_TEMP/uv-b"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])
+          dockerfile='''FROM ghcr.io/agentslastexam/container-ubuntu22-base:0.1.0
+          RUN set -eu; \\
+              curl -fLsS --retry 3 --connect-timeout 20 https://github.com/astral-sh/uv/releases/download/0.11.3/uv-x86_64-unknown-linux-gnu.tar.gz -o /tmp/uv-release.tar.gz; \\
+              echo "c0f3236f146e55472663cfbcc9be3042a9f1092275bbe3fe2a56a6cbfd3da5ce  /tmp/uv-release.tar.gz" | sha256sum -c -; \\
+              tar -xzOf /tmp/uv-release.tar.gz uv-x86_64-unknown-linux-gnu/uv > /usr/local/bin/uv; \\
+              echo "fa5fc652fa5ed5b44fa8e7dda507f27975c02f59643787fd8ab4bf36f1ba7438  /usr/local/bin/uv" | sha256sum -c -; \\
+              chmod 0755 /usr/local/bin/uv; \\
+              rm /tmp/uv-release.tar.gz
+          COPY marker /opt/ale-uv-test-marker
+          '''
+          for variant in ('a','b'):
+              folder=root/('uv-'+variant)
+              (folder/'Dockerfile').write_text(dockerfile)
+              (folder/'marker').write_text(variant+'\n')
+          PY
+          docker build -t ale-uv-release:a "$RUNNER_TEMP/uv-a"
+          docker build -t ale-uv-release:b "$RUNNER_TEMP/uv-b"
+          for variant in a b; do
+            docker run --rm --entrypoint /bin/sh "ale-uv-release:$variant" -c 'sha256sum /usr/local/bin/uv; stat -c "uid=%u gid=%g mode=%a" /usr/local/bin/uv'
+          done
+      - name: Verify the uv layer is shared
+        run: |
+          python3 - <<'PY'
+          import json, subprocess
+          def layers(tag):
+              data=json.loads(subprocess.check_output(['docker','image','inspect','ale-uv-release:'+tag],text=True))
+              return data[0]['RootFS']['Layers']
+          a,b=layers('a'),layers('b')
+          assert len(a)==len(b) and len(a)>1
+          assert a[:-1]==b[:-1] and a[-1]!=b[-1], 'The shared uv layer was not reused'
+          print('Shared base and pinned uv layer; distinct task layers:',len(a)-1,'shared layers')
+          PY
+          docker system df -v | head -20
