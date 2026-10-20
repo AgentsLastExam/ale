@@ -81,6 +81,10 @@ the exclusion list is recorded in the snapshot manifest.
 Alternatively, Task-authored `artifact_include_files` selects exact relative file paths
 from directory artifacts. The solver sandbox resolves selected paths as the agent
 account, including links, and ALE stores their regular-file contents rather than links.
+For separate verification, `artifact_omit_unreadable_files: true` omits explicitly
+selected files when agent-side access is denied. The snapshot records the policy and
+the omitted paths; separate verification sees them as missing. This option requires
+`artifact_include_files` and does not suppress other capture failures.
 `artifact_include_directories` may select entire relative subtrees in the same snapshot;
 links inside those subtrees are followed as the agent and their contents are stored.
 Unreadable files, dangling links and special files within a selected subtree fail capture.

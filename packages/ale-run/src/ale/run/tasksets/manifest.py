@@ -353,6 +353,7 @@ def _effective_spec(
         artifact_include_regular_files=manifest.artifact_include_regular_files,
         artifact_preserve_file_directories=manifest.artifact_preserve_file_directories,
         artifact_allow_missing=manifest.artifact_allow_missing,
+        artifact_omit_unreadable_files=manifest.artifact_omit_unreadable_files,
         tools=manifest.tools,
         params=params,
         verify=manifest.verify,

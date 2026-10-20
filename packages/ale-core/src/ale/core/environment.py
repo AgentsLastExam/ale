@@ -93,6 +93,7 @@ class ArtifactSink(Protocol):
         regular_files: tuple[ArtifactRegularFiles, ...] = (),
         preserve_file_directories: bool = False,
         allow_missing: bool = False,
+        omit_unreadable_files: bool = False,
     ) -> Path: ...
 
     async def collect_file(self, sandbox: Sandbox, source: str, name: str) -> Path: ...

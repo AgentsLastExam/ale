@@ -149,6 +149,7 @@ def test_manifest_field_set_is_exact() -> None:
         "artifact_include_regular_files",
         "artifact_preserve_file_directories",
         "artifact_allow_missing",
+        "artifact_omit_unreadable_files",
         "tools",
         "params",
         "verify",
@@ -385,6 +386,33 @@ def test_artifact_include_files_require_linux_container_and_no_excludes() -> Non
     ):
         with pytest.raises(ValidationError):
             TaskManifestV1.model_validate(values | extra)
+
+
+def test_omitting_unreadable_files_requires_selected_files_and_separate_verification() -> None:
+    values = {
+        "spec_type": "core/v1",
+        "name": "demo",
+        "image": {"kind": "container"},
+        "artifacts": ("/output",),
+        "artifact_include_files": ("result.txt",),
+        "artifact_omit_unreadable_files": True,
+        "verify": {
+            "environment_mode": "separate",
+            "resources": {"cpus": 1, "memory_mb": 512, "storage_mb": None, "gpus": 0},
+        },
+    }
+    assert TaskManifestV1.model_validate(values).artifact_omit_unreadable_files is True
+    for extra in (
+        {"verify": {"environment_mode": "shared"}},
+        {"artifact_include_files": ()},
+        {"image": {"kind": "vm"}},
+        {"os": "windows", "artifacts": (r"C:\\output",)},
+    ):
+        with pytest.raises(ValidationError):
+            TaskManifestV1.model_validate(values | extra)
+    assert not TaskManifestV1.model_validate(
+        values | {"artifact_omit_unreadable_files": False}
+    ).artifact_omit_unreadable_files
 
 
 def test_artifact_included_directories_are_normalized_and_disjoint() -> None:
