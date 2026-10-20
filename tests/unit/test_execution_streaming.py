@@ -151,6 +151,28 @@ async def test_verifier_learns_how_much_of_its_phase_is_left(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_selected_verifier_python_is_only_exposed_during_verification(tmp_path: Path) -> None:
+    ctx = context(tmp_path)
+    sandbox = StageSandbox(ExecResult(exit_code=0))
+    environment = StandardEnvironment(NopHarness())
+    await environment._run_stage(
+        ctx,
+        sandbox,
+        Path("/opt/ale/setup"),
+        Phase.SETUP,  # type: ignore[arg-type]
+    )
+    assert "ALE_VERIFY_PYTHON" not in sandbox.env
+    await environment._run_stage(
+        ctx,
+        sandbox,
+        Path("/opt/ale/verify"),
+        Phase.VERIFY,
+        verify_python="python3.12",  # type: ignore[arg-type]
+    )
+    assert sandbox.env["ALE_VERIFY_PYTHON"] == "python3.12"
+
+
+@pytest.mark.asyncio
 async def test_concurrent_episode_output_never_crosses_files(tmp_path: Path) -> None:
     async def run(name: str) -> None:
         root = tmp_path / name

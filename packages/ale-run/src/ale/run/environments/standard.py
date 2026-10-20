@@ -116,10 +116,6 @@ def _sandbox_path(operating_system: OperatingSystem, root: str, *parts: str) -> 
     return str(path_type(root).joinpath(*parts))
 
 
-def _python(operating_system: OperatingSystem) -> str:
-    return "python.exe" if operating_system is OperatingSystem.WINDOWS else "python3"
-
-
 class StandardEnvironment(Environment):
     """Linear provision → setup → agent → verify flow."""
 
@@ -539,18 +535,20 @@ class StandardEnvironment(Environment):
         # the agent could not. The agent has already finished; nothing it does can follow.
         await sandbox.open_egress()
 
-        destination = await self._site_packages(ctx, sandbox)
+        python, destination = await self._site_packages(ctx, sandbox)
         framework_source, framework_version, framework_hash = installed_ale_verify()
         await sandbox.upload_dir(
             str(framework_source),
             f"{destination}/ale_verify",
         )
-        await self._probe_package(ctx, sandbox, "ale-verify", "import ale_verify")
+        await self._probe_package(sandbox, python, "ale-verify", "import ale_verify")
         ctx.ale_verify_provenance = AleVerifyProvenance(
             version=framework_version,
             content_hash=framework_hash,
         )
-        exit_code = await self._run_stage(ctx, sandbox, verify_root, Phase.VERIFY)
+        exit_code = await self._run_stage(
+            ctx, sandbox, verify_root, Phase.VERIFY, verify_python=python
+        )
         record = await self._collect_verification_record(ctx, sandbox)
         await self._collect_agent_judge_log(ctx, sandbox, record)
         if exit_code != 0:
@@ -858,7 +856,13 @@ class StandardEnvironment(Environment):
     # --- helpers ---
 
     async def _run_stage(
-        self, ctx: EpisodeContext, sandbox: Sandbox, directory: PurePath, phase: Phase
+        self,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        directory: PurePath,
+        phase: Phase,
+        *,
+        verify_python: str | None = None,
     ) -> int:
         layout = _layout(ctx.spec.os)
         entry = directory / ("run.ps1" if ctx.spec.os is OperatingSystem.WINDOWS else "run.sh")
@@ -880,6 +884,8 @@ class StandardEnvironment(Environment):
                     **ctx.verification_command_env,
                 }
             )
+            if verify_python is not None:
+                env["ALE_VERIFY_PYTHON"] = verify_python
             if (ctx.run_dir / "trajectory.json").is_file():
                 env["ALE_TRAJECTORY_PATH"] = str(layout.path("verify", "trajectory.json"))
             # Judges retry provider failures until this budget runs out, so a verdict is
@@ -954,41 +960,46 @@ class StandardEnvironment(Environment):
         return result.exit_code
 
     async def _probe_package(
-        self, ctx: EpisodeContext, sandbox: Sandbox, name: str, statement: str
+        self, sandbox: Sandbox, python: str, name: str, statement: str
     ) -> None:
-        result = await sandbox.exec([_python(ctx.spec.os), "-c", statement])
+        result = await sandbox.exec([python, "-c", statement])
         if not result.ok:
             raise TaskError(
                 f"package {name!r} is incompatible with the selected image: "
                 f"{result.stderr.strip() or result.stdout.strip()}"
             )
 
-    async def _site_packages(self, ctx: EpisodeContext, sandbox: Sandbox) -> str:
-        """Where this image's interpreter looks for installed packages."""
+    async def _site_packages(self, ctx: EpisodeContext, sandbox: Sandbox) -> tuple[str, str]:
+        """Select the verifier interpreter and its package destination."""
         destination = (
             "site.getusersitepackages()"
             if ctx.spec.os is OperatingSystem.WINDOWS
             else "sysconfig.get_paths()['purelib']"
         )
-        result = await sandbox.exec(
-            [
-                _python(ctx.spec.os),
-                "-c",
-                (
-                    "import sys,sysconfig,site;"
-                    "assert sys.version_info >= (3,12), "
-                    "f'ale_verify requires Python 3.12+, got {sys.version.split()[0]}';"
-                    f"print({destination})"
-                ),
-            ],
+        script = (
+            "import sys,sysconfig,site;"
+            "assert sys.version_info >= (3,12), "
+            "f'ale_verify requires Python 3.12+, got {sys.version.split()[0]}';"
+            f"print({destination})"
         )
-        path = result.stdout.strip()
-        if result.exit_code != 0 or not path:
-            raise TaskError(
-                "verify-stage Python must be Python 3.12+ and expose site-packages: "
-                f"{result.stderr.strip() or result.stdout.strip()}"
-            )
-        return path
+        candidates = (
+            ("python.exe",) if ctx.spec.os is OperatingSystem.WINDOWS else ("python3", "python3.12")
+        )
+        failures = []
+        for python in candidates:
+            argv = [python, "-c", script]
+            if ctx.spec.os is not OperatingSystem.WINDOWS:
+                # A missing executable must be a normal probe failure on every Provider.
+                argv = ["sh", "-c", 'command -v "$1" >/dev/null 2>&1 && exec "$@"', "sh", *argv]
+            result = await sandbox.exec(argv)
+            path = result.stdout.strip()
+            if result.ok and path:
+                return python, path
+            failures.append(f"{python}: {result.stderr.strip() or path or 'not available'}")
+        raise TaskError(
+            "verify-stage Python must be Python 3.12+ and expose site-packages: "
+            + "; ".join(failures)
+        )
 
     async def _upload_oracle(self, ctx: EpisodeContext, task: Task, sandbox: Sandbox) -> None:
         folder = getattr(task, "folder", None)

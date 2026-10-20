@@ -265,21 +265,23 @@ in `task.yaml`; never depend on ambient Host configuration.
 `verify/run.sh` (or Windows `verify/run.ps1`) evaluates the final outcome and writes the reward map. Verifier implementation
 conventionally lives in `verify/verify.py`; private references belong in `verify/assets/`.
 ALE runs the stage with `verify/` as cwd. Stage code and assets use ordinary relative paths;
-solver outputs use literal absolute paths. The verification image must expose system Python 3.12
-or newer; ALE stages the `ale_verify` package into that interpreter's site-packages.
+solver outputs use literal absolute paths. The verification image must expose Python 3.12
+or newer; ALE stages `ale_verify` into the selected interpreter's site-packages and sets
+`ALE_VERIFY_PYTHON` to its command. Use this variable to invoke Python so the stage uses the
+same interpreter even when a Linux VM's default `python3` is older.
 
 The Linux entry is:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-exec python3 verify.py
+exec "$ALE_VERIFY_PYTHON" verify.py
 ```
 
 The Windows entry is:
 
 ```powershell
-python.exe .\verify.py
+& $env:ALE_VERIFY_PYTHON .\verify.py
 ```
 
 APIs, scoring, and record behavior are defined in [Verification](verification.md).

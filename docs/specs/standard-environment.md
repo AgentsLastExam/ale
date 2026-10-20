@@ -89,9 +89,11 @@ and uploads the same `verify/`. It never reruns setup or copies the solver files
 Verification runs as framework-controlled Task code with open egress. ALE stages `ale_verify`, the rendered
 instruction, parameters, optional solver trajectory, and run-level Judge configuration,
 then executes the OS entry from the verification staging directory. Linux uses
-`/opt/ale/verify/run.sh` and system `python3`; Windows uses
-`C:\ProgramData\ALE\verify\run.ps1` and system `python.exe`. Both placements must produce
-the same reward envelope and `verification.json` contract.
+`/opt/ale/verify/run.sh`; Windows uses `C:\ProgramData\ALE\verify\run.ps1`. ALE selects
+Python 3.12 or newer for `ale_verify`: on Linux it tries `python3` and then `python3.12`,
+and on Windows it uses `python.exe`. The selected command is passed to verification as
+`ALE_VERIFY_PYTHON`. It does not change the solver's interpreter or environment. Both
+placements must produce the same reward envelope and `verification.json` contract.
 
 ### Teardown and retention
 
