@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -45,9 +46,11 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
         target = Path(str(kwargs["local_dir"])) / "tasks/one/image/assets"
         target.mkdir(parents=True)
         (target / "remote.txt").write_text("remote")
-        (target / "remote.txt").chmod(0o755)
+        (target / "remote.txt").chmod(0o777)
         (target / "tool.sh").write_text("#!/bin/sh\n")
-        (target / "tool.sh").chmod(0o644)
+        (target / "tool.sh").chmod(0o666)
+        (target / "private.sh").write_text("#!/bin/sh\n")
+        (target / "private.sh").chmod(0o600)
         return str(target)
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
@@ -56,6 +59,7 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
         lambda repo, commit, paths: {
             "tasks/one/image/assets/remote.txt": False,
             "tasks/one/image/assets/tool.sh": True,
+            "tasks/one/image/assets/private.sh": True,
         },
     )
     (result,) = pull_assets(
@@ -66,8 +70,9 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
     assert result.commit == "a" * 40
     assert api.revision == "a" * 40
     assert (repository / "tasks/one/image/assets/remote.txt").read_text() == "remote"
-    assert not (repository / "tasks/one/image/assets/remote.txt").stat().st_mode & 0o111
-    assert (repository / "tasks/one/image/assets/tool.sh").stat().st_mode & 0o111 == 0o111
+    assert stat.S_IMODE((repository / "tasks/one/image/assets/remote.txt").stat().st_mode) == 0o644
+    assert stat.S_IMODE((repository / "tasks/one/image/assets/tool.sh").stat().st_mode) == 0o755
+    assert stat.S_IMODE((repository / "tasks/one/image/assets/private.sh").stat().st_mode) == 0o700
     assert preserved.read_text() == "keep"
     assert all(not item.dirty for item in asset_status([repository / "tasks/one"]))
     (repository / "tasks/one/image/assets/tool.sh").chmod(0o644)

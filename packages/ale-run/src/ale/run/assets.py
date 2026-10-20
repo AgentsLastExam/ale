@@ -222,8 +222,13 @@ def _restore_executable_modes(
     if files.keys() != modes.keys():
         raise AssetError("downloaded Task assets do not match the resolved Git tree")
     for name, path in files.items():
-        mode = path.stat().st_mode & ~0o111
-        path.chmod(mode | (0o111 if modes[name] else 0))
+        # A downloader or inherited default ACL can make files group/other writable.
+        # Keep its read permissions, but do not carry those extra write bits into a
+        # Task image. Executable files remain executable by users who can read them.
+        mode = path.stat().st_mode & 0o644
+        if modes[name]:
+            mode |= 0o100 | ((mode & 0o044) >> 2)
+        path.chmod(mode)
 
 
 def push_assets(

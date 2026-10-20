@@ -95,7 +95,9 @@ Pull replaces only the selected Task's asset roots and refuses dirty files unles
 `--force` is supplied. A revision is resolved to an immutable SHA before downloading.
 The downloaded file set and executable bits must match that revision's Git tree before
 any local asset roots are replaced. As in Git, file modes preserve executability, not
-arbitrary permission bits.
+arbitrary permission bits. Pull keeps the downloaded read permissions, removes group
+and other write permissions, and grants executable permissions to the owner and to
+readable groups and others when the Git entry is executable.
 Recovery, verification, and export from a recorded version must use that fixed SHA or
 the saved local checkpoint, never a moving branch name. The accepted asset commit also
 participates in completed-episode reuse identity; dirty assets cannot reuse an episode.
