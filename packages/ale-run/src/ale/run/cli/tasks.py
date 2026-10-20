@@ -723,6 +723,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                             providers,
                             run_dir=run_dir,
                             episode_id=episode_id,
+                            collect_artifacts=settings.artifacts.collect == "host",
                             provenance=inputs,
                             phase_callback=lambda phase, current=episode_id: ledger.update_phase(
                                 current, phase.value

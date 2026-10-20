@@ -143,6 +143,45 @@ def test_validate_accepts_run_level_judge_config(
     assert observed["runs_dir"] == tmp_path / "runs"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("policy", "expected"), [("host", True), ("none", False)])
+async def test_validation_passes_artifact_policy_to_episodes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_task_repo,  # type: ignore[no-untyped-def]
+    policy: str,
+    expected: bool,
+) -> None:
+    repository = write_task_repo("validation-artifacts")
+    task_cli = import_module("ale.run.cli.tasks")
+    digest = "sha256:" + "a" * 64
+
+    async def fake_prepare(tasks, _providers):  # type: ignore[no-untyped-def]
+        for task in tasks:
+            task.prepared_image = PreparedTaskImage(
+                kind=ImageKind.CONTAINER,
+                source="solver-local",
+                input_identity=digest,
+                image_source_identity=digest,
+                runtime_ref="ale-task:fixture",
+                prepared_identity=digest,
+            )
+        return ()
+
+    class EpisodeReached(Exception):
+        pass
+
+    async def fake_episode(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["collect_artifacts"] is expected
+        raise EpisodeReached
+
+    monkeypatch.setattr(task_cli, "_prepare_images", fake_prepare)
+    monkeypatch.setattr(task_cli, "run_episode", fake_episode)
+    settings = RunConfig.model_validate({"artifacts": {"collect": policy}})
+    with pytest.raises(EpisodeReached):
+        await task_cli._validate(str(repository), settings, tmp_path / "runs")
+
+
 def test_every_command_reads_the_selected_credential_file_first(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

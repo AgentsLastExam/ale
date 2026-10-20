@@ -76,8 +76,9 @@ snapshot. Missing, overlapping, symlink, special-file, and transfer failures are
 errors.
 
 With `artifacts.collect = "none"`, ALE does not inspect artifact paths, create a spool,
-copy bytes, or restore anything. A separate verifier that needs solver output therefore
-requires host artifact collection.
+copy bytes, or restore anything. This run policy applies to `ale run` and both episodes
+of `ale validate`. A separate verifier that needs solver output therefore requires host
+artifact collection.
 
 ### Verify
 

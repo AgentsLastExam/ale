@@ -13,6 +13,29 @@ pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("policy", "retained"), [("host", True), ("none", False)])
+async def test_validation_respects_artifact_policy_for_shared_verification(
+    tmp_path: Path,
+    write_repo: Callable[..., Path],
+    policy: str,
+    retained: bool,
+) -> None:
+    root = tmp_path / "repo"
+    write_repo(root)
+    settings = RunConfig.model_validate({"artifacts": {"collect": policy}})
+
+    assert await _validate(str(root), settings, tmp_path / "runs") == 0
+
+    validation_path = next((tmp_path / "runs").glob("validate-*/validation.json"))
+    task = json.loads(validation_path.read_text())["tasks"][0]
+    assert task["untouched"]["rewards"] == {"reward": 0.0, "overall": 0.0}
+    assert task["oracle"]["rewards"] == {"reward": 1.0, "overall": 1.0}
+    for name in ("untouched", "oracle"):
+        episode = validation_path.parent / Path(task[name]["result_path"]).parent
+        assert (episode / "artifacts" / "snapshot.json").is_file() is retained
+
+
+@pytest.mark.asyncio
 async def test_validation_records_selected_variants_and_rejects_partial_oracles(
     tmp_path: Path,
     write_repo: Callable[..., Path],
