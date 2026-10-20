@@ -18,7 +18,8 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from pathlib import Path, PureWindowsPath
+from fnmatch import fnmatchcase
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
 from ale.core.config import LoggingPolicy, SandboxRetentionConfig, VerificationConfig
@@ -359,6 +360,7 @@ class _Artifacts(ArtifactSink):
         target = self.root / stored
         target.parent.mkdir(parents=True, exist_ok=True)
         unreadable_files: tuple[str, ...] = ()
+        placeholders: tuple[str, ...] = ()
         try:
             if kind == "missing":
                 identity = None
@@ -371,7 +373,7 @@ class _Artifacts(ArtifactSink):
             else:
                 target.mkdir()
                 if excludes or includes or include_directories or regular_files:
-                    unreadable_files = await _download_filtered_artifact(
+                    unreadable_files, placeholders = await _download_filtered_artifact(
                         sandbox,
                         source,
                         target,
@@ -409,6 +411,8 @@ class _Artifacts(ArtifactSink):
         if omit_unreadable_files:
             entry["omit_unreadable_files"] = True
             entry["unreadable_files"] = list(unreadable_files)
+        if placeholders:
+            entry["unreadable_regular_file_placeholders"] = list(placeholders)
         self.entries.append(entry)
         self.collected.append(name)
         self._write_manifest()
@@ -510,6 +514,36 @@ def _artifact_tree_identity(root: Path) -> tuple[str, int]:
     return f"sha256:{digest.hexdigest()}", size
 
 
+def _valid_regular_placeholders(
+    paths: object, selections: tuple[ArtifactRegularFiles, ...]
+) -> bool:
+    """Reject staged placeholder paths outside the opt-in, matching selection."""
+    if not isinstance(paths, list) or any(not isinstance(name, str) for name in paths):
+        return False
+    if len(paths) != len(set(paths)):
+        return False
+    for name in paths:
+        path = PurePosixPath(name)
+        if not name or path.is_absolute() or str(path) != name or ".." in path.parts:
+            return False
+        matched = False
+        for selection in selections:
+            directory = PurePosixPath(selection.path)
+            in_directory = directory in path.parents and (
+                selection.recursive or path.parent == directory
+            )
+            if (
+                in_directory
+                and selection.unreadable == "empty"
+                and (selection.pattern is None or fnmatchcase(path.name, selection.pattern))
+            ):
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
+
+
 async def _download_filtered_artifact(
     sandbox: Sandbox,
     source: str,
@@ -520,10 +554,10 @@ async def _download_filtered_artifact(
     regular_files: tuple[ArtifactRegularFiles, ...],
     preserve_file_directories: bool,
     omit_unreadable_files: bool,
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Stage a filtered tree or explicitly selected file and directory contents."""
     script = r"""
-import errno, json, os, shutil, stat, sys, tempfile
+import errno, fnmatch, json, os, shutil, stat, sys, tempfile
 (root, encoded_excludes, encoded_includes, encoded_directories, encoded_regular,
  encoded_preserve, encoded_omit) = sys.argv[1:]
 excluded = set(json.loads(encoded_excludes))
@@ -533,6 +567,7 @@ regular_files = json.loads(encoded_regular)
 preserve = json.loads(encoded_preserve)
 omit_unreadable = json.loads(encoded_omit)
 unreadable = []
+placeholders = []
 stage = tempfile.mkdtemp(prefix='ale-artifact-', dir='/tmp')
 flags = os.O_RDONLY | os.O_NOFOLLOW
 def walk(fd, destination, relative):
@@ -630,41 +665,81 @@ try:
                 shutil.copytree('/proc/self/fd/' + str(fd), destination)
             finally:
                 os.close(fd)
-        # Preserve the regular-file view of each directory without following
-        # links or copying unrelated subtrees. Explicit files may overlap this
-        # selection, so a file already copied through that route is retained.
-        def copy_regular(fd, destination, recursive):
+        # Match names before opening file contents. Optional link following is
+        # restricted to regular-file targets, never directory recursion.
+        def copy_regular(
+            fd, destination, relative, recursive, pattern, follow_symlinks, unreadable
+        ):
             for entry in sorted(os.listdir(fd)):
+                matches = pattern is None or fnmatch.fnmatchcase(entry, pattern)
+                if not matches and not recursive:
+                    continue
                 mode = os.stat(entry, dir_fd=fd, follow_symlinks=False).st_mode
-                if stat.S_ISREG(mode):
-                    child = os.open(entry, flags | os.O_NONBLOCK, dir_fd=fd)
-                    try:
-                        info = os.fstat(child)
-                        if not stat.S_ISREG(info.st_mode):
-                            raise ValueError('artifact file changed type: ' + entry)
-                        path = os.path.join(destination, entry)
-                        os.makedirs(destination, exist_ok=True)
-                        if not os.path.exists(path):
-                            with os.fdopen(child, 'rb', closefd=False) as src:
-                                with open(path, 'xb') as dst:
-                                    shutil.copyfileobj(src, dst)
-                            os.chmod(path, stat.S_IMODE(info.st_mode))
-                        elif not os.path.isfile(path):
-                            raise ValueError('artifact selection changed type: ' + entry)
-                    finally:
-                        os.close(child)
-                elif recursive and stat.S_ISDIR(mode):
+                child_name = relative + '/' + entry
+                if recursive and stat.S_ISDIR(mode):
                     child = os.open(entry, flags | os.O_DIRECTORY, dir_fd=fd)
                     try:
-                        copy_regular(child, os.path.join(destination, entry), recursive)
+                        copy_regular(
+                            child, os.path.join(destination, entry), child_name, recursive,
+                            pattern, follow_symlinks, unreadable
+                        )
                     finally:
                         os.close(child)
+                    continue
+                is_link = stat.S_ISLNK(mode)
+                if not matches or (is_link and not follow_symlinks):
+                    continue
+                if not stat.S_ISREG(mode) and not is_link:
+                    continue
+                try:
+                    path_flags = os.O_PATH | (0 if follow_symlinks else os.O_NOFOLLOW)
+                    child = os.open(entry, path_flags, dir_fd=fd)
+                except OSError as exc:
+                    if (is_link and follow_symlinks
+                            and exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)):
+                        continue
+                    raise
+                try:
+                    info = os.fstat(child)
+                    if not stat.S_ISREG(info.st_mode):
+                        if not is_link:
+                            raise ValueError('artifact file changed type: ' + entry)
+                        continue
+                    path = os.path.join(destination, entry)
+                    os.makedirs(destination, exist_ok=True)
+                    if not os.path.exists(path):
+                        try:
+                            read_fd = os.open(
+                                '/proc/self/fd/' + str(child), os.O_RDONLY | os.O_NONBLOCK
+                            )
+                        except OSError as exc:
+                            if unreadable == 'empty' and exc.errno in (errno.EACCES, errno.EPERM):
+                                with open(path, 'xb'):
+                                    pass
+                                os.chmod(path, 0o600)
+                                placeholders.append(child_name)
+                                continue
+                            raise
+                        try:
+                            with os.fdopen(read_fd, 'rb', closefd=False) as src:
+                                with open(path, 'xb') as dst:
+                                    shutil.copyfileobj(src, dst)
+                        finally:
+                            os.close(read_fd)
+                        os.chmod(path, stat.S_IMODE(info.st_mode))
+                    elif not os.path.isfile(path):
+                        raise ValueError('artifact selection changed type: ' + entry)
+                finally:
+                    os.close(child)
 
         for selection in regular_files:
             name = selection['path']
             path = os.path.join(root, name)
             try:
-                fd = os.open(path, flags | os.O_DIRECTORY)
+                directory_flags = os.O_RDONLY | os.O_DIRECTORY
+                if not selection['follow_symlinks']:
+                    directory_flags |= os.O_NOFOLLOW
+                fd = os.open(path, directory_flags)
             except OSError as exc:
                 if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
                     continue
@@ -672,7 +747,10 @@ try:
             try:
                 destination = os.path.join(stage, name)
                 os.makedirs(destination, exist_ok=True)
-                copy_regular(fd, destination, selection['recursive'])
+                copy_regular(
+                    fd, destination, name, selection['recursive'], selection['pattern'],
+                    selection['follow_symlinks'], selection['unreadable']
+                )
             finally:
                 os.close(fd)
     else:
@@ -684,7 +762,7 @@ try:
 except BaseException:
     shutil.rmtree(stage)
     raise
-print(json.dumps({'stage': stage, 'unreadable_files': unreadable}))
+print(json.dumps({'stage': stage, 'unreadable_files': unreadable, 'placeholders': placeholders}))
 """
     result = await sandbox.exec(
         [
@@ -711,7 +789,10 @@ print(json.dumps({'stage': stage, 'unreadable_files': unreadable}))
         staged = json.loads(result.stdout)
         stage = staged["stage"]
         unreadable_files = staged["unreadable_files"]
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        placeholders = staged["placeholders"]
+        if not _valid_regular_placeholders(placeholders, regular_files):
+            raise ValueError("invalid placeholder list")
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise ArtifactTransferError(f"invalid artifact stage: {source}") from exc
     if not isinstance(stage, str) or not stage.startswith("/tmp/ale-artifact-") or "/" in stage[5:]:
         raise ArtifactTransferError(f"invalid artifact stage: {source}")
@@ -729,7 +810,11 @@ print(json.dumps({'stage': stage, 'unreadable_files': unreadable}))
         cleanup = await sandbox.exec(["rm", "-rf", "--", stage])
     if not cleanup.ok:
         raise ArtifactTransferError(f"could not remove temporary artifact stage: {stage}")
-    return tuple(unreadable_files)
+    for name in placeholders:
+        path = target / name
+        if path.is_symlink() or not path.is_file() or path.stat().st_size != 0:
+            raise ArtifactTransferError(f"invalid unreadable artifact placeholder: {source}")
+    return tuple(unreadable_files), tuple(placeholders)
 
 
 async def run_episode(

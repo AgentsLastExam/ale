@@ -176,8 +176,17 @@ default it inspects only immediate entries; `recursive: true` also inspects real
 subdirectories. It does not copy empty descendant directories. A missing path, link,
 or non-directory is omitted. An unreadable selected regular file or directory fails
 capture. Exact `artifact_include_files` paths may lie under a regular-file selection:
-those explicit paths still follow links and their selected bytes are retained. Regular
-selections may not overlap each other or an `artifact_include_directories` subtree.
+those explicit paths still follow links and their selected bytes are retained. Set
+`pattern` to a case-sensitive filename wildcard such as `*.sgf` to collect matching
+entries only. Set `follow_symlinks: true` to follow a linked selected directory and
+links to matching regular files; linked directories are never recursed into.
+Unreadable matching files fail capture by default. For a verifier that treats an
+unreadable file like empty contents but still needs its filename, opt into
+`unreadable: empty`; this requires separate verification. ALE records the
+placeholder paths in `snapshot.json`.
+Other errors, including inaccessible directories, remain capture errors.
+Regular selections may not overlap each other. A nonrecursive regular selection may
+contain an `artifact_include_directories` subtree; other overlaps are rejected.
 The same Linux container and exclusion restrictions apply, and each selection is
 recorded in `snapshot.json`.
 
