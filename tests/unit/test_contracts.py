@@ -399,6 +399,10 @@ def test_artifact_regular_file_directories_are_validated() -> None:
         {"artifact_include_regular_files": ({"path": "/output"},)},
         {"artifact_include_regular_files": ({"path": "output"}, {"path": "output/sub"})},
         {"artifact_include_regular_files": ({"path": "output", "unknown": True},)},
+        {"artifact_include_regular_files": ({"path": "output", "pattern": "../*.sgf"},)},
+        {"artifact_include_regular_files": ({"path": "output", "pattern": ""},)},
+        {"artifact_include_regular_files": ({"path": "output", "unreadable": "ignore"},)},
+        {"artifact_include_regular_files": ({"path": "output", "pattern": "dir\\*.sgf"},)},
         {"artifact_include_directories": ("output",)},
         {"artifact_include_files": ("output",)},
         {"artifact_excludes": ("other",)},
@@ -408,3 +412,34 @@ def test_artifact_regular_file_directories_are_validated() -> None:
     ):
         with pytest.raises(ValidationError):
             TaskManifestV1.model_validate(values | extra)
+
+
+def test_empty_unreadable_regular_files_require_separate_verification() -> None:
+    fields = {
+        "artifacts": ("/base",),
+        "artifact_include_regular_files": ({"path": "output", "unreadable": "empty"},),
+    }
+    with pytest.raises(ValidationError, match="require separate verification"):
+        make_spec(**fields)
+    with pytest.raises(ValidationError, match="require separate verification"):
+        TaskManifestV1.model_validate(
+            {"spec_type": "core/v1", "name": "demo", "image": {"kind": "container"}} | fields
+        )
+    verify = {
+        "environment_mode": "separate",
+        "resources": {"cpus": 1, "memory_mb": 1024, "storage_mb": None, "gpus": 0},
+    }
+    assert (
+        make_spec(**(fields | {"verify": verify})).artifact_include_regular_files[0].unreadable
+        == "empty"
+    )
+    assert (
+        TaskManifestV1.model_validate(
+            {"spec_type": "core/v1", "name": "demo", "image": {"kind": "container"}}
+            | fields
+            | {"verify": verify}
+        )
+        .artifact_include_regular_files[0]
+        .unreadable
+        == "empty"
+    )

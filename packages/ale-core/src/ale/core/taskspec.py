@@ -56,6 +56,20 @@ class ArtifactRegularFiles(BaseModel):
 
     path: str
     recursive: bool = False
+    pattern: str | None = None
+    follow_symlinks: bool = False
+    unreadable: Literal["error", "empty"] = "error"
+
+    # --- validation ---
+
+    @field_validator("pattern")
+    @classmethod
+    def _validate_pattern(cls, pattern: str | None) -> str | None:
+        if pattern is not None and (
+            not pattern or pattern in {".", ".."} or "/" in pattern or "\\" in pattern
+        ):
+            raise ValueError("regular-file pattern must be a single filename pattern")
+        return pattern
 
 
 def _task_path(path: str, operating_system: OperatingSystem) -> PurePosixPath | PureWindowsPath:
@@ -342,6 +356,16 @@ class VerifySpec(BaseModel):
         return self
 
 
+def _validate_unreadable_regular_files(
+    selections: tuple[ArtifactRegularFiles, ...], verify: VerifySpec
+) -> None:
+    if (
+        any(selection.unreadable == "empty" for selection in selections)
+        and verify.environment_mode is not VerificationMode.SEPARATE
+    ):
+        raise ValueError("empty unreadable regular files require separate verification")
+
+
 class VariantOverride(BaseModel):
     model_config = _FROZEN
 
@@ -395,6 +419,7 @@ class TaskManifestV1(BaseModel):
             self.os,
             self.image.kind,
         )
+        _validate_unreadable_regular_files(self.artifact_include_regular_files, self.verify)
 
     @model_validator(mode="after")
     def _valid_manifest(self) -> Self:
@@ -444,6 +469,7 @@ class TaskSpec(BaseModel):
             self.os,
             self.image.kind,
         )
+        _validate_unreadable_regular_files(self.artifact_include_regular_files, self.verify)
         return self
 
     @property

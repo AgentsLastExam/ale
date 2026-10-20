@@ -434,7 +434,66 @@ async def test_regular_file_selection_restores_only_real_top_level_files(tmp_pat
     stored = result.run_dir / "artifacts/output/deliverables"
     assert {path.name for path in stored.iterdir()} == {"answer.txt"}
     entry = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"][0]
-    assert entry["regular_files"] == [{"path": "deliverables", "recursive": False}]
+    assert entry["regular_files"] == [
+        {
+            "path": "deliverables",
+            "recursive": False,
+            "pattern": None,
+            "follow_symlinks": False,
+            "unreadable": "error",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_patterned_files_restore_links_and_record_unreadable(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "patterned-regular-files")
+    dockerfile = task / "image/Dockerfile"
+    dockerfile.write_text(dockerfile.read_text().replace("-base:latest", "-base:0.1.0"))
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + 'artifact_include_regular_files: [{path: deliverables, pattern: "*.sgf", '
+        + "follow_symlinks: true, unreadable: empty}]\n"
+        + "verify:\n  environment_mode: separate\n"
+        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    )
+    (task / "oracle/run.sh").write_text(
+        "#!/bin/sh\nset -eu\n"
+        "mkdir -p /home/user/output/deliverables\n"
+        "printf answer > /home/user/output/deliverables/answer.sgf\n"
+        "printf linked > /home/user/linked.sgf\n"
+        "ln -s /home/user/linked.sgf /home/user/output/deliverables/linked.sgf\n"
+        "printf protected > /home/user/output/deliverables/unreadable.sgf\n"
+        "chmod 000 /home/user/output/deliverables/unreadable.sgf\n"
+        "ln -s /missing /home/user/output/deliverables/dangling.sgf\n"
+        "mkfifo /home/user/output/deliverables/pipe.sgf\n"
+        "printf ignored > /home/user/output/deliverables/ignored.txt\n"
+    )
+    (task / "verify/verify.py").write_text(
+        "from pathlib import Path\n"
+        "from ale_verify import CheckResult, Verification\n"
+        "root = Path('/home/user/output/deliverables')\n"
+        "correct = ("
+        "{p.name for p in root.iterdir()} == {'answer.sgf', 'linked.sgf', 'unreadable.sgf'} "
+        "and (root / 'answer.sgf').read_text() == 'answer' "
+        "and (root / 'linked.sgf').read_text() == 'linked' "
+        "and (root / 'unreadable.sgf').read_bytes() == b'')\n"
+        "v = Verification()\n"
+        "v.check('selection', CheckResult(float(correct)))\n"
+        "v.aggregate('overall')\n"
+        "v.write()\n"
+    )
+
+    result = await execute(task, tmp_path / "runs")
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"selection": 1.0, "overall": 1.0}
+    assert [outcome.roles for outcome in result.record.sandboxes] == [("solver",), ("verifier",)]
+    artifacts = result.run_dir / "artifacts"
+    assert not (artifacts / "output/deliverables/linked.sgf").is_symlink()
+    entry = json.loads((artifacts / "snapshot.json").read_text())["entries"][0]
+    assert entry["unreadable_regular_file_placeholders"] == ["deliverables/unreadable.sgf"]
 
 
 @pytest.mark.asyncio

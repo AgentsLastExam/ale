@@ -98,8 +98,16 @@ each declared relative directory, optionally recursing into real subdirectories.
 It skips symbolic links and special files and omits empty descendant directories.
 Explicit selected files can overlap and retain their ordinary link-following behavior.
 Missing or non-directory selections are omitted; unreadable selected entries fail
-capture. This selection has the same Linux container and exclusion restrictions and
-is recorded in the snapshot manifest.
+capture. An optional case-sensitive `pattern` filters entry names using filename
+wildcards. With `follow_symlinks: true`, the selected directory and matching links
+to regular files are followed as the agent; directory links are never traversed
+recursively. The snapshot contains bytes rather than links. With the explicit
+`unreadable: empty` policy, a matching regular file that cannot be opened due
+to permissions becomes an empty placeholder. The snapshot records each replaced
+path; other capture errors still fail. Use this only when the verifier treats
+an unreadable file and empty contents equivalently. This policy requires separate
+verification. This selection has the same Linux container and exclusion restrictions
+and is recorded in the snapshot manifest.
 
 With `artifacts.collect = "none"`, ALE does not inspect artifact paths, create a spool,
 copy bytes, or restore anything. A separate verifier that needs solver output therefore

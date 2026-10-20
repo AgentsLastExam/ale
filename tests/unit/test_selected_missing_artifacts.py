@@ -14,7 +14,7 @@ import pytest
 from ale.core.errors import ArtifactTransferError
 from ale.core.sandbox import ExecResult, OperatingSystem
 from ale.core.taskspec import ArtifactRegularFiles
-from ale.run.episode import _Artifacts
+from ale.run.episode import _Artifacts, _valid_regular_placeholders
 
 
 class LocalSandbox:
@@ -206,7 +206,15 @@ async def test_regular_file_selection_ignores_links_and_special_files(
         assert not path.exists() and not path.is_symlink()
     assert not (stored / "unselected").exists()
     entry = json.loads((sink.root / "snapshot.json").read_text())["entries"][0]
-    assert entry["regular_files"] == [{"path": "output", "recursive": recursive}]
+    assert entry["regular_files"] == [
+        {
+            "path": "output",
+            "recursive": recursive,
+            "pattern": None,
+            "follow_symlinks": False,
+            "unreadable": "error",
+        }
+    ]
 
     shutil.rmtree(root)
     await sink.restore(sandbox)  # type: ignore[arg-type]
@@ -275,3 +283,131 @@ async def test_missing_regular_selection_root_is_restored_as_missing(tmp_path: P
     (root / "stale").write_text("must disappear")
     await sink.restore(sandbox)  # type: ignore[arg-type]
     assert not root.exists()
+
+
+@pytest.mark.asyncio
+async def test_patterned_regular_files_follow_only_matching_file_links(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "base"
+    output = root / "output"
+    output.mkdir(parents=True)
+    (output / "valid.sgf").write_text("regular")
+    (output / "ignored.txt").write_text("unrelated")
+    (output / "broken.txt").symlink_to("missing")
+    (output / "broken.sgf").symlink_to("missing")
+    (output / "loop.sgf").symlink_to("loop.sgf")
+    (output / "matching-dir.sgf").mkdir()
+    (output / "symlink-dir.sgf").symlink_to(output / "matching-dir.sgf", target_is_directory=True)
+    target = tmp_path / "outside.sgf"
+    target.write_text("linked")
+    (output / "linked.sgf").symlink_to(target)
+    os.mkfifo(output / "fifo.sgf")
+    (output / "fifo-link.sgf").symlink_to("fifo.sgf")
+    sandbox = LocalSandbox()
+    sink = _Artifacts(tmp_path / "run")
+    selection = ArtifactRegularFiles(path="output", pattern="*.sgf", follow_symlinks=True)
+    await sink.collect(sandbox, str(root), "base", regular_files=(selection,))  # type: ignore[arg-type]
+    stored = sink.root / "base/output"
+    assert {path.name for path in stored.iterdir()} == {"valid.sgf", "linked.sgf"}
+    assert (stored / "valid.sgf").read_text() == "regular"
+    assert (stored / "linked.sgf").read_text() == "linked"
+    assert not (stored / "linked.sgf").is_symlink()
+    entry = json.loads((sink.root / "snapshot.json").read_text())["entries"][0]
+    assert entry["regular_files"] == [selection.model_dump()]
+
+
+@pytest.mark.asyncio
+async def test_patterned_regular_files_traverse_real_directories_only(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "base"
+    output = root / "output"
+    (output / "nested").mkdir(parents=True)
+    (output / "nested/keep.sgf").write_text("keep")
+    (output / "nested/skip.txt").write_text("skip")
+    (output / "linked-dir").symlink_to(output / "nested", target_is_directory=True)
+    sink = _Artifacts(tmp_path / "run")
+    selection = ArtifactRegularFiles(
+        path="output", recursive=True, pattern="*.sgf", follow_symlinks=True
+    )
+    await sink.collect(LocalSandbox(), str(root), "base", regular_files=(selection,))  # type: ignore[arg-type]
+    stored = sink.root / "base/output"
+    assert (stored / "nested/keep.sgf").read_text() == "keep"
+    assert not (stored / "nested/skip.txt").exists()
+    assert not (stored / "linked-dir").exists()
+
+
+@pytest.mark.asyncio
+async def test_patterned_regular_files_can_follow_selected_directory_link(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "base"
+    root.mkdir()
+    actual = tmp_path / "actual-output"
+    actual.mkdir()
+    (actual / "answer.sgf").write_text("answer")
+    (root / "output").symlink_to(actual, target_is_directory=True)
+    sink = _Artifacts(tmp_path / "run")
+    selection = ArtifactRegularFiles(path="output", pattern="*.sgf", follow_symlinks=True)
+    await sink.collect(LocalSandbox(), str(root), "base", regular_files=(selection,))  # type: ignore[arg-type]
+    stored = sink.root / "base/output/answer.sgf"
+    assert stored.read_text() == "answer"
+    assert not stored.parent.is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_unreadable_regular_file_placeholder_is_opt_in_and_recorded(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "base"
+    output = root / "output"
+    output.mkdir(parents=True)
+    candidate = output / "candidate.sgf"
+    candidate.write_text("protected bytes")
+    candidate.chmod(0)
+    sandbox = LocalSandbox()
+    try:
+        try:
+            candidate.read_bytes()
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("the test account can read a mode-000 file")
+        default_sink = _Artifacts(tmp_path / "default")
+        with pytest.raises(ArtifactTransferError):
+            await default_sink.collect(
+                sandbox,
+                str(root),
+                "base",
+                regular_files=(ArtifactRegularFiles(path="output", pattern="*.sgf"),),
+            )  # type: ignore[arg-type]
+        sink = _Artifacts(tmp_path / "placeholder")
+        selection = ArtifactRegularFiles(path="output", pattern="*.sgf", unreadable="empty")
+        await sink.collect(sandbox, str(root), "base", regular_files=(selection,))  # type: ignore[arg-type]
+        assert (sink.root / "base/output/candidate.sgf").read_bytes() == b""
+        entry = json.loads((sink.root / "snapshot.json").read_text())["entries"][0]
+        assert entry["unreadable_regular_file_placeholders"] == ["output/candidate.sgf"]
+    finally:
+        candidate.chmod(0o600)
+    assert candidate.read_text() == "protected bytes"
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ["../outside.sgf"],
+        ["/tmp/outside.sgf"],
+        ["output/../outside.sgf"],
+        ["output/other.txt"],
+        ["other/candidate.sgf"],
+        ["output/sub/candidate.sgf"],
+        ["output/candidate.sgf", "output/candidate.sgf"],
+        [1],
+    ],
+)
+def test_placeholder_paths_cannot_escape_the_opted_in_selection(paths: object) -> None:
+    selection = ArtifactRegularFiles(path="output", pattern="*.sgf", unreadable="empty")
+    assert not _valid_regular_placeholders(paths, (selection,))
+    assert _valid_regular_placeholders(["output/candidate.sgf"], (selection,))
+    assert not _valid_regular_placeholders(["output/candidate.sgf"], ())
