@@ -497,6 +497,57 @@ async def test_patterned_files_restore_links_and_record_unreadable(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("directory", [False, True])
+async def test_regular_selection_and_subtree_restore_submission_type(
+    tmp_path: Path, directory: bool
+) -> None:
+    task = scaffold_task(tmp_path / "selected-file-or-directory")
+    dockerfile = task / "image/Dockerfile"
+    dockerfile.write_text(dockerfile.read_text().replace("-base:latest", "-base:0.1.0"))
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + "artifact_include_directories: [deliverables/submission]\n"
+        + "artifact_include_regular_files: [{path: deliverables, pattern: submission}]\n"
+        + "verify:\n  environment_mode: separate\n"
+        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    )
+    create = (
+        "mkdir -p /home/user/output/deliverables/submission\n"
+        "printf answer > /home/user/output/deliverables/submission/result.txt\n"
+        if directory
+        else "mkdir -p /home/user/output/deliverables\n"
+        "printf answer > /home/user/output/deliverables/submission\n"
+    )
+    (task / "oracle/run.sh").write_text(
+        "#!/bin/sh\nset -eu\n"
+        + create
+        + "ln -s /missing /home/user/output/deliverables/unrelated\n"
+    )
+    (task / "verify/verify.py").write_text(
+        "from pathlib import Path\n"
+        "from ale_verify import CheckResult, Verification\n"
+        "root = Path('/home/user/output/deliverables')\n"
+        "submission = root / 'submission'\n"
+        f"correct = (submission.is_dir() == {directory!r} and "
+        "(submission / 'result.txt' if submission.is_dir() else submission)"
+        ".read_text() == 'answer' "
+        "and {p.name for p in root.iterdir()} == {'submission'})\n"
+        "v = Verification()\n"
+        "v.check('selection', CheckResult(float(correct)))\n"
+        "v.aggregate('overall')\n"
+        "v.write()\n"
+    )
+
+    result = await execute(task, tmp_path / "runs")
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"selection": 1.0, "overall": 1.0}
+    stored = result.run_dir / "artifacts/output/deliverables/submission"
+    assert stored.is_dir() is directory
+
+
+@pytest.mark.asyncio
 async def test_selected_file_directory_reaches_separate_verifier_without_contents(
     tmp_path: Path,
 ) -> None:

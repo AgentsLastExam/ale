@@ -16,6 +16,8 @@ from ale.core.sandbox import ExecResult, OperatingSystem
 from ale.core.taskspec import ArtifactRegularFiles
 from ale.run.episode import _Artifacts, _valid_regular_placeholders
 
+pytestmark = pytest.mark.unit
+
 
 class LocalSandbox:
     request = SimpleNamespace(os=OperatingSystem.LINUX)
@@ -354,6 +356,35 @@ async def test_patterned_regular_files_can_follow_selected_directory_link(
     stored = sink.root / "base/output/answer.sgf"
     assert stored.read_text() == "answer"
     assert not stored.parent.is_symlink()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("directory", [False, True])
+async def test_nonrecursive_selection_preserves_file_or_directory(
+    tmp_path: Path, directory: bool
+) -> None:
+    root = tmp_path / "base"
+    output = root / "output"
+    output.mkdir(parents=True)
+    submission = output / "submission"
+    if directory:
+        submission.mkdir()
+        (submission / "result.txt").write_text("answer")
+    else:
+        submission.write_text("answer")
+    (output / "unrelated").symlink_to("missing")
+    sink = _Artifacts(tmp_path / "run")
+    await sink.collect(
+        LocalSandbox(),
+        str(root),
+        "base",
+        include_directories=("output/submission",),
+        regular_files=(ArtifactRegularFiles(path="output", pattern="submission"),),
+    )  # type: ignore[arg-type]
+    stored = sink.root / "base/output/submission"
+    assert stored.is_dir() is directory
+    assert (stored / "result.txt" if directory else stored).read_text() == "answer"
+    assert not (stored.parent / "unrelated").exists()
 
 
 @pytest.mark.asyncio

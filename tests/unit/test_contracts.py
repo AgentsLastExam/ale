@@ -443,3 +443,20 @@ def test_empty_unreadable_regular_files_require_separate_verification() -> None:
         .unreadable
         == "empty"
     )
+
+
+def test_nonrecursive_regular_selection_can_contain_a_selected_subtree() -> None:
+    fields = {
+        "artifacts": ("/base",),
+        "artifact_include_directories": ("output/submission",),
+        "artifact_include_regular_files": ({"path": "output", "pattern": "submission"},),
+    }
+    spec = make_spec(**fields)
+    assert spec.artifact_include_directories == ("output/submission",)
+    with pytest.raises(ValidationError, match="overlaps directory"):
+        make_spec(
+            **(
+                fields
+                | {"artifact_include_regular_files": ({"path": "output", "recursive": True},)}
+            )
+        )

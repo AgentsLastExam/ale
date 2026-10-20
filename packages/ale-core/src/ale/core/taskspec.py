@@ -127,10 +127,15 @@ def _validate_artifact_selection(
     _validate_artifact_relative_paths(includes + include_directories, "included paths")
     regular_paths = tuple(selection.path for selection in regular_files)
     _validate_artifact_relative_paths(regular_paths, "regular-file directories")
-    for value in regular_paths:
+    for selection in regular_files:
+        value = selection.path
         regular = PurePosixPath(value)
         for directory in map(PurePosixPath, include_directories):
-            if regular == directory or regular in directory.parents or directory in regular.parents:
+            if (
+                regular == directory
+                or directory in regular.parents
+                or (selection.recursive and regular in directory.parents)
+            ):
                 raise ValueError(f"artifact regular-file directory overlaps directory: {value}")
         for file in map(PurePosixPath, includes):
             if regular == file or file in regular.parents:

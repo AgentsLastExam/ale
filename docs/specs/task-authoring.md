@@ -179,7 +179,8 @@ unreadable file like empty contents but still needs its filename, opt into
 `unreadable: empty`; this requires separate verification. ALE records the
 placeholder paths in `snapshot.json`.
 Other errors, including inaccessible directories, remain capture errors.
-Regular selections may not overlap each other or an `artifact_include_directories` subtree.
+Regular selections may not overlap each other. A nonrecursive regular selection may
+contain an `artifact_include_directories` subtree; other overlaps are rejected.
 The same Linux container and exclusion restrictions apply, and each selection is
 recorded in `snapshot.json`.
 

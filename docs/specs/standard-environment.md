@@ -107,7 +107,8 @@ to permissions becomes an empty placeholder. The snapshot records each replaced
 path; other capture errors still fail. Use this only when the verifier treats
 an unreadable file and empty contents equivalently. This policy requires separate
 verification. This selection has the same Linux container and exclusion restrictions
-and is recorded in the snapshot manifest.
+and is recorded in the snapshot manifest. A nonrecursive regular selection can contain
+an explicitly selected directory subtree; recursive overlaps are rejected.
 
 With `artifacts.collect = "none"`, ALE does not inspect artifact paths, create a spool,
 copy bytes, or restore anything. A separate verifier that needs solver output therefore
