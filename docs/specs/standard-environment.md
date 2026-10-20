@@ -104,8 +104,11 @@ to regular files are followed as the agent; directory links are never traversed
 recursively. The snapshot contains bytes rather than links. With the explicit
 `unreadable: empty` policy, a matching regular file that cannot be opened due
 to permissions becomes an empty placeholder. The snapshot records each replaced
-path; other capture errors still fail. Use this only when the verifier treats
-an unreadable file and empty contents equivalently. This policy requires separate
+path. When following a matching symlink fails with a permission error, the target's
+type is unknown: no file is captured, and the snapshot records its relative path in
+`unresolved_symlink_targets`. Other capture errors still fail. Use this policy only
+when the verifier treats unreadable files and empty contents equivalently and handles
+unresolved links as needed. This policy requires separate
 verification. This selection has the same Linux container and exclusion restrictions
 and is recorded in the snapshot manifest. A nonrecursive regular selection can contain
 an explicitly selected directory subtree; recursive overlaps are rejected.
@@ -113,6 +116,10 @@ an explicitly selected directory subtree; recursive overlaps are rejected.
 With `artifacts.collect = "none"`, ALE does not inspect artifact paths, create a spool,
 copy bytes, or restore anything. A separate verifier that needs solver output therefore
 requires host artifact collection.
+
+When an artifact snapshot exists, ALE stages its manifest for the verifier at the path
+in `ALE_ARTIFACT_SNAPSHOT_PATH`; the variable is empty without a snapshot. The manifest
+is framework-produced metadata describing solver-controlled files.
 
 ### Verify
 
