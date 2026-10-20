@@ -532,6 +532,80 @@ async def test_unreadable_selected_file_is_omitted_for_separate_verification(
 
 
 @pytest.mark.asyncio
+async def test_separate_verifier_receives_unresolved_link_metadata(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "unresolved-link-metadata")
+    dockerfile = task / "image/Dockerfile"
+    dockerfile.write_text(dockerfile.read_text().replace("-base:latest", "-base:0.1.0"))
+    manifest = task / "task.yaml"
+    manifest.write_text(
+        manifest.read_text()
+        + 'artifact_include_regular_files: [{path: deliverables, pattern: "*.sgf", '
+        + "follow_symlinks: true, unreadable: empty}]\n"
+        + "verify:\n  environment_mode: separate\n"
+        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    )
+    (task / "oracle/run.sh").write_text(
+        "#!/bin/sh\nset -eu\n"
+        "mkdir -p /home/user/output/deliverables /home/user/blocked\n"
+        "printf answer > /home/user/output/deliverables/answer.sgf\n"
+        "printf protected > /home/user/blocked/target.sgf\n"
+        "chmod 000 /home/user/blocked\n"
+        "ln -s /home/user/blocked/target.sgf /home/user/output/deliverables/unresolved.sgf\n"
+    )
+    (task / "verify/artifact-snapshot.json").write_text('{"entries": []}')
+    (task / "verify/verify.py").write_text(
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "from ale_verify import CheckResult, Verification\n"
+        "manifest = json.loads(Path(os.environ['ALE_ARTIFACT_SNAPSHOT_PATH']).read_text())\n"
+        "entry, = manifest['entries']\n"
+        "output = Path('/home/user/output/deliverables')\n"
+        "correct = (entry['source'] == '/home/user/output' "
+        "and entry['unresolved_symlink_targets'] == ['deliverables/unresolved.sgf'] "
+        "and (output / 'answer.sgf').read_text() == 'answer' "
+        "and not (output / 'unresolved.sgf').exists())\n"
+        "v = Verification()\n"
+        "v.check('metadata', CheckResult(float(correct)))\n"
+        "v.aggregate('overall')\n"
+        "v.write()\n"
+    )
+
+    result = await execute(task, tmp_path / "runs")
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"metadata": 1.0, "overall": 1.0}
+    entry = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"][0]
+    assert entry["unresolved_symlink_targets"] == ["deliverables/unresolved.sgf"]
+
+
+@pytest.mark.asyncio
+async def test_no_artifact_snapshot_clears_image_environment(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "no-snapshot-environment")
+    dockerfile = task / "image/Dockerfile"
+    dockerfile.write_text(
+        dockerfile.read_text().replace("-base:latest", "-base:0.1.0")
+        + "\nENV ALE_ARTIFACT_SNAPSHOT_PATH=/tmp/spoof\n"
+    )
+    (task / "verify/verify.py").write_text(
+        "import os\n"
+        "from ale_verify import CheckResult, Verification\n"
+        "v = Verification()\n"
+        "v.check('metadata', CheckResult(float(os.environ['ALE_ARTIFACT_SNAPSHOT_PATH'] == '')))\n"
+        "v.aggregate('overall')\n"
+        "v.write()\n"
+    )
+    result = await run_episode(
+        load_tasks(task)[0],
+        StandardEnvironment(OracleHarness()),
+        provider_registry(DockerProvider()),
+        run_dir=tmp_path / "runs",
+        collect_artifacts=False,
+    )
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"metadata": 1.0, "overall": 1.0}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("directory", [False, True])
 async def test_regular_selection_and_subtree_restore_submission_type(
     tmp_path: Path, directory: bool

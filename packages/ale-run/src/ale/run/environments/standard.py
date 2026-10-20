@@ -523,6 +523,11 @@ class StandardEnvironment(Environment):
         await sandbox.write_file(
             str(layout.path("verify", "instruction.md")), ctx.spec.instruction.encode("utf-8")
         )
+        snapshot = ctx.artifacts.path("snapshot.json")
+        if ctx.artifacts.enabled and snapshot.is_file():
+            await sandbox.write_file(
+                str(layout.path("verify", "artifact-snapshot.json")), snapshot.read_bytes()
+            )
         parameters = json.dumps(ctx.spec.params, ensure_ascii=False).encode("utf-8")
         await sandbox.write_file(str(layout.path("verify", "parameters.json")), parameters)
         await self._stage_verification_config(ctx, sandbox)
@@ -868,6 +873,11 @@ class StandardEnvironment(Environment):
             )
             if (ctx.run_dir / "trajectory.json").is_file():
                 env["ALE_TRAJECTORY_PATH"] = str(layout.path("verify", "trajectory.json"))
+            env["ALE_ARTIFACT_SNAPSHOT_PATH"] = (
+                str(layout.path("verify", "artifact-snapshot.json"))
+                if ctx.artifacts.enabled and ctx.artifacts.path("snapshot.json").is_file()
+                else ""
+            )
         await sandbox.write_file(
             str(directory / "params.json"), json.dumps(ctx.spec.params).encode("utf-8")
         )

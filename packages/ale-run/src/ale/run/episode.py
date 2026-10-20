@@ -361,6 +361,7 @@ class _Artifacts(ArtifactSink):
         target.parent.mkdir(parents=True, exist_ok=True)
         unreadable_files: tuple[str, ...] = ()
         placeholders: tuple[str, ...] = ()
+        unresolved_links: tuple[str, ...] = ()
         try:
             if kind == "missing":
                 identity = None
@@ -373,7 +374,11 @@ class _Artifacts(ArtifactSink):
             else:
                 target.mkdir()
                 if excludes or includes or include_directories or regular_files:
-                    unreadable_files, placeholders = await _download_filtered_artifact(
+                    (
+                        unreadable_files,
+                        placeholders,
+                        unresolved_links,
+                    ) = await _download_filtered_artifact(
                         sandbox,
                         source,
                         target,
@@ -413,6 +418,8 @@ class _Artifacts(ArtifactSink):
             entry["unreadable_files"] = list(unreadable_files)
         if placeholders:
             entry["unreadable_regular_file_placeholders"] = list(placeholders)
+        if unresolved_links:
+            entry["unresolved_symlink_targets"] = list(unresolved_links)
         self.entries.append(entry)
         self.collected.append(name)
         self._write_manifest()
@@ -554,7 +561,7 @@ async def _download_filtered_artifact(
     regular_files: tuple[ArtifactRegularFiles, ...],
     preserve_file_directories: bool,
     omit_unreadable_files: bool,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     """Stage a filtered tree or explicitly selected file and directory contents."""
     script = r"""
 import errno, fnmatch, json, os, shutil, stat, sys, tempfile
@@ -568,6 +575,7 @@ preserve = json.loads(encoded_preserve)
 omit_unreadable = json.loads(encoded_omit)
 unreadable = []
 placeholders = []
+unresolved_links = []
 stage = tempfile.mkdtemp(prefix='ale-artifact-', dir='/tmp')
 flags = os.O_RDONLY | os.O_NOFOLLOW
 def walk(fd, destination, relative):
@@ -698,6 +706,12 @@ try:
                     if (is_link and follow_symlinks
                             and exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)):
                         continue
+                    if (is_link and follow_symlinks and unreadable == 'empty'
+                            and exc.errno in (errno.EACCES, errno.EPERM)):
+                        # The target's type is unknown. Record it rather than
+                        # pretending it is a readable or unreadable regular file.
+                        unresolved_links.append(child_name)
+                        continue
                     raise
                 try:
                     info = os.fstat(child)
@@ -762,7 +776,8 @@ try:
 except BaseException:
     shutil.rmtree(stage)
     raise
-print(json.dumps({'stage': stage, 'unreadable_files': unreadable, 'placeholders': placeholders}))
+print(json.dumps({'stage': stage, 'unreadable_files': unreadable, 'placeholders': placeholders,
+                  'unresolved_links': unresolved_links}))
 """
     result = await sandbox.exec(
         [
@@ -790,8 +805,14 @@ print(json.dumps({'stage': stage, 'unreadable_files': unreadable, 'placeholders'
         stage = staged["stage"]
         unreadable_files = staged["unreadable_files"]
         placeholders = staged["placeholders"]
+        unresolved_links = staged["unresolved_links"]
         if not _valid_regular_placeholders(placeholders, regular_files):
             raise ValueError("invalid placeholder list")
+        followed = tuple(selection for selection in regular_files if selection.follow_symlinks)
+        if not _valid_regular_placeholders(unresolved_links, followed):
+            raise ValueError("invalid unresolved symlink list")
+        if set(placeholders) & set(unresolved_links):
+            raise ValueError("overlapping placeholder and unresolved symlink lists")
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise ArtifactTransferError(f"invalid artifact stage: {source}") from exc
     if not isinstance(stage, str) or not stage.startswith("/tmp/ale-artifact-") or "/" in stage[5:]:
@@ -814,7 +835,11 @@ print(json.dumps({'stage': stage, 'unreadable_files': unreadable, 'placeholders'
         path = target / name
         if path.is_symlink() or not path.is_file() or path.stat().st_size != 0:
             raise ArtifactTransferError(f"invalid unreadable artifact placeholder: {source}")
-    return tuple(unreadable_files), tuple(placeholders)
+    for name in unresolved_links:
+        path = target / name
+        if path.is_symlink() or path.exists():
+            raise ArtifactTransferError(f"invalid unresolved artifact symlink: {source}")
+    return tuple(unreadable_files), tuple(placeholders), tuple(unresolved_links)
 
 
 async def run_episode(

@@ -630,6 +630,46 @@ async def test_unreadable_regular_file_placeholder_is_opt_in_and_recorded(
     assert candidate.read_text() == "protected bytes"
 
 
+@pytest.mark.asyncio
+async def test_unresolved_link_target_requires_opt_in_and_is_recorded(tmp_path: Path) -> None:
+    root = tmp_path / "base"
+    output = root / "output"
+    output.mkdir(parents=True)
+    (output / "answer.sgf").write_text("answer")
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "target").write_text("private")
+    (output / "unresolved.sgf").symlink_to(blocked / "target")
+    (output / "unmatched.txt").symlink_to(blocked / "target")
+    blocked.chmod(0)
+    sandbox = LocalSandbox()
+    try:
+        try:
+            (output / "unresolved.sgf").stat()
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("the test account can traverse a mode-000 directory")
+
+        default = _Artifacts(tmp_path / "default")
+        selection = ArtifactRegularFiles(path="output", pattern="*.sgf", follow_symlinks=True)
+        with pytest.raises(ArtifactTransferError):
+            await default.collect(sandbox, str(root), "base", regular_files=(selection,))  # type: ignore[arg-type]
+
+        sink = _Artifacts(tmp_path / "tolerant")
+        selection = selection.model_copy(update={"unreadable": "empty"})
+        await sink.collect(sandbox, str(root), "base", regular_files=(selection,))  # type: ignore[arg-type]
+        stored = sink.root / "base/output"
+        assert (stored / "answer.sgf").read_text() == "answer"
+        assert not (stored / "unresolved.sgf").exists()
+        entry = json.loads((sink.root / "snapshot.json").read_text())["entries"][0]
+        assert entry["unresolved_symlink_targets"] == ["output/unresolved.sgf"]
+        assert "unreadable_regular_file_placeholders" not in entry
+    finally:
+        blocked.chmod(0o700)
+    assert (output / "unresolved.sgf").is_symlink()
+
+
 @pytest.mark.parametrize(
     "paths",
     [
