@@ -1,158 +1,34 @@
-name: ci
+name: v1.1 artifact selection hosted validation
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
-# No pull_request trigger: development goes straight to main during the initial build-out.
-# It also removes a failure mode — the paths filter calls the PR files API, which needs a
-# `pull-requests: read` grant this repository does not give, so PR runs failed on
-# permissions rather than on anything about the code.
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  UV_FROZEN: "1"
+permissions:
+  contents: read
 
 jobs:
-  changes:
+  artifact-integration:
     runs-on: ubuntu-latest
-    outputs:
-      code: ${{ steps.filter.outputs.code }}
-      docs: ${{ steps.filter.outputs.docs }}
-      images: ${{ steps.filter.outputs.images }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            code:
-              - 'packages/**'
-              - 'scripts/**'
-              - 'tests/**'
-              - '.github/workflows/**'
-              - 'Justfile'
-              - 'pyproject.toml'
-              - 'uv.lock'
-              - '.importlinter'
-            docs:
-              - 'docs/**'
-              - 'images/**/AGENTS.md'
-              - 'images/**/README.md'
-              - 'README.md'
-              - 'CLAUDE.md'
-              - 'AGENTS.md'
-              - '.env.example'
-            images:
-              - 'images/**'
-              - '!images/**/*.md'
-
-  lint:
-    needs: changes
-    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run lint-imports
-
-  unit:
-    needs: changes
-    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      - run: uv run pytest -m unit
-
-  verification-package:
-    needs: changes
-    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      - run: uv run pytest packages/ale-verify/tests
-
-  live-verification:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      UV_FROZEN: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - run: uv sync --frozen --all-groups
-      - name: Build Agent Judge acceptance image
-        if: env.OPENAI_API_KEY != '' || env.ANTHROPIC_API_KEY != ''
-        run: docker build -f tests/acceptance/agent-judge.Dockerfile -t ale-agent-judge-live:local .
-      - name: Run live judge acceptance
-        if: env.OPENAI_API_KEY != '' || env.ANTHROPIC_API_KEY != ''
-        env:
-          ALE_LIVE_AGENT_JUDGE_IMAGE: docker.io/library/ale-agent-judge-live:local
-        run: uv run pytest tests/acceptance/test_live_llm_judge.py tests/acceptance/test_live_agent_judge.py
-
-  # Docker is preinstalled on GitHub-hosted runners, so the container backend is
-  # exercised on every code change.
-  container-backend:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --all-groups
-      # One -m, not two: a second `-m` replaces the first rather than intersecting, so
-      # the earlier form silently ran every non-KVM test including the unit suite.
-      # The desktop image is tens of gigabytes, so it stays out of hosted CI.
-      - run: uv run pytest -m "(conformance or integration) and not needs_kvm and not needs_gui"
-
-  # Hardware virtualisation is not available on hosted runners; this job only runs
-  # where a self-hosted runner advertises KVM.
-  vm-backend:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: [self-hosted, kvm]
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --frozen --all-groups
-      # The runner reuses a qcow2 produced by `ale prepare` or ALE_QEMU_IMAGE. Building a
-      # multi-gigabyte guest here would test image production rather than Provider code.
-      # Tests skip honestly when neither source is available.
-      - run: uv run pytest -m needs_kvm
-
-  # The desktop image is far too large for hosted runners, so GUI coverage runs where
-  # it is already pulled.
-  desktop:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: [self-hosted, desktop]
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --frozen --all-groups
-      - run: uv run pytest -m needs_gui
+      - run: images/build.sh container-ubuntu22
+      - name: Exercise artifact collection and separate verification in Docker
+        run: >-
+          uv run pytest -v tests/integration/test_task_local_verification.py
+          -k 'selected_files_restore_link_contents_without_unrelated_links
+          or selected_missing_file_reaches_verifier_as_missing
+          or regular_file_selection_restores_only_real_top_level_files
+          or patterned_files_restore_links_and_record_unreadable
+          or unreadable_selected_file_is_omitted_for_separate_verification
+          or regular_selection_and_subtree_restore_submission_type
+          or selected_file_directory_reaches_separate_verifier_without_contents
+          or selected_missing_root_reaches_verifier_as_missing
+          or missing_excluded_root_reaches_verifier_when_opted_in
+          or selected_directory_preserves_solver_files_for_separate_verifier
+          or selected_directory_cannot_read_framework_only_file
+          or selected_symlink_cannot_read_framework_only_file'
