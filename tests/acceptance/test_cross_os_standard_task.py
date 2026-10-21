@@ -231,7 +231,7 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                     [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
                         [Security.Principal.WindowsBuiltInRole]::Administrator
                     )
-                if ($admin) { exit 18 }
+                if (-not $admin) { exit 18 }
                 if (Test-Path "C:\ProgramData\ALE\verify\assets") { exit 17 }
                 New-Item "$env:ALE_HOME\input", "$env:ALE_HOME\output" `
                     -ItemType Directory -Force | Out-Null
@@ -244,6 +244,9 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
             textwrap.dedent(
                 r"""
                 $ErrorActionPreference = "Stop"
+                if (([Security.Principal.WindowsPrincipal] `
+                    [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+                        [Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 18 }
                 $params = Get-Content $env:ALE_PARAMS_JSON | ConvertFrom-Json
                 $seed = (Get-Content ".\assets\suffix.txt").Trim()
                 $word = (Get-Content "$env:ALE_HOME\input\seed.txt").Trim()
@@ -430,6 +433,7 @@ async def test_standard_task_assets_and_variants_across_operating_systems(
         StandardEnvironment(OracleHarness()),
         providers,
         run_dir=tmp_path / "runs",
+        collect_artifacts=True,
     )
 
     greeting = "hello" if variant == "base" else "hola"
@@ -441,7 +445,7 @@ async def test_standard_task_assets_and_variants_across_operating_systems(
         "setup_ran": 1.0,
         "overall": 1.0,
     }
-    assert (result.run_dir / "artifacts/output/result.txt").read_text() == (
+    assert (result.run_dir / "artifacts/0000/output/result.txt").read_text() == (
         f"{greeting} world verified"
     )
 

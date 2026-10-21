@@ -129,31 +129,16 @@ that same destination; do not declare one path while instructing the agent to us
 
 ### Artifact copying
 
-`artifacts` is the only Task field for selecting output. Each entry is an absolute file
-path, directory path, or glob (`*`, `?`, `[...]`, and recursive `**`). The actual filesystem
-type decides how it is copied: a directory named `answer.json` is copied as a directory.
-A matched directory includes its contents, including hidden files. Globs do not match
-hidden names unless their pattern explicitly starts with a dot. Overlapping matches are
-copied once. Filesystem roots and paths containing `..` are rejected.
+`artifacts` accepts absolute file paths, directory paths, and globs such as `*.sgf` or
+`**/*.json`. ALE copies each match according to its actual type, follows links to their
+contents, and skips missing paths, cycles, and copy failures. These are fixed defaults;
+the verifier decides how to score the resulting output. Copying uses the framework's
+privileged identity on every supported OS; see [Permissions](sandbox-image.md#permissions).
 
-Copying runs with the framework identity (root on Linux) and follows file and directory
-symlinks, storing the target contents at the declared path. Broken links, link cycles,
-special files, missing paths, and individual copy failures are logged and skipped. Other
-files continue to copy. Traversal stops at 64 directory levels or 100,000 visited entries
-per declaration to bound recursive expansion. These are copy safeguards, not scoring rules.
-
-The verifier decides whether absent, incomplete, incorrectly typed, or otherwise invalid
-outputs deserve a score or a verification error. ALE does not synthesize placeholder
-files or provide a special snapshot-metadata interface to task graders. A task that needs
-the original link identity or other live filesystem state must evaluate that state in its
-own shared verifier. Separate-verifier images must start without prepopulated candidate
-answers: a missing source is skipped, not a command to delete an unrelated image path.
-
-Run-level `artifacts.collect` defaults to `"none"`: no artifact inspection, copying, or
-restoration occurs. Set `artifacts.collect = "host"` to retain outputs and transfer them
-to a separate verifier. `run`, `validate`, and `reverify` honor the same setting. Validation
-uses the normal setup/capture/verification path, replacing the evaluated agent with the
-untouched pass and the task oracle pass. Both passes use the configured seed and timeouts.
+Run-level `artifacts.collect` defaults to `"none"` (no copy or restore). Set it to `"host"`
+to retain outputs or transfer them to a separate verifier. `run`, `validate`, and `reverify`
+use the same policy. Separate-verifier images must not contain prepopulated candidate
+answers; tasks that grade original links or live state should use shared verification.
 
 ### Verification topology
 
@@ -268,11 +253,9 @@ state that must vary by episode: reset mutable data, generate per-episode values
 copies, or start services that depend on dynamic state. Stable installation and configuration
 belong in `image/`.
 
-On Linux, `setup/run.sh` executes as `root`, while both the evaluated solver and the validation
-oracle execute as the image's agent account (`user` in the ALE base images). `verify/run.sh`
-executes as `root`. ALE does not change ownership of Task-created paths. If image or setup code
-creates a directory or file that the solver or oracle must modify, it must explicitly grant that
-account the required ownership or permissions, for example with `chown` or `install -o user`.
+Setup and verification use the framework's privileged identity; solver and oracle use
+the agent identity. See [Permissions](sandbox-image.md#permissions). Image/setup code must
+grant the agent access to files it needs to modify, using ownership or ACLs as appropriate.
 
 ## instruction.md
 

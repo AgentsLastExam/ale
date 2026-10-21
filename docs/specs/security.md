@@ -110,12 +110,12 @@ credential; a malicious Task author is outside this threat model.
 ## 4. The agent cannot change what it is measured under
 
 The agent runs as the account the image declares, and so does the oracle that stands in
-for it during validation. Linux framework work runs as root. The current Windows base
-runs guestd in the interactive agent session so it can share the Cua Driver desktop;
-withholding of setup, oracle, and verification material is therefore enforced by phase
-ordering rather than a second Windows identity.
-Its default token is limited; an administrator session requires the Host's SMBIOS
-`ale-sudo` marker, supplied only for `request.sudo`, including Windows image builds.
+for it during validation. Framework work runs as root on Linux and Administrator on
+Windows. Windows guestd stays in the interactive session but launches agent commands
+with the desktop's limited token. Only the Host's SMBIOS `ale-sudo` marker, supplied for
+`request.sudo`, permits elevated agent commands. The Provider verifies both tokens before
+Task code runs; image builds request elevation explicitly. Material visibility still
+follows phase ordering. See [Permissions](sandbox-image.md#permissions).
 
 This is what stops an agent rewriting the network policy that isolates it, the clock its
 timeouts are measured against, or the guest service driving its own sandbox. None of that

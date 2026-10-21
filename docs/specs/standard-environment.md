@@ -87,9 +87,10 @@ verification first releases or retains the solver according to run policy, provi
 fresh verifier sandbox, restores captured artifacts to their original absolute paths,
 and uploads the same `verify/`. It never reruns setup or copies the solver filesystem.
 
-Verification runs as framework-controlled Task code with open egress and root privileges
-on Linux, in both shared and separate modes. Task code may explicitly drop privileges
-when executing a submitted program. ALE stages `ale_verify`, the rendered
+Verification runs as framework-controlled Task code with open egress and elevated
+privileges (root on Linux, Administrator on Windows), in both shared and separate modes.
+Task code may explicitly drop privileges when executing a submitted program.
+ALE stages `ale_verify`, the rendered
 instruction, parameters, optional solver trajectory, and run-level Judge configuration,
 then executes the OS entry from the verification staging directory. Linux uses
 `/opt/ale/verify/run.sh` and system `python3`; Windows uses

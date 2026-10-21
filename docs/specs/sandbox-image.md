@@ -283,16 +283,18 @@ not a Task image declaration.
 
 ## Permissions
 
-Solver and oracle run as the image user. Linux setup, artifact collection/restoration,
-and verification run as root, regardless of shared or separate verification and of the
-agent's `resources.sudo` setting. The
-current Windows guestd runs in the interactive agent session so Cua Driver and process
-execution share one desktop; stage directories are withheld by lifecycle rather than a
-second Windows account. The Windows base starts with a limited token by default; only
-Host-provided SMBIOS `ale-sudo` for `request.sudo` selects an administrator session, and
-image builds explicitly request it. On Linux the framework layer configures sudo when the
-image is prepared. A requested solver sudo/admin grant is verified before use and recorded. ALE does not pre-create declared artifacts or silently repair Task filesystem
-ownership: the image/setup/agent owns the type and existence of each output.
+Setup, artifact collection/restoration, and verification use the framework's elevated
+identity: root on Linux, Administrator on Windows. This applies to shared and separate
+verification independently of the agent's `resources.sudo` setting.
+
+Solver and oracle use the image's agent account. Windows guestd runs elevated in that
+account's interactive session and launches agent commands with the desktop's limited
+token, unless the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a limited
+desktop session are required; the Provider checks both framework and agent privileges
+before Task execution. Rebuild older Windows Task images with the current framework;
+direct `image.ref` disks must already satisfy this contract. Linux configures requested
+sudo during image preparation. Grants are verified and recorded. ALE does not pre-create
+artifacts or repair their ownership: image/setup/agent code owns their type and existence.
 
 ## Base-image changes
 

@@ -81,7 +81,9 @@ $start = "$env:ProgramData\ALE\start-guestd.ps1"
 @"
 `$env:ALE_AGENT_USER = "$AgentUser"
 `$env:ALE_AGENT_HOME = "C:\Users\$AgentUser"
-& "$python" "$guestd\main.py" --tcp 0.0.0.0:7411
+`$serial = (Get-CimInstance Win32_ComputerSystemProduct).IdentifyingNumber
+`$env:ALE_AGENT_SUDO = if (`$serial -eq "ale-sudo") { "1" } else { "0" }
+& "$python" -I -S "$guestd\main.py" --tcp 0.0.0.0:7411
 "@ | Set-Content -Path $start -Encoding UTF8
 
 $account = "$env:COMPUTERNAME\$AgentUser"
@@ -89,27 +91,12 @@ $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument `
     "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$start`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $account
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive `
-    -RunLevel Limited
+    -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Days 3650) `
     -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName "ALE Guestd" -Action $action `
+Register-ScheduledTask -TaskName "ALE Guestd Session" -Action $action -Trigger $trigger `
     -Principal $taskPrincipal -Settings $settings -Force | Out-Null
-
-# The Host marks image builds and Tasks requesting elevation through read-only SMBIOS.
-$session = "$env:ProgramData\ALE\start-session.ps1"
-@"
-if ((Get-CimInstance Win32_ComputerSystemProduct).IdentifyingNumber -eq "ale-sudo") {
-    & "$start"
-} else {
-    Start-ScheduledTask -TaskName "ALE Guestd"
-}
-"@ | Set-Content -Path $session -Encoding UTF8
-$sessionAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument `
-    "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$session`""
-$sessionPrincipal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive `
-    -RunLevel Highest
-Register-ScheduledTask -TaskName "ALE Guestd Session" -Action $sessionAction -Trigger $trigger `
-    -Principal $sessionPrincipal -Settings $settings -Force | Out-Null
+Unregister-ScheduledTask -TaskName "ALE Guestd" -Confirm:$false -ErrorAction SilentlyContinue
 
 # The seed came from GCP, but the prepared disk runs behind ALE's QEMU runner.  Leaving
 # cloud agents enabled adds minute-long metadata timeouts to every cold boot.
