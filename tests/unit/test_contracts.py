@@ -264,10 +264,11 @@ def test_shared_and_separate_verification_contracts_are_strict() -> None:
     [
         ("relative",),
         ("/output", "/output"),
-        ("/output", "/output/result.json"),
+        ("/output/../etc",),
+        ("/",),
     ],
 )
-def test_artifacts_are_absolute_unique_and_non_overlapping(artifacts: tuple[str, ...]) -> None:
+def test_artifacts_are_absolute_unique_and_safe(artifacts: tuple[str, ...]) -> None:
     with pytest.raises(ValidationError):
         TaskManifestV1(
             spec_type="core/v1",

@@ -708,7 +708,7 @@ class StandardEnvironment(Environment):
                 name = path_type(path).name or f"artifact-{index}"
                 await ctx.artifacts.collect(sandbox, path, name)
                 logger.info(
-                    "artifact collected",
+                    "artifact collection attempted",
                     extra={"ale_data": {"source": path, "name": name}},
                 )
 

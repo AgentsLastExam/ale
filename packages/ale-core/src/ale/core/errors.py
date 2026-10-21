@@ -17,7 +17,6 @@ __all__ = [
     "AgentResourceError",
     "AgentUnsupportedError",
     "AleError",
-    "ArtifactTransferError",
     "AssetError",
     "BudgetExceededError",
     "ConfigError",
@@ -177,10 +176,6 @@ class OutputStreamError(EnvironmentError_):
 
 class TaskError(AleError):
     """The task's own machinery failed — a task defect, not an agent result."""
-
-
-class ArtifactTransferError(TaskError):
-    """Declared solver evidence could not be captured or restored exactly."""
 
 
 class VerifierOutputError(TaskError):

@@ -406,13 +406,13 @@ class TestArtifactPolicy:
         assert ImageRef(kind="container", reference="local:build").kind == "container"
 
     def test_the_run_decides_whether_to_keep_them(self) -> None:
-        assert RunConfig().artifacts.collect == "host"
+        assert RunConfig().artifacts.collect == "none"
         dropped = RunConfig.model_validate({"artifacts": {"collect": "none"}})
         assert dropped.artifacts.collect == "none"
 
     def test_the_policy_is_part_of_the_run_identity(self) -> None:
         """Two runs that kept different things are not the same run."""
-        kept = RunConfig()
+        kept = RunConfig.model_validate({"artifacts": {"collect": "host"}})
         dropped = RunConfig.model_validate({"artifacts": {"collect": "none"}})
         assert kept.config_hash != dropped.config_hash
 

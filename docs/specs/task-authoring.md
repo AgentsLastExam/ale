@@ -86,7 +86,8 @@ timeouts:                           # optional positive seconds; defaults shown
   verify: 300
 
 artifacts:                          # optional outcome paths captured from the sandbox
-  - /home/user/output               # absolute, unique, and non-overlapping
+  - /home/user/output               # absolute file or directory path
+  - /home/user/games/*.sgf          # glob patterns are allowed
 
 tools:                              # optional; use only when the Task explicitly requires them
   skills:
@@ -123,8 +124,36 @@ extras:                             # optional namespaced extensions; no standar
 ```
 
 When the instruction requires deliverable files, every instructed destination must equal or be
-contained by a declared `artifacts` path. Commands and examples in `instruction.md` must write to
+contained by a declared `artifacts` path, or matched by a declared glob. Commands and examples in `instruction.md` must write to
 that same destination; do not declare one path while instructing the agent to use another.
+
+### Artifact copying
+
+`artifacts` is the only Task field for selecting output. Each entry is an absolute file
+path, directory path, or glob (`*`, `?`, `[...]`, and recursive `**`). The actual filesystem
+type decides how it is copied: a directory named `answer.json` is copied as a directory.
+A matched directory includes its contents, including hidden files. Globs do not match
+hidden names unless their pattern explicitly starts with a dot. Overlapping matches are
+copied once. Filesystem roots and paths containing `..` are rejected.
+
+Copying runs with the framework identity (root on Linux) and follows file and directory
+symlinks, storing the target contents at the declared path. Broken links, link cycles,
+special files, missing paths, and individual copy failures are logged and skipped. Other
+files continue to copy. Traversal stops at 64 directory levels or 100,000 visited entries
+per declaration to bound recursive expansion. These are copy safeguards, not scoring rules.
+
+The verifier decides whether absent, incomplete, incorrectly typed, or otherwise invalid
+outputs deserve a score or a verification error. ALE does not synthesize placeholder
+files or provide a special snapshot-metadata interface to task graders. A task that needs
+the original link identity or other live filesystem state must evaluate that state in its
+own shared verifier. Separate-verifier images must start without prepopulated candidate
+answers: a missing source is skipped, not a command to delete an unrelated image path.
+
+Run-level `artifacts.collect` defaults to `"none"`: no artifact inspection, copying, or
+restoration occurs. Set `artifacts.collect = "host"` to retain outputs and transfer them
+to a separate verifier. `run`, `validate`, and `reverify` honor the same setting. Validation
+uses the normal setup/capture/verification path, replacing the evaluated agent with the
+untouched pass and the task oracle pass. Both passes use the configured seed and timeouts.
 
 ### Verification topology
 

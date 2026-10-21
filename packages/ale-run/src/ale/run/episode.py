@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
 from ale.core.config import LoggingPolicy, SandboxRetentionConfig, VerificationConfig
@@ -26,7 +27,6 @@ from ale.core.environment import ArtifactSink, Budget, Environment, EpisodeConte
 from ale.core.errors import (
     AgentError,
     AgentRefusalError,
-    ArtifactTransferError,
     BudgetExceededError,
     EnvironmentError_,
     PhaseTimeoutError,
@@ -37,11 +37,12 @@ from ale.core.harness import EffectiveAgentResources, HarnessSession
 from ale.core.lock import AssetProvenance, LimitTermination, RunLock
 from ale.core.result import FailureInfo as ResultFailureInfo
 from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
-from ale.core.sandbox import RetainedSandbox, Sandbox, SandboxRequest, SandboxRole
+from ale.core.sandbox import Identity, RetainedSandbox, Sandbox, SandboxRequest, SandboxRole
 from ale.core.task import Task
 from ale.core.taskspec import OperatingSystem
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import Status, Verdict
+from ale.run import artifact_files
 from ale.run.assets import observe_task_assets
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, Limits, SessionRegistry
@@ -304,62 +305,85 @@ class _Artifacts(ArtifactSink):
     def root(self) -> Path:
         return self.run_dir / "artifacts"
 
-    async def collect(self, sandbox: Sandbox, source: str, name: str) -> Path:
+    async def collect(self, sandbox: Sandbox, source: str, name: str) -> None:
         if not self.enabled:
-            raise ArtifactTransferError("artifact collection is disabled")
-        probe = await sandbox.exec(
-            [
-                "python.exe" if sandbox.request.os is OperatingSystem.WINDOWS else "python3",
-                "-c",
-                (
-                    "import json,os,stat,sys; s=os.lstat(sys.argv[1]); "
-                    "print(json.dumps({'kind':'symlink' if stat.S_ISLNK(s.st_mode) else "
-                    "'file' if stat.S_ISREG(s.st_mode) else 'directory' if "
-                    "stat.S_ISDIR(s.st_mode) else 'special','mode':stat.S_IMODE(s.st_mode)}))"
-                ),
-                source,
-            ]
+            return
+        logger = logging.getLogger("ale.execution")
+        python = "python.exe" if sandbox.request.os is OperatingSystem.WINDOWS else "python3"
+        script = Path(artifact_files.__file__).read_text()
+        path_type = (
+            PureWindowsPath if sandbox.request.os is OperatingSystem.WINDOWS else PurePosixPath
         )
-        if not probe.ok:
-            raise ArtifactTransferError(f"declared artifact is missing: {source}")
-        try:
-            details = json.loads(probe.stdout)
-        except json.JSONDecodeError as exc:
-            raise ArtifactTransferError(f"could not inspect artifact {source}") from exc
-        kind = details.get("kind")
-        if kind not in {"file", "directory"}:
-            raise ArtifactTransferError(f"artifact {source} is an unsupported {kind}")
-
-        stored = name
-        if (self.root / stored).exists():
-            stored = f"{len(self.entries):04d}-{name}"
-        target = self.root / stored
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            if kind == "file":
-                data = await sandbox.read_file(source)
-                target.write_bytes(data)
-                identity = f"sha256:{hashlib.sha256(data).hexdigest()}"
-                size = len(data)
-            else:
-                target.mkdir()
-                await sandbox.download_dir(source, str(target))
-                identity, size = _artifact_tree_identity(target)
-        except Exception as exc:
-            raise ArtifactTransferError(f"could not capture artifact {source}: {exc}") from exc
-        self.entries.append(
-            {
-                "source": source,
-                "kind": kind,
-                "stored_path": stored,
-                "mode": int(details["mode"]),
-                "content_identity": identity,
-                "size_bytes": size,
-            }
-        )
+        base = path_type(source).parent
+        while any(char in str(base) for char in "*?["):
+            base = base.parent
+        # A separate directory for each declaration prevents basename collisions and
+        # keeps snapshot.json reserved for the inventory, even for that literal filename.
+        batch = self.root / f"{len(self.collected):04d}"
         self.collected.append(name)
-        self._write_manifest()
-        return target
+        captured = {entry["source"] for entry in self.entries}
+        try:
+            probe = await sandbox.exec(
+                [python, "-c", script, "inspect", source], identity=Identity.FRAMEWORK
+            )
+            if not probe.ok:
+                raise OSError(probe.stderr or "artifact inspection failed")
+            details = json.loads(probe.stdout)
+            for reason in details["skipped"]:
+                logger.warning("artifact skipped: %s", reason)
+            for item in details["entries"]:
+                remote = str(item["source"])
+                try:
+                    relative = path_type(remote).relative_to(base)
+                    if ".." in relative.parts or path_type(remote) == path_type(remote).parent:
+                        raise ValueError("artifact path escapes its declaration")
+                    if remote in captured:
+                        continue
+                    target = batch.joinpath(*relative.parts)
+                    kind = item["kind"]
+                    if kind == "directory":
+                        target.mkdir(parents=True, exist_ok=True)
+                        identity, size = None, 0
+                    elif kind == "file":
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        digest = hashlib.sha256()
+                        size = 0
+                        with target.open("wb") as output:
+
+                            async def receive(stream: str, data: bytes, digest=digest) -> None:
+                                nonlocal size
+                                if stream == "stdout":
+                                    output.write(data)
+                                    digest.update(data)
+                                    size += len(data)
+
+                            copied = await sandbox.exec(
+                                [python, "-c", script, "read", remote],
+                                identity=Identity.FRAMEWORK,
+                                output_sink=receive,
+                            )
+                        if not copied.ok:
+                            target.unlink(missing_ok=True)
+                            raise OSError(copied.stderr or "artifact read failed")
+                        identity = f"sha256:{digest.hexdigest()}"
+                    else:
+                        raise ValueError(f"unsupported artifact type: {kind}")
+                    self.entries.append(
+                        {
+                            "source": remote,
+                            "kind": kind,
+                            "stored_path": target.relative_to(self.root).as_posix(),
+                            "mode": int(item["mode"]),
+                            "content_identity": identity,
+                            "size_bytes": size,
+                        }
+                    )
+                    captured.add(remote)
+                except Exception as exc:
+                    logger.warning("artifact skipped: %s: %s", remote, exc)
+            self._write_manifest()
+        except Exception as exc:
+            logger.warning("artifact skipped: %s: %s", source, exc)
 
     async def collect_file(self, sandbox: Sandbox, source: str, name: str) -> Path:
         """One file rather than a directory, for a harness's own logs.
@@ -377,43 +401,58 @@ class _Artifacts(ArtifactSink):
         return self.root / name
 
     async def restore(self, sandbox: Sandbox) -> None:
-        for entry in self.entries:
+        if not self.enabled or not self.entries:
+            return
+        python = "python.exe" if sandbox.request.os is OperatingSystem.WINDOWS else "python3"
+        roots: list[PurePosixPath | PureWindowsPath] = []
+        path_type = (
+            PureWindowsPath if sandbox.request.os is OperatingSystem.WINDOWS else PurePosixPath
+        )
+        for entry in sorted(
+            self.entries, key=lambda item: len(path_type(str(item["source"])).parts)
+        ):
             source = str(entry["source"])
             target = self.root / str(entry["stored_path"])
-            if sandbox.request.os is OperatingSystem.WINDOWS:
-                quoted = source.replace("'", "''")
-                parent = str(PureWindowsPath(source).parent)
-                parent_quoted = parent.replace("'", "''")
-                created = await sandbox.exec(
-                    [
-                        "powershell.exe",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-Command",
-                        f"Remove-Item -LiteralPath '{quoted}' -Recurse -Force "
-                        "-ErrorAction SilentlyContinue; "
-                        f"New-Item -ItemType Directory -Path '{parent_quoted}' -Force | Out-Null",
-                    ]
-                )
-            else:
-                await sandbox.exec(["rm", "-rf", "--", source])
-                parent = str(Path(source).parent)
-                created = await sandbox.exec(["mkdir", "-p", "--", parent])
-            if not created.ok:
-                raise ArtifactTransferError(f"could not create artifact parent {parent}")
             try:
+                path = path_type(source)
+                clear = not any(path == root or root in path.parents for root in roots)
+                if clear:
+                    roots.append(path)
+                prepared = await sandbox.exec(
+                    [
+                        python,
+                        "-c",
+                        (
+                            "import os,pathlib,shutil,sys; p=pathlib.Path(sys.argv[1]); "
+                            "directory=sys.argv[2]=='directory'; clear=sys.argv[3]=='True'; "
+                            "shutil.rmtree(p) if p.is_dir() and not p.is_symlink() and clear "
+                            "else p.unlink() if p.is_symlink() or (p.exists() and clear) "
+                            "else None; "
+                            "(p if directory else p.parent).mkdir(parents=True,exist_ok=True)"
+                        ),
+                        source,
+                        str(entry["kind"]),
+                        str(clear),
+                    ],
+                    identity=Identity.FRAMEWORK,
+                )
+                if not prepared.ok:
+                    raise OSError(prepared.stderr or "cannot prepare artifact destination")
                 if entry["kind"] == "file":
-                    await sandbox.write_file(source, target.read_bytes())
-                else:
-                    await sandbox.upload_dir(str(target), source)
+                    await sandbox.write_file(
+                        source, target.read_bytes(), identity=Identity.FRAMEWORK
+                    )
                 if sandbox.request.os is OperatingSystem.LINUX:
-                    mode = await sandbox.exec(["chmod", f"{int(entry['mode']):o}", "--", source])
+                    mode = await sandbox.exec(
+                        ["chmod", f"{int(entry['mode']):o}", "--", source],
+                        identity=Identity.FRAMEWORK,
+                    )
                     if not mode.ok:
-                        raise ArtifactTransferError(f"could not restore artifact mode: {source}")
-            except ArtifactTransferError:
-                raise
+                        raise OSError(mode.stderr or "cannot restore artifact mode")
             except Exception as exc:
-                raise ArtifactTransferError(f"could not restore artifact {source}: {exc}") from exc
+                logging.getLogger("ale.execution").warning(
+                    "artifact restore skipped: %s: %s", source, exc
+                )
 
     def cleanup(self) -> None:
         return None
@@ -427,23 +466,6 @@ class _Artifacts(ArtifactSink):
         temporary.replace(target)
 
 
-def _artifact_tree_identity(root: Path) -> tuple[str, int]:
-    digest = hashlib.sha256()
-    size = 0
-    for path in sorted(root.rglob("*")):
-        relative = path.relative_to(root).as_posix()
-        if path.is_symlink():
-            raise ArtifactTransferError(f"artifact directory contains a symlink: {relative}")
-        if path.is_dir():
-            continue
-        if not path.is_file():
-            raise ArtifactTransferError(f"artifact directory contains a special file: {relative}")
-        data = path.read_bytes()
-        size += len(data)
-        digest.update(relative.encode() + b"\0" + data)
-    return f"sha256:{digest.hexdigest()}", size
-
-
 async def run_episode(
     task: Task,
     environment: Environment,
@@ -454,7 +476,7 @@ async def run_episode(
     token: str = "",
     model: str = "",
     seed: int = 0,
-    collect_artifacts: bool = True,
+    collect_artifacts: bool = False,
     provenance: ProvenanceInputs | None = None,
     proxy_url: str = "",
     gateway: Gateway | None = None,

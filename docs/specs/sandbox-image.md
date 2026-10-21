@@ -283,7 +283,9 @@ not a Task image declaration.
 
 ## Permissions
 
-Solver and oracle run as the image user. Linux setup and verification run as root. The
+Solver and oracle run as the image user. Linux setup, artifact collection/restoration,
+and verification run as root, regardless of shared or separate verification and of the
+agent's `resources.sudo` setting. The
 current Windows guestd runs in the interactive agent session so Cua Driver and process
 execution share one desktop; stage directories are withheld by lifecycle rather than a
 second Windows account. The Windows base starts with a limited token by default; only
