@@ -573,6 +573,26 @@ def test_windows_health_must_declare_its_agent_identity() -> None:
         )
 
 
+@pytest.mark.parametrize("sudo", [False, True])
+@pytest.mark.parametrize(
+    "framework_admin,agent_admin", [(True, False), (True, True), (False, False)]
+)
+async def test_windows_privileges_must_match_framework_and_agent_roles(
+    sudo: bool, framework_admin: bool, agent_admin: bool
+) -> None:
+    class Client:
+        async def exec(self, argv, *, run_as, timeout_sec):
+            elevated = framework_admin if run_as is None else agent_admin
+            return 0, f"{int(elevated)}\r\n", "", False
+
+    check = QemuProvider()._verify_windows_privileges(Client(), "user", sudo)
+    if framework_admin and agent_admin == sudo:
+        await check
+    else:
+        with pytest.raises(ProviderCapabilityError, match=r"Windows .* token"):
+            await check
+
+
 @pytest.mark.asyncio
 async def test_prepared_vm_is_checked_without_runtime_reference_resolution(
     monkeypatch: pytest.MonkeyPatch,

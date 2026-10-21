@@ -65,11 +65,11 @@ def test_authoring_contract_names_the_current_task_shape() -> None:
         "environment_mode: separate",
         "vm-ubuntu24-base",
         "metadata.network_justification",
+        "artifacts.collect",
     ):
         assert required in text
     for irrelevant in (
         "sandbox-base-",
-        "artifacts.collect",
         "ALE_ASSETS_COLLECTION",
         "There is no Image Tree",
         "Submission checklist",

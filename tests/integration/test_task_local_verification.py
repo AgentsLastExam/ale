@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from ale.core.errors import ArtifactTransferError
-from ale.core.sandbox import ExecResult, ImageRef, PreparedTaskImage
-from ale.core.taskspec import ImageKind, ImageSpec, OperatingSystem, VerifySpec
+from ale.core.sandbox import ImageRef, PreparedTaskImage
+from ale.core.taskspec import ImageKind, ImageSpec, VerifySpec
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
-from ale.run.episode import _artifact_tree_identity, _Artifacts, run_episode
+from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
@@ -92,6 +89,7 @@ async def execute(task_path: Path, run_dir: Path):  # type: ignore[no-untyped-de
         StandardEnvironment(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=run_dir,
+        collect_artifacts=True,
     )
 
 
@@ -205,117 +203,6 @@ async def test_local_separate_verifier_builds_declared_kind(
     assert result is not None
     assert result.image.kind is kind
     assert result.image.source == "verifier-local"
-
-
-class ArtifactSandbox:
-    def __init__(
-        self,
-        *,
-        kind: str = "file",
-        mode: int = 0o640,
-        data: bytes = b"artifact",
-        missing: bool = False,
-        fail_read: bool = False,
-    ) -> None:
-        self.request = SimpleNamespace(os=OperatingSystem.LINUX)
-        self.kind = kind
-        self.mode = mode
-        self.data = data
-        self.missing = missing
-        self.fail_read = fail_read
-        self.writes: list[tuple[str, bytes]] = []
-        self.uploads: list[tuple[str, str]] = []
-        self.commands: list[list[str]] = []
-
-    async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
-        command = [str(item) for item in argv]
-        self.commands.append(command)
-        if command[0] == "python3":
-            if self.missing:
-                return ExecResult(exit_code=1, stderr="missing")
-            return ExecResult(
-                exit_code=0,
-                stdout=json.dumps({"kind": self.kind, "mode": self.mode}),
-            )
-        return ExecResult(exit_code=0)
-
-    async def read_file(self, path):  # type: ignore[no-untyped-def]
-        if self.fail_read:
-            raise OSError("transfer failed")
-        return self.data
-
-    async def write_file(self, path, data):  # type: ignore[no-untyped-def]
-        self.writes.append((str(path), data))
-
-    async def download_dir(self, source, target):  # type: ignore[no-untyped-def]
-        root = Path(target)
-        (root / "child").mkdir()
-        (root / "child/data.txt").write_bytes(self.data)
-
-    async def upload_dir(self, source, target):  # type: ignore[no-untyped-def]
-        self.uploads.append((str(source), str(target)))
-
-
-@pytest.mark.asyncio
-async def test_artifact_file_snapshot_restores_exact_absolute_path_and_mode(
-    tmp_path: Path,
-) -> None:
-    sandbox = ArtifactSandbox(mode=0o600)
-    sink = _Artifacts(tmp_path)
-
-    await sink.collect(sandbox, "/etc/ale/result.json", "result.json")
-    await sink.restore(sandbox)
-
-    assert sandbox.writes == [("/etc/ale/result.json", b"artifact")]
-    assert ["chmod", "600", "--", "/etc/ale/result.json"] in sandbox.commands
-    manifest = json.loads((tmp_path / "artifacts/snapshot.json").read_text())
-    assert manifest["entries"][0]["source"] == "/etc/ale/result.json"
-
-
-@pytest.mark.asyncio
-async def test_artifact_directory_snapshot_and_restore(tmp_path: Path) -> None:
-    sandbox = ArtifactSandbox(kind="directory", mode=0o750)
-    sink = _Artifacts(tmp_path)
-
-    await sink.collect(sandbox, "/var/lib/ale-report", "ale-report")
-    await sink.restore(sandbox)
-
-    assert sandbox.uploads == [(str(tmp_path / "artifacts/ale-report"), "/var/lib/ale-report")]
-    assert ["chmod", "750", "--", "/var/lib/ale-report"] in sandbox.commands
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("sandbox", "message"),
-    [
-        (ArtifactSandbox(missing=True), "missing"),
-        (ArtifactSandbox(kind="symlink"), "unsupported symlink"),
-        (ArtifactSandbox(kind="special"), "unsupported special"),
-        (ArtifactSandbox(fail_read=True), "transfer failed"),
-    ],
-)
-async def test_invalid_or_failed_artifact_capture_is_explicit(
-    tmp_path: Path,
-    sandbox: ArtifactSandbox,
-    message: str,
-) -> None:
-    with pytest.raises(ArtifactTransferError, match=message):
-        await _Artifacts(tmp_path).collect(sandbox, "/absolute/output", "output")
-
-
-def test_artifact_directory_rejects_inner_symlinks_and_special_files(tmp_path: Path) -> None:
-    symlink_root = tmp_path / "symlink"
-    symlink_root.mkdir()
-    (symlink_root / "regular").write_text("data")
-    (symlink_root / "link").symlink_to("regular")
-    with pytest.raises(ArtifactTransferError, match="symlink"):
-        _artifact_tree_identity(symlink_root)
-
-    special_root = tmp_path / "special"
-    special_root.mkdir()
-    os.mkfifo(special_root / "pipe")
-    with pytest.raises(ArtifactTransferError, match="special"):
-        _artifact_tree_identity(special_root)
 
 
 @pytest.mark.asyncio
@@ -508,3 +395,55 @@ async def test_separate_verifier_image_sources_restore_identically_without_setup
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"content": 1.0, "fresh": 1.0, "overall": 1.0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["shared", "separate"])
+async def test_privileged_artifacts_globs_links_missing_and_directory_at_file_path(tmp_path, mode):
+    task = scaffold_task(tmp_path / f"copy-{mode}")
+    (task / "instruction.md").write_text("Leave the prepared outputs for verification.\n")
+    (task / "task.yaml").write_text(
+        f"spec_type: core/v1\nname: copy-{mode}\nimage: {{kind: container}}\n"
+        "resources: {cpus: 1, memory_mb: 512}\n"
+        "artifacts: [/root/answers/*.sgf, /root/missing, /root/answers/result.json]\n"
+        + (
+            "verify:\n  environment_mode: separate\n"
+            "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+            if mode == "separate"
+            else ""
+        )
+    )
+    setup = task / "setup/run.sh"
+    setup.parent.mkdir()
+    setup.write_text(
+        "#!/bin/sh\nset -eu\n"
+        "mkdir -p /root/answers/result.json /root/private\n"
+        "printf protected > /root/private/value\n"
+        "chmod 000 /root/private/value\n"
+        "ln -s /root/private/value /root/answers/game.sgf\n"
+        "ln -s /root/missing /root/answers/broken.sgf\n"
+        "ln -s /root/answers/result.json /root/answers/result.json/loop\n"
+    )
+    setup.chmod(0o755)
+    (task / "oracle/run.sh").write_text("#!/bin/sh\nset -eu\n[ $(id -u) -ne 0 ]\n")
+    (task / "verify/verify.py").write_text(
+        "import os\nfrom pathlib import Path\n"
+        "from ale_verify import Verification, CheckResult\n"
+        "assert os.geteuid() == 0\n"
+        "v = Verification()\n"
+        "content = Path('/root/answers/game.sgf').read_text()\n"
+        "v.check('protected', CheckResult(float(content == 'protected')))\n"
+        "v.check('directory', CheckResult(float(Path('/root/answers/result.json').is_dir())))\n"
+        "v.check('missing', CheckResult(float(not Path('/root/missing').exists())))\n"
+        "v.aggregate('overall')\nv.write()\n"
+    )
+    result = await execute(task, tmp_path / "runs")
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {
+        "protected": 1.0,
+        "directory": 1.0,
+        "missing": 1.0,
+        "overall": 1.0,
+    }
+    entries = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"]
+    assert not any(entry["source"].endswith(("broken.sgf", "/loop")) for entry in entries)

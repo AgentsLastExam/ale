@@ -53,8 +53,9 @@ see or control the desktop.
 - guestd provides exec, file transfer, health, lifecycle, and the shared Sandbox protocol.
   The base's copy is a bootstrap: building a Task image replaces it with the engine's own,
   so it only has to speak the current authentication handshake.
-- Image builds and `resources.sudo` need the elevated `ALE Guestd Session` logon task.
-- This engine needs `vm-windows10-base:0.1.1`, which has both.
+- `ALE Guestd Session` always runs elevated. Agent commands use the limited desktop
+  token unless `resources.sudo` grants Administrator access; UAC must remain enabled.
+- Building a Task on an older base updates this startup contract with the framework.
 - Cua Driver exclusively provides screenshots and desktop input. ALE installs its pinned
   version when it builds a Task image; the base carries none.
 

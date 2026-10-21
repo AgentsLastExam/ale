@@ -520,7 +520,7 @@ async def _reverify(
                     run_dir=run_dir,
                     model=source_lock.agent.model,
                     seed=source_lock.seed,
-                    collect_artifacts=True,
+                    collect_artifacts=settings.artifacts.collect == "host",
                     provenance=provenance,
                     episode_id=episode_id,
                     gateway=gateway,
@@ -718,11 +718,17 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                         return await run_episode(
                             task,
                             StandardEnvironment(
-                                harness, agent_enabled=agent_enabled, timeouts=settings.timeouts
+                                harness,
+                                agent_enabled=agent_enabled,
+                                max_steps=settings.agent.max_steps,
+                                timeouts=settings.timeouts,
                             ),
                             providers,
                             run_dir=run_dir,
                             episode_id=episode_id,
+                            seed=settings.seed,
+                            collect_artifacts=settings.artifacts.collect == "host",
+                            allowed_hosts=frozenset(task.spec.network.allowed_hosts),
                             provenance=inputs,
                             phase_callback=lambda phase, current=episode_id: ledger.update_phase(
                                 current, phase.value

@@ -188,6 +188,23 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
     -ExecutionTimeLimit (New-TimeSpan -Days 3650)
 Register-ScheduledTask -TaskName "ALE Cua Driver" -Action $action -Trigger $trigger `
     -Principal $principal -Settings $settings -Force | Out-Null
+# Framework operations always need Administrator access. The Host's existing SMBIOS
+# grant controls only agent commands; guestd launches other agent commands unelevated.
+$start = "$root\start-guestd.ps1"
+$python = (& python.exe -c "import sys; print(sys.executable)").Trim()
+@"
+`$env:ALE_AGENT_USER = "$User"
+`$env:ALE_AGENT_HOME = "$env:USERPROFILE"
+`$serial = (Get-CimInstance Win32_ComputerSystemProduct).IdentifyingNumber
+`$env:ALE_AGENT_SUDO = if (`$serial -eq "ale-sudo") { "1" } else { "0" }
+& "$python" -I -S "$root\guestd\main.py" --tcp 0.0.0.0:7411
+"@ | Set-Content -LiteralPath $start -Encoding UTF8
+$guestAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
+    "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$start`""
+)
+Register-ScheduledTask -TaskName "ALE Guestd Session" -Action $guestAction -Trigger $trigger `
+    -Principal $principal -Settings $settings -Force | Out-Null
+Unregister-ScheduledTask -TaskName "ALE Guestd" -Confirm:$false -ErrorAction SilentlyContinue
 """
 
 

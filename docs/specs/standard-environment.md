@@ -72,10 +72,11 @@ staged, not by a conventional path or a flag a Task must remember.
 After the solver stops, the Harness performs idempotent cleanup and ALE converts its
 observed evidence into `trajectory.json`. When run policy sets `artifacts.collect =
 "host"`, every Task-declared artifact is captured as an immutable file or directory
-snapshot. Missing, overlapping, symlink, special-file, and transfer failures are explicit
-errors.
+snapshot. Files and directories are selected directly by `artifacts`, including globs.
+Copying follows links and skips missing or uncopyable entries, with bounded traversal;
+see [Artifact copying](task-authoring.md#artifact-copying). The verifier owns scoring.
 
-With `artifacts.collect = "none"`, ALE does not inspect artifact paths, create a spool,
+With the default `artifacts.collect = "none"`, ALE does not inspect artifact paths, create a spool,
 copy bytes, or restore anything. A separate verifier that needs solver output therefore
 requires host artifact collection.
 
@@ -86,7 +87,10 @@ verification first releases or retains the solver according to run policy, provi
 fresh verifier sandbox, restores captured artifacts to their original absolute paths,
 and uploads the same `verify/`. It never reruns setup or copies the solver filesystem.
 
-Verification runs as framework-controlled Task code with open egress. ALE stages `ale_verify`, the rendered
+Verification runs as framework-controlled Task code with open egress and elevated
+privileges (root on Linux, Administrator on Windows), in both shared and separate modes.
+Task code may explicitly drop privileges when executing a submitted program.
+ALE stages `ale_verify`, the rendered
 instruction, parameters, optional solver trajectory, and run-level Judge configuration,
 then executes the OS entry from the verification staging directory. Linux uses
 `/opt/ale/verify/run.sh` and system `python3`; Windows uses

@@ -86,7 +86,8 @@ timeouts:                           # optional positive seconds; defaults shown
   verify: 300
 
 artifacts:                          # optional outcome paths captured from the sandbox
-  - /home/user/output               # absolute, unique, and non-overlapping
+  - /home/user/output               # absolute file or directory path
+  - /home/user/games/*.sgf          # glob patterns are allowed
 
 tools:                              # optional; use only when the Task explicitly requires them
   skills:
@@ -123,8 +124,21 @@ extras:                             # optional namespaced extensions; no standar
 ```
 
 When the instruction requires deliverable files, every instructed destination must equal or be
-contained by a declared `artifacts` path. Commands and examples in `instruction.md` must write to
+contained by a declared `artifacts` path, or matched by a declared glob. Commands and examples in `instruction.md` must write to
 that same destination; do not declare one path while instructing the agent to use another.
+
+### Artifact copying
+
+`artifacts` accepts absolute file paths, directory paths, and globs such as `*.sgf` or
+`**/*.json`. ALE copies each match according to its actual type, follows links to their
+contents, and skips missing paths, cycles, and copy failures. These are fixed defaults;
+the verifier decides how to score the resulting output. Copying uses the framework's
+privileged identity on every supported OS; see [Permissions](sandbox-image.md#permissions).
+
+Run-level `artifacts.collect` defaults to `"none"` (no copy or restore). Set it to `"host"`
+to retain outputs or transfer them to a separate verifier. `run`, `validate`, and `reverify`
+use the same policy. Separate-verifier images must not contain prepopulated candidate
+answers; tasks that grade original links or live state should use shared verification.
 
 ### Verification topology
 
@@ -239,11 +253,9 @@ state that must vary by episode: reset mutable data, generate per-episode values
 copies, or start services that depend on dynamic state. Stable installation and configuration
 belong in `image/`.
 
-On Linux, `setup/run.sh` executes as `root`, while both the evaluated solver and the validation
-oracle execute as the image's agent account (`user` in the ALE base images). `verify/run.sh`
-executes as `root`. ALE does not change ownership of Task-created paths. If image or setup code
-creates a directory or file that the solver or oracle must modify, it must explicitly grant that
-account the required ownership or permissions, for example with `chown` or `install -o user`.
+Setup and verification use the framework's privileged identity; solver and oracle use
+the agent identity. See [Permissions](sandbox-image.md#permissions). Image/setup code must
+grant the agent access to files it needs to modify, using ownership or ACLs as appropriate.
 
 ## instruction.md
 

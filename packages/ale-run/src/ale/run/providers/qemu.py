@@ -808,8 +808,10 @@ class QemuProvider(Provider):
                 # display manager and session start after the guest service is already
                 # answering, so "the sandbox replied" is not "the sandbox has a screen".
                 await self._await_desktop(client)
-            if request.sudo:
-                await self._verify_sudo(client, agent_user, request.os)
+            if request.os is OperatingSystem.WINDOWS:
+                await self._verify_windows_privileges(client, agent_user, request.sudo)
+            elif request.sudo:
+                await self._verify_sudo(client, agent_user)
         except BaseException:
             with contextlib.suppress(BaseException):
                 await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))
@@ -1132,35 +1134,29 @@ class QemuProvider(Provider):
             )
         return user, home, bool(health.get("gui"))
 
-    async def _verify_sudo(
-        self, client: GuestClient, agent_user: str, operating_system: OperatingSystem
+    async def _verify_windows_privileges(
+        self, client: GuestClient, agent_user: str, sudo: bool
     ) -> None:
-        """Prove the agent can elevate, as its Task requested.
-
-        Linux disks get working sudo when they are prepared; a Windows agent is elevated by
-        the session its guest service runs in. Checked here so provenance never records an
-        elevation that did not apply.
-        """
-        if operating_system is OperatingSystem.WINDOWS:
-            code, _, stderr, _ = await client.exec(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    "if (-not ([Security.Principal.WindowsPrincipal] "
-                    "[Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("
-                    "[Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 1 }",
-                ],
-                run_as=agent_user,
-                timeout_sec=30,
+        """Check actual tokens, including the default limited agent, before any Task code."""
+        command = [
+            "python.exe",
+            "-c",
+            "import ctypes; print(int(bool(ctypes.windll.shell32.IsUserAnAdmin())))",
+        ]
+        for user, expected in ((None, True), (agent_user, sudo)):
+            code, output, stderr, timed_out = await client.exec(
+                command, run_as=user, timeout_sec=30
             )
-            if code != 0:
+            if code != 0 or timed_out or output.strip() != str(int(expected)):
+                role = "framework" if user is None else "agent"
+                required = "Administrator" if expected else "limited"
                 raise ProviderCapabilityError(
-                    f"elevated privileges were requested but {agent_user} is not an Administrator: "
-                    f"{stderr.strip()}"
+                    f"Windows {role} must run with a {required} token; rebuild the image "
+                    f"with the current ALE framework and UAC enabled: {stderr.strip()}"
                 )
-            return
+
+    async def _verify_sudo(self, client: GuestClient, agent_user: str) -> None:
+        """Prove the Linux agent can use the sudo grant configured during preparation."""
         code, _, stderr, _ = await client.exec(
             ["sudo", "-n", "true"], run_as=agent_user, timeout_sec=30
         )

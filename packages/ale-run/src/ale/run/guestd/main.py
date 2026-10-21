@@ -21,6 +21,7 @@ import argparse
 import base64
 import contextlib
 import hmac
+import json
 import os
 import queue
 import shutil
@@ -115,7 +116,29 @@ class Handler:
             popen_kwargs["start_new_session"] = True
         popen_kwargs.update(_drop_to(params.get("run_as"), env))
         try:
-            if shell_cmd:
+            if os.name == "nt" and params.get("run_as") and os.environ.get("ALE_AGENT_SUDO") != "1":
+                # The elevated launcher must never inherit agent-controlled cwd or Python
+                # startup settings. Pass those only to its limited-token child.
+                proc = subprocess.Popen(
+                    [sys.executable, "-I", "-S", str(Path(__file__).with_name("windows.py"))],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
+                assert proc.stdin is not None
+                with proc.stdin:
+                    proc.stdin.write(
+                        json.dumps(
+                            {
+                                "argv": argv,
+                                "shell": shell_cmd,
+                                "cwd": cwd,
+                                "env": env,
+                            }
+                        ).encode("utf-8")
+                    )
+            elif shell_cmd:
                 proc = subprocess.Popen(shell_cmd, shell=True, **popen_kwargs)
             else:
                 proc = subprocess.Popen(list(argv), **popen_kwargs)

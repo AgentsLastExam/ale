@@ -62,10 +62,9 @@ def _validate_artifact_paths(paths: tuple[str, ...], operating_system: Operating
         raise ValueError("artifact paths must be absolute: " + ", ".join(relative))
     if len(normalized) != len(set(normalized)):
         raise ValueError("artifact paths must be unique")
-    for index, path in enumerate(normalized):
-        for other in normalized[index + 1 :]:
-            if path in other.parents or other in path.parents:
-                raise ValueError(f"artifact paths overlap: {path} and {other}")
+    for path in normalized:
+        if ".." in path.parts or path == path.parent:
+            raise ValueError("artifact paths must not be filesystem roots or contain '..'")
 
 
 class ImageSpec(BaseModel):

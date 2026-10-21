@@ -115,7 +115,7 @@ class ArtifactPolicy(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    collect: Literal["host", "none"] = "host"
+    collect: Literal["host", "none"] = "none"
 
 
 class LoggingPolicy(BaseModel):

@@ -38,6 +38,7 @@ async def run_one(task_root: Path, run_dir: Path, harness: object):  # type: ign
         StandardEnvironment(harness),  # type: ignore[arg-type]
         provider_registry(DockerProvider()),
         run_dir=run_dir,
+        collect_artifacts=True,
     )
 
 
@@ -119,7 +120,7 @@ async def test_traces_and_artifacts_are_written(
     assert not (result.run_dir / "trace.semantic.jsonl").exists()
     assert not (result.run_dir / "events.jsonl").exists()
     assert (result.run_dir / "result.json").is_file()
-    assert (result.run_dir / "artifacts" / "output" / "result.txt").is_file()
+    assert (result.run_dir / "artifacts" / "0000" / "output" / "result.txt").is_file()
 
 
 @pytest.mark.asyncio
