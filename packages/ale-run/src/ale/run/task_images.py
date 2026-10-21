@@ -395,12 +395,17 @@ def _context_identity(context: Path) -> str:
     """What a build reads from its context.
 
     File contents are hashed. Assets are observed by path, size, modification time and
-    mode, as asset dirtiness is, so finding an unchanged Task's image never re-reads them.
+    mode, so finding an unchanged Task's image never re-reads them. Docker also copies
+    permission bits that are not part of the canonical source or asset identities.
     """
     assets = context / "assets"
     return content_hash(
         {
             "files": tree_digest(context, exclude=("assets",)),
+            "permissions": [
+                [str(entry.relative_to(context)), entry.lstat().st_mode & 0o7777]
+                for entry in sorted((context, *context.rglob("*")))
+            ],
             "directories": sorted(
                 str(entry.relative_to(context)) for entry in context.rglob("*") if entry.is_dir()
             ),

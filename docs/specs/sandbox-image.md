@@ -138,9 +138,11 @@ files are rejected; convert them to a standalone qcow2 so its identity covers th
 The operator must keep prepared local disks unchanged while they are in use.
 
 The authored image source digest excludes `image/assets` so normal Task identity and
-asset provenance remain separate. A prepared Linux image is recorded under its build
-context's file contents, its asset inventory (path, size, modification time and mode, as
-for asset dirtiness) and the framework identity. An unchanged Task finds its image there
+asset provenance remain separate. The local build cache also observes file and directory
+permission bits, since Docker can copy them even when the source digest and asset Git
+revision record at most executable bits. A prepared Linux image is recorded under its build
+context's file contents, directories and permissions, its asset inventory (path, size and
+modification time) and the framework identity. An unchanged Task finds its image there
 and uses it directly, without asking Docker to build or check anything, so a base tag that
 moves is not followed: name exact base versions. Windows cache keys include the actual
 image asset bytes. Dirty or unsynchronized assets disable resume and reporting.

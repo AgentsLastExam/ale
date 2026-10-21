@@ -396,6 +396,46 @@ async def test_preparation_failure_names_and_bounds_its_stage(write_task_repo) -
 
 
 @pytest.mark.asyncio
+async def test_local_build_cache_invalidates_on_context_permission_changes(
+    write_task_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    task = _task(write_task_repo)
+    image = task.folder.image_dir  # type: ignore[attr-defined]
+    asset = image / "assets/data.txt"
+    asset.parent.mkdir()
+    asset.parent.chmod(0o755)
+    asset.write_text("data")
+    asset.chmod(0o644)
+    dockerfile = image / "Dockerfile"
+    dockerfile.chmod(0o644)
+    builds: list[tuple[str, ...]] = []
+
+    async def fake_run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
+        if argv[:3] == ("docker", "buildx", "version"):
+            return 0, "", ""
+        if argv[:3] == ("docker", "buildx", "build"):
+            builds.append(argv)
+            Path(argv[argv.index("--metadata-file") + 1]).write_text(
+                json.dumps({"containerimage.config.digest": "sha256:" + "c" * 64})
+            )
+            return 0, "", ""
+        return 0, "sha256:" + "c" * 64, ""
+
+    monkeypatch.setattr("ale.run.task_images._run", fake_run)
+    await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
+    reused = await prepare_task_image_result(task, _Registry())  # type: ignore[arg-type]
+    assert len(builds) == 1 and reused.steps[1].outcome == "reused"
+
+    for path, mode in ((asset, 0o664), (asset.parent, 0o775), (dockerfile, 0o664)):
+        previous_mtime = path.stat().st_mtime_ns
+        path.chmod(mode)
+        assert path.stat().st_mtime_ns == previous_mtime
+        result = await prepare_task_image_result(task, _Registry())  # type: ignore[arg-type]
+        assert result.steps[1].outcome == "executed"
+    assert len(builds) == 4
+
+
+@pytest.mark.asyncio
 async def test_image_assets_do_not_change_the_local_source_identity(
     write_task_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
