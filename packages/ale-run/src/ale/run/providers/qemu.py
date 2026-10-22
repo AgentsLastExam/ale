@@ -63,6 +63,7 @@ from ale.run.images import (
     resolve_prepared_vm_image,
     resolve_vm_image,
 )
+from ale.run.providers.uploads import set_upload_permissions
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, TcpTransport
 
@@ -509,10 +510,7 @@ class QemuSandbox(Sandbox):
             elif entry.is_file():
                 await self._client.mkdirs(str(destination.parent), run_as=run_as)
                 await self._client.write_file(str(destination), entry.read_bytes(), run_as=run_as)
-        if run_as and self.request.os is OperatingSystem.LINUX:
-            # The directories were made by the guest service, which is root; without this
-            # the agent owns the files it was given and not the tree holding them.
-            await self._client.exec(["chown", "-R", run_as, str(target)])
+        await set_upload_permissions(self._client, str(target), os=self.request.os, agent=run_as)
 
     async def download_dir(self, source: str, target: str) -> None:
         Path(target).mkdir(parents=True, exist_ok=True)

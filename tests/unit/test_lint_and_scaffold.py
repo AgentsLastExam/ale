@@ -37,6 +37,13 @@ def test_stage_entries_are_executable(tmp_path: Path) -> None:
         assert (task / stage / "run.sh").stat().st_mode & 0o111
 
 
+def test_stage_entries_do_not_require_host_executable_bits(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    for stage in ("verify", "oracle"):
+        (task / stage / "run.sh").chmod(0o644)
+    assert lint_repository(task) == []
+
+
 def test_refuses_to_clobber_without_force(tmp_path: Path) -> None:
     target = tmp_path / "fresh"
     scaffold_task(target)

@@ -333,7 +333,7 @@ def assets_pull(
     ] = None,
     force: Annotated[
         bool,
-        typer.Option("--force", help="Replace locally dirty selected asset roots"),
+        typer.Option("--force", help="Replace existing selected asset roots"),
     ] = False,
     revision: Annotated[
         str | None,

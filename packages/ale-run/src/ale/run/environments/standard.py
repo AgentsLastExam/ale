@@ -333,6 +333,14 @@ class StandardEnvironment(Environment):
                     target,
                     identity=Identity.AGENT,
                 )
+                if ctx.spec.os is OperatingSystem.LINUX and server.command.startswith("{mcp}/"):
+                    # The declared command, rather than a Host mode, requests execution.
+                    executable = server.command.replace("{mcp}", target)
+                    result = await sandbox.exec(
+                        ["chmod", "u+x", "--", executable], identity=Identity.AGENT
+                    )
+                    if not result.ok:
+                        raise TaskError(f"could not prepare MCP command: {executable}")
                 server = server.model_copy(
                     update={
                         "command": (

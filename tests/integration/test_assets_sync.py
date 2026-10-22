@@ -59,6 +59,52 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
     assert preserved.read_text() == "keep"
     assert all(not item.dirty for item in asset_status([repository / "tasks/one"]))
 
+    task = repository / "tasks/one"
+    remote = task / "image/assets/remote.txt"
+    with pytest.raises(AssetError, match=r"already exist.*--force"):
+        pull_assets([task], collection="agents-last-exam/assets-123")
+    remote.write_text("local edit")
+    with pytest.raises(AssetError, match=r"already exist.*--force"):
+        pull_assets([task], collection="agents-last-exam/assets-123")
+    assert remote.read_text() == "local edit"
+    pull_assets([task], collection="agents-last-exam/assets-123", force=True)
+    assert remote.read_text() == "remote"
+    assert preserved.read_text() == "keep"
+
+
+def test_pull_rejects_empty_existing_assets_before_contacting_hf(
+    write_task_repo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    repository = write_task_repo("ale-tasks-demo", tasks=("one",))
+    (repository / "tasks/one/image/assets").mkdir()
+
+    def forbidden() -> None:
+        pytest.fail("existing assets must be rejected before contacting HF")
+
+    monkeypatch.setattr("huggingface_hub.HfApi", forbidden)
+    with pytest.raises(AssetError, match=r"already exist.*--force"):
+        pull_assets([repository])
+
+
+def test_pull_preserves_assets_created_during_download(
+    write_task_repo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    repository = write_task_repo("ale-tasks-demo", tasks=("one",))
+    local = repository / "tasks/one/image/assets/local.txt"
+    monkeypatch.setattr("huggingface_hub.HfApi", FakeApi)
+
+    def download(**kwargs: object) -> str:
+        local.parent.mkdir()
+        local.write_text("concurrent edit")
+        return str(kwargs["local_dir"])
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", download)
+    with pytest.raises(AssetError, match=r"already exist.*--force"):
+        pull_assets([repository], collection="agents-last-exam/assets-123")
+    assert local.read_text() == "concurrent edit"
+
 
 def test_pull_rolls_back_every_selected_root_when_replacement_fails(
     ale_checkout: Path,

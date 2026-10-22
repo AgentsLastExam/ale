@@ -288,6 +288,12 @@ Setup, artifact collection/restoration, and verification use the framework's ele
 identity: root on Linux, Administrator on Windows. This applies to shared and separate
 verification independently of the agent's `resources.sudo` setting.
 
+Directory uploads ignore Host permissions: Linux files use `0644`, directories `0755`,
+owned by the selected framework or agent identity. Windows resets ACLs to grant
+SYSTEM/Administrators full control, Users read access, and the selected agent modify
+access for agent uploads. Task entry scripts run through their interpreter, without
+requiring executable bits. Artifact collection/restoration does not use these defaults.
+
 Solver and oracle use the image's agent account. Windows guestd runs elevated in that
 account's interactive session and launches agent commands with the desktop's limited
 token, unless the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a limited
