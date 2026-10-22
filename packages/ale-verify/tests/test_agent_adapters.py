@@ -6,13 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from ale_verify import JudgeError, ScoredChoice, _agents, _llm
+from ale_verify import JudgeError, _agents, _llm
 
 
-def rubric() -> dict[str, ScoredChoice]:
+def schema():
     return {
-        "no": ScoredChoice(0, "Fails."),
-        "yes": ScoredChoice(1, "Works."),
+        "type": "object",
+        "properties": {"choice": {"enum": ["no", "yes"]}, "reasoning": {"type": "string"}},
+        "required": ["choice", "reasoning"],
     }
 
 
@@ -39,7 +40,7 @@ def run(config: dict[str, str]):  # type: ignore[no-untyped-def]
         invocation_id="judge-1",
         name="functional",
         prompt="Inspect and execute the program.",
-        rubric=rubric(),
+        output_schema=schema(),
         evidence=(),
         config=config,
     )
@@ -161,8 +162,8 @@ def test_service_failure_retries_then_repairs_a_verdict_within_one_budget(
         )
 
     monkeypatch.setattr(_agents.subprocess, "run", execute)
-    choice, _, invocation = run(config)
-    assert choice == "yes"
+    result, invocation = run(config)
+    assert result["choice"] == "yes"
     assert len(calls) == 3
     assert [attempt.mode for attempt in invocation.attempts] == [
         "initial",
@@ -170,7 +171,7 @@ def test_service_failure_retries_then_repairs_a_verdict_within_one_budget(
         "schema_repair",
     ]
     assert calls[0][1]["input"] == calls[1][1]["input"]
-    assert "unknown choice 'invalid'" in calls[2][1]["input"]
+    assert "choice" in calls[2][1]["input"]
     resume_flag = "resume" if config["adapter"] == "codex-cli" else "--resume"
     assert resume_flag not in calls[1][0]
     assert resume_flag in calls[2][0]
@@ -191,8 +192,8 @@ def test_recovered_codex_error_does_not_reject_a_valid_judge_verdict(
             '{"type":"turn.completed"}\n'
         ),
     )
-    choice, _, invocation = run(codex_config())
-    assert choice == "yes"
+    result, invocation = run(codex_config())
+    assert result["choice"] == "yes"
     assert invocation.status == "completed"
 
 
@@ -213,9 +214,9 @@ def test_codex_command_root_home_cwd_version_and_final_response(
         )
 
     monkeypatch.setattr(_agents.subprocess, "run", execute)
-    choice, reasoning, invocation = run(codex_config())
+    result, invocation = run(codex_config())
     argv, kwargs = calls[-1]
-    assert (choice, reasoning) == ("yes", "Observed working.")
+    assert (result["choice"], result["reasoning"]) == ("yes", "Observed working.")
     assert argv[:3] == ["/usr/bin/codex", "exec", "--json"]
     assert f'model_reasoning_effort="{codex_config()["reasoning_effort"]}"' in argv
     assert 'model_provider="ale_verify"' in argv
@@ -252,7 +253,7 @@ def test_claude_command_and_final_response(
         )
 
     monkeypatch.setattr(_agents.subprocess, "run", execute)
-    _, _, invocation = run(claude_config())
+    _, invocation = run(claude_config())
     argv, kwargs = calls[-1]
     assert argv[0] == "/usr/bin/claude"
     assert "--output-format=stream-json" in argv
@@ -269,7 +270,7 @@ def test_missing_cli_and_non_root_fail_before_launch(
     with pytest.raises(JudgeError, match="unavailable"):
         run(codex_config())
     monkeypatch.setattr(_agents.os, "geteuid", lambda: 1000)
-    with pytest.raises(JudgeError, match="root"):
+    with pytest.raises(JudgeError, match="framework privileges"):
         run(codex_config())
 
 
@@ -288,7 +289,7 @@ def test_version_probe_failure_is_recorded_as_a_failed_invocation(
     assert caught.value.invocation.attempts[0].outcome == "failed"
 
 
-def test_stale_transcript_is_replaced(
+def test_existing_invocation_transcripts_are_preserved(
     monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
 ) -> None:
     agent_env["log"].write_text('{"stale":true}\n')
@@ -305,7 +306,7 @@ def test_stale_transcript_is_replaced(
 
     monkeypatch.setattr(_agents.subprocess, "run", execute)
     run(codex_config())
-    assert '"stale"' not in agent_env["log"].read_text()
+    assert '"stale"' in agent_env["log"].read_text()
 
 
 def test_missing_or_different_cli_is_installed_at_the_exact_version(

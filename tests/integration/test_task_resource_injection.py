@@ -269,7 +269,7 @@ def _write_task(root: Path) -> Path:
         import json
         from pathlib import Path
 
-        from ale_verify import CheckResult, Verification
+        from ale_verify import write
 
         nonce = Path("/home/user/input/nonce.txt").read_text()
         answer = Path("/home/user/output/result.txt").read_text()
@@ -277,10 +277,7 @@ def _write_task(root: Path) -> Path:
         fragment = receipt.get("fragment", "")
         ok = answer == f"SKILL-R7::{nonce}::{fragment}"
         ok = ok and receipt.get("nonce") == nonce and len(fragment) == 24
-        verification = Verification()
-        verification.check("reward", CheckResult(float(ok)))
-        verification.aggregate("overall")
-        verification.write()
+        write({"overall": float(ok)})
         PY
         """).strip()
     )
@@ -315,7 +312,7 @@ async def test_autonomous_agent_uses_task_skill_and_mcp_to_pass(tmp_path: Path) 
     )
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"reward": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
     trajectory = AtifTrajectory.model_validate_json(
         (result.run_dir / "trajectory.json").read_text()
     )

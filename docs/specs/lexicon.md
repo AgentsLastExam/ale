@@ -25,9 +25,9 @@ remains `core/v1`.
 | **Verify assets** | Task-local `verify/assets` bytes uploaded only with the verify stage and read by verifier code through ordinary relative paths. | never baked into the solver image or published during agent execution |
 | **Oracle assets** | Task-local `oracle/assets` bytes uploaded only when the oracle harness runs and read through ordinary relative paths. | never uploaded for an evaluated solver |
 | **Setup** | Trusted framework-controlled Task work that creates irreducibly per-episode state after the Task image starts. | not package installation, fixed compilation, or fixed input download |
-| **Framework Verification Library** (`ale_verify`) | The engine-owned Python package staged for verify; it composes checks, direct Judges, aggregates, stats, and the final reward map. | not a repository Kit, Host verification service, Gateway client, or plugin |
+| **Framework Verification Library** (`ale_verify`) | The engine-owned Python package staged for verify; it provides optional checks, Judges returning data, and atomic JSON result writing. | not a repository Kit, Host verification service, Gateway client, or plugin |
 | **Judge Invocation** | One attributable LLM or agent Judge execution with its resolved configuration, attempts, usage, verdict, and evidence links. | not a Task manifest declaration or reusable profile |
-| **Verification Record** | The sandbox-owned `verification.json` derivation of rewards: criteria, stats, aggregates, Judge invocations, diagnostics, and failure. | not the Episode Result or solver trajectory |
+| **Verification Result** | The Task-authored JSON object saved as `verification.json`; only `overall` has scoring semantics. | not the Episode Result or solver trajectory |
 | **Artifact snapshot** | Immutable regular-file/directory solver evidence captured after Harness cleanup and before verification, with exact source path, type, mode, and content identity. | not post-verifier bytes or an implicit workspace copy |
 | **Separate verifier** | A fresh verifier sandbox using reused solver content, a Task-local verifier build, or a resolved external image, with independently requested resources and exact artifact restoration. | not a second setup run or a copy of the whole solver filesystem |
 | **Retained sandbox** | An ALE-managed, sanitized debug sandbox returned with a durable Provider handle and cleanup command when run policy requests `keep`. | not Task-controlled or an unmanaged leaked container |
@@ -42,7 +42,7 @@ remains `core/v1`.
 | **Native Continuation** | Opaque state that resumes one exact native agent session in its original live Sandbox. | not Run resume, transcript replay, or cross-Sandbox restoration |
 | **Limit Termination** | The recorded layer, limit, configured value, and cause that stopped an Episode. | not an untyped process exit |
 | **GuestServer** (`ale-guestd`) | The in-sandbox service through which execution, file transfer, and observation flow. | never Provider-specific |
-| **Gateway** | The host-side service through which solver traffic in API-key and subscription modes is controlled, metered, credentialed, and recorded. | not used by verification Judges |
+| **Gateway** | The host-side service through which solver traffic in API-key and subscription modes is controlled, metered, credentialed, and recorded. | Judge traffic is attributed separately from solver traffic |
 | **ATIF Trajectory** | The Harbor ATIF v1.7 document containing the complete ordered agent-visible interaction ALE can observe. | not setup, verification internals, or a native transcript |
 | **Transport Trace** | The append-only Gateway record of solver model calls, refusals, accounting when available, and trajectory links. | not full conversation storage |
 | **Execution Trace** | The append-only record of framework phases, commands, Task-stage output, policies, and diagnostics. | not agent-owned tool activity |

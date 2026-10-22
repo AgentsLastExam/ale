@@ -51,7 +51,7 @@ from ale.run.providers import ProviderRegistry
 from ale.run.recording import EpisodeRecording
 from ale.run.task_images import prepare_task_image, prepare_verifier_image
 from ale.run.verification import judge_endpoints, open_judge_sessions
-from ale_verify import VerificationRecord
+from ale_verify import JudgeInvocation
 
 __all__ = ["EpisodeResult", "run_episode", "run_episode_with_retries"]
 
@@ -758,10 +758,10 @@ def _write_lock(
         inputs = replace(
             inputs, agent=inputs.agent.model_copy(update={"version": ctx.agent_version})
         )
-    record = ctx.verification_record
-    if isinstance(record, VerificationRecord):
+    invocations = tuple(item for item in ctx.judge_invocations if isinstance(item, JudgeInvocation))
+    if invocations:
         endpoints = judge_endpoints(ctx.verification_config)
-        inputs = replace(inputs, judges=judge_provenance(record, endpoints))
+        inputs = replace(inputs, judges=judge_provenance(invocations, endpoints))
     observed_asset = task.asset_observation
     asset = (
         AssetProvenance(

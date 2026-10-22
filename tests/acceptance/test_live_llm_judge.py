@@ -93,11 +93,15 @@ async def test_live_llm_judge_record_and_transport(
         verification_config=verification,
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"correctness": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
     assert (result.run_dir / "result.json").is_file()
     assert (result.run_dir / "verification.json").is_file()
-    record = json.loads((result.run_dir / "verification.json").read_text())
-    invocation = record["judge_invocations"][0]
+    json.loads((result.run_dir / "verification.json").read_text())
+    invocation = next(
+        json.loads(line)["invocation"]
+        for line in (result.run_dir / "llm-judge.jsonl").read_text().splitlines()
+        if json.loads(line)["event"] == "completed"
+    )
     assert invocation["kind"] == "llm"
     assert invocation["status"] == "completed"
     transport = (result.run_dir / "trace.transport.jsonl").read_text()

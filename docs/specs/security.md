@@ -177,9 +177,9 @@ Verified by `tests/integration/test_limits.py`, which asserts prompt typed termi
 and that no container outlives its episode.
 
 Judge failure follows the same rule. Missing credentials/configuration, provider
-failures, timeouts, refusals, malformed JSON, incomplete rubric coverage, and off-menu
-choices remain typed failed episodes. ALE never records scorer failure as an evaluated
-agent reward of zero.
+failures, timeouts, refusals and invalid structured responses raise exceptions. Unhandled
+exceptions fail the episode; ALE never invents a zero reward. A Task may explicitly handle
+a Judge failure according to its own scoring policy.
 
 ## 7. A result carries what produced it
 
@@ -231,9 +231,9 @@ session" selector, transcript replay fallback, or configurable disk/global resum
 An agent judge runs as framework/root so it can inspect and test the completed sandbox.
 That privilege means it can mutate any guest byte, so the integrity boundary is on the
 host: declared solver artifacts, native logs, hashes, and canonical solver trajectory are
-finalized before verify. Deterministic criteria accepted before agent launch are
-immutable, only the active agent verdict may be added afterward, and post-judge sandbox
-bytes are never published as solver artifacts.
+finalized before verify. Task code controls the order of checks and Judge calls. Post-judge
+sandbox bytes are never republished as solver artifacts. A task that needs original evidence must retain it
+before a Judge changes the live workspace.
 
 ## 11. Debug retention is explicit and sanitized
 

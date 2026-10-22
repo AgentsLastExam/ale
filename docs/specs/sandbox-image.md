@@ -8,7 +8,8 @@ directly, or builds `image/run.ps1` on `image.base_ref`.
 
 A Linux Task may build from any image that has:
 
-- system Python 3.12 or newer as `python3`, which the guest service and `ale_verify` run on;
+- `python3` for the guest service (3.12+ in containers); Linux VMs may retain
+  Python 3.10+ when `python3.12` is available for verification;
 - the agent account the Task names with `image.user` (default `user`), with a home;
 - for a container, a long-lived command that ALE does not replace;
 - for a VM, a bootable systemd system (the VM base provides one);

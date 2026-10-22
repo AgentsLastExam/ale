@@ -295,35 +295,22 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
 
     (task / "verify" / "verify.py").write_text(
         textwrap.dedent(
-            """\
-            import json
-            import os
-            from pathlib import Path
-
-            from ale_verify import Verification, checks
-
-            home = Path(os.environ["ALE_HOME"])
-            params = json.loads(Path(os.environ["ALE_TASK_PARAMETERS_PATH"]).read_text())
-            suffix = Path("assets/expected-suffix.txt").read_text().strip()
-            verification = Verification()
-            verification.check(
-                "output",
-                checks.text_equals(
-                    str(home / "output/result.txt"),
-                    f"{params['greeting']} world {suffix}",
-                ),
-            )
-            verification.check(
-                "setup_asset",
-                checks.text_equals(str(home / "input/seed.txt"), "world\\n"),
-            )
-            verification.check(
-                "setup_ran",
-                checks.text_equals(str(home / "input/setup-marker.txt"), "setup"),
-            )
-            verification.aggregate("overall")
-            verification.write()
-            """
+            "import json\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "from ale_verify import checks, write\n"
+            "home = Path(os.environ['ALE_HOME'])\n"
+            "params = json.loads(Path(os.environ['ALE_TASK_PARAMETERS_PATH']).read_text())\n"
+            "suffix = Path('assets/expected-suffix.txt').read_text().strip()\n"
+            "verification = {}\n"
+            "verification['output'] = checks.text_equals(str(home / 'output/re"
+            "sult.txt'), f\"{params['greeting']} world {suffix}\")['score']\n"
+            "verification['setup_asset'] = checks.text_equals(str(home / 'inpu"
+            "t/seed.txt'), 'world\\n')['score']\n"
+            "verification['setup_ran'] = checks.text_equals(str(home / 'input/"
+            "setup-marker.txt'), 'setup')['score']\n"
+            "verification['overall'] = sum(verification.values()) / len(verification.values())\n"
+            "write(verification)\n"
         )
     )
     return task
@@ -383,22 +370,16 @@ def _write_windows_gui_task(root: Path) -> Path:
     )
     (task / "verify" / "verify.py").write_text(
         textwrap.dedent(
-            """\
-            import os
-            from pathlib import Path
-
-            from ale_verify import Verification, checks
-
-            home = Path(os.environ["ALE_HOME"])
-            expected = Path("assets/answer.txt").read_text()
-            verification = Verification()
-            verification.check(
-                "desktop_answer",
-                checks.text_equals(str(home / "output/result.txt"), expected),
-            )
-            verification.aggregate("overall")
-            verification.write()
-            """
+            "import os\n"
+            "from pathlib import Path\n"
+            "from ale_verify import checks, write\n"
+            "home = Path(os.environ['ALE_HOME'])\n"
+            "expected = Path('assets/answer.txt').read_text()\n"
+            "verification = {}\n"
+            "verification['desktop_answer'] = checks.text_equals(str(home / 'o"
+            "utput/result.txt'), expected)['score']\n"
+            "verification['overall'] = sum(verification.values()) / len(verification.values())\n"
+            "write(verification)\n"
         )
     )
     return task
@@ -439,12 +420,7 @@ async def test_standard_task_assets_and_variants_across_operating_systems(
     greeting = "hello" if variant == "base" else "hola"
     assert task.spec.params == {"greeting": greeting}
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {
-        "output": 1.0,
-        "setup_asset": 1.0,
-        "setup_ran": 1.0,
-        "overall": 1.0,
-    }
+    assert result.verdict.rewards == {"overall": 1.0}
     assert (result.run_dir / "artifacts/0000/output/result.txt").read_text() == (
         f"{greeting} world verified"
     )
@@ -490,7 +466,7 @@ async def test_real_llm_reads_and_edits_the_windows_desktop(tmp_path: Path) -> N
         await gateway.stop()
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"desktop_answer": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
     trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
     transport = [
         json.loads(line)

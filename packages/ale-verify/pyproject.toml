@@ -3,7 +3,9 @@ name = "ale-verify"
 version = "0.1.1"
 description = "Sandbox-local verification composition for ALE tasks"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "fastjsonschema==2.21.2",
+]
 
 [build-system]
 requires = ["hatchling"]

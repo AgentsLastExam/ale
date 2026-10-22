@@ -932,11 +932,11 @@ def _reused_result(
 
 
 def _is_full_reward_map(rewards: dict[str, float] | None) -> bool:
-    return bool(rewards) and all(value == 1.0 for value in rewards.values())
+    return bool(rewards) and rewards.get("overall") == 1.0
 
 
 def _is_zero_reward_map(rewards: dict[str, float] | None) -> bool:
-    return bool(rewards) and all(value == 0.0 for value in rewards.values())
+    return bool(rewards) and rewards.get("overall") == 0.0
 
 
 def _validation_notices(
@@ -959,7 +959,7 @@ def _validation_notices(
         failures.append(
             ValidationNotice(
                 code="untouched_nonzero",
-                message=f"untouched rewards must all be zero, got {untouched.rewards}",
+                message=f"untouched overall must be zero, got {untouched.rewards}",
             )
         )
 
@@ -974,28 +974,14 @@ def _validation_notices(
         failures.append(
             ValidationNotice(
                 code="oracle_not_full",
-                message=f"oracle rewards must all be one, got {oracle.rewards}",
-            )
-        )
-
-    untouched_names = tuple((untouched.rewards or {}).keys())
-    oracle_names = tuple((oracle.rewards or {}).keys())
-    if (
-        untouched.status is Status.COMPLETED
-        and oracle.status is Status.COMPLETED
-        and set(untouched_names) != set(oracle_names)
-    ):
-        failures.append(
-            ValidationNotice(
-                code="reward_name_mismatch",
                 message=(
-                    f"untouched rewards {untouched_names} and oracle rewards "
-                    f"{oracle_names} do not match"
+                    "oracle overall must be one after rounding to two decimals, "
+                    f"got {oracle.rewards}"
                 ),
             )
         )
 
-    return untouched_names or oracle_names, (), tuple(failures)
+    return ("overall",), (), tuple(failures)
 
 
 def _validation_attempt(result: EpisodeResult, run_dir: Path) -> ValidationAttempt:

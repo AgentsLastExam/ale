@@ -433,7 +433,7 @@ async def test_validation_projects_only_final_episode_attempts(
             counts[name],
         )
         if not failed:
-            rewards = {"quality": 1.0 if name == "oracle" else 0.0}
+            rewards = {"overall": 1.0 if name == "oracle" else 0.0}
             result.record = result.record.model_copy(update={"rewards": rewards})
             result.verdict = Verdict.completed(rewards)
             atomic_write_json(result.run_dir / "result.json", result.record)

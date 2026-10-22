@@ -42,26 +42,22 @@ RUN mkdir -p /home/user/output && chown -R user:user /home/user/output
 VERIFY_SH = """\
 #!/usr/bin/env bash
 set -euo pipefail
-exec python3 verify.py
+exec "$ALE_VERIFY_PYTHON" verify.py
 """
 
 VERIFY_PY = """\
 import json
 import os
 
-from ale_verify import Verification, checks
-
+from ale_verify import checks, write
 
 with open(os.environ["ALE_PARAMS_JSON"], encoding="utf-8") as handle:
     expected = json.load(handle)["greeting"] + "\\n"
 
-verification = Verification()
-verification.check(
-    "content",
-    checks.text_equals("/home/user/output/result.txt", expected),
-)
-verification.write()
+check = checks.text_equals("/home/user/output/result.txt", expected)
+write({"overall": check["score"], "content": check})
 """
+
 
 ORACLE_SH = """\
 #!/usr/bin/env bash

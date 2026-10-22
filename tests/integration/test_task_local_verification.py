@@ -33,6 +33,11 @@ def framework_layer(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("ale.run.task_images.with_framework", layer)
 
+    async def disk(image, **kwargs):
+        return image, "reused"
+
+    monkeypatch.setattr("ale.run.task_images._framed_disk", disk)
+
 
 DIGEST = "sha256:" + "d" * 64
 
@@ -210,20 +215,21 @@ async def test_task_local_helper_and_framework_package_are_importable(tmp_path: 
     task_path = scaffold_task(tmp_path / "local-helper")
     (task_path / "verify" / "helper.py").write_text(
         "from ale_verify import checks\n"
+        "\n"
         "def result():\n"
         "    return checks.text_equals('/home/user/output/result.txt', 'hello\\n')\n"
     )
     (task_path / "verify" / "verify.py").write_text(
-        "from ale_verify import Verification\n"
+        "from ale_verify import write\n"
         "from helper import result\n"
-        "v = Verification()\n"
-        "v.check('local', result())\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "v = {}\n"
+        "v['local'] = result()['score']\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     result = await execute(task_path, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"local": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -239,7 +245,7 @@ async def test_oracle_assets_are_staged_with_the_oracle(tmp_path: Path) -> None:
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"content": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -257,15 +263,15 @@ async def test_verify_assets_are_withheld_then_available_by_relative_path(
     reference.parent.mkdir(parents=True)
     reference.write_text("withheld")
     (task / "verify" / "verify.py").write_text(
-        "from ale_verify import Verification, checks\n"
-        "v = Verification()\n"
-        "v.check('reference', checks.text_equals('assets/reference.txt', 'withheld'))\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "from ale_verify import checks, write\n"
+        "v = {}\n"
+        "v['reference'] = checks.text_equals('assets/reference.txt', 'withheld')['score']\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"reference": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -273,14 +279,14 @@ async def test_no_assets_verifier_does_not_receive_a_synthetic_asset_root(tmp_pa
     task = scaffold_task(tmp_path / "no-assets")
     (task / "verify" / "verify.py").write_text(
         "from pathlib import Path\n"
-        "from ale_verify import CheckResult, Verification\n"
-        "v = Verification()\n"
-        "v.check('absent', CheckResult(float(not Path('assets').exists())))\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "from ale_verify import write\n"
+        "v = {}\n"
+        "v['absent'] = float(not Path('assets').exists())\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
-    assert result.verdict.rewards == {"absent": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -327,18 +333,18 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
         "printf ready > /var/lib/ale-report/state.txt\n"
     )
     (task / "verify/verify.py").write_text(
-        "from ale_verify import Verification, checks\n"
-        "v = Verification()\n"
-        "v.check('file', checks.json_value('/home/user/output/result.json', 'status', 'ok'))\n"
-        "v.check('directory', checks.text_equals('/var/lib/ale-report/state.txt', 'ready'))\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "from ale_verify import checks, write\n"
+        "v = {}\n"
+        "v['file'] = checks.json_value('/home/user/output/result.json', 'status', 'ok')['score']\n"
+        "v['directory'] = checks.text_equals('/var/lib/ale-report/state.txt', 'ready')['score']\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
 
     result = await execute(task, tmp_path / "runs")
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"file": 1.0, "directory": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
     assert [outcome.roles for outcome in result.record.sandboxes] == [
         ("solver",),
         ("verifier",),
@@ -383,18 +389,18 @@ async def test_separate_verifier_image_sources_restore_identically_without_setup
     )
     (task / "verify/verify.py").write_text(
         "from pathlib import Path\n"
-        "from ale_verify import CheckResult, Verification, checks\n"
-        "v = Verification()\n"
-        "v.check('content', checks.text_equals('/home/user/output/result.txt', 'hello\\n'))\n"
-        "v.check('fresh', CheckResult(float(not Path('/tmp/solver-setup-ran').exists())))\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "from ale_verify import checks, write\n"
+        "v = {}\n"
+        "v['content'] = checks.text_equals('/home/user/output/result.txt', 'hello\\n')['score']\n"
+        "v['fresh'] = float(not Path('/tmp/solver-setup-ran').exists())\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
 
     result = await execute(task, tmp_path / "runs")
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"content": 1.0, "fresh": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -427,23 +433,20 @@ async def test_privileged_artifacts_globs_links_missing_and_directory_at_file_pa
     setup.chmod(0o755)
     (task / "oracle/run.sh").write_text("#!/bin/sh\nset -eu\n[ $(id -u) -ne 0 ]\n")
     (task / "verify/verify.py").write_text(
-        "import os\nfrom pathlib import Path\n"
-        "from ale_verify import Verification, CheckResult\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "from ale_verify import write\n"
         "assert os.geteuid() == 0\n"
-        "v = Verification()\n"
+        "v = {}\n"
         "content = Path('/root/answers/game.sgf').read_text()\n"
-        "v.check('protected', CheckResult(float(content == 'protected')))\n"
-        "v.check('directory', CheckResult(float(Path('/root/answers/result.json').is_dir())))\n"
-        "v.check('missing', CheckResult(float(not Path('/root/missing').exists())))\n"
-        "v.aggregate('overall')\nv.write()\n"
+        "v['protected'] = float(content == 'protected')\n"
+        "v['directory'] = float(Path('/root/answers/result.json').is_dir())\n"
+        "v['missing'] = float(not Path('/root/missing').exists())\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {
-        "protected": 1.0,
-        "directory": 1.0,
-        "missing": 1.0,
-        "overall": 1.0,
-    }
+    assert result.verdict.rewards == {"overall": 1.0}
     entries = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"]
     assert not any(entry["source"].endswith(("broken.sgf", "/loop")) for entry in entries)

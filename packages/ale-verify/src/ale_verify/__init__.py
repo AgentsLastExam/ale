@@ -1,15 +1,17 @@
-"""Stateful sandbox-local verification for ALE tasks."""
+"""Plain task results and optional Judge tools."""
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import uuid
-from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from dataclasses import asdict
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from . import _agents, _llm
+from . import _agents, _llm, checks
 from ._io import (
     MAX_TOTAL_EVIDENCE_BYTES,
     ConfigurationError,
@@ -17,6 +19,7 @@ from ._io import (
     JudgeError,
     VerificationError,
     atomic_json,
+    configured_secrets,
     endpoint_identity,
     evidence_text,
     inline_evidence,
@@ -24,39 +27,28 @@ from ._io import (
     media_type,
     read_file_evidence,
     read_text_evidence,
-    sanitize,
+    redact,
 )
-from ._records import (
-    AggregateResult,
-    CheckResult,
-    CriterionResult,
-    EvidenceReference,
-    JudgeAttempt,
-    JudgeInvocation,
-    ScoredChoice,
-    VerificationRecord,
-)
+from ._journal import journal
+from ._json import json_object, schema_validator
+from ._records import EvidenceReference, JudgeAttempt, JudgeInvocation
 
 __version__ = "0.1.1"
-
 __all__ = [
-    "AggregateResult",
-    "CheckResult",
     "ConfigurationError",
-    "CriterionResult",
     "EvidenceError",
     "EvidenceReference",
     "JudgeAttempt",
     "JudgeError",
     "JudgeInvocation",
-    "ScoredChoice",
-    "Verification",
     "VerificationError",
-    "VerificationRecord",
     "checks",
     "endpoint_identity",
+    "judge",
     "judge_route",
     "probe_judge",
+    "read_result",
+    "write",
 ]
 
 
@@ -107,348 +99,140 @@ def probe_judge(kind: str, config: Mapping[str, str]) -> None:
         raise ValueError("Judge kind must be 'llm' or 'agent'")
 
 
-class Verification:
-    """One ordered scoring program and one atomically maintained record."""
-
-    def __init__(self) -> None:
-        self._criteria: OrderedDict[str, CriterionResult] = OrderedDict()
-        self._metrics: OrderedDict[str, float] = OrderedDict()
-        self._aggregates: OrderedDict[str, AggregateResult] = OrderedDict()
-        self._invocations: list[JudgeInvocation] = []
-        self._diagnostics: list[str] = []
-        self._status = "in_progress"
-        self._failure: str | None = None
-        self._agent_judge_started = False
-        self._criteria_closed = False
-        self._record_path = os.environ.get("ALE_VERIFICATION_PATH", "")
-        self._verdict_path = os.environ.get("ALE_VERDICT_PATH", "")
-
-    def check(self, name: str, result: CheckResult, *, weight: float = 1.0) -> float:
-        self._assert_mutable()
-        self._assert_criteria_open()
-        self._new_name(name)
-        if not isinstance(result, CheckResult):
-            raise TypeError("result must be a CheckResult")
-        criterion = CriterionResult(
-            name=name,
-            source="check",
-            score=result.score,
-            weight=weight,
-            reasoning=result.diagnostic or None,
-            raw_value=result.raw_value,
-            evidence=result.evidence,
-        )
-        self._criteria[name] = criterion
-        self._persist()
-        return criterion.score
-
-    def stat(self, name: str, value: float) -> float:
-        self._assert_mutable()
-        self._new_name(name)
-        number = float(value)
-        if not math.isfinite(number):
-            raise ValueError("stat values must be finite")
-        self._metrics[name] = number
-        self._persist()
-        return number
-
-    def judge(
-        self,
-        kind: str,
-        name: str,
-        *,
-        prompt: str,
-        rubric: Mapping[str, Mapping[str, object] | ScoredChoice],
-        files: Sequence[str] = (),
-        reference: str | None = None,
-        trajectory: bool = False,
-        mcp_servers: Sequence[Mapping[str, object]] = (),
-        weight: float = 1.0,
-    ) -> float:
-        self._assert_mutable()
-        self._assert_criteria_open()
-        self._new_name(name)
-        if kind not in {"llm", "agent"}:
-            raise ValueError("Judge kind must be 'llm' or 'agent'")
-        if kind == "llm" and mcp_servers:
-            raise ValueError("mcp_servers is supported only by Agent Judge")
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("Judge prompt must be non-empty")
-        choices = _rubric(rubric)
-        weight = _weight(weight)
-        if kind == "agent" and self._agent_judge_started:
-            raise RuntimeError("only one Agent Judge invocation is allowed")
-        if any(not os.path.isabs(os.fspath(path)) for path in files):
-            raise ValueError("Judge evidence paths must be absolute")
-        try:
-            authored = [] if reference is None else [inline_evidence(reference, kind="reference")]
-        except EvidenceError as exc:
-            raise ValueError(f"Judge reference is invalid: {exc}") from exc
-
-        try:
-            evidence = [*_solver_evidence(kind, files), *authored]
-            if sum(item.size_bytes for _, item in evidence) > MAX_TOTAL_EVIDENCE_BYTES:
-                raise _Unavailable(f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total")
-            if trajectory and not os.environ.get("ALE_TRAJECTORY_PATH"):
-                raise _Unavailable("no solver trajectory was recorded")
-        except _Unavailable as unavailable:
-            return self._unavailable(kind, name, weight, str(unavailable))
-        if kind == "agent":
-            self._agent_judge_started = True
-
-        invocation_id = "judge-" + uuid.uuid4().hex
-        try:
-            if trajectory:
-                evidence.append(
-                    read_text_evidence(os.environ["ALE_TRAJECTORY_PATH"], kind="solver_trajectory")
-                )
-            if sum(item.size_bytes for _, item in evidence) > MAX_TOTAL_EVIDENCE_BYTES:
-                raise EvidenceError(f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total")
-            config = load_config().get(kind)
-            if config is None:
-                raise ConfigurationError(f"verification {kind} configuration is missing")
-            runner = _llm.run if kind == "llm" else _agents.run
-            arguments: dict[str, object] = dict(
-                invocation_id=invocation_id,
-                name=name,
-                prompt=prompt,
-                rubric=choices,
-                evidence=tuple(evidence),
-                config=config,
-            )
-            if kind == "agent":
-                arguments["mcp_servers"] = tuple(mcp_servers)
-            choice, reasoning, invocation = runner(**arguments)
-            if not isinstance(invocation, JudgeInvocation):
-                raise RuntimeError("Judge returned a malformed invocation")
-            selected = choices.get(choice)
-            if selected is None:
-                raise RuntimeError(f"Judge returned unknown choice {choice!r}")
-            if not isinstance(reasoning, str) or not reasoning.strip():
-                raise RuntimeError("Judge returned empty reasoning")
-        except Exception as exc:
-            invocation = getattr(exc, "invocation", None)
-            if (
-                invocation is None
-                and len(exc.args) > 1
-                and isinstance(exc.args[1], JudgeInvocation)
-            ):
-                invocation = exc.args[1]
-            if isinstance(invocation, JudgeInvocation):
-                self._invocations.append(invocation)
-            return self._fail(f"judge infrastructure: {sanitize(exc)}")
-
-        self._invocations.append(invocation)
-        criterion = CriterionResult(
-            name=name,
-            source="llm_judge" if kind == "llm" else "agent_judge",
-            score=selected.score,
-            weight=weight,
-            reasoning=reasoning,
-            raw_value=choice,
-            evidence=tuple(reference for _, reference in evidence),
-            judge_invocation_id=invocation.id,
-        )
-        self._criteria[name] = criterion
-        self._persist()
-        return criterion.score
-
-    def aggregate(
-        self,
-        name: str,
-        *,
-        inputs: Sequence[str] | None = None,
-        weights: Mapping[str, float] | None = None,
-    ) -> float:
-        self._assert_terminal_mutation()
-        self._new_name(name)
-        selected = list(self._criteria) if inputs is None else list(inputs)
-        if not selected:
-            raise ValueError("aggregate requires at least one input")
-        if len(selected) != len(set(selected)):
-            raise ValueError("aggregate inputs must be unique")
-        values: OrderedDict[str, float] = OrderedDict()
-        stored_weights: OrderedDict[str, float] = OrderedDict()
-        for input_name in selected:
-            if input_name in self._criteria:
-                item = self._criteria[input_name]
-                values[input_name] = item.score
-                stored_weights[input_name] = item.weight
-            elif inputs is not None and input_name in self._aggregates:
-                values[input_name] = self._aggregates[input_name].score
-                stored_weights[input_name] = 1.0
-            else:
-                raise ValueError(f"unknown aggregate input: {input_name}")
-        if weights is not None:
-            if set(weights) != set(values):
-                raise ValueError("aggregate weight keys must match inputs exactly")
-            stored_weights = OrderedDict(
-                (input_name, _weight(weights[input_name])) for input_name in values
-            )
-        total = sum(stored_weights.values())
-        score = sum(values[key] * stored_weights[key] for key in values) / total
-        aggregate = AggregateResult(
-            name=name,
-            method=(
-                "weighted_mean"
-                if weights is not None or len(set(stored_weights.values())) > 1
-                else "mean"
-            ),
-            inputs=dict(values),
-            weights=dict(stored_weights),
-            score=score,
-        )
-        self._aggregates[name] = aggregate
-        if inputs is None:
-            # Every criterion is now in this aggregate; a later one would silently be left out.
-            self._criteria_closed = True
-        self._persist()
-        return aggregate.score
-
-    def write(self) -> None:
-        self._assert_terminal_mutation()
-        if not self._criteria and not self._aggregates:
-            raise ValueError("verification must contain at least one reward")
-        if "overall" in self._metrics:
-            raise ValueError('"overall" is the total reward; give the stat another name')
-        if "overall" not in self._aggregates and "overall" not in self._criteria:
-            # The total every report reads: unless the author defined it, the weighted mean
-            # of every criterion.
-            if not self._criteria:
-                raise ValueError('verification without criteria must define "overall" itself')
-            self.aggregate("overall")
-        self._status = "completed"
-        record = self._persist()
-        if not self._verdict_path:
-            raise RuntimeError("ALE_VERDICT_PATH is not configured")
-        atomic_json(
-            self._verdict_path,
-            {"rewards": record.rewards, "metrics": dict(record.metrics)},
-        )
-
-    def _new_name(self, name: str) -> None:
-        _name(name)
-        if name in self._criteria or name in self._aggregates or name in self._metrics:
-            raise ValueError(f"duplicate verification name: {name}")
-
-    def _assert_mutable(self) -> None:
-        self._assert_terminal_mutation()
-        if self._agent_judge_started:
-            raise RuntimeError("check and Judge calls are forbidden after an Agent Judge")
-
-    def _assert_criteria_open(self) -> None:
-        if self._criteria_closed:
-            raise RuntimeError(
-                "criteria cannot be added after an aggregate over all criteria; "
-                "add every check and Judge first"
-            )
-
-    def _assert_terminal_mutation(self) -> None:
-        if self._status != "in_progress":
-            raise RuntimeError("verification is already terminal")
-
-    def _unavailable(self, kind: str, name: str, weight: float, reason: str) -> float:
-        """Score a Judge criterion zero because the solver left nothing valid to judge.
-
-        Missing or unusable solver output is the evaluated agent's outcome, not a scorer
-        failure, so it counts as zero instead of removing the episode from aggregates. No
-        Judge runs; an authored path that the oracle cannot satisfy fails validation.
-        """
-        criterion = CriterionResult(
-            name=name,
-            source="check",
-            score=0.0,
-            weight=weight,
-            reasoning=f"no {kind} Judge ran: {sanitize(reason)}",
-            raw_value={"judge": kind, "solver_evidence": "unavailable"},
-        )
-        self._criteria[name] = criterion
-        self._persist()
-        return criterion.score
-
-    def _fail(self, message: str) -> Any:
-        self._status = "failed"
-        self._failure = message
-        self._persist()
-        raise VerificationError(message)
-
-    def _record(self) -> VerificationRecord:
-        return VerificationRecord(
-            status=self._status,  # type: ignore[arg-type]
-            criteria=tuple(self._criteria.values()),
-            metrics=dict(self._metrics),
-            aggregates=tuple(self._aggregates.values()),
-            judge_invocations=tuple(self._invocations),
-            diagnostics=tuple(self._diagnostics),
-            failure=self._failure,
-        )
-
-    def _persist(self) -> VerificationRecord:
-        if not self._record_path:
-            raise RuntimeError("ALE_VERIFICATION_PATH is not configured")
-        record = self._record()
-        atomic_json(self._record_path, record.to_dict())
-        return record
-
-
-def _name(value: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("verification names must be non-empty strings")
+def read_result(raw: str | bytes) -> dict[str, Any]:
+    """Validate a result and round only overall to two decimal places, half up."""
+    value = json_object(raw)
+    overall = value.get("overall")
+    if isinstance(overall, bool) or not isinstance(overall, (int, float)):
+        raise ValueError("overall must be a number")
+    if not 0 <= overall <= 1 or not math.isfinite(overall):
+        raise ValueError("overall must be finite and between 0 and 1")
+    value["overall"] = float(
+        Decimal(str(overall)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    )
     return value
 
 
-def _weight(value: float) -> float:
-    value = float(value)
-    if not math.isfinite(value) or value <= 0:
-        raise ValueError("weights must be finite and positive")
-    return value
+def write(result: dict[str, Any]) -> None:
+    """Atomically save a result. The engine accepts it only after normal exit."""
+    # Round-tripping also rejects non-JSON Python objects and non-finite values.
+    _json_types(result)
+    normalized = read_result(json.dumps(result, ensure_ascii=False, allow_nan=False))
+    path = os.environ.get("ALE_VERDICT_PATH")
+    if not path:
+        raise RuntimeError("ALE_VERDICT_PATH is not configured")
+    atomic_json(path, normalized)
 
 
-def _rubric(
-    rubric: Mapping[str, Mapping[str, object] | ScoredChoice],
-) -> OrderedDict[str, ScoredChoice]:
-    if not isinstance(rubric, Mapping) or len(rubric) < 2:
-        raise ValueError("Judge rubric requires at least two choices")
-    normalized: OrderedDict[str, ScoredChoice] = OrderedDict()
-    for label, authored in rubric.items():
-        _name(label)
-        if label in normalized:
-            raise ValueError(f"duplicate rubric choice: {label}")
-        if isinstance(authored, ScoredChoice):
-            normalized[label] = authored
-        elif isinstance(authored, Mapping):
-            if set(authored) != {"score", "description"}:
-                raise ValueError("rubric choices require only score and description")
-            normalized[label] = ScoredChoice(
-                score=authored["score"],  # type: ignore[arg-type]
-                description=authored["description"],  # type: ignore[arg-type]
-            )
-        else:
-            raise ValueError("rubric choices must be mappings")
-    return normalized
+def _json_types(value: Any) -> None:
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("JSON object keys must be strings")
+        for item in value.values():
+            _json_types(item)
+    elif isinstance(value, list):
+        for item in value:
+            _json_types(item)
+    elif value is not None and not isinstance(value, (str, int, float, bool)):
+        raise ValueError("result must contain only JSON values")
 
 
-class _Unavailable(Exception):
-    """The solver left no usable evidence for a Judge criterion."""
-
-
-def _solver_evidence(
-    kind: str, files: Sequence[str]
-) -> list[tuple[str | bytes, EvidenceReference]]:
-    """Read the solver files a Judge assesses; an unusable one is the solver's outcome."""
-    evidence: list[tuple[str | bytes, EvidenceReference]] = []
-    size = 0
-    for path in files:
-        try:
+def judge(
+    kind: str,
+    name: str = "judge",
+    *,
+    prompt: str,
+    output_schema: dict[str, Any] | None = None,
+    files: Sequence[str] = (),
+    reference: str | None = None,
+    trajectory: bool = False,
+    mcp_servers: Sequence[Mapping[str, object]] = (),
+) -> dict[str, Any]:
+    """Return model data; all interpretation and scoring belong to the caller."""
+    if kind not in {"llm", "agent"}:
+        raise ValueError("Judge kind must be 'llm' or 'agent'")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("Judge prompt must be non-empty")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Judge name must be non-empty")
+    schema_validator(output_schema)  # Reject invalid schemas before a paid call.
+    invocation_id = "judge-" + uuid.uuid4().hex
+    secrets: tuple[str, ...] = ()
+    try:
+        configs = load_config()
+        secrets = configured_secrets(configs)
+        journal(
+            kind,
+            {
+                "event": "started",
+                "id": invocation_id,
+                "kind": kind,
+                "name": name,
+                "prompt": prompt,
+                "output_schema": output_schema,
+            },
+            secrets,
+        )
+        config = configs.get(kind)
+        if config is None:
+            raise ConfigurationError(f"verification {kind} configuration is missing")
+        evidence = []
+        for path in files:
             raw, item = read_file_evidence(path)
             content = evidence_text(raw, item) if kind == "llm" and media_type(raw) is None else raw
-        except EvidenceError as exc:
-            raise _Unavailable(str(exc)) from exc
-        size += item.size_bytes
-        if size > MAX_TOTAL_EVIDENCE_BYTES:
-            raise _Unavailable(f"evidence exceeds {MAX_TOTAL_EVIDENCE_BYTES} bytes in total")
-        evidence.append((content, item))
-    return evidence
-
-
-from . import checks  # noqa: E402
+            evidence.append((content, item))
+        if reference is not None:
+            evidence.append(inline_evidence(reference, kind="reference"))
+        if trajectory:
+            path = os.environ.get("ALE_TRAJECTORY_PATH")
+            if not path:
+                raise EvidenceError("no solver trajectory was recorded")
+            evidence.append(read_text_evidence(path, kind="solver_trajectory"))
+        if sum(item.size_bytes for _, item in evidence) > MAX_TOTAL_EVIDENCE_BYTES:
+            raise EvidenceError("Judge evidence exceeds the total byte limit")
+        journal(
+            kind,
+            {
+                "event": "evidence",
+                "id": invocation_id,
+                "files": [asdict(item) for _, item in evidence],
+            },
+            secrets,
+        )
+        arguments = dict(
+            invocation_id=invocation_id,
+            name=name,
+            prompt=prompt,
+            output_schema=output_schema,
+            evidence=evidence,
+            config=config,
+        )
+        if kind == "agent":
+            arguments["mcp_servers"] = mcp_servers
+        response, invocation = (_llm.run if kind == "llm" else _agents.run)(**arguments)
+        journal(
+            kind,
+            {
+                "event": "completed",
+                "id": invocation_id,
+                "invocation": asdict(invocation),
+                "response": response,
+            },
+            secrets,
+        )
+        return response
+    except Exception as exc:
+        invocation = getattr(exc, "invocation", None)
+        journal(
+            kind,
+            {
+                "event": "failed",
+                "id": invocation_id,
+                "error": redact(exc, secrets),
+                "invocation": asdict(invocation)
+                if isinstance(invocation, JudgeInvocation)
+                else None,
+            },
+            secrets,
+        )
+        raise

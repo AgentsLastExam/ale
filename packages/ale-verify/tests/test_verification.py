@@ -1,388 +1,244 @@
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 
 import pytest
 
-from ale_verify import (
-    CheckResult,
-    JudgeAttempt,
-    JudgeInvocation,
-    Verification,
-    VerificationRecord,
-    _io,
-)
-
-HASH0 = "sha256:" + "0" * 64
-HASH1 = "sha256:" + "1" * 64
+from ale_verify import EvidenceError, JudgeError, _io, _llm, judge, read_result, write
 
 
 @pytest.fixture
-def verify_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
-    record = tmp_path / "verification.json"
-    verdict = tmp_path / "rewards.json"
-    config = tmp_path / "config.json"
+def verify_env(monkeypatch, tmp_path):
+    result, log, config = (
+        tmp_path / name for name in ("result.json", "llm-judge.jsonl", "config.json")
+    )
     config.write_text(
         json.dumps(
             {
                 "llm": {
-                    "model": "judge-model",
+                    "model": "gpt-test",
                     "reasoning_effort": "medium",
-                    "base_url": "https://example.test",
+                    "base_url": "https://example.test/v1/responses",
                     "api_key_env": "JUDGE_KEY",
                 }
             }
         )
     )
-    monkeypatch.setenv("ALE_VERIFICATION_PATH", str(record))
-    monkeypatch.setenv("ALE_VERDICT_PATH", str(verdict))
-    monkeypatch.setenv("ALE_VERIFY_CONFIG_PATH", str(config))
-    monkeypatch.setenv("JUDGE_KEY", "secret")
-    return record, verdict
+    for key, value in {
+        "ALE_VERDICT_PATH": result,
+        "ALE_LLM_JUDGE_LOG_PATH": log,
+        "ALE_VERIFY_CONFIG_PATH": config,
+        "JUDGE_KEY": "provider-secret",
+    }.items():
+        monkeypatch.setenv(key, str(value))
+    return result, log
 
 
-def test_one_state_holds_checks_stats_judge_aggregate_and_final_write(
-    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path]
-) -> None:
-    record_path, verdict_path = verify_env
-
-    def fake_run(**kwargs):  # type: ignore[no-untyped-def]
-        return (
-            "yes",
-            "Observed correct output.",
-            JudgeInvocation(
-                id=kwargs["invocation_id"],
-                kind="llm",
-                criterion_name=kwargs["name"],
-                status="completed",
-                attempts=(
-                    JudgeAttempt(
-                        index=1,
-                        mode="initial",
-                        started_at="2026-07-31T00:00:00Z",
-                        finished_at="2026-07-31T00:00:01Z",
-                        outcome="completed",
-                        model="judge-model",
-                        reasoning_effort="medium",
-                        endpoint_identity="https://example.test",
-                        prompt_hash=HASH0,
-                        rubric_hash=HASH1,
-                    ),
-                ),
-            ),
-        )
-
-    monkeypatch.setattr("ale_verify._llm.run", fake_run)
-    verification = Verification()
-    assert verification.check("format", CheckResult(1, "valid")) == 1
-    assert verification.check("content", CheckResult(0.5), weight=2) == 0.5
-    assert verification.stat("files", 2) == 2
-    assert (
-        verification.judge(
-            "llm",
-            "correctness",
-            prompt="Judge correctness.",
-            rubric={
-                "no": {"score": 0.0, "description": "Wrong."},
-                "yes": {"score": 1.0, "description": "Correct."},
-            },
-        )
-        == 1
-    )
-    assert verification.aggregate("overall") == pytest.approx(0.75)
-    verification.write()
-
-    record = VerificationRecord.from_json(record_path.read_bytes())
-    envelope = json.loads(verdict_path.read_text())
-    assert record.status == "completed"
-    assert record.aggregates[0].method == "weighted_mean"
-    assert envelope == {"rewards": record.rewards, "metrics": record.metrics}
-    assert not list(record_path.parent.glob("*.tmp"))
-
-
-def test_verification_has_no_stage_asset_resolver() -> None:
-    assert not hasattr(Verification, "asset_path")
-
-
-def test_windows_skips_unsupported_directory_fsync(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(_io.os, "name", "nt")
-    monkeypatch.setattr(_io.os, "open", lambda *_args: pytest.fail("os.open was called"))
-    _io._fsync_directory(tmp_path)
-
-
-def test_duplicate_invalid_and_terminal_mutations_fail(verify_env: tuple[Path, Path]) -> None:
-    verification = Verification()
-    verification.check("format", CheckResult(1))
-    with pytest.raises(ValueError, match="duplicate"):
-        verification.check("format", CheckResult(1))
-    with pytest.raises(ValueError, match="between 0 and 1"):
-        verification.check("bad", CheckResult(2))
-    with pytest.raises(ValueError, match="positive"):
-        verification.aggregate("bad-weight", weights={"format": 0})
-    verification.stat("files", 1)
-    with pytest.raises(ValueError, match="duplicate"):
-        verification.stat("files", 2)
-    with pytest.raises(ValueError, match="duplicate"):
-        verification.stat("format", 2)
-    verification.aggregate("overall")
-    with pytest.raises(RuntimeError, match="after an aggregate over all criteria"):
-        verification.check("late-criterion", CheckResult(1))
-    verification.stat("late-stat", 1)
-    verification.write()
-    with pytest.raises(RuntimeError, match="terminal"):
-        verification.stat("late", 1)
-
-
-def test_write_adds_overall_as_the_weighted_mean_of_every_criterion(
-    verify_env: tuple[Path, Path],
-) -> None:
-    verification = Verification()
-    verification.check("a", CheckResult(1), weight=3)
-    verification.check("b", CheckResult(0))
-    verification.aggregate("first", inputs=["a"])
-    verification.stat("files", 2)
-    verification.write()
-    record = VerificationRecord.from_json(verify_env[0].read_bytes())
-    assert record.rewards == {"a": 1.0, "b": 0.0, "first": 1.0, "overall": 0.75}
-
-
-def test_an_author_defined_overall_is_kept(verify_env: tuple[Path, Path]) -> None:
-    verification = Verification()
-    verification.check("a", CheckResult(1))
-    verification.check("b", CheckResult(0))
-    verification.aggregate("overall", inputs=["a"])
-    verification.write()
-    record = VerificationRecord.from_json(verify_env[0].read_bytes())
-    assert record.rewards["overall"] == 1.0
-
-
-def test_a_check_named_overall_is_the_total(verify_env: tuple[Path, Path]) -> None:
-    verification = Verification()
-    verification.check("overall", CheckResult(1))
-    verification.write()
-    record = VerificationRecord.from_json(verify_env[0].read_bytes())
-    assert record.rewards == {"overall": 1.0}
-
-
-def test_a_stat_cannot_take_the_name_of_the_total(verify_env: tuple[Path, Path]) -> None:
-    verification = Verification()
-    verification.check("a", CheckResult(1))
-    verification.stat("overall", 3)
-    with pytest.raises(ValueError, match="total reward"):
-        verification.write()
-
-
-def test_explicit_aggregates_leave_criteria_open(verify_env: tuple[Path, Path]) -> None:
-    verification = Verification()
-    verification.check("a", CheckResult(1))
-    verification.aggregate("first", inputs=["a"])
-    verification.check("b", CheckResult(0))
-    verification.aggregate("overall")
-    verification.write()
-    record = VerificationRecord.from_json(verify_env[0].read_bytes())
-    assert record.rewards == {"a": 1.0, "b": 0.0, "first": 1.0, "overall": 0.5}
-
-
-def test_agent_judge_is_the_last_mutating_operation(
-    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path]
-) -> None:
-    config = Path(__import__("os").environ["ALE_VERIFY_CONFIG_PATH"])
-    config.write_text(
-        json.dumps(
-            {
-                "agent": {
-                    "adapter": "codex-cli",
-                    "version": "1.2.3",
-                    "model": "judge-model",
-                    "reasoning_effort": "high",
-                    "base_url": "https://example.test",
-                    "api_key_env": "JUDGE_KEY",
-                }
-            }
-        )
-    )
-
-    def fake_run(**kwargs):  # type: ignore[no-untyped-def]
-        return (
-            "yes",
-            "Works.",
-            JudgeInvocation(
-                id=kwargs["invocation_id"],
-                kind="agent",
-                criterion_name=kwargs["name"],
-                adapter="codex-cli",
-                adapter_version="1",
-                status="completed",
-                attempts=(
-                    JudgeAttempt(
-                        index=1,
-                        mode="initial",
-                        started_at="2026-07-31T00:00:00Z",
-                        finished_at="2026-07-31T00:00:01Z",
-                        outcome="completed",
-                        model="judge-model",
-                        reasoning_effort="high",
-                        endpoint_identity="https://example.test",
-                        prompt_hash=HASH0,
-                        rubric_hash=HASH1,
-                    ),
-                ),
-            ),
-        )
-
-    monkeypatch.setattr("ale_verify._agents.run", fake_run)
-    verification = Verification()
-    verification.judge(
-        "agent",
-        "functional",
-        prompt="Test it.",
-        rubric={
-            "no": {"score": 0, "description": "Fails."},
-            "yes": {"score": 1, "description": "Works."},
-        },
-    )
-    with pytest.raises(RuntimeError, match="after an Agent Judge"):
-        verification.check("late", CheckResult(1))
-    verification.aggregate("overall")
-    verification.write()
-
-
-def test_judge_failure_persists_failed_state_and_cannot_be_caught_into_a_score(
-    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path]
-) -> None:
-    def fail(**kwargs):  # type: ignore[no-untyped-def]
-        attempt = JudgeAttempt(
-            index=1,
-            mode="initial",
-            started_at="2026-07-31T00:00:00Z",
-            finished_at="2026-07-31T00:00:01Z",
-            outcome="failed",
-            model="judge-model",
-            reasoning_effort="medium",
-            endpoint_identity="https://example.test",
-            prompt_hash=HASH0,
-            rubric_hash=HASH1,
-            error="endpoint failed",
-        )
-        invocation = JudgeInvocation(
-            id=kwargs["invocation_id"],
-            kind="llm",
-            criterion_name=kwargs["name"],
-            status="failed",
-            attempts=(attempt,),
-            failure="endpoint failed",
-        )
-        raise RuntimeError("endpoint failed", invocation)
-
-    monkeypatch.setattr("ale_verify._llm.run", fail)
-    verification = Verification()
-    with pytest.raises(RuntimeError, match="endpoint failed"):
-        verification.judge(
-            "llm",
-            "correctness",
-            prompt="Judge.",
-            rubric={
-                "no": {"score": 0, "description": "Wrong."},
-                "yes": {"score": 1, "description": "Right."},
-            },
-        )
-    record = VerificationRecord.from_json(verify_env[0].read_bytes())
-    assert record.status == "failed"
-    assert record.rewards == {}
-    with pytest.raises(RuntimeError, match="terminal"):
-        verification.check("fallback", CheckResult(1))
-
-
-RUBRIC = {
-    "no": {"score": 0, "description": "Wrong."},
-    "yes": {"score": 1, "description": "Correct."},
-}
+def test_plain_nested_result_and_repeated_write(verify_env):
+    result, log = verify_env
+    value = {
+        "overall": 0.74,
+        "dimensions": {"correctness": 0.8},
+        "reasoning": ["example", None],
+        "measurements": {"count": 200},
+    }
+    write(value)
+    assert read_result(result.read_bytes()) == value
+    write({"overall": 1})
+    assert read_result(result.read_bytes()) == {"overall": 1}
+    assert not log.exists()
+    assert not list(result.parent.glob("*.tmp"))
 
 
 @pytest.mark.parametrize(
-    "case",
-    ["missing", "directory", "symlink", "fifo", "binary", "large", "total", "no-trajectory"],
+    ("raw_score", "expected"),
+    [
+        (0, 0.0),
+        (1, 1.0),
+        (0.004, 0.0),
+        (0.005, 0.01),
+        (0.125, 0.13),
+        (0.145, 0.15),
+        (0.994, 0.99),
+        (0.995, 1.0),
+        (0.999, 1.0),
+    ],
 )
-def test_unusable_solver_evidence_scores_zero_without_contacting_a_judge(
-    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path], tmp_path: Path, case: str
-) -> None:
-    path = tmp_path / "evidence"
-    options: dict[str, object] = {"files": [str(path)]}
-    if case == "directory":
-        path.mkdir()
-    elif case == "symlink":
-        target = tmp_path / "target"
-        target.write_text("content")
-        path.symlink_to(target)
-    elif case == "fifo":
-        if not hasattr(os, "mkfifo"):
-            pytest.skip("FIFOs are POSIX-only")
-        os.mkfifo(path)
-    elif case == "binary":
-        path.write_bytes(b"\xffunsupported binary")
-    elif case == "large":
-        with path.open("wb") as handle:
-            handle.truncate(_io.MAX_FILE_BYTES + 1)
-    elif case == "total":
-        path.write_text("content")
-        monkeypatch.setattr("ale_verify.MAX_TOTAL_EVIDENCE_BYTES", 10)
-        options["files"] = [str(path), str(path)]
-    elif case == "no-trajectory":
-        monkeypatch.delenv("ALE_TRAJECTORY_PATH", raising=False)
-        options = {"trajectory": True}
-
-    monkeypatch.setattr("ale_verify._llm.run", lambda **_: pytest.fail("Judge was contacted"))
-    verification = Verification()
-    score = verification.judge("llm", "content", prompt="Judge content.", rubric=RUBRIC, **options)
-    verification.check("format", CheckResult(1))
-    verification.aggregate("overall")
-    verification.write()
-
-    assert score == 0
-    record = VerificationRecord.from_json(verify_env[0].read_bytes())
-    assert record.status == "completed"
-    assert record.rewards == {"content": 0.0, "format": 1.0, "overall": 0.5}
-    (criterion,) = [item for item in record.criteria if item.name == "content"]
-    assert criterion.source == "check"
-    assert criterion.reasoning and criterion.reasoning.startswith("no llm Judge ran:")
-    assert record.judge_invocations == ()
+def test_result_precision_is_identical_for_sdk_and_direct_json(verify_env, raw_score, expected):
+    result, _ = verify_env
+    value = {"overall": raw_score, "details": {"raw": raw_score, "count": 123}}
+    normalized = {"overall": expected, "details": value["details"]}
+    assert read_result(json.dumps(value)) == normalized
+    write(value)
+    assert json.loads(result.read_text()) == normalized
+    assert read_result(result.read_bytes()) == normalized
+    assert value["overall"] == raw_score  # Submission does not change task calculations.
 
 
-@pytest.mark.parametrize("case", ["relative", "reference"])
-def test_authored_evidence_errors_are_request_errors(
-    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path], case: str
-) -> None:
-    options: dict[str, object] = (
-        {"files": ["output/report.md"]}
-        if case == "relative"
-        else {"reference": "x" * (_io.MAX_REFERENCE_BYTES + 1)}
-    )
-    monkeypatch.setattr("ale_verify._llm.run", lambda **_: pytest.fail("Judge was contacted"))
-    verification = Verification()
-    with pytest.raises(ValueError):
-        verification.judge("llm", "content", prompt="Judge content.", rubric=RUBRIC, **options)
-    assert not verify_env[0].exists() or (
-        VerificationRecord.from_json(verify_env[0].read_bytes()).failure is None
-    )
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        [],
+        {},
+        {"overall": True},
+        {"overall": "1"},
+        {"overall": -0.1},
+        {"overall": -0.0001},
+        {"overall": 1.0001},
+        {"overall": 10**500},
+        {"overall": float("nan")},
+        {"overall": 1, "nested": {"x": float("inf")}},
+        {"overall": 1, "x": (1, 2)},
+        {"overall": 1, 2: "invalid key"},
+    ],
+)
+def test_bad_result_never_replaces_previous_good_result(verify_env, value):
+    result, _ = verify_env
+    write({"overall": 0.5})
+    with pytest.raises((TypeError, ValueError)):
+        write(value)
+    assert read_result(result.read_bytes()) == {"overall": 0.5}
 
 
-def test_a_staged_trajectory_that_cannot_be_read_is_an_infrastructure_failure(
-    monkeypatch: pytest.MonkeyPatch, verify_env: tuple[Path, Path], tmp_path: Path
-) -> None:
-    monkeypatch.setenv("ALE_TRAJECTORY_PATH", str(tmp_path / "missing-trajectory.json"))
-    monkeypatch.setattr("ale_verify._llm.run", lambda **_: pytest.fail("Judge was contacted"))
-    verification = Verification()
-    with pytest.raises(_io.VerificationError):
-        verification.judge(
-            "llm", "content", prompt="Judge content.", rubric=RUBRIC, trajectory=True
+def test_direct_json_has_the_same_contract():
+    assert read_result('{"overall":1,"extra":{"any":[false,null,20]}}')["overall"] == 1
+    with pytest.raises(ValueError, match="duplicate"):
+        read_result('{"overall":0,"overall":1}')
+
+
+def test_judge_returns_data_and_logs_invalid_and_valid_responses(monkeypatch, verify_env):
+    result, log = verify_env
+    responses = iter(["not json", '{"grade":2}', '{"grade":0.999,"reasoning":{"why":"good"}}'])
+    prompts = []
+
+    def request(protocol, config, prompt, secret, evidence):
+        prompts.append(prompt)
+        return {"output_text": next(responses)}
+
+    monkeypatch.setattr(_llm, "_request", request)
+    schema = {
+        "type": "object",
+        "properties": {"grade": {"type": "number", "minimum": 0, "maximum": 1}},
+        "required": ["grade"],
+    }
+    assessment = judge("llm", prompt="Assess it", output_schema=schema)
+    assert assessment == {"grade": 0.999, "reasoning": {"why": "good"}}
+    assert not result.exists()
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len([e for e in events if e["event"] == "response"]) == 3
+    errors = [e["error"] for e in events if e["event"] == "error"]
+    assert errors[0] in prompts[1]
+    assert errors[1] in prompts[2]
+    assert "grade" in errors[1]
+    assert all("Output JSON Schema" in prompt for prompt in prompts)
+    assert events[-1]["response"] == assessment
+    write({"overall": assessment["grade"] * 0.5, "review": assessment})
+    saved = read_result(result.read_bytes())
+    assert saved["overall"] == 0.5
+    assert saved["review"] == assessment
+
+
+def test_optional_schema_and_calls_after_write(monkeypatch, verify_env):
+    monkeypatch.setattr(_llm, "_request", lambda *args: {"output_text": '{"anything":[1,true]}'})
+    write({"overall": 0})
+    assert judge("llm", prompt="Inspect") == {"anything": [1, True]}
+    assert judge("llm", prompt="Inspect again") == {"anything": [1, True]}
+
+
+def test_each_judge_kind_keeps_its_own_events(monkeypatch, verify_env):
+    from ale_verify import JudgeInvocation, _agents
+
+    result, llm_log = verify_env
+    agent_log = result.parent / "agent-judge.jsonl"
+    monkeypatch.setenv("ALE_AGENT_JUDGE_LOG_PATH", str(agent_log))
+    config_path = result.parent / "config.json"
+    config = json.loads(config_path.read_text())
+    config["agent"] = {**config["llm"], "adapter": "codex-cli", "version": "1.2.3"}
+    config_path.write_text(json.dumps(config))
+    monkeypatch.setattr(_llm, "_request", lambda *args: {"output_text": '{"ok":true}'})
+
+    def agent(**kwargs):
+        _agents._append_transcript(
+            invocation_id=kwargs["invocation_id"],
+            index=1,
+            argv=["codex"],
+            stdout="native provider-secret",
+            stderr="",
+            secrets=("provider-secret",),
         )
-    record = VerificationRecord.from_json(verify_env[0].read_bytes())
-    assert record.status == "failed"
-    assert record.failure and record.failure.startswith("judge infrastructure:")
-    assert not verify_env[1].exists()
-    with pytest.raises(RuntimeError, match="terminal"):
-        verification.check("fallback", CheckResult(1))
+        return {"ok": True}, JudgeInvocation(
+            id=kwargs["invocation_id"],
+            kind="agent",
+            name="agent review",
+            status="completed",
+            adapter="codex-cli",
+            adapter_version="1.2.3",
+        )
+
+    monkeypatch.setattr(_agents, "run", agent)
+    judge("llm", prompt="LLM review")
+    assert not agent_log.exists()
+    judge("agent", prompt="Agent review")
+    judge("llm", prompt="LLM review again")
+
+    for path, kind, count in [(llm_log, "llm", 2), (agent_log, "agent", 1)]:
+        events = [json.loads(line) for line in path.read_text().splitlines()]
+        completed = [e for e in events if e["event"] == "completed"]
+        assert len(completed) == count
+        assert {e["invocation"]["kind"] for e in completed} == {kind}
+        ids = {e["id"] for e in completed}
+        assert all(e["id"] in ids for e in events)
+        assert ("native [REDACTED]" in path.read_text()) is (kind == "agent")
+        assert "provider-secret" not in path.read_text()
+
+
+def test_missing_evidence_raises_without_inventing_zero(monkeypatch, verify_env):
+    result, log = verify_env
+    monkeypatch.setattr(_llm, "_request", lambda *args: pytest.fail("must not call model"))
+    with pytest.raises(EvidenceError):
+        judge("llm", prompt="Inspect", files=[str(result.parent / "missing")])
+    assert not result.exists()
+    assert json.loads(log.read_text().splitlines()[-1])["event"] == "failed"
+
+
+def test_failed_judge_keeps_responses_and_no_result(monkeypatch, verify_env):
+    result, log = verify_env
+    monkeypatch.setattr(_llm, "_request", lambda *args: {"output_text": "invalid provider-secret"})
+    with pytest.raises(JudgeError):
+        judge("llm", prompt="Inspect")
+    assert not result.exists()
+    assert "provider-secret" not in log.read_text()
+    assert "invalid [REDACTED]" in log.read_text()
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len([e for e in events if e["event"] == "response"]) == 4
+    assert events[-1]["event"] == "failed"
+
+
+def test_windows_skips_unsupported_directory_fsync(monkeypatch, tmp_path):
+    monkeypatch.setattr(_io.os, "name", "nt")
+    monkeypatch.setattr(_io.os, "open", lambda *args: pytest.fail("no directory open on Windows"))
+    _io._fsync_directory(tmp_path)
+
+
+def test_schema_references_and_defaults(monkeypatch, verify_env):
+    monkeypatch.setattr(_llm, "_request", lambda *args: {"output_text": '{"value":0.5}'})
+    schema = {
+        "definitions": {"grade": {"type": "number", "minimum": 0, "maximum": 1}},
+        "type": "object",
+        "properties": {"value": {"$ref": "#/definitions/grade"}, "extra": {"default": 7}},
+        "required": ["value"],
+    }
+    assert judge("llm", prompt="Assess", output_schema=schema) == {"value": 0.5}
+    monkeypatch.setattr(_llm, "_request", lambda *args: pytest.fail("invalid schema made a call"))
+    for invalid in ({"$ref": "ftp://example.test/schema"}, {"$schema": "draft-2020-12"}):
+        with pytest.raises(ValueError):
+            judge("llm", prompt="Assess", output_schema=invalid)
+
+
+def test_initial_prompt_is_redacted(monkeypatch, verify_env):
+    _, log = verify_env
+    monkeypatch.setattr(_llm, "_request", lambda *args: {"output_text": '{"ok":true}'})
+    judge("llm", prompt="Do not disclose provider-secret")
+    assert "provider-secret" not in log.read_text()
+    assert "[REDACTED]" in log.read_text()

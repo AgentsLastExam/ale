@@ -50,14 +50,14 @@ async def test_setup_runs_relative_entry_as_root(tmp_path: Path) -> None:
     entry.chmod(0o755)
     check = task / "verify" / "verify.py"
     check.write_text(
-        "from ale_verify import Verification, checks\n"
-        "v = Verification()\n"
-        "v.check('root', checks.text_equals('/home/user/output/setup-uid', '0\\n'))\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "from ale_verify import checks, write\n"
+        "v = {}\n"
+        "v['root'] = checks.text_equals('/home/user/output/setup-uid', '0\\n')['score']\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
-    assert result.verdict.rewards == {"root": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -112,12 +112,12 @@ async def test_setup_assets_are_uploaded_with_the_complete_stage(
     source.parent.mkdir(parents=True)
     source.write_text("dynamic")
     (task / "verify" / "verify.py").write_text(
-        "from ale_verify import Verification, checks\n"
-        "v = Verification()\n"
-        "v.check('setup', checks.text_equals('/home/user/output/setup-ready', 'ready'))\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "from ale_verify import checks, write\n"
+        "v = {}\n"
+        "v['setup'] = checks.text_equals('/home/user/output/setup-ready', 'ready')['score']\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"setup": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}

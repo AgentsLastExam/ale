@@ -60,7 +60,7 @@ def test_attempt_consistency_and_finite_rewards() -> None:
         )
 
 
-def test_observation_matches_checked_in_json_schema() -> None:
+def test_observation_matches_schema_fixture() -> None:
     observation = ValidationObservation(
         run_id="validate-1",
         engine=ValidationEngine(version="0.1.0", commit="deadbeef"),
@@ -77,7 +77,7 @@ def test_observation_matches_checked_in_json_schema() -> None:
         ),
     )
     schema_path = (
-        Path(__file__).resolve().parents[2] / "docs/specs/schemas/validation-observation-v1.json"
+        Path(__file__).resolve().parents[1] / "fixtures/validation-observation-v1.schema.json"
     )
     schema = json.loads(schema_path.read_text())
     jsonschema.validate(observation.model_dump(mode="json"), schema)

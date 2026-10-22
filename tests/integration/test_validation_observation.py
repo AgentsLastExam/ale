@@ -23,14 +23,11 @@ async def test_validation_records_selected_variants_and_rejects_partial_oracles(
         handle.write("\nvariants:\n  - name: hard\n    params: {greeting: hello}\n")
     (task / "verify" / "verify.py").write_text(
         "import os\n"
-        "from ale_verify import CheckResult, Verification\n"
-        "verification = Verification()\n"
-        "verification.check(\n"
-        "    'reward',\n"
-        "    CheckResult(0.5 if os.path.isfile('/home/user/output/result.txt') else 0.0),\n"
-        ")\n"
-        "verification.aggregate('overall')\n"
-        "verification.write()\n"
+        "from ale_verify import write\n"
+        "verification = {}\n"
+        "verification['reward'] = 0.5 if os.path.isfile('/home/user/output/result.txt') else 0.0\n"
+        "verification['overall'] = sum(verification.values()) / len(verification.values())\n"
+        "write(verification)\n"
     )
 
     assert await _validate(f"{root}@{{base,hard}}", RunConfig(), tmp_path / "runs") == 2
@@ -40,8 +37,8 @@ async def test_validation_records_selected_variants_and_rejects_partial_oracles(
     assert [task["variant"] for task in observation["tasks"]] == ["base", "hard"]
     for item in observation["tasks"]:
         assert item["passed"] is False
-        assert item["untouched"]["rewards"] == {"reward": 0.0, "overall": 0.0}
-        assert item["oracle"]["rewards"] == {"reward": 0.5, "overall": 0.5}
+        assert item["untouched"]["rewards"] == {"overall": 0.0}
+        assert item["oracle"]["rewards"] == {"overall": 0.5}
         assert item["warnings"] == []
         assert item["failures"][0]["code"] == "oracle_not_full"
         assert item["untouched"]["lock_digest"].startswith("sha256:")
@@ -49,23 +46,41 @@ async def test_validation_records_selected_variants_and_rejects_partial_oracles(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("policy", "retained"), [("host", True), ("none", False)])
+@pytest.mark.parametrize(
+    ("policy", "retained", "writer"), [("host", True, "sdk"), ("none", False, "direct")]
+)
 async def test_validation_respects_artifact_policy_for_shared_verification(
     tmp_path: Path,
     write_repo: Callable[..., Path],
     policy: str,
     retained: bool,
+    writer: str,
 ) -> None:
     root = tmp_path / "repo"
-    write_repo(root)
+    task_root = write_repo(root)
+    script = (
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "score = 0.999 if Path('/home/user/output/result.txt').is_file() else 0.004\n"
+        "result = {'overall':score,'details':{'raw':score}}\n"
+    )
+    if writer == "sdk":
+        script += "from ale_verify import write\nwrite(result)\n"
+    else:
+        script += "Path(os.environ['ALE_VERDICT_PATH']).write_text(json.dumps(result))\n"
+    (task_root / "verify" / "verify.py").write_text(script)
     settings = RunConfig.model_validate({"artifacts": {"collect": policy}})
 
     assert await _validate(str(root), settings, tmp_path / "runs") == 0
 
     validation_path = next((tmp_path / "runs").glob("validate-*/validation.json"))
     task = json.loads(validation_path.read_text())["tasks"][0]
-    assert task["untouched"]["rewards"] == {"reward": 0.0, "overall": 0.0}
-    assert task["oracle"]["rewards"] == {"reward": 1.0, "overall": 1.0}
+    assert task["passed"] is True
+    assert task["untouched"]["rewards"] == {"overall": 0.0}
+    assert task["oracle"]["rewards"] == {"overall": 1.0}
     for name in ("untouched", "oracle"):
         episode = validation_path.parent / Path(task[name]["result_path"]).parent
+        saved = json.loads((episode / "verification.json").read_text())
+        assert saved["overall"] == task[name]["rewards"]["overall"]
+        assert saved["details"]["raw"] == (0.004 if name == "untouched" else 0.999)
         assert (episode / "artifacts" / "snapshot.json").is_file() is retained

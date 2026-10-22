@@ -4,13 +4,12 @@ import base64
 import io
 import json
 import urllib.error
-from collections import OrderedDict
 from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
 
-from ale_verify import ConfigurationError, JudgeError, ScoredChoice, _llm, probe_judge
+from ale_verify import ConfigurationError, JudgeError, _llm, probe_judge
 from ale_verify._io import EvidenceError, inline_evidence, read_file_evidence, read_text_evidence
 
 
@@ -56,12 +55,16 @@ def fresh_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ALE_VERIFY_DEADLINE_SECONDS", raising=False)
 
 
-def rubric() -> OrderedDict[str, ScoredChoice]:
-    return OrderedDict(
-        no=ScoredChoice(0, "Incorrect."),
-        partial=ScoredChoice(0.5, "Partially correct."),
-        yes=ScoredChoice(1, "Correct."),
-    )
+def schema():
+    return {
+        "type": "object",
+        "properties": {
+            "choice": {"enum": ["no", "partial", "yes"]},
+            "reasoning": {"type": "string", "minLength": 1},
+        },
+        "required": ["choice", "reasoning"],
+        "additionalProperties": False,
+    }
 
 
 def config(**overrides: str) -> dict[str, str]:
@@ -80,7 +83,7 @@ def call(**overrides):  # type: ignore[no-untyped-def]
         invocation_id="judge-1",
         name="correctness",
         prompt="Judge the answer.",
-        rubric=rubric(),
+        output_schema=schema(),
         evidence=overrides.pop("evidence", ()),
         config=selected_config,
         **overrides,
@@ -130,8 +133,8 @@ def test_openai_request_and_strict_choice_parsing(
         )
 
     monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
-    choice, reasoning, invocation = call()
-    assert (choice, reasoning) == ("yes", "It is correct.")
+    result, invocation = call()
+    assert (result["choice"], result["reasoning"]) == ("yes", "It is correct.")
     assert observed["url"] == "https://api.openai.com/v1/responses"
     assert observed["payload"]["reasoning"] == {"effort": "medium"}
     assert observed["payload"]["stream"] is True
@@ -169,10 +172,10 @@ def test_anthropic_request_is_rendered_without_a_dialect_setting(
         )
 
     monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
-    choice, _, invocation = call(
+    result, invocation = call(
         config=config(model="claude-sonnet-4", base_url="https://api.anthropic.com")
     )
-    assert choice == "partial"
+    assert result["choice"] == "partial"
     assert observed["url"] == "https://api.anthropic.com/v1/messages"
     assert observed["headers"]["X-api-key"] == "provider-secret"
     assert observed["payload"]["output_config"] == {"effort": "medium"}
@@ -206,10 +209,8 @@ def test_chat_completions_request_and_response(
         )
 
     monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
-    choice, reasoning, invocation = call(
-        config=config(base_url="https://api.openai.com/v1/chat/completions")
-    )
-    assert (choice, reasoning) == ("yes", "Correct.")
+    result, invocation = call(config=config(base_url="https://api.openai.com/v1/chat/completions"))
+    assert (result["choice"], result["reasoning"]) == ("yes", "Correct.")
     assert observed["url"] == "https://api.openai.com/v1/chat/completions"
     assert observed["payload"]["messages"][0]["role"] == "user"
     assert observed["payload"]["reasoning_effort"] == "medium"
@@ -239,12 +240,13 @@ def test_schema_repair_includes_the_concrete_error_and_exact_shape(
 
     monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
     monkeypatch.setattr(_llm.time, "sleep", lambda _seconds: None)
-    _, _, invocation = call()
+    _, invocation = call()
     assert len(invocation.attempts) == 2
     assert invocation.attempts[0].outcome == "invalid"
     assert invocation.attempts[1].mode == "schema_repair"
-    assert "unknown choice 'mostly'" in prompts[1]
-    assert '{"choice":"no|partial|yes","reasoning":"..."}' in prompts[1]
+    assert "choice" in prompts[1]
+    assert "Output JSON Schema" in prompts[1]
+    assert invocation.attempts[0].error in prompts[1]
 
 
 def test_three_schema_repairs_are_the_limit_for_invalid_verdicts(
@@ -285,7 +287,7 @@ def test_attempt_mode_describes_the_prompt_sent(
         return response
 
     monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
-    _, _, invocation = call()
+    _, invocation = call()
     assert [attempt.mode for attempt in invocation.attempts] == [
         "initial",
         "schema_repair",
@@ -330,9 +332,8 @@ def test_successful_provider_fields_are_sanitized(
             }
         ),
     )
-    _, reasoning, invocation = call()
-    assert "provider-secret" not in reasoning
-    assert "provider-secret" not in (invocation.attempts[0].request_id or "")
+    with pytest.raises(JudgeError, match="credential"):
+        call()
 
 
 def test_evidence_requires_absolute_bounded_regular_utf8_files(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -388,8 +389,8 @@ def test_mixed_evidence_reaches_each_protocol_and_survives_repair(
     monkeypatch.setenv("JUDGE_KEY", "provider-secret")
     monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
     monkeypatch.setattr(_llm.time, "sleep", lambda _: None)
-    choice, _, invocation = call(config=config(base_url=endpoint), evidence=evidence)
-    assert choice == "yes"
+    result, invocation = call(config=config(base_url=endpoint), evidence=evidence)
+    assert result["choice"] == "yes"
     assert [attempt.mode for attempt in invocation.attempts] == ["initial", "schema_repair"]
     for payload in observed:
         parts = payload.get("input", payload.get("messages"))[0]["content"]
@@ -420,7 +421,7 @@ def test_mixed_evidence_reaches_each_protocol_and_survives_repair(
                 file["file_data"] == "data:application/pdf;base64," + base64.b64encode(pdf).decode()
             )
     assert observed[0] != observed[1]
-    assert "Your previous verdict was rejected" in parts[0]["text"]
+    assert "Your previous response was rejected" in parts[0]["text"]
     assert base64.b64encode(png).decode() not in json.dumps(asdict(invocation))
 
 
@@ -437,7 +438,7 @@ def test_mixed_evidence_reaches_each_protocol_and_survives_repair(
 def test_public_judge_sends_media_bytes_and_records_original_evidence(
     monkeypatch, tmp_path, raw, mime
 ) -> None:  # type: ignore[no-untyped-def]
-    from ale_verify import Verification, VerificationRecord
+    from ale_verify import judge
     from ale_verify._io import digest
 
     path = tmp_path / "artifact"
@@ -447,7 +448,7 @@ def test_public_judge_sends_media_bytes_and_records_original_evidence(
     record_path = tmp_path / "verification.json"
     monkeypatch.setenv("JUDGE_KEY", "secret")
     monkeypatch.setenv("ALE_VERIFY_CONFIG_PATH", str(settings))
-    monkeypatch.setenv("ALE_VERIFICATION_PATH", str(record_path))
+    monkeypatch.setenv("ALE_LLM_JUDGE_LOG_PATH", str(record_path))
     monkeypatch.setenv("ALE_VERDICT_PATH", str(tmp_path / "rewards.json"))
 
     def open_(request, timeout):  # type: ignore[no-untyped-def]
@@ -459,24 +460,22 @@ def test_public_judge_sends_media_bytes_and_records_original_evidence(
         return Response({"output_text": '{"choice":"yes","reasoning":"Checked evidence."}'})
 
     monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
-    verification = Verification()
     assert (
-        verification.judge(
+        judge(
             "llm",
             "correctness",
             prompt="Inspect the attached artifact.",
-            rubric=rubric(),
+            output_schema=schema(),
             files=[str(path)],
             reference="reference value",
-        )
-        == 1
+        )["choice"]
+        == "yes"
     )
-    verification.aggregate("overall")
-    verification.write()
-    record = VerificationRecord.from_json(record_path.read_bytes())
-    assert record.criteria[0].evidence[0].sha256 == digest(raw)
-    assert record.criteria[0].evidence[0].size_bytes == len(raw)
-    assert record.criteria[0].evidence[1].kind == "reference"
+    events = [json.loads(line) for line in record_path.read_text().splitlines()]
+    evidence = next(e["files"] for e in events if e["event"] == "evidence")
+    assert evidence[0]["sha256"] == digest(raw)
+    assert evidence[0]["size_bytes"] == len(raw)
+    assert evidence[1]["kind"] == "reference"
     assert base64.b64encode(raw).decode() not in record_path.read_text()
 
 
@@ -584,8 +583,8 @@ def test_streamed_responses_are_rebuilt_for_each_protocol(monkeypatch, endpoint,
 
     monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
     model = "claude-opus-4" if "anthropic" in endpoint else "gpt-5"
-    choice, reasoning, invocation = call(config=config(base_url=endpoint, model=model))
-    assert (choice, reasoning) == ("yes", "Streamed.")
+    result, invocation = call(config=config(base_url=endpoint, model=model))
+    assert (result["choice"], result["reasoning"]) == ("yes", "Streamed.")
     usage = invocation.attempts[0].usage or {}
     assert 4 in usage.values()
 
@@ -600,8 +599,8 @@ def test_a_stream_cut_short_is_retried_as_a_transient_failure(monkeypatch) -> No
         ]
     )
     monkeypatch.setattr(_llm.urllib.request, "urlopen", lambda *_a, **_k: next(responses))
-    choice, _, invocation = call()
-    assert choice == "yes"
+    result, invocation = call()
+    assert result["choice"] == "yes"
     assert [attempt.outcome for attempt in invocation.attempts] == ["failed", "completed"]
     assert invocation.attempts[1].mode == "retry"
 
@@ -623,8 +622,8 @@ def test_provider_overload_is_retried_without_a_count_and_honours_retry_after(mo
         return response
 
     monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
-    choice, _, invocation = call()
-    assert choice == "no"
+    result, invocation = call()
+    assert result["choice"] == "no"
     assert len(invocation.attempts) == 9
     assert slept[1::2] == [7.0] * 4
     assert all(0 < delay <= 60 for delay in slept)
@@ -711,14 +710,14 @@ def test_anthropic_max_tokens_follows_the_provider_limit(monkeypatch) -> None:  
 
     monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
     anthropic = config(model="claude-x", base_url="https://api.anthropic.com")
-    assert call(config=anthropic)[0] == "yes"
-    assert call(config=anthropic)[0] == "yes"
+    assert call(config=anthropic)[0]["choice"] == "yes"
+    assert call(config=anthropic)[0]["choice"] == "yes"
     assert sent == [128000, 32000, 32000]
 
 
 def test_a_verdict_in_a_json_fence_is_accepted() -> None:
-    choice, reasoning = _llm._verdict('```json\n{"choice":"yes","reasoning":"Ok."}\n```', rubric())
-    assert (choice, reasoning) == ("yes", "Ok.")
+    result = _llm.response_object('```json\n{"choice":"yes","reasoning":"Ok."}\n```', schema())
+    assert (result["choice"], result["reasoning"]) == ("yes", "Ok.")
 
 
 def test_probe_sends_a_tiny_request_and_reports_a_rejection(monkeypatch) -> None:  # type: ignore[no-untyped-def]

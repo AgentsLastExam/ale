@@ -12,31 +12,33 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from ._io import digest
-from ._records import CheckResult, EvidenceReference
+from ._records import EvidenceReference
 
 
-def file_exists(path: str | os.PathLike[str]) -> CheckResult:
+def file_exists(path: str | os.PathLike[str]) -> dict[str, Any]:
     exists = os.path.isfile(path)
-    return CheckResult(float(exists), "file exists" if exists else "file is missing", exists)
+    return _result(float(exists), "file exists" if exists else "file is missing", exists)
 
 
-def file_missing(path: str | os.PathLike[str]) -> CheckResult:
+def file_missing(path: str | os.PathLike[str]) -> dict[str, Any]:
     missing = not os.path.exists(path)
-    return CheckResult(float(missing), "file is missing" if missing else "path exists", missing)
+    return _result(float(missing), "file is missing" if missing else "path exists", missing)
 
 
-def text_equals(path: str | os.PathLike[str], expected: str) -> CheckResult:
+def text_equals(path: str | os.PathLike[str], expected: str) -> dict[str, Any]:
     return _text(path, lambda actual: actual == expected, "text equals expected", expected)
 
 
-def text_contains(path: str | os.PathLike[str], expected: str) -> CheckResult:
+def text_contains(path: str | os.PathLike[str], expected: str) -> dict[str, Any]:
     return _text(path, lambda actual: expected in actual, "text contains expected", expected)
 
 
-def text_regex(path: str | os.PathLike[str], pattern: str, flags: int = 0) -> CheckResult:
+def text_regex(path: str | os.PathLike[str], pattern: str, flags: int = 0) -> dict[str, Any]:
     compiled = re.compile(pattern, flags)
     return _text(
         path,
@@ -46,7 +48,7 @@ def text_regex(path: str | os.PathLike[str], pattern: str, flags: int = 0) -> Ch
     )
 
 
-def json_value(path: str | os.PathLike[str], json_path: str, expected: object) -> CheckResult:
+def json_value(path: str | os.PathLike[str], json_path: str, expected: object) -> dict[str, Any]:
     parts = _json_parts(json_path)
     try:
         with open(path, encoding="utf-8") as handle:
@@ -54,14 +56,14 @@ def json_value(path: str | os.PathLike[str], json_path: str, expected: object) -
         for part in parts:
             value = value[int(part)] if isinstance(value, list) else value[part]
         matched = value == expected
-        return CheckResult(
+        return _result(
             float(matched),
             "JSON value matched" if matched else "JSON value differed",
             value,
             _evidence(path),
         )
     except (FileNotFoundError, KeyError, IndexError, TypeError, ValueError) as exc:
-        return CheckResult(0.0, f"JSON check failed: {exc}")
+        return _result(0.0, f"JSON check failed: {exc}")
 
 
 def numeric(
@@ -69,12 +71,12 @@ def numeric(
     expected: float,
     abs_tolerance: float = 0.0,
     rel_tolerance: float = 0.0,
-) -> CheckResult:
+) -> dict[str, Any]:
     values = (float(actual), float(expected), float(abs_tolerance), float(rel_tolerance))
     if any(not math.isfinite(value) for value in values) or values[2] < 0 or values[3] < 0:
         raise ValueError("numeric values and tolerances must be finite and tolerances non-negative")
     matched = math.isclose(values[0], values[1], abs_tol=values[2], rel_tol=values[3])
-    return CheckResult(
+    return _result(
         float(matched),
         "numeric value matched" if matched else "numeric value differed",
         values[0],
@@ -88,7 +90,7 @@ def command(
     exit_code: int = 0,
     stdout: str | re.Pattern[str] | None = None,
     stderr: str | re.Pattern[str] | None = None,
-) -> CheckResult:
+) -> dict[str, Any]:
     if not isinstance(argv, (list, tuple)) or not argv:
         raise ValueError("command argv must be a non-empty list or tuple")
     if not math.isfinite(float(timeout_seconds)) or timeout_seconds <= 0:
@@ -103,7 +105,7 @@ def command(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        return CheckResult(
+        return _result(
             0.0,
             "command timed out",
             {"timed_out": True, "stdout": _bounded(exc.stdout), "stderr": _bounded(exc.stderr)},
@@ -113,7 +115,7 @@ def command(
         matched = matched and _matches(completed.stdout, stdout)
     if stderr is not None:
         matched = matched and _matches(completed.stderr, stderr)
-    return CheckResult(
+    return _result(
         float(matched),
         "command matched" if matched else "command output differed",
         {
@@ -124,20 +126,20 @@ def command(
     )
 
 
-def csv_value(path: str | os.PathLike[str], row: int, column: int, expected: str) -> CheckResult:
+def csv_value(path: str | os.PathLike[str], row: int, column: int, expected: str) -> dict[str, Any]:
     try:
         with open(path, newline="", encoding="utf-8") as handle:
             rows = list(csv.reader(handle))
         value = rows[int(row)][int(column)]
         matched = value == expected
-        return CheckResult(
+        return _result(
             float(matched),
             "CSV value matched" if matched else "CSV value differed",
             value,
             _evidence(path),
         )
     except (FileNotFoundError, IndexError, TypeError, ValueError, csv.Error) as exc:
-        return CheckResult(0.0, f"CSV check failed: {exc}")
+        return _result(0.0, f"CSV check failed: {exc}")
 
 
 def sqlite_value(
@@ -145,7 +147,7 @@ def sqlite_value(
     query: str,
     expected: object,
     parameters: tuple[object, ...] = (),
-) -> CheckResult:
+) -> dict[str, Any]:
     if not isinstance(query, str) or not query.strip():
         raise ValueError("SQLite query must be non-empty")
     try:
@@ -159,14 +161,14 @@ def sqlite_value(
             connection.close()
         value = None if row is None else row[0]
         matched = value == expected
-        return CheckResult(
+        return _result(
             float(matched),
             "SQLite value matched" if matched else "SQLite value differed",
             value,
             _evidence(path),
         )
     except (OSError, sqlite3.Error) as exc:
-        return CheckResult(0.0, f"SQLite check failed: {exc}")
+        return _result(0.0, f"SQLite check failed: {exc}")
 
 
 def http(
@@ -174,7 +176,7 @@ def http(
     status: int = 200,
     contains: str | None = None,
     timeout_seconds: float = 10,
-) -> CheckResult:
+) -> dict[str, Any]:
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in ("http", "https") or parsed.hostname not in (
         "localhost",
@@ -192,18 +194,18 @@ def http(
             observed = response.status
             body = response.read(1024 * 1024).decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        return CheckResult(0.0, f"HTTP check failed: {exc}")
+        return _result(0.0, f"HTTP check failed: {exc}")
     matched = observed == status and (contains is None or contains in body)
-    return CheckResult(
+    return _result(
         float(matched),
         "HTTP response matched" if matched else "HTTP response differed",
         {"status": observed, "body": _bounded(body)},
     )
 
 
-def trajectory_tool_used(name: str) -> CheckResult:
+def trajectory_tool_used(name: str) -> dict[str, Any]:
     used = name in _trajectory_tools()
-    return CheckResult(
+    return _result(
         float(used),
         "tool was used" if used else "tool was not used",
         name,
@@ -211,9 +213,9 @@ def trajectory_tool_used(name: str) -> CheckResult:
     )
 
 
-def trajectory_tool_not_used(name: str) -> CheckResult:
+def trajectory_tool_not_used(name: str) -> dict[str, Any]:
     used = name in _trajectory_tools()
-    return CheckResult(
+    return _result(
         float(not used),
         "tool was not used" if not used else "tool was used",
         name,
@@ -221,12 +223,12 @@ def trajectory_tool_not_used(name: str) -> CheckResult:
     )
 
 
-def trajectory_turn_count(minimum: int | None = None, maximum: int | None = None) -> CheckResult:
+def trajectory_turn_count(minimum: int | None = None, maximum: int | None = None) -> dict[str, Any]:
     if minimum is None and maximum is None:
         raise ValueError("set minimum or maximum")
     count = sum(1 for step in _trajectory()["steps"] if step.get("source") == "agent")
     matched = (minimum is None or count >= minimum) and (maximum is None or count <= maximum)
-    return CheckResult(
+    return _result(
         float(matched),
         "turn count matched" if matched else "turn count differed",
         count,
@@ -234,19 +236,19 @@ def trajectory_turn_count(minimum: int | None = None, maximum: int | None = None
     )
 
 
-def _text(path, predicate, success: str, expected: object) -> CheckResult:  # type: ignore[no-untyped-def]
+def _text(path, predicate, success: str, expected: object) -> dict[str, Any]:  # type: ignore[no-untyped-def]
     try:
         with open(path, encoding="utf-8") as handle:
             actual = handle.read()
         matched = predicate(actual)
-        return CheckResult(
+        return _result(
             float(matched),
             success if matched else "text differed",
             _bounded(actual),
             _evidence(path),
         )
     except (FileNotFoundError, OSError, UnicodeDecodeError) as exc:
-        return CheckResult(0.0, f"text check failed: {exc}", expected)
+        return _result(0.0, f"text check failed: {exc}", expected)
 
 
 def _matches(actual: str, expected: str | re.Pattern[str]) -> bool:
@@ -310,3 +312,17 @@ def _bounded(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         value = value.decode("utf-8", errors="replace")
     return value[:4096]
+
+
+def _result(
+    score: float,
+    diagnostic: str = "",
+    raw_value: Any = None,
+    evidence: tuple[EvidenceReference, ...] = (),
+) -> dict[str, Any]:
+    return {
+        "score": score,
+        "diagnostic": diagnostic,
+        "raw_value": raw_value,
+        "evidence": [asdict(item) for item in evidence],
+    }

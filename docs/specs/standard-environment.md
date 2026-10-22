@@ -93,9 +93,10 @@ Task code may explicitly drop privileges when executing a submitted program.
 ALE stages `ale_verify`, the rendered
 instruction, parameters, optional solver trajectory, and run-level Judge configuration,
 then executes the OS entry from the verification staging directory. Linux uses
-`/opt/ale/verify/run.sh` and system `python3`; Windows uses
-`C:\ProgramData\ALE\verify\run.ps1` and system `python.exe`. Both placements must produce
-the same reward envelope and `verification.json` contract.
+`/opt/ale/verify/run.sh`; Windows uses `C:\ProgramData\ALE\verify\run.ps1`.
+ALE selects Python 3.12+ (`python3`, then `python3.12` on Linux; `python.exe` on Windows)
+and provides its command as `ALE_VERIFY_PYTHON`. Both placements produce the same JSON
+result containing `overall`. The solver interpreter is unchanged.
 
 ### Teardown and retention
 
@@ -131,15 +132,16 @@ is still allowed when the retry configuration is nonzero.
 
 `ale validate` uses this same protocol twice with fresh sandboxes:
 
-- untouched must complete with a non-empty all-zero reward map;
-- oracle must complete with the same reward names;
-- every oracle reward must equal one;
+- untouched must complete with `overall` equal to zero;
+- oracle must complete with `overall` equal to one;
+- both use the [two-decimal result precision](verification.md#result) applied to every run;
+  all additional result fields are ignored by validation;
 - setup, image, resource, artifact, verifier, Judge, timeout, and infrastructure failures
   fail validation rather than becoming scores.
 
 Validation tests Task feasibility and verifier behavior. It is separate from ordinary
 run admission and from endpoint availability checks. The persisted `validation.json`
-contract is [schema version 1](schemas/validation-observation-v1.json).
+records the untouched and oracle attempts, scores, failures, and RunLock references.
 
 Validation honors `episode_retries` independently for untouched and oracle episodes.
 Every retry starts the complete protocol in fresh Sandboxes. Only each episode's last

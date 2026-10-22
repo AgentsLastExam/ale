@@ -1,31 +1,13 @@
-from __future__ import annotations
-
 import json
+from dataclasses import asdict
 from pathlib import Path
 
-import pytest
+import jsonschema
 
-from ale_verify import (
-    AggregateResult,
-    CriterionResult,
-    EvidenceReference,
-    JudgeAttempt,
-    JudgeInvocation,
-    ScoredChoice,
-    VerificationRecord,
-)
-
-HASH0 = "sha256:" + "0" * 64
-HASH1 = "sha256:" + "1" * 64
+from ale_verify import JudgeAttempt, JudgeInvocation, read_result
 
 
-def test_record_round_trip_and_reward_projection() -> None:
-    evidence = EvidenceReference(
-        kind="file",
-        location="/home/user/output/result.json",
-        sha256=HASH0,
-        size_bytes=2,
-    )
+def test_judge_metadata_round_trips_independently_of_a_result():
     attempt = JudgeAttempt(
         index=1,
         mode="initial",
@@ -35,93 +17,21 @@ def test_record_round_trip_and_reward_projection() -> None:
         model="judge-model",
         reasoning_effort="medium",
         endpoint_identity="https://example.test/v1",
-        prompt_hash=HASH0,
-        rubric_hash=HASH1,
-        usage={"input_tokens": 4},
+        prompt_hash="sha256:" + "0" * 64,
+        schema_hash="sha256:" + "1" * 64,
     )
     invocation = JudgeInvocation(
-        id="judge-1",
-        kind="llm",
-        criterion_name="correctness",
-        status="completed",
-        attempts=(attempt,),
+        id="judge-1", kind="llm", name="review", status="completed", attempts=(attempt,)
     )
-    record = VerificationRecord(
-        status="completed",
-        criteria=(
-            CriterionResult(
-                name="correctness",
-                source="llm_judge",
-                score=1,
-                evidence=(evidence,),
-                judge_invocation_id="judge-1",
-            ),
-        ),
-        metrics={"files": 1},
-        aggregates=(
-            AggregateResult(
-                name="overall",
-                method="mean",
-                inputs={"correctness": 1},
-                weights={"correctness": 1},
-                score=1,
-            ),
-        ),
-        judge_invocations=(invocation,),
-    )
-    restored = VerificationRecord.from_json(record.to_json())
-    assert restored == record
-    assert restored.rewards == {"correctness": 1.0, "overall": 1.0}
-    assert restored.metrics == {"files": 1.0}
+    assert JudgeInvocation.from_dict(json.loads(json.dumps(asdict(invocation)))) == invocation
 
 
-@pytest.mark.parametrize("score", [-0.1, 1.1, float("nan"), float("inf")])
-def test_scores_are_bounded(score: float) -> None:
-    with pytest.raises(ValueError):
-        ScoredChoice(score=score, description="choice")
-
-
-def test_record_rejects_collisions_unknown_judge_links_and_bad_terminal_state() -> None:
-    with pytest.raises(ValueError, match="collide"):
-        VerificationRecord(
-            criteria=(CriterionResult(name="same", source="check", score=1),),
-            metrics={"same": 1},
-        )
-    with pytest.raises(ValueError, match="unknown invocation"):
-        VerificationRecord(
-            criteria=(
-                CriterionResult(
-                    name="judged",
-                    source="llm_judge",
-                    score=1,
-                    judge_invocation_id="missing",
-                ),
-            )
-        )
-    with pytest.raises(ValueError, match="failed"):
-        VerificationRecord(status="failed")
-
-
-@pytest.mark.parametrize("field", ["metrics", "diagnostics", "criterion_score"])
-def test_wrongly_typed_record_fields_are_malformed_records(field: str) -> None:
-    record = VerificationRecord(
-        status="completed",
-        criteria=(CriterionResult(name="c", source="check", score=1),),
-    ).to_dict()
-    if field == "metrics":
-        record["metrics"] = []
-    elif field == "diagnostics":
-        record["diagnostics"] = 5
-    else:
-        record["criteria"] = [{**record["criteria"][0], "score": None}]
-    with pytest.raises(ValueError, match="malformed verification record"):
-        VerificationRecord.from_json(json.dumps(record))
-
-
-def test_serialized_shape_matches_published_schema_top_level() -> None:
+def test_result_matches_schema_fixture():
     schema = json.loads(
         (
-            Path(__file__).resolve().parents[3] / "docs/specs/schemas/verification-record-v1.json"
+            Path(__file__).resolve().parents[3]
+            / "tests/fixtures/verification-result-v1.schema.json"
         ).read_text()
     )
-    assert set(VerificationRecord().to_dict()) == set(schema["required"])
+    result = read_result('{"overall":0.5,"why":{"anything":[1,true,null]}}')
+    jsonschema.validate(result, schema)

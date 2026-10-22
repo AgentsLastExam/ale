@@ -28,11 +28,12 @@ from ._io import (
     redact,
     sanitize,
 )
+from ._journal import journal
+from ._json import response_object
 from ._records import (
     EvidenceReference,
     JudgeAttempt,
     JudgeInvocation,
-    ScoredChoice,
 )
 
 #: Invalid or refused verdicts get at most this many further attempts. Transient provider
@@ -88,17 +89,17 @@ def run(
     invocation_id: str,
     name: str,
     prompt: str,
-    rubric: Mapping[str, ScoredChoice],
+    output_schema: dict[str, Any] | None,
     evidence: Sequence[tuple[str | bytes, EvidenceReference]],
     config: Mapping[str, str],
-) -> tuple[str, str, JudgeInvocation]:
+) -> tuple[dict[str, Any], JudgeInvocation]:
     protocol = resolve_protocol(config)
     effort = config["reasoning_effort"]
     if effort not in _EFFORTS:
         raise ValueError(f"reasoning_effort {effort!r} is unsupported")
-    rendered = _prompt(name, prompt, rubric, evidence)
+    rendered = _prompt(name, prompt, output_schema, evidence)
     prompt_hash = digest(rendered)
-    rubric_hash = digest(_rubric_json(rubric))
+    schema_hash = digest(json.dumps(output_schema, sort_keys=True))
     endpoint = endpoint_identity(config["base_url"])
     secret = os.environ.get(config["api_key_env"], "")
     if not secret:
@@ -108,7 +109,7 @@ def run(
             config,
             endpoint,
             prompt_hash,
-            rubric_hash,
+            schema_hash,
             f"{config['api_key_env']} is not set for the LLM Judge",
         )
         raise JudgeError(invocation.failure or "LLM Judge configuration failed", invocation)
@@ -122,19 +123,51 @@ def run(
     while True:
         index += 1
         attempt_mode = "initial" if index == 1 else "schema_repair" if repair else "retry"
-        request_prompt = _repair_prompt(rendered, rubric, last_error) if repair else rendered
+        request_prompt = _repair_prompt(rendered, last_error) if repair else rendered
         started = _now()
         request_id = None
         usage = None
+        journal(
+            "llm",
+            {
+                "event": "request",
+                "id": invocation_id,
+                "attempt": index,
+                "prompt": request_prompt,
+                "schema": output_schema,
+                "model": config["model"],
+                "reasoning_effort": effort,
+                "endpoint_identity": endpoint,
+            },
+            (secret,),
+        )
         try:
             payload = _request(protocol, config, request_prompt, secret, evidence)
             request_id = _request_id(payload, secret)
             usage = _usage(payload)
+            journal(
+                "llm",
+                {"event": "response", "id": invocation_id, "attempt": index, "response": payload},
+                (secret,),
+            )
             text = _response_text(protocol, payload)
-            choice, reasoning = _verdict(text, rubric)
+            result = response_object(text, output_schema)
+            if secret in json.dumps(result, ensure_ascii=False):
+                raise ValueError("Judge response contains a credential")
         except Exception as exc:
             last_error = sanitize(exc, (secret,))
             outcome = _outcome(exc)
+            journal(
+                "llm",
+                {
+                    "event": "error",
+                    "id": invocation_id,
+                    "attempt": index,
+                    "error": last_error,
+                    "outcome": outcome,
+                },
+                (secret,),
+            )
             attempts.append(
                 JudgeAttempt(
                     index=index,
@@ -146,7 +179,7 @@ def run(
                     reasoning_effort=effort,
                     endpoint_identity=endpoint,
                     prompt_hash=prompt_hash,
-                    rubric_hash=rubric_hash,
+                    schema_hash=schema_hash,
                     request_id=request_id,
                     usage=usage,
                     error=last_error,
@@ -173,18 +206,17 @@ def run(
                 reasoning_effort=effort,
                 endpoint_identity=endpoint,
                 prompt_hash=prompt_hash,
-                rubric_hash=rubric_hash,
+                schema_hash=schema_hash,
                 request_id=request_id,
                 usage=usage,
             )
         )
         return (
-            choice,
-            sanitize(reasoning, (secret,)),
+            result,
             JudgeInvocation(
                 id=invocation_id,
                 kind="llm",
-                criterion_name=name,
+                name=name,
                 status="completed",
                 attempts=tuple(attempts),
             ),
@@ -194,7 +226,7 @@ def run(
     invocation = JudgeInvocation(
         id=invocation_id,
         kind="llm",
-        criterion_name=name,
+        name=name,
         status="failed",
         attempts=tuple(attempts),
         failure=failure,
@@ -581,17 +613,12 @@ def _endpoint(base_url: str, protocol: str) -> str:
 def _prompt(
     name: str,
     prompt: str,
-    rubric: Mapping[str, ScoredChoice],
+    output_schema: dict[str, Any] | None,
     evidence: Sequence[tuple[str | bytes, EvidenceReference]],
 ) -> str:
-    choices = "|".join(rubric)
-    sections = [
-        "Return JSON only. Do not include Markdown or additional keys.",
-        f'Exact response: {{"choice":"{choices}","reasoning":"..."}}',
-        f"Criterion: {name}",
-        f"Task: {prompt}",
-        f"Rubric: {_rubric_json(rubric)}",
-    ]
+    sections = [prompt, "Return one JSON object, with no Markdown."]
+    if output_schema is not None:
+        sections.append("Output JSON Schema: " + json.dumps(output_schema, ensure_ascii=False))
     if evidence:
         sections.append(
             "Evidence:\n"
@@ -604,28 +631,10 @@ def _prompt(
     return "\n\n".join(sections)
 
 
-def _repair_prompt(
-    original: str,
-    rubric: Mapping[str, ScoredChoice],
-    error: str,
-) -> str:
-    choices = "|".join(rubric)
+def _repair_prompt(original: str, error: str) -> str:
     return (
-        f"{original}\n\nYour previous verdict was rejected:\n{error}\n\n"
-        f'Submit exactly:\n{{"choice":"{choices}","reasoning":"..."}}\n'
-        "Do not include Markdown or additional keys."
-    )
-
-
-def _rubric_json(rubric: Mapping[str, ScoredChoice]) -> str:
-    return json.dumps(
-        {
-            label: {"score": choice.score, "description": choice.description}
-            for label, choice in rubric.items()
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+        f"{original}\n\nYour previous response was rejected: {error}\n"
+        "Return one valid JSON object matching the requested schema."
     )
 
 
@@ -672,23 +681,6 @@ def _response_text(protocol: str, payload: Mapping[str, Any]) -> str:
     return text
 
 
-def _verdict(text: str, rubric: Mapping[str, ScoredChoice]) -> tuple[str, str]:
-    fenced = re.fullmatch(r"\s*```(?:json)?\s*(.*?)\s*```\s*", text, flags=re.S)
-    try:
-        loaded = json.loads(fenced.group(1) if fenced else text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"verdict is not valid JSON: {exc.msg}") from exc
-    if not isinstance(loaded, dict) or set(loaded) != {"choice", "reasoning"}:
-        raise ValueError("verdict must contain exactly choice and reasoning")
-    choice = loaded["choice"]
-    reasoning = loaded["reasoning"]
-    if choice not in rubric:
-        raise ValueError(f"unknown choice {choice!r}; expected one of {list(rubric)}")
-    if not isinstance(reasoning, str) or not reasoning.strip():
-        raise ValueError("verdict reasoning must be a non-empty string")
-    return choice, reasoning
-
-
 def _usage(payload: Mapping[str, Any]) -> dict[str, int] | None:
     usage = payload.get("usage")
     if not isinstance(usage, dict):
@@ -722,14 +714,14 @@ def _failed_preflight(
     config: Mapping[str, str],
     endpoint: str,
     prompt_hash: str,
-    rubric_hash: str,
+    schema_hash: str,
     failure: str,
 ) -> JudgeInvocation:
     now = _now()
     return JudgeInvocation(
         id=invocation_id,
         kind="llm",
-        criterion_name=name,
+        name=name,
         status="failed",
         attempts=(
             JudgeAttempt(
@@ -742,7 +734,7 @@ def _failed_preflight(
                 reasoning_effort=config["reasoning_effort"],
                 endpoint_identity=endpoint,
                 prompt_hash=prompt_hash,
-                rubric_hash=rubric_hash,
+                schema_hash=schema_hash,
                 error=failure,
             ),
         ),

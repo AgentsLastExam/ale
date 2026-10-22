@@ -93,14 +93,14 @@ def _separate_gpu_task(root: Path) -> Path:
     )
     (task / "verify/verify.py").write_text(
         "import subprocess\n"
-        "from ale_verify import CheckResult, Verification\n"
+        "from ale_verify import write\n"
         "solver = open('/home/user/output/solver-gpu.txt').read().strip()\n"
-        "verifier = subprocess.check_output(["
-        "'nvidia-smi','--query-gpu=uuid','--format=csv,noheader'], text=True).strip()\n"
-        "v = Verification()\n"
-        "v.check('disjoint', CheckResult(float(solver != verifier)))\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "verifier = subprocess.check_output(['nvidia-smi', '--query-gpu=uu"
+        "id', '--format=csv,noheader'], text=True).strip()\n"
+        "v = {}\n"
+        "v['disjoint'] = float(solver != verifier)\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     return task
 
@@ -159,7 +159,7 @@ async def test_kept_solver_and_separate_verifier_receive_disjoint_gpus(tmp_path:
     )
     try:
         assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-        assert result.verdict.rewards == {"disjoint": 1.0, "overall": 1.0}
+        assert result.verdict.rewards == {"overall": 1.0}
         assert result.lock is not None
         solver = result.lock.resources
         verifier = result.lock.verification.resources

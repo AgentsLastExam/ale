@@ -210,7 +210,7 @@ class EpisodeContext:
     verification_secrets: tuple[str, ...] = ()
     judge_tokens: dict[str, str] = field(default_factory=dict)
     """Gateway tokens of this episode's Judge sessions, by Judge kind."""
-    verification_record: object | None = None
+    judge_invocations: tuple[object, ...] = ()
     ale_verify_provenance: AleVerifyProvenance | None = None
     verifier_resolved_image: ResolvedImage | None = None
     verifier_resource_allocation: ResourceAllocation | None = None

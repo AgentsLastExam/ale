@@ -27,13 +27,13 @@ async def test_relocated_task_local_verifier_does_not_enter_solver_image(
     (source / "verify" / "helper.py").write_text(f"EXPECTED = {secret!r}\n")
     (source / "verify" / "verify.py").write_text(
         "from pathlib import Path\n"
-        "from ale_verify import CheckResult, Verification\n"
+        "from ale_verify import write\n"
         "from helper import EXPECTED\n"
-        "v = Verification()\n"
-        "v.check('withheld', CheckResult(float(EXPECTED == 'verify-only-marker')))\n"
-        "v.check('not_baked', CheckResult(float(not Path('/verify/helper.py').exists())))\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "v = {}\n"
+        "v['withheld'] = float(EXPECTED == 'verify-only-marker')\n"
+        "v['not_baked'] = float(not Path('/verify/helper.py').exists())\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     relocated = tmp_path / "elsewhere" / "task"
     relocated.parent.mkdir()
@@ -45,7 +45,7 @@ async def test_relocated_task_local_verifier_does_not_enter_solver_image(
         run_dir=tmp_path / "runs",
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"withheld": 1.0, "not_baked": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
 
 
 @pytest.mark.asyncio
@@ -60,11 +60,11 @@ async def test_external_reference_is_published_only_for_live_verification(
     reference.parent.mkdir(parents=True)
     reference.write_text("expected")
     (task_path / "verify" / "verify.py").write_text(
-        "from ale_verify import Verification, checks\n"
-        "v = Verification()\n"
-        "v.check('reference', checks.text_equals('assets/expected.txt', 'expected'))\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "from ale_verify import checks, write\n"
+        "v = {}\n"
+        "v['reference'] = checks.text_equals('assets/expected.txt', 'expected')['score']\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     result = await run_episode(
         load_tasks(task_path)[0],
@@ -73,4 +73,4 @@ async def test_external_reference_is_published_only_for_live_verification(
         run_dir=tmp_path / "runs",
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"reference": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
