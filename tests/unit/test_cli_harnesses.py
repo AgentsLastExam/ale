@@ -379,6 +379,30 @@ async def test_resource_translation_uses_episode_local_native_config(tmp_path: P
         assert "token" not in rendered
 
 
+async def test_codex_resources_create_skills_directory_on_windows(tmp_path: Path) -> None:
+    sandbox = FakeSandbox()
+    current = session(home=r"C:\Users\Agent User")
+    effective = resources(tmp_path)
+    skill = effective.skills[0].model_copy(update={"executable_files": ("run tool.sh",)})
+    effective = effective.model_copy(update={"skills": (skill,)})
+    await CodexCliHarness().install_resources(sandbox, current, effective)  # type: ignore[arg-type]
+    command = sandbox.commands[0]
+    assert command[:2] == ["C:/Program Files/Git/bin/bash.exe", "-c"]
+    assert "mkdir -p -- 'C:/Users/Agent User/.codex-ale/skills'" in command[2]
+    assert "C:/Users/Agent User/.codex-ale/config.toml" in sandbox.files
+    chmod = sandbox.commands[1]
+    assert chmod[:2] == ["C:/Program Files/Git/bin/bash.exe", "-c"]
+    assert (
+        "chmod +x -- 'C:/Users/Agent User/.codex-ale/skills/resource-proof/run tool.sh'" in chmod[2]
+    )
+
+
+async def test_codex_resources_fail_if_skills_directory_cannot_be_created(tmp_path: Path) -> None:
+    sandbox = FakeSandbox(exit_code=1, stderr="permission denied")
+    with pytest.raises(AgentError, match="permission denied"):
+        await CodexCliHarness().install_resources(sandbox, session(), resources(tmp_path))  # type: ignore[arg-type]
+
+
 async def test_grok_chat_gateway_selects_native_chat_backend(tmp_path: Path) -> None:
     sandbox = FakeSandbox()
     harness = GrokBuildHarness(gateway_dialect="openai-chat-completions")
