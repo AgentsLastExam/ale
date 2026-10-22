@@ -293,8 +293,22 @@ def _write_task(root: Path) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_autonomous_agent_uses_task_skill_and_mcp_to_pass(tmp_path: Path) -> None:
+@pytest.mark.parametrize("direct_command", [False, True])
+async def test_autonomous_agent_uses_task_skill_and_mcp_to_pass(
+    tmp_path: Path, direct_command: bool
+) -> None:
     task_root = _write_task(tmp_path / "repo")
+    if direct_command:
+        config = task_root / "tools/mcp/task-proof.toml"
+        config.write_text(
+            config.read_text().replace(
+                'command = "python3"\nargs = ["{mcp}/task_proof_mcp.py"]',
+                'command = "{mcp}/task_proof_mcp.py"',
+            )
+        )
+        command = task_root / "tools/mcp/task_proof_mcp.py"
+        command.write_text("#!/usr/bin/env python3\n" + command.read_text())
+        command.chmod(0o600)
     task = load_tasks(task_root)[0]
     resources = resolve_agent_resources(
         task=task.spec.tools,

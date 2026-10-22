@@ -148,9 +148,13 @@ def pull_assets(
 ) -> tuple[AssetSyncResult, ...]:
     from huggingface_hub import HfApi, snapshot_download
 
+    selections = select_asset_repositories(paths)
+    if not force:
+        for selection in selections:
+            _require_absent_assets(selection.tasks)
     api = HfApi()
     results: list[AssetSyncResult] = []
-    for selection in select_asset_repositories(paths):
+    for selection in selections:
         remote_repo_id = f"agents-last-exam/{selection.repository_name}"
         collection_slug = asset_collection(api, collection, create=False)
         info = api.repo_info(remote_repo_id, repo_type="dataset", revision=revision or "main")
@@ -159,15 +163,6 @@ def pull_assets(
         commit = info.sha
         if not commit:
             raise AssetError(f"dataset {remote_repo_id} has no resolved commit")
-        dirty = [
-            item
-            for item in asset_status([task.folder.root for task in selection.tasks])
-            if item.dirty
-        ]
-        if dirty and not force:
-            names = ", ".join(item.task_path for item in dirty)
-            raise AssetError(f"local assets are dirty for {names}; pass --force to replace them")
-
         with tempfile.TemporaryDirectory(prefix="ale-assets-pull-") as temporary:
             downloaded = Path(temporary)
             try:
@@ -179,6 +174,8 @@ def pull_assets(
                     local_dir=downloaded,
                 )
                 with _repository_lock(selection.repository_root, exclusive=True):
+                    if not force:
+                        _require_absent_assets(selection.tasks)
                     _replace_selected_assets(selection.tasks, downloaded)
                     observations = _mark_clean(selection, commit)
             except AssetError:
@@ -197,6 +194,16 @@ def pull_assets(
             )
         )
     return tuple(results)
+
+
+def _require_absent_assets(tasks: Sequence[AssetLocation]) -> None:
+    for task in tasks:
+        for stage in STAGES:
+            root = task.folder.root / stage / "assets"
+            if root.exists() or root.is_symlink():
+                raise AssetError(
+                    f"local assets already exist at {root}; pass --force to replace them"
+                )
 
 
 def push_assets(

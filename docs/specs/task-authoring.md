@@ -175,13 +175,14 @@ author moves it ([Sandbox image](sandbox-image.md#versions)).
 The submitted initial environment must be reproducible from `image/`; an exploratory sandbox
 snapshot is not Task source. Large build inputs belong in `image/assets/` and are copied by the
 image build. Image-local scripts may implement non-trivial installation and configuration.
+Build-only large inputs can use read-only BuildKit mounts; runtime data belongs in the image.
 
 ```dockerfile
 FROM ghcr.io/agentslastexam/container-ubuntu22-base:0.1.1
 
-COPY install.sh /tmp/install.sh
+COPY --chmod=0755 install.sh /tmp/install.sh
 RUN /tmp/install.sh && rm /tmp/install.sh
-COPY assets/corpus.json /home/user/input/corpus.json
+COPY --chmod=0644 assets/corpus.json /home/user/input/corpus.json
 ```
 
 For a Linux VM Task, use the VM base as the final stage. ALE converts that OCI image into the bootable VM;
@@ -255,7 +256,7 @@ belong in `image/`.
 
 Setup and verification use the framework's privileged identity; solver and oracle use
 the agent identity. See [Permissions](sandbox-image.md#permissions). Image/setup code must
-grant the agent access to files it needs to modify, using ownership or ACLs as appropriate.
+explicitly set required ownership, write and execute permissions instead of relying on Host modes.
 
 ## instruction.md
 

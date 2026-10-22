@@ -90,8 +90,8 @@ ale assets pull TASK --revision HF_SHA     # fixed published version
 ale assets push TASK                       # explicit manual sync to main
 ```
 
-Pull replaces only the selected Task's asset roots and refuses dirty files unless
-`--force` is supplied. A revision is resolved to an immutable SHA before downloading.
+Pull refuses any existing selected asset root, including empty or clean roots;
+`--force` explicitly replaces them. A revision is resolved to an immutable SHA before downloading.
 Recovery, verification, and export from a recorded version must use that fixed SHA or
 the saved local checkpoint, never a moving branch name. The accepted asset commit also
 participates in completed-episode reuse identity; dirty assets cannot reuse an episode.

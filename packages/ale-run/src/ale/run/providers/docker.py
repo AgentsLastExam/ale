@@ -47,6 +47,7 @@ from ale.run import ale_image
 from ale.run.framework import with_framework
 from ale.run.gpu import GpuLease, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
+from ale.run.providers.uploads import set_upload_permissions
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, StdioTransport
 
@@ -412,23 +413,14 @@ class DockerSandbox(Sandbox):
     async def upload_dir(
         self, source: str, target: PurePosixPath | str, *, identity: Identity = Identity.FRAMEWORK
     ) -> None:
-        """Copy a directory in, owned by whoever the caller said it is for.
-
-        `docker cp` writes as root whatever `--user` would say, so ownership is set
-        afterwards rather than assumed. Staging content the agent must be able to change
-        and leaving it root-owned is the failure this exists to prevent — and one the
-        framework must not paper over later, since a task decides what it opens up.
-        """
+        """Copy a directory and apply the fixed upload permissions."""
         await self._client.mkdirs(str(target))
         code, _, stderr = await _docker("cp", f"{Path(source)}/.", f"{self.container}:{target}")
         if code != 0:
             raise ProviderStartError(f"upload to {target} failed: {stderr.strip()}")
-        if (owner := self._as(identity)) is not None:
-            code, _, stderr = await _docker(
-                "exec", self.container, "chown", "-R", owner, str(target)
-            )
-            if code != 0:
-                raise ProviderStartError(f"could not give {target} to {owner}: {stderr.strip()}")
+        await set_upload_permissions(
+            self._client, str(target), os=self.request.os, agent=self._as(identity)
+        )
 
     async def download_dir(self, source: PurePosixPath | str, target: str) -> None:
         Path(target).mkdir(parents=True, exist_ok=True)

@@ -136,15 +136,6 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
         if not file.is_file():
             findings.append(Finding(folder.root, f"no {label}"))
 
-    for stage in ("setup", "verify", "oracle"):
-        entry = folder.stage_entry(stage, operating_system)
-        if (
-            operating_system is OperatingSystem.LINUX
-            and entry is not None
-            and not _is_executable(entry)
-        ):
-            findings.append(Finding(entry, "not executable: chmod +x it"))
-
     dockerfile = folder.image_dir / "Dockerfile"
     image = manifest.get("image")
     kind = image.get("kind") if isinstance(image, dict) else None
@@ -205,7 +196,3 @@ def _vm_boot_override(path: Path) -> bool:
 
 def _has_files(path: Path) -> bool:
     return path.is_dir() and any(item.is_file() for item in path.rglob("*"))
-
-
-def _is_executable(path: Path) -> bool:
-    return bool(path.stat().st_mode & 0o111)
