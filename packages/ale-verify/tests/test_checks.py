@@ -17,13 +17,13 @@ def test_file_text_regex_and_json_checks(tmp_path: Path) -> None:
     text.write_text("hello 42\n")
     data = tmp_path / "value.json"
     data.write_text('{"nested":{"value":7}}')
-    assert checks.file_exists(text).score == 1
-    assert checks.file_missing(tmp_path / "missing").score == 1
-    assert checks.text_equals(text, "hello 42\n").score == 1
-    assert checks.text_contains(text, "42").score == 1
-    assert checks.text_regex(text, r"\d+").score == 1
-    assert checks.json_value(data, "nested.value", 7).score == 1
-    assert checks.json_value(data, "nested.value", 8).score == 0
+    assert checks.file_exists(text)["score"] == 1
+    assert checks.file_missing(tmp_path / "missing")["score"] == 1
+    assert checks.text_equals(text, "hello 42\n")["score"] == 1
+    assert checks.text_contains(text, "42")["score"] == 1
+    assert checks.text_regex(text, r"\d+")["score"] == 1
+    assert checks.json_value(data, "nested.value", 7)["score"] == 1
+    assert checks.json_value(data, "nested.value", 8)["score"] == 0
 
 
 def test_command_numeric_csv_and_sqlite_checks(tmp_path: Path) -> None:
@@ -33,17 +33,17 @@ def test_command_numeric_csv_and_sqlite_checks(tmp_path: Path) -> None:
     with sqlite3.connect(db) as connection:
         connection.execute("create table values_ (value integer)")
         connection.execute("insert into values_ values (7)")
-    assert checks.command([sys.executable, "-c", "print('ok')"], stdout="ok\n").score == 1
+    assert checks.command([sys.executable, "-c", "print('ok')"], stdout="ok\n")["score"] == 1
     assert (
         checks.command(
             [sys.executable, "-c", "import time; time.sleep(1)"],
             timeout_seconds=0.01,
-        ).score
+        )["score"]
         == 0
     )
-    assert checks.numeric(1.01, 1, abs_tolerance=0.02).score == 1
-    assert checks.csv_value(csv_path, 1, 1, "7").score == 1
-    assert checks.sqlite_value(db, "select value from values_", 7).score == 1
+    assert checks.numeric(1.01, 1, abs_tolerance=0.02)["score"] == 1
+    assert checks.csv_value(csv_path, 1, 1, "7")["score"] == 1
+    assert checks.sqlite_value(db, "select value from values_", 7)["score"] == 1
 
 
 def test_loopback_http_and_trajectory_checks(
@@ -62,7 +62,7 @@ def test_loopback_http_and_trajectory_checks(
             return b"ready"
 
     monkeypatch.setattr(checks.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
-    assert checks.http("http://127.0.0.1:8080/health", contains="ready").score == 1
+    assert checks.http("http://127.0.0.1:8080/health", contains="ready")["score"] == 1
     trajectory = tmp_path / "trajectory.json"
     trajectory.write_text(
         json.dumps(
@@ -78,9 +78,9 @@ def test_loopback_http_and_trajectory_checks(
         )
     )
     monkeypatch.setenv("ALE_TRAJECTORY_PATH", str(trajectory))
-    assert checks.trajectory_tool_used("shell").score == 1
-    assert checks.trajectory_tool_not_used("browser").score == 1
-    assert checks.trajectory_turn_count(minimum=1, maximum=1).score == 1
+    assert checks.trajectory_tool_used("shell")["score"] == 1
+    assert checks.trajectory_tool_not_used("browser")["score"] == 1
+    assert checks.trajectory_turn_count(minimum=1, maximum=1)["score"] == 1
     with pytest.raises(ValueError, match="local"):
         checks.http("https://example.com")
 
@@ -104,10 +104,10 @@ def test_http_check_compares_real_non_success_statuses() -> None:
     base = f"http://127.0.0.1:{server.server_address[1]}"
     try:
         missing = checks.http(f"{base}/missing", status=404, contains="missing")
-        assert missing.score == 1
-        assert missing.raw_value == {"status": 404, "body": "missing"}
-        assert checks.http(f"{base}/missing").score == 0
-        assert checks.http(f"{base}/health", contains="ready").score == 1
+        assert missing["score"] == 1
+        assert missing["raw_value"] == {"status": 404, "body": "missing"}
+        assert checks.http(f"{base}/missing")["score"] == 0
+        assert checks.http(f"{base}/health", contains="ready")["score"] == 1
     finally:
         server.shutdown()
         server.server_close()

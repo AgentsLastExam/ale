@@ -103,8 +103,8 @@ def test_task_quality_standard_owns_only_semantic_quality() -> None:
     ):
         assert implementation_detail not in text
     verification = (ROOT / "docs/specs/verification.md").read_text(encoding="utf-8")
-    assert "Scores are finite values from 0 through 1" in verification
-    assert "Every reward map has an `overall` reward" in verification
+    assert "finite number from 0 through 1" in verification
+    assert "ALE interprets only `overall`" in verification
 
 
 @pytest.mark.parametrize(

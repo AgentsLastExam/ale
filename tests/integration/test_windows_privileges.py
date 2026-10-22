@@ -73,15 +73,17 @@ New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
     )
     (task / "verify/run.ps1").write_text("python.exe .\\verify.py\nexit $LASTEXITCODE\n")
     (task / "verify/verify.py").write_text(
-        "import ctypes\nfrom pathlib import Path\n"
-        "from ale_verify import Verification, CheckResult\n"
+        "import ctypes\n"
+        "from pathlib import Path\n"
+        "from ale_verify import write\n"
         "assert ctypes.windll.shell32.IsUserAnAdmin()\n"
-        "v = Verification()\n"
-        "content = Path(r'C:\\ale-copy\\game.sgf').read_text()\n"
-        "v.check('protected', CheckResult(float(content == 'protected')))\n"
-        "v.check('directory', CheckResult(float(Path(r'C:\\ale-copy\\directory.json').is_dir())))\n"
-        "v.check('missing', CheckResult(float(not Path(r'C:\\missing').exists())))\n"
-        "v.aggregate('overall')\nv.write()\n"
+        "v = {}\n"
+        "content = Path('C:\\\\ale-copy\\\\game.sgf').read_text()\n"
+        "v['protected'] = float(content == 'protected')\n"
+        "v['directory'] = float(Path('C:\\\\ale-copy\\\\directory.json').is_dir())\n"
+        "v['missing'] = float(not Path('C:\\\\missing').exists())\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     result = await run_episode(
         load_task_folder(task),
@@ -93,10 +95,5 @@ New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
         collect_artifacts=True,
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {
-        "protected": 1.0,
-        "directory": 1.0,
-        "missing": 1.0,
-        "overall": 1.0,
-    }
+    assert result.verdict.rewards == {"overall": 1.0}
     assert (result.run_dir / "artifacts/0000/game.sgf").read_text() == "protected"

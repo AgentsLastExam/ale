@@ -14,13 +14,13 @@ from ale.run.harnesses.builtin import OracleHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
-from ale_verify import CheckResult, JudgeAttempt, JudgeInvocation, Verification
+from ale_verify import JudgeAttempt, JudgeInvocation, judge, write
 from tests.support import CONTAINER_BASE, provider_registry
 
 pytestmark = pytest.mark.integration
 
 
-def test_agent_judge_freezes_later_checks_and_does_not_touch_solver_trajectory(
+def test_multiple_agent_judges_allow_later_checks_without_touching_solver_trajectory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     record = tmp_path / "verification.json"
@@ -35,7 +35,7 @@ def test_agent_judge_freezes_later_checks_and_does_not_touch_solver_trajectory(
         '"base_url":"https://example.test","api_key_env":"KEY"}}'
     )
     for key, value in {
-        "ALE_VERIFICATION_PATH": record,
+        "ALE_AGENT_JUDGE_LOG_PATH": record,
         "ALE_VERDICT_PATH": verdict,
         "ALE_VERIFY_CONFIG_PATH": config,
         "ALE_TRAJECTORY_PATH": trajectory,
@@ -45,12 +45,11 @@ def test_agent_judge_freezes_later_checks_and_does_not_touch_solver_trajectory(
 
     def fake(**kwargs):  # type: ignore[no-untyped-def]
         return (
-            "yes",
-            "Works.",
+            {"works": True},
             JudgeInvocation(
                 id=kwargs["invocation_id"],
                 kind="agent",
-                criterion_name=kwargs["name"],
+                name=kwargs["name"],
                 adapter="codex-cli",
                 adapter_version="1",
                 status="completed",
@@ -65,27 +64,18 @@ def test_agent_judge_freezes_later_checks_and_does_not_touch_solver_trajectory(
                         reasoning_effort="high",
                         endpoint_identity="https://example.test",
                         prompt_hash="sha256:" + "0" * 64,
-                        rubric_hash="sha256:" + "1" * 64,
+                        schema_hash="sha256:" + "1" * 64,
                     ),
                 ),
             ),
         )
 
     monkeypatch.setattr("ale_verify._agents.run", fake)
-    verification = Verification()
-    verification.judge(
-        "agent",
-        "functional",
-        prompt="Test.",
-        rubric={
-            "no": {"score": 0, "description": "Fails."},
-            "yes": {"score": 1, "description": "Works."},
-        },
-    )
-    with pytest.raises(RuntimeError, match="after an Agent Judge"):
-        verification.check("late", CheckResult(1))
-    verification.aggregate("overall")
-    verification.write()
+    first = judge("agent", "functional", prompt="Test.")
+    second = judge("agent", "functional", prompt="Test again.")
+    write({"overall": float(first["works"] and second["works"]), "late": 42})
+    events = [json.loads(line) for line in record.read_text().splitlines()]
+    assert len([item for item in events if item["event"] == "completed"]) == 2
     assert trajectory.read_bytes() == before
 
 
@@ -157,17 +147,15 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 verify.py\n"
     )
     (task_root / "verify" / "verify.py").write_text(
-        "from ale_verify import Verification\n"
-        "v = Verification()\n"
-        "v.judge(\n"
-        "    'agent', 'functional', prompt='Inspect result.txt.',\n"
-        "    rubric={\n"
-        "        'no': {'score': 0.0, 'description': 'Missing.'},\n"
-        "        'yes': {'score': 1.0, 'description': 'Contains baseline.'},\n"
-        "    },\n"
-        ")\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "from ale_verify import judge, write\n"
+        "v = {}\n"
+        "v['functional'] = {'no': 0.0, 'yes': 1.0}[judge('agent', 'functio"
+        "nal', prompt='Inspect result.txt.', output_schema={'type': 'objec"
+        "t', 'properties': {'choice': {'enum': ['no', 'yes']}, 'reasoning'"
+        ": {'type': 'string'}}, 'required': ['choice', 'reasoning']})['cho"
+        "ice']]\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     task = load_tasks(task_root)[0]
 
@@ -181,6 +169,7 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
             run_dir=tmp_path / "runs",
             gateway=gateway,
             gateway_url=gateway_url,
+            collect_artifacts=True,
             verification_config=VerificationConfig(
                 agent=AgentJudgeConfig(
                     adapter=adapter,  # type: ignore[arg-type]
@@ -197,7 +186,10 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     record = json.loads((result.run_dir / "verification.json").read_text())
-    invocation = record["judge_invocations"][0]
+    events = [
+        json.loads(line) for line in (result.run_dir / "agent-judge.jsonl").read_text().splitlines()
+    ]
+    invocation = next(item["invocation"] for item in events if item["event"] == "completed")
     assert [attempt["outcome"] for attempt in invocation["attempts"]] == [
         "invalid",
         "completed",
@@ -205,7 +197,7 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
     assert invocation["adapter"] == adapter
     assert invocation["attempts"][0]["request_id"]
     assert invocation["attempts"][1]["request_id"] == invocation["attempts"][0]["request_id"]
-    assert (result.run_dir / "logs" / "agent-judge.jsonl").is_file()
+    assert (result.run_dir / "agent-judge.jsonl").is_file()
     assert not (result.run_dir / "artifacts" / "output" / "post-judge.txt").exists()
     trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
     assert trajectory["agent"]["name"] == "oracle"

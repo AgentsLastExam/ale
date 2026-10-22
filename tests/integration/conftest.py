@@ -21,17 +21,11 @@ VERIFY_DEFAULT = textwrap.dedent("""
     exec python3 verify.py
 """).strip()
 
-VERIFY_CHECK = textwrap.dedent("""
-    from ale_verify import Verification, checks
-
-    verification = Verification()
-    verification.check(
-        "reward",
-        checks.text_equals("/home/user/output/result.txt", "hello world"),
-    )
-    verification.aggregate("overall")
-    verification.write()
-""").strip()
+VERIFY_CHECK = (
+    "from ale_verify import checks, write\n"
+    "check = checks.text_equals('/home/user/output/result.txt', 'hello world')\n"
+    "write({'overall': check['score'], 'content': check})\n"
+)
 
 
 def _write_repo(

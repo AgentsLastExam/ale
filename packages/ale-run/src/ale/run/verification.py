@@ -51,13 +51,24 @@ def installed_ale_verify() -> tuple[Path, str, str]:
     source = Path(str(importlib.resources.files("ale_verify")))
     if not source.is_dir():
         raise TaskDefinitionError("installed ale_verify package directory is unavailable")
-    return source, importlib.metadata.version("ale-verify"), _hash_directory(source)
+    import fastjsonschema
+
+    return (
+        source,
+        importlib.metadata.version("ale-verify"),
+        content_hash(
+            {
+                "ale_verify": _hash_directory(source),
+                "fastjsonschema": _hash_directory(Path(fastjsonschema.__file__).parent),
+            }
+        ),
+    )
 
 
 def judge_kinds(verify_dirs: Iterable[Path]) -> frozenset[str]:
     """The Judge kinds these verifiers call, from a syntax scan of their Python files.
 
-    A ``.judge(...)`` call whose kind is not a string literal could be either kind and
+    An imported Judge call whose kind is not a string literal could be either kind and
     counts as both. A file that does not parse is left for the verifier to report.
     """
     kinds: set[str] = set()
@@ -67,11 +78,29 @@ def judge_kinds(verify_dirs: Iterable[Path]) -> frozenset[str]:
                 tree = ast.parse(path.read_bytes(), filename=str(path))
             except (OSError, SyntaxError, ValueError):
                 continue
+            judge_names = set()
+            module_names = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    module_names.update(
+                        item.asname or item.name for item in node.names if item.name == "ale_verify"
+                    )
+                if isinstance(node, ast.ImportFrom) and node.module == "ale_verify":
+                    judge_names.update(
+                        item.asname or item.name for item in node.names if item.name == "judge"
+                    )
             for node in ast.walk(tree):
                 if not (
                     isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "judge"
+                    and (
+                        (
+                            isinstance(node.func, ast.Attribute)
+                            and node.func.attr == "judge"
+                            and isinstance(node.func.value, ast.Name)
+                            and node.func.value.id in module_names
+                        )
+                        or (isinstance(node.func, ast.Name) and node.func.id in judge_names)
+                    )
                 ):
                     continue
                 kind = node.args[0] if node.args else None

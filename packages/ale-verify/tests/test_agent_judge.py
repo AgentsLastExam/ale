@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ale_verify import JudgeError, ScoredChoice, Verification, VerificationRecord, _agents, _llm
+from ale_verify import JudgeError, _agents, _llm, judge
 from test_agent_adapters import codex_config, completed
 
 
@@ -17,7 +17,6 @@ def agent_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path
     instruction = tmp_path / "instruction.md"
     instruction.write_text("Create a working program.")
     log = tmp_path / "agent-judge.jsonl"
-    record = tmp_path / "verification.json"
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"agent": codex_config()}))
     monkeypatch.setenv("ALE_HOME", str(workspace))
@@ -25,12 +24,11 @@ def agent_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path
     monkeypatch.setenv("ALE_TASK_INSTRUCTION_PATH", str(instruction))
     monkeypatch.setenv("ALE_AGENT_JUDGE_LOG_PATH", str(log))
     monkeypatch.setenv("ALE_VERIFY_CONFIG_PATH", str(config))
-    monkeypatch.setenv("ALE_VERIFICATION_PATH", str(record))
     monkeypatch.setenv("JUDGE_KEY", "provider-secret")
     monkeypatch.setattr(_agents.os, "geteuid", lambda: 0)
     # Verification's budget allows three retries.
     monkeypatch.setattr(_llm, "_wait_to_retry", lambda failures, _after=None: failures <= 3)
-    return {"workspace": workspace, "log": log, "record": record, "instruction": instruction}
+    return {"workspace": workspace, "log": log, "instruction": instruction}
 
 
 def run():  # type: ignore[no-untyped-def]
@@ -38,9 +36,10 @@ def run():  # type: ignore[no-untyped-def]
         invocation_id="judge-1",
         name="functional",
         prompt="Test it.",
-        rubric={
-            "no": ScoredChoice(0, "Fails."),
-            "yes": ScoredChoice(1, "Works."),
+        output_schema={
+            "type": "object",
+            "properties": {"choice": {"enum": ["no", "yes"]}},
+            "required": ["choice"],
         },
         evidence=(),
         config=codex_config(),
@@ -80,12 +79,13 @@ def test_invalid_verdict_repairs_in_the_same_session_with_concrete_error(
         return completed(next(outputs))
 
     monkeypatch.setattr(_agents.subprocess, "run", execute)
-    choice, _, invocation = run()
-    assert choice == "yes"
+    result, invocation = run()
+    assert result["choice"] == "yes"
     assert len(calls) == 2
     assert calls[1][0][-3:-1] == ["resume", "thread-1"]
-    assert "unknown choice 'mostly'" in calls[1][1]["input"]
-    assert '{"choice":"no|yes","reasoning":"..."}' in calls[1][1]["input"]
+    assert "choice" in calls[1][1]["input"]
+    assert "Output JSON Schema" in calls[1][1]["input"]
+    assert invocation.attempts[0].error in calls[1][1]["input"]
     assert invocation.attempts[1].mode == "schema_repair"
 
 
@@ -116,7 +116,11 @@ def test_timeout_after_schema_repair_keeps_latest_error_and_partial_native_evide
     assert "provider capacity exhausted" in invocation.failure
     assert "unknown choice" not in invocation.failure
     assert "provider-secret" not in invocation.failure
-    logs = [json.loads(line) for line in agent_env["log"].read_text().splitlines()]
+    logs = [
+        item
+        for line in agent_env["log"].read_text().splitlines()
+        if (item := json.loads(line))["event"] == "response"
+    ]
     assert len(logs) == 5
     assert [attempt.mode for attempt in invocation.attempts] == [
         "initial",
@@ -169,9 +173,13 @@ def test_transcript_is_sanitized(
         )
 
     monkeypatch.setattr(_agents.subprocess, "run", execute)
-    _, reasoning, _ = run()
-    assert reasoning == "[REDACTED] works"
-    transcript = json.loads(agent_env["log"].read_text())["stdout"]
+    with pytest.raises(JudgeError, match="credential"):
+        run()
+    transcript = next(
+        item["stdout"]
+        for line in agent_env["log"].read_text().splitlines()
+        if (item := json.loads(line))["event"] == "response"
+    )
     assert len(transcript) > 2_000
     _, final = _agents._final_response("codex-cli", transcript)
     assert final is not None
@@ -206,26 +214,27 @@ def test_agent_receives_selected_evidence_during_initial_and_repair_calls(
         return completed(event("thread-1", {"choice": choice, "reasoning": "Checked evidence."}))
 
     monkeypatch.setattr(_agents.subprocess, "run", execute)
-    verification = Verification()
     assert (
-        verification.judge(
+        judge(
             "agent",
             "content",
             prompt="Compare the artifact against the expected totals.",
             files=[str(artifact)],
             reference="Expected totals: accepted=17, rejected=4.",
             trajectory=include_trajectory,
-            rubric={
-                "no": {"score": 0, "description": "Incorrect."},
-                "yes": {"score": 1, "description": "Correct."},
+            output_schema={
+                "type": "object",
+                "properties": {"choice": {"enum": ["no", "yes"]}},
+                "required": ["choice"],
             },
-        )
-        == 1
+        )["choice"]
+        == "yes"
     )
     assert len(calls) == 2
     assert calls[1][0][-3:-1] == ["resume", "thread-1"]
-    record = VerificationRecord.from_json(agent_env["record"].read_bytes())
-    assert [item.kind for item in record.criteria[0].evidence] == ["file", "reference"] + (
+    events = [json.loads(line) for line in agent_env["log"].read_text().splitlines()]
+    evidence = next(e for e in events if e["event"] == "evidence")
+    assert [item["kind"] for item in evidence["files"]] == ["file", "reference"] + (
         ["solver_trajectory"] if include_trajectory else []
     )
 
@@ -243,17 +252,16 @@ def test_configured_instruction_cannot_be_silently_omitted(
         "run",
         lambda *_args, **_kwargs: pytest.fail("Agent must not start without its instruction"),
     )
-    verification = Verification()
-    with pytest.raises(RuntimeError, match="judge infrastructure: evidence"):
-        verification.judge(
+    with pytest.raises(RuntimeError, match="evidence"):
+        judge(
             "agent",
             "content",
             prompt="Check the artifact.",
-            rubric={
-                "no": {"score": 0, "description": "Incorrect."},
-                "yes": {"score": 1, "description": "Correct."},
+            output_schema={
+                "type": "object",
+                "properties": {"choice": {"enum": ["no", "yes"]}},
+                "required": ["choice"],
             },
         )
-    record = VerificationRecord.from_json(agent_env["record"].read_bytes())
-    assert record.status == "failed"
-    assert record.rewards == {}
+    events = [json.loads(line) for line in agent_env["log"].read_text().splitlines()]
+    assert events[-1]["event"] == "failed"

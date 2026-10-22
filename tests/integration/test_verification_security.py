@@ -58,16 +58,16 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
     )
     (task_root / "verify" / "verify.py").write_text(
         "import os, sys\n"
-        "from ale_verify import CheckResult, Verification, checks\n"
-        "v = Verification()\n"
-        "v.check('setup_scope', checks.text_equals('/home/user/output/setup-key', 'absent'))\n"
-        "v.check('verify_scope', CheckResult(float(bool(os.environ.get('ALE_LLM_JUDGE_TOKEN'))"
-        " and 'JUDGE_KEY' not in os.environ)))\n"
-        "v.check('no_host_callback', CheckResult(float(not any(name in os.environ for name in "
-        "('ALE_VERIFICATION_URL', 'ALE_VERIFICATION_TOKEN')))))\n"
+        "from ale_verify import checks, write\n"
+        "v = {}\n"
+        "v['setup_scope'] = checks.text_equals('/home/user/output/setup-key', 'absent')['score']\n"
+        "v['verify_scope'] = float(bool(os.environ.get('ALE_LLM_JUDGE_TOKE"
+        "N')) and 'JUDGE_KEY' not in os.environ)\n"
+        "v['no_host_callback'] = float(not any((name in os.environ for nam"
+        "e in ('ALE_VERIFICATION_URL', 'ALE_VERIFICATION_TOKEN'))))\n"
         "sys.stderr.write(os.environ['ALE_LLM_JUDGE_TOKEN'])\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     (task_root / "setup" / "run.sh").chmod(0o755)
 
@@ -95,12 +95,7 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
         await gateway.stop()
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {
-        "setup_scope": 1.0,
-        "verify_scope": 1.0,
-        "no_host_callback": 1.0,
-        "overall": 1.0,
-    }
+    assert result.verdict.rewards == {"overall": 1.0}
     for path in result.run_dir.rglob("*"):
         if path.is_file():
             assert secret.encode() not in path.read_bytes()
@@ -125,11 +120,11 @@ async def test_record_containing_a_verify_credential_is_not_collected(
     )
     (task_root / "verify" / "verify.py").write_text(
         "import os\n"
-        "from ale_verify import CheckResult, Verification\n"
-        "v = Verification()\n"
-        "v.check('score', CheckResult(1.0, raw_value=os.environ['JUDGE_KEY']))\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "from ale_verify import write\n"
+        "v = {}\n"
+        "v['score'] = {'score': 1.0, 'raw_value': os.environ['JUDGE_KEY']}['score']\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     (task_root / "setup" / "run.sh").chmod(0o755)
     task = load_tasks(task_root)[0]

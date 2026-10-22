@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import textwrap
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -18,10 +19,8 @@ from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
 from ale_verify import (
-    CriterionResult,
     JudgeAttempt,
     JudgeInvocation,
-    VerificationRecord,
 )
 from tests.support import CONTAINER_BASE, provider_registry
 
@@ -48,34 +47,48 @@ def provenance(task_path: Path) -> ProvenanceInputs:
 
 
 @pytest.mark.asyncio
-async def test_record_and_envelope_mismatch_is_rejected_but_record_is_retained(
-    tmp_path: Path,
+@pytest.mark.parametrize("mode", ["direct", "crash", "malformed", "stale"])
+@pytest.mark.parametrize("environment_mode", ["shared", "separate"])
+async def test_plain_result_is_accepted_only_after_normal_exit(
+    tmp_path: Path, mode: str, environment_mode: str
 ) -> None:
-    task_root = repository(tmp_path / "repo", "mismatch")
-    (task_root / "verify" / "verify.py").write_text(
-        "import json, os\n"
-        "from ale_verify import CheckResult, Verification\n"
-        "v = Verification()\n"
-        "v.check('score', CheckResult(1.0))\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
-        "with open(os.environ['ALE_VERDICT_PATH'], 'w') as handle:\n"
-        "    json.dump({'rewards': {'score': 0.0}, 'metrics': {}}, handle)\n"
+    task_root = repository(tmp_path / "repo", "plain-result")
+    if environment_mode == "separate":
+        manifest = task_root / "task.yaml"
+        manifest.write_text(
+            manifest.read_text()
+            + "verify:\n  environment_mode: separate\n"
+            + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+        )
+    script = (
+        "import json, os\nfrom pathlib import Path\n"
+        "Path(os.environ['ALE_VERDICT_PATH']).write_text(json.dumps({"
+        "'overall':0.999,'details':{'count':10,'raw':0.999}}))\n"
     )
-    task = load_tasks(task_root)[0]
-
+    if mode == "crash":
+        script += "raise RuntimeError('after writing result')\n"
+    elif mode == "malformed":
+        script += "Path(os.environ['ALE_VERDICT_PATH']).write_text('partial JSON')\n"
+    elif mode == "stale":
+        (task_root / "verify/result.json").write_text('{"overall":1}')
+        script = "pass\n"
+    (task_root / "verify/verify.py").write_text(script)
     result = await run_episode(
-        task,
+        load_tasks(task_root)[0],
         StandardEnvironment(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
     )
-
-    assert result.verdict.status is Status.TASK_ERROR
-    assert result.verdict.rewards is None
-    record = json.loads((result.run_dir / "verification.json").read_text())
-    assert record["criteria"][0]["name"] == "score"
-    assert record["criteria"][0]["score"] == 1.0
+    if mode == "direct":
+        assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+        assert result.verdict.rewards == {"overall": 1.0}
+        assert json.loads((result.run_dir / "verification.json").read_text()) == {
+            "overall": 1.0,
+            "details": {"count": 10, "raw": 0.999},
+        }
+    else:
+        assert result.verdict.status is Status.TASK_ERROR
+        assert result.verdict.rewards is None
 
 
 @pytest.mark.asyncio
@@ -86,7 +99,7 @@ async def test_agent_transcript_and_judge_provenance_are_collected_after_exit(
     invocation = JudgeInvocation(
         id="judge-1",
         kind="agent",
-        criterion_name="functional",
+        name="functional",
         adapter="codex-cli",
         adapter_version="codex 1",
         status="completed",
@@ -101,36 +114,22 @@ async def test_agent_transcript_and_judge_provenance_are_collected_after_exit(
                 reasoning_effort="high",
                 endpoint_identity="https://example.test",
                 prompt_hash=HASH0,
-                rubric_hash=HASH1,
+                schema_hash=HASH1,
                 request_id="native-session",
             ),
         ),
-    )
-    record = VerificationRecord(
-        status="completed",
-        criteria=(
-            CriterionResult(
-                name="functional",
-                source="agent_judge",
-                score=1.0,
-                reasoning="Works.",
-                raw_value="yes",
-                judge_invocation_id="judge-1",
-            ),
-        ),
-        judge_invocations=(invocation,),
     )
     script = textwrap.dedent(
         f"""
         import json, os
         from pathlib import Path
-        record = {record.to_dict()!r}
-        Path(os.environ["ALE_VERIFICATION_PATH"]).write_text(json.dumps(record))
-        Path(os.environ["ALE_VERDICT_PATH"]).write_text(
-            json.dumps({{"rewards": {{"functional": 1.0}}, "metrics": {{}}}})
-        )
+        record = {{"event":"completed", "invocation":{asdict(invocation)!r}}}
+        transcript = {{"event":"response", "attempt":1,"stdout":"sanitized","stderr":""}}
         Path(os.environ["ALE_AGENT_JUDGE_LOG_PATH"]).write_text(
-            '{{"attempt":1,"stdout":"sanitized","stderr":""}}\\n'
+            json.dumps(transcript)+"\\n"+json.dumps(record)+"\\n"
+        )
+        Path(os.environ["ALE_VERDICT_PATH"]).write_text(
+            json.dumps({{"overall":1.0, "details":{{"functional":1.0}}}})
         )
         """
     ).strip()
@@ -146,8 +145,9 @@ async def test_agent_transcript_and_judge_provenance_are_collected_after_exit(
     )
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert (result.run_dir / "logs" / "agent-judge.jsonl").is_file()
-    assert not (result.run_dir / "logs" / "oracle" / "agent-judge.jsonl").exists()
+    assert (result.run_dir / "agent-judge.jsonl").is_file()
+    assert not (result.run_dir / "llm-judge.jsonl").exists()
+    assert not list((result.run_dir / "logs").rglob("*judge.jsonl"))
     assert result.lock is not None
     assert result.lock.ale_verify is not None
     assert result.lock.judges[0].adapter == "codex-cli"

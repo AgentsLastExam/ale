@@ -9,10 +9,8 @@ from test_runtime_contracts import make_lock
 from ale.core.lock import AleVerifyProvenance, JudgeProvenance
 from ale.run.provenance import judge_provenance
 from ale_verify import (
-    CriterionResult,
     JudgeAttempt,
     JudgeInvocation,
-    VerificationRecord,
 )
 
 pytestmark = pytest.mark.unit
@@ -25,7 +23,7 @@ def invocation() -> JudgeInvocation:
     return JudgeInvocation(
         id="judge-1",
         kind="llm",
-        criterion_name="correctness",
+        name="correctness",
         status="completed",
         attempts=(
             JudgeAttempt(
@@ -38,7 +36,7 @@ def invocation() -> JudgeInvocation:
                 reasoning_effort="medium",
                 endpoint_identity="https://example.test/v1",
                 prompt_hash=HASH0,
-                rubric_hash=HASH1,
+                schema_hash=HASH1,
             ),
         ),
     )
@@ -52,7 +50,7 @@ def test_run_lock_separates_verify_runtime_and_direct_judges() -> None:
         reasoning_effort="medium",
         endpoint_identity="https://example.test/v1",
         prompt_hash=HASH0,
-        rubric_hash=HASH1,
+        schema_hash=HASH1,
         attempts=1,
     )
     lock = make_lock(
@@ -67,18 +65,7 @@ def test_run_lock_separates_verify_runtime_and_direct_judges() -> None:
 
 
 def test_judge_provenance_is_derived_from_the_collected_record() -> None:
-    record = VerificationRecord(
-        status="completed",
-        criteria=(
-            CriterionResult(
-                name="correctness",
-                source="llm_judge",
-                score=1.0,
-                judge_invocation_id="judge-1",
-            ),
-        ),
-        judge_invocations=(invocation(),),
-    )
+    record = (invocation(),)
     observed = judge_provenance(record)
     assert observed[0].invocation_id == "judge-1"
     assert observed[0].endpoint_identity == "https://example.test/v1"

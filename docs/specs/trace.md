@@ -9,7 +9,7 @@ other files may carry only stable identifiers, references, or small run-level pr
 | `trace.transport.jsonl` | Gateway calls in API-key and subscription modes (verification Judge calls marked `purpose: judge`), retries, refusals, usage, cost when price is known, call-to-step links | full conversation messages |
 | `trace.execution.jsonl` | framework phases, task/framework commands, output, policy, cleanup failures | agent-owned tool calls, rewards |
 | `result.json` | terminal status, all named rewards, failure, phase timings | conversation, provenance |
-| `verification.json` | criterion diagnostics, metrics, aggregates, and Judge invocations/attempts | terminal status, solver trajectory, native Agent transcript |
+| `verification.json` | the complete Task-authored result, including nested details | terminal status, solver trajectory, native Agent transcript |
 | `lock.json` | immutable provenance and enforced termination limits | live run state |
 
 `events.jsonl`, `trace.semantic.jsonl`, per-episode ledger databases, scalar/primary
@@ -222,17 +222,15 @@ Streamed responses that do not supply this explicit object record no exact token
 Native logs are diagnostic evidence, never canonical truth.
 
 An Agent Judge is not a solver Harness and produces no ATIF trajectory. When invoked,
-its bounded, sanitized native JSONL transcript is retained at
-`logs/agent-judge.jsonl`; otherwise that path is absent.
+its sanitized native stdout/stderr are retained as response events in
+`agent-judge.jsonl` alongside its Judge events; otherwise that path is absent.
 
-## Verification record
+## Verification result
 
-`verification.json` is atomically replaced after each accepted mutation. It preserves
-completed deterministic criteria and judge attempts even when later verification fails.
-The verifier owns this file until its OS-specific entry exits. ALE then validates it against the
-reward envelope and copies it unchanged to the episode. No intermediate snapshot is
-sent to the Host, and Judge calls never merge into the solver's `trajectory.json` or
-Transport Trace.
+`verification.json` preserves the complete Task-authored JSON result. Only `overall`
+is projected into episode rewards. `llm-judge.jsonl` and `agent-judge.jsonl` sit alongside
+it and are collected independently, including after failure.
+See [Verification](verification.md) for the result and tool contracts.
 
 ## Interoperability
 

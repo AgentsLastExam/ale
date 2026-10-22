@@ -31,7 +31,6 @@ from ale.core.trace import (
     TransportEvent,
 )
 from ale.core.trajectory import AtifTrajectory
-from ale_verify import VerificationRecord
 
 __all__ = [
     "INLINE_TEXT_LIMIT",
@@ -401,8 +400,8 @@ class EpisodeRecording:
     def write_result(self, result: ResultRecord) -> None:
         atomic_write_json(self.result_path, result)
 
-    def write_verification(self, record: VerificationRecord) -> None:
-        atomic_write_json(self.verification_path, record.to_dict(), sort_keys=False)
+    def write_verification(self, result: dict[str, Any]) -> None:
+        atomic_write_json(self.verification_path, result, sort_keys=False)
 
     def write_lock(self, lock: RunLock) -> None:
         atomic_write_json(self.lock_path, lock)

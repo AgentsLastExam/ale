@@ -62,7 +62,7 @@ async def test_four_episodes_at_once_each_score_and_stay_separate(
 
     for result in results:
         assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-        assert result.verdict.rewards == {"reward": 1.0, "overall": 1.0}
+        assert result.verdict.rewards == {"overall": 1.0}
 
     # Distinct identities and distinct directories: two episodes writing to one path would
     # still score, and the second would be reporting the first one's work.

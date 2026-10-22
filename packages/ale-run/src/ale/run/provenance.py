@@ -44,7 +44,7 @@ from ale.core.result import SandboxOutcome
 from ale.core.sandbox import PreparedTaskImage, ResolvedImage, ResourceAllocation
 from ale.core.taskspec import ImageSpec, TaskSpec
 from ale.run import __version__
-from ale_verify import VerificationRecord
+from ale_verify import JudgeInvocation
 
 __all__ = [
     "ProvenanceInputs",
@@ -94,7 +94,7 @@ def gateway_provenance(settings: RunConfig, *, observable: bool = True) -> Gatew
 
 
 def judge_provenance(
-    record: VerificationRecord, endpoints: Mapping[str, str] | None = None
+    invocations: tuple[JudgeInvocation, ...], endpoints: Mapping[str, str] | None = None
 ) -> tuple[JudgeProvenance, ...]:
     """Project collected sandbox observations into the stable RunLock shape.
 
@@ -103,7 +103,7 @@ def judge_provenance(
     """
     endpoints = endpoints or {}
     observed: list[JudgeProvenance] = []
-    for invocation in record.judge_invocations:
+    for invocation in invocations:
         if not invocation.attempts:
             continue
         first = invocation.attempts[0]
@@ -115,7 +115,7 @@ def judge_provenance(
                 reasoning_effort=first.reasoning_effort,
                 endpoint_identity=endpoints.get(invocation.kind, first.endpoint_identity),
                 prompt_hash=first.prompt_hash,
-                rubric_hash=first.rubric_hash,
+                schema_hash=first.schema_hash,
                 adapter=invocation.adapter,
                 adapter_version=invocation.adapter_version,
                 attempts=len(invocation.attempts),

@@ -202,7 +202,7 @@ class JudgeProvenance(BaseModel):
     reasoning_effort: str
     endpoint_identity: str
     prompt_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    rubric_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    schema_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     adapter: Literal["codex-cli", "claude-code"] | None = None
     adapter_version: str | None = None
     placement: Literal["verify"] = "verify"

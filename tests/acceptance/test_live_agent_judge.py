@@ -95,13 +95,24 @@ async def test_live_agent_judge_records_transcript_without_an_extra_trajectory(
         verification_config=verification,
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"functional": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
     record = json.loads((result.run_dir / "verification.json").read_text())
     assert "agent_trajectory" not in record
-    assert record["judge_invocations"][0]["adapter"] == adapter
-    agent_log = result.run_dir / "logs" / "agent-judge.jsonl"
+    assert (
+        next(
+            json.loads(line)["invocation"]["adapter"]
+            for line in (result.run_dir / "agent-judge.jsonl").read_text().splitlines()
+            if json.loads(line)["event"] == "completed"
+        )
+        == adapter
+    )
+    agent_log = result.run_dir / "agent-judge.jsonl"
     assert agent_log.is_file()
-    transcript = json.loads(agent_log.read_text())["stdout"]
+    transcript = [
+        event["stdout"]
+        for line in agent_log.read_text().splitlines()
+        if (event := json.loads(line))["event"] == "response"
+    ][-1]
     _, final = _agents._final_response(adapter, transcript)
     assert final is not None
     assert json.loads(final)["choice"] == "yes"

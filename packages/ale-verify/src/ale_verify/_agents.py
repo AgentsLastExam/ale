@@ -11,11 +11,13 @@ import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from . import _llm
 from ._io import JudgeError, digest, endpoint_identity, read_text_evidence, redact, sanitize
-from ._records import EvidenceReference, JudgeAttempt, JudgeInvocation, ScoredChoice
+from ._journal import journal
+from ._json import response_object
+from ._records import EvidenceReference, JudgeAttempt, JudgeInvocation
 
 #: Installing an exact Judge CLI is setup rather than judging, so it keeps a bound.
 _INSTALL_TIMEOUT_SECONDS = 600
@@ -26,27 +28,27 @@ def run(
     invocation_id: str,
     name: str,
     prompt: str,
-    rubric: Mapping[str, ScoredChoice],
+    output_schema: dict[str, Any] | None,
     evidence: Sequence[tuple[str | bytes, EvidenceReference]],
     config: Mapping[str, str],
     mcp_servers: Sequence[Mapping[str, object]] = (),
-) -> tuple[str, str, JudgeInvocation]:
+) -> tuple[dict[str, Any], JudgeInvocation]:
     adapter = config["adapter"]
     endpoint = endpoint_identity(config["base_url"])
-    rendered = _prompt(name, prompt, rubric, evidence)
+    rendered = _prompt(name, prompt, output_schema, evidence)
     prompt_hash = digest(rendered)
-    rubric_hash = digest(_llm._rubric_json(rubric))
+    schema_hash = digest(json.dumps(output_schema, sort_keys=True))
     secret = os.environ.get(config["api_key_env"], "")
 
-    if os.geteuid() != 0:
+    if not _elevated():
         _preflight_failure(
             invocation_id,
             name,
             config,
             endpoint,
             prompt_hash,
-            rubric_hash,
-            "Agent Judge must run as root",
+            schema_hash,
+            "Agent Judge requires framework privileges",
         )
     if not secret:
         _preflight_failure(
@@ -55,7 +57,7 @@ def run(
             config,
             endpoint,
             prompt_hash,
-            rubric_hash,
+            schema_hash,
             f"{config['api_key_env']} is not set for the Agent Judge",
         )
 
@@ -67,16 +69,13 @@ def run(
             config,
             endpoint,
             prompt_hash,
-            rubric_hash,
+            schema_hash,
             "ALE_HOME must identify the completed solver workspace",
         )
     stage = Path(os.environ.get("ALE_STAGE_DIR", "/opt/ale/verify"))
     home = stage / "agent" / invocation_id
     shutil.rmtree(home, ignore_errors=True)
     home.mkdir(parents=True, mode=0o700)
-    log_path = Path(os.environ.get("ALE_AGENT_JUDGE_LOG_PATH", str(stage / "agent-judge.jsonl")))
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.unlink(missing_ok=True)
 
     try:
         binary, version = _ensure_binary(adapter, config["version"], stage)
@@ -88,7 +87,7 @@ def run(
             config,
             endpoint,
             prompt_hash,
-            rubric_hash,
+            schema_hash,
             sanitize(exc, (secret,)),
         )
     environment = _environment(adapter, home, config, secret)
@@ -106,7 +105,7 @@ def run(
         mode: Literal["initial", "retry", "schema_repair"] = (
             "initial" if index == 1 else "schema_repair" if repair else "retry"
         )
-        current_prompt = _repair_prompt(rendered, rubric, repair_error) if repair else rendered
+        current_prompt = _repair_prompt(rendered, repair_error) if repair else rendered
         # A Judge run is bounded only by what is left of verification, never by a
         # per-attempt ceiling: a long, thorough inspection is exactly what it is for.
         left = _llm._time_left()
@@ -123,6 +122,20 @@ def run(
             mcp_config=mcp_config,
         )
         started = _now()
+        journal(
+            "agent",
+            {
+                "event": "request",
+                "id": invocation_id,
+                "attempt": index,
+                "prompt": current_prompt,
+                "schema": output_schema,
+                "model": config["model"],
+                "reasoning_effort": config["reasoning_effort"],
+                "endpoint_identity": endpoint,
+            },
+            (secret,),
+        )
         try:
             completed = subprocess.run(
                 argv,
@@ -147,7 +160,12 @@ def run(
                 else exc.stderr or ""
             )
             _append_transcript(
-                log_path, index=index, argv=argv, stdout=stdout, stderr=stderr, secrets=(secret,)
+                invocation_id=invocation_id,
+                index=index,
+                argv=argv,
+                stdout=stdout,
+                stderr=stderr,
+                secrets=(secret,),
             )
             error = repair_error = "Agent Judge timed out: " + _failure_detail(
                 adapter, None, stdout, stderr, secret
@@ -160,7 +178,7 @@ def run(
                     config,
                     endpoint,
                     prompt_hash,
-                    rubric_hash,
+                    schema_hash,
                     started,
                     session_id,
                     error,
@@ -182,7 +200,7 @@ def run(
                     config,
                     endpoint,
                     prompt_hash,
-                    rubric_hash,
+                    schema_hash,
                     started,
                     session_id,
                     error,
@@ -191,7 +209,7 @@ def run(
             break
 
         _append_transcript(
-            log_path,
+            invocation_id=invocation_id,
             index=index,
             argv=argv,
             stdout=completed.stdout,
@@ -212,7 +230,7 @@ def run(
                     config,
                     endpoint,
                     prompt_hash,
-                    rubric_hash,
+                    schema_hash,
                     started,
                     session_id,
                     repair_error,
@@ -238,7 +256,7 @@ def run(
                         config,
                         endpoint,
                         prompt_hash,
-                        rubric_hash,
+                        schema_hash,
                         started,
                         session_id,
                         repair_error,
@@ -255,7 +273,7 @@ def run(
                     config,
                     endpoint,
                     prompt_hash,
-                    rubric_hash,
+                    schema_hash,
                     started,
                     session_id,
                     repair_error,
@@ -268,7 +286,9 @@ def run(
                 raise ValueError(f"{adapter} did not report a native session")
             if final is None:
                 raise ValueError(f"{adapter} emitted no identifiable final response")
-            choice, reasoning = _llm._verdict(final, rubric)
+            result = response_object(final, output_schema)
+            if secret in json.dumps(result, ensure_ascii=False):
+                raise ValueError("Judge response contains a credential")
         except ValueError as exc:
             repair_error = sanitize(exc, (secret,))
             attempts.append(
@@ -279,7 +299,7 @@ def run(
                     config,
                     endpoint,
                     prompt_hash,
-                    rubric_hash,
+                    schema_hash,
                     started,
                     session_id,
                     repair_error,
@@ -299,19 +319,18 @@ def run(
                 config,
                 endpoint,
                 prompt_hash,
-                rubric_hash,
+                schema_hash,
                 started,
                 session_id,
                 None,
             )
         )
         return (
-            choice,
-            sanitize(reasoning, (secret,)),
+            result,
             JudgeInvocation(
                 id=invocation_id,
                 kind="agent",
-                criterion_name=name,
+                name=name,
                 adapter=adapter,  # type: ignore[arg-type]
                 adapter_version=version,
                 status="completed",
@@ -326,7 +345,7 @@ def run(
     invocation = JudgeInvocation(
         id=invocation_id,
         kind="agent",
-        criterion_name=name,
+        name=name,
         adapter=adapter,  # type: ignore[arg-type]
         adapter_version=version,
         status="failed",
@@ -440,7 +459,7 @@ def _environment(
 def _prompt(
     name: str,
     prompt: str,
-    rubric: Mapping[str, ScoredChoice],
+    output_schema: dict[str, Any] | None,
     evidence: Sequence[tuple[str | bytes, EvidenceReference]],
 ) -> str:
     instruction_path = os.environ.get("ALE_TASK_INSTRUCTION_PATH")
@@ -459,35 +478,35 @@ def _prompt(
     }
     if not any(reference.kind == "solver_trajectory" for _, reference in evidence):
         resources.pop("ALE_TRAJECTORY_PATH", None)
-    choices = "|".join(rubric)
     evidence_lines = "\n".join(
         f"- {reference.kind}: {reference.location or 'inline'} ({reference.sha256})"
         + (f"\n{content}" if reference.location is None else "")
         for content, reference in evidence
     )
     return (
-        "You are a verification agent running as root with the completed solver artifacts.\n"
+        "You are a verification agent with elevated privileges and the completed workspace.\n"
         "Inspect files and execute commands needed to reach an empirical verdict.\n\n"
         f"Task instruction:\n{instruction}\n\n"
-        f"Criterion {name}: {prompt}\n\n"
-        f"Rubric: {_llm._rubric_json(rubric)}\n\n"
+        f"{name}: {prompt}\n\n"
+        f"Output JSON Schema: {json.dumps(output_schema or {'type': 'object'})}\n\n"
         f"Framework resources: {json.dumps(resources, sort_keys=True)}\n"
         f"Selected evidence:\n{evidence_lines}\n\n"
-        f'Return only: {{"choice":"{choices}","reasoning":"..."}}'
+        "Return one JSON object, with no Markdown."
     )
 
 
-def _repair_prompt(
-    original: str,
-    rubric: Mapping[str, ScoredChoice],
-    error: str,
-) -> str:
-    choices = "|".join(rubric)
-    return (
-        f"{original}\n\nYour previous verdict was rejected:\n{error}\n\n"
-        f'Submit exactly:\n{{"choice":"{choices}","reasoning":"..."}}\n'
-        "Do not repeat workspace mutations unless needed to inspect their current result."
+def _repair_prompt(original: str, error: str) -> str:
+    return _llm._repair_prompt(original, error) + (
+        "\nDo not repeat workspace mutations unless needed to inspect their current result."
     )
+
+
+def _elevated() -> bool:
+    if os.name == "nt":
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    return os.geteuid() == 0
 
 
 def _final_response(adapter: str, transcript: str) -> tuple[str | None, str | None]:
@@ -724,8 +743,8 @@ def _write_mcp_config(
 
 
 def _append_transcript(
-    path: Path,
     *,
+    invocation_id: str,
     index: int,
     argv: Sequence[str],
     stdout: str,
@@ -733,16 +752,13 @@ def _append_transcript(
     secrets: tuple[str, ...],
 ) -> None:
     record = {
+        "invocation_id": invocation_id,
         "attempt": index,
         "argv": [Path(argv[0]).name, *argv[1:]],
         "stdout": redact(stdout, secrets),
         "stderr": redact(stderr, secrets),
     }
-    with path.open("a", encoding="utf-8") as handle:
-        json.dump(record, handle, ensure_ascii=False, separators=(",", ":"))
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    journal("agent", {"event": "response", "id": invocation_id, **record}, secrets)
 
 
 def _attempt(
@@ -752,7 +768,7 @@ def _attempt(
     config: Mapping[str, str],
     endpoint: str,
     prompt_hash: str,
-    rubric_hash: str,
+    schema_hash: str,
     started_at: str,
     session_id: str | None,
     error: str | None,
@@ -767,7 +783,7 @@ def _attempt(
         reasoning_effort=config["reasoning_effort"],
         endpoint_identity=endpoint,
         prompt_hash=prompt_hash,
-        rubric_hash=rubric_hash,
+        schema_hash=schema_hash,
         request_id=session_id,
         error=error,
     )
@@ -779,14 +795,14 @@ def _preflight_failure(
     config: Mapping[str, str],
     endpoint: str,
     prompt_hash: str,
-    rubric_hash: str,
+    schema_hash: str,
     failure: str,
 ) -> None:
     now = _now()
     invocation = JudgeInvocation(
         id=invocation_id,
         kind="agent",
-        criterion_name=name,
+        name=name,
         adapter=config["adapter"],  # type: ignore[arg-type]
         status="failed",
         attempts=(
@@ -800,7 +816,7 @@ def _preflight_failure(
                 reasoning_effort=config["reasoning_effort"],
                 endpoint_identity=endpoint,
                 prompt_hash=prompt_hash,
-                rubric_hash=rubric_hash,
+                schema_hash=schema_hash,
                 error=failure,
             ),
         ),

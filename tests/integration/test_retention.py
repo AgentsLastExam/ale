@@ -177,7 +177,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
     stale.write_text("must not survive a verifier revision\n")
     registry = provider_registry(DockerProvider())
     task = load_tasks(task_path)[0]
-    settings = RunConfig()
+    settings = RunConfig.model_validate({"artifacts": {"collect": "host"}})
     first = await run_episode(
         task,
         StandardEnvironment(OracleHarness()),
@@ -190,6 +190,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
             config_hash=settings.config_hash,
         ),
         sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
+        collect_artifacts=True,
     )
     retained = next(item for item in first.record.sandboxes if item.outcome == "retained")
     assert retained.handle is not None
@@ -198,13 +199,13 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
 
     stale.unlink()
     (task_path / "verify/verify.py").write_text(
-        "from ale_verify import Verification, checks\n"
-        "v = Verification()\n"
-        "v.check('reverified', checks.text_equals("
-        "'/home/user/output/result.txt', 'hello\\n'))\n"
-        "v.check('stale_removed', checks.file_missing('/opt/ale/verify/stale.txt'))\n"
-        "v.aggregate('overall')\n"
-        "v.write()\n"
+        "from ale_verify import checks, write\n"
+        "v = {}\n"
+        "v['reverified'] = checks.text_equals('/home/user/output/result.tx"
+        "t', 'hello\\n')['score']\n"
+        "v['stale_removed'] = checks.file_missing('/opt/ale/verify/stale.txt')['score']\n"
+        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
     )
     from ale.run.cli import tasks as task_cli
 
@@ -216,7 +217,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         assert await _reverify(str(task_path), first.run_dir, settings, tmp_path / "second") == 0
         result_path = next((tmp_path / "second").rglob("result.json"))
         result = json.loads(result_path.read_text())
-        assert result["rewards"] == {"reverified": 1.0, "stale_removed": 1.0, "overall": 1.0}
+        assert result["rewards"] == {"overall": 1.0}
         if mode == "separate":
             assert result["sandboxes"][0]["roles"] == ["verifier"]
         assert retained.handle in {item["handle"] for item in await list_retained()}
@@ -452,7 +453,7 @@ async def test_sanitation_failure_destroys_sandbox_without_changing_reward(
     )
 
     assert result.verdict.status is Status.COMPLETED
-    assert result.verdict.rewards == {"content": 1.0, "overall": 1.0}
+    assert result.verdict.rewards == {"overall": 1.0}
     assert result.record.sandboxes[0].outcome == "retention-failed"
     assert "sanitation" in (result.record.sandboxes[0].reason or "")
     assert not any(item["episode"] == result.episode_id for item in await list_retained())

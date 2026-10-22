@@ -18,7 +18,7 @@ from ale.run.gateway.server import Gateway
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
-from ale_verify import ScoredChoice, _llm
+from ale_verify import _llm
 from tests.support import CONTAINER_BASE, provider_registry
 
 pytestmark = pytest.mark.integration
@@ -49,15 +49,12 @@ async def test_direct_llm_call_uses_provider_without_gateway(
     port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
     monkeypatch.setenv("JUDGE_KEY", "secret")
     try:
-        choice, _, invocation = await asyncio.to_thread(
+        response_data, invocation = await asyncio.to_thread(
             _llm.run,
             invocation_id="judge-1",
             name="correctness",
             prompt="Judge.",
-            rubric={
-                "no": ScoredChoice(0, "Wrong."),
-                "yes": ScoredChoice(1, "Correct."),
-            },
+            output_schema={"type": "object"},
             evidence=(),
             config={
                 "model": "gpt-5-mini",
@@ -69,7 +66,7 @@ async def test_direct_llm_call_uses_provider_without_gateway(
     finally:
         await runner.cleanup()
 
-    assert choice == "yes"
+    assert response_data["choice"] == "yes"
     assert requests[0]["model"] == "gpt-5-mini"
     assert invocation.attempts[0].usage == {"input_tokens": 2, "output_tokens": 1}
     assert "secret" not in json.dumps(invocation, default=str)
@@ -110,26 +107,26 @@ def judged_task(root: Path) -> Path:
     )
     (task / "verify" / "verify.py").write_text(
         "import os\n"
-        "from ale_verify import CheckResult, Verification, checks\n"
-        "v = Verification()\n"
-        "v.check('credential_scope', checks.text_equals('/home/user/output/setup-key', 'absent'))\n"
-        "v.check('key_withheld', CheckResult(0.0 if 'JUDGE_KEY' in os.environ else 1.0))\n"
-        "v.judge(\n"
-        "    'llm', 'correctness', prompt='Judge the answer.',\n"
-        "    rubric={\n"
-        "        'no': {'score': 0.0, 'description': 'Incorrect.'},\n"
-        "        'yes': {'score': 1.0, 'description': 'Correct.'},\n"
-        "    },\n"
-        "    files=['/home/user/output/answer.txt'],\n"
-        ")\n"
-        "v.write()\n"
+        "from ale_verify import checks, judge, write\n"
+        "v = {}\n"
+        "v['credential_scope'] = checks.text_equals('/home/user/outpu"
+        "t/setup-key', 'absent')['score']\n"
+        "v['key_withheld'] = 0.0 if 'JUDGE_KEY' in os.environ else 1."
+        "0\n"
+        "v['correctness'] = {'no': 0.0, 'yes': 1.0}[judge('llm', 'cor"
+        "rectness', prompt='Judge the answer.', files=['/home/user/ou"
+        "tput/answer.txt'], output_schema={'type': 'object', 'propert"
+        "ies': {'choice': {'enum': ['no', 'yes']}, 'reasoning': {'typ"
+        "e': 'string'}}, 'required': ['choice', 'reasoning']})['choic"
+        "e']]\n"
+        'write({"overall": sum(v.values()) / len(v), **v})\n'
     )
     for script in task.glob("*/run.sh"):
         script.chmod(0o755)
     return task
 
 
-async def run_judged_task(tmp_path: Path, provider, *, path: str) -> None:  # type: ignore[no-untyped-def]
+async def run_judged_task(tmp_path: Path, provider, *, path: str, crash: bool = False) -> None:  # type: ignore[no-untyped-def]
     """A Judge in the verifier reaches a Host endpoint through the Gateway, keyless."""
     secret = "sandbox-direct-secret"
     seen: list[str] = []
@@ -168,7 +165,11 @@ async def run_judged_task(tmp_path: Path, provider, *, path: str) -> None:  # ty
     os.environ["JUDGE_KEY"] = secret
     gateway = Gateway()
     gateway_url = await gateway.start()
-    task = load_tasks(judged_task(tmp_path / "repo"))[0]
+    task_root = judged_task(tmp_path / "repo")
+    if crash:
+        script = task_root / "verify/verify.py"
+        script.write_text(script.read_text() + "raise RuntimeError('after Judge and write')\n")
+    task = load_tasks(task_root)[0]
     try:
         result = await run_episode(
             task,
@@ -191,16 +192,20 @@ async def run_judged_task(tmp_path: Path, provider, *, path: str) -> None:  # ty
         await gateway.stop()
         await runner.cleanup()
 
-    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {
-        "credential_scope": 1.0,
-        "key_withheld": 1.0,
-        "correctness": 1.0,
-        "overall": 1.0,
-    }
+    if crash:
+        assert result.verdict.status is Status.TASK_ERROR
+        assert result.verdict.rewards is None
+        assert not (result.run_dir / "verification.json").exists()
+    else:
+        assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+        assert result.verdict.rewards == {"overall": 1.0}
+        assert json.loads((result.run_dir / "verification.json").read_text())["overall"] == 1
     assert seen and all(secret in header for header in seen)
-    record = json.loads((result.run_dir / "verification.json").read_text())
-    invocation = record["judge_invocations"][0]
+    invocation = next(
+        json.loads(line)["invocation"]
+        for line in (result.run_dir / "llm-judge.jsonl").read_text().splitlines()
+        if json.loads(line)["event"] == "completed"
+    )
     assert invocation["attempts"][0]["endpoint_identity"].endswith(path)
     assert invocation["attempts"][0]["usage"] in (
         {"input_tokens": 2, "output_tokens": 1},
@@ -233,3 +238,9 @@ async def test_chat_completions_judge_runs_through_the_gateway(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_anthropic_messages_judge_runs_through_the_gateway(tmp_path: Path) -> None:
     await run_judged_task(tmp_path, DockerProvider(), path="/v1/messages")
+
+
+@pytest.mark.needs_docker
+@pytest.mark.asyncio
+async def test_judge_logs_survive_a_later_task_crash(tmp_path: Path) -> None:
+    await run_judged_task(tmp_path, DockerProvider(), path="/v1/responses", crash=True)

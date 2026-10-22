@@ -1,6 +1,5 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agents-last-exam.org/schemas/validation-observation-v1.json",
   "title": "ALE Validation Observation",
   "type": "object",
   "additionalProperties": false,
