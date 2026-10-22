@@ -19,7 +19,7 @@ from ale.run.providers import ProviderRegistry
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import prepare_task_image, prepare_task_image_result
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import VM_BASE
+from tests.support import CONTAINER_BASE, VM_BASE
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -111,6 +111,47 @@ async def test_local_container_build_reuse_and_input_boundaries(
     dockerfile.write_text(dockerfile.read_text() + "\nRUN true\n")
     image_edit = await prepare_task_image(load_tasks(task_path)[0], registry)
     assert image_edit.input_identity != first.input_identity
+
+
+@pytest.mark.asyncio
+async def test_container_cache_tracks_copied_file_permissions(
+    tmp_path: Path, isolated_ale_cache: Path
+) -> None:
+    task_path = scaffold_task(tmp_path / "task")
+    context = task_path / "image"
+    assets = context / "assets"
+    assets.mkdir()
+    copied_dir = assets / "nested"
+    copied_dir.mkdir()
+    copied_dir.chmod(0o755)
+    payload = copied_dir / "payload"
+    payload.write_text("permission probe")
+    payload.chmod(0o644)
+    (context / "Dockerfile").write_text(f"FROM {CONTAINER_BASE}\nCOPY assets/ /permission-probe/\n")
+    registry = ProviderRegistry(RunConfig())
+    identities = []
+    for file_mode in (0o644, 0o664):
+        payload.chmod(file_mode)
+        prepared = await prepare_task_image_result(load_tasks(task_path)[0], registry)
+        identities.append(prepared.image.runtime_ref)
+        assert prepared.steps[1].outcome == "executed"
+        code, out, err = await task_images._run(
+            "docker",
+            "run",
+            "--rm",
+            "--network=none",
+            "--entrypoint",
+            "stat",
+            prepared.image.runtime_ref,
+            "-c",
+            "%a",
+            "/permission-probe/nested/payload",
+        )
+        assert code == 0, err
+        assert out.strip() == f"{file_mode:o}"
+        reused = await prepare_task_image_result(load_tasks(task_path)[0], registry)
+        assert reused.steps[1].outcome == "reused"
+    assert len(set(identities)) == 2
 
 
 @pytest.mark.asyncio
