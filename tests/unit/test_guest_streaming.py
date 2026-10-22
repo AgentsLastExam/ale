@@ -8,13 +8,14 @@ import socket
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from ale.core.errors import OutputStreamError
 from ale.run.guestd.main import Handler, _Server, _TCPHandler
-from ale.run.transport import GuestClient
+from ale.run.transport import GuestClient, TcpTransport
 
 pytestmark = pytest.mark.unit
 
@@ -33,6 +34,28 @@ def test_tcp_guest_replies_without_client_eof() -> None:
                 client.sendall(b'{"id":2,"op":"health","params":{}}\n')
                 assert json.loads(replies.readline())["ok"] is True
         finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_tcp_guest_round_trips_multiple_chunks_and_empty_file(tmp_path: Path) -> None:
+    with _Server(("127.0.0.1", 0), _TCPHandler) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        transport = TcpTransport(*server.server_address, token="t" * 43)
+        try:
+            await transport.start(timeout_sec=5)
+            client = GuestClient(transport)
+            path = str(tmp_path / "large.bin")
+            data = bytes(range(256)) * (5 * 1024 * 1024 // 256)
+            await client.write_file(path, data)
+            assert await client.read_file(path) == data
+            await client.write_file(path, b"")
+            assert await client.read_file(path) == b""
+            assert (await client.health())["os"]
+        finally:
+            await transport.close()
             server.shutdown()
             thread.join(timeout=2)
 

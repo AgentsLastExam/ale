@@ -504,7 +504,7 @@ def serve_stream(reader: TextIO | BinaryIO, writer: TextIO, claim: Claim | None 
 
 
 class _TCPHandler(socketserver.StreamRequestHandler):
-    rbufsize = 0
+    rbufsize = 64 * 1024
 
     def handle(self) -> None:
         writer = self.wfile
