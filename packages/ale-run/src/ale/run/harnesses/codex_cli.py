@@ -117,10 +117,24 @@ class CodexCliHarness(AutonomousHarness):
             target = skills_root / skill.name
             await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
             if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
+                result = await sandbox.exec(
+                    bash_command(
+                        session.home,
+                        shlex.join(
+                            [
+                                "chmod",
+                                "+x",
+                                "--",
+                                *(str(target / path) for path in skill.executable_files),
+                            ]
+                        ),
+                    ),
                     identity=Identity.AGENT,
                 )
+                if not result.ok:
+                    raise AgentError(
+                        f"could not make Codex skill executable: {result.stderr[-800:]}"
+                    )
 
         lines = [
             'model_provider = "ale"',

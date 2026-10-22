@@ -382,11 +382,19 @@ async def test_resource_translation_uses_episode_local_native_config(tmp_path: P
 async def test_codex_resources_create_skills_directory_on_windows(tmp_path: Path) -> None:
     sandbox = FakeSandbox()
     current = session(home=r"C:\Users\Agent User")
-    await CodexCliHarness().install_resources(sandbox, current, resources(tmp_path))  # type: ignore[arg-type]
+    effective = resources(tmp_path)
+    skill = effective.skills[0].model_copy(update={"executable_files": ("run tool.sh",)})
+    effective = effective.model_copy(update={"skills": (skill,)})
+    await CodexCliHarness().install_resources(sandbox, current, effective)  # type: ignore[arg-type]
     command = sandbox.commands[0]
     assert command[:2] == ["C:/Program Files/Git/bin/bash.exe", "-c"]
     assert "mkdir -p -- 'C:/Users/Agent User/.codex-ale/skills'" in command[2]
     assert "C:/Users/Agent User/.codex-ale/config.toml" in sandbox.files
+    chmod = sandbox.commands[1]
+    assert chmod[:2] == ["C:/Program Files/Git/bin/bash.exe", "-c"]
+    assert (
+        "chmod +x -- 'C:/Users/Agent User/.codex-ale/skills/resource-proof/run tool.sh'" in chmod[2]
+    )
 
 
 async def test_codex_resources_fail_if_skills_directory_cannot_be_created(tmp_path: Path) -> None:
