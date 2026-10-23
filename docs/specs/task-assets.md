@@ -15,7 +15,9 @@ pending change; it is not the current CLI contract.
 ## Repository and access
 
 Each Task source repository has one private Hugging Face dataset named
-`agents-last-exam/<source-repository-name>`, in that organization's `assets` collection.
+`<namespace>/<source-repository-name>`, in that namespace's `assets` collection. The
+namespace is `agents-last-exam` unless `ALE_ASSETS_NAMESPACE` names another organization
+or user, so a Task repository maintained elsewhere keeps its assets in its own namespace.
 The source repository name comes from its `origin` URL, falling back to the main Git
 directory. A linked worktree's directory name is never the dataset name. Dataset paths
 mirror source paths, for example `tasks/example/verify/assets/expected.json`.
@@ -25,7 +27,7 @@ It does not upload Task files. An existing public dataset is rejected. Commands 
 operator's HF authentication, including `HF_TOKEN`; credentials never enter a remote
 Git URL or the Task definition. Git and Git LFS must be installed for local checkpoints
 and uploads. `ALE_ASSETS_COLLECTION` or `--collection`, when supplied for manual sync,
-must identify the organization's collection titled `assets`; otherwise it is discovered.
+must identify the namespace's collection titled `assets`; otherwise it is discovered.
 
 ## Local versions
 

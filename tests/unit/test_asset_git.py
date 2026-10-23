@@ -216,8 +216,11 @@ def test_repository_name_uses_origin_and_main_worktree(write_task_repo, tmp_path
     assert select_asset_repositories([linked])[0].repository_name == "canonical-tasks"
 
 
+@pytest.mark.parametrize(
+    ("configured", "namespace"), [(None, "agents-last-exam"), ("other-team", "other-team")]
+)
 def test_private_org_repository_and_collection_are_enforced(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, configured: str | None, namespace: str
 ) -> None:
     calls: list[tuple[str, object]] = []
 
@@ -229,22 +232,27 @@ def test_private_org_repository_and_collection_are_enforced(
             return SimpleNamespace(private=True)
 
         def list_collections(self, **kwargs: object) -> list[object]:
-            assert kwargs == {"owner": "agents-last-exam"}
-            return [SimpleNamespace(title="assets", slug="agents-last-exam/assets-123")]
+            assert kwargs == {"owner": namespace}
+            return [SimpleNamespace(title="assets", slug=f"{namespace}/assets-123")]
 
         def add_collection_item(self, *args: object, **kwargs: object) -> None:
             calls.append(("collection", args))
 
     monkeypatch.delenv("ALE_ASSETS_COLLECTION", raising=False)
+    if configured is None:
+        monkeypatch.delenv("ALE_ASSETS_NAMESPACE", raising=False)
+    else:
+        monkeypatch.setenv("ALE_ASSETS_NAMESPACE", configured)
     monkeypatch.setattr("huggingface_hub.HfApi", Api)
     assert ensure_asset_repository("tasks-example") == (
-        "agents-last-exam/tasks-example",
-        "agents-last-exam/assets-123",
+        f"{namespace}/tasks-example",
+        f"{namespace}/assets-123",
     )
     assert calls[0] == (
-        "agents-last-exam/tasks-example",
+        f"{namespace}/tasks-example",
         {"repo_type": "dataset", "private": True, "exist_ok": True},
     )
+    AssetCheckpoint(repo_id=f"{namespace}/demo", task_path="tasks/demo", workspace=Path("/w"))
 
 
 def test_removed_assets_have_a_deletion_commit(
