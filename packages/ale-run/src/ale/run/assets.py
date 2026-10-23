@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 Stage = Literal["image", "setup", "verify", "oracle"]
 STAGES: tuple[Stage, ...] = ("image", "setup", "verify", "oracle")
+DEFAULT_NAMESPACE = "agents-last-exam"
 
 __all__ = [
     "AssetRepositorySelection",
@@ -155,7 +156,7 @@ def pull_assets(
     api = HfApi()
     results: list[AssetSyncResult] = []
     for selection in selections:
-        remote_repo_id = f"agents-last-exam/{selection.repository_name}"
+        remote_repo_id = asset_repo_id(selection.repository_name)
         collection_slug = asset_collection(api, collection, create=False)
         info = api.repo_info(remote_repo_id, repo_type="dataset", revision=revision or "main")
         if not info.private:
@@ -243,32 +244,40 @@ def push_assets(
     return tuple(results)
 
 
+def asset_namespace() -> str:
+    """The Hugging Face organization or user that owns asset datasets and their collection."""
+    return os.environ.get("ALE_ASSETS_NAMESPACE", "").strip() or DEFAULT_NAMESPACE
+
+
+def asset_repo_id(repository_name: str) -> str:
+    return f"{asset_namespace()}/{repository_name}"
+
+
 def asset_collection(api: HfApi, collection: str | None = None, *, create: bool) -> str:
-    """Resolve the organization's assets collection without depending on the caller's account."""
+    """Resolve the namespace's assets collection without depending on the caller's account."""
+    namespace = asset_namespace()
     configured = collection or os.environ.get("ALE_ASSETS_COLLECTION", "").strip()
     if configured:
         slug = resolve_asset_collection(configured).collection_slug
         item = api.get_collection(slug)
-        if not slug.startswith("agents-last-exam/") or item.title != "assets":
-            raise AssetError("asset collection must be agents-last-exam's assets collection")
+        if not slug.startswith(f"{namespace}/") or item.title != "assets":
+            raise AssetError(f"asset collection must be {namespace}'s assets collection")
         return slug
-    matches = [
-        item for item in api.list_collections(owner="agents-last-exam") if item.title == "assets"
-    ]
+    matches = [item for item in api.list_collections(owner=namespace) if item.title == "assets"]
     if len(matches) == 1:
         return matches[0].slug
     if not matches and create:
         return api.create_collection(
-            "assets", namespace="agents-last-exam", private=True, exists_ok=True
+            "assets", namespace=namespace, private=True, exists_ok=True
         ).slug
-    raise AssetError("agents-last-exam must have exactly one assets collection")
+    raise AssetError(f"{namespace} must have exactly one assets collection")
 
 
 def ensure_asset_repository(repository_name: str, collection: str | None = None) -> tuple[str, str]:
     from huggingface_hub import HfApi
 
     api = HfApi()
-    repo_id = f"agents-last-exam/{repository_name}"
+    repo_id = asset_repo_id(repository_name)
     api.create_repo(repo_id, repo_type="dataset", private=True, exist_ok=True)
     if not api.repo_info(repo_id, repo_type="dataset").private:
         raise AssetError(f"asset dataset must be private: {repo_id}")
