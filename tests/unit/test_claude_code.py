@@ -178,38 +178,20 @@ async def test_native_resume_uses_exact_id_and_only_new_input() -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_resume_rejects_drift_other_sandbox_and_missing_state() -> None:
+async def test_native_resume_continues_wherever_the_session_files_are() -> None:
     harness = ClaudeCodeHarness()
     sandbox = FakeSandbox()
-    current = native_session()
-    first = await harness.launch("first", sandbox, current, timeout_sec=10)  # type: ignore[arg-type]
+    first = await harness.launch("first", sandbox, native_session(), timeout_sec=10)  # type: ignore[arg-type]
     assert first.continuation is not None
 
-    with pytest.raises(NativeContinuationError, match="original live sandbox"):
-        await harness.resume(
-            "next",
-            first.continuation,
-            sandbox,  # type: ignore[arg-type]
-            native_session(sandbox_id="other"),
-            timeout_sec=10,
-        )
-    with pytest.raises(NativeContinuationError, match="changed"):
-        await ClaudeCodeHarness(settings={"effort": "high"}).resume(
-            "next",
-            first.continuation,
-            sandbox,  # type: ignore[arg-type]
-            current,
-            timeout_sec=10,
-        )
+    # A sandbox started from a snapshot is another sandbox in another episode.
+    later = native_session(sandbox_id="from-snapshot")
+    second = await harness.resume("next", first.continuation, sandbox, later, timeout_sec=10)  # type: ignore[arg-type]
+    assert second.continuation == first.continuation
+
     sandbox.has_state = False
     with pytest.raises(NativeContinuationError, match="absent"):
-        await harness.resume(
-            "next",
-            first.continuation,
-            sandbox,  # type: ignore[arg-type]
-            current,
-            timeout_sec=10,
-        )
+        await harness.resume("next", first.continuation, sandbox, later, timeout_sec=10)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

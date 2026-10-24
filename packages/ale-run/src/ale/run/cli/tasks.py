@@ -30,7 +30,11 @@ from ale.core.validation import (
 from ale.core.verdict import Status, Verdict
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.assets import observe_task_assets
-from ale.run.environments.standard import RetainedVerificationEnvironment, StandardEnvironment
+from ale.run.environments.standard import (
+    Resume,
+    RetainedVerificationEnvironment,
+    StandardEnvironment,
+)
 from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
@@ -49,6 +53,7 @@ from ale.run.provenance import (
     gateway_provenance,
 )
 from ale.run.providers import ProviderRegistry
+from ale.run.providers.docker import SNAPSHOT_PREFIX, snapshot_image
 from ale.run.recording import atomic_write_json
 from ale.run.secrets import provider_credentials
 from ale.run.sources import parse_task_reference, resolve, select_tasks
@@ -149,6 +154,7 @@ async def _run_one(
     runs_dir: Path,
     run_id: str | None = None,
     require_reportable: bool = False,
+    continue_from: Path | None = None,
 ) -> int:
     try:
         authentication = resolve_authentication(settings.agent)
@@ -176,7 +182,18 @@ async def _run_one(
             harness.validate_os(task.spec.os)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
-    except AleError as error:
+        resume, resumed_from = None, None
+        if continue_from is not None:
+            source, source_lock, handle = _continuation_source(continue_from)
+            resume = _resume(source, source_lock, handle, harness, len(tasks) * settings.episodes)
+            resumed_from = source.episode_id
+            # The episode starts from the source's disk: its snapshot, or its kept sandbox,
+            # which is attached only if it still runs the image it was created from.
+            for task in tasks:
+                task.prepared_image = (
+                    snapshot_image(handle) if resume.attach is None else _locked_image(source_lock)
+                )
+    except (AleError, OSError, ValueError) as error:
         typer.echo(f"{error}", err=True)
         return EXIT_BAD_REFERENCE
 
@@ -251,7 +268,10 @@ async def _run_one(
             return await run_episode(
                 task,
                 StandardEnvironment(
-                    harness, max_steps=settings.agent.max_steps, timeouts=settings.timeouts
+                    harness,
+                    max_steps=settings.agent.max_steps,
+                    timeouts=settings.timeouts,
+                    resume=resume,
                 ),
                 providers,
                 run_dir=run_dir,
@@ -321,6 +341,7 @@ async def _run_one(
                 gateway=gateway_provenance(settings),
                 config_hash=settings.config_hash,
                 timeouts=settings.timeouts,
+                resumed_from=resumed_from,
             )
             if task.prepared_image is None:
                 raise TaskDefinitionError(f"solver image was not prepared for {task.spec.label}")
@@ -445,24 +466,7 @@ async def _reverify(
             # Reverification reuses an existing solver, not a freshly rebuilt image.
             # Each source episode owns its exact prepared image and immutable provenance.
             task = copy.copy(task)
-            image = source_lock.image
-            task.prepared_image = PreparedTaskImage(
-                kind=image.declaration.kind,
-                source="solver-local" if image.source == "local" else "external-ref",
-                input_identity=image.input_identity,
-                image_source_identity=image.image_source_identity,
-                runtime_ref=(
-                    image.prepared_identity
-                    if image.declaration.kind is ImageKind.CONTAINER
-                    else image.runtime_ref
-                ),
-                prepared_identity=image.prepared_identity,
-                base_materials=image.base_materials,
-                resolved_reference=image.resolved_reference,
-                oci_identity=image.oci_identity,
-                materializer_identity=image.materializer_identity,
-                builder_identity=image.builder_identity,
-            )
+            task.prepared_image = _locked_image(source_lock)
             try:
                 task.asset_observation = observed_assets
                 prepared = await prepare_verifier_image_result(task, providers)
@@ -591,6 +595,68 @@ def _retained_source_episodes(
     if not episodes:
         raise ValueError(f"no retained solver episode found under {source_run}")
     return tuple(episodes)
+
+
+def _locked_image(lock: RunLock) -> PreparedTaskImage:
+    """The exact solver image a prior episode recorded."""
+    image = lock.image
+    return PreparedTaskImage(
+        kind=image.declaration.kind,
+        source="solver-local" if image.source == "local" else "external-ref",
+        input_identity=image.input_identity,
+        image_source_identity=image.image_source_identity,
+        runtime_ref=(
+            image.prepared_identity
+            if image.declaration.kind is ImageKind.CONTAINER
+            else image.runtime_ref
+        ),
+        prepared_identity=image.prepared_identity,
+        base_materials=image.base_materials,
+        resolved_reference=image.resolved_reference,
+        oci_identity=image.oci_identity,
+        materializer_identity=image.materializer_identity,
+        builder_identity=image.builder_identity,
+    )
+
+
+def _continuation_source(episode: Path) -> tuple[ResultRecord, RunLock, str]:
+    """A prior episode's record, lock and the handle of its kept or snapshot solver."""
+    episode = episode.expanduser().resolve()
+    result = ResultRecord.model_validate_json((episode / "result.json").read_text())
+    lock = RunLock.model_validate_json((episode / "lock.json").read_text())
+    handle = next(
+        (
+            sandbox.handle
+            for sandbox in result.sandboxes
+            if "solver" in sandbox.roles
+            and sandbox.outcome in {"retained", "snapshotted"}
+            and sandbox.handle is not None
+        ),
+        None,
+    )
+    if result.continuation is None or handle is None:
+        raise ValueError(
+            f"{episode} has no native agent session with a kept or snapshot solver sandbox; "
+            'run it with [sandbox_retention] solver = "keep" or "snapshot"'
+        )
+    return result, lock, handle
+
+
+def _resume(
+    source: ResultRecord, lock: RunLock, handle: str, harness: Harness, episodes: int
+) -> Resume:
+    continuation = source.continuation
+    assert continuation is not None
+    if continuation.harness != harness.name:
+        raise ConfigError(
+            f"{source.episode_id} is a {continuation.harness} session; run it with that agent"
+        )
+    if handle.startswith(SNAPSHOT_PREFIX):
+        return Resume(continuation)
+    # A kept sandbox is one live machine: a second episode would share or race for it.
+    if episodes != 1:
+        raise ConfigError("a kept sandbox continues in exactly one episode; snapshot it to branch")
+    return Resume(continuation, attach=lambda request: _attach_retained(handle, request, lock))
 
 
 async def _attach_retained(

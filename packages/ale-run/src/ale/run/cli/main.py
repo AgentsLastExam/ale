@@ -38,6 +38,9 @@ from ale.run.providers.docker import (
     HANDLE_PREFIX as DOCKER_HANDLE_PREFIX,
 )
 from ale.run.providers.docker import (
+    SNAPSHOT_PREFIX as DOCKER_SNAPSHOT_PREFIX,
+)
+from ale.run.providers.docker import (
     destroy_retained as destroy_retained_docker,
 )
 from ale.run.providers.docker import (
@@ -144,11 +147,21 @@ def run(
             help="Fail unless every episode's provenance could back a published result",
         ),
     ] = False,
+    continue_from: Annotated[
+        Path | None,
+        typer.Option(
+            "--continue-from",
+            help="Episode directory whose kept or snapshot sandbox and agent session to continue",
+        ),
+    ] = None,
 ) -> None:
     """Run a task and report its verdict.
 
     Re-invoking with the same ``--run-id`` continues where an interrupted run stopped:
     episodes are matched by what they are, not by when they ran.
+
+    ``--continue-from`` starts each episode from a prior episode's sandbox, kept or
+    snapshot, and resumes that episode's native agent session with this task's instruction.
     """
     flags = [*(overrides or []), f"episodes={episodes}", f"concurrency={concurrency}"]
     if episode_retries is not None:
@@ -162,7 +175,9 @@ def run(
     if api_key_env:
         flags.append(f"gateway.api_key_env={api_key_env}")
     settings = _config(config, flags, agent=agent, model=model)
-    exit_code = asyncio.run(_run_one(reference, settings, runs_dir, run_id, require_reportable))
+    exit_code = asyncio.run(
+        _run_one(reference, settings, runs_dir, run_id, require_reportable, continue_from)
+    )
     raise typer.Exit(exit_code)
 
 
@@ -415,11 +430,11 @@ async def _list_retained_sandboxes() -> list[dict[str, object]]:
 async def _destroy_retained_sandbox(handle: str) -> None:
     if handle.startswith(QEMU_HANDLE_PREFIX):
         await destroy_retained_qemu(handle)
-    elif handle.startswith(DOCKER_HANDLE_PREFIX):
+    elif handle.startswith((DOCKER_HANDLE_PREFIX, DOCKER_SNAPSHOT_PREFIX)):
         await destroy_retained_docker(handle)
     else:
         raise ProviderCapabilityError(
-            "retained sandbox handle must start with 'docker:' or 'qemu:'"
+            "retained sandbox handle must start with 'docker:', 'docker-snapshot:' or 'qemu:'"
         )
 
 

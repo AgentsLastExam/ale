@@ -19,7 +19,7 @@ import json
 import logging
 import shutil
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
@@ -41,6 +41,7 @@ from ale.core.harness import (
     AutonomousHarness,
     EffectiveAgentResources,
     Harness,
+    NativeContinuation,
     PolicyHarness,
     TrajectoryParseContext,
 )
@@ -115,6 +116,18 @@ def _sandbox_path(operating_system: OperatingSystem, root: str, *parts: str) -> 
     return str(path_type(root).joinpath(*parts))
 
 
+@dataclass(frozen=True)
+class Resume:
+    """Continue a native agent session rather than launch a new one.
+
+    ``attach`` reconnects a kept sandbox for the episode's request; without it the sandbox
+    is provisioned as usual, from the snapshot the caller made the episode's image.
+    """
+
+    continuation: NativeContinuation
+    attach: Callable[[SandboxRequest], Awaitable[Sandbox]] | None = None
+
+
 class StandardEnvironment(Environment):
     """Linear provision → setup → agent → verify flow."""
 
@@ -128,12 +141,14 @@ class StandardEnvironment(Environment):
         stall_limit: int = DEFAULT_STALL_LIMIT,
         agent_enabled: bool = True,
         timeouts: RunTimeouts | None = None,
+        resume: Resume | None = None,
     ) -> None:
         self.harness = harness
         self.max_steps = max_steps
         self.stall_limit = stall_limit
         self.agent_enabled = agent_enabled
         self.timeouts = timeouts or RunTimeouts()
+        self.resume = resume
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
         spec = task.spec
@@ -204,7 +219,10 @@ class StandardEnvironment(Environment):
             sudo=spec.resources.sudo,
             user=spec.image.user,
         )
-        sandbox = await ctx.sandboxes.acquire(request)
+        if self.resume is not None and self.resume.attach is not None:
+            sandbox = ctx.sandboxes.adopt(await self.resume.attach(request))
+        else:
+            sandbox = await ctx.sandboxes.acquire(request)
         ctx.resolved_image = sandbox.resolved_image
         ctx.resource_allocation = sandbox.allocation
         # Derived from the account the image declared, not configured anywhere. A run
@@ -301,18 +319,25 @@ class StandardEnvironment(Environment):
         await self._seal(ctx, sandbox)
 
         async def launch() -> None:
+            recorded = _RecordedSandbox(
+                ctx,
+                sandbox,
+                component="harness-launch",
+                actor="task" if harness.name == "oracle" else "framework",
+            )
             with _limit_terminated(ctx):
-                run = await harness.launch(
-                    spec.instruction,
-                    _RecordedSandbox(
-                        ctx,
-                        sandbox,
-                        component="harness-launch",
-                        actor="task" if harness.name == "oracle" else "framework",
-                    ),
-                    session,
-                    timeout_sec=timeout,
-                )
+                if self.resume is None:
+                    run = await harness.launch(
+                        spec.instruction, recorded, session, timeout_sec=timeout
+                    )
+                else:
+                    run = await harness.resume(
+                        spec.instruction,
+                        self.resume.continuation,
+                        recorded,
+                        session,
+                        timeout_sec=timeout,
+                    )
                 ctx.agent_run = run
                 if run.exit_code != 0:
                     detail = run.final_message or "no diagnostic output"

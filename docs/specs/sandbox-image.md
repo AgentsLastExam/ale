@@ -264,12 +264,14 @@ Given a conforming image, the Docker Provider:
 - observes the resulting image and resource allocation;
 - labels every ALE container with episode, physical role, requested retention, and GPU
   identity;
-- destroys by default or returns a retained handle after framework sanitation.
+- destroys by default, or after framework sanitation returns a retained handle or
+  commits a snapshot image (`docker-snapshot:<image ID>`) and destroys the container.
 
 The QEMU Provider applies the same retention contract to its runner container and the
 episode qcow2 overlay mounted into it. `keep` leaves both alive and discoverable;
 `ale sandbox destroy HANDLE` removes both. Provider-qualified QEMU handles prevent the
-runner from being mistaken for a container sandbox.
+runner from being mistaken for a container sandbox. QEMU does not snapshot yet and
+rejects `snapshot` retention.
 
 QEMU enforces Task egress in the runner network namespace, outside both Linux and Windows
 guests. The guest does not need an OS-specific firewall implementation for ALE policy.

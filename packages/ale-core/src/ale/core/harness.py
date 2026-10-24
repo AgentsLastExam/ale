@@ -147,15 +147,17 @@ class EffectiveAgentResources(BaseModel):
 
 
 class NativeContinuation(BaseModel):
-    """Exact native session state, valid only in its original live sandbox."""
+    """What continues one native agent session: its harness and native session ID.
+
+    The session itself is files in the sandbox, so it continues wherever those files are:
+    the original sandbox while it is kept, or a sandbox started from its snapshot. The
+    harness checks that the session exists before resuming; nothing else is bound to it.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     harness: str
     native_session_id: str
-    episode_id: str
-    sandbox_id: str
-    fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class AgentRun(BaseModel):
@@ -299,7 +301,7 @@ class AutonomousHarness(Harness):
         *,
         timeout_sec: float,
     ) -> AgentRun:
-        """Continue an exact native session using only the new instruction."""
+        """Continue a native session in this sandbox using only the new instruction."""
         raise AgentUnsupportedError(f"{self.name} does not support native resume")
 
 

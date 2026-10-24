@@ -235,8 +235,6 @@ async def attach_retained(
         or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
     ):
         raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
-    if labels.get(EPISODE_LABEL) != request.episode_id:
-        raise ProviderCapabilityError(f"{handle!r} belongs to a different episode")
     if not record.get("State", {}).get("Running"):
         raise ProviderStartError(f"retained sandbox {handle!r} is not running")
     storage = labels.get(STORAGE_LABEL, "")
@@ -740,6 +738,8 @@ class QemuProvider(Provider):
 
     async def create(self, request: SandboxRequest) -> QemuSandbox:
         self.accepts(request)
+        if request.retention == "snapshot":
+            raise ProviderCapabilityError("QemuProvider cannot snapshot sandboxes yet; use keep")
         if request.image_kind is not ImageKind.VM:
             raise ProviderCapabilityError("QemuProvider requires image.kind=vm")
         await self.preflight()

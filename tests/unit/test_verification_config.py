@@ -135,3 +135,7 @@ def test_sandbox_retention_is_run_owned_and_defaults_to_destroy() -> None:
     assert configured.sandbox_retention.solver == "keep"
     with pytest.raises(ValidationError):
         RunConfig.model_validate({"sandbox_retention": {"solver": "sometimes"}})
+    snapshot = RunConfig.model_validate({"sandbox_retention": {"solver": "snapshot"}})
+    assert snapshot.sandbox_retention.solver == "snapshot"
+    with pytest.raises(ValidationError):
+        RunConfig.model_validate({"sandbox_retention": {"verifier": "snapshot"}})

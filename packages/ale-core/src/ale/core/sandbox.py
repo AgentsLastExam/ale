@@ -228,7 +228,7 @@ class SandboxRequest(BaseModel):
     episode_id: str
     os: OperatingSystem = OperatingSystem.LINUX
     role: SandboxRole = SandboxRole.SOLVER
-    retention: Literal["destroy", "keep"] = "destroy"
+    retention: Literal["destroy", "keep", "snapshot"] = "destroy"
     prepared_image: PreparedTaskImage
     resources: Resources
     network: NetworkPolicy
@@ -413,6 +413,12 @@ class Sandbox(ABC):
         self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
     ) -> RetainedSandbox:
         raise ProviderCapabilityError(f"{type(self).__name__} does not support retention")
+
+    async def snapshot(
+        self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
+    ) -> RetainedSandbox:
+        """Save this sandbox's disk as a durable image; the caller then destroys it."""
+        raise ProviderCapabilityError(f"{type(self).__name__} does not support snapshots")
 
     async def screenshot(self) -> bytes:
         """Capture the guest desktop. Only meaningful on GUI-capable sandboxes."""

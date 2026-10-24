@@ -57,6 +57,7 @@ __all__ = [
     "attach_retained",
     "destroy_retained",
     "list_retained",
+    "snapshot_image",
 ]
 
 GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
@@ -69,6 +70,9 @@ ROLE_LABEL = "ale.role"
 RETENTION_LABEL = "ale.retention"
 GPU_LABEL = "ale.gpus"
 HANDLE_PREFIX = "docker:"
+#: A snapshot is an image, named by its ID: ``docker-snapshot:sha256:…``.
+SNAPSHOT_PREFIX = "docker-snapshot:"
+SNAPSHOT_REPOSITORY = "ale-snapshot"
 
 #: The name a sandbox uses for its gateway. It is mapped to the host's address *on the
 #: container's own bridge* rather than to docker's usual host-gateway: an ``--internal``
@@ -109,12 +113,12 @@ async def list_retained() -> list[dict[str, object]]:
     if code != 0:
         raise ProviderStartError(f"could not list ALE sandboxes: {stderr.strip()}")
     handles = output.split()
-    if not handles:
-        return []
-    code, raw, stderr = await _docker("inspect", *handles, timeout=30)
-    if code != 0:
-        raise ProviderStartError(f"could not inspect ALE sandboxes: {stderr.strip()}")
-    records = json.loads(raw)
+    records = []
+    if handles:
+        code, raw, stderr = await _docker("inspect", *handles, timeout=30)
+        if code != 0:
+            raise ProviderStartError(f"could not inspect ALE sandboxes: {stderr.strip()}")
+        records = json.loads(raw)
     found: list[dict[str, object]] = []
     for record in records:
         labels = record.get("Config", {}).get("Labels", {}) or {}
@@ -133,10 +137,75 @@ async def list_retained() -> list[dict[str, object]]:
                 "cleanup_command": f"ale sandbox destroy {handle}",
             }
         )
-    return sorted(found, key=lambda item: str(item["handle"]))
+    return sorted([*found, *await _list_snapshots()], key=lambda item: str(item["handle"]))
+
+
+async def _list_snapshots() -> list[dict[str, object]]:
+    code, output, stderr = await _docker(
+        "images",
+        "-q",
+        "--no-trunc",
+        "--filter",
+        f"label={MANAGED_LABEL}=true",
+        "--filter",
+        f"label={RETENTION_LABEL}=snapshot",
+        timeout=30,
+    )
+    if code != 0:
+        raise ProviderStartError(f"could not list ALE snapshots: {stderr.strip()}")
+    images = sorted(set(output.split()))
+    if not images:
+        return []
+    code, raw, stderr = await _docker("image", "inspect", *images, timeout=30)
+    if code != 0:
+        raise ProviderStartError(f"could not inspect ALE snapshots: {stderr.strip()}")
+    found: list[dict[str, object]] = []
+    for record in json.loads(raw):
+        labels = record.get("Config", {}).get("Labels", {}) or {}
+        handle = f"{SNAPSHOT_PREFIX}{record['Id']}"
+        found.append(
+            {
+                "provider": "docker",
+                "handle": handle,
+                "episode": labels.get(LABEL, ""),
+                "role": labels.get(ROLE_LABEL, ""),
+                "image": record["Id"],
+                "gpus": (),
+                "running": False,
+                "cleanup_command": f"ale sandbox destroy {handle}",
+            }
+        )
+    return found
+
+
+def snapshot_image(handle: str) -> PreparedTaskImage:
+    """The image a snapshot handle names, ready to provision a new sandbox from."""
+    if not handle.startswith(SNAPSHOT_PREFIX):
+        raise ProviderCapabilityError(f"{handle!r} is not a Docker snapshot handle")
+    identity = handle.removeprefix(SNAPSHOT_PREFIX)
+    return PreparedTaskImage(
+        kind=ImageKind.CONTAINER,
+        source="solver-local",
+        input_identity=identity,
+        image_source_identity=identity,
+        runtime_ref=identity,
+        prepared_identity=identity,
+    )
 
 
 async def destroy_retained(handle: str) -> None:
+    if handle.startswith(SNAPSHOT_PREFIX):
+        image = handle.removeprefix(SNAPSHOT_PREFIX)
+        code, raw, stderr = await _docker("image", "inspect", image, timeout=30)
+        if code != 0:
+            raise ProviderStartError(f"snapshot {handle!r} does not exist: {stderr.strip()}")
+        labels = json.loads(raw)[0].get("Config", {}).get("Labels", {}) or {}
+        if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "snapshot":
+            raise ProviderCapabilityError(f"{handle!r} is not an ALE snapshot")
+        code, _, stderr = await _docker("image", "rm", image, timeout=120)
+        if code != 0:
+            raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
+        return
     if not handle.startswith(HANDLE_PREFIX):
         raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
     container = handle.removeprefix(HANDLE_PREFIX)
@@ -180,8 +249,6 @@ async def attach_retained(
         or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
     ):
         raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
-    if labels.get(LABEL) != request.episode_id:
-        raise ProviderCapabilityError(f"{handle!r} belongs to a different episode")
     if not record.get("State", {}).get("Running"):
         raise ProviderStartError(f"retained sandbox {handle!r} is not running")
 
@@ -195,6 +262,8 @@ async def attach_retained(
     )
     if len(networks) > 1:
         raise ProviderCapabilityError(f"{handle!r} has more than one ALE network")
+    if not networks and request.network.mode is not NetworkMode.OPEN:
+        raise ProviderCapabilityError(f"{handle!r} has open egress; this Task does not allow it")
     provider = DockerProvider()
     if networks:
         await provider._restrict_host(container, networks[0], request, reattached=True)
@@ -493,6 +562,31 @@ class DockerSandbox(Sandbox):
             reason=reason,
             cleanup_command=f"ale sandbox destroy {handle}",
             gpu_devices=gpu_devices,
+        )
+
+    async def snapshot(
+        self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
+    ) -> RetainedSandbox:
+        # The image keeps the container's labels; these mark it as a snapshot and free the
+        # GPUs it names, which a new sandbox from it selects for itself.
+        code, output, stderr = await _docker(
+            "commit",
+            "--change",
+            f"LABEL {RETENTION_LABEL}=snapshot {GPU_LABEL}=",
+            self.container,
+            f"{SNAPSHOT_REPOSITORY}:{self.sandbox_id}",
+            timeout=600,
+        )
+        if code != 0:
+            raise ProviderStartError(f"could not snapshot {self.container}: {stderr.strip()}")
+        handle = f"{SNAPSHOT_PREFIX}{output.strip()}"
+        return RetainedSandbox(
+            provider="docker",
+            handle=handle,
+            episode_id=self.request.episode_id,
+            roles=roles,
+            reason=reason,
+            cleanup_command=f"ale sandbox destroy {handle}",
         )
 
 

@@ -61,9 +61,10 @@ All ALE extensions live under `extra.ale`:
 
 Images use ATIF image parts whose `source.path` is episode-relative. Subagents use
 embedded `subagent_trajectories` with unique `trajectory_id` values and resolvable
-`subagent_trajectory_ref` entries. Same-sandbox native resume extends the same logical
-session; `continued_trajectory_ref` is used only when a continuation is stored as a
-separate document.
+`subagent_trajectory_ref` entries. A continued episode records only its own turn of the
+native session, and RunLock `resumed_from` names the episode it continued;
+`continued_trajectory_ref` is used only when a continuation is stored as a separate
+document.
 
 Optional token IDs, masks, log probabilities, sampling metadata, reasoning, and metrics
 are written only from exact observed evidence. ALE never retokenizes text or fabricates
@@ -190,7 +191,7 @@ leaves that last failed result current and makes the run fail. Successful logica
 are not repeated by another episode's retry or by resuming the same completed run.
 
 When automatic retries are enabled, failed attempts destroy their owned Sandboxes even
-when retention requested `keep`; successful final attempts use the configured policy.
+when retention requested `keep` or `snapshot`; successful final attempts use the configured policy.
 The same result layout applies to validation and separate reverification; their execution
 boundaries are specified in [Standard Environment](standard-environment.md).
 

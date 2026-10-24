@@ -55,7 +55,6 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.agent_resources import continuation_fingerprint
 from ale.run.harnesses._npm import agent_home, agent_path, bash_command, npm_command, npm_env
 from ale.run.subscription import classify_subscription_error
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -305,17 +304,6 @@ class ClaudeCodeHarness(AutonomousHarness):
         *,
         timeout_sec: float,
     ) -> AgentRun:
-        fingerprint = self._continuation_fingerprint(session)
-        if continuation.harness != self.name:
-            raise NativeContinuationError("continuation belongs to a different harness")
-        if continuation.episode_id != session.episode_id:
-            raise NativeContinuationError("continuation belongs to a different episode")
-        if not session.sandbox_id or continuation.sandbox_id != session.sandbox_id:
-            raise NativeContinuationError("continuation requires the original live sandbox")
-        if continuation.fingerprint != fingerprint:
-            raise NativeContinuationError(
-                "model, settings, or effective resources changed since launch"
-            )
         state = await sandbox.exec(
             bash_command(
                 session.home,
@@ -381,7 +369,6 @@ class ClaudeCodeHarness(AutonomousHarness):
             if resume
             else f"--session-id {shlex.quote(native_session_id)}"
         )
-        redirect = ">>" if resume else ">"
         clear_api_auth = ""
         if session.authentication == "subscription":
             names = "ANTHROPIC_API_KEY "
@@ -397,7 +384,7 @@ class ClaudeCodeHarness(AutonomousHarness):
             f'printf "%s" "$prompt" | '
             f"claude --verbose --output-format=stream-json {self._flags()} "
             f"{mcp_flags} {selector} --print "
-            f"{redirect} {shlex.quote(str(transcript_path))} 2>&1"
+            f"> {shlex.quote(str(transcript_path))} 2>&1"
         )
 
         result = await sandbox.exec(
@@ -429,13 +416,7 @@ class ClaudeCodeHarness(AutonomousHarness):
             raise NativeContinuationError(
                 "Claude stream did not confirm the requested native session ID"
             )
-        continuation = NativeContinuation(
-            harness=self.name,
-            native_session_id=confirmed,
-            episode_id=session.episode_id,
-            sandbox_id=session.sandbox_id,
-            fingerprint=self._continuation_fingerprint(session),
-        )
+        continuation = NativeContinuation(harness=self.name, native_session_id=confirmed)
         return AgentRun(
             exit_code=result.exit_code,
             final_message=_final_message(transcript),
@@ -832,16 +813,6 @@ class ClaudeCodeHarness(AutonomousHarness):
         ):
             env[alias] = session.model
         return env
-
-    def _continuation_fingerprint(self, session: HarnessSession) -> str:
-        return continuation_fingerprint(
-            harness=self.name,
-            model=session.model,
-            settings=self.settings.model_dump(mode="json"),
-            resources_digest=session.resources_digest,
-            authentication=session.authentication,
-            profile_slot_id=session.profile_slot_id,
-        )
 
     def _flags(self) -> str:
         parts: list[str] = []

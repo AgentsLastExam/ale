@@ -216,15 +216,18 @@ not make arbitrary remote MCP authentication implicit; that remains a separate c
 
 `cua-desktop` follows the same opt-in MCP path. It is not automatically injected.
 
-## 9. Native continuation stays in one live sandbox
+## 9. Native continuation follows the sandbox state
 
-A native continuation binds the harness, model, validated settings, effective resource
-digest, episode ID, sandbox ID, and exact native session ID. Resume sends only the new
-instruction and selects that exact session.
+A native continuation names the harness and the exact native session ID. Resume sends only
+the new instruction and selects that exact session, in a sandbox that carries its state:
+the source episode's kept sandbox, or a new sandbox started from its snapshot. Either one
+holds only what retention sanitation left (§11). The continuing episode gets its own
+gateway session and token, installs agent resources with them, and is sealed like any
+other, so nothing from the source episode's session stays valid.
 
-Continuation fails when the sandbox was destroyed, the native state is absent, any bound
-input changed, or the request names another episode or sandbox. There is no "latest
-session" selector, transcript replay fallback, or configurable disk/global resume scope.
+Continuation fails when the native state is absent or the selected agent is not the
+continuation's harness. There is no "latest session" selector or transcript replay
+fallback.
 
 ## 10. Root agent judges do not redefine solver output
 
@@ -238,7 +241,8 @@ before a Judge changes the live workspace.
 ## 11. Debug retention is explicit and sanitized
 
 Run configuration, not Task content, decides whether solver and verifier sandboxes are
-destroyed or retained. Default is destroy. Before a kept sandbox receives a durable
+destroyed or retained, and whether a solver is kept running or saved as a snapshot.
+Default is destroy. Before a kept sandbox receives a durable
 handle, Harness cleanup and required evidence capture finish, known verification
 credentials are removed, and episode capabilities are revoked. Harness cleanup normally
 removes temporary CLI state. Subscription credentials stay in the checkout-local Host
@@ -248,6 +252,8 @@ Every Docker sandbox and QEMU runner is labeled with ALE ownership, episode, rol
 requested retention, and allocated GPU identity. Retained resources remain discoverable
 through `ale sandbox list` and removable only through a validated ALE-managed handle.
 Live labels also prevent a retained GPU from being assigned to another ALE sandbox.
+A snapshot is the sanitized disk saved as an ALE-labeled image, after which the sandbox is
+destroyed; it holds no process or GPU, and is listed and removed the same way.
 Retention does not change rewards or verification records.
 
 ---

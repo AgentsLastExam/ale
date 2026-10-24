@@ -298,6 +298,10 @@ class RunLock(BaseModel):
     timeouts: RunTimeouts = RunTimeouts()
     sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
     termination: LimitTermination | None = None
+    resumed_from: str | None = Field(
+        default=None,
+        description="Episode whose sandbox state and native session this episode continued",
+    )
 
     def missing_for_report(self) -> list[str]:
         """Reasons this lock cannot back a reported result.

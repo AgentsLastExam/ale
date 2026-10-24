@@ -36,7 +36,6 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.agent_resources import continuation_fingerprint
 from ale.run.harnesses._npm import agent_path, bash_command, ensure_npm_cli, npm_env
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
@@ -266,7 +265,6 @@ class OpenClawCliHarness(AutonomousHarness):
         *,
         timeout_sec: float,
     ) -> AgentRun:
-        self._check_continuation(continuation, session)
         transcript = (
             agent_path(session.home)
             / ".openclaw-ale"
@@ -375,13 +373,7 @@ class OpenClawCliHarness(AutonomousHarness):
         )
         if not copied.ok:
             raise NativeContinuationError("OpenClaw native session transcript is absent")
-        continuation = NativeContinuation(
-            harness=self.name,
-            native_session_id=native_session_id,
-            episode_id=session.episode_id,
-            sandbox_id=session.sandbox_id,
-            fingerprint=self._fingerprint(session),
-        )
+        continuation = NativeContinuation(harness=self.name, native_session_id=native_session_id)
         return AgentRun(
             exit_code=0,
             final_message=_envelope_message(envelope),
@@ -483,28 +475,6 @@ class OpenClawCliHarness(AutonomousHarness):
             else None
         )
         return builder.build(final_metrics=final_metrics)
-
-    def _fingerprint(self, session: HarnessSession) -> str:
-        return continuation_fingerprint(
-            harness=self.name,
-            model=session.model,
-            settings=self.settings.model_dump(mode="json"),
-            resources_digest=session.resources_digest,
-            authentication=session.authentication,
-            profile_slot_id=session.profile_slot_id,
-        )
-
-    def _check_continuation(
-        self, continuation: NativeContinuation, session: HarnessSession
-    ) -> None:
-        if continuation.harness != self.name or continuation.episode_id != session.episode_id:
-            raise NativeContinuationError("continuation belongs to a different harness or episode")
-        if not session.sandbox_id or continuation.sandbox_id != session.sandbox_id:
-            raise NativeContinuationError("continuation requires the original live sandbox")
-        if continuation.fingerprint != self._fingerprint(session):
-            raise NativeContinuationError(
-                "model, settings, or effective resources changed since launch"
-            )
 
 
 def _supported_node(output: str) -> bool:
