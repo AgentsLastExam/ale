@@ -12,8 +12,9 @@ Harness.
 - Pin the native program version and record a meaningful integrity identity.
 - Native logs are evidence, not canonical trajectory. Parsing must be deterministic and
   preserve malformed/incomplete evidence as explicit issues.
-- Native continuation is valid only for the original episode, Sandbox and effective
-  model/settings/resources/authentication fingerprint.
+- Native continuation names the harness and the exact native session ID. The session is
+  files under `HarnessSession.home`, so it resumes wherever they are: the kept Sandbox or
+  one started from its snapshot. Check the session exists before resuming.
 - Provider-specific config and log formats stay in the provider Harness. Share only
   mechanics that are already identical across several adapters.
 

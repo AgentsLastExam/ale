@@ -25,29 +25,7 @@ from ale.core.taskspec import (
     ToolProvision,
 )
 
-__all__ = ["continuation_fingerprint", "resolve_agent_resources"]
-
-
-def continuation_fingerprint(
-    *,
-    harness: str,
-    model: str,
-    settings: object,
-    resources_digest: str,
-    authentication: str = "api-key",
-    profile_slot_id: str | None = None,
-) -> str:
-    """Bind native state to every definition value that can change its behavior."""
-    return content_hash(
-        {
-            "harness": harness,
-            "model": model,
-            "settings": settings,
-            "resources_digest": resources_digest,
-            "authentication": authentication,
-            "profile_slot_id": profile_slot_id,
-        }
-    )
+__all__ = ["resolve_agent_resources"]
 
 
 def resolve_agent_resources(

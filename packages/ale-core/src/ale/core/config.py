@@ -222,9 +222,17 @@ class VerificationConfig(BaseModel):
 
 
 class SandboxRetentionConfig(BaseModel):
+    """What happens to sandboxes after an episode.
+
+    ``keep`` leaves the solver running for a short follow-up such as reverification or a
+    continuation soon after. ``snapshot`` saves the solver's disk and destroys the sandbox:
+    later episodes can continue from it any number of times, it holds no resources, and it
+    survives host restarts.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    solver: Literal["destroy", "keep"] = "destroy"
+    solver: Literal["destroy", "keep", "snapshot"] = "destroy"
     verifier: Literal["destroy", "keep"] = "destroy"
 
 

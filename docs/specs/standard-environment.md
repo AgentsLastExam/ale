@@ -101,7 +101,10 @@ result containing `overall`. The solver interpreter is unchanged.
 ### Teardown and retention
 
 Solver and verifier retention are independent run policies and default to `destroy`.
-Before a requested keep, ALE removes known verification credentials and Judge state.
+Either may be `keep`; the solver may instead be `snapshot`, which saves the sanitized disk
+as a durable image and destroys the Sandbox. Docker supports snapshots; QEMU rejects them
+at provisioning. Before a requested keep or snapshot, ALE removes known verification
+credentials and Judge state.
 Subscription credentials never enter the Sandbox, so retention does not add a provider
 credential cleanup step. Failure of other required sanitation still forces destruction.
 Result and RunLock record the requested policy, actual Provider outcome, retained handle,
@@ -127,6 +130,23 @@ separate verification with a new verifier Sandbox each time, preserving the sour
 Shared reverification remains a single attempt because verification may modify that same
 source Sandbox; a clean retry requires a new full `ale run`. The original shared attempt
 is still allowed when the retry configuration is nonzero.
+
+## Continuation
+
+`ale run TASK --continue-from EPISODE_DIR` starts each episode from a prior episode's
+Sandbox state and resumes that episode's native agent session with TASK's instruction. The
+source must have recorded a `continuation` and kept or snapshotted its solver
+(`[sandbox_retention] solver = "keep"` or `"snapshot"`).
+
+- From a snapshot, ALE provisions a new Sandbox from the snapshot image. The snapshot is
+  unchanged, so one state can be continued any number of times.
+- From a kept Sandbox, ALE reattaches it and this episode's retention then governs it. A
+  kept Sandbox continues in exactly one episode.
+
+Setup runs again; the Harness is installed, receives this episode's gateway session and
+agent resources, and the Sandbox is sealed; then the Harness resumes instead of launching.
+Verification and recording are unchanged, and RunLock `resumed_from` names the source
+episode. The agent must be the continuation's harness; the model and Task may differ.
 
 ## Validation
 

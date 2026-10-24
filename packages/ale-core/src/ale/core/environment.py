@@ -69,6 +69,11 @@ class SandboxLease(Protocol):
 
     async def acquire(self, request: SandboxRequest) -> Sandbox: ...
 
+    def adopt(self, sandbox: Sandbox) -> Sandbox:
+        """Take over a sandbox attached outside the lease, such as a retained one being
+        resumed, so this episode's retention policy reaps it like an acquired one."""
+        ...
+
     async def release(self, sandbox: Sandbox) -> None: ...
 
     def mark_sanitized(

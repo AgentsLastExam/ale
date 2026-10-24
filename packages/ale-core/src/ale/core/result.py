@@ -8,6 +8,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ale.core.harness import NativeContinuation
 from ale.core.verdict import Status
 
 __all__ = ["FailureInfo", "PhaseTiming", "ResultRecord", "SandboxOutcome"]
@@ -44,8 +45,8 @@ class SandboxOutcome(BaseModel):
     model_config = _STRICT
 
     roles: tuple[Literal["solver", "verifier"], ...]
-    requested: Literal["destroy", "keep"]
-    outcome: Literal["destroyed", "retained", "retention-failed"]
+    requested: Literal["destroy", "keep", "snapshot"]
+    outcome: Literal["destroyed", "retained", "snapshotted", "retention-failed"]
     provider: str
     handle: str | None = None
     reason: str | None = None
@@ -66,6 +67,10 @@ class ResultRecord(BaseModel):
     finished_at: datetime
     phases: tuple[PhaseTiming, ...] = ()
     sandboxes: tuple[SandboxOutcome, ...] = ()
+    continuation: NativeContinuation | None = Field(
+        default=None,
+        description="The agent's native session, for `ale run --continue-from` this episode",
+    )
 
     @field_validator("rewards")
     @classmethod

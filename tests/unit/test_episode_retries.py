@@ -14,10 +14,12 @@ from test_runtime_contracts import make_lock
 from typer.testing import CliRunner
 
 from ale.core.config import RunConfig, SandboxRetentionConfig
+from ale.core.errors import ConfigError
+from ale.core.harness import NativeContinuation
 from ale.core.result import FailureInfo, ResultRecord, SandboxOutcome
 from ale.core.sandbox import PreparedTaskImage, RetainedSandbox, SandboxRequest
 from ale.core.verdict import Status, Verdict
-from ale.run.cli.tasks import _retained_source_episodes
+from ale.run.cli.tasks import _continuation_source, _resume, _retained_source_episodes
 from ale.run.episode import EpisodeResult, _Lease, run_episode, run_episode_with_retries
 from ale.run.ledger import Ledger
 from ale.run.recording import atomic_write_json
@@ -212,6 +214,111 @@ async def test_failed_retry_destroys_even_sanitized_keep_sandboxes() -> None:
     sandbox.retain.assert_not_awaited()
     assert not lease.live
     assert not any(outcome.handle for outcome in lease.outcomes)
+
+
+def _image() -> PreparedTaskImage:
+    digest = "sha256:" + "a" * 64
+    return PreparedTaskImage(
+        kind="container",
+        source="external-ref",
+        input_identity=digest,
+        runtime_ref="image@" + digest,
+        prepared_identity=digest,
+        resolved_reference="image@" + digest,
+    )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_retention_saves_the_disk_and_destroys_the_sandbox() -> None:
+    handle = "docker-snapshot:sha256:" + "c" * 64
+    sandbox = SimpleNamespace(
+        sandbox_id="sandbox",
+        destroy=AsyncMock(),
+        retain=AsyncMock(),
+        snapshot=AsyncMock(
+            return_value=RetainedSandbox(
+                provider="docker",
+                handle=handle,
+                episode_id="episode",
+                roles=("solver", "verifier"),
+                reason="test",
+                cleanup_command=f"ale sandbox destroy {handle}",
+            )
+        ),
+        release_resources=lambda: None,
+    )
+    provider = SimpleNamespace(name="docker", create=AsyncMock(return_value=sandbox))
+    lease = _Lease(
+        SimpleNamespace(get=lambda _: provider),  # type: ignore[arg-type]
+        SandboxRetentionConfig(solver="snapshot"),
+    )
+    request = SandboxRequest(
+        episode_id="episode", role="shared", resources={}, network={}, prepared_image=_image()
+    )
+    acquired = await lease.acquire(request)
+    assert provider.create.await_args.args[0].retention == "snapshot"
+    lease.mark_sanitized(acquired, succeeded=True)
+    await lease.finalize(allow_retention=True)
+
+    sandbox.snapshot.assert_awaited_once()
+    sandbox.destroy.assert_awaited_once()
+    sandbox.retain.assert_not_awaited()
+    assert not lease.live
+    [outcome] = lease.outcomes
+    assert (outcome.requested, outcome.outcome, outcome.handle) == (
+        "snapshot",
+        "snapshotted",
+        handle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_adopted_sandbox_follows_this_episodes_retention() -> None:
+    request = SandboxRequest(
+        episode_id="source", retention="keep", resources={}, network={}, prepared_image=_image()
+    )
+    kept = SimpleNamespace(
+        sandbox_id="kept",
+        request=request,
+        allocation=SimpleNamespace(provider="docker"),
+        destroy=AsyncMock(),
+        release_resources=lambda: None,
+    )
+    lease = _Lease(SimpleNamespace(), SandboxRetentionConfig())  # type: ignore[arg-type]
+    assert lease.adopt(kept) is kept  # type: ignore[arg-type]
+    assert kept.request.retention == "destroy"
+    await lease.release(kept)  # type: ignore[arg-type]
+    kept.destroy.assert_awaited_once()
+    assert [outcome.outcome for outcome in lease.outcomes] == ["destroyed"]
+
+
+def test_continue_from_needs_a_session_and_a_reusable_sandbox(tmp_path: Path) -> None:
+    episode = tmp_path / "episode"
+    record = write_result(episode, Status.COMPLETED, 1).record
+    atomic_write_json(episode / "lock.json", make_lock())
+    with pytest.raises(ValueError, match="no native agent session"):
+        _continuation_source(episode)
+
+    snapshot = "docker-snapshot:sha256:" + "c" * 64
+    for handle, outcome in ((snapshot, "snapshotted"), ("docker:kept", "retained")):
+        sandbox = SandboxOutcome(
+            roles=("solver",), requested="keep", outcome=outcome, provider="docker", handle=handle
+        )
+        session = NativeContinuation(harness="claude-code", native_session_id="native")
+        update = {"sandboxes": (sandbox,), "continuation": session}
+        atomic_write_json(episode / "result.json", record.model_copy(update=update))
+        source, lock, found = _continuation_source(episode)
+        assert found == handle
+        claude, codex = SimpleNamespace(name="claude-code"), SimpleNamespace(name="codex-cli")
+        with pytest.raises(ConfigError, match="claude-code session"):
+            _resume(source, lock, found, codex, 1)  # type: ignore[arg-type]
+        resume = _resume(source, lock, found, claude, 1)  # type: ignore[arg-type]
+        assert resume.continuation == session
+        assert (resume.attach is None) == (outcome == "snapshotted")
+
+    # A snapshot can branch into many episodes; a kept sandbox is one machine.
+    with pytest.raises(ConfigError, match="exactly one episode"):
+        _resume(source, lock, found, claude, 2)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

@@ -207,6 +207,7 @@ class ProvenanceInputs:
     timeouts: RunTimeouts = field(default_factory=RunTimeouts)
     judges: tuple[JudgeProvenance, ...] = ()
     framework: FrameworkProvenance = field(default_factory=framework_provenance)
+    resumed_from: str | None = None
 
 
 def build_lock(
@@ -273,6 +274,7 @@ def build_lock(
         ),
         termination=termination,
         sandbox_outcomes=sandbox_outcomes,
+        resumed_from=inputs.resumed_from,
     )
 
 

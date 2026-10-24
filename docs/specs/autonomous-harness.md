@@ -54,7 +54,7 @@ The built-in `cua-desktop` uses the OS's system Python. Task-provided Skills and
 commands must themselves work on Windows.
 
 All four adapters support local Skills, canonical stdio and Streamable HTTP MCP
-servers, and same-sandbox native resume at their pinned versions. Support is determined
+servers, and native resume at their pinned versions. Support is determined
 from the pinned program's verified behavior, not a permanent assumption about a product
 name. In particular, `openclaw@2026.7.1` supports MCP; a future pin that changes this
 must update validation and acceptance together.
@@ -151,13 +151,14 @@ limits, retry coalescing, and Transport Trace stay common.
 ### Resume
 
 Resume is optional and rejected explicitly by default. Native resume, when implemented,
-uses the exact `NativeContinuation` and only the new instruction. It requires the same
-live sandbox and matching harness, episode, sandbox, model, settings, and resource
-fingerprint.
+uses the exact `NativeContinuation` (harness and native session ID) and only the new
+instruction. The native session is files in the sandbox, so it continues wherever those
+files are: the original sandbox while it is kept, or a sandbox started from its snapshot
+(see [Continuation](standard-environment.md#continuation)). The adapter checks that the
+session exists before resuming and fails explicitly when it does not.
 
-An adapter must never use a "latest session" selector, replay the transcript, resume in
-another sandbox, or silently start a new conversation. This release has one scope only:
-the original live sandbox.
+An adapter must never use a "latest session" selector, replay the transcript, or silently
+start a new conversation.
 
 If the native program can create child sessions, collected evidence must select the
 requested root session by exact native ID. A substring match or "first/latest session"

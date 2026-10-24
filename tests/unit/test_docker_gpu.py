@@ -14,11 +14,13 @@ from ale.run.providers.docker import (
     _verify_docker_gpu,
     destroy_retained,
     list_retained,
+    snapshot_image,
 )
 
 pytestmark = pytest.mark.unit
 
 UUID = "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+SNAPSHOT = "sha256:" + "c" * 64
 
 
 def test_nvidia_smi_rows_are_strict_and_normalized() -> None:
@@ -80,6 +82,11 @@ async def test_retained_listing_includes_stale_state_and_cleanup_command(
     async def docker(*args: str, **kwargs: object) -> tuple[int, str, str]:
         if args[:3] == ("ps", "-a", "-q"):
             return 0, "container-id\n", ""
+        if args[0] == "images":
+            return 0, f"{SNAPSHOT}\n", ""
+        if args[:2] == ("image", "inspect"):
+            labels = {"ale.managed": "true", "ale.retention": "snapshot", "ale.episode": "episode"}
+            return 0, json.dumps([{"Id": SNAPSHOT, "Config": {"Labels": labels}}]), ""
         assert args[0] == "inspect"
         return (
             0,
@@ -108,6 +115,16 @@ async def test_retained_listing_includes_stale_state_and_cleanup_command(
     assert await list_retained() == [
         {
             "provider": "docker",
+            "handle": f"docker-snapshot:{SNAPSHOT}",
+            "episode": "episode",
+            "role": "",
+            "image": SNAPSHOT,
+            "gpus": (),
+            "running": False,
+            "cleanup_command": f"ale sandbox destroy docker-snapshot:{SNAPSHOT}",
+        },
+        {
+            "provider": "docker",
             "handle": "docker:ale-episode-solver",
             "episode": "episode",
             "role": "solver",
@@ -115,8 +132,9 @@ async def test_retained_listing_includes_stale_state_and_cleanup_command(
             "gpus": (UUID,),
             "running": False,
             "cleanup_command": "ale sandbox destroy docker:ale-episode-solver",
-        }
+        },
     ]
+    assert snapshot_image(f"docker-snapshot:{SNAPSHOT}").prepared_identity == SNAPSHOT
 
 
 @pytest.mark.asyncio

@@ -34,7 +34,6 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.agent_resources import continuation_fingerprint
 from ale.run.harnesses._npm import (
     agent_home,
     agent_path,
@@ -284,7 +283,6 @@ class GrokBuildHarness(AutonomousHarness):
         *,
         timeout_sec: float,
     ) -> AgentRun:
-        self._check_continuation(continuation, session)
         state = await sandbox.exec(
             bash_command(
                 session.home,
@@ -361,7 +359,7 @@ class GrokBuildHarness(AutonomousHarness):
             f"{selector} > {shlex.quote(str(segment))} "
             f"2>> {shlex.quote(str(home / STDERR_NAME))}; "
             f"status=$?; cat {shlex.quote(str(segment))} "
-            f">> {shlex.quote(str(transcript))}; exit $status"
+            f"> {shlex.quote(str(transcript))}; exit $status"
         )
         env = {
             **await npm_env(sandbox, session.home),
@@ -408,13 +406,7 @@ class GrokBuildHarness(AutonomousHarness):
         if confirmed != native_session_id:
             raise NativeContinuationError("Grok did not confirm the requested native session ID")
         await self._export_session(sandbox, session, confirmed)
-        continuation = NativeContinuation(
-            harness=self.name,
-            native_session_id=confirmed,
-            episode_id=session.episode_id,
-            sandbox_id=session.sandbox_id,
-            fingerprint=self._fingerprint(session),
-        )
+        continuation = NativeContinuation(harness=self.name, native_session_id=confirmed)
         return AgentRun(
             exit_code=0,
             final_message=_stream_final_message(segment_output),
@@ -523,31 +515,6 @@ class GrokBuildHarness(AutonomousHarness):
             if message is not None:
                 builder.add(source="agent", message=message)
         return builder.build()
-
-    def _fingerprint(self, session: HarnessSession) -> str:
-        return continuation_fingerprint(
-            harness=self.name,
-            model=session.model,
-            settings={
-                **self.settings.model_dump(mode="json"),
-                "gateway_dialect": self.gateway_dialect,
-            },
-            resources_digest=session.resources_digest,
-            authentication=session.authentication,
-            profile_slot_id=session.profile_slot_id,
-        )
-
-    def _check_continuation(
-        self, continuation: NativeContinuation, session: HarnessSession
-    ) -> None:
-        if continuation.harness != self.name or continuation.episode_id != session.episode_id:
-            raise NativeContinuationError("continuation belongs to a different harness or episode")
-        if not session.sandbox_id or continuation.sandbox_id != session.sandbox_id:
-            raise NativeContinuationError("continuation requires the original live sandbox")
-        if continuation.fingerprint != self._fingerprint(session):
-            raise NativeContinuationError(
-                "model, settings, or effective resources changed since launch"
-            )
 
 
 def _toml(value: str) -> str:

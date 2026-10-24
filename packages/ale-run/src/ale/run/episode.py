@@ -138,7 +138,7 @@ class _LeaseEntry:
     sandbox: Sandbox
     provider_name: str
     roles: tuple[Literal["solver", "verifier"], ...]
-    requested: Literal["destroy", "keep"]
+    requested: Literal["destroy", "keep", "snapshot"]
     sanitation: Literal["not-run", "succeeded", "failed"] = "not-run"
     sanitation_reason: str | None = None
 
@@ -157,32 +157,37 @@ class _Lease:
         self.outcomes: list[SandboxOutcome] = []
         self.retained: list[tuple[_LeaseEntry, SandboxOutcome]] = []
 
+    def _policy(
+        self, role: SandboxRole
+    ) -> tuple[tuple[Literal["solver", "verifier"], ...], Literal["destroy", "keep", "snapshot"]]:
+        if role is SandboxRole.SHARED:
+            # The shared sandbox is the solver's: its snapshot or keep wins.
+            if self.retention.solver != "destroy":
+                return ("solver", "verifier"), self.retention.solver
+            return ("solver", "verifier"), self.retention.verifier
+        if role is SandboxRole.VERIFIER:
+            return ("verifier",), self.retention.verifier
+        return ("solver",), self.retention.solver
+
     async def acquire(self, request: SandboxRequest) -> Sandbox:
-        roles: tuple[Literal["solver", "verifier"], ...]
-        if request.role is SandboxRole.SHARED:
-            roles = ("solver", "verifier")
-            policy = (
-                "keep"
-                if self.retention.solver == "keep" or self.retention.verifier == "keep"
-                else "destroy"
-            )
-        elif request.role is SandboxRole.VERIFIER:
-            roles = ("verifier",)
-            policy = self.retention.verifier
-        else:
-            roles = ("solver",)
-            policy = self.retention.solver
+        roles, policy = self._policy(request.role)
         request = request.model_copy(update={"retention": policy})
         provider = self.providers.get(request.image_kind)
         sandbox = await provider.create(request)
         self.live.append(_LeaseEntry(sandbox, provider.name, roles, policy))
         return sandbox
 
+    def adopt(self, sandbox: Sandbox) -> Sandbox:
+        roles, policy = self._policy(sandbox.request.role)
+        sandbox.request = sandbox.request.model_copy(update={"retention": policy})
+        self.live.append(_LeaseEntry(sandbox, sandbox.allocation.provider, roles, policy))
+        return sandbox
+
     async def release(self, sandbox: Sandbox) -> None:
         entry = self._find(sandbox)
         if entry is None:
             return
-        if entry.requested == "keep":
+        if entry.requested != "destroy":
             if entry.sanitation == "succeeded":
                 return
             await self._destroy(entry, outcome="retention-failed")
@@ -199,13 +204,20 @@ class _Lease:
 
     async def finalize(self, *, allow_retention: bool = True) -> None:
         for entry in list(self.live):
-            if not allow_retention or entry.requested != "keep" or entry.sanitation != "succeeded":
+            if (
+                not allow_retention
+                or entry.requested == "destroy"
+                or entry.sanitation != "succeeded"
+            ):
                 outcome = (
                     "destroyed"
                     if not allow_retention or entry.requested == "destroy"
                     else "retention-failed"
                 )
                 await self._destroy(entry, outcome=outcome)
+                continue
+            if entry.requested == "snapshot":
+                await self._snapshot(entry)
                 continue
             try:
                 retained = await entry.sandbox.retain(
@@ -221,6 +233,28 @@ class _Lease:
                 outcome = _retained_outcome(entry, retained)
                 self.outcomes.append(outcome)
                 self.retained.append((entry, outcome))
+
+    async def _snapshot(self, entry: _LeaseEntry) -> None:
+        """Save the sandbox's disk, then destroy the sandbox itself."""
+        try:
+            saved = await entry.sandbox.snapshot(
+                roles=entry.roles,
+                reason="requested by sandbox_retention run configuration",
+            )
+        except Exception as exc:
+            entry.sanitation_reason = str(exc)
+            await self._destroy(entry, outcome="retention-failed")
+            return
+        self.outcomes.append(_retained_outcome(entry, saved, outcome="snapshotted"))
+        try:
+            await entry.sandbox.destroy()
+        except Exception as exc:
+            raise RetentionFinalizationError(
+                f"could not destroy sandbox {entry.sandbox.sandbox_id}: {exc}"
+            ) from exc
+        finally:
+            entry.sandbox.release_resources()
+            self.live.remove(entry)
 
     async def destroy_retained(self) -> None:
         """Undo retention if terminal recording fails after Sandbox finalization."""
@@ -279,11 +313,16 @@ class _Lease:
         return next((entry for entry in self.live if entry.sandbox is sandbox), None)
 
 
-def _retained_outcome(entry: _LeaseEntry, retained: RetainedSandbox) -> SandboxOutcome:
+def _retained_outcome(
+    entry: _LeaseEntry,
+    retained: RetainedSandbox,
+    *,
+    outcome: Literal["retained", "snapshotted"] = "retained",
+) -> SandboxOutcome:
     return SandboxOutcome(
         roles=entry.roles,
         requested=entry.requested,
-        outcome="retained",
+        outcome=outcome,
         provider=retained.provider,
         handle=retained.handle,
         reason=retained.reason,
@@ -716,6 +755,7 @@ async def run_episode(
         finished_at=finished_at,
         phases=tuple(ctx.phases),
         sandboxes=tuple(lease.outcomes),
+        continuation=ctx.agent_run.continuation if ctx.agent_run is not None else None,
     )
     recording.write_result(record)
     recording.execution.append(
