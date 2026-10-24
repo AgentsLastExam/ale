@@ -20,7 +20,7 @@ stops at that boundary and creates no sandbox.
 ## Phase order
 
 ```text
-provision -> setup -> agent/oracle -> Harness cleanup -> evidence capture
+provision -> setup -> agent/oracle -> final evidence capture -> Harness cleanup
           -> shared or separate verify -> teardown/retention -> result
 ```
 
@@ -69,8 +69,19 @@ staged, not by a conventional path or a flag a Task must remember.
 
 ### Evidence capture
 
-After the solver stops, the Harness performs idempotent cleanup and ALE converts its
-observed evidence into `trajectory.json`. When run policy sets `artifacts.collect =
+While a CLI runs, ALE synchronizes its stream logs and updates `trajectory.json`
+every 60 seconds. Native session directories are included only when
+`logging.collect_native_logs=true` (default false). File reads use an independent
+Sandbox connection so the running command cannot block collection. Each collection
+attempt is bounded; unchanged files transfer no content.
+Periodic conversion runs off the event loop to keep Gateway requests responsive.
+Only the episode loop publishes its result; cancellation discards a pending result.
+
+After the solver stops, ALE stops the polling task, performs final catch-up and
+conversion, then invokes idempotent Harness cleanup. Evidence collection survives
+cleanup failure. An interrupted or unconfirmed execution produces an incomplete
+trajectory; native-state cleanup is skipped for an unconfirmed CLI exit. When run
+policy sets `artifacts.collect =
 "host"`, every Task-declared artifact is captured as an immutable file or directory
 snapshot. Files and directories are selected directly by `artifacts`, including globs.
 Copying follows links and skips missing or uncopyable entries, with bounded traversal;

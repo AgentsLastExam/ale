@@ -1,4 +1,4 @@
-"""Strict local Harbor ATIF v1.7 trajectory models."""
+"""Strict local Harbor ATIF v1.8 trajectory models."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 __all__ = [
     "AtifAgent",
+    "AtifAudioSource",
     "AtifContentPart",
     "AtifFinalMetrics",
     "AtifImageSource",
@@ -23,6 +24,19 @@ __all__ = [
 ]
 
 _STRICT = ConfigDict(frozen=True, extra="forbid")
+_AUDIO_MEDIA_TYPE_ALIASES = {
+    "audio/mp3": "audio/mpeg",
+    "audio/mpga": "audio/mpeg",
+    "audio/x-mpeg": "audio/mpeg",
+    "audio/x-wav": "audio/wav",
+    "audio/wave": "audio/wav",
+    "audio/vnd.wave": "audio/wav",
+    "audio/x-m4a": "audio/mp4",
+    "audio/m4a": "audio/mp4",
+    "audio/x-aac": "audio/aac",
+    "audio/x-flac": "audio/flac",
+    "audio/x-aiff": "audio/aiff",
+}
 
 
 class AtifAgent(BaseModel):
@@ -42,19 +56,53 @@ class AtifImageSource(BaseModel):
     path: str
 
 
+class AtifAudioSource(BaseModel):
+    model_config = _STRICT
+
+    media_type: Literal[
+        "audio/wav",
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/aac",
+        "audio/ogg",
+        "audio/flac",
+        "audio/webm",
+        "audio/aiff",
+    ]
+    path: str
+    duration_sec: float | None = Field(default=None, ge=0)
+
+    # --- validation ---
+
+    @field_validator("media_type", mode="before")
+    @classmethod
+    def _normalize_media_type(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            return _AUDIO_MEDIA_TYPE_ALIASES.get(normalized, normalized)
+        return value
+
+
 class AtifContentPart(BaseModel):
     model_config = _STRICT
 
-    type: Literal["text", "image"]
+    type: Literal["text", "image", "audio"]
     text: str | None = None
-    source: AtifImageSource | None = None
+    source: AtifImageSource | AtifAudioSource | None = None
+
+    # --- validation ---
 
     @model_validator(mode="after")
     def _matching_content(self) -> Self:
-        if self.type == "text" and (self.text is None or self.source is not None):
-            raise ValueError("text content requires text and forbids source")
-        if self.type == "image" and (self.source is None or self.text is not None):
-            raise ValueError("image content requires source and forbids text")
+        if self.type == "text":
+            if self.text is None or self.source is not None:
+                raise ValueError("text content requires text and forbids source")
+            return self
+        if self.source is None or self.text is not None:
+            raise ValueError(f"{self.type} content requires source and forbids text")
+        expected = AtifImageSource if self.type == "image" else AtifAudioSource
+        if not isinstance(self.source, expected):
+            raise ValueError(f"{self.type} content requires {expected.__name__}")
         return self
 
 
@@ -169,7 +217,7 @@ class AtifStep(BaseModel):
 class AtifTrajectory(BaseModel):
     model_config = _STRICT
 
-    schema_version: Literal["ATIF-v1.7"] = "ATIF-v1.7"
+    schema_version: Literal["ATIF-v1.8"] = "ATIF-v1.8"
     session_id: str | None = None
     trajectory_id: str | None = None
     agent: AtifAgent

@@ -67,7 +67,7 @@ def test_loopback_http_and_trajectory_checks(
     trajectory.write_text(
         json.dumps(
             {
-                "schema_version": "ATIF-v1.7",
+                "schema_version": "ATIF-v1.8",
                 "steps": [
                     {
                         "source": "agent",

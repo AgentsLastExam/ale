@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from ale.core.config import load_run_config
-from ale.core.errors import AgentError, ConfigError, SubscriptionProviderLimitError
+from ale.core.errors import (
+    AgentError,
+    ConfigError,
+    NativeContinuationError,
+    SubscriptionProviderLimitError,
+)
 from ale.core.harness import (
     EffectiveAgentResources,
     HarnessSession,
@@ -22,7 +28,8 @@ from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.computer_use import ComputerUseHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
-from ale.run.harnesses.openclaw_cli import OpenClawCliHarness, _supported_node
+from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
+from ale.run.harnesses.openclaw_cli.adapter import _supported_node
 from ale.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
@@ -53,17 +60,37 @@ class FakeSandbox:
         self.commands: list[list[str]] = []
         self.environments: list[dict[str, str]] = []
         self.result = ExecResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
+        self.native_stdout = stdout.encode()
+        self.native_stderr = stderr.encode()
 
     async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
         self.commands.append([str(part) for part in argv])
         self.environments.append(kwargs.get("env") or {})
+        command = " ".join(str(part) for part in argv)
+        if "/.ale-harness/stdout.log" in command:
+            root = kwargs["cwd"] + "/.ale-harness/"
+            self.files[root + "stdout.log"] += self.native_stdout
+            self.files[root + "stderr.log"] += self.native_stderr
+            return self.result.model_copy(update={"stdout": "", "stderr": ""})
+        if "mkdir -p" in command:
+            return ExecResult(exit_code=0)
         return self.result
 
     async def write_file(self, path, data, **kwargs):  # type: ignore[no-untyped-def]
         self.files[str(path)] = data
 
     async def read_file(self, path, **kwargs):  # type: ignore[no-untyped-def]
-        return self.files[str(path)]
+        data = self.files[str(path)]
+        offset = kwargs.get("offset", 0)
+        length = kwargs.get("length")
+        return data[offset:] if length is None else data[offset : offset + length]
+
+    async def list_files(self, path):
+        return tuple(
+            SimpleNamespace(path=name, size=len(data))
+            for name, data in self.files.items()
+            if name.startswith(str(path) + "/")
+        )
 
     async def upload_dir(self, source, target, **kwargs):  # type: ignore[no-untyped-def]
         self.uploads.append((source, str(target)))
@@ -101,7 +128,7 @@ async def test_windows_harness_uses_git_bash_native_paths_and_retains_failure(
 ) -> None:
     inherited_path = r"C:\Windows\System32;C:\Program Files\nodejs"
     sandbox = FakeSandbox(stdout=inherited_path)
-    sandbox.files[f"C:/Users/Agent User/{path}"] = json.dumps(native).encode()
+    sandbox.native_stdout = json.dumps(native).encode()
     with pytest.raises(AgentError, match="proof"):
         await harness.launch("work", sandbox, session(home=r"C:\Users\Agent User"), timeout_sec=60)
     commands = list(zip(sandbox.commands, sandbox.environments, strict=True))
@@ -155,8 +182,8 @@ async def test_native_failures_keep_the_cause_exit_code_and_stderr(
     harness, path, native, exit_code
 ) -> None:
     sandbox = FakeSandbox(exit_code, stderr="shell diagnostic token")
-    sandbox.files[f"/home/agent/{path}"] = json.dumps(native).encode()
-    sandbox.files["/home/agent/stderr.log"] = b"warning token\n" * 1000
+    sandbox.native_stdout = json.dumps(native).encode()
+    sandbox.native_stderr = b"warning token\n" * 1000
     with pytest.raises(AgentError) as caught:
         await harness.launch("work", sandbox, session(), timeout_sec=60)
     detail = str(caught.value)
@@ -167,16 +194,13 @@ async def test_native_failures_keep_the_cause_exit_code_and_stderr(
     assert len(detail) < 3000
 
 
-async def test_openclaw_keeps_its_native_conversation_when_the_turn_fails() -> None:
+async def test_openclaw_declares_native_conversation_without_post_exit_copy() -> None:
     sandbox = FakeSandbox(17)
-    sandbox.files["/home/agent/result.json"] = b'{"payloads": [{"isError": true, "text": "x"}]}'
+    sandbox.native_stdout = b'{"payloads": [{"isError": true, "text": "x"}]}'
     with pytest.raises(AgentError):
         await OpenClawCliHarness().launch("work", sandbox, session(), timeout_sec=60)
-    run = next(argv[-1] for argv in sandbox.commands if "openclaw agent" in argv[-1])
-    _, _, after = run.partition("status=$?; ")
-    assert "/home/agent/.openclaw-ale/agents/main/sessions/" in after
-    assert "/home/agent/transcript.jsonl" in after
-    assert after.startswith("cp -- ") and after.endswith('exit "$status"')
+    assert OpenClawCliHarness().native_logs[0].root == ".openclaw-ale/agents/*/sessions"
+    assert not any("cp --" in " ".join(argv) for argv in sandbox.commands)
 
 
 @pytest.mark.parametrize(
@@ -194,7 +218,7 @@ async def test_nonzero_process_failure_keeps_stdout_when_stderr_has_only_warning
 
 async def test_codex_recovered_transport_and_tool_errors_do_not_fail_success() -> None:
     sandbox = FakeSandbox()
-    sandbox.files["/home/agent/transcript.jsonl"] = b"\n".join(
+    sandbox.native_stdout = b"\n".join(
         [
             b'{"type":"thread.started","thread_id":"thread-1"}',
             b'{"type":"error","message":"Reconnecting"}',
@@ -212,7 +236,7 @@ async def test_codex_recovered_transport_and_tool_errors_do_not_fail_success() -
 
 async def test_nonzero_codex_does_not_treat_solver_output_as_failure_diagnostic() -> None:
     sandbox = FakeSandbox(1, stderr="native process failed")
-    sandbox.files["/home/agent/transcript.jsonl"] = (
+    sandbox.native_stdout = (
         b'{"type":"item.completed","item":{"type":"agent_message","text":"PRIVATE TASK ANSWER"}}'
     )
     with pytest.raises(AgentError) as caught:
@@ -223,10 +247,8 @@ async def test_nonzero_codex_does_not_treat_solver_output_as_failure_diagnostic(
 
 async def test_subscription_failure_keeps_native_reason_before_long_stderr() -> None:
     sandbox = FakeSandbox(1)
-    sandbox.files["/home/agent/transcript.jsonl"] = (
-        b'{"type":"turn.failed","error":{"message":"rate limit reached token"}}'
-    )
-    sandbox.files["/home/agent/stderr.log"] = b"unrelated warning\n" * 1000
+    sandbox.native_stdout = b'{"type":"turn.failed","error":{"message":"rate limit reached token"}}'
+    sandbox.native_stderr = b"unrelated warning\n" * 1000
     with pytest.raises(SubscriptionProviderLimitError) as caught:
         await CodexCliHarness().launch(
             "work", sandbox, session(authentication="subscription"), timeout_sec=60
@@ -417,9 +439,7 @@ async def test_subscription_config_uses_the_same_gateway_provider(
 
 async def test_codex_subscription_launch_drops_api_credentials() -> None:
     sandbox = FakeSandbox()
-    sandbox.files["/home/agent/transcript.jsonl"] = (
-        b'{"type":"thread.started","thread_id":"thread-1"}\n'
-    )
+    sandbox.native_stdout = b'{"type":"thread.started","thread_id":"thread-1"}\n'
 
     await CodexCliHarness().launch(  # type: ignore[arg-type]
         "test",
@@ -428,30 +448,26 @@ async def test_codex_subscription_launch_drops_api_credentials() -> None:
         timeout_sec=60,
     )
 
-    assert sandbox.environments[0]["ALE_GATEWAY_TOKEN"] == "token"
-    assert "unset OPENAI_API_KEY OPENAI_BASE_URL CODEX_ACCESS_TOKEN" in sandbox.commands[0][2]
+    assert sandbox.environments[-1]["ALE_GATEWAY_TOKEN"] == "token"
+    assert "unset OPENAI_API_KEY OPENAI_BASE_URL CODEX_ACCESS_TOKEN" in sandbox.commands[-1][2]
 
 
 async def test_grok_subscription_launch_uses_gateway_and_requested_model() -> None:
     sandbox = FakeSandbox()
-    sandbox.files["/home/agent/.grok-ale/segment.jsonl"] = (
-        b'{"type":"end","sessionId":"session-1"}\n'
-    )
+    sandbox.native_stdout = b'{"type":"end","sessionId":"session-1"}\n'
 
-    await GrokBuildHarness()._run(  # type: ignore[arg-type]
-        "test",
+    prepared = await GrokBuildHarness().prepare_command(
+        "/home/agent/instruction.md",
         sandbox,
         session(authentication="subscription"),
         native_session_id="session-1",
-        resume=False,
-        timeout_sec=60,
     )
 
-    command = sandbox.commands[0][2]
+    command = prepared.argv[2]
     assert "--model test-model" in command
     assert "unset XAI_API_KEY GROK_CLI_CHAT_PROXY_BASE_URL" in command
-    assert sandbox.environments[0]["ALE_GATEWAY_TOKEN"] == "token"
-    assert sandbox.environments[0]["GROK_WORKSPACE_DATA_COLLECTION_DISABLED"] == "1"
+    assert prepared.env["ALE_GATEWAY_TOKEN"] == "token"
+    assert prepared.env["GROK_WORKSPACE_DATA_COLLECTION_DISABLED"] == "1"
 
 
 async def test_openclaw_declares_explicit_reasoning_support(tmp_path: Path) -> None:
@@ -464,6 +480,12 @@ async def test_openclaw_declares_explicit_reasoning_support(tmp_path: Path) -> N
     assert rendered["models"]["providers"]["openai"]["models"][0]["reasoning"] is True
 
 
+def native_path(tmp_path: Path, relative: str) -> Path:
+    path = tmp_path / "native" / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def context(tmp_path: Path, harness: str) -> TrajectoryParseContext:
     return TrajectoryParseContext(
         episode_id="episode",
@@ -474,11 +496,12 @@ def context(tmp_path: Path, harness: str) -> TrajectoryParseContext:
         agent_version="1.0",
         blobs=BlobStore(tmp_path),
         session_id="session",
+        native_logs_enabled=True,
     )
 
 
 def test_grok_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
-    (tmp_path / "session_chat_history.jsonl").write_text(
+    native_path(tmp_path, ".grok-ale/sessions/session/chat_history.jsonl").write_text(
         "\n".join(
             [
                 json.dumps(
@@ -533,7 +556,7 @@ def test_grok_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
 
 
 def test_codex_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
-    (tmp_path / "transcript.jsonl").write_text(
+    (tmp_path / "stdout.log").write_text(
         "\n".join(
             [
                 json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
@@ -567,14 +590,12 @@ def test_codex_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
 
 
 def test_codex_declares_native_session_evidence() -> None:
-    assert "session.jsonl" in CodexCliHarness.logs
+    assert CodexCliHarness().native_logs[0].root == ".codex-ale/sessions"
 
 
-async def test_codex_exports_the_exact_root_native_session() -> None:
+async def test_codex_does_not_export_a_post_exit_session_copy() -> None:
     sandbox = FakeSandbox()
-    sandbox.files["/home/agent/transcript.jsonl"] = (
-        b'{"type":"thread.started","thread_id":"thread-1"}\n'
-    )
+    sandbox.native_stdout = b'{"type":"thread.started","thread_id":"thread-1"}\n'
 
     await CodexCliHarness().launch(  # type: ignore[arg-type]
         "test",
@@ -583,12 +604,11 @@ async def test_codex_exports_the_exact_root_native_session() -> None:
         timeout_sec=60,
     )
 
-    export_command = sandbox.commands[-1][2]
-    assert '"id":"thread-1"' in export_command
+    assert not any("cp " in " ".join(argv) for argv in sandbox.commands)
 
 
 def test_codex_parser_uses_complete_native_function_call_evidence(tmp_path: Path) -> None:
-    (tmp_path / "transcript.jsonl").write_text(
+    (tmp_path / "stdout.log").write_text(
         "\n".join(
             [
                 json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
@@ -626,7 +646,7 @@ def test_codex_parser_uses_complete_native_function_call_evidence(tmp_path: Path
             ]
         )
     )
-    (tmp_path / "session.jsonl").write_text(
+    native_path(tmp_path, ".codex-ale/sessions/rollout-session.jsonl").write_text(
         "\n".join(
             [
                 json.dumps(
@@ -760,7 +780,7 @@ def test_codex_parser_uses_complete_native_function_call_evidence(tmp_path: Path
 
 
 def test_codex_parser_rejects_a_subagent_session_export(tmp_path: Path) -> None:
-    (tmp_path / "transcript.jsonl").write_text(
+    (tmp_path / "stdout.log").write_text(
         "\n".join(
             [
                 json.dumps({"type": "thread.started", "thread_id": "session"}),
@@ -779,7 +799,7 @@ def test_codex_parser_rejects_a_subagent_session_export(tmp_path: Path) -> None:
             ]
         )
     )
-    (tmp_path / "session.jsonl").write_text(
+    native_path(tmp_path, ".codex-ale/sessions/rollout-session.jsonl").write_text(
         "\n".join(
             [
                 json.dumps(
@@ -808,16 +828,16 @@ def test_codex_parser_rejects_a_subagent_session_export(tmp_path: Path) -> None:
     assert [call.tool_call_id for call in calls] == ["root-shell"]
     assert trajectory.extra["ale"]["parse_issues"] == [
         {
-            "source": "session.jsonl",
-            "reason": "session_id_mismatch",
-            "expected": "session",
-            "actual": "child",
-        }
+            "reason": "unconverted_native_files",
+            "count": 1,
+            "sources": ["native/.codex-ale/sessions/rollout-session.jsonl"],
+        },
+        {"reason": "native_session_unavailable", "session_id": "session"},
     ]
 
 
 def test_openclaw_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
-    (tmp_path / "transcript.jsonl").write_text(
+    native_path(tmp_path, ".openclaw-ale/agents/main/sessions/session.jsonl").write_text(
         "\n".join(
             [
                 json.dumps(
@@ -879,3 +899,100 @@ def test_openclaw_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
 )
 def test_openclaw_node_runtime_gate(version: str, supported: bool) -> None:
     assert _supported_node(version) is supported
+
+
+@pytest.mark.parametrize(
+    "harness", [ClaudeCodeHarness(), CodexCliHarness(), GrokBuildHarness(), OpenClawCliHarness()]
+)
+async def test_instruction_file_carries_full_utf8_prompt(harness) -> None:
+    class CompletingSandbox(FakeSandbox):
+        async def exec(self, argv, **kwargs):
+            if "/.ale-harness/stdout.log" in " ".join(str(part) for part in argv):
+                root = kwargs["cwd"] + "/.ale-harness/"
+                requested = json.loads(self.files[root + "invocations.jsonl"].splitlines()[-1])[
+                    "expected_session_id"
+                ]
+                if harness.name == "claude-code":
+                    event = {"type": "result", "session_id": requested, "result": "done"}
+                elif harness.name == "codex-cli":
+                    event = {"type": "thread.started", "thread_id": "thread-1"}
+                elif harness.name == "grok-build":
+                    event = {"type": "end", "sessionId": requested}
+                else:
+                    event = {
+                        "meta": {"agentMeta": {"sessionId": requested}},
+                        "payloads": [{"text": "done"}],
+                    }
+                self.native_stdout = json.dumps(event).encode() + b"\n"
+                self.native_stderr = b"a separate warning\n"
+            return await super().exec(argv, **kwargs)
+
+    instruction = "多行任务\nPreserve 'quotes', $HOME, `substitution` and \u2603 exactly."
+    sandbox = CompletingSandbox()
+    await harness.launch(instruction, sandbox, session(), timeout_sec=60)
+    assert sandbox.files["/home/agent/instruction.md"] == instruction.encode("utf-8")
+    assert all(instruction not in " ".join(argv) for argv in sandbox.commands)
+    assert all(instruction not in env.values() for env in sandbox.environments)
+    assert sandbox.files["/home/agent/.ale-harness/stderr.log"] == b"a separate warning\n"
+    assert b"warning" not in sandbox.files["/home/agent/.ale-harness/stdout.log"]
+    command = " ".join(sandbox.commands[-1])
+    if isinstance(harness, GrokBuildHarness):
+        assert "--prompt-file /home/agent/instruction.md" in command
+    elif isinstance(harness, OpenClawCliHarness):
+        assert "--message-file /home/agent/instruction.md" in command
+    else:
+        assert "Read instruction.md in the current working directory" in command
+
+
+async def test_empty_resume_cannot_reuse_previous_success() -> None:
+    harness = CodexCliHarness()
+    sandbox = FakeSandbox()
+    sandbox.native_stdout = b'{"type":"thread.started","thread_id":"thread-1"}\n'
+    first = await harness.launch("first", sandbox, session(), timeout_sec=60)
+    assert first.continuation is not None
+    sandbox.native_stdout = b""
+    with pytest.raises(NativeContinuationError, match="session ID"):
+        await harness.resume("second", first.continuation, sandbox, session(), timeout_sec=60)
+    assert sandbox.files["/home/agent/instruction.md"] == b"second"
+    records = [
+        json.loads(line)
+        for line in sandbox.files["/home/agent/.ale-harness/invocations.jsonl"].splitlines()
+    ]
+    assert records[1]["stdout_offset"] > 0
+
+
+def test_invocation_boundaries_preserve_resumed_events_after_partial_json(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from ale.run.harnesses.evidence import jsonl_events
+
+    partial = b'{"type":"unfinished"'
+    resumed = b'{"type":"thread.started","thread_id":"resumed"}\n'
+    (tmp_path / "stdout.log").write_bytes(partial + resumed + b'{"type":')
+    (tmp_path / "invocations.jsonl").write_text(
+        json.dumps({"stdout_offset": 0}) + "\n" + json.dumps({"stdout_offset": len(partial)}) + "\n"
+    )
+    running = replace(context(tmp_path, "codex"), incomplete=True, incomplete_reason="running")
+    events, issues = jsonl_events(running)
+    assert events == [{"type": "thread.started", "thread_id": "resumed"}]
+    assert len(issues) == 1  # The closed first invocation really was truncated.
+    _, final_issues = jsonl_events(replace(running, incomplete_reason="agent_interrupted"))
+    assert len(final_issues) == 2
+
+
+def test_disabled_native_collection_reports_summary_scope_without_missing_file_error(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    (tmp_path / "stdout.log").write_text(json.dumps({"payloads": [{"text": "done"}]}))
+    native_path(tmp_path, ".openclaw-ale/agents/main/sessions/session.jsonl").write_text(
+        "bad native bytes"
+    )
+    trajectory = OpenClawCliHarness().parse_trajectory(
+        replace(context(tmp_path, "openclaw"), native_logs_enabled=False)
+    )
+    assert trajectory.steps[-1].message == "done"
+    assert trajectory.extra["ale"]["evidence_scope"] == "stdout_only"
+    assert trajectory.extra["ale"]["limitations"]
+    assert not trajectory.extra["ale"].get("parse_issues")

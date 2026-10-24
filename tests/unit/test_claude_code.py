@@ -6,6 +6,7 @@ import base64
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,7 +96,7 @@ class FakeSandbox:
         self.sandbox_id = sandbox_id
         self.commands: list[str] = []
         self.prompts: list[str] = []
-        self.transcript = b""
+        self.files: dict[str, bytes] = {}
         self.has_state = True
         self.environments: list[dict[str, str]] = []
 
@@ -105,9 +106,9 @@ class FakeSandbox:
         self.environments.append(env or {})
         if "find " in command:
             return ExecResult(exit_code=0 if self.has_state else 1)
-        if "claude " not in command:
+        if "/.ale-harness/stdout.log" not in command:
             return ExecResult(exit_code=0)
-        prompt = next(value for key, value in (env or {}).items() if key.startswith("ALE_PROMPT_"))
+        prompt = self.files["/home/agent/instruction.md"].decode()
         self.prompts.append(prompt)
         match = re.search(r"--(?:session-id|resume) ([^ ]+)", command)
         assert match
@@ -116,11 +117,22 @@ class FakeSandbox:
             json.dumps({"type": "result", "session_id": session_id, "result": prompt}).encode()
             + b"\n"
         )
-        self.transcript = self.transcript + line if " >> " in command else line
+        self.files["/home/agent/.ale-harness/stdout.log"] += line
         return ExecResult(exit_code=0)
 
-    async def read_file(self, path):  # type: ignore[no-untyped-def]
-        return self.transcript
+    async def read_file(self, path, *, offset=0, length=None):
+        data = self.files[str(path)]
+        return data[offset:] if length is None else data[offset : offset + length]
+
+    async def write_file(self, path, data, **kwargs):
+        self.files[str(path)] = data
+
+    async def list_files(self, path):
+        return tuple(
+            SimpleNamespace(path=name, size=len(data))
+            for name, data in self.files.items()
+            if name.startswith(str(path) + "/")
+        )
 
 
 def native_session(**updates: object) -> HarnessSession:
@@ -247,7 +259,7 @@ def parse_context(tmp_path: Path) -> TrajectoryParseContext:
 def test_stream_json_parser_preserves_atif_tool_grouping_and_parse_issues(
     tmp_path: Path,
 ) -> None:
-    transcript = tmp_path / "transcript.jsonl"
+    transcript = tmp_path / "stdout.log"
     transcript.write_text(
         "\n".join(
             [
@@ -349,7 +361,7 @@ def test_stream_json_parser_preserves_atif_tool_grouping_and_parse_issues(
 
 
 def test_stream_json_parser_keeps_missing_result_absent(tmp_path: Path) -> None:
-    (tmp_path / "transcript.jsonl").write_text(
+    (tmp_path / "stdout.log").write_text(
         json.dumps(
             {
                 "type": "assistant",
@@ -374,7 +386,7 @@ def test_stream_json_parser_keeps_missing_result_absent(tmp_path: Path) -> None:
 
 
 def test_stream_json_parser_rejects_orphan_results(tmp_path: Path) -> None:
-    (tmp_path / "transcript.jsonl").write_text(
+    (tmp_path / "stdout.log").write_text(
         json.dumps(
             {
                 "type": "user",
@@ -400,7 +412,7 @@ def test_stream_json_parser_externalizes_document_and_binary_results(
 ) -> None:
     document = base64.b64encode(b"%PDF-demo").decode()
     binary = base64.b64encode(b"\x00\x01\x02").decode()
-    (tmp_path / "transcript.jsonl").write_text(
+    (tmp_path / "stdout.log").write_text(
         "\n".join(
             [
                 json.dumps(
@@ -462,3 +474,71 @@ def test_stream_json_parser_externalizes_document_and_binary_results(
     assert all((tmp_path / ref["path"]).is_file() for ref in refs)
     assert document not in parsed.model_dump_json()
     assert binary not in parsed.model_dump_json()
+
+
+def test_native_root_and_linked_child_are_collected_without_duplicate_stream_messages(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    native_root = tmp_path / "native/.claude-config/projects/project"
+    native_root.mkdir(parents=True)
+    root_events = [
+        {
+            "type": "assistant",
+            "sessionId": "root",
+            "message": {
+                "id": "root-message",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "delegate",
+                        "name": "Task",
+                        "input": {"prompt": "child task"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "sessionId": "root",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "delegate", "content": "child done"}
+                ],
+            },
+        },
+    ]
+    serialized = "".join(json.dumps(event) + "\n" for event in root_events)
+    (native_root / "root.jsonl").write_text(serialized)
+    (tmp_path / "stdout.log").write_text(serialized)
+    (native_root / "unrelated.jsonl").write_text(
+        json.dumps({"type": "assistant", "message": {"content": "ignore me"}})
+    )
+    children = native_root / "root/subagents"
+    children.mkdir(parents=True)
+    (children / "agent-child.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "sessionId": "child-session",
+                "isSidechain": True,
+                "agentId": "child",
+                "parentToolUseID": "delegate",
+                "message": {
+                    "id": "child-message",
+                    "content": [{"type": "text", "text": "child done"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    trajectory = ClaudeCodeHarness().parse_trajectory(
+        replace(parse_context(tmp_path), session_id="root", native_logs_enabled=True)
+    )
+    calls = [call for step in trajectory.steps for call in step.tool_calls or []]
+    assert [call.tool_call_id for call in calls] == ["delegate"]
+    assert len(trajectory.subagent_trajectories) == 1
+    assert trajectory.subagent_trajectories[0].steps[-1].message == "child done"
+    assert "ignore me" not in trajectory.model_dump_json()

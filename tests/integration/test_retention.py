@@ -111,7 +111,7 @@ def context(root: Path, policy: LoggingPolicy, run: AgentRun | None):
     recording = EpisodeRecording(root)
     logs = root / "logs/claude-code"
     logs.mkdir(parents=True)
-    (logs / "transcript.jsonl").write_text(
+    (logs / "stdout.log").write_text(
         json.dumps({"type": "result", "session_id": "session", "result": "done"}) + "\n"
     )
     return SimpleNamespace(
@@ -146,14 +146,14 @@ def test_debug_and_interruption_keep_native_logs(tmp_path: Path) -> None:
         AgentRun(exit_code=0, final_message="done"),
     )
     StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(debug_ctx)  # type: ignore[arg-type]
-    assert (debug / "logs/claude-code/transcript.jsonl").is_file()
+    assert (debug / "logs/claude-code/stdout.log").is_file()
 
     interrupted = tmp_path / "interrupted"
     interrupted_ctx = context(interrupted, LoggingPolicy(), None)
     StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
         interrupted_ctx
     )
-    assert (interrupted / "logs/claude-code/transcript.jsonl").is_file()
+    assert (interrupted / "logs/claude-code/stdout.log").is_file()
     trajectory = json.loads((interrupted / "trajectory.json").read_text())
     assert trajectory["extra"]["ale"]["incomplete"] is True
 
@@ -228,7 +228,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
 def test_conversion_failure_keeps_native_logs(tmp_path: Path) -> None:
     root = tmp_path / "failed"
     ctx = context(root, LoggingPolicy(), AgentRun(exit_code=0, final_message="done"))
-    transcript = root / "logs/claude-code/transcript.jsonl"
+    transcript = root / "logs/claude-code/stdout.log"
     transcript.write_text(
         json.dumps(
             {

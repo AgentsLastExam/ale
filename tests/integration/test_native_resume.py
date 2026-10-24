@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from pathlib import PurePosixPath
 
 import pytest
 
 from ale.core.harness import HarnessSession
-from ale.core.sandbox import ExecResult
+from ale.core.sandbox import ExecResult, SandboxFile
 from ale.core.testkit import AutonomousHarnessConformance
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 
@@ -22,12 +23,17 @@ class FakeClaudeSandbox:
         self.prompts: list[str] = []
         self.selectors: list[tuple[str, str]] = []
         self.transcript = b""
+        self.files: dict[str, bytes] = {}
 
     async def exec(self, argv, *, env=None, **kwargs):  # type: ignore[no-untyped-def]
         command = " ".join(str(part) for part in argv)
         if "find " in command or "claude " not in command:
             return ExecResult(exit_code=0)
-        prompt = next(value for key, value in (env or {}).items() if key.startswith("ALE_PROMPT_"))
+        prompt = next(
+            data.decode("utf-8")
+            for path, data in self.files.items()
+            if path.endswith("/instruction.md")
+        )
         self.prompts.append(prompt)
         match = re.search(r"--(session-id|resume) ([^ ]+)", command)
         assert match
@@ -39,10 +45,23 @@ class FakeClaudeSandbox:
             + b"\n"
         )
         self.transcript = self.transcript + line if " >> " in command else line
+        path = next(path for path in self.files if path.endswith("/stdout.log"))
+        self.files[path] = self.transcript
         return ExecResult(exit_code=0)
 
-    async def read_file(self, path):  # type: ignore[no-untyped-def]
-        return self.transcript
+    async def write_file(self, path, data, **kwargs):  # type: ignore[no-untyped-def]
+        self.files[str(path)] = data
+
+    async def read_file(self, path, *, offset=0, length=None):  # type: ignore[no-untyped-def]
+        data = self.files[str(path)]
+        return data[offset:] if length is None else data[offset : offset + length]
+
+    async def list_files(self, path):  # type: ignore[no-untyped-def]
+        return tuple(
+            SandboxFile(path=name, size=len(data), mtime_ns=1, file_id=name)
+            for name, data in self.files.items()
+            if PurePosixPath(name).is_relative_to(path)
+        )
 
 
 @pytest.mark.asyncio

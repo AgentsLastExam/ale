@@ -7,6 +7,8 @@ import pytest
 from ale.core.result import ResultRecord
 from ale.core.trajectory import (
     AtifAgent,
+    AtifAudioSource,
+    AtifContentPart,
     AtifMetrics,
     AtifObservation,
     AtifObservationResult,
@@ -71,8 +73,57 @@ def fixture() -> tuple[AtifTrajectory, ResultRecord]:
 
 def test_harbor_export_is_direct_atif_and_preserves_all_rewards() -> None:
     trajectory, result = fixture()
-    assert harbor_trajectory(trajectory)["schema_version"] == "ATIF-v1.7"
+    assert harbor_trajectory(trajectory)["schema_version"] == "ATIF-v1.8"
     assert harbor_result(result) == {"rewards": {"correctness": 1.0, "format": 0.5}}
+
+
+@pytest.mark.parametrize("step_index", [0, 1])
+def test_prime_verifiers_rejects_audio_instead_of_mislabeling_or_dropping_it(
+    step_index: int,
+) -> None:
+    trajectory, result = fixture()
+    steps = list(trajectory.steps)
+    steps[step_index] = steps[step_index].model_copy(
+        update={
+            "message": [
+                AtifContentPart(
+                    type="audio",
+                    source=AtifAudioSource(media_type="audio/wav", path="question.wav"),
+                )
+            ]
+        }
+    )
+    trajectory = trajectory.model_copy(update={"steps": steps})
+    exported = harbor_trajectory(trajectory)
+    assert exported["steps"][step_index]["message"][0]["type"] == "audio"
+    with pytest.raises(ValueError, match="cannot represent ATIF audio"):
+        prime_verifiers_record(trajectory, result)
+
+
+def test_prime_verifiers_rejects_audio_feedback_without_a_tool_call() -> None:
+    trajectory, result = fixture()
+    observation = AtifObservation(
+        results=[
+            AtifObservationResult(
+                content=[
+                    AtifContentPart(
+                        type="audio",
+                        source=AtifAudioSource(media_type="audio/wav", path="feedback.wav"),
+                    )
+                ]
+            )
+        ]
+    )
+    trajectory = trajectory.model_copy(
+        update={
+            "steps": [
+                trajectory.steps[0],
+                trajectory.steps[1].model_copy(update={"observation": observation}),
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="cannot represent ATIF audio"):
+        prime_verifiers_record(trajectory, result)
 
 
 def test_prime_verifiers_record_preserves_messages_tools_calls_and_rewards() -> None:

@@ -38,6 +38,7 @@ from ale.core.sandbox import (
     ResourceAllocation,
     RetainedSandbox,
     Sandbox,
+    SandboxFile,
     SandboxRequest,
     SandboxRole,
     SandboxState,
@@ -200,13 +201,19 @@ async def attach_retained(
         await provider._restrict_host(container, networks[0], request, reattached=True)
     agent_user = request.user
     client = await provider._connect(container, agent_user)
-    agent_home, _ = await provider._guest_contract(client)
+    try:
+        agent_home, _ = await provider._guest_contract(client)
+        file_client = await provider._connect(container, agent_user)
+    except BaseException:
+        await client.close()
+        raise
     return DockerSandbox(
         sandbox_id=container.removeprefix("ale-"),
         request=request.model_copy(update={"role": SandboxRole(role)}),
         container=container,
         network=networks[0] if networks else None,
         client=client,
+        file_client=file_client,
         resolved_image=resolved,
         allocation=allocation,
         agent_user=agent_user,
@@ -328,6 +335,7 @@ class DockerSandbox(Sandbox):
         container: str,
         network: str | None,
         client: GuestClient,
+        file_client: GuestClient,
         resolved_image: ResolvedImage,
         allocation: ResourceAllocation,
         resource_lease: GpuLease | None = None,
@@ -344,6 +352,7 @@ class DockerSandbox(Sandbox):
         self.container = container
         self.network = network
         self._client = client
+        self._file_client = file_client
         self.agent_user = agent_user
         self.agent_home = agent_home
         self._sealed = False
@@ -407,8 +416,13 @@ class DockerSandbox(Sandbox):
     ) -> None:
         await self._client.write_file(str(path), data, run_as=self._as(identity))
 
-    async def read_file(self, path: PurePosixPath | str) -> bytes:
-        return await self._client.read_file(str(path))
+    async def read_file(
+        self, path: PurePosixPath | str, *, offset: int = 0, length: int | None = None
+    ) -> bytes:
+        return await self._file_client.read_file(str(path), offset=offset, length=length)
+
+    async def list_files(self, path: str) -> tuple[SandboxFile, ...]:
+        return await self._file_client.scan_files(path)
 
     async def upload_dir(
         self, source: str, target: PurePosixPath | str, *, identity: Identity = Identity.FRAMEWORK
@@ -470,7 +484,9 @@ class DockerSandbox(Sandbox):
             return
         self.state = SandboxState.DESTROYED
         try:
-            await self._client.close()
+            await asyncio.gather(
+                self._client.close(), self._file_client.close(), return_exceptions=True
+            )
             await _docker("rm", "-f", "-v", self.container, timeout=60)
             if self.network:
                 await _docker("network", "rm", self.network, timeout=60)
@@ -480,7 +496,9 @@ class DockerSandbox(Sandbox):
     async def retain(
         self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
     ) -> RetainedSandbox:
-        await self._client.close()
+        await asyncio.gather(
+            self._client.close(), self._file_client.close(), return_exceptions=True
+        )
         gpu_devices = (
             self.allocation.gpu.provider_addresses if self.allocation.gpu is not None else ()
         )
@@ -615,6 +633,7 @@ class DockerProvider(Provider):
         # is nothing left here to decide.
         argv += [resolved_image.observed_ref]
 
+        clients: list[GuestClient] = []
         try:
             code, _, stderr = await _docker(*argv, timeout=300)
             if code != 0:
@@ -654,6 +673,7 @@ class DockerProvider(Provider):
                 await self._restrict_host(container, network, request)
             agent_user = request.user
             client = await self._connect(container, agent_user)
+            clients.append(client)
             agent_home, has_desktop = await self._guest_contract(client)
             if request.sudo:
                 await self._verify_sudo(client, agent_user)
@@ -662,7 +682,10 @@ class DockerProvider(Provider):
                 _verify_docker_gpu(selected, observed_gpu)
             if has_desktop:
                 await self._await_desktop(client)
+            file_client = await self._connect(container, agent_user)
+            clients.append(file_client)
         except BaseException:
+            await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
             with contextlib.suppress(BaseException):
                 await asyncio.shield(_docker("rm", "-f", "-v", container))
             if network:
@@ -680,6 +703,7 @@ class DockerProvider(Provider):
             container=container,
             network=network,
             client=client,
+            file_client=file_client,
             resolved_image=resolved_image,
             allocation=ResourceAllocation(
                 cpus=request.resources.cpus,
@@ -938,12 +962,14 @@ class DockerProvider(Provider):
                 "--stdio",
             ]
         )
-        await transport.start()
         client = GuestClient(transport)
         try:
+            await transport.start()
             await asyncio.wait_for(client.health(), timeout=60)
-        except Exception as exc:
+        except BaseException as exc:
             await client.close()
+            if not isinstance(exc, Exception):
+                raise
             raise ProviderStartError(f"guest service did not answer: {exc}") from exc
         return client
 

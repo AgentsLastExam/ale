@@ -51,6 +51,7 @@ from ale.core.sandbox import (
     ResourceAllocation,
     RetainedSandbox,
     Sandbox,
+    SandboxFile,
     SandboxRequest,
     SandboxRole,
     SandboxState,
@@ -254,15 +255,15 @@ async def attach_retained(
         raise ProviderCapabilityError(f"{handle!r} has no guest service port") from exc
 
     resolved = await resolve_prepared_vm_image(request.prepared_image)
-    transport = TcpTransport("127.0.0.1", host_port, token=_read_guest_token(Path(storage)))
-    await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
-    client = GuestClient(transport)
+    token = _read_guest_token(Path(storage))
+    client = await _connect(host_port, token)
     provider = QemuProvider()
     attached_request = request.model_copy(update={"role": SandboxRole(role)})
     try:
         agent_user, agent_home, _ = await provider._read_guest_contract(client, attached_request)
         # A later run reaches its own Gateway, so its port is routed in as well.
         host_ip = await provider._wire_network(container, attached_request)
+        file_client = await _connect(host_port, token)
     except BaseException:
         await client.close()
         raise
@@ -273,6 +274,7 @@ async def attach_retained(
         storage=Path(storage),
         host_port=host_port,
         client=client,
+        file_client=file_client,
         resolved_image=resolved,
         allocation=allocation,
         agent_user=agent_user,
@@ -360,6 +362,17 @@ def _proxy_env(request: SandboxRequest) -> dict[str, str]:
     }
 
 
+async def _connect(host_port: int, token: str) -> GuestClient:
+    transport = TcpTransport("127.0.0.1", host_port, token=token)
+    client = GuestClient(transport)
+    try:
+        await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
+    except BaseException:
+        await client.close()
+        raise
+    return client
+
+
 async def _run(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -390,6 +403,7 @@ class QemuSandbox(Sandbox):
         storage: Path,
         host_port: int,
         client: GuestClient,
+        file_client: GuestClient,
         resolved_image: ResolvedImage,
         allocation: ResourceAllocation,
         resource_lease: GpuLease | None = None,
@@ -411,6 +425,7 @@ class QemuSandbox(Sandbox):
         self.agent_home = agent_home
         self.host_ip = host_ip
         self._client = client
+        self._file_client = file_client
         self._sealed = False
         self.state = SandboxState.READY
 
@@ -481,8 +496,11 @@ class QemuSandbox(Sandbox):
     ) -> None:
         await self._client.write_file(str(path), data, run_as=self._as(identity))
 
-    async def read_file(self, path: str) -> bytes:
-        return await self._client.read_file(str(path))
+    async def read_file(self, path: str, *, offset: int = 0, length: int | None = None) -> bytes:
+        return await self._file_client.read_file(str(path), offset=offset, length=length)
+
+    async def list_files(self, path: str) -> tuple[SandboxFile, ...]:
+        return await self._file_client.scan_files(path)
 
     async def upload_dir(
         self,
@@ -516,12 +534,12 @@ class QemuSandbox(Sandbox):
         Path(target).mkdir(parents=True, exist_ok=True)
         path_type = PureWindowsPath if self.request.os is OperatingSystem.WINDOWS else PurePosixPath
         source_path = path_type(str(source))
-        for relative_name in await self._client.list_files(str(source_path)):
+        for relative_name in await self._file_client.list_files(str(source_path)):
             relative = PurePosixPath(relative_name)
             remote = source_path.joinpath(*relative.parts)
             local = Path(target).joinpath(*relative.parts)
             local.parent.mkdir(parents=True, exist_ok=True)
-            local.write_bytes(await self._client.read_file(str(remote)))
+            local.write_bytes(await self._file_client.read_file(str(remote)))
 
     async def screenshot(self) -> bytes:
         return await self._client.screenshot()
@@ -594,7 +612,9 @@ class QemuSandbox(Sandbox):
         result = await self.exec(["shutdown.exe", "/s", "/t", "1"], timeout_sec=30)
         if not result.ok:
             raise ProviderStartError(f"could not shut down build VM: {result.stderr}")
-        await self._client.close()
+        await asyncio.gather(
+            self._client.close(), self._file_client.close(), return_exceptions=True
+        )
         code, output, stderr = await _run("docker", "wait", self.container, timeout=300)
         if code != 0 or output.strip() != "0":
             raise ProviderStartError(f"build VM did not shut down cleanly: {stderr or output}")
@@ -634,7 +654,9 @@ class QemuSandbox(Sandbox):
 
         try:
             with contextlib.suppress(Exception):
-                await self._client.close()
+                await asyncio.gather(
+                    self._client.close(), self._file_client.close(), return_exceptions=True
+                )
             with contextlib.suppress(Exception):
                 await _run("docker", "rm", "-f", self.container, timeout=60)
             # The overlay is this episode's entire mutable state.
@@ -646,7 +668,9 @@ class QemuSandbox(Sandbox):
     async def retain(
         self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
     ) -> RetainedSandbox:
-        await self._client.close()
+        await asyncio.gather(
+            self._client.close(), self._file_client.close(), return_exceptions=True
+        )
         gpu_devices = (
             self.allocation.gpu.provider_addresses if self.allocation.gpu is not None else ()
         )
@@ -789,11 +813,11 @@ class QemuProvider(Provider):
             shutil.rmtree(storage, ignore_errors=True)
             raise
 
+        clients: list[GuestClient] = []
         try:
             host_ip = await self._wire_network(container, request)
-            transport = TcpTransport("127.0.0.1", host_port, token=guest_token)
-            await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
-            client = GuestClient(transport)
+            client = await _connect(host_port, guest_token)
+            clients.append(client)
             agent_user, agent_home, has_desktop = await self._read_guest_contract(client, request)
             effective_storage_mb = await self._prepare_root_storage(
                 client, request.resources.storage_mb, request.os
@@ -810,7 +834,10 @@ class QemuProvider(Provider):
                 await self._verify_windows_privileges(client, agent_user, request.sudo)
             elif request.sudo:
                 await self._verify_sudo(client, agent_user)
+            file_client = await _connect(host_port, guest_token)
+            clients.append(file_client)
         except BaseException:
+            await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
             with contextlib.suppress(BaseException):
                 await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))
             shutil.rmtree(storage, ignore_errors=True)
@@ -827,6 +854,7 @@ class QemuProvider(Provider):
             storage=storage,
             host_port=host_port,
             client=client,
+            file_client=file_client,
             resolved_image=resolved_image,
             allocation=ResourceAllocation(
                 cpus=request.resources.cpus,
@@ -852,8 +880,12 @@ class QemuProvider(Provider):
             agent_home=agent_home,
             host_ip=host_ip,
         )
-        if request.network.mode is NetworkMode.OPEN:
-            await sandbox.open_egress()
+        try:
+            if request.network.mode is NetworkMode.OPEN:
+                await sandbox.open_egress()
+        except BaseException:
+            await sandbox.destroy()
+            raise
         return sandbox
 
     async def _make_overlay(
