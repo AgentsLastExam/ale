@@ -14,8 +14,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import fcntl
 import json
-from collections.abc import Awaitable, Callable, Sequence
+import os
+import stat
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Protocol
 
 from ale.core.errors import GuestUnreachableError, OutputStreamError, ProviderStartError
@@ -27,12 +31,22 @@ _READ_LIMIT = 16 * 1024 * 1024  # generous: file chunks arrive base64-encoded
 #: Bytes per write_file message; base64 of this stays well under the guest's 8 MiB line.
 _WRITE_CHUNK_BYTES = 4 * 1024 * 1024
 _OUTPUT_PREVIEW_BYTES = 64 * 1024
+#: Body bytes gathered before one transport write: large enough that a tree of small files
+#: costs a handful of writes, small enough to keep memory flat for a large one.
+_BODY_BUFFER_BYTES = 1024 * 1024
+#: Bytes read from one large file per write; such blocks are sent as they are, uncopied.
+_FILE_BLOCK_BYTES = 4 * 1024 * 1024
+#: The session pipe's capacity. Linux defaults to 64 KiB, which turns each megabyte of an
+#: upload into sixteen event-loop wakeups; 1 MiB is the unprivileged maximum.
+_PIPE_BYTES = 1024 * 1024
+#: The first guest protocol with ``put_tree``.
+_STREAMED_UPLOADS = 2
 
 
 class Transport(Protocol):
-    """A line-oriented duplex channel to one guest service."""
+    """A duplex channel to one guest service: bytes out, reply lines back."""
 
-    async def send(self, line: str) -> None: ...
+    async def send(self, data: bytes) -> None: ...
 
     async def recv(self) -> str: ...
 
@@ -54,11 +68,15 @@ class StdioTransport:
             stderr=asyncio.subprocess.PIPE,
             limit=_READ_LIMIT,
         )
+        assert self._proc.stdin is not None
+        pipe = self._proc.stdin.get_extra_info("pipe")
+        with contextlib.suppress(AttributeError, OSError):
+            fcntl.fcntl(pipe.fileno(), fcntl.F_SETPIPE_SZ, _PIPE_BYTES)
 
-    async def send(self, line: str) -> None:
+    async def send(self, data: bytes) -> None:
         proc = self._require()
         assert proc.stdin is not None
-        proc.stdin.write((line + "\n").encode("utf-8"))
+        proc.stdin.write(data)
         await proc.stdin.drain()
 
     async def recv(self) -> str:
@@ -122,7 +140,8 @@ class TcpTransport:
                     self._host, self._port, limit=_READ_LIMIT
                 )
                 await self.send(
-                    json.dumps({"id": 0, "op": "auth", "params": {"token": self._token}})
+                    json.dumps({"id": 0, "op": "auth", "params": {"token": self._token}}).encode()
+                    + b"\n"
                 )
                 reply = json.loads(await asyncio.wait_for(self.recv(), timeout=interval_sec * 10))
             except (OSError, GuestUnreachableError, TimeoutError, ValueError) as exc:
@@ -147,10 +166,10 @@ class TcpTransport:
             f"{timeout_sec:g}s ({last})"
         )
 
-    async def send(self, line: str) -> None:
+    async def send(self, data: bytes) -> None:
         if self._writer is None:
             raise GuestUnreachableError("transport is not started")
-        self._writer.write((line + "\n").encode("utf-8"))
+        self._writer.write(data)
         await self._writer.drain()
 
     async def recv(self) -> str:
@@ -182,6 +201,7 @@ class GuestClient:
         self._transport = transport
         self._lock = asyncio.Lock()
         self._next_id = 0
+        self._health: dict[str, Any] | None = None
 
     async def call(
         self,
@@ -190,17 +210,21 @@ class GuestClient:
         *,
         timeout_sec: float | None = None,
         event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        body: Callable[[int], Iterator[bytes]] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """Perform one operation; returns its data and any interim events."""
+        """Perform one operation; returns its data and any interim events.
+
+        ``body`` produces the request body for its id. It runs in a worker thread, so
+        reading a large tree from disk never stalls the event loop the Gateway shares.
+        """
         async with self._lock:
             self._next_id += 1
             req_id = self._next_id
-            payload = json.dumps(
-                {"id": req_id, "op": op, "params": params or {}},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            await self._transport.send(payload)
+            await self._transport.send(_line({"id": req_id, "op": op, "params": params or {}}))
+            if body is not None:
+                blocks = body(req_id)
+                while (block := await asyncio.to_thread(next, blocks, None)) is not None:
+                    await self._transport.send(block)
             events: list[dict[str, Any]] = []
             callback_error: BaseException | None = None
             while True:
@@ -232,6 +256,7 @@ class GuestClient:
 
     async def health(self) -> dict[str, Any]:
         data, _ = await self.call("health", timeout_sec=30)
+        self._health = data
         return data
 
     async def exec(
@@ -317,6 +342,47 @@ class GuestClient:
             if event.get("event") == "chunk"
         )
 
+    async def upload_dir(self, source: str, target: str, *, run_as: str | None = None) -> None:
+        """Stream the tree at ``source`` into ``target`` as one ``put_tree`` request.
+
+        The guest applies the upload modes and owner as it writes. A Windows image build
+        boots a base disk with the guest service it was saved with, which may predate
+        ``put_tree``; only there are files sent one by one.
+        """
+        health = self._health or await self.health()
+        if int(health.get("proto") or 1) < _STREAMED_UPLOADS:
+            if health.get("os") != "windows":
+                raise ProviderStartError(
+                    "the guest service predates streamed uploads; rebuild the image"
+                )
+            await self._upload_files(Path(source), PureWindowsPath(target), run_as=run_as)
+            return
+        root = Path(source)
+        if not root.is_dir():
+            raise ProviderStartError(f"upload source is not a directory: {root}")
+        params: dict[str, Any] = {"path": target}
+        if run_as:
+            params["run_as"] = run_as
+        body = _TreeBody(root)
+        try:
+            await self.call("put_tree", params, body=body)
+        except GuestUnreachableError:
+            if body.error is not None:
+                raise body.error from None
+            raise
+
+    async def _upload_files(
+        self, root: Path, target: PureWindowsPath | PurePosixPath, *, run_as: str | None
+    ) -> None:
+        await self.mkdirs(str(target), run_as=run_as)
+        for entry in sorted(root.rglob("*")):
+            destination = target.joinpath(*entry.relative_to(root).parts)
+            if entry.is_dir():
+                await self.mkdirs(str(destination), run_as=run_as)
+            elif entry.is_file():
+                await self.mkdirs(str(destination.parent), run_as=run_as)
+                await self.write_file(str(destination), entry.read_bytes(), run_as=run_as)
+
     async def mkdirs(self, path: str, *, run_as: str | None = None) -> None:
         params = {"path": path}
         if run_as:
@@ -345,6 +411,93 @@ class GuestClient:
 
     async def close(self) -> None:
         await self._transport.close()
+
+
+def _line(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+class _TreeBody:
+    """The ``put_tree`` body for a Host directory, in sorted depth-first order.
+
+    Links are sent as links, never followed. A local failure (an unreadable file, a FIFO,
+    a file that shrinks while read) never leaves the guest mid-frame: the current file is
+    padded to its announced size, the body is aborted, and the failure is kept in
+    ``error`` for the caller to raise once the guest has answered.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.error: ProviderStartError | None = None
+
+    def __call__(self, req_id: int) -> Iterator[bytes]:
+        buffer = bytearray()
+        try:
+            for name, entry in self._entries(""):
+                if not entry.is_file(follow_symlinks=False):
+                    buffer += self._header(req_id, name, entry)
+                else:
+                    with open(entry.path, "rb") as handle:
+                        remaining = os.fstat(handle.fileno()).st_size
+                        buffer += _line(
+                            {"id": req_id, "entry": name, "kind": "file", "size": remaining}
+                        )
+                        while remaining:
+                            try:
+                                block = handle.read(min(remaining, _FILE_BLOCK_BYTES))
+                                if not block:
+                                    raise ProviderStartError(f"{name} changed while it was read")
+                            except (OSError, ProviderStartError):
+                                yield bytes(buffer)
+                                buffer.clear()
+                                while remaining:
+                                    yield bytes(min(remaining, _FILE_BLOCK_BYTES))
+                                    remaining -= min(remaining, _FILE_BLOCK_BYTES)
+                                raise
+                            remaining -= len(block)
+                            if len(block) >= _BODY_BUFFER_BYTES:
+                                if buffer:
+                                    yield bytes(buffer)
+                                    buffer.clear()
+                                yield block
+                                continue
+                            buffer += block
+                            if len(buffer) >= _BODY_BUFFER_BYTES:
+                                yield bytes(buffer)
+                                buffer.clear()
+                if len(buffer) >= _BODY_BUFFER_BYTES:
+                    yield bytes(buffer)
+                    buffer.clear()
+        except (OSError, ProviderStartError) as exc:
+            self.error = (
+                exc
+                if isinstance(exc, ProviderStartError)
+                else ProviderStartError(f"cannot upload from {self.root}: {exc}")
+            )
+            buffer += _line({"id": req_id, "abort": str(self.error)})
+        else:
+            buffer += _line({"id": req_id, "end": True})
+        yield bytes(buffer)
+
+    def _entries(self, prefix: str) -> Iterator[tuple[str, os.DirEntry[str]]]:
+        with os.scandir(self.root / prefix if prefix else self.root) as listing:
+            children = sorted(listing, key=lambda child: child.name)
+        for child in children:
+            name = f"{prefix}{child.name}"
+            yield name, child
+            if child.is_dir(follow_symlinks=False):
+                yield from self._entries(name + "/")
+
+    @staticmethod
+    def _header(req_id: int, name: str, entry: os.DirEntry[str]) -> bytes:
+        if entry.is_symlink():
+            return _line(
+                {"id": req_id, "entry": name, "kind": "symlink", "target": os.readlink(entry)}
+            )
+        if entry.is_dir(follow_symlinks=False):
+            return _line({"id": req_id, "entry": name, "kind": "dir"})
+        kind = stat.filemode(entry.stat(follow_symlinks=False).st_mode)[0]
+        raise ProviderStartError(f"cannot upload {name}: unsupported file type {kind!r}")
 
 
 def _collect(events: list[dict[str, Any]], name: str) -> str:

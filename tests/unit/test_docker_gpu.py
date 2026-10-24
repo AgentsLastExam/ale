@@ -6,14 +6,13 @@ import pytest
 
 from ale.core.errors import ProviderCapabilityError
 from ale.run.providers.docker import (
+    DockerProvider,
     _gpu_run_args,
     _managed_gpu_ids,
     _parse_host_nvidia_smi,
     _parse_nvidia_smi,
     _storage_run_args,
     _verify_docker_gpu,
-    destroy_retained,
-    list_retained,
 )
 
 pytestmark = pytest.mark.unit
@@ -105,7 +104,7 @@ async def test_retained_listing_includes_stale_state_and_cleanup_command(
         )
 
     monkeypatch.setattr("ale.run.providers.docker._docker", docker)
-    assert await list_retained() == [
+    assert await DockerProvider().list_retained() == [
         {
             "provider": "docker",
             "handle": "docker:ale-episode-solver",
@@ -126,4 +125,4 @@ async def test_destroy_rejects_non_ale_container(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr("ale.run.providers.docker._docker", docker)
     with pytest.raises(ProviderCapabilityError, match="not an ALE-retained"):
-        await destroy_retained("docker:someone-elses-container")
+        await DockerProvider().destroy_retained("docker:someone-elses-container")

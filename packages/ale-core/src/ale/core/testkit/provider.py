@@ -2,21 +2,96 @@
 
 Subclass, set ``provider``, and the same assertions that keep the container backend
 honest apply to any other backend. The suite deliberately tests *contract* behaviour —
-what callers are entitled to assume — not implementation details.
+what callers are entitled to assume — not implementation details. Each guarantee in
+``docs/specs/sandbox-image.md`` that a Provider enforces has its test here, so a backend
+that passes this suite gives the same guarantees, not merely the same method names.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import tempfile
 import uuid
-from pathlib import PurePosixPath
+from collections.abc import AsyncIterator
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 import pytest
 
 from ale.core.errors import ProviderCapabilityError
-from ale.core.sandbox import Identity, ImageRef, Provider, SandboxRequest
+from ale.core.sandbox import Identity, ImageRef, Provider, Sandbox, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 
 __all__ = ["ProviderConformance"]
+
+#: An address off every host, reached by IP so no resolver is involved.
+INTERNET = "1.1.1.1:443"
+
+#: Reports, per ``kind=address`` argument, whether the sandbox reached it.
+_REACH = """
+import socket, sys, urllib.request
+for target in sys.argv[1:]:
+    kind, _, address = target.partition("=")
+    try:
+        if kind == "http":
+            urllib.request.urlopen(address, timeout=10).read()
+        else:
+            host, port = address.rsplit(":", 1)
+            socket.create_connection((host, int(port)), timeout=10).close()
+        print(target, "open")
+    except Exception:
+        print(target, "closed")
+"""
+
+_UPLOAD_MODES = """
+import os, pwd, stat, sys
+root, owner = sys.argv[1:]
+account = pwd.getpwnam(owner)
+for parent, directories, files in os.walk(root):
+    for path in [parent, *(os.path.join(parent, name) for name in files)]:
+        info = os.lstat(path)
+        assert (info.st_uid, info.st_gid) == (account.pw_uid, account.pw_gid), path
+        if not stat.S_ISLNK(info.st_mode):
+            expected = 0o755 if stat.S_ISDIR(info.st_mode) else 0o644
+            assert stat.S_IMODE(info.st_mode) == expected, (path, oct(info.st_mode))
+assert os.readlink(os.path.join(root, "link")) == "assets/data.txt"
+"""
+
+
+@contextlib.asynccontextmanager
+async def _host_services() -> AsyncIterator[tuple[int, int]]:
+    """A stand-in Gateway answering HTTP, and another Host service that must stay unseen."""
+
+    async def gateway(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(Exception):
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            await writer.drain()
+        writer.close()
+
+    async def other(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+
+    servers = [await asyncio.start_server(gateway, "0.0.0.0", 0)]
+    servers.append(await asyncio.start_server(other, "0.0.0.0", 0))
+    try:
+        yield tuple(server.sockets[0].getsockname()[1] for server in servers)  # type: ignore[misc]
+    finally:
+        for server in servers:
+            server.close()
+            await server.wait_closed()
+
+
+async def _reach(
+    sandbox: Sandbox, *targets: str, identity: Identity = Identity.AGENT
+) -> dict[str, bool]:
+    result = await sandbox.exec(
+        ["python3", "-c", _REACH, *targets], identity=identity, timeout_sec=90
+    )
+    assert result.ok, result.stderr
+    states = dict(line.rsplit(" ", 1) for line in result.stdout.strip().splitlines())
+    return {target: states[target] == "open" for target in targets}
 
 
 class ProviderConformance:
@@ -104,6 +179,123 @@ class ProviderConformance:
             assert elevated.ok
         finally:
             await sandbox.destroy()
+
+    @pytest.mark.asyncio
+    async def test_the_agent_and_the_framework_are_different_accounts(self) -> None:
+        """Agent work runs as the Task's account; framework work runs as root.
+
+        The agent cannot elevate, read the guest service that drives it, or change system
+        configuration: any of these would let it alter the conditions it is measured under.
+        """
+        request = await self.request()
+        async with await self.provider.create(request) as sandbox:
+            agent = await sandbox.exec(
+                ["sh", "-c", 'id -un; printf %s "$HOME"'], identity=Identity.AGENT
+            )
+            assert agent.ok, agent.stderr
+            assert agent.stdout.split("\n", 1) == [request.user, sandbox.agent_home]
+            assert sandbox.agent_user == request.user
+            framework = await sandbox.exec(["id", "-u"])
+            assert framework.stdout.strip() == "0"
+            probe = (
+                "command -v sudo >/dev/null && sudo -n true 2>/dev/null && echo elevated; "
+                "cat /opt/ale/guestd/main.py >/dev/null 2>&1 && echo read-guestd; "
+                "touch /etc/ale-conformance 2>/dev/null && echo wrote-etc; true"
+            )
+            escaped = await sandbox.exec(["sh", "-c", probe], identity=Identity.AGENT)
+            assert escaped.ok and escaped.stdout.split() == [], escaped.stdout
+
+    @pytest.mark.asyncio
+    async def test_uploads_ignore_host_modes_and_belong_to_their_identity(self) -> None:
+        """The same tree lands the same way on every backend.
+
+        Host modes never travel (a Task fetched from object storage has none to give),
+        ownership follows the identity, links stay links, and re-uploading over a tree the
+        other identity owns replaces it.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / "assets/empty").mkdir(parents=True)
+            (source / "assets/data.txt").write_text("input")
+            (source / ".hidden").write_text("hidden")
+            (source / "run.sh").write_text("printf stage-ok")
+            (source / "link").symlink_to("assets/data.txt")
+            async with await self.provider.create(await self.request()) as sandbox:
+                target = "/tmp/ale-conformance-upload"
+                for identity, mode in [(Identity.AGENT, 0o777), (Identity.FRAMEWORK, 0o600)]:
+                    for path in source.rglob("*"):
+                        if not path.is_symlink():
+                            path.chmod(0o700 if path.is_dir() else mode)
+                    await sandbox.upload_dir(str(source), target, identity=identity)
+                    owner = sandbox.agent_user if identity is Identity.AGENT else "root"
+                    modes = await sandbox.exec(["python3", "-c", _UPLOAD_MODES, target, owner])
+                    assert modes.ok, modes.stderr
+                    stage = await sandbox.exec(["sh", f"{target}/run.sh"], identity=identity)
+                    assert stage.stdout == "stage-ok", stage.stderr
+                    edit = await sandbox.exec(
+                        ["sh", "-c", f"echo edit > {target}/assets/data.txt"],
+                        identity=Identity.AGENT,
+                    )
+                    assert edit.ok == (identity is Identity.AGENT), edit.stderr
+
+    @pytest.mark.asyncio
+    async def test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else(self) -> None:
+        """The isolation claim a ``block`` RunLock makes, across the phase transitions.
+
+        Framework phases have the network; the agent phase reaches only the episode's
+        Gateway, not the Internet and not any other service on the Host; verification
+        gets the network back. The Gateway's address never moves in between.
+        """
+        async with _host_services() as (gateway_port, other_port):
+            request = await self.request(gateway_url=f"http://127.0.0.1:{gateway_port}")
+            async with await self.provider.create(request) as sandbox:
+                gateway = sandbox.gateway_url
+                assert gateway is not None
+                host = urlsplit(gateway).hostname
+                await sandbox.open_egress()
+                opened = await _reach(sandbox, f"tcp={INTERNET}", identity=Identity.FRAMEWORK)
+                assert opened[f"tcp={INTERNET}"], "framework phases must have the network"
+
+                await sandbox.close_egress()
+                sealed = await _reach(
+                    sandbox, f"http={gateway}", f"tcp={INTERNET}", f"tcp={host}:{other_port}"
+                )
+                assert sealed == {
+                    f"http={gateway}": True,
+                    f"tcp={INTERNET}": False,
+                    f"tcp={host}:{other_port}": False,
+                }, sealed
+                assert sandbox.gateway_url == gateway
+
+                await sandbox.open_egress()
+                reopened = await _reach(sandbox, f"tcp={INTERNET}", identity=Identity.FRAMEWORK)
+                assert reopened[f"tcp={INTERNET}"], "verification must get the network back"
+
+    @pytest.mark.asyncio
+    async def test_a_task_that_declared_open_is_never_sealed(self) -> None:
+        request = await self.request(network=NetworkPolicy(mode=NetworkMode.OPEN))
+        async with await self.provider.create(request) as sandbox:
+            await sandbox.close_egress()
+            reached = await _reach(sandbox, f"tcp={INTERNET}")
+            assert reached[f"tcp={INTERNET}"], "an open task lost its network"
+
+    @pytest.mark.asyncio
+    async def test_a_retained_sandbox_can_be_listed_and_destroyed(self) -> None:
+        sandbox = await self.provider.create(await self.request(retention="keep"))
+        try:
+            retained = await sandbox.retain(roles=("solver",), reason="conformance")
+        except ProviderCapabilityError:
+            await sandbox.destroy()
+            pytest.skip(f"{self.provider.name} does not retain sandboxes")
+        try:
+            assert retained.provider == self.provider.name
+            assert retained.handle.startswith(f"{self.provider.name}:")
+            listed = {record["handle"] for record in await self.provider.list_retained()}
+            assert retained.handle in listed
+        finally:
+            await self.provider.destroy_retained(retained.handle)
+        listed = {record["handle"] for record in await self.provider.list_retained()}
+        assert retained.handle not in listed
 
     @pytest.mark.asyncio
     async def test_destroy_is_idempotent(self) -> None:

@@ -17,7 +17,7 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers.docker import DockerProvider, destroy_retained
+from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import prepare_reference, provider_registry
@@ -126,7 +126,7 @@ async def _run_separate_gpu(task: Path, run_dir: Path, indices: tuple[int, ...])
 async def _cleanup_retained(result) -> None:  # type: ignore[no-untyped-def]
     for outcome in result.record.sandboxes:
         if outcome.handle:
-            await destroy_retained(outcome.handle)
+            await DockerProvider().destroy_retained(outcome.handle)
 
 
 @pytest.mark.asyncio

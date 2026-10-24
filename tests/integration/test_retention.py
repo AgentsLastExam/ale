@@ -28,8 +28,6 @@ from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_prove
 from ale.run.providers.docker import (
     DockerProvider,
     DockerSandbox,
-    destroy_retained,
-    list_retained,
 )
 from ale.run.recording import EpisodeRecording
 from ale.run.scaffold import scaffold_task
@@ -220,9 +218,11 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         assert result["rewards"] == {"overall": 1.0}
         if mode == "separate":
             assert result["sandboxes"][0]["roles"] == ["verifier"]
-        assert retained.handle in {item["handle"] for item in await list_retained()}
+        assert retained.handle in {
+            item["handle"] for item in await DockerProvider().list_retained()
+        }
     finally:
-        await destroy_retained(retained.handle)
+        await DockerProvider().destroy_retained(retained.handle)
 
 
 def test_conversion_failure_keeps_native_logs(tmp_path: Path) -> None:
@@ -300,7 +300,7 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
     assert outcome.handle and outcome.cleanup_command
     container = outcome.handle.removeprefix("docker:")
     try:
-        retained = await list_retained()
+        retained = await DockerProvider().list_retained()
         assert any(item["handle"] == outcome.handle for item in retained)
         probe = await asyncio.create_subprocess_exec(
             "docker",
@@ -323,7 +323,7 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
         )
         assert await credentials.wait() == 0
     finally:
-        await destroy_retained(outcome.handle)
+        await DockerProvider().destroy_retained(outcome.handle)
 
 
 @pytest.mark.needs_docker
@@ -353,9 +353,9 @@ async def test_separate_retention_applies_to_solver_and_verifier_independently(
     handle = by_role[("solver",)].handle
     assert handle is not None
     try:
-        assert any(item["handle"] == handle for item in await list_retained())
+        assert any(item["handle"] == handle for item in await DockerProvider().list_retained())
     finally:
-        await destroy_retained(handle)
+        await DockerProvider().destroy_retained(handle)
 
 
 @pytest.mark.needs_docker
@@ -389,9 +389,11 @@ async def test_shared_failure_still_applies_keep_and_records_the_phase(
     assert outcome.outcome == "retained"
     assert outcome.handle is not None
     try:
-        assert any(item["handle"] == outcome.handle for item in await list_retained())
+        assert any(
+            item["handle"] == outcome.handle for item in await DockerProvider().list_retained()
+        )
     finally:
-        await destroy_retained(outcome.handle)
+        await DockerProvider().destroy_retained(outcome.handle)
 
 
 @pytest.mark.needs_docker
@@ -422,11 +424,11 @@ async def test_separate_verifier_failure_retains_each_requested_sandbox(tmp_path
             "retained",
             "retained",
         ]
-        retained = await list_retained()
+        retained = await DockerProvider().list_retained()
         assert set(handles) <= {item["handle"] for item in retained}
     finally:
         for handle in handles:
-            await destroy_retained(handle)
+            await DockerProvider().destroy_retained(handle)
 
 
 @pytest.mark.needs_docker
@@ -456,4 +458,6 @@ async def test_sanitation_failure_destroys_sandbox_without_changing_reward(
     assert result.verdict.rewards == {"overall": 1.0}
     assert result.record.sandboxes[0].outcome == "retention-failed"
     assert "sanitation" in (result.record.sandboxes[0].reason or "")
-    assert not any(item["episode"] == result.episode_id for item in await list_retained())
+    assert not any(
+        item["episode"] == result.episode_id for item in await DockerProvider().list_retained()
+    )

@@ -8,8 +8,6 @@ container and a real gateway process.
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from aiohttp import web
 
@@ -18,7 +16,7 @@ from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, SessionRegistry
-from ale.run.providers.docker import HOST_ALIAS, DockerProvider
+from ale.run.providers.docker import DockerProvider
 from tests.support import CONTAINER_BASE, prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -145,57 +143,3 @@ async def test_sandbox_reaches_https_through_the_episode_proxy() -> None:
         assert result.stdout.strip().isdigit()
     finally:
         await proxy.stop()
-
-
-@pytest.mark.asyncio
-async def test_sealed_sandbox_reaches_no_other_host_port() -> None:
-    """The host's bridge address answers only on the episode's Gateway port."""
-    upstream_runner, upstream_url = await _stub_upstream()
-    gateway = Gateway(api_key="host-only-credential", upstream=upstream_url, host="0.0.0.0")
-    await gateway.start()
-    gateway.open_session(GatewaySession(episode_id="iso-host", model="claude-opus-4-8"))
-
-    async def accept(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        writer.write(b"host service\n")
-        await writer.drain()
-        writer.close()
-
-    other_service = await asyncio.start_server(accept, "0.0.0.0", 0)
-    other_port = other_service.sockets[0].getsockname()[1]
-    gateway_port = gateway.base_url.rsplit(":", 1)[1]
-
-    provider = DockerProvider()
-    prepared = await prepare_reference(provider, IMAGE)
-    request = SandboxRequest(
-        episode_id="iso-host",
-        prepared_image=prepared,
-        resources=Resources(cpus=1, memory_mb=512),
-        network=NetworkPolicy(mode=NetworkMode.BLOCK),
-        gateway_url=gateway.base_url,
-    )
-    probe = (
-        "import socket,sys\n"
-        "for port in sys.argv[1:]:\n"
-        "    try:\n"
-        "        socket.create_connection(('" + HOST_ALIAS + "', int(port)), timeout=5).close()\n"
-        "        print(port, 'open')\n"
-        "    except OSError as error:\n"
-        "        print(port, 'closed', type(error).__name__)\n"
-    )
-    try:
-        async with await provider.create(request) as sandbox:
-            await sandbox.close_egress()
-            result = await sandbox.exec(
-                ["python3", "-c", probe, gateway_port, str(other_port), "22"],
-                identity=Identity.AGENT,
-                timeout_sec=60,
-            )
-        lines = dict(line.split(" ", 1) for line in result.stdout.strip().splitlines())
-        assert lines[gateway_port] == "open", result.stdout
-        assert lines[str(other_port)].startswith("closed"), result.stdout
-        assert lines["22"].startswith("closed"), result.stdout
-    finally:
-        other_service.close()
-        await other_service.wait_closed()
-        await gateway.stop()
-        await upstream_runner.cleanup()

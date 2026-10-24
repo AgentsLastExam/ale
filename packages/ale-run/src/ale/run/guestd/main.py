@@ -21,11 +21,13 @@ import argparse
 import base64
 import contextlib
 import hmac
+import io
 import json
 import os
 import queue
 import shutil
 import socketserver
+import stat
 import subprocess
 import sys
 import threading
@@ -43,6 +45,7 @@ from protocol import (
     ERR_PERMISSION,
     ERR_UNAUTHORIZED,
     ERR_UNSUPPORTED,
+    MAX_LINE_BYTES,
     PROTOCOL_VERSION,
     ProtocolError,
     decode,
@@ -60,11 +63,16 @@ GUESTD_VERSION = "0.1.1"
 DEFAULT_TOKEN_FILE = None if os.name == "nt" else Path("/run/ale/guestd-token")
 
 
+class _Desync(Exception):
+    """A request body that cannot be parsed further; the session must end."""
+
+
 class Handler:
     """Executes operations. Transport-agnostic by construction."""
 
-    def __init__(self, emit: Any) -> None:
+    def __init__(self, emit: Any, reader: BinaryIO | None = None) -> None:
         self._emit = emit
+        self._reader = reader
 
     def dispatch(self, req_id: int, op: str, params: dict[str, Any]) -> dict[str, Any]:
         handler = getattr(self, f"op_{op}", None)
@@ -212,6 +220,72 @@ class Handler:
             os.chown(path, *owner)
         return ok(req_id, bytes=len(data))
 
+    def op_put_tree(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
+        """Write a directory tree streamed in the request body.
+
+        Every entry gets the upload modes (directories 0755, files 0644) and the owner
+        of ``run_as`` (root when absent) as it is written, so a task's files behave the
+        same whichever Provider carried them. A failure part-way still drains the body,
+        keeping the session usable, and reports the first error.
+        """
+        if self._reader is None:
+            raise ProtocolError(ERR_UNSUPPORTED, "put_tree needs a streamed session")
+        reader = self._reader
+        root = _require(params, "path")
+        failure: ProtocolError | None = None
+        tree: _PosixTree | _PathTree | None = None
+        try:
+            owner = _owner_of(params.get("run_as") or "root")
+            tree = _PosixTree(root, owner) if os.open in os.supports_dir_fd else _PathTree(root)
+        except ProtocolError as exc:
+            failure = exc
+        except OSError as exc:
+            failure = _os_failure(exc)
+        files = total = 0
+        splice = _splices(reader)
+        try:
+            while True:
+                frame = _frame(reader, req_id)
+                if frame.get("end"):
+                    break
+                if "abort" in frame:
+                    failure = failure or ProtocolError(ERR_BAD_REQUEST, str(frame["abort"]))
+                    break
+                kind = frame.get("kind")
+                size = _size(frame) if kind == "file" else 0
+                drained = False
+                entry = frame.get("entry")
+                try:
+                    if failure is None and tree is not None:
+                        parts = _entry_parts(entry)
+                        if kind == "dir":
+                            tree.directory(parts)
+                        elif kind == "file":
+                            sink = tree.file(parts)
+                            try:
+                                drained = True
+                                _copy(reader, size, sink, splice=splice)
+                            finally:
+                                os.close(sink)
+                            files += 1
+                            total += size
+                        elif kind == "symlink":
+                            tree.symlink(parts, str(frame.get("target") or ""))
+                        else:
+                            raise ProtocolError(ERR_BAD_REQUEST, f"unknown entry kind: {kind!r}")
+                except ProtocolError as exc:
+                    failure = failure or exc
+                except OSError as exc:
+                    failure = failure or _os_failure(exc, str(entry))
+                if not drained:
+                    _copy(reader, size, None)
+        finally:
+            if tree is not None:
+                tree.close()
+        if failure is not None:
+            raise failure
+        return ok(req_id, files=files, bytes=total)
+
     def op_read_file(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
         path = Path(_require(params, "path"))
         offset = int(params.get("offset") or 0)
@@ -295,6 +369,227 @@ def _require(params: dict[str, Any], key: str) -> Any:
     if key not in params:
         raise ProtocolError(ERR_BAD_REQUEST, f"missing parameter: {key}")
     return params[key]
+
+
+# --- streamed uploads ---------------------------------------------------------
+
+
+def _frame(reader: BinaryIO, req_id: int) -> dict[str, Any]:
+    raw = reader.readline(MAX_LINE_BYTES + 1)
+    if not raw:
+        raise _Desync("the request body ended early")
+    try:
+        frame = decode(raw.decode("utf-8"))
+    except (ProtocolError, UnicodeDecodeError) as exc:
+        raise _Desync(f"unreadable body frame: {exc}") from exc
+    if frame.get("id") != req_id:
+        raise _Desync("a body frame names another request")
+    return frame
+
+
+def _size(frame: dict[str, Any]) -> int:
+    size = frame.get("size")
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+        raise _Desync("a file entry needs a non-negative size")
+    return size
+
+
+def _entry_parts(entry: object) -> tuple[str, ...]:
+    """Split a relative POSIX entry name, refusing anything that could leave the root."""
+    if not isinstance(entry, str) or not entry:
+        raise ProtocolError(ERR_BAD_REQUEST, f"unsafe entry name: {entry!r}")
+    parts = tuple(entry.split("/"))
+    unsafe = "\\\0:" if os.name == "nt" else "\0"
+    if any(part in {"", ".", ".."} or set(part) & set(unsafe) for part in parts):
+        raise ProtocolError(ERR_BAD_REQUEST, f"unsafe entry name: {entry!r}")
+    return parts
+
+
+def _splices(reader: BinaryIO) -> bool:
+    """Whether file bodies can move from ``reader`` to disk inside the kernel.
+
+    A container session's stdin is a pipe, and ``os.splice`` (Python 3.10+) moves a pipe's
+    bytes into a file without copying them through this process: the difference between
+    a quarter and a half of a second per 256 MiB.
+    """
+    if not hasattr(os, "splice"):
+        return False
+    try:
+        return stat.S_ISFIFO(os.fstat(reader.fileno()).st_mode)
+    except (OSError, ValueError, AttributeError, io.UnsupportedOperation):
+        return False
+
+
+def _copy(reader: BinaryIO, size: int, sink: int | None, *, splice: bool = False) -> None:
+    """Move exactly ``size`` body bytes into the descriptor ``sink``, or discard them.
+
+    A failed write still consumes the rest, so the next frame is where the sender put it.
+    """
+    remaining, failure = size, None
+
+    def write(view: memoryview) -> None:
+        nonlocal failure
+        if sink is None or failure is not None:
+            return
+        try:
+            while view:
+                view = view[os.write(sink, view) :]
+        except OSError as exc:
+            failure = exc
+
+    if remaining and sink is not None and splice:
+        # Take what the buffered reader already holds, then splice from its descriptor:
+        # past this point its buffer is empty, so nothing is read twice or skipped.
+        ahead = reader.read(min(len(reader.peek(1)), remaining))  # type: ignore[attr-defined]
+        if not ahead:
+            raise _Desync("the request body ended inside a file")
+        remaining -= len(ahead)
+        write(memoryview(ahead))
+        while remaining and failure is None:
+            try:
+                moved = os.splice(reader.fileno(), sink, min(remaining, 1 << 24))
+            except OSError:
+                break  # a file system without splice: the loop below copies the rest
+            if not moved:
+                raise _Desync("the request body ended inside a file")
+            remaining -= moved
+    while remaining:
+        block = reader.read(min(remaining, CHUNK_BYTES))
+        if not block:
+            raise _Desync("the request body ended inside a file")
+        remaining -= len(block)
+        write(memoryview(block))
+    if failure is not None:
+        raise failure
+
+
+def _os_failure(exc: OSError, entry: str = "") -> ProtocolError:
+    code = ERR_PERMISSION if isinstance(exc, PermissionError) else ERR_INTERNAL
+    return ProtocolError(code, f"{entry + ': ' if entry else ''}{exc.strerror or exc}")
+
+
+class _PosixTree:
+    """An upload root written only through directory descriptors.
+
+    The service writing it is root, so nothing already below the root is followed: a
+    symbolic or hard link left where an entry lands is replaced, never written through.
+    The root's own parents are framework-chosen paths and resolve normally.
+    """
+
+    _DIRECTORY = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+
+    def __init__(self, root: str, owner: tuple[int, int] | None) -> None:
+        self._owner = owner
+        parent, name = os.path.split(os.path.abspath(root))
+        if not name:
+            raise ProtocolError(ERR_BAD_REQUEST, "cannot upload onto the filesystem root")
+        os.makedirs(parent, exist_ok=True)
+        base = os.open(parent, os.O_RDONLY)
+        try:
+            self._root = self._enter(base, name)
+        finally:
+            os.close(base)
+        self._chain: list[tuple[str, int]] = []
+
+    def directory(self, parts: tuple[str, ...]) -> None:
+        self._at(parts)
+
+    def file(self, parts: tuple[str, ...]) -> int:
+        parent, name = self._at(parts[:-1]), parts[-1]
+        self._clear(parent, name)
+        descriptor = os.open(name, self._NEW_FILE, 0o644, dir_fd=parent)
+        try:
+            self._settle(descriptor, 0o644)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    def symlink(self, parts: tuple[str, ...], target: str) -> None:
+        parent, name = self._at(parts[:-1]), parts[-1]
+        self._clear(parent, name)
+        os.symlink(target, name, dir_fd=parent)
+        if self._owner is not None:
+            os.chown(name, *self._owner, dir_fd=parent, follow_symlinks=False)
+
+    def close(self) -> None:
+        for _, descriptor in self._chain:
+            os.close(descriptor)
+        self._chain.clear()
+        os.close(self._root)
+
+    def _at(self, names: tuple[str, ...]) -> int:
+        """The descriptor for ``names``, reusing the open chain as far as it matches."""
+        keep = 0
+        while keep < min(len(names), len(self._chain)) and self._chain[keep][0] == names[keep]:
+            keep += 1
+        for _, descriptor in self._chain[keep:]:
+            os.close(descriptor)
+        del self._chain[keep:]
+        for name in names[keep:]:
+            parent = self._chain[-1][1] if self._chain else self._root
+            self._chain.append((name, self._enter(parent, name)))
+        return self._chain[-1][1] if self._chain else self._root
+
+    def _enter(self, parent: int, name: str) -> int:
+        try:
+            descriptor = os.open(name, self._DIRECTORY, dir_fd=parent)
+        except FileNotFoundError:
+            os.mkdir(name, 0o755, dir_fd=parent)
+            descriptor = os.open(name, self._DIRECTORY, dir_fd=parent)
+        except OSError:
+            if not stat.S_ISLNK(os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode):
+                raise
+            os.unlink(name, dir_fd=parent)
+            os.mkdir(name, 0o755, dir_fd=parent)
+            descriptor = os.open(name, self._DIRECTORY, dir_fd=parent)
+        try:
+            self._settle(descriptor, 0o755)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    def _settle(self, descriptor: int, mode: int) -> None:
+        if self._owner is not None:
+            os.fchown(descriptor, *self._owner)
+        os.fchmod(descriptor, mode)
+
+    @staticmethod
+    def _clear(parent: int, name: str) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(name, dir_fd=parent)
+
+
+class _PathTree:
+    """The same upload where directory descriptors do not exist (Windows).
+
+    Windows access comes from ACLs, which the Provider resets once the tree is written.
+    """
+
+    def __init__(self, root: str) -> None:
+        self._root = Path(root)
+        self._root.mkdir(parents=True, exist_ok=True)
+
+    def directory(self, parts: tuple[str, ...]) -> None:
+        self._root.joinpath(*parts).mkdir(parents=True, exist_ok=True)
+
+    def file(self, parts: tuple[str, ...]) -> int:
+        path = self._root.joinpath(*parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+        return os.open(path, flags, 0o644)
+
+    def symlink(self, parts: tuple[str, ...], target: str) -> None:
+        path = self._root.joinpath(*parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        os.symlink(target, path)
+
+    def close(self) -> None:
+        return None
 
 
 def _drop_to(name: str | None, env: dict[str, str]) -> dict[str, Any]:
@@ -465,9 +760,10 @@ def _authenticate(line: str, claim: Claim, emit: Any) -> bool:
     return True
 
 
-def serve_stream(reader: TextIO | BinaryIO, writer: TextIO, claim: Claim | None = None) -> None:
-    """Serve requests from a line-oriented stream until it closes.
+def serve_stream(reader: BinaryIO, writer: TextIO, claim: Claim | None = None) -> None:
+    """Serve requests from a byte stream until it closes.
 
+    Requests are lines; an operation with a body reads its frames from the same stream.
     With a ``claim``, the first request must authenticate; anything else closes the
     connection before an operation can run.
     """
@@ -476,11 +772,10 @@ def serve_stream(reader: TextIO | BinaryIO, writer: TextIO, claim: Claim | None 
         writer.write(encode(payload) + "\n")
         writer.flush()
 
-    handler = Handler(emit)
+    handler = Handler(emit, reader)
     authenticated = claim is None
     while raw := reader.readline():
-        line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
-        line = line.strip()
+        line = raw.decode("utf-8", "replace").strip()
         if not line:
             continue
         if not authenticated:
@@ -497,6 +792,10 @@ def serve_stream(reader: TextIO | BinaryIO, writer: TextIO, claim: Claim | None 
             if not isinstance(op, str):
                 raise ProtocolError(ERR_BAD_REQUEST, "missing op")
             emit(handler.dispatch(req_id, op, message.get("params") or {}))
+        except _Desync as exc:
+            # The rest of the stream cannot be framed, so no later reply could be trusted.
+            emit(err(req_id, ERR_BAD_REQUEST, str(exc)))
+            return
         except ProtocolError as exc:
             emit(err(req_id, exc.code, exc.message))
         except Exception as exc:  # keep the session alive; one bad request is not fatal
@@ -504,8 +803,6 @@ def serve_stream(reader: TextIO | BinaryIO, writer: TextIO, claim: Claim | None 
 
 
 class _TCPHandler(socketserver.StreamRequestHandler):
-    rbufsize = 0
-
     def handle(self) -> None:
         writer = self.wfile
 
@@ -549,7 +846,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.ready_file).write_text(f"{GUESTD_VERSION}\n", encoding="utf-8")
 
     if args.stdio:
-        serve_stream(sys.stdin, sys.stdout)
+        serve_stream(sys.stdin.buffer, sys.stdout)
         return 0
 
     host, _, port = args.tcp.rpartition(":")

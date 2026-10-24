@@ -34,24 +34,7 @@ from ale.run.cli.tasks import (
     _validate,
 )
 from ale.run.lint import lint_repository
-from ale.run.providers.docker import (
-    HANDLE_PREFIX as DOCKER_HANDLE_PREFIX,
-)
-from ale.run.providers.docker import (
-    destroy_retained as destroy_retained_docker,
-)
-from ale.run.providers.docker import (
-    list_retained as list_retained_docker,
-)
-from ale.run.providers.qemu import (
-    HANDLE_PREFIX as QEMU_HANDLE_PREFIX,
-)
-from ale.run.providers.qemu import (
-    destroy_retained as destroy_retained_qemu,
-)
-from ale.run.providers.qemu import (
-    list_retained as list_retained_qemu,
-)
+from ale.run.providers import RETAINING_PROVIDERS, provider_named
 from ale.run.scaffold import scaffold_task
 from ale.run.secrets import load_env
 
@@ -406,21 +389,20 @@ def sandbox_destroy(handle: Annotated[str, typer.Argument(help="Retained sandbox
 
 
 async def _list_retained_sandboxes() -> list[dict[str, object]]:
-    return sorted(
-        [*await list_retained_docker(), *await list_retained_qemu()],
-        key=lambda item: str(item["handle"]),
-    )
+    records = [
+        record
+        for name in RETAINING_PROVIDERS
+        for record in await provider_named(name).list_retained()
+    ]
+    return sorted(records, key=lambda item: str(item["handle"]))
 
 
 async def _destroy_retained_sandbox(handle: str) -> None:
-    if handle.startswith(QEMU_HANDLE_PREFIX):
-        await destroy_retained_qemu(handle)
-    elif handle.startswith(DOCKER_HANDLE_PREFIX):
-        await destroy_retained_docker(handle)
-    else:
-        raise ProviderCapabilityError(
-            "retained sandbox handle must start with 'docker:' or 'qemu:'"
-        )
+    name, separator, _ = handle.partition(":")
+    if not separator or name not in RETAINING_PROVIDERS:
+        offered = ", ".join(f"'{provider}:'" for provider in RETAINING_PROVIDERS)
+        raise ProviderCapabilityError(f"retained sandbox handle must start with {offered}")
+    await provider_named(name).destroy_retained(handle)
 
 
 def main() -> None:

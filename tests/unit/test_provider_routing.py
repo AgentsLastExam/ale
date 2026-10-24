@@ -119,28 +119,23 @@ async def test_missing_provider_fails_at_request_admission() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retained_sandbox_commands_route_provider_qualified_qemu_handles(
+async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cli = importlib.import_module("ale.run.cli.main")
     destroyed: list[tuple[str, str]] = []
 
-    async def docker_list() -> list[dict[str, object]]:
-        return [{"handle": "docker:z"}, {"handle": "docker:a"}]
+    class Retaining:
+        def __init__(self, name: str) -> None:
+            self.name = name
 
-    async def qemu_list() -> list[dict[str, object]]:
-        return [{"handle": "qemu:z"}, {"handle": "qemu:a"}]
+        async def list_retained(self) -> list[dict[str, object]]:
+            return [{"handle": f"{self.name}:z"}, {"handle": f"{self.name}:a"}]
 
-    async def docker_destroy(handle: str) -> None:
-        destroyed.append(("docker", handle))
+        async def destroy_retained(self, handle: str) -> None:
+            destroyed.append((self.name, handle))
 
-    async def qemu_destroy(handle: str) -> None:
-        destroyed.append(("qemu", handle))
-
-    monkeypatch.setattr(cli, "list_retained_docker", docker_list)
-    monkeypatch.setattr(cli, "list_retained_qemu", qemu_list)
-    monkeypatch.setattr(cli, "destroy_retained_docker", docker_destroy)
-    monkeypatch.setattr(cli, "destroy_retained_qemu", qemu_destroy)
+    monkeypatch.setattr(cli, "provider_named", Retaining)
 
     assert [item["handle"] for item in await _list_retained_sandboxes()] == [
         "docker:a",

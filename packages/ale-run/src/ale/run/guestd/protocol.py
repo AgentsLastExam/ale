@@ -3,6 +3,11 @@
 JSON Lines in both directions. One request per line, one terminal response per request,
 optional interim events in between for streamed operations.
 
+A ``put_tree`` request is followed by a body: one header line per entry, each naming the
+request id, and a ``file`` header is followed by exactly ``size`` raw bytes. The body ends
+with ``{"id": n, "end": true}``, or ``{"id": n, "abort": reason}`` when the sender cannot
+finish. Raw bytes keep a bulk upload at pipe speed instead of base64-in-JSON speed.
+
 Standard library only, and no engine imports: this module is copied into images whose
 Python we do not control.
 """
@@ -12,7 +17,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
 CHUNK_BYTES = 4 * 1024 * 1024

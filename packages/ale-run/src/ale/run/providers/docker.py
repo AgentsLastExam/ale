@@ -47,16 +47,13 @@ from ale.run import ale_image
 from ale.run.framework import with_framework
 from ale.run.gpu import GpuLease, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
-from ale.run.providers.uploads import set_upload_permissions
+from ale.run.providers.privileges import verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, StdioTransport
 
 __all__ = [
     "DockerProvider",
     "DockerSandbox",
-    "attach_retained",
-    "destroy_retained",
-    "list_retained",
 ]
 
 GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
@@ -93,125 +90,6 @@ async def _managed_gpu_ids() -> set[str]:
     if code != 0:
         return set()
     return {device for line in output.splitlines() for device in line.split(",") if device}
-
-
-async def list_retained() -> list[dict[str, object]]:
-    code, output, stderr = await _docker(
-        "ps",
-        "-a",
-        "-q",
-        "--filter",
-        f"label={MANAGED_LABEL}=true",
-        "--filter",
-        f"label={RETENTION_LABEL}=keep",
-        timeout=30,
-    )
-    if code != 0:
-        raise ProviderStartError(f"could not list ALE sandboxes: {stderr.strip()}")
-    handles = output.split()
-    if not handles:
-        return []
-    code, raw, stderr = await _docker("inspect", *handles, timeout=30)
-    if code != 0:
-        raise ProviderStartError(f"could not inspect ALE sandboxes: {stderr.strip()}")
-    records = json.loads(raw)
-    found: list[dict[str, object]] = []
-    for record in records:
-        labels = record.get("Config", {}).get("Labels", {}) or {}
-        gpu = tuple(filter(None, labels.get(GPU_LABEL, "").split(",")))
-        container = record.get("Name", "").removeprefix("/")
-        handle = f"{HANDLE_PREFIX}{container}"
-        found.append(
-            {
-                "provider": "docker",
-                "handle": handle,
-                "episode": labels.get(LABEL, ""),
-                "role": labels.get(ROLE_LABEL, ""),
-                "image": record.get("Image", ""),
-                "gpus": gpu,
-                "running": bool(record.get("State", {}).get("Running")),
-                "cleanup_command": f"ale sandbox destroy {handle}",
-            }
-        )
-    return sorted(found, key=lambda item: str(item["handle"]))
-
-
-async def destroy_retained(handle: str) -> None:
-    if not handle.startswith(HANDLE_PREFIX):
-        raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
-    container = handle.removeprefix(HANDLE_PREFIX)
-    code, raw, stderr = await _docker("inspect", container, timeout=30)
-    if code != 0:
-        raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
-    record = json.loads(raw)[0]
-    labels = record.get("Config", {}).get("Labels", {}) or {}
-    if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "keep":
-        raise ProviderCapabilityError(f"{handle!r} is not an ALE-retained Docker sandbox")
-    networks = tuple(
-        name
-        for name in (record.get("NetworkSettings", {}).get("Networks", {}) or {})
-        if name.startswith("ale-net-")
-    )
-    code, _, stderr = await _docker("rm", "-f", "-v", container, timeout=60)
-    if code != 0:
-        raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
-    for network in networks:
-        await _docker("network", "rm", network, timeout=30)
-
-
-async def attach_retained(
-    handle: str,
-    request: SandboxRequest,
-    allocation: ResourceAllocation,
-) -> DockerSandbox:
-    """Reconnect to a running retained container without taking ownership of it."""
-    if not handle.startswith(HANDLE_PREFIX):
-        raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
-    container = handle.removeprefix(HANDLE_PREFIX)
-    code, raw, stderr = await _docker("inspect", container, timeout=30)
-    if code != 0:
-        raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
-    record = json.loads(raw)[0]
-    labels = record.get("Config", {}).get("Labels", {}) or {}
-    role = labels.get(ROLE_LABEL, "")
-    if (
-        labels.get(MANAGED_LABEL) != "true"
-        or labels.get(RETENTION_LABEL) != "keep"
-        or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
-    ):
-        raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
-    if labels.get(LABEL) != request.episode_id:
-        raise ProviderCapabilityError(f"{handle!r} belongs to a different episode")
-    if not record.get("State", {}).get("Running"):
-        raise ProviderStartError(f"retained sandbox {handle!r} is not running")
-
-    resolved = await resolve_prepared_container_image(request.prepared_image)
-    if record.get("Image") != resolved.observed_identity:
-        raise ProviderCapabilityError(f"{handle!r} does not use the expected solver image")
-    networks = tuple(
-        name
-        for name in (record.get("NetworkSettings", {}).get("Networks", {}) or {})
-        if name.startswith("ale-net-")
-    )
-    if len(networks) > 1:
-        raise ProviderCapabilityError(f"{handle!r} has more than one ALE network")
-    provider = DockerProvider()
-    if networks:
-        await provider._restrict_host(container, networks[0], request, reattached=True)
-    agent_user = request.user
-    client = await provider._connect(container, agent_user)
-    agent_home, _ = await provider._guest_contract(client)
-    return DockerSandbox(
-        sandbox_id=container.removeprefix("ale-"),
-        request=request.model_copy(update={"role": SandboxRole(role)}),
-        container=container,
-        network=networks[0] if networks else None,
-        client=client,
-        resolved_image=resolved,
-        allocation=allocation,
-        agent_user=agent_user,
-        agent_home=agent_home,
-    )
 
 
 async def _docker(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
@@ -339,13 +217,13 @@ class DockerSandbox(Sandbox):
             request=request,
             resolved_image=resolved_image,
             allocation=allocation,
+            agent_user=agent_user,
+            agent_home=agent_home,
             resource_lease=resource_lease,
         )
         self.container = container
         self.network = network
         self._client = client
-        self.agent_user = agent_user
-        self.agent_home = agent_home
         self._sealed = False
         self.state = SandboxState.READY
 
@@ -413,20 +291,7 @@ class DockerSandbox(Sandbox):
     async def upload_dir(
         self, source: str, target: PurePosixPath | str, *, identity: Identity = Identity.FRAMEWORK
     ) -> None:
-        """Copy a directory and apply the fixed upload permissions."""
-        await self._client.mkdirs(str(target))
-        code, _, stderr = await _docker("cp", f"{Path(source)}/.", f"{self.container}:{target}")
-        if code != 0:
-            raise ProviderStartError(f"upload to {target} failed: {stderr.strip()}")
-        await set_upload_permissions(
-            self._client, str(target), os=self.request.os, agent=self._as(identity)
-        )
-
-    async def download_dir(self, source: PurePosixPath | str, target: str) -> None:
-        Path(target).mkdir(parents=True, exist_ok=True)
-        code, _, stderr = await _docker("cp", f"{self.container}:{source}/.", target)
-        if code != 0:
-            raise ProviderStartError(f"download from {source} failed: {stderr.strip()}")
+        await self._client.upload_dir(source, str(target), run_as=self._as(identity))
 
     async def screenshot(self) -> bytes:
         return await self._client.screenshot()
@@ -655,8 +520,7 @@ class DockerProvider(Provider):
             agent_user = request.user
             client = await self._connect(container, agent_user)
             agent_home, has_desktop = await self._guest_contract(client)
-            if request.sudo:
-                await self._verify_sudo(client, agent_user)
+            await verify_identities(client, agent_user, sudo=request.sudo)
             observed_gpu = await self._container_gpus(client) if selected else ()
             if selected:
                 _verify_docker_gpu(selected, observed_gpu)
@@ -881,21 +745,6 @@ class DockerProvider(Provider):
             raise ProviderCapabilityError("guestd did not report the agent account's home")
         return home, bool(health.get("gui"))
 
-    async def _verify_sudo(self, client: GuestClient, agent_user: str) -> None:
-        """Prove the agent can elevate, as its Task requested.
-
-        The framework layer installs and grants sudo when the image is prepared; checked
-        here so provenance never records an elevation that did not apply.
-        """
-        code, _, stderr, _ = await client.exec(
-            ["sudo", "-n", "true"], run_as=agent_user, timeout_sec=30
-        )
-        if code != 0:
-            raise ProviderCapabilityError(
-                f"elevated privileges were requested but {agent_user} cannot elevate in "
-                f"this sandbox; prepare the image with resources.sudo: true: {stderr.strip()}"
-            )
-
     async def _await_desktop(self, client: GuestClient, timeout_sec: float = 120) -> None:
         """Block until the screen can actually be captured.
 
@@ -946,6 +795,122 @@ class DockerProvider(Provider):
             await client.close()
             raise ProviderStartError(f"guest service did not answer: {exc}") from exc
         return client
+
+    async def list_retained(self) -> list[dict[str, object]]:
+        code, output, stderr = await _docker(
+            "ps",
+            "-a",
+            "-q",
+            "--filter",
+            f"label={MANAGED_LABEL}=true",
+            "--filter",
+            f"label={RETENTION_LABEL}=keep",
+            timeout=30,
+        )
+        if code != 0:
+            raise ProviderStartError(f"could not list ALE sandboxes: {stderr.strip()}")
+        handles = output.split()
+        if not handles:
+            return []
+        code, raw, stderr = await _docker("inspect", *handles, timeout=30)
+        if code != 0:
+            raise ProviderStartError(f"could not inspect ALE sandboxes: {stderr.strip()}")
+        records = json.loads(raw)
+        found: list[dict[str, object]] = []
+        for record in records:
+            labels = record.get("Config", {}).get("Labels", {}) or {}
+            gpu = tuple(filter(None, labels.get(GPU_LABEL, "").split(",")))
+            container = record.get("Name", "").removeprefix("/")
+            handle = f"{HANDLE_PREFIX}{container}"
+            found.append(
+                {
+                    "provider": "docker",
+                    "handle": handle,
+                    "episode": labels.get(LABEL, ""),
+                    "role": labels.get(ROLE_LABEL, ""),
+                    "image": record.get("Image", ""),
+                    "gpus": gpu,
+                    "running": bool(record.get("State", {}).get("Running")),
+                    "cleanup_command": f"ale sandbox destroy {handle}",
+                }
+            )
+        return sorted(found, key=lambda item: str(item["handle"]))
+
+    async def destroy_retained(self, handle: str) -> None:
+        if not handle.startswith(HANDLE_PREFIX):
+            raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
+        container = handle.removeprefix(HANDLE_PREFIX)
+        code, raw, stderr = await _docker("inspect", container, timeout=30)
+        if code != 0:
+            raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
+        record = json.loads(raw)[0]
+        labels = record.get("Config", {}).get("Labels", {}) or {}
+        if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "keep":
+            raise ProviderCapabilityError(f"{handle!r} is not an ALE-retained Docker sandbox")
+        networks = tuple(
+            name
+            for name in (record.get("NetworkSettings", {}).get("Networks", {}) or {})
+            if name.startswith("ale-net-")
+        )
+        code, _, stderr = await _docker("rm", "-f", "-v", container, timeout=60)
+        if code != 0:
+            raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
+        for network in networks:
+            await _docker("network", "rm", network, timeout=30)
+
+    async def attach_retained(
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+    ) -> DockerSandbox:
+        """Reconnect to a running retained container without taking ownership of it."""
+        if not handle.startswith(HANDLE_PREFIX):
+            raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
+        container = handle.removeprefix(HANDLE_PREFIX)
+        code, raw, stderr = await _docker("inspect", container, timeout=30)
+        if code != 0:
+            raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
+        record = json.loads(raw)[0]
+        labels = record.get("Config", {}).get("Labels", {}) or {}
+        role = labels.get(ROLE_LABEL, "")
+        if (
+            labels.get(MANAGED_LABEL) != "true"
+            or labels.get(RETENTION_LABEL) != "keep"
+            or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
+        ):
+            raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
+        if labels.get(LABEL) != request.episode_id:
+            raise ProviderCapabilityError(f"{handle!r} belongs to a different episode")
+        if not record.get("State", {}).get("Running"):
+            raise ProviderStartError(f"retained sandbox {handle!r} is not running")
+
+        resolved = await resolve_prepared_container_image(request.prepared_image)
+        if record.get("Image") != resolved.observed_identity:
+            raise ProviderCapabilityError(f"{handle!r} does not use the expected solver image")
+        networks = tuple(
+            name
+            for name in (record.get("NetworkSettings", {}).get("Networks", {}) or {})
+            if name.startswith("ale-net-")
+        )
+        if len(networks) > 1:
+            raise ProviderCapabilityError(f"{handle!r} has more than one ALE network")
+        if networks:
+            await self._restrict_host(container, networks[0], request, reattached=True)
+        agent_user = request.user
+        client = await self._connect(container, agent_user)
+        agent_home, _ = await self._guest_contract(client)
+        return DockerSandbox(
+            sandbox_id=container.removeprefix("ale-"),
+            request=request.model_copy(update={"role": SandboxRole(role)}),
+            container=container,
+            network=networks[0] if networks else None,
+            client=client,
+            resolved_image=resolved,
+            allocation=allocation,
+            agent_user=agent_user,
+            agent_home=agent_home,
+        )
 
 
 def _url_port(url: str | None) -> str:

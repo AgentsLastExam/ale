@@ -50,9 +50,6 @@ from ale.run.providers.qemu import (
     _port_of,
     _verify_qemu_gpu_count,
     _VfioGpu,
-    attach_retained,
-    destroy_retained,
-    list_retained,
 )
 
 pytestmark = pytest.mark.unit
@@ -308,7 +305,7 @@ async def test_qemu_retained_listing_and_destroy_remove_the_overlay(
 
     monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
 
-    assert await list_retained() == [
+    assert await QemuProvider().list_retained() == [
         {
             "provider": "qemu",
             "handle": "qemu:ale-qemu-test",
@@ -320,7 +317,7 @@ async def test_qemu_retained_listing_and_destroy_remove_the_overlay(
             "cleanup_command": "ale sandbox destroy qemu:ale-qemu-test",
         }
     ]
-    await destroy_retained("qemu:ale-qemu-test")
+    await QemuProvider().destroy_retained("qemu:ale-qemu-test")
     assert removed == ["ale-qemu-test"]
     assert not storage.exists()
 
@@ -400,7 +397,7 @@ async def test_qemu_retained_solver_can_be_reattached(
         provider="qemu",
     )
 
-    sandbox = await attach_retained("qemu:ale-qemu-test", request(), allocation)
+    sandbox = await QemuProvider().attach_retained("qemu:ale-qemu-test", request(), allocation)
 
     assert sandbox.storage == storage
     assert sandbox.host_port == 17411
