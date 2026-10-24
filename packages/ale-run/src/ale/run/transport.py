@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Protocol
 
 from ale.core.errors import GuestUnreachableError, OutputStreamError, ProviderStartError
-from ale.core.sandbox import ExecOutputSink
+from ale.core.sandbox import ExecOutputSink, SandboxFile
 
 __all__ = ["GuestClient", "StdioTransport", "TcpTransport", "Transport"]
 
@@ -309,8 +309,13 @@ class GuestClient:
                 params["run_as"] = run_as
             await self.call("write_file", params)
 
-    async def read_file(self, path: str) -> bytes:
-        _, events = await self.call("read_file", {"path": path})
+    async def read_file(self, path: str, *, offset: int = 0, length: int | None = None) -> bytes:
+        if offset < 0 or (length is not None and length < 0):
+            raise ValueError("file offset and length must be nonnegative")
+        params: dict[str, Any] = {"path": path, "offset": offset}
+        if length is not None:
+            params["length"] = length
+        _, events = await self.call("read_file", params)
         return b"".join(
             base64.b64decode(event["data"]["b64"])
             for event in events
@@ -330,6 +335,10 @@ class GuestClient:
     async def list_files(self, path: str) -> tuple[str, ...]:
         data, _ = await self.call("list_files", {"path": path})
         return tuple(str(item) for item in data.get("files", ()))
+
+    async def scan_files(self, path: str) -> tuple[SandboxFile, ...]:
+        data, _ = await self.call("scan_files", {"path": path})
+        return tuple(SandboxFile.model_validate(item) for item in data["files"])
 
     async def disk_usage(self, path: str) -> tuple[int, int, int]:
         data, _ = await self.call("disk_usage", {"path": path})

@@ -55,6 +55,7 @@ def run_task(
     for setting in settings:
         command.extend(("--set", setting))
     command.extend(("--set", 'logging.native_logs="debug"'))
+    command.extend(("--set", "logging.collect_native_logs=true"))
     result = subprocess.run(
         command,
         cwd=ENGINE_ROOT,
@@ -73,13 +74,41 @@ def jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def native_session_file(
+    logs: Path, harness: str, session_id: str, *, grok_file: str = "chat_history.jsonl"
+) -> Path:
+    """Resolve the exact recorded session; a newer or child session cannot substitute."""
+    assert session_id
+    if harness == "claude-code":
+        matches = list((logs / "native/.claude-config/projects").rglob(f"{session_id}.jsonl"))
+    elif harness == "grok-build":
+        matches = list((logs / "native/.grok-ale/sessions").rglob(f"{session_id}/{grok_file}"))
+    elif harness == "openclaw-cli":
+        matches = list(
+            (logs / "native/.openclaw-ale/agents").glob(f"*/sessions/{session_id}.jsonl")
+        )
+    elif harness == "codex-cli":
+        matches = [
+            path
+            for path in (logs / "native/.codex-ale/sessions").rglob("*.jsonl")
+            if any(
+                event.get("type") == "session_meta"
+                and (event.get("payload") or {}).get("id") == session_id
+                for event in jsonl(path)
+            )
+        ]
+    else:
+        raise ValueError(f"no native session assertion for {harness}")
+    assert len(matches) == 1, (harness, session_id, matches)
+    return matches[0]
+
+
 def audit_episode(
     episode: Path,
     *,
     model: str = MODEL,
     harness: str = "claude-code",
     version: str = "2.1.227",
-    native_log: str = "transcript.jsonl",
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -90,7 +119,9 @@ def audit_episode(
     trajectory = json.loads((episode / "trajectory.json").read_text())
     execution = jsonl(episode / "trace.execution.jsonl")
     result = json.loads((episode / "result.json").read_text())
-    native = jsonl(episode / "logs" / harness / native_log)
+    logs = episode / "logs" / harness
+    assert (logs / "stdout.log").stat().st_size > 0
+    native = jsonl(native_session_file(logs, harness, trajectory["session_id"]))
     lock = json.loads((episode / "lock.json").read_text())
 
     calls = [record for record in transport if record["kind"] == "call"]
@@ -108,7 +139,7 @@ def audit_episode(
     assert verify_commands and verify_commands[-1]["outcome"] == "succeeded"
     assert result["status"] == "completed"
     assert result["rewards"] and all(value == 1.0 for value in result["rewards"].values())
-    assert trajectory["schema_version"] == "ATIF-v1.7"
+    assert trajectory["schema_version"] == "ATIF-v1.8"
     assert trajectory["steps"][0]["source"] == "user"
     assert lock["agent"]["harness"] == harness
     assert lock["agent"]["model"] == model

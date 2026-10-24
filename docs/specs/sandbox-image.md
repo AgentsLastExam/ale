@@ -254,6 +254,20 @@ Task code.
 
 ## Runtime behavior
 
+Each Sandbox owns two fixed guest connections: one for commands and one for file
+discovery and reads. A long-running command must not block periodic log collection.
+Docker uses two stdio guest sessions; QEMU uses two authenticated connections to the
+same guest server and port. Providers close both on startup failure, retention,
+destruction, and image export.
+
+`Sandbox.list_files(path)` accepts an absolute directory path or directory glob and
+returns regular descendants with absolute paths, byte sizes, modification times in
+nanoseconds, and file identities where available. Missing roots return no files;
+symbolic links are not traversed or returned. `Sandbox.read_file(path, offset=0,
+length=None)` reads regular-file bytes, supports bounded ranges, and rejects negative
+offsets or lengths. A zero length reads no bytes. Callers own collection deadlines
+and compare metadata around reads when a consistent snapshot is required.
+
 Given a conforming image, the Docker Provider:
 
 - starts the exact prepared content without replacing its command, adding the framework

@@ -306,6 +306,7 @@ class TestConfigLayering:
 
     def test_logging_retention_defaults_are_explicit_and_strict(self) -> None:
         assert LoggingPolicy().model_dump() == {
+            "collect_native_logs": False,
             "native_logs": "minimal",
             "transport_payloads": "digests",
             "token_data": "none",

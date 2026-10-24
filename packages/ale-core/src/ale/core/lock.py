@@ -284,7 +284,7 @@ class RunLock(BaseModel):
     agent: AgentProvenance
     framework: FrameworkProvenance
     gateway: GatewayProvenance
-    trajectory_schema: Literal["ATIF-v1.7"] = "ATIF-v1.7"
+    trajectory_schema: Literal["ATIF-v1.8"] = "ATIF-v1.8"
     result_schema_version: Literal[2] = 2
     transport_schema_version: Literal[1] = 1
     execution_schema_version: Literal[1] = 1

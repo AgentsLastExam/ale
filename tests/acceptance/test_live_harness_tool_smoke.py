@@ -10,6 +10,7 @@ from .trajectory import (
     WORKSPACE_ROOT,
     jsonl,
     llm_audit_evidence,
+    native_session_file,
     run_task,
     task_path,
 )
@@ -21,21 +22,18 @@ CASES = (
         "grok-build",
         "grok-4.5",
         "0.2.112",
-        "session_chat_history.jsonl",
         ('gateway.dialect="openai-chat-completions"',),
     ),
     (
         "codex-cli",
         "gpt-5.4-mini",
         "0.146.0",
-        "transcript.jsonl",
         ('agent.settings.reasoning_effort="high"',),
     ),
     (
         "openclaw-cli",
         "gpt-5.4-mini",
         "2026.7.1",
-        "transcript.jsonl",
         ('agent.settings.thinking="off"',),
     ),
 )
@@ -69,7 +67,7 @@ def _tool_evidence(trajectory: dict[str, Any]) -> list[dict[str, object]]:
 
 
 @pytest.mark.parametrize(
-    ("harness", "model", "version", "native_log", "settings"),
+    ("harness", "model", "version", "settings"),
     CASES,
     ids=[case[0] for case in CASES],
 )
@@ -78,7 +76,6 @@ def test_real_harness_exercises_its_visible_tool_surface(
     harness: str,
     model: str,
     version: str,
-    native_log: str,
     settings: tuple[str, ...],
 ) -> None:
     task = task_path(
@@ -98,7 +95,9 @@ def test_real_harness_exercises_its_visible_tool_surface(
     trajectory = json.loads((episode / "trajectory.json").read_text())
     transport = jsonl(episode / "trace.transport.jsonl")
     execution = jsonl(episode / "trace.execution.jsonl")
-    native = jsonl(episode / "logs" / harness / native_log)
+    native = jsonl(
+        native_session_file(episode / "logs" / harness, harness, trajectory["session_id"])
+    )
     report = json.loads((episode / "artifacts/output/tool_report.json").read_text())
 
     tested = len(report["tools_tested"])

@@ -20,6 +20,12 @@ Every shipped autonomous harness must include:
 9. provenance integration; and
 10. separately marked live acceptance for model-dependent behavior.
 
+Native CLI integrations use `CliHarness` and a local package containing `adapter.py`,
+`settings.py`, `trajectory.py`, and `README.md`. The base implements launch/resume,
+separate stream capture, and continuation checks. Adapters implement
+`prepare_command()` and `read_result()` plus the existing installation, resource,
+and pure trajectory hooks. Non-CLI autonomous Harnesses keep `AutonomousHarness`.
+
 There is no central capability registry. If configured behavior is unsupported, the
 adapter must raise a typed error before provisioning. It must never ignore a field or
 resource.
@@ -137,6 +143,18 @@ the agent deadline. It must:
 - return `AgentRun`;
 - classify known refusals and native limits with typed errors.
 
+`CliHarness` writes the complete instruction as UTF-8 bytes to
+`<session.home>/instruction.md` before each launch or resume. A native prompt-file
+option receives this path. A CLI without that option receives only the fixed ASCII
+request `Read instruction.md in the current working directory and follow its instructions.`
+The original instruction never passes through shell quoting, argv, or an environment
+variable; this preserves Unicode and literal shell characters on Windows and Linux.
+
+The base captures raw stdout/stderr separately under `.ale-harness/` and records
+invocation byte boundaries and the requested session ID in `invocations.jsonl`.
+Result interpretation receives only the current invocation's output. It cannot reuse
+the success or session ID of a previous resumed turn.
+
 A failed launch retains the process exit code and a bounded, credential-redacted diagnostic
 from native error events and stderr. Stderr warnings must not displace the native failure
 reason; ordinary assistant messages and tool output are not failure diagnostics. A terminal
@@ -165,16 +183,42 @@ lookup is invalid.
 
 ### Collect and Parse
 
-Declare evidence paths in `Harness.logs`, relative to the agent home. ALE collects them
-regardless of task artifact policy before releasing the sandbox.
+CLI adapters explicitly declare native session directories in `native_logs`, relative
+to the agent home, including child-session locations. The shared collector preserves
+their home-relative paths under `logs/<harness>/native/`. `NativeLogs.append_globs`
+identifies verified append-only records; other files use replacement snapshots.
+Native collection is enabled by run-level `logging.collect_native_logs=true` and
+defaults to false. When false, ALE does not scan or transfer native session trees.
+
+CLI stdout, stderr, and invocation boundaries are always collected independently of
+task artifact policy. Every 60 seconds ALE retrieves changed evidence and updates the
+same `trajectory.json`; final catch-up precedes cleanup. Append reads transfer only
+new bytes in bounded chunks; unchanged files transfer no content. Parsers rebuild
+from the local mirror only when evidence changes. Incomplete final lines remain raw
+evidence and are deferred while running. Periodic conversion failures retain the
+last valid trajectory and retry, without cancelling the agent.
+
+Periodic conversion runs in a background thread; only the episode loop publishes
+its result. Cancelling collection discards any pending conversion result, so a late
+worker cannot overwrite final evidence or perform finalization. Blob writes are
+content-addressed and safe for concurrent conversions.
+
+Non-CLI Harnesses continue to declare ordinary evidence files in `Harness.logs`.
 
 `parse_trajectory()` is pure host-side code. For identical collected bytes it returns an
-identical schema-valid ATIF v1.7 trajectory. It preserves valid events before malformed
+identical schema-valid ATIF v1.8 trajectory. It preserves valid events before malformed
 or truncated input, returns bounded parse issues under `extra.ale`, and never writes
 Gateway transport records. A parser that raises does not decide the episode: ALE records
-the minimal truthful trajectory with `incomplete_reason: conversion_failed` and a
+the last valid trajectory (or a minimal truthful fallback) with
+`incomplete_reason: conversion_failed` and a
 `parse_issues` entry, keeps the native logs regardless of retention policy, and continues to
 artifact capture and verification.
+
+`extra.ale.evidence_scope` distinguishes `stdout_only` from `stdout_and_native`.
+Disabling native collection intentionally limits information that exists only in
+session files; it must not invent missing reasoning or child conversations. Periodic
+updates are marked `incomplete_reason: running`. Final transport links, exact token
+enrichment, and retention run once, after the polling task has stopped.
 
 MCP records correlate the native tool-use ID with its tool result and retain the logical
 server, tool, request arguments, and success result or error. A selected tool with no

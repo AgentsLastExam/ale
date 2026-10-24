@@ -187,6 +187,7 @@ class TrajectoryParseContext:
     final_message: str | None = None
     incomplete: bool = False
     incomplete_reason: str | None = None
+    native_logs_enabled: bool = False
 
 
 class Harness(ABC):

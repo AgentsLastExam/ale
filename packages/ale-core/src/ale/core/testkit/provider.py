@@ -7,6 +7,7 @@ what callers are entitled to assume — not implementation details.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from pathlib import PurePosixPath
 
@@ -73,6 +74,44 @@ class ProviderConformance:
             payload = b"\x00binary\xffdata"
             await sandbox.write_file(path, payload)
             assert await sandbox.read_file(path) == payload
+
+    @pytest.mark.asyncio
+    async def test_file_reads_progress_while_a_command_is_running(self) -> None:
+        async with await self.provider.create(await self.request()) as sandbox:
+            ready = asyncio.Event()
+
+            async def output(stream: str, data: bytes) -> None:
+                if stream == "stdout" and b"ready" in data:
+                    ready.set()
+
+            command = asyncio.create_task(
+                sandbox.exec(
+                    [
+                        "python3",
+                        "-c",
+                        "from pathlib import Path; import time; "
+                        "Path('/tmp/concurrent-read').mkdir(); "
+                        "Path('/tmp/concurrent-read/session.jsonl')"
+                        ".write_bytes(b'first\\nsecond\\n'); "
+                        "print('ready', flush=True); time.sleep(5)",
+                    ],
+                    timeout_sec=15,
+                    output_sink=output,
+                )
+            )
+            try:
+                await asyncio.wait_for(ready.wait(), timeout=10)
+                files = await asyncio.wait_for(
+                    sandbox.list_files("/tmp/concurrent-read"), timeout=2
+                )
+                assert len(files) == 1 and files[0].size == 13
+                data = await asyncio.wait_for(
+                    sandbox.read_file(files[0].path, offset=6, length=7), timeout=2
+                )
+                assert data == b"second\n"
+                assert not command.done()
+            finally:
+                assert (await command).ok
 
     @pytest.mark.asyncio
     async def test_ready_sandbox_reports_observed_image_and_resources(self) -> None:

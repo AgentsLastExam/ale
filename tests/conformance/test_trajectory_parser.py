@@ -16,7 +16,7 @@ pytestmark = pytest.mark.unit
 
 
 def parse(tmp_path: Path, events: list[dict], *, incomplete: bool = False):
-    (tmp_path / "transcript.jsonl").write_text(
+    (tmp_path / "stdout.log").write_text(
         "".join(json.dumps(event) + "\n" for event in events)
         + ('{"type":"assistant"\n' if incomplete else "")
     )

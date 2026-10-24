@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import contextlib
 import json
 import secrets
+from pathlib import Path
 
 import pytest
 
@@ -12,15 +12,17 @@ from ale.core.taskspec import NetworkPolicy, Resources
 from ale.core.trace import read_jsonl
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
+from ale.run.harnesses.base import FIXED_PROMPT
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
+from ale.run.harnesses.logs import CliLogCollector
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
 from ale.run.secrets import provider_credentials
 from tests.support import CONTAINER_BASE, prepare_reference
 
-from .trajectory import LIVE, llm_audit_evidence
+from .trajectory import LIVE, llm_audit_evidence, native_session_file
 
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm, LIVE]
 
@@ -123,10 +125,9 @@ async def test_real_native_resume_keeps_exact_session_and_only_new_input(
         ]
 
         logs = tmp_path / "logs"
-        logs.mkdir()
-        for name in harness.logs:
-            with contextlib.suppress(Exception):
-                (logs / name).write_bytes(await sandbox.read_file(f"/home/user/{name}"))
+        collection = CliLogCollector(sandbox, session, harness, logs, native_logs=True)
+        await collection.sync(final=True)
+        assert not collection.incomplete
         trajectory = harness.parse_trajectory(
             TrajectoryParseContext(
                 episode_id=session.episode_id,
@@ -137,23 +138,28 @@ async def test_real_native_resume_keeps_exact_session_and_only_new_input(
                 agent_version=observed,
                 blobs=recording.blobs,
                 session_id=first.continuation.native_session_id,
+                native_logs_enabled=True,
             )
         )
         transport = read_jsonl(tmp_path / "trace.transport.jsonl").records
         assert len([record for record in transport if record["kind"] == "call"]) >= 3
+        expected_requests = [FIXED_PROMPT] * 3 if harness.name == "codex-cli" else list(prompts)
         native_turns = [
-            turn for turn in _native_turns(harness.name, logs) if turn["message"] in prompts
+            turn
+            for turn in _native_turns(harness.name, logs, first.continuation.native_session_id)
+            if turn["message"] in expected_requests
         ]
-        if native_turns:
-            assert [turn["message"] for turn in native_turns] == list(prompts)
-            assert {turn["session_id"] for turn in native_turns} == {
-                first.continuation.native_session_id
-            }
+        assert [turn["message"] for turn in native_turns] == expected_requests
+        assert {turn["session_id"] for turn in native_turns} == {
+            first.continuation.native_session_id
+        }
         llm_audit_evidence(
             {
                 "trajectory": trajectory.to_json_dict(),
                 "transport": transport,
                 "native_user_turns": native_turns,
+                "expected_user_requests": expected_requests,
+                "instruction_file_contents": list(prompts),
                 "expected_messages": [
                     "SEGMENT-1",
                     f"SEGMENT-2::{code}",
@@ -163,8 +169,11 @@ async def test_real_native_resume_keeps_exact_session_and_only_new_input(
             },
             requirement=(
                 f"{harness.name} continued one exact native session across three turns. "
-                "The native user-turn evidence must contain each supplied new instruction "
-                "exactly once in order under that session. The transport includes every "
+                "The native user-turn evidence must match expected_user_requests in order, "
+                "with exactly one new user request per invocation. The CLI reads the supplied "
+                "instruction file directly when supported; otherwise it receives a fixed "
+                "request to read instruction.md. That file was updated before each turn, "
+                "and responses must match its instructions in order. The transport includes every "
                 "CLI-owned model request, including ancillary requests, so its call count "
                 "need not equal the number of user turns."
             ),
@@ -177,10 +186,11 @@ async def test_real_native_resume_keeps_exact_session_and_only_new_input(
         await gateway.stop()
 
 
-def _native_turns(harness: str, logs) -> list[dict[str, str]]:  # type: ignore[no-untyped-def]
+def _native_turns(harness: str, logs: Path, native_id: str) -> list[dict[str, str]]:
     turns: list[dict[str, str]] = []
     if harness == "grok-build":
-        for line in (logs / "session_updates.jsonl").read_text().splitlines():
+        path = native_session_file(logs, harness, native_id, grok_file="updates.jsonl")
+        for line in path.read_text().splitlines():
             event = json.loads(line)
             params = event.get("params") or {}
             update = params.get("update") or {}
@@ -193,7 +203,8 @@ def _native_turns(harness: str, logs) -> list[dict[str, str]]:  # type: ignore[n
                 }
             )
     elif harness == "openclaw-cli":
-        events = [json.loads(line) for line in (logs / "transcript.jsonl").read_text().splitlines()]
+        path = native_session_file(logs, harness, native_id)
+        events = [json.loads(line) for line in path.read_text().splitlines()]
         session_id = next(
             (str(event.get("id")) for event in events if event.get("type") == "session"),
             "",
@@ -214,7 +225,8 @@ def _native_turns(harness: str, logs) -> list[dict[str, str]]:  # type: ignore[n
             if text:
                 turns.append({"session_id": session_id, "message": text})
     elif harness == "codex-cli":
-        events = [json.loads(line) for line in (logs / "session.jsonl").read_text().splitlines()]
+        path = native_session_file(logs, harness, native_id)
+        events = [json.loads(line) for line in path.read_text().splitlines()]
         session_id = next(
             (
                 str((event.get("payload") or {}).get("id") or "")

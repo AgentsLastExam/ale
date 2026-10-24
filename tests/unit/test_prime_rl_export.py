@@ -5,6 +5,7 @@ import pytest
 from ale.core.errors import IncompleteTrainingDataError
 from ale.core.trajectory import (
     AtifAgent,
+    AtifAudioSource,
     AtifContentPart,
     AtifImageSource,
     AtifMetrics,
@@ -48,7 +49,15 @@ def test_exact_training_data_converts_without_retokenization() -> None:
     assert sample.temperatures == [0.7] * 4
 
 
-def test_multimodal_training_data_requires_and_preserves_exact_processor_state() -> None:
+@pytest.mark.parametrize("media_type", ["image", "audio"])
+def test_multimodal_training_data_requires_and_preserves_exact_processor_state(
+    media_type: str,
+) -> None:
+    source = (
+        AtifImageSource(media_type="image/png", path="blobs/image/example.png")
+        if media_type == "image"
+        else AtifAudioSource(media_type="audio/wav", path="blobs/audio/example.wav")
+    )
     metrics = exact_metrics().model_copy(
         update={
             "extra": {
@@ -70,11 +79,8 @@ def test_multimodal_training_data_requires_and_preserves_exact_processor_state()
                         "message": [
                             AtifContentPart(type="text", text="prompt"),
                             AtifContentPart(
-                                type="image",
-                                source=AtifImageSource(
-                                    media_type="image/png",
-                                    path="blobs/image/example.png",
-                                ),
+                                type=media_type,
+                                source=source,
                             ),
                         ]
                     }
@@ -90,7 +96,13 @@ def test_multimodal_training_data_requires_and_preserves_exact_processor_state()
     assert sample.mm_token_type_ids == [1, 1, 0, 0]
 
 
-def test_multimodal_training_data_rejects_missing_processor_state() -> None:
+@pytest.mark.parametrize("media_type", ["image", "audio"])
+def test_multimodal_training_data_rejects_missing_processor_state(media_type: str) -> None:
+    source = (
+        AtifImageSource(media_type="image/png", path="blobs/image/example.png")
+        if media_type == "image"
+        else AtifAudioSource(media_type="audio/wav", path="blobs/audio/example.wav")
+    )
     multimodal = trajectory(exact_metrics())
     multimodal = multimodal.model_copy(
         update={
@@ -99,11 +111,8 @@ def test_multimodal_training_data_rejects_missing_processor_state() -> None:
                     update={
                         "message": [
                             AtifContentPart(
-                                type="image",
-                                source=AtifImageSource(
-                                    media_type="image/png",
-                                    path="blobs/image/example.png",
-                                ),
+                                type=media_type,
+                                source=source,
                             )
                         ]
                     }

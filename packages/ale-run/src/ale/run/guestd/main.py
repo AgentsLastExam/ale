@@ -20,12 +20,14 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import fnmatch
 import hmac
 import json
 import os
 import queue
 import shutil
 import socketserver
+import stat
 import subprocess
 import sys
 import threading
@@ -216,18 +218,34 @@ class Handler:
         path = Path(_require(params, "path"))
         offset = int(params.get("offset") or 0)
         length = params.get("length")
+        if offset < 0 or (length is not None and int(length) < 0):
+            raise ProtocolError(ERR_BAD_REQUEST, "file offset and length must be nonnegative")
+        remaining = None if length is None else int(length)
+        copied = 0
         try:
-            with path.open("rb") as handle:
+            if path.is_symlink():
+                raise ProtocolError(ERR_BAD_REQUEST, "file reads do not follow symbolic links")
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            with os.fdopen(os.open(path, flags), "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise ProtocolError(ERR_BAD_REQUEST, "file is not a regular file")
                 handle.seek(offset)
-                data = handle.read(int(length)) if length else handle.read()
+                while remaining is None or remaining > 0:
+                    block = handle.read(
+                        CHUNK_BYTES if remaining is None else min(CHUNK_BYTES, remaining)
+                    )
+                    if not block:
+                        break
+                    self._emit(event(req_id, "chunk", b64=base64.b64encode(block).decode("ascii")))
+                    copied += len(block)
+                    if remaining is not None:
+                        remaining -= len(block)
         except FileNotFoundError as exc:
             raise ProtocolError(ERR_NOT_FOUND, str(exc)) from exc
         except PermissionError as exc:
             raise ProtocolError(ERR_PERMISSION, str(exc)) from exc
-        for start in range(0, len(data), CHUNK_BYTES):
-            block = data[start : start + CHUNK_BYTES]
-            self._emit(event(req_id, "chunk", b64=base64.b64encode(block).decode("ascii")))
-        return ok(req_id, bytes=len(data), eof=not length or len(data) < int(length))
+        return ok(req_id, bytes=copied, eof=length is None or copied < int(length))
 
     def op_stat(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
         path = Path(_require(params, "path"))
@@ -257,6 +275,60 @@ class Handler:
             req_id,
             files=[path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()],
         )
+
+    def op_scan_files(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
+        pattern = Path(_require(params, "path"))
+        if not pattern.is_absolute() or ".." in pattern.parts:
+            raise ProtocolError(ERR_BAD_REQUEST, "file scans require an absolute directory path")
+        roots = [Path(pattern.anchor)]
+        for part in pattern.parts[1:]:
+            matched = []
+            for root in roots:
+                try:
+                    with os.scandir(root) as children:
+                        matched.extend(
+                            Path(child.path)
+                            for child in children
+                            if fnmatch.fnmatch(child.name, part)
+                            and child.is_dir(follow_symlinks=False)
+                            and not child.is_symlink()
+                            and not (
+                                os.name == "nt"
+                                and child.stat(follow_symlinks=False).st_file_attributes
+                                & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                            )
+                        )
+                except FileNotFoundError:
+                    continue
+            roots = matched
+        files: dict[str, dict[str, Any]] = {}
+        pending = list(roots)
+        while pending:
+            root = pending.pop()
+            try:
+                with os.scandir(root) as children:
+                    for child in children:
+                        try:
+                            info = child.stat(follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        if (
+                            os.name == "nt"
+                            and info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                        ):
+                            continue
+                        if stat.S_ISDIR(info.st_mode) and not child.is_symlink():
+                            pending.append(Path(child.path))
+                        elif stat.S_ISREG(info.st_mode):
+                            files[child.path] = {
+                                "path": child.path,
+                                "size": info.st_size,
+                                "mtime_ns": info.st_mtime_ns,
+                                "file_id": f"{info.st_dev}:{info.st_ino}" if info.st_ino else None,
+                            }
+            except FileNotFoundError:
+                continue
+        return ok(req_id, files=[files[path] for path in sorted(files)])
 
     def op_disk_usage(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
         usage = shutil.disk_usage(Path(_require(params, "path")))

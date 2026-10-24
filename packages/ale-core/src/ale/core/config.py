@@ -119,10 +119,11 @@ class ArtifactPolicy(BaseModel):
 
 
 class LoggingPolicy(BaseModel):
-    """Explicit retention choices; canonical evidence is never disabled."""
+    """Evidence collection and retention; canonical records are always written."""
 
     model_config = ConfigDict(extra="forbid")
 
+    collect_native_logs: bool = False
     native_logs: Literal["minimal", "debug"] = "minimal"
     transport_payloads: Literal["digests", "debug"] = "digests"
     token_data: Literal["none", "exact"] = "none"

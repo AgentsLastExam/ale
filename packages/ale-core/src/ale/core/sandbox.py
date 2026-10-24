@@ -38,6 +38,7 @@ __all__ = [
     "ResourceAllocation",
     "RetainedSandbox",
     "Sandbox",
+    "SandboxFile",
     "SandboxRequest",
     "SandboxRole",
     "SandboxState",
@@ -328,6 +329,17 @@ class GuestTransport(Protocol):
     async def close(self) -> None: ...
 
 
+class SandboxFile(BaseModel):
+    """One regular guest file observed during a directory scan."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str
+    size: int = Field(ge=0)
+    mtime_ns: int
+    file_id: str | None = None
+
+
 class Sandbox(ABC):
     """One isolated execution instance."""
 
@@ -375,7 +387,18 @@ class Sandbox(ABC):
     ) -> None: ...
 
     @abstractmethod
-    async def read_file(self, path: str) -> bytes: ...
+    async def read_file(self, path: str, *, offset: int = 0, length: int | None = None) -> bytes:
+        """Read regular-file bytes, independently of an active exec command."""
+        ...
+
+    @abstractmethod
+    async def list_files(self, path: str) -> tuple[SandboxFile, ...]:
+        """Scan directory roots matching an absolute path/glob, without following links.
+
+        Return sorted absolute paths and metadata for their regular descendant files.
+        Missing roots yield an empty tuple. Reads can proceed during an active exec.
+        """
+        ...
 
     async def open_egress(self) -> None:
         """Let the sandbox reach the network, for the framework's own phases.

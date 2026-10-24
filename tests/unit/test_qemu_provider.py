@@ -190,6 +190,7 @@ async def test_windows_image_export_requires_clean_shutdown_and_preserves_the_ba
     client = Client()
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox._client = client  # type: ignore[assignment]
+    sandbox._file_client = Client()  # type: ignore[assignment]
     sandbox.request = request(os="windows")
     sandbox.container = "ale-qemu-build"
     sandbox.storage = tmp_path / "storage"
@@ -209,6 +210,7 @@ async def test_windows_image_export_requires_clean_shutdown_and_preserves_the_ba
         return
 
     await sandbox.save_image(destination)
+    assert sandbox._file_client.closed
     overlay = str(sandbox.storage / "data.qcow2")
     assert commands == [
         ("docker", "wait", "ale-qemu-build"),
@@ -260,6 +262,7 @@ async def test_qemu_retain_returns_a_provider_qualified_handle() -> None:
     client = Client()
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox._client = client  # type: ignore[attr-defined]
+    sandbox._file_client = Client()  # type: ignore[assignment]
     sandbox.container = "ale-qemu-test"  # type: ignore[attr-defined]
     sandbox.request = request(retention="keep")  # type: ignore[attr-defined]
     sandbox.allocation = SimpleNamespace(gpu=None)  # type: ignore[attr-defined]
@@ -267,6 +270,7 @@ async def test_qemu_retain_returns_a_provider_qualified_handle() -> None:
     retained = await sandbox.retain(roles=("solver",), reason="debug")
 
     assert client.closed
+    assert sandbox._file_client.closed
     assert retained.provider == "qemu"
     assert retained.handle == f"{HANDLE_PREFIX}ale-qemu-test"
     assert retained.cleanup_command == "ale sandbox destroy qemu:ale-qemu-test"
