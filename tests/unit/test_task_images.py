@@ -267,6 +267,35 @@ async def test_buildx_uses_fixed_context_and_observes_container_identity(
 
 
 @pytest.mark.asyncio
+async def test_a_containerd_image_store_is_found_by_its_manifest_digest(
+    write_task_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    task = _task(write_task_repo)
+    manifest = "sha256:" + "d" * 64
+
+    async def fake_run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
+        if argv[:3] == ("docker", "buildx", "version"):
+            return 0, "buildx", ""
+        if argv[:3] == ("docker", "buildx", "build"):
+            Path(argv[argv.index("--metadata-file") + 1]).write_text(
+                json.dumps(
+                    {
+                        "containerimage.config.digest": "sha256:" + "c" * 64,
+                        "containerimage.digest": manifest,
+                    }
+                )
+            )
+            return 0, "", ""
+        if argv[:3] == ("docker", "image", "inspect") and argv[-1] == manifest:
+            return 0, manifest + "\n", ""
+        return 1, "", "No such image"
+
+    monkeypatch.setattr("ale.run.task_images._run", fake_run)
+    prepared = await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
+    assert prepared.prepared_identity == manifest
+
+
+@pytest.mark.asyncio
 async def test_unchanged_task_uses_its_prepared_image_without_building(
     write_task_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
