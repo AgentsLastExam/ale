@@ -31,7 +31,7 @@ import uuid
 import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
@@ -63,16 +63,13 @@ from ale.run.images import (
     resolve_prepared_vm_image,
     resolve_vm_image,
 )
-from ale.run.providers.uploads import set_upload_permissions
+from ale.run.providers.privileges import verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, TcpTransport
 
 __all__ = [
     "QemuProvider",
     "QemuSandbox",
-    "attach_retained",
-    "destroy_retained",
-    "list_retained",
 ]
 
 #: Where the guest service listens inside the VM. Forwarded to an ephemeral host port.
@@ -141,144 +138,6 @@ async def _managed_gpu_ids() -> set[str]:
     if code != 0:
         return set()
     return {device for line in output.splitlines() for device in line.split(",") if device}
-
-
-async def list_retained() -> list[dict[str, object]]:
-    code, output, stderr = await _run(
-        "docker",
-        "ps",
-        "-a",
-        "-q",
-        "--filter",
-        f"label={MANAGED_LABEL}=true",
-        "--filter",
-        f"label={RETENTION_LABEL}=keep",
-        timeout=30,
-    )
-    if code != 0:
-        raise ProviderStartError(f"could not list retained QEMU sandboxes: {stderr.strip()}")
-    containers = output.split()
-    if not containers:
-        return []
-    code, raw, stderr = await _run("docker", "inspect", *containers, timeout=30)
-    if code != 0:
-        raise ProviderStartError(f"could not inspect retained QEMU sandboxes: {stderr.strip()}")
-    found: list[dict[str, object]] = []
-    for record in json.loads(raw):
-        labels = record.get("Config", {}).get("Labels", {}) or {}
-        container = record.get("Name", "").removeprefix("/")
-        found.append(
-            {
-                "provider": "qemu",
-                "handle": f"{HANDLE_PREFIX}{container}",
-                "episode": labels.get(EPISODE_LABEL, ""),
-                "role": labels.get(ROLE_LABEL, ""),
-                "image": record.get("Image", ""),
-                "gpus": tuple(filter(None, labels.get(GPU_LABEL, "").split(","))),
-                "running": bool(record.get("State", {}).get("Running")),
-                "cleanup_command": f"ale sandbox destroy {HANDLE_PREFIX}{container}",
-            }
-        )
-    return sorted(found, key=lambda item: str(item["handle"]))
-
-
-async def destroy_retained(handle: str) -> None:
-    if not handle.startswith(HANDLE_PREFIX):
-        raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
-    container = handle.removeprefix(HANDLE_PREFIX)
-    code, raw, stderr = await _run("docker", "inspect", container, timeout=30)
-    if code != 0:
-        raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
-    record = json.loads(raw)[0]
-    labels = record.get("Config", {}).get("Labels", {}) or {}
-    if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "keep":
-        raise ProviderCapabilityError(f"{handle!r} is not an ALE-retained QEMU sandbox")
-    storage = labels.get(STORAGE_LABEL, "")
-    mounted_storage = {
-        mount.get("Source", "")
-        for mount in record.get("Mounts", ())
-        if mount.get("Type") == "bind" and mount.get("Destination") == "/storage"
-    }
-    if not storage or storage not in mounted_storage:
-        raise ProviderCapabilityError(f"{handle!r} has no valid ALE-owned QEMU overlay")
-    code, _, stderr = await _run("docker", "rm", "-f", container, timeout=60)
-    if code != 0:
-        raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
-    try:
-        shutil.rmtree(storage)
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        raise ProviderStartError(
-            f"destroyed {handle} but could not remove its overlay {storage}: {exc}"
-        ) from exc
-
-
-async def attach_retained(
-    handle: str,
-    request: SandboxRequest,
-    allocation: ResourceAllocation,
-) -> QemuSandbox:
-    """Reconnect to a running retained VM without taking ownership of it."""
-    if not handle.startswith(HANDLE_PREFIX):
-        raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
-    container = handle.removeprefix(HANDLE_PREFIX)
-    code, raw, stderr = await _run("docker", "inspect", container, timeout=30)
-    if code != 0:
-        raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
-    record = json.loads(raw)[0]
-    labels = record.get("Config", {}).get("Labels", {}) or {}
-    role = labels.get(ROLE_LABEL, "")
-    if (
-        labels.get(MANAGED_LABEL) != "true"
-        or labels.get(RETENTION_LABEL) != "keep"
-        or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
-    ):
-        raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
-    if labels.get(EPISODE_LABEL) != request.episode_id:
-        raise ProviderCapabilityError(f"{handle!r} belongs to a different episode")
-    if not record.get("State", {}).get("Running"):
-        raise ProviderStartError(f"retained sandbox {handle!r} is not running")
-    storage = labels.get(STORAGE_LABEL, "")
-    mounted_storage = {
-        mount.get("Source", "")
-        for mount in record.get("Mounts", ())
-        if mount.get("Type") == "bind" and mount.get("Destination") == "/storage"
-    }
-    if not storage or storage not in mounted_storage:
-        raise ProviderCapabilityError(f"{handle!r} has no valid ALE-owned QEMU overlay")
-    ports = record.get("NetworkSettings", {}).get("Ports", {}).get(f"{GUEST_PORT}/tcp") or []
-    try:
-        host_port = int(ports[0]["HostPort"])
-    except (IndexError, KeyError, TypeError, ValueError) as exc:
-        raise ProviderCapabilityError(f"{handle!r} has no guest service port") from exc
-
-    resolved = await resolve_prepared_vm_image(request.prepared_image)
-    transport = TcpTransport("127.0.0.1", host_port, token=_read_guest_token(Path(storage)))
-    await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
-    client = GuestClient(transport)
-    provider = QemuProvider()
-    attached_request = request.model_copy(update={"role": SandboxRole(role)})
-    try:
-        agent_user, agent_home, _ = await provider._read_guest_contract(client, attached_request)
-        # A later run reaches its own Gateway, so its port is routed in as well.
-        host_ip = await provider._wire_network(container, attached_request)
-    except BaseException:
-        await client.close()
-        raise
-    return QemuSandbox(
-        sandbox_id=container.removeprefix("ale-qemu-"),
-        request=attached_request,
-        container=container,
-        storage=Path(storage),
-        host_port=host_port,
-        client=client,
-        resolved_image=resolved,
-        allocation=allocation,
-        agent_user=agent_user,
-        agent_home=agent_home,
-        host_ip=host_ip,
-    )
 
 
 def _index_vfio_gpus(candidates: tuple[_VfioGpu, ...]) -> dict[str, _VfioGpu]:
@@ -378,6 +237,58 @@ async def _run(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
     )
 
 
+_WINDOWS_ACL = """
+$ErrorActionPreference = 'Stop'
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$admins = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+$users = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+$owner = $admins
+if ($agent) {
+    $owner = [System.Security.Principal.NTAccount]::new($agent).Translate(
+        [System.Security.Principal.SecurityIdentifier])
+}
+$items = @(Get-Item -LiteralPath $target -Force) +
+    @(Get-ChildItem -LiteralPath $target -Force -Recurse)
+foreach ($item in $items) {
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+    $inherit = [System.Security.AccessControl.InheritanceFlags]::None
+    if ($item.PSIsContainer) {
+        $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+        $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    } else {
+        $acl = [System.Security.AccessControl.FileSecurity]::new()
+    }
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.SetOwner($owner)
+    foreach ($sid in @($system, $admins, $users)) {
+        $rights = if ($sid -eq $users) { 'ReadAndExecute' } else { 'FullControl' }
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $sid, $rights, $inherit, 'None', 'Allow'))
+    }
+    if ($agent) {
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $owner, 'Modify', $inherit, 'None', 'Allow'))
+    }
+    Set-Acl -LiteralPath $item.FullName -AclObject $acl
+}
+"""
+
+
+async def _reset_windows_acl(client: GuestClient, target: str, *, agent: str | None) -> None:
+    """Replace inherited ACLs on an uploaded tree; the agent may modify its own uploads.
+
+    guestd writes the tree with Windows' inherited ACLs, which say nothing about who the
+    upload was for; this resets them the way Linux uploads get their modes and owner.
+    """
+    target_literal = target.replace("'", "''")
+    agent_literal = (agent or "").replace("'", "''")
+    command = f"$target = '{target_literal}'; $agent = '{agent_literal}';\n"
+    argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command + _WINDOWS_ACL]
+    code, _, stderr, _ = await client.exec(argv)
+    if code != 0:
+        raise ProviderStartError(f"could not set upload permissions for {target}: {stderr.strip()}")
+
+
 class QemuSandbox(Sandbox):
     """One virtual machine, driven through the guest service."""
 
@@ -394,7 +305,7 @@ class QemuSandbox(Sandbox):
         allocation: ResourceAllocation,
         resource_lease: GpuLease | None = None,
         agent_user: str,
-        agent_home: str = "/home/user",
+        agent_home: str,
         host_ip: str = "",
     ) -> None:
         super().__init__(
@@ -402,13 +313,13 @@ class QemuSandbox(Sandbox):
             request=request,
             resolved_image=resolved_image,
             allocation=allocation,
+            agent_user=agent_user,
+            agent_home=agent_home,
             resource_lease=resource_lease,
         )
         self.container = container
         self.storage = storage
         self.host_port = host_port
-        self.agent_user = agent_user
-        self.agent_home = agent_home
         self.host_ip = host_ip
         self._client = client
         self._sealed = False
@@ -491,37 +402,10 @@ class QemuSandbox(Sandbox):
         *,
         identity: Identity = Identity.FRAMEWORK,
     ) -> None:
-        """Copy a directory in over the guest protocol.
-
-        There is no ``docker cp`` equivalent here, and adding a share or an SSH
-        dependency would be a second transport to keep working. The guest service
-        already moves files, so the directory is walked and sent through it.
-        """
-        root = Path(source)
         run_as = self._as(identity)
-        path_type = PureWindowsPath if self.request.os is OperatingSystem.WINDOWS else PurePosixPath
-        target_path = path_type(str(target))
-        await self._client.mkdirs(str(target_path), run_as=run_as)
-        for entry in sorted(root.rglob("*")):
-            relative = entry.relative_to(root)
-            destination = target_path.joinpath(*relative.parts)
-            if entry.is_dir():
-                await self._client.mkdirs(str(destination), run_as=run_as)
-            elif entry.is_file():
-                await self._client.mkdirs(str(destination.parent), run_as=run_as)
-                await self._client.write_file(str(destination), entry.read_bytes(), run_as=run_as)
-        await set_upload_permissions(self._client, str(target), os=self.request.os, agent=run_as)
-
-    async def download_dir(self, source: str, target: str) -> None:
-        Path(target).mkdir(parents=True, exist_ok=True)
-        path_type = PureWindowsPath if self.request.os is OperatingSystem.WINDOWS else PurePosixPath
-        source_path = path_type(str(source))
-        for relative_name in await self._client.list_files(str(source_path)):
-            relative = PurePosixPath(relative_name)
-            remote = source_path.joinpath(*relative.parts)
-            local = Path(target).joinpath(*relative.parts)
-            local.parent.mkdir(parents=True, exist_ok=True)
-            local.write_bytes(await self._client.read_file(str(remote)))
+        await self._client.upload_dir(source, str(target), run_as=run_as)
+        if self.request.os is OperatingSystem.WINDOWS:
+            await _reset_windows_acl(self._client, str(target), agent=run_as)
 
     async def screenshot(self) -> bytes:
         return await self._client.screenshot()
@@ -808,8 +692,8 @@ class QemuProvider(Provider):
                 await self._await_desktop(client)
             if request.os is OperatingSystem.WINDOWS:
                 await self._verify_windows_privileges(client, agent_user, request.sudo)
-            elif request.sudo:
-                await self._verify_sudo(client, agent_user)
+            else:
+                await verify_identities(client, agent_user, sudo=request.sudo)
         except BaseException:
             with contextlib.suppress(BaseException):
                 await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))
@@ -1153,16 +1037,140 @@ class QemuProvider(Provider):
                     f"with the current ALE framework and UAC enabled: {stderr.strip()}"
                 )
 
-    async def _verify_sudo(self, client: GuestClient, agent_user: str) -> None:
-        """Prove the Linux agent can use the sudo grant configured during preparation."""
-        code, _, stderr, _ = await client.exec(
-            ["sudo", "-n", "true"], run_as=agent_user, timeout_sec=30
+    async def list_retained(self) -> list[dict[str, object]]:
+        code, output, stderr = await _run(
+            "docker",
+            "ps",
+            "-a",
+            "-q",
+            "--filter",
+            f"label={MANAGED_LABEL}=true",
+            "--filter",
+            f"label={RETENTION_LABEL}=keep",
+            timeout=30,
         )
         if code != 0:
-            raise ProviderCapabilityError(
-                f"elevated privileges were requested but {agent_user} cannot elevate in "
-                f"this guest; prepare the image with resources.sudo: true: {stderr.strip()}"
+            raise ProviderStartError(f"could not list retained QEMU sandboxes: {stderr.strip()}")
+        containers = output.split()
+        if not containers:
+            return []
+        code, raw, stderr = await _run("docker", "inspect", *containers, timeout=30)
+        if code != 0:
+            raise ProviderStartError(f"could not inspect retained QEMU sandboxes: {stderr.strip()}")
+        found: list[dict[str, object]] = []
+        for record in json.loads(raw):
+            labels = record.get("Config", {}).get("Labels", {}) or {}
+            container = record.get("Name", "").removeprefix("/")
+            found.append(
+                {
+                    "provider": "qemu",
+                    "handle": f"{HANDLE_PREFIX}{container}",
+                    "episode": labels.get(EPISODE_LABEL, ""),
+                    "role": labels.get(ROLE_LABEL, ""),
+                    "image": record.get("Image", ""),
+                    "gpus": tuple(filter(None, labels.get(GPU_LABEL, "").split(","))),
+                    "running": bool(record.get("State", {}).get("Running")),
+                    "cleanup_command": f"ale sandbox destroy {HANDLE_PREFIX}{container}",
+                }
             )
+        return sorted(found, key=lambda item: str(item["handle"]))
+
+    async def destroy_retained(self, handle: str) -> None:
+        if not handle.startswith(HANDLE_PREFIX):
+            raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
+        container = handle.removeprefix(HANDLE_PREFIX)
+        code, raw, stderr = await _run("docker", "inspect", container, timeout=30)
+        if code != 0:
+            raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
+        record = json.loads(raw)[0]
+        labels = record.get("Config", {}).get("Labels", {}) or {}
+        if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "keep":
+            raise ProviderCapabilityError(f"{handle!r} is not an ALE-retained QEMU sandbox")
+        storage = labels.get(STORAGE_LABEL, "")
+        mounted_storage = {
+            mount.get("Source", "")
+            for mount in record.get("Mounts", ())
+            if mount.get("Type") == "bind" and mount.get("Destination") == "/storage"
+        }
+        if not storage or storage not in mounted_storage:
+            raise ProviderCapabilityError(f"{handle!r} has no valid ALE-owned QEMU overlay")
+        code, _, stderr = await _run("docker", "rm", "-f", container, timeout=60)
+        if code != 0:
+            raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
+        try:
+            shutil.rmtree(storage)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise ProviderStartError(
+                f"destroyed {handle} but could not remove its overlay {storage}: {exc}"
+            ) from exc
+
+    async def attach_retained(
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+    ) -> QemuSandbox:
+        """Reconnect to a running retained VM without taking ownership of it."""
+        if not handle.startswith(HANDLE_PREFIX):
+            raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
+        container = handle.removeprefix(HANDLE_PREFIX)
+        code, raw, stderr = await _run("docker", "inspect", container, timeout=30)
+        if code != 0:
+            raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
+        record = json.loads(raw)[0]
+        labels = record.get("Config", {}).get("Labels", {}) or {}
+        role = labels.get(ROLE_LABEL, "")
+        if (
+            labels.get(MANAGED_LABEL) != "true"
+            or labels.get(RETENTION_LABEL) != "keep"
+            or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
+        ):
+            raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
+        if labels.get(EPISODE_LABEL) != request.episode_id:
+            raise ProviderCapabilityError(f"{handle!r} belongs to a different episode")
+        if not record.get("State", {}).get("Running"):
+            raise ProviderStartError(f"retained sandbox {handle!r} is not running")
+        storage = labels.get(STORAGE_LABEL, "")
+        mounted_storage = {
+            mount.get("Source", "")
+            for mount in record.get("Mounts", ())
+            if mount.get("Type") == "bind" and mount.get("Destination") == "/storage"
+        }
+        if not storage or storage not in mounted_storage:
+            raise ProviderCapabilityError(f"{handle!r} has no valid ALE-owned QEMU overlay")
+        ports = record.get("NetworkSettings", {}).get("Ports", {}).get(f"{GUEST_PORT}/tcp") or []
+        try:
+            host_port = int(ports[0]["HostPort"])
+        except (IndexError, KeyError, TypeError, ValueError) as exc:
+            raise ProviderCapabilityError(f"{handle!r} has no guest service port") from exc
+
+        resolved = await resolve_prepared_vm_image(request.prepared_image)
+        transport = TcpTransport("127.0.0.1", host_port, token=_read_guest_token(Path(storage)))
+        await transport.start(timeout_sec=BOOT_TIMEOUT_SEC)
+        client = GuestClient(transport)
+        attached_request = request.model_copy(update={"role": SandboxRole(role)})
+        try:
+            agent_user, agent_home, _ = await self._read_guest_contract(client, attached_request)
+            # A later run reaches its own Gateway, so its port is routed in as well.
+            host_ip = await self._wire_network(container, attached_request)
+        except BaseException:
+            await client.close()
+            raise
+        return QemuSandbox(
+            sandbox_id=container.removeprefix("ale-qemu-"),
+            request=attached_request,
+            container=container,
+            storage=Path(storage),
+            host_port=host_port,
+            client=client,
+            resolved_image=resolved,
+            allocation=allocation,
+            agent_user=agent_user,
+            agent_home=agent_home,
+            host_ip=host_ip,
+        )
 
 
 def _is_blank(png: bytes) -> bool:

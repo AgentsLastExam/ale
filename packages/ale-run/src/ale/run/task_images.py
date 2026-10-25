@@ -701,16 +701,26 @@ async def _build_oci(*, context: Path, source_digest: str, source: str) -> _OciB
         except (OSError, json.JSONDecodeError) as exc:
             raise ProviderStartError(f"Buildx wrote invalid metadata: {exc}") from exc
 
-    built_identity = metadata.get("containerimage.config.digest") or metadata.get(
-        "containerimage.digest"
-    )
-    if not isinstance(built_identity, str) or not built_identity.startswith("sha256:"):
+    # The classic image store names an image by its config digest, the containerd store
+    # (Docker 29's default) by its manifest digest; whichever this daemon uses resolves.
+    candidates = [
+        digest
+        for digest in (
+            metadata.get("containerimage.config.digest"),
+            metadata.get("containerimage.digest"),
+        )
+        if isinstance(digest, str) and digest.startswith("sha256:")
+    ]
+    if not candidates:
         raise ProviderStartError("Buildx metadata has no immutable image digest")
-    code, image_id, stderr = await _run(
-        "docker", "image", "inspect", "--format", "{{.Id}}", built_identity, timeout=30
-    )
-    image_id = image_id.strip()
-    if code != 0 or not image_id.startswith("sha256:"):
+    for built_identity in candidates:
+        code, image_id, stderr = await _run(
+            "docker", "image", "inspect", "--format", "{{.Id}}", built_identity, timeout=30
+        )
+        image_id = image_id.strip()
+        if code == 0 and image_id.startswith("sha256:"):
+            break
+    else:
         raise ProviderStartError(
             f"Docker did not load the built Task image: {stderr.strip() or image_id}"
         )

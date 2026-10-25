@@ -210,10 +210,8 @@ class StandardEnvironment(Environment):
         # Derived from the account the image declared, not configured anywhere. A run
         # that could choose its own working directory was a second answer to a question
         # the image had already answered, and two answers can disagree.
-        ctx.home = getattr(sandbox, "agent_home", f"/home/{_agent_user(sandbox)}")
-        ctx.sandbox_identity = SandboxProvenance(
-            user=_agent_user(sandbox), sudo=spec.resources.sudo
-        )
+        ctx.home = sandbox.agent_home
+        ctx.sandbox_identity = SandboxProvenance(user=sandbox.agent_user, sudo=spec.resources.sudo)
         return sandbox
 
     async def _provision_verifier(self, ctx: EpisodeContext) -> Sandbox:
@@ -1132,11 +1130,7 @@ class RetainedVerificationEnvironment(StandardEnvironment):
         ctx.resolved_image = self.solver.resolved_image
         ctx.resource_allocation = self.solver.allocation
         ctx.sandbox_identity = self.sandbox_identity
-        ctx.home = getattr(
-            self.solver,
-            "agent_home",
-            f"/home/{_agent_user(self.solver)}",
-        )
+        ctx.home = self.solver.agent_home
         trajectory = self.source_run_dir / "trajectory.json"
         if trajectory.is_file():
             shutil.copy2(trajectory, ctx.run_dir / "trajectory.json")
@@ -1206,11 +1200,6 @@ def _limit_terminated(ctx: EpisodeContext) -> Iterator[None]:
         raise BudgetExceededError(
             refusal.name, float(refusal.configured_value), refusal.observed_value
         ) from error
-
-
-def _agent_user(sandbox: Sandbox) -> str:
-    """The account this sandbox calls the agent, for a plain `chown`."""
-    return getattr(sandbox, "agent_user", "user")
 
 
 def _with_parse_issue(trajectory: AtifTrajectory, issue: dict[str, object]) -> AtifTrajectory:

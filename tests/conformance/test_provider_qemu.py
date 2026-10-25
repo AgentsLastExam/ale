@@ -24,8 +24,7 @@ from ale.core.sandbox import Identity, ImageRef, Sandbox, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
 from ale.run.providers.docker import DockerProvider
-from ale.run.providers.docker import destroy_retained as destroy_retained_docker
-from ale.run.providers.qemu import QemuProvider, destroy_retained, list_retained
+from ale.run.providers.qemu import QemuProvider
 from ale.run.sources import cache_root
 
 LEGACY_IMAGE = Path.home() / ".cache/ale/images/ale-ubuntu-desktop.qcow2"
@@ -93,13 +92,13 @@ class TestQemuProvider(ProviderConformance):
         retained = await sandbox.retain(roles=("solver",), reason="conformance")
         sandbox.release_resources()
         try:
-            records = await list_retained()
+            records = await QemuProvider().list_retained()
             record = next(item for item in records if item["handle"] == retained.handle)
             assert record["provider"] == "qemu"
             assert record["running"] is True
             assert Path(sandbox.storage).is_dir()  # type: ignore[attr-defined]
         finally:
-            await destroy_retained(retained.handle)
+            await QemuProvider().destroy_retained(retained.handle)
         assert not Path(sandbox.storage).exists()  # type: ignore[attr-defined]
 
 
@@ -186,6 +185,6 @@ async def test_cli_manages_multiple_mixed_retained_sandboxes() -> None:
         for handle in retained:
             with contextlib.suppress(Exception):
                 if handle.startswith("qemu:"):
-                    await destroy_retained(handle)
+                    await QemuProvider().destroy_retained(handle)
                 else:
-                    await destroy_retained_docker(handle)
+                    await DockerProvider().destroy_retained(handle)

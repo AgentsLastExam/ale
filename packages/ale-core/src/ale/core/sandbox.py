@@ -28,7 +28,6 @@ __all__ = [
     "ExecResult",
     "GpuAllocation",
     "GpuDevice",
-    "GuestTransport",
     "Identity",
     "ImageKind",
     "ImageRef",
@@ -316,20 +315,12 @@ class RetainedSandbox(BaseModel):
     gpu_devices: tuple[str, ...] = ()
 
 
-class GuestTransport(Protocol):
-    """How the host reaches the guest service.
-
-    Implemented by a piped ``exec`` session for containers and by a socket for virtual
-    machines; callers never see the difference.
-    """
-
-    async def request(self, op: str, params: dict[str, object]) -> dict[str, object]: ...
-
-    async def close(self) -> None: ...
-
-
 class Sandbox(ABC):
-    """One isolated execution instance."""
+    """One isolated execution instance.
+
+    ``agent_user`` and ``agent_home`` are the account :attr:`Identity.AGENT` maps to, as
+    the guest reported it once the sandbox was ready, not as the request assumed it.
+    """
 
     def __init__(
         self,
@@ -338,12 +329,16 @@ class Sandbox(ABC):
         request: SandboxRequest,
         resolved_image: ResolvedImage,
         allocation: ResourceAllocation,
+        agent_user: str,
+        agent_home: str,
         resource_lease: ResourceLease | None = None,
     ) -> None:
         self.sandbox_id = sandbox_id
         self.request = request
         self.resolved_image = resolved_image
         self.allocation = allocation
+        self.agent_user = agent_user
+        self.agent_home = agent_home
         self._resource_lease = resource_lease
         self.state = SandboxState.CREATED
 
@@ -377,6 +372,7 @@ class Sandbox(ABC):
     @abstractmethod
     async def read_file(self, path: str) -> bytes: ...
 
+    @abstractmethod
     async def open_egress(self) -> None:
         """Let the sandbox reach the network, for the framework's own phases.
 
@@ -386,24 +382,30 @@ class Sandbox(ABC):
         ours; holding all three to the agent's limits bought nothing and cost a great deal,
         most visibly an agent that could not be installed into an image that had not
         pre-baked it.
-
-        Default: nothing. A provider that cannot vary this must say so by overriding
-        :meth:`close_egress`, because a sandbox that silently stays open during the agent
-        phase would make every isolation claim in a run's provenance false.
         """
-        return None
 
+    @abstractmethod
     async def close_egress(self) -> None:
-        """Apply the task's declared policy, before the agent starts."""
-        return None
+        """Apply the task's declared policy, before the agent starts.
+
+        Abstract rather than a no-op default: a sandbox that silently stayed open through
+        the agent phase would make every isolation claim in a run's provenance false. A
+        backend that cannot change policy at runtime raises here, and one that cannot
+        apply a policy at all rejects it in :meth:`Provider.accepts`.
+        """
 
     @abstractmethod
     async def upload_dir(
         self, source: str, target: str, *, identity: Identity = Identity.FRAMEWORK
-    ) -> None: ...
+    ) -> None:
+        """Copy a Host directory into the sandbox with the fixed upload semantics.
 
-    @abstractmethod
-    async def download_dir(self, source: str, target: str) -> None: ...
+        Host modes never travel: directories become 0755 and files 0644 (on Windows, a
+        reset ACL), owned by the identity's account, and links arrive as links. Entry
+        scripts run through an interpreter, so nothing depends on an executable bit that
+        an object store would have dropped anyway. Every Provider streams the tree through
+        the guest service, which applies these rules in one place.
+        """
 
     @abstractmethod
     async def destroy(self) -> None:
@@ -450,3 +452,17 @@ class Provider(ABC):
     def accepts(self, request: SandboxRequest) -> None:
         """Raise unless this provider can serve ``request``."""
         self.capabilities().check(request.resources, request.network, request.os)
+
+    async def list_retained(self) -> list[dict[str, object]]:
+        """The sandboxes this provider kept after their episodes, as operator records."""
+        return []
+
+    async def destroy_retained(self, handle: str) -> None:
+        """Destroy one retained sandbox and everything it owns."""
+        raise ProviderCapabilityError(f"{self.name} does not retain sandboxes")
+
+    async def attach_retained(
+        self, handle: str, request: SandboxRequest, allocation: ResourceAllocation
+    ) -> Sandbox:
+        """Reconnect to a running retained sandbox without taking ownership of it."""
+        raise ProviderCapabilityError(f"{self.name} does not retain sandboxes")

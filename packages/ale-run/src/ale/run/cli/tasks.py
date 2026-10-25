@@ -12,7 +12,7 @@ from pathlib import Path
 import typer
 
 from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config, select_agent_name
-from ale.core.errors import AleError, ConfigError, TaskDefinitionError
+from ale.core.errors import AleError, ConfigError, ProviderCapabilityError, TaskDefinitionError
 from ale.core.harness import EffectiveAgentResources, Harness
 from ale.core.ids import content_hash
 from ale.core.lock import AssetProvenance, RunLock
@@ -48,7 +48,7 @@ from ale.run.provenance import (
     framework_provenance,
     gateway_provenance,
 )
-from ale.run.providers import ProviderRegistry
+from ale.run.providers import ProviderRegistry, provider_named
 from ale.run.recording import atomic_write_json
 from ale.run.secrets import provider_credentials
 from ale.run.sources import parse_task_reference, resolve, select_tasks
@@ -599,15 +599,12 @@ async def _attach_retained(
     lock: RunLock,
 ) -> Sandbox:
     assert lock.resources is not None
-    if handle.startswith("docker:"):
-        from ale.run.providers.docker import attach_retained
-
-        return await attach_retained(handle, request, lock.resources.effective)
-    if handle.startswith("qemu:"):
-        from ale.run.providers.qemu import attach_retained
-
-        return await attach_retained(handle, request, lock.resources.effective)
-    raise TaskDefinitionError(f"unsupported retained sandbox handle: {handle}")
+    allocation = lock.resources.effective
+    try:
+        provider = provider_named(allocation.provider)
+    except ProviderCapabilityError as exc:
+        raise TaskDefinitionError(f"unsupported retained sandbox handle: {handle}") from exc
+    return await provider.attach_retained(handle, request, allocation)
 
 
 def _same_assets(recorded: AssetProvenance | None, current: TaskAssetObservation | None) -> bool:

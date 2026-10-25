@@ -275,7 +275,9 @@ QEMU enforces Task egress in the runner network namespace, outside both Linux an
 guests. The guest does not need an OS-specific firewall implementation for ALE policy.
 
 Retained handles are always provider-qualified: `docker:<runtime-id>` for containers and
-`qemu:<runtime-id>` for VMs. Unqualified handles are rejected.
+`qemu:<runtime-id>` for VMs. Unqualified handles are rejected. Listing, destroying and
+attaching are Provider operations, routed by the Provider a handle or RunLock names, so a
+new backend needs no CLI change.
 
 GPU workload libraries such as CUDA, PyTorch, and simulators remain Task Dockerfile
 responsibility. Tasks request a count only; Provider configuration selects eligible host
@@ -293,6 +295,10 @@ owned by the selected framework or agent identity. Windows resets ACLs to grant
 SYSTEM/Administrators full control, Users read access, and the selected agent modify
 access for agent uploads. Task entry scripts run through their interpreter, without
 requiring executable bits. Artifact collection/restoration does not use these defaults.
+Every Provider streams the tree through guestd's `put_tree`, which applies these rules as
+it writes, so they have one implementation rather than one per backend. Links arrive as
+links; a link or hard link already at a destination is replaced, never written through,
+because the writer is root.
 
 Solver and oracle use the image's agent account. Windows guestd runs elevated in that
 account's interactive session and launches agent commands with the desktop's limited
@@ -300,8 +306,36 @@ token, unless the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a 
 desktop session are required; the Provider checks both framework and agent privileges
 before Task execution. Rebuild older Windows Task images with the current framework;
 direct `image.ref` disks must already satisfy this contract. Linux configures requested
-sudo during image preparation. Grants are verified and recorded. ALE does not pre-create
+sudo during image preparation. Grants, and their absence, are verified and recorded: a
+Linux sandbox is refused when its guest service is not root, when a requested grant does
+not work, or when an agent that did not request one is root or can use sudo. ALE does not pre-create
 artifacts or repair their ownership: image/setup/agent code owns their type and existence.
+
+## Provider contract
+
+A Provider turns a SandboxRequest into a running Sandbox that holds the guarantees below,
+or rejects the request before anything is created; it never degrades one silently. It owns
+isolation (resources, network, identity, enforced where the agent cannot reach), the
+channels (Host to guestd, sandbox to Gateway), the lifecycle (create, destroy, retain,
+attach) and truthful observation. It does not own phase timing (the Environment), command
+and file semantics (guestd), credentials (the Gateway) or image and Task content (the
+engine).
+
+| Guarantee | Enforced by | Conformance test |
+|---|---|---|
+| Agent work runs as `image.user`, framework work as root or Administrator; the agent elevates exactly when `resources.sudo` asks | Provider check in `create`, both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected` |
+| Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
+| Framework phases have the network; after `close_egress` the agent reaches its Gateway (and allowlist proxy) and nothing else; `open` Tasks are never sealed; the Gateway address never moves | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |
+| Resources are applied or rejected; the RunLock records the observed image and allocation | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
+| Destroy is idempotent; retained sandboxes can be listed and destroyed through their Provider | Provider | `test_destroy_is_idempotent`, `test_a_retained_sandbox_can_be_listed_and_destroyed` |
+| A declared desktop can be captured and driven | Provider and image | `test_a_declared_desktop_can_actually_be_used`, `test_a_declared_desktop_accepts_input` |
+
+`open_egress` and `close_egress` are abstract: a default that did nothing would let a new
+backend run the agent with the network while its RunLock said `block`. A backend that
+cannot change policy at runtime raises there, and one that cannot apply a policy rejects it
+in `accepts`. A Provider is complete when it passes `ale.core.testkit.ProviderConformance`;
+an escape the suite cannot observe, such as a platform's own in-sandbox service, is that
+Provider's to close and to check in `create`.
 
 ## Base-image changes
 
