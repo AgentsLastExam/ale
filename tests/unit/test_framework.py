@@ -10,12 +10,14 @@ from pathlib import Path
 import pytest
 
 from ale.core.errors import ProviderStartError, TaskDefinitionError
-from ale.core.sandbox import ExecResult
+from ale.core.sandbox import ExecResult, PreparedTaskImage
 from ale.run import framework, guestd
 from ale.run.framework import (
     LABEL,
     MARKER,
+    MATERIALIZER_IMAGE,
     frame_disk,
+    framed_disk,
     framework_identity,
     framework_on_disk,
     install_on_windows,
@@ -154,6 +156,70 @@ async def test_the_framework_a_disk_carries_is_read_from_its_marker(
     assert await framework_on_disk(tmp_path / "d.qcow2", builder="b") is None
 
 
+def _external_disk(path: str, digest: str) -> PreparedTaskImage:
+    return PreparedTaskImage(
+        kind="vm",
+        source="external-ref",
+        input_identity=digest,
+        runtime_ref=path,
+        prepared_identity=digest,
+        resolved_reference=f"file://{path}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_vm_disk_is_framed_once_and_a_framed_disk_is_used_as_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "cache"))
+    source = tmp_path / "input.qcow2"
+    source.write_bytes(b"disk")
+    framed: list[Path] = []
+    carried: dict[Path, str | None] = {}
+
+    async def builder_identity() -> str:
+        return "sha256:" + "9" * 64
+
+    async def valid(path: Path) -> bool:
+        return path.is_file()
+
+    async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
+        assert argv[:2] == ("qemu-img", "convert")
+        Path(argv[-1]).write_bytes(Path(argv[-2]).read_bytes())
+        return 0, "", ""
+
+    async def frame(disk: Path, *, user: str, sudo: bool, builder: str) -> None:
+        assert builder == MATERIALIZER_IMAGE
+        framed.append(disk)
+
+    async def on_disk(disk: Path, *, builder: str) -> str | None:
+        return carried.get(disk)
+
+    monkeypatch.setattr(framework, "_builder_identity", builder_identity)
+    monkeypatch.setattr(framework, "_valid_qcow2", valid)
+    monkeypatch.setattr(framework, "_run", run)
+    monkeypatch.setattr(framework, "frame_disk", frame)
+    monkeypatch.setattr(framework, "framework_on_disk", on_disk)
+    image = _external_disk(str(source), "sha256:" + "d" * 64)
+
+    first, reused = await framed_disk(image, user="user", sudo=False)
+    assert not reused and len(framed) == 1
+    assert first.runtime_ref != image.runtime_ref
+    assert first.resolved_reference == image.resolved_reference
+    assert first.prepared_identity != image.prepared_identity
+    assert await framed_disk(image, user="user", sudo=False) == (first, True)
+    assert len(framed) == 1
+    await framed_disk(image, user="user", sudo=True)
+    assert len(framed) == 2  # another framework is another copy
+
+    ready = image.model_copy(update={"prepared_identity": "sha256:" + "e" * 64})
+    carried[source] = framework_identity(user="user", sudo=False, vm=True)
+    assert await framed_disk(ready, user="user", sudo=False) == (ready, True)
+    carried.clear()  # recorded once, not looked at again
+    assert await framed_disk(ready, user="user", sudo=False) == (ready, True)
+    assert len(framed) == 2
+
+
 @pytest.mark.asyncio
 async def test_a_framing_container_does_not_outlive_its_call(
     monkeypatch: pytest.MonkeyPatch,
@@ -202,6 +268,53 @@ async def test_docker_frames_an_image_unless_it_carries_exactly_this_framework(
     assert await provider._framed(resolved, request) == resolved  # type: ignore[arg-type]
     reframed = await provider._framed(resolved, request)  # type: ignore[arg-type]
     assert (reframed.observed_identity, reframed.observed_ref) == (framed, framed)
+
+
+@pytest.mark.asyncio
+async def test_qemu_frames_a_linux_disk_unless_it_carries_exactly_this_framework(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ale.core.sandbox import ResolvedImage, SandboxRequest
+    from ale.core.taskspec import NetworkPolicy, OperatingSystem, Resources
+    from ale.run.providers import qemu
+
+    original = "sha256:" + "1" * 64
+    framed = "sha256:" + "2" * 64
+    prepared = _external_disk("/disks/task.qcow2", original)
+    copy = prepared.model_copy(
+        update={"runtime_ref": "/cache/framed.qcow2", "prepared_identity": framed}
+    )
+    answers = iter([prepared, copy])
+    asked: list[tuple[PreparedTaskImage, str, bool]] = []
+
+    async def frame(image: PreparedTaskImage, *, user: str, sudo: bool) -> tuple:
+        asked.append((image, user, sudo))
+        return next(answers), False
+
+    monkeypatch.setattr(qemu, "framed_disk", frame)
+    resolved = ResolvedImage(
+        kind="vm",
+        prepared_identity=original,
+        observed_identity=original,
+        observed_ref=prepared.runtime_ref,
+    )
+    request = SandboxRequest(
+        episode_id="e1",
+        prepared_image=prepared,
+        resources=Resources(sudo=True),
+        network=NetworkPolicy(),
+        user="app",
+        sudo=True,
+    )
+    provider = qemu.QemuProvider()
+    assert await provider._framed(resolved, request) == resolved
+    reframed = await provider._framed(resolved, request)
+    assert reframed.prepared_identity == original  # what the request named, still
+    assert (reframed.observed_identity, reframed.observed_ref) == (framed, copy.runtime_ref)
+    assert asked == [(prepared, "app", True)] * 2
+    windows = request.model_copy(update={"os": OperatingSystem.WINDOWS})
+    assert await provider._framed(resolved, windows) == resolved
+    assert len(asked) == 2  # a Windows disk boots as it is
 
 
 def _zip(files: dict[str, bytes]) -> bytes:

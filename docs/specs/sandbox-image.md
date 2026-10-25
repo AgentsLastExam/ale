@@ -33,6 +33,10 @@ disk's own programs that the setup calls. Each copy is made once per disk and fr
 and then used directly, and a disk that already carries this framework, such as one ALE
 prepared, is used as it is.
 
+An image or Linux disk handed straight to a Provider, rather than prepared from a Task,
+gets the same layer from the Provider when it does not carry this framework, so every
+Linux sandbox runs the guestd of the engine driving it however it was made.
+
 There are no image labels to declare. Whether a sandbox has a desktop is decided from the
 image's own configuration before anything starts: a VM has one when its systemd enables a
 display manager (`display-manager.service`), and a container has one when its image sets
@@ -58,8 +62,11 @@ pieces through it:
 Elevation for `resources.sudo` is granted per boot by the Host, not built into the disk.
 A Windows sandbox has a desktop for ALE to drive exactly when its image carries the
 framework's Cua Driver, so the Provider waits for a screenshot in every Task image and
-not in the bare base booted to build one. A disk used directly as `image.ref` is not
-prepared by ALE and must carry a current guestd and Cua Driver itself.
+not in the bare base booted to build one. A disk used directly as `image.ref`, or handed
+straight to a Provider, is not prepared by ALE and must carry a current guestd and Cua
+Driver itself: the Windows framework can only be installed in a running guest, through a
+guestd the disk already carries
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#qemu)).
 
 ## ALE base images
 
@@ -349,6 +356,7 @@ engine).
 
 | Guarantee | Enforced by | Conformance test |
 |---|---|---|
+| Every Linux sandbox runs the framework of the engine driving it, whatever image or disk it was handed; a Windows disk must already carry it | Provider in `create` | `test_a_sandbox_carries_the_engines_framework` |
 | Agent work runs as `image.user`, framework work as root or Administrator; the agent elevates exactly when `resources.sudo` asks | Provider check in `create`, both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |

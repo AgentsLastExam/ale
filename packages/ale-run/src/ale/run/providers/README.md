@@ -45,3 +45,31 @@ request to that name's own host, so sending an allowed name to another address r
 the allowed host; other ports of unlisted addresses are unreachable. The proxy accepts every
 TCP connection to port 443 before it decides, which is why egress is checked with a TLS
 handshake rather than a connect.
+
+## QEMU
+
+`QemuProvider.create` frames a Linux disk it is handed with `framework.framed_disk`, the
+function Task preparation uses for a qcow2 `ref`, so both share one cache in
+`vm-builds`. Measured on a KVM host:
+
+- A disk that already carries this framework, such as one ALE prepared, boots as it is.
+  Reading its `/opt/ale/framework` with the VM builder's `virt-cat` takes about 3 s, and
+  the answer is recorded next to the cache, so each disk pays it once per Host.
+- Any other disk is copied with `qemu-img convert` and framed offline with
+  `virt-customize`, about 30–40 s, once per disk, framework identity and builder image.
+  The copy is an uncompressed qcow2, about 4.5 GB for the 2.3 GB VM base.
+- The resolved image keeps the request's prepared identity and observes the copy that
+  boots, which the RunLock records.
+
+A Windows disk boots as it is, because the Linux way does not carry over:
+
+- The Windows framework registers logon tasks (`ALE Cua Driver`, `ALE Guestd Session`)
+  with the guest's Task Scheduler and locates the guest's `python.exe`, so
+  `install_on_windows` runs in a booted guest, not offline.
+- It reaches that guest through a guestd the disk already carries, elevated as the agent;
+  only the ALE Windows base has one, so any other disk could not be framed at all.
+- Framing would cost a boot, the install, a clean shutdown and an export of the whole
+  disk (tens of GB) before the sandbox's own boot.
+- A Windows disk records no framework identity, so even a Task image ALE just built would
+  be framed again. `_build_windows_image` also boots the bare base through
+  `QemuProvider.create` on purpose.

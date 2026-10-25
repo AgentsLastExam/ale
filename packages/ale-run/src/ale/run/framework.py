@@ -16,10 +16,10 @@ The result is an ordinary image built on the Task image, so Docker runs it and V
 preparation materializes it. A label records what it was built with, which makes adding
 the same layer twice a no-op.
 
-A Linux VM disk named by reference gets the same pieces installed into it offline, inside
-the VM builder's own small appliance VM, so the disk's programs never run on the Host.
-Both record what they installed in ``/opt/ale/framework``; a disk that already carries
-this framework is used as it is.
+A Linux VM disk named by reference or handed straight to the QEMU Provider gets the same
+pieces installed into a copy of it offline, inside the VM builder's own small appliance
+VM, so the disk's programs never run on the Host. Both record what they installed in
+``/opt/ale/framework``; a disk that already carries this framework is used as it is.
 
 A Windows image is built inside a running VM, so the same pieces arrive there through the
 guest service the base already runs, after the Task's own image script: the current
@@ -35,6 +35,7 @@ import fcntl
 import hashlib
 import io
 import json
+import os
 import re
 import shlex
 import shutil
@@ -48,15 +49,17 @@ from pathlib import Path, PureWindowsPath
 
 from ale.core.errors import ProviderStartError, TaskDefinitionError
 from ale.core.ids import content_hash
-from ale.core.sandbox import Sandbox
-from ale.run import guestd
+from ale.core.sandbox import PreparedTaskImage, Sandbox
+from ale.run import ale_image, guestd
 from ale.run.sources import cache_root
 
 __all__ = [
     "CUA_DRIVER_VERSION",
     "LABEL",
     "MARKER",
+    "MATERIALIZER_IMAGE",
     "frame_disk",
+    "framed_disk",
     "framework_identity",
     "framework_on_disk",
     "install_on_windows",
@@ -67,6 +70,9 @@ __all__ = [
 LABEL = "ale.framework"
 #: Where a prepared Linux image records the framework identity it carries.
 MARKER = "/opt/ale/framework"
+#: The VM builder: it materializes Linux VM OCI content into a qcow2, and its libguestfs
+#: installs the framework into a Linux qcow2.
+MATERIALIZER_IMAGE = os.environ.get("ALE_VM_MATERIALIZER", ale_image("ale-vm-materializer"))
 CUA_DRIVER_VERSION = "0.12.6"
 #: Release asset and its published SHA-256, per guest platform.
 _CUA_DRIVER = {
@@ -299,6 +305,68 @@ async def with_framework(image: str, *, user: str, sudo: bool, vm: bool = False)
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+async def framed_disk(
+    image: PreparedTaskImage, *, user: str, sudo: bool
+) -> tuple[PreparedTaskImage, bool]:
+    """A Linux VM disk with the framework installed, and whether it was already there.
+
+    A copy of the disk is framed once per disk, framework and builder, and then used
+    directly. A disk that already carries this exact framework, such as one ALE prepared,
+    is used as it is; that is read from the disk once and then recorded.
+    """
+    identity = framework_identity(user=user, sudo=sudo, vm=True)
+    key = content_hash(
+        {
+            "disk": image.prepared_identity,
+            "framework": identity,
+            "builder": await _builder_identity(),
+        }
+    )
+    root = cache_root() / "vm-builds"
+    root.mkdir(parents=True, exist_ok=True)
+    disk = root / f"{key.removeprefix('sha256:')}.qcow2"
+    # Names the input disk when it already carried this framework, so it is checked once.
+    carried = disk.with_suffix(".json")
+    source = Path(image.runtime_ref)
+    with disk.with_suffix(".lock").open("a") as lock:
+        await _acquire(lock)
+        try:
+            if await _valid_qcow2(disk):
+                return _with_disk(image, disk, key), True
+            if _carried(carried) == str(source):
+                return image, True
+            if await framework_on_disk(source, builder=MATERIALIZER_IMAGE) == identity:
+                carried.write_text(json.dumps({"disk": str(source)}), encoding="utf-8")
+                return image, True
+            with tempfile.TemporaryDirectory(prefix=f".{disk.stem}-", dir=root) as temporary:
+                output = Path(temporary) / "disk.qcow2"
+                code, _, stderr = await _run(
+                    "qemu-img", "convert", "-O", "qcow2", str(source), str(output), timeout=1800
+                )
+                if code != 0:
+                    raise ProviderStartError(f"could not copy the VM disk: {stderr.strip()}")
+                await frame_disk(output, user=user, sudo=sudo, builder=MATERIALIZER_IMAGE)
+                if not await _valid_qcow2(output):
+                    raise ProviderStartError("framing produced no valid qcow2")
+                os.replace(output, disk)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+    return _with_disk(image, disk, key), False
+
+
+def _carried(record: Path) -> str | None:
+    try:
+        return str(json.loads(record.read_text(encoding="utf-8"))["disk"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _with_disk(image: PreparedTaskImage, disk: Path, identity: str) -> PreparedTaskImage:
+    return image.model_copy(
+        update={"runtime_ref": str(disk.resolve()), "prepared_identity": identity}
+    )
+
+
 async def framework_on_disk(disk: Path, *, builder: str) -> str | None:
     """The framework identity a Linux VM disk records, or None when it carries none.
 
@@ -474,6 +542,23 @@ async def _inspect(reference: str, *, missing_ok: bool = False) -> dict:
     loaded = json.loads(config or "null") or {}
     loaded["Id"] = image_id.strip()
     return loaded
+
+
+async def _builder_identity() -> str:
+    """The VM builder's local image ID, pulling it first when this host lacks it."""
+    if found := await _inspect(MATERIALIZER_IMAGE, missing_ok=True):
+        return found["Id"]
+    code, _, stderr = await _run("docker", "pull", MATERIALIZER_IMAGE, timeout=900)
+    if code != 0:
+        raise ProviderStartError(f"could not acquire image {MATERIALIZER_IMAGE}: {stderr.strip()}")
+    return (await _inspect(MATERIALIZER_IMAGE))["Id"]
+
+
+async def _valid_qcow2(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    code, _, _ = await _run("qemu-img", "check", "-q", str(path), timeout=300)
+    return code == 0
 
 
 async def _acquire(handle) -> None:  # type: ignore[no-untyped-def]

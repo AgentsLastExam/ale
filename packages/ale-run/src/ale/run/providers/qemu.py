@@ -58,6 +58,7 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem
 from ale.run import ale_image, guestd
+from ale.run.framework import framed_disk
 from ale.run.gpu import GpuLease, normalize_pci_bdf, parse_nvidia_smi
 from ale.run.images import (
     resolve_local_vm_fixture,
@@ -664,6 +665,7 @@ class QemuProvider(Provider):
             used = await _managed_gpu_ids()
             by_group = {group: gpu for group, gpu in by_group.items() if gpu.bdf not in used}
         resolved_image = await resolve_prepared_vm_image(request.prepared_image)
+        resolved_image = await self._framed(resolved_image, request)
         base_image = Path(resolved_image.observed_ref)
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
@@ -886,6 +888,26 @@ class QemuProvider(Provider):
             with contextlib.suppress(BaseException):
                 await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))
             raise
+
+    async def _framed(self, resolved: ResolvedImage, request: SandboxRequest) -> ResolvedImage:
+        """Install the engine's framework into a Linux disk that was not prepared with it.
+
+        Task preparation frames the disk already; this covers a disk handed straight to
+        the Provider, so any Linux disk can serve as a sandbox, as any image can under
+        Docker. A Windows disk boots as it is: its framework is installed only by a
+        running image build, which boots the bare base through this Provider.
+        """
+        if request.os is not OperatingSystem.LINUX:
+            return resolved
+        framed, _ = await framed_disk(request.prepared_image, user=request.user, sudo=request.sudo)
+        if framed == request.prepared_image:
+            return resolved
+        return resolved.model_copy(
+            update={
+                "observed_identity": framed.prepared_identity,
+                "observed_ref": framed.runtime_ref,
+            }
+        )
 
     async def _guest_gpus(self, client: GuestClient) -> tuple[GpuDevice, ...]:
         code, stdout, stderr, _ = await client.exec(

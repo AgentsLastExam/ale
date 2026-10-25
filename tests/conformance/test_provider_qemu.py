@@ -4,11 +4,14 @@ One suite, two backends, no per-provider assertions: that is what makes "the san
 contract is real" a claim rather than an aspiration, and what turns the future OS
 roadmap into "swap the guest image".
 
-Needs KVM and a built guest image, so it skips rather than fails where either is absent.
+The disk is this engine version's VM base, materialized once per host, without the
+framework: the Provider adds it, as Docker adds it to the container base. Set
+``ALE_QEMU_IMAGE`` to run the suite on another Linux disk. Needs KVM and Docker.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import subprocess
@@ -18,41 +21,53 @@ import uuid
 from pathlib import Path
 
 import pytest
-from tests.support import CONTAINER_BASE
+from tests.support import CONTAINER_BASE, VM_BASE
 
 from ale.core.sandbox import Identity, ImageRef, Sandbox, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
+from ale.run import task_images
+from ale.run.framework import framework_identity
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.qemu import QemuProvider
-from ale.run.sources import cache_root
 
-LEGACY_IMAGE = Path.home() / ".cache/ale/images/ale-ubuntu-desktop.qcow2"
-DEFAULT_IMAGE = max(
-    (cache_root() / "vm-builds").glob("*.qcow2"),
-    key=lambda path: path.stat().st_mtime_ns,
-    default=LEGACY_IMAGE,
-)
-IMAGE = Path(os.environ.get("ALE_QEMU_IMAGE", DEFAULT_IMAGE))
+pytestmark = [pytest.mark.conformance, pytest.mark.needs_kvm]
 
-pytestmark = [
-    pytest.mark.conformance,
-    pytest.mark.needs_kvm,
-    pytest.mark.skipif(
-        not IMAGE.is_file(),
-        reason=f"no prepared VM disk at {IMAGE}; run ale prepare on a VM Task",
-    ),
-]
+
+@pytest.fixture(scope="module")
+def vm_disk() -> Path:
+    """The disk every VM in this module boots, the same for every run of one engine."""
+    if override := os.environ.get("ALE_QEMU_IMAGE"):
+        return Path(override)
+    if not os.access("/dev/kvm", os.R_OK | os.W_OK):
+        pytest.skip("/dev/kvm is unavailable")
+
+    async def materialize() -> Path:
+        identity = await task_images._docker_image_identity(VM_BASE)
+        build = task_images._OciBuild(
+            input_identity=identity,
+            image_source_identity=identity,
+            runtime_ref=identity,
+            oci_identity=identity,
+            base_materials=(),
+        )
+        return Path((await task_images._materialize_vm(build, source="solver-local")).runtime_ref)
+
+    return asyncio.run(materialize())
 
 
 class TestQemuProvider(ProviderConformance):
     """Every assertion in the shared suite, run against a virtual machine."""
 
-    provider = QemuProvider(image=IMAGE)
-    image = ImageRef(kind="vm", reference="ale-guest-ubuntu-desktop:24.04")
+    image = ImageRef(kind="vm", reference=VM_BASE)
     #: The same disk. There is one VM guest and it has a desktop, so the GUI half of
     #: the shared suite runs against it rather than being skipped.
     gui_image = image
+    framework = framework_identity(user="user", sudo=False, vm=True)
+
+    @pytest.fixture(autouse=True)
+    def _provider(self, vm_disk: Path) -> None:
+        self.provider = QemuProvider(image=vm_disk)
 
     async def request(self, **overrides: object) -> SandboxRequest:
         resources = overrides.get("resources", Resources())
@@ -69,9 +84,7 @@ class TestQemuProvider(ProviderConformance):
     @pytest.mark.asyncio
     async def test_ubuntu_gnome_session_and_fresh_overlay(self) -> None:
         assert self.provider.capabilities().network_modes == frozenset(NetworkMode)
-        started = time.monotonic()
         first = await self.provider.create(await self.request())
-        assert time.monotonic() - started < 60
         try:
             release = await first.exec(["sh", "-c", ". /etc/os-release; echo $VERSION_ID"])
             assert release.stdout.strip() == "24.04"
@@ -83,7 +96,11 @@ class TestQemuProvider(ProviderConformance):
         finally:
             await first.destroy()
 
-        async with await self.provider.create(await self.request()) as fresh:
+        # Timed on the second boot: the first may have framed the disk.
+        request = await self.request()
+        started = time.monotonic()
+        async with await self.provider.create(request) as fresh:
+            assert time.monotonic() - started < 60
             assert not (await fresh.exec(["test", "-e", "/home/user/overlay-marker"])).ok
 
     @pytest.mark.asyncio
@@ -103,13 +120,11 @@ class TestQemuProvider(ProviderConformance):
 
 
 @pytest.mark.asyncio
-async def test_cli_manages_multiple_mixed_retained_sandboxes() -> None:
+async def test_cli_manages_multiple_mixed_retained_sandboxes(vm_disk: Path) -> None:
     docker = DockerProvider()
-    qemu = QemuProvider(image=IMAGE)
+    qemu = QemuProvider(image=vm_disk)
     docker_image = await docker.prepare_image(ImageRef(kind="container", reference=CONTAINER_BASE))
-    qemu_image = await qemu.prepare_image(
-        ImageRef(kind="vm", reference="ale-guest-ubuntu-desktop:24.04")
-    )
+    qemu_image = await qemu.prepare_image(ImageRef(kind="vm", reference=VM_BASE))
     active: list[Sandbox] = []
     retained: set[str] = set()
     qemu_storage: Path | None = None
