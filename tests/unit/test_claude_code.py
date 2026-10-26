@@ -36,21 +36,16 @@ def test_unknown_setting_is_not_silently_ignored() -> None:
 
 
 def test_default_and_unlimited_omit_native_limit_flags() -> None:
-    default = ClaudeCodeHarness(settings={"max_turns": "default", "max_budget_usd": "default"})
-    unlimited = ClaudeCodeHarness(
-        settings={"max_turns": "unlimited", "max_budget_usd": "unlimited"}
-    )
+    default = ClaudeCodeHarness(settings={"max_turns": "default"})
+    unlimited = ClaudeCodeHarness(settings={"max_turns": "unlimited"})
     assert "--max-turns" not in default._flags()
-    assert "--max-budget-usd" not in default._flags()
     assert "--max-turns" not in unlimited._flags()
-    assert "--max-budget-usd" not in unlimited._flags()
 
 
 def test_concrete_settings_map_to_native_flags() -> None:
     harness = ClaudeCodeHarness(
         settings={
             "max_turns": 12,
-            "max_budget_usd": 3.5,
             "permission_mode": "manual",
             "allowed_tools": ["Bash(git status:*)"],
             "disallowed_tools": ["WebFetch"],
@@ -60,7 +55,6 @@ def test_concrete_settings_map_to_native_flags() -> None:
     )
     flags = harness._flags()
     assert "--max-turns 12" in flags
-    assert "--max-budget-usd 3.5" in flags
     assert "--permission-mode default" in flags
     assert "--allowedTools 'Bash(git status:*)'" in flags
     assert "--disallowedTools WebFetch" in flags
@@ -667,6 +661,8 @@ def test_recorded_native_subagent_is_linked_through_its_meta_file(tmp_path: Path
     # Only the native record has the child's reply; stdout stops at its last call.
     assert final.message == "DONE"
     assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+    # The native result reports a price; ALE reports tokens only.
+    assert "cost" not in trajectory.model_dump_json()
 
 
 def test_native_subagent_without_its_meta_file_stays_reported(tmp_path: Path) -> None:

@@ -169,7 +169,7 @@ def test_chat_stream_usage_may_cross_network_chunk_boundaries() -> None:
     [
         (Limits(max_input_tokens=5), "max_input_tokens"),
         (Limits(max_total_tokens=9), "max_total_tokens"),
-        (Limits(max_cost_usd=0.000009), "max_cost_usd"),
+        (Limits(max_output_tokens=4), "max_output_tokens"),
     ],
 )
 async def test_chat_usage_limits_stop_the_call_after_the_threshold(

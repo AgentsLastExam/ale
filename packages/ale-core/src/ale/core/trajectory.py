@@ -1,4 +1,7 @@
-"""Strict local Harbor ATIF v1.8 trajectory models."""
+"""Strict local Harbor ATIF v1.8 trajectory models.
+
+ALE reports tokens, never price, so Harbor's optional cost metrics are not modelled.
+"""
 
 from __future__ import annotations
 
@@ -112,7 +115,6 @@ class AtifMetrics(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     cached_tokens: int | None = None
-    cost_usd: float | None = None
     prompt_token_ids: list[int] | None = None
     completion_token_ids: list[int] | None = None
     logprobs: list[float] | None = None
@@ -125,7 +127,6 @@ class AtifFinalMetrics(BaseModel):
     total_prompt_tokens: int | None = None
     total_completion_tokens: int | None = None
     total_cached_tokens: int | None = None
-    total_cost_usd: float | None = None
     total_steps: int | None = Field(default=None, ge=0)
     extra: dict[str, Any] | None = None
 

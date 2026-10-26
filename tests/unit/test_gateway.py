@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientSession, web
 
-from ale.core.errors import ConfigError
 from ale.core.trace import read_jsonl
 from ale.run.gateway.anthropic import (
     extract_usage,
@@ -21,9 +20,8 @@ from ale.run.gateway.anthropic import (
     stream_completed,
     usage_from_stream,
 )
-from ale.run.gateway.pricing import estimate_cost, price_for
 from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import CallUsage, GatewaySession, Limits
+from ale.run.gateway.session import CallUsage, GatewaySession, Limits, Usage
 from ale.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
@@ -38,6 +36,8 @@ class Upstream:
         self.calls = 0
         self.count_calls = 0
         self.counted_input = 2
+        self.cache_read = 0
+        self.cache_write = 0
         self.output_tokens = 20
         self.status = 200
         self.delay = 0.0
@@ -94,6 +94,8 @@ class Upstream:
             "stop_reason": "end_turn",
             "usage": {
                 "input_tokens": self.counted_input,
+                "cache_read_input_tokens": self.cache_read,
+                "cache_creation_input_tokens": self.cache_write,
                 "output_tokens": min(self.output_tokens, payload["max_tokens"]),
             },
         }
@@ -382,17 +384,6 @@ class TestAuthority:
 
 
 class TestLimits:
-    def test_finite_cost_limit_requires_known_model_pricing(self) -> None:
-        gateway = Gateway(api_key=REAL_KEY)
-        with pytest.raises(ConfigError, match="known pricing"):
-            gateway.open_session(
-                GatewaySession(
-                    episode_id="unknown",
-                    model="vendor-new-model",
-                    limits=Limits(max_cost_usd=1.0),
-                )
-            )
-
     async def test_ceiling_refuses_the_next_call(self, stack) -> None:
         gateway, upstream, session, _ = stack
         session.limits = Limits(max_model_calls=1)
@@ -419,17 +410,6 @@ class TestLimits:
         ):
             assert response.status == 429
             assert response.headers["x-should-retry"] == "false"
-
-    async def test_cost_ceiling_uses_recorded_usage(self, stack) -> None:
-        gateway, _upstream, session, _ = stack
-        session.limits = Limits(max_cost_usd=0.0005)
-
-        first, _ = await call(gateway, session)
-        second, body = await call(gateway, session, messages=[{"role": "user", "content": "x"}])
-
-        assert first == 200
-        assert second == 429
-        assert body["error"]["ale"]["limit"] == "max_cost_usd"
 
     async def test_input_ceiling_stops_after_provider_usage_crosses_it(self, stack) -> None:
         gateway, upstream, session, _ = stack
@@ -465,19 +445,10 @@ class TestLimits:
         assert body["error"]["ale"]["limit"] == "max_output_tokens"
         assert upstream.seen_max_tokens == [100]
 
-    @pytest.mark.parametrize(
-        "limits",
-        [
-            Limits(max_total_tokens=10),
-            Limits(max_cost_usd=0.00075),
-        ],
-    )
-    async def test_total_and_cost_limits_do_not_preempt_the_current_call(
-        self, stack, limits: Limits
-    ) -> None:
+    async def test_total_limit_does_not_preempt_the_current_call(self, stack) -> None:
         gateway, upstream, session, _ = stack
         upstream.counted_input = 100
-        session.limits = limits
+        session.limits = Limits(max_total_tokens=10)
 
         status, _ = await call(gateway, session, max_tokens=100)
 
@@ -597,8 +568,25 @@ class TestRecording:
         assert record["episode_id"] == "ep-1"
         assert record["input_tokens"] == 2
         assert record["output_tokens"] == 20
-        assert record["cost_usd"] > 0
+        assert not any("cost" in key for key in record), "ALE reports tokens, not price"
         assert record["disposition"] == "forwarded"
+
+    async def test_session_usage_keeps_cache_reads_and_writes(self, stack) -> None:
+        gateway, upstream, session, trace = stack
+        upstream.cache_read, upstream.cache_write = 30, 5
+        await call(gateway, session)
+        await call(gateway, session, messages=[{"role": "user", "content": "different"}])
+
+        # Input counts every token the provider processed, cache reads and writes included.
+        assert session.usage == Usage(
+            model_calls=2,
+            input_tokens=74,
+            cache_read_tokens=60,
+            cache_write_tokens=10,
+            output_tokens=40,
+        )
+        records = read_jsonl(trace.path).records
+        assert [record["cache_write_tokens"] for record in records] == [5, 5]
 
     async def test_a_refusal_is_recorded_too(self, stack) -> None:
         gateway, _upstream, session, trace = stack
@@ -693,7 +681,7 @@ class TestDialect:
         assert not stream_completed([start])
         assert not stream_completed([start, error, stop])
 
-    def test_cache_tokens_count_as_input_and_are_priced_separately(self) -> None:
+    def test_cache_tokens_count_as_input_and_are_reported_separately(self) -> None:
         usage, stop_reason = extract_usage(
             {
                 "stop_reason": "end_turn",
@@ -709,9 +697,6 @@ class TestDialect:
         assert usage == CallUsage(
             input_tokens=10_000, cache_read_tokens=9_000, cache_write_tokens=900, output_tokens=50
         )
-        # claude-opus-4-8: $5 input, $0.50 cache read, $6.25 cache write, $25 output per MTok
-        expected = (100 * 5 + 9_000 * 0.50 + 900 * 6.25 + 50 * 25) / 1_000_000
-        assert estimate_cost("claude-opus-4-8", usage) == pytest.approx(expected)
 
     def test_streamed_cache_tokens_are_read_from_message_start(self) -> None:
         events = [
@@ -725,23 +710,9 @@ class TestDialect:
             "end_turn",
         )
 
-    def test_prices_are_exact_model_ids_and_unknown_is_not_free(self) -> None:
-        usage = CallUsage(input_tokens=1_000, output_tokens=1_000)
-        assert estimate_cost("claude-haiku-4-5", usage) < estimate_cost("claude-opus-4-8", usage)
-        assert price_for("claude-haiku-4-5-20251001") == price_for("claude-haiku-4-5")
-        assert price_for("gpt-5-mini-2025-08-07") == price_for("gpt-5-mini")
-        assert price_for("claude-opus-4-8-custom") is None
-        assert estimate_cost("my-proxy-opus", usage) is None
-
-    def test_long_prompts_use_the_long_context_tier(self) -> None:
-        short = estimate_cost("claude-haiku-5-5", CallUsage(input_tokens=100_000))
-        long = estimate_cost("claude-haiku-5-5", CallUsage(input_tokens=100_001))
-        assert short == pytest.approx(0.01)
-        assert long == pytest.approx(100_001 * 0.50 / 1_000_000)
-
     def test_refusal_looks_like_a_provider_error(self) -> None:
         """Harnesses stop on provider errors already; none should need to know about ALE."""
-        body = refusal_body("max_cost_usd", 5.0)
+        body = refusal_body("max_total_tokens", 5_000)
         assert body["type"] == "error"
         assert body["error"]["type"] == "ale_limit_reached"
 

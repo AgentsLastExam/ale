@@ -51,7 +51,6 @@ class Limits:
     max_input_tokens: int | None = None
     max_output_tokens: int | None = None
     max_total_tokens: int | None = None
-    max_cost_usd: float | None = None
 
 
 class LimitReached(Exception):
@@ -80,10 +79,13 @@ class CallUsage:
 
 @dataclass
 class Usage:
+    """One session's forwarded calls and their tokens, with :class:`CallUsage` meanings."""
+
     model_calls: int = 0
     input_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     output_tokens: int = 0
-    cost_usd: float = 0.0
 
     @property
     def total_tokens(self) -> int:
@@ -155,7 +157,6 @@ class GatewaySession:
                 ("max_input_tokens", limits.max_input_tokens, usage.input_tokens),
                 ("max_output_tokens", limits.max_output_tokens, usage.output_tokens),
                 ("max_total_tokens", limits.max_total_tokens, usage.total_tokens),
-                ("max_cost_usd", limits.max_cost_usd, usage.cost_usd),
             )
             for name, limit, observed in completed:
                 if limit is not None and observed >= limit:
@@ -164,21 +165,16 @@ class GatewaySession:
             self._reserved_calls += 1
             return GatewayReservation()
 
-    async def commit(
-        self,
-        reservation: GatewayReservation,
-        *,
-        input_tokens: int = 0,
-        output_tokens: int = 0,
-        cost_usd: float = 0.0,
-    ) -> int:
-        """Release a reservation and account for the forwarded call."""
+    async def commit(self, reservation: GatewayReservation, usage: CallUsage | None = None) -> int:
+        """Release a reservation and account for the forwarded call and its tokens."""
+        usage = usage or CallUsage()
         async with self._lock:
             self._reserved_calls -= 1
             self.usage.model_calls += 1
-            self.usage.input_tokens += input_tokens
-            self.usage.output_tokens += output_tokens
-            self.usage.cost_usd += cost_usd
+            self.usage.input_tokens += usage.input_tokens
+            self.usage.cache_read_tokens += usage.cache_read_tokens
+            self.usage.cache_write_tokens += usage.cache_write_tokens
+            self.usage.output_tokens += usage.output_tokens
             self.seq += 1
             return self.seq
 

@@ -142,12 +142,6 @@ class ClaudeCodeHarness(CliHarness):
             marker in lowered for marker in ("max turns", "error_max_turns")
         ):
             return HarnessLimitError("max_turns", self.settings.max_turns, self.settings.max_turns)
-        if isinstance(self.settings.max_budget_usd, float) and any(
-            marker in lowered for marker in ("max budget", "error_max_budget_usd")
-        ):
-            return HarnessLimitError(
-                "max_budget_usd", self.settings.max_budget_usd, self.settings.max_budget_usd
-            )
         for needle, error_type in ERROR_PATTERNS:
             if needle.lower() in lowered:
                 return error_type(detail)
@@ -209,8 +203,6 @@ class ClaudeCodeHarness(CliHarness):
         parts: list[str] = []
         if isinstance(self.settings.max_turns, int):
             parts.extend(("--max-turns", str(self.settings.max_turns)))
-        if isinstance(self.settings.max_budget_usd, float):
-            parts.extend(("--max-budget-usd", str(self.settings.max_budget_usd)))
         if self.settings.permission_mode != "default":
             mode = (
                 "default"

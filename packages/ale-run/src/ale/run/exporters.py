@@ -291,7 +291,6 @@ def _prime_call(record: dict[str, Any], node: int | None) -> dict[str, Any]:
             "prompt_tokens": max(int(record.get("input_tokens") or 0) - cached, 0),
             "completion_tokens": int(record.get("output_tokens") or 0),
             "cached_input_tokens": cached or None,
-            "cost": record.get("cost_usd"),
         }
     error = None
     if record.get("disposition") != "forwarded":

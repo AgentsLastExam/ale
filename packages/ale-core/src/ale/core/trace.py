@@ -96,8 +96,6 @@ class TransportCall(_Event):
     cache_write_tokens: int = Field(default=0, ge=0)
     """Of ``input_tokens``, those written to the provider's prompt cache."""
     output_tokens: int = Field(default=0, ge=0)
-    cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
-    """Estimated list-price cost, or ``None`` when the model has no listed price."""
     stop_reason: str | None = None
     latency_ms: int = Field(default=0, ge=0)
     disposition: Literal["forwarded", "refused", "failed"]

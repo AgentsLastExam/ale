@@ -93,6 +93,7 @@ class OpenClawCliHarness(CliHarness):
                 }
             },
             "models": {
+                # OpenClaw would otherwise fetch price data; ALE reports tokens only.
                 "pricing": {"enabled": False},
                 "providers": {
                     self.settings.provider: {

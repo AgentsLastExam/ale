@@ -104,25 +104,17 @@ class ResultSink(Protocol):
 
 @dataclass
 class Budget:
-    """Wall-clock and money ceilings for one episode.
+    """The wall-clock ceiling for one episode.
 
-    The gateway enforces token and cost limits by refusing calls; this object is the
-    environment's read-only view of what is left.
+    The gateway enforces token and model-call limits by refusing calls; this object is
+    the environment's read-only view of the time left.
     """
 
     deadline_sec: float
-    max_cost_usd: float | None = None
-    spent_usd: float = 0.0
     started_at: float = 0.0
 
     def remaining_sec(self, now: float) -> float:
         return max(0.0, self.deadline_sec - (now - self.started_at))
-
-    @property
-    def remaining_usd(self) -> float | None:
-        if self.max_cost_usd is None:
-            return None
-        return max(0.0, self.max_cost_usd - self.spent_usd)
 
 
 @dataclass

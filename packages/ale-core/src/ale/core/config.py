@@ -6,11 +6,11 @@ on the command line and the other way round. Four layers, highest wins:
     command line  >  run config file  >  agent preset file  >  model defaults
 
 Two rules keep this honest. Unknown keys are errors, never silent no-ops — a typo in a
-budget ceiling must not read as "no ceiling". And the merged result is hashed into the
+token ceiling must not read as "no ceiling". And the merged result is hashed into the
 provenance record, so a run always carries the settings it actually used.
 
 Override syntax is ``--set a.b.c=value`` with TOML scalar parsing, so
-``--set gateway.limits.max_cost_usd=2.5`` is a float and ``--set agent.stream=true``
+``--set timeouts.agent=1800.5`` is a float and ``--set agent.stream=true``
 is a boolean.
 """
 
@@ -99,9 +99,6 @@ class GatewayLimits(BaseModel):
     max_input_tokens: Annotated[int, Field(gt=0, strict=True)] | Literal["unlimited"] = "unlimited"
     max_output_tokens: Annotated[int, Field(gt=0, strict=True)] | Literal["unlimited"] = "unlimited"
     max_total_tokens: Annotated[int, Field(gt=0, strict=True)] | Literal["unlimited"] = "unlimited"
-    max_cost_usd: Annotated[float, Field(gt=0, allow_inf_nan=False)] | Literal["unlimited"] = (
-        "unlimited"
-    )
 
 
 class ArtifactPolicy(BaseModel):

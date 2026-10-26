@@ -176,7 +176,7 @@ non-zero if any scoring path exists during setup.
 
 ## 6. Limits end episodes rather than stalling them
 
-API-key and subscription token, cost and model-call ceilings are enforced by the Gateway
+API-key and subscription token and model-call ceilings are enforced by the Gateway
 refusing the next call with a 429, and an agent phase that fails after a refusal ends as
 `budget_exceeded` for every Harness and authentication mode. Some subscription endpoints expose less request-side
 control; in particular, Codex rejects `max_output_tokens`, so ALE accounts the completed
