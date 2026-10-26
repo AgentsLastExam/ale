@@ -169,7 +169,7 @@ Declare evidence paths in `Harness.logs`, relative to the agent home. ALE collec
 regardless of task artifact policy before releasing the sandbox.
 
 `parse_trajectory()` is pure host-side code. For identical collected bytes it returns an
-identical schema-valid ATIF v1.7 trajectory. It preserves valid events before malformed
+identical schema-valid ATIF v1.8 trajectory. It preserves valid events before malformed
 or truncated input, returns bounded parse issues under `extra.ale`, and never writes
 Gateway transport records. A parser that raises does not decide the episode: ALE records
 the minimal truthful trajectory with `incomplete_reason: conversion_failed` and a

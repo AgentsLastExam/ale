@@ -96,6 +96,28 @@ def test_failed_blob_publication_removes_its_temporary_file(
     assert list((tmp_path / "blobs/image").iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    ("media_type", "extension"),
+    [
+        ("audio/wav", "wav"),
+        ("audio/mpeg", "mp3"),
+        ("audio/mp4", "m4a"),
+        ("audio/aac", "aac"),
+        ("audio/ogg", "ogg"),
+        ("audio/flac", "flac"),
+        ("audio/webm", "webm"),
+        ("audio/aiff", "aiff"),
+    ],
+)
+def test_atif_audio_blobs_have_stable_extensions(
+    tmp_path: Path, media_type: str, extension: str
+) -> None:
+    ref = BlobStore(tmp_path).put(b"recorded audio", media_type=media_type)
+    assert ref.path.startswith("blobs/audio/")
+    assert ref.path.endswith(f".{extension}")
+    assert (tmp_path / ref.path).read_bytes() == b"recorded audio"
+
+
 def test_media_classes_cover_large_payload_families() -> None:
     assert {item.value for item in MediaClass} == {
         "image",
@@ -113,7 +135,7 @@ def test_recording_verifies_referenced_blob_bytes(tmp_path: Path) -> None:
     recording.trajectory_path.write_text(
         json.dumps(
             {
-                "schema_version": "ATIF-v1.7",
+                "schema_version": "ATIF-v1.8",
                 "agent": {"name": "x", "version": "1"},
                 "steps": [
                     {

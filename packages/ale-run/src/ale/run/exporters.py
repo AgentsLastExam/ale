@@ -153,9 +153,9 @@ def prime_rl_samples(
 ) -> list[PrimeRlSample]:
     """Export exact observed training evidence; never retokenize ATIF text."""
     samples: list[PrimeRlSample] = []
-    context_has_images = False
+    context_has_media = False
     for step in trajectory.steps:
-        context_has_images = context_has_images or _has_images(step)
+        context_has_media = context_has_media or _has_media(step)
         if step.source != "agent" or step.metrics is None:
             continue
         metrics = step.metrics
@@ -202,7 +202,7 @@ def prime_rl_samples(
             )
         mm_kwargs = ale.get("mm_kwargs")
         mm_token_type_ids = ale.get("mm_token_type_ids")
-        if context_has_images and (mm_kwargs is None or mm_token_type_ids is None):
+        if context_has_media and (mm_kwargs is None or mm_token_type_ids is None):
             raise IncompleteTrainingDataError(
                 f"step {step.step_id} lacks exact multimodal processor data"
             )
@@ -256,6 +256,7 @@ def _append_step(
     )
     step_node = parent = len(nodes) - 1
     for observation in step.observation.results if step.observation else ():
+        content = _prime_content(observation.content or "")
         if observation.source_call_id is None:
             continue
         nodes.append(
@@ -264,7 +265,7 @@ def _append_step(
                 "message": {
                     "role": "tool",
                     "tool_call_id": observation.source_call_id,
-                    "content": _prime_content(observation.content or ""),
+                    "content": content,
                 },
                 "sampled": False,
                 "timestamp": _timestamp(step.timestamp),
@@ -313,6 +314,8 @@ def _prime_call(record: dict[str, Any], node: int | None) -> dict[str, Any]:
 def _prime_content(value: str | list[AtifContentPart]) -> Any:
     if isinstance(value, str):
         return value
+    if any(part.type == "audio" for part in value):
+        raise ValueError("Prime Verifiers v1 cannot represent ATIF audio content")
     return [
         (
             {"type": "text", "text": part.text or ""}
@@ -341,7 +344,7 @@ def _timestamp(value: Any) -> float:
         return 0.0
 
 
-def _has_images(step: AtifStep) -> bool:
+def _has_media(step: AtifStep) -> bool:
     values = [step.message]
     values.extend(
         result.content
@@ -349,5 +352,6 @@ def _has_images(step: AtifStep) -> bool:
         if result.content is not None
     )
     return any(
-        isinstance(value, list) and any(part.type == "image" for part in value) for value in values
+        isinstance(value, list) and any(part.type in {"image", "audio"} for part in value)
+        for value in values
     )

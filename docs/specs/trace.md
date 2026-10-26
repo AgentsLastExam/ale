@@ -5,7 +5,7 @@ other files may carry only stable identifiers, references, or small run-level pr
 
 | Artifact | Owns | Does not own |
 |---|---|---|
-| `trajectory.json` | agent-visible messages, reasoning actually exposed, tool calls/results, images, subagents | setup/verify commands, rewards, aggregate usage |
+| `trajectory.json` | agent-visible messages, reasoning actually exposed, tool calls/results, images, audio, subagents | setup/verify commands, rewards, aggregate usage |
 | `trace.transport.jsonl` | Gateway calls in API-key and subscription modes (verification Judge calls marked `purpose: judge`), retries, refusals, usage, cost when price is known, call-to-step links | full conversation messages |
 | `trace.execution.jsonl` | framework phases, task/framework commands, output, policy, cleanup failures | agent-owned tool calls, rewards |
 | `result.json` | terminal status, all named rewards, failure, phase timings | conversation, provenance |
@@ -22,12 +22,12 @@ being reinterpreted with values that were never observed.
 
 ## ATIF trajectory
 
-`trajectory.json` is a Harbor ATIF v1.7 document, not an ALE envelope. It is validated
+`trajectory.json` is a Harbor ATIF v1.8 document, not an ALE envelope. It is validated
 before atomic replacement:
 
 ```json
 {
-  "schema_version": "ATIF-v1.7",
+  "schema_version": "ATIF-v1.8",
   "session_id": "native-session",
   "trajectory_id": "trajectory-...",
   "agent": {
@@ -59,11 +59,19 @@ All ALE extensions live under `extra.ale`:
 - `parse_issues`: bounded `{reason, detail}` records of native evidence the parser could not
   convert.
 
-Images use ATIF image parts whose `source.path` is episode-relative. Subagents use
-embedded `subagent_trajectories` with unique `trajectory_id` values and resolvable
-`subagent_trajectory_ref` entries. Same-sandbox native resume extends the same logical
-session; `continued_trajectory_ref` is used only when a continuation is stored as a
-separate document.
+Images and audio use ATIF media parts whose `source.path` is episode-relative. Audio
+sources carry `media_type`, `path`, and optional nonnegative `duration_sec`; unknown
+duration stays absent. Canonical audio MIME types are `audio/wav`, `audio/mpeg`,
+`audio/mp4`, `audio/aac`, `audio/ogg`, `audio/flac`, `audio/webm`, and `audio/aiff`.
+The model normalizes Harbor's documented aliases (for example `audio/mp3` to
+`audio/mpeg`) and rejects mismatches between a content part and its source type.
+Audio bytes remain in `blobs/audio/`, never inline base64. Raw PCM, G.711, realtime
+audio streams, and video content parts are outside ATIF v1.8.
+
+Subagents use embedded `subagent_trajectories` with unique `trajectory_id` values and
+resolvable `subagent_trajectory_ref` entries. Same-sandbox native resume extends the same
+logical session; `continued_trajectory_ref` is used only when a continuation is stored as
+a separate document.
 
 Optional token IDs, masks, log probabilities, sampling metadata, reasoning, and metrics
 are written only from exact observed evidence. ALE never retokenizes text or fabricates
@@ -236,19 +244,21 @@ See [Verification](verification.md) for the result and tool contracts.
 
 Harbor consumes `trajectory.json` directly and receives the complete reward map.
 Prime Verifiers conversion creates message/tool nodes, branch/subagent relationships,
-linked model calls, timings, metrics, and all named rewards. Prime-RL conversion requires
-aligned token IDs, sampled mask, log probabilities, temperatures, and multimodal
-processor data when applicable; otherwise it raises `IncompleteTrainingDataError`.
+linked model calls, timings, metrics, and all named rewards. Its v1 message schema does
+not represent audio; exporting audio raises instead of relabeling or dropping it.
+Prime-RL conversion requires aligned token IDs, sampled mask, log probabilities,
+temperatures, and multimodal processor data for image or audio context; otherwise it
+raises `IncompleteTrainingDataError`.
 Scalar-only destinations require an explicit caller-supplied aggregation callback.
 
-The Harbor v1.7 schema source is the adjacent
+The Harbor v1.8 schema source is the adjacent
 `harbor/src/harbor/models/trajectories/` model set. Schema parity is checked by
 `tests/conformance/test_harbor_atif.py`. After reviewing a Harbor version change,
 regenerate the checked fixture from the ALE repository root:
 
 ```bash
 uv run --project ../harbor python -c \
-  'import json; from pathlib import Path; from harbor.models.trajectories import Trajectory; Path("tests/fixtures/atif-v1.7.schema.json").write_text(json.dumps(Trajectory.model_json_schema(), indent=2, sort_keys=True) + "\n")'
+  'import json; from pathlib import Path; from harbor.models.trajectories import Trajectory; Path("tests/fixtures/atif-v1.8.schema.json").write_text(json.dumps(Trajectory.model_json_schema(), indent=2, sort_keys=True) + "\n")'
 ```
 
 Commit the fixture and the corresponding ALE model/conformance changes together.

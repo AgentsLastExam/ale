@@ -43,7 +43,7 @@ remains `core/v1`.
 | **Limit Termination** | The recorded layer, limit, configured value, and cause that stopped an Episode. | not an untyped process exit |
 | **GuestServer** (`ale-guestd`) | The in-sandbox service through which execution, file transfer, and observation flow. | never Provider-specific |
 | **Gateway** | The host-side service through which solver traffic in API-key and subscription modes is controlled, metered, credentialed, and recorded. | Judge traffic is attributed separately from solver traffic |
-| **ATIF Trajectory** | The Harbor ATIF v1.7 document containing the complete ordered agent-visible interaction ALE can observe. | not setup, verification internals, or a native transcript |
+| **ATIF Trajectory** | The Harbor ATIF v1.8 document containing the complete ordered agent-visible interaction ALE can observe. | not setup, verification internals, or a native transcript |
 | **Transport Trace** | The append-only Gateway record of solver model calls, refusals, accounting when available, and trajectory links. | not full conversation storage |
 | **Execution Trace** | The append-only record of framework phases, commands, Task-stage output, policies, and diagnostics. | not agent-owned tool activity |
 | **Episode Result** | The sole terminal outcome: status, complete named rewards when verified, stats, bounded failure, phase timing, and timestamps. | not a scalar reward |

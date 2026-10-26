@@ -108,7 +108,7 @@ def audit_episode(
     assert verify_commands and verify_commands[-1]["outcome"] == "succeeded"
     assert result["status"] == "completed"
     assert result["rewards"] and all(value == 1.0 for value in result["rewards"].values())
-    assert trajectory["schema_version"] == "ATIF-v1.7"
+    assert trajectory["schema_version"] == "ATIF-v1.8"
     assert trajectory["steps"][0]["source"] == "user"
     assert lock["agent"]["harness"] == harness
     assert lock["agent"]["model"] == model
