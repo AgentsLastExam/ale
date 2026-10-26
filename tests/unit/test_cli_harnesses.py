@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -34,6 +35,7 @@ from ale.core.harness import (
 )
 from ale.core.sandbox import ExecResult, SandboxFile
 from ale.core.taskspec import OperatingSystem, StdioMcpServer
+from ale.core.trajectory import AtifTrajectory
 from ale.run.cli.tasks import PRESET_DIR, _harness
 from ale.run.harnesses import _release
 from ale.run.harnesses._npm import reported_version
@@ -884,7 +886,7 @@ def test_codex_function_output_images_become_atif_images(tmp_path: Path) -> None
     assert "remote.png" in content[2].text
 
 
-def test_codex_parser_rejects_a_subagent_session_export(tmp_path: Path) -> None:
+def test_codex_children_stay_raw_evidence_without_the_root_rollout(tmp_path: Path) -> None:
     native_path(tmp_path, STDOUT_PATH).write_text(
         "\n".join(
             [
@@ -939,6 +941,294 @@ def test_codex_parser_rejects_a_subagent_session_export(tmp_path: Path) -> None:
             "sources": [".codex-ale/sessions/rollout-child.jsonl"],
         },
     ]
+
+
+#: Trimmed native logs of live runs whose agent spawned one subagent.
+RECORDED = Path(__file__).resolve().parents[1] / "fixtures/harness-logs"
+CODEX_ROOT = "01a175a9-0f81-7b93-ae65-da0c2a7ec6ac"
+CODEX_CHILD = "01a175aa-61f6-7471-af90-411c882937d6"
+CODEX_DAY = ".codex-ale/sessions/2026/10/26"
+OPENCLAW_ROOT = "b8ca4087-ea61-4187-86ee-8de3c6436da0"
+OPENCLAW_CHILD = "b4b72c4f-3edd-4104-94a6-b8a0278f938c"
+OPENCLAW_SESSIONS = ".openclaw-ale/agents/main/sessions"
+SUBAGENT_RUNS = [
+    pytest.param(
+        CodexCliHarness(),
+        "codex-cli-subagent",
+        CODEX_ROOT,
+        CODEX_CHILD,
+        "call_24f034d96a464402a1c632612af5143f",
+        id="codex",
+    ),
+    pytest.param(
+        OpenClawCliHarness(),
+        "openclaw-cli-subagent",
+        OPENCLAW_ROOT,
+        OPENCLAW_CHILD,
+        "call_3fe4e2d219214d5ebfdd437eab53b560|fc_00c55f0336e05945016adea32167bc81998148cd9e86f8d902",
+        id="openclaw",
+    ),
+]
+
+
+def recorded_context(tmp_path: Path, fixture: str, session_id: str) -> TrajectoryParseContext:
+    """A finished run over a private copy of recorded logs, which a test may add to."""
+    shutil.copytree(RECORDED / fixture, tmp_path / "logs")
+    return TrajectoryParseContext(
+        episode_id="episode",
+        trajectory_id="trajectory",
+        instruction="Goal: test every tool available to you and produce a structured report.",
+        logs_dir=tmp_path / "logs",
+        model="test-model",
+        agent_version="1.0",
+        blobs=BlobStore(tmp_path),
+        session_id=session_id,
+    )
+
+
+def subagent_refs(trajectory: AtifTrajectory) -> dict[str, list[str]]:
+    """Each call's referenced subagent trajectory IDs."""
+    return {
+        result.source_call_id or "": [ref.trajectory_id or "" for ref in refs]
+        for step in trajectory.steps
+        for result in (step.observation.results if step.observation else ())
+        if (refs := result.subagent_trajectory_ref)
+    }
+
+
+def write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+
+@pytest.mark.parametrize(("harness", "fixture", "root", "child", "spawn"), SUBAGENT_RUNS)
+def test_recorded_subagents_are_embedded_and_referenced_from_their_spawn(
+    tmp_path: Path, harness, fixture: str, root: str, child: str, spawn: str
+) -> None:
+    trajectory = harness.parse_trajectory(recorded_context(tmp_path, fixture, root))
+    (subagent,) = trajectory.subagent_trajectories
+
+    assert subagent.trajectory_id == f"trajectory-subagent-{child}"
+    assert subagent.session_id == child
+    assert subagent_refs(trajectory) == {spawn: [subagent.trajectory_id]}
+    assert subagent.agent == trajectory.agent
+    # Converted, the child is no longer unused evidence.
+    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+
+
+def test_codex_subagent_follows_every_input_its_parent_sent(tmp_path: Path) -> None:
+    trajectory = CodexCliHarness().parse_trajectory(
+        recorded_context(tmp_path, "codex-cli-subagent", CODEX_ROOT)
+    )
+    (subagent,) = trajectory.subagent_trajectories
+
+    # Spawned, messaged, closed, resumed and messaged again; injected context stays out.
+    assert [(step.source, step.message) for step in subagent.steps] == [
+        (
+            "user",
+            "Wait for a follow-up message. After receiving it, respond exactly AGENT_MARKER "
+            "and do not modify files.",
+        ),
+        ("agent", "Waiting for your follow-up message."),
+        ("agent", "Waiting for your follow-up message."),
+        ("user", "Follow-up: provide the requested marker now."),
+        ("agent", "AGENT_MARKER"),
+        ("user", "You have been resumed. Respond exactly RESUMED_MARKER."),
+        ("agent", "RESUMED_MARKER"),
+    ]
+
+
+def test_openclaw_subagent_keeps_its_delegated_task_and_tool_calls(tmp_path: Path) -> None:
+    trajectory = OpenClawCliHarness().parse_trajectory(
+        recorded_context(tmp_path, "openclaw-cli-subagent", OPENCLAW_ROOT)
+    )
+    (subagent,) = trajectory.subagent_trajectories
+    first, write, final = subagent.steps
+
+    assert first.source == "user"
+    assert first.message.startswith("[Subagent Context] You are running as a subagent")
+    assert [call.function_name for call in write.tool_calls] == ["write"]
+    (result,) = write.observation.results
+    assert result.content[0].text.startswith("Successfully wrote 12 bytes")
+    assert final.message.startswith("Wrote the exact string `SPAWN_MARKER`")
+    assert subagent.final_metrics.total_prompt_tokens == 21113
+
+
+@pytest.mark.parametrize(("harness", "fixture", "root", "child", "spawn"), SUBAGENT_RUNS)
+def test_a_child_no_spawn_result_names_stays_reported(
+    tmp_path: Path, harness, fixture: str, root: str, child: str, spawn: str
+) -> None:
+    parse = recorded_context(tmp_path, fixture, root)
+    if fixture.startswith("codex"):
+        orphan = f"{CODEX_DAY}/rollout-2026-10-26T00-50-00-orphan.jsonl"
+        write_jsonl(
+            parse.logs_dir / orphan,
+            [
+                {"type": "session_meta", "payload": {"id": "orphan", "parent_thread_id": root}},
+                {"type": "event_msg", "payload": {"type": "user_message", "message": "hi"}},
+            ],
+        )
+    else:
+        orphan = f"{OPENCLAW_SESSIONS}/orphan.jsonl"
+        index = parse.logs_dir / OPENCLAW_SESSIONS / "sessions.json"
+        entries = json.loads(index.read_text())
+        entries["agent:main:subagent:orphan"] = {
+            "sessionId": "orphan",
+            "spawnedBy": f"agent:main:explicit:{root}",
+        }
+        index.write_text(json.dumps(entries))
+        write_jsonl(
+            parse.logs_dir / orphan,
+            [{"type": "message", "message": {"role": "user", "content": "hi"}}],
+        )
+
+    trajectory = harness.parse_trajectory(parse)
+
+    assert [item.session_id for item in trajectory.subagent_trajectories] == [child]
+    assert trajectory.extra["ale"]["parse_issues"] == [
+        {"reason": "unlinked_subagent", "source": orphan},
+        {"reason": "unconverted_native_files", "count": 1, "sources": [orphan]},
+    ]
+
+
+@pytest.mark.parametrize(("harness", "fixture", "root", "child", "spawn"), SUBAGENT_RUNS)
+def test_a_child_claimed_twice_is_converted_once(
+    tmp_path: Path, harness, fixture: str, root: str, child: str, spawn: str
+) -> None:
+    parse = recorded_context(tmp_path, fixture, root)
+    if fixture.startswith("codex"):
+        rollout = next((parse.logs_dir / CODEX_DAY).glob(f"*-{child}.jsonl"))
+        duplicate = f"{CODEX_DAY}/rollout-2026-10-26T00-50-00-{child}.jsonl"
+        shutil.copy(rollout, parse.logs_dir / duplicate)
+        expected = [
+            {"reason": "unlinked_subagent", "source": duplicate},
+            {"reason": "unconverted_native_files", "count": 1, "sources": [duplicate]},
+        ]
+    else:
+        index = parse.logs_dir / OPENCLAW_SESSIONS / "sessions.json"
+        entries = json.loads(index.read_text())
+        alias = dict(next(entry for entry in entries.values() if entry["sessionId"] == child))
+        entries["agent:main:subagent:alias"] = alias
+        index.write_text(json.dumps(entries))
+        expected = None
+
+    trajectory = harness.parse_trajectory(parse)
+
+    assert [item.session_id for item in trajectory.subagent_trajectories] == [child]
+    assert (trajectory.extra or {}).get("ale", {}).get("parse_issues") == expected
+
+
+def test_codex_nested_spawn_agent_calls_nest_their_trajectories(tmp_path: Path) -> None:
+    """A thread's own children embed in its trajectory, whichever call form spawned them."""
+    sessions = tmp_path / ".codex-ale/sessions"
+
+    def thread(name: str, parent: str | None, first: str, spawns: str | None) -> None:
+        records: list[dict[str, object]] = [
+            {"type": "session_meta", "payload": {"id": name, "parent_thread_id": parent}},
+            {"type": "event_msg", "payload": {"type": "user_message", "message": first}},
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": first}],
+                },
+            },
+        ]
+        if spawns is not None:
+            records += [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": json.dumps({"message": f"Help {name}"}),
+                        "call_id": f"spawn-{spawns}",
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": f"spawn-{spawns}",
+                        "output": json.dumps({"agent_id": spawns, "nickname": spawns}),
+                    },
+                },
+            ]
+        write_jsonl(sessions / f"rollout-x-{name}.jsonl", records)
+
+    thread("session", None, "Use the task MCP.", "child")
+    thread("child", "session", "Help session", "grandchild")
+    thread("grandchild", "child", "Help child", None)
+
+    trajectory = CodexCliHarness().parse_trajectory(context(tmp_path, "codex"))
+    (child,) = trajectory.subagent_trajectories
+    (grandchild,) = child.subagent_trajectories
+
+    assert subagent_refs(trajectory) == {"spawn-child": ["codex-trajectory-subagent-child"]}
+    assert subagent_refs(child) == {
+        "spawn-grandchild": ["codex-trajectory-subagent-child-subagent-grandchild"]
+    }
+    assert child.steps[1].tool_calls[0].function_name == "multi_agent.spawn_agent"
+    assert [step.message for step in grandchild.steps] == ["Help child"]
+    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+
+
+def test_openclaw_nested_spawns_nest_their_trajectories(tmp_path: Path) -> None:
+    sessions = tmp_path / OPENCLAW_SESSIONS
+
+    def session(name: str, first: str, spawns: str | None) -> None:
+        records: list[dict[str, object]] = [
+            {"type": "message", "message": {"role": "user", "content": first}}
+        ]
+        if spawns is not None:
+            records += [
+                {
+                    "type": "message",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "toolCall", "id": f"spawn-{spawns}", "name": "sessions_spawn"}
+                        ],
+                    },
+                },
+                {
+                    "type": "message",
+                    "message": {
+                        "role": "toolResult",
+                        "toolCallId": f"spawn-{spawns}",
+                        "toolName": "sessions_spawn",
+                        "content": [{"type": "text", "text": "accepted"}],
+                        "details": {"status": "accepted", "childSessionKey": f"key-{spawns}"},
+                    },
+                },
+            ]
+        write_jsonl(sessions / f"{name}.jsonl", records)
+
+    session("session", "Use the task MCP.", "child")
+    session("child", "Help session", "grandchild")
+    session("grandchild", "Help child", None)
+    (sessions / "sessions.json").write_text(
+        json.dumps(
+            {
+                "key-session": {"sessionId": "session"},
+                "key-child": {"sessionId": "child", "spawnedBy": "key-session"},
+                "key-grandchild": {"sessionId": "grandchild", "spawnedBy": "key-child"},
+            }
+        )
+    )
+
+    trajectory = OpenClawCliHarness().parse_trajectory(context(tmp_path, "openclaw"))
+    (child,) = trajectory.subagent_trajectories
+    (grandchild,) = child.subagent_trajectories
+
+    assert subagent_refs(trajectory) == {"spawn-child": ["openclaw-trajectory-subagent-child"]}
+    assert subagent_refs(child) == {
+        "spawn-grandchild": ["openclaw-trajectory-subagent-child-subagent-grandchild"]
+    }
+    assert [step.message for step in grandchild.steps] == ["Help child"]
+    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
 
 
 @pytest.mark.parametrize("name", ["grok", "openclaw"])

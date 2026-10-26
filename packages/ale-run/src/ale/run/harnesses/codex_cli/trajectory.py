@@ -5,7 +5,8 @@ from __future__ import annotations
 import base64
 import json
 import re
-from pathlib import PurePosixPath
+from dataclasses import replace
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ale.core.harness import TrajectoryParseContext
@@ -16,6 +17,7 @@ from ale.core.trajectory import (
     AtifImageSource,
     AtifObservation,
     AtifObservationResult,
+    AtifSubagentTrajectoryRef,
     AtifToolCall,
     AtifTrajectory,
     TrajectoryBuilder,
@@ -36,6 +38,10 @@ _CALL_TYPES = frozenset(
     ("function_call", "custom_tool_call", "web_search_call", "tool_search_call")
 )
 _OUTPUT_TYPES = frozenset(("function_call_output", "custom_tool_call_output", "tool_search_output"))
+#: Every other mirrored rollout, with the issues reading it raised.
+_Rollouts = dict[Path, tuple[list[dict[str, Any]], list[dict[str, Any]]]]
+#: How a code-mode script calls ``spawn_agent``.
+_SPAWN_TOOL = "multi_agent_v1__spawn_agent"
 _DATA_URL = re.compile(r"data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)")
 
 
@@ -61,6 +67,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         and is_session_file(PurePosixPath(path.relative_to(context.logs_dir).as_posix()), expected)
     ]
     rollout: list[dict[str, Any]] = []
+    consumed: set[Path] = set()
     if len(matches) == 1:
         rollout, native_issues = native_events(context, matches[0])
         issues.extend(native_issues)
@@ -70,15 +77,18 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
                 {"reason": "session_id_mismatch", "expected": expected, "actual": observed}
             )
             rollout = []
+        else:
+            consumed.add(matches[0])
     else:
         issues.append({"reason": "native_session_unavailable", "session_id": expected})
-    issues.extend(unconverted(context, set(files) - set(matches[:1])))
+    # Without the root rollout no spawn can be found, so every child stays raw evidence.
+    threads = {
+        path: native_events(context, path) for path in files if rollout and path not in consumed
+    }
+    subagents, spawned = _subagents(context, expected, rollout, threads, issues, consumed)
+    issues.extend(unconverted(context, set(files) - consumed))
     builder = TrajectoryBuilder(
-        trajectory_id=context.trajectory_id,
-        session_id=expected,
-        agent=AtifAgent(
-            name="codex-cli", version=context.agent_version, model_name=context.model or None
-        ),
+        trajectory_id=context.trajectory_id, session_id=expected, agent=_agent(context)
     )
     # The rollout is the complete ordered conversation. Its user messages include context
     # Codex injects, so a turn starts only at the exact prompt ALE sent. Turns the rollout
@@ -91,12 +101,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         if event.get("type") == "item.completed"
         and (event.get("item") or {}).get("type") == "mcp_tool_call"
     ]
-    outputs = {
-        str(payload.get("call_id") or ""): payload
-        for event in rollout
-        if event.get("type") == "response_item"
-        and (payload := event.get("payload") or {}).get("type") in _OUTPUT_TYPES
-    }
+    outputs = _outputs(rollout)
     used_mcp: set[int] = set()
     for event in rollout:
         payload = event.get("payload") or {}
@@ -117,15 +122,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
             issues.append({"reason": "prompt_not_in_native_session", "invocation": 1})
             builder.add(source="user", message=recorded[0].prompt)
             native_turns = 1
-        if kind == "message":
-            if text := _text(payload):
-                builder.add(source="agent", message=text)
-        elif kind == "reasoning":
-            if summary := _summary(payload):
-                builder.add(source="agent", message="", reasoning_content=summary)
-        elif kind in _CALL_TYPES:
-            call, observation = _native_call(payload, outputs, transcript_mcp, used_mcp, context)
-            builder.add(source="agent", message="", tool_calls=[call], observation=observation)
+        _agent_item(builder, payload, outputs, spawned, transcript_mcp, used_mcp, context)
     if native_turns:
         _errors(builder, turns[native_turns - 1])
     if rollout and native_turns < len(recorded):
@@ -150,9 +147,153 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         if usage
         else None
     )
-    trajectory = builder.build(final_metrics=final_metrics)
+    trajectory = builder.build(final_metrics=final_metrics, subagent_trajectories=subagents or None)
     extra = _extra(context, issues)
     return trajectory.model_copy(update={"extra": extra}) if extra else trajectory
+
+
+def _subagents(
+    context: TrajectoryParseContext,
+    thread_id: str | None,
+    rollout: list[dict[str, Any]],
+    threads: _Rollouts,
+    issues: list[dict[str, Any]],
+    consumed: set[Path],
+) -> tuple[list[AtifTrajectory], dict[str, list[AtifSubagentTrajectoryRef]]]:
+    """The threads ``thread_id`` spawned, converted, with references keyed by spawning call.
+
+    A child names its parent in its first record, and the call that spawned it names the
+    child in its own result: ``spawn_agent``'s, or what a code-mode script printed of it.
+    A child that no spawn result names stays raw evidence with a parse issue.
+    """
+    children = {
+        path: events
+        for path, (events, _) in threads.items()
+        if path not in consumed
+        and (meta := _session_meta(events)).get("parent_thread_id") == thread_id
+        and meta.get("id") != thread_id
+    }
+    embedded: list[AtifTrajectory] = []
+    refs: dict[str, list[AtifSubagentTrajectoryRef]] = {}
+    for call_id, result in _spawn_results(rollout):
+        for path, events in list(children.items()):
+            child_id = str(_session_meta(events).get("id") or "")
+            if not child_id or child_id not in result:
+                continue
+            if any(item.session_id == child_id for item in embedded):
+                # A second rollout claiming the same thread stays raw evidence.
+                continue
+            del children[path]
+            consumed.add(path)
+            child = _thread_trajectory(
+                replace(
+                    context,
+                    trajectory_id=f"{context.trajectory_id}-subagent-{child_id}",
+                    session_id=child_id,
+                ),
+                events,
+                threads,
+                issues,
+                consumed,
+            )
+            if child is None:
+                # Spawned, but no turn of its own was recorded.
+                consumed.discard(path)
+                continue
+            issues.extend(threads[path][1])
+            embedded.append(child)
+            refs.setdefault(call_id, []).append(
+                AtifSubagentTrajectoryRef(trajectory_id=child.trajectory_id, session_id=child_id)
+            )
+    issues.extend(
+        {"reason": "unlinked_subagent", "source": path.relative_to(context.logs_dir).as_posix()}
+        for path in sorted(children)
+    )
+    return embedded, refs
+
+
+def _thread_trajectory(
+    context: TrajectoryParseContext,
+    rollout: list[dict[str, Any]],
+    threads: _Rollouts,
+    issues: list[dict[str, Any]],
+    consumed: set[Path],
+) -> AtifTrajectory | None:
+    """A spawned thread's rollout, which no ALE invocation or stdout describes.
+
+    Each input its parent sent is recorded as a ``user_message`` event; the context
+    Codex injects into the conversation is not, so it stays out as it does for the root.
+    """
+    subagents, spawned = _subagents(context, context.session_id, rollout, threads, issues, consumed)
+    builder = TrajectoryBuilder(
+        trajectory_id=context.trajectory_id,
+        session_id=context.session_id,
+        agent=_agent(context),
+        extra=_extra(context, []),
+    )
+    outputs = _outputs(rollout)
+    for event in rollout:
+        payload = event.get("payload") or {}
+        if event.get("type") == "event_msg" and payload.get("type") == "user_message":
+            builder.add(source="user", message=str(payload.get("message") or ""))
+        elif event.get("type") == "response_item":
+            # Only stdout carries the real server name of an MCP call, and only the root's.
+            _agent_item(builder, payload, outputs, spawned, [], set(), context)
+    if not builder.steps:
+        return None
+    return builder.build(subagent_trajectories=subagents or None)
+
+
+def _spawn_results(rollout: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Each call that can spawn a thread, in order, with its result as text."""
+    outputs = _outputs(rollout)
+    found = []
+    for event in rollout:
+        payload = event.get("payload") or {}
+        if event.get("type") != "response_item":
+            continue
+        if payload.get("type") == "function_call":
+            spawns = (payload.get("namespace"), payload.get("name")) == (
+                "multi_agent_v1",
+                "spawn_agent",
+            )
+        else:
+            spawns = payload.get("type") == "custom_tool_call" and _SPAWN_TOOL in str(
+                payload.get("input") or ""
+            )
+        call_id = str(payload.get("call_id") or "")
+        if spawns and call_id in outputs:
+            # A thread ID needs no JSON escaping, so it appears verbatim in the dump.
+            result = json.dumps(outputs[call_id].get("output"), ensure_ascii=False, default=str)
+            found.append((call_id, result))
+    return found
+
+
+def _agent_item(
+    builder: TrajectoryBuilder,
+    payload: dict[str, Any],
+    outputs: dict[str, dict[str, Any]],
+    spawned: dict[str, list[AtifSubagentTrajectoryRef]],
+    transcript_mcp: list[dict[str, Any]],
+    used_mcp: set[int],
+    context: TrajectoryParseContext,
+) -> None:
+    """An agent message, reasoning summary, or call from a rollout, as one step."""
+    kind = payload.get("type")
+    if kind == "message":
+        if payload.get("role") == "assistant" and (text := _text(payload)):
+            builder.add(source="agent", message=text)
+    elif kind == "reasoning":
+        if summary := _summary(payload):
+            builder.add(source="agent", message="", reasoning_content=summary)
+    elif kind in _CALL_TYPES:
+        call, observation = _native_call(payload, outputs, transcript_mcp, used_mcp, context)
+        if observation is not None and (refs := spawned.get(call.tool_call_id)):
+            (result,) = observation.results
+            observation = AtifObservation(
+                results=[result.model_copy(update={"subagent_trajectory_ref": refs})]
+            )
+        builder.add(source="agent", message="", tool_calls=[call], observation=observation)
 
 
 def _errors(builder: TrajectoryBuilder, events: list[dict[str, Any]]) -> None:
@@ -424,11 +565,32 @@ def _thread_id_from_events(events: list[dict[str, Any]]) -> str | None:
 
 
 def _session_id_from_events(events: list[dict[str, Any]]) -> str | None:
+    value = _session_meta(events).get("id")
+    return value if isinstance(value, str) else None
+
+
+def _session_meta(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """What a rollout's first ``session_meta`` record says about its thread."""
     for event in events:
-        payload = event.get("payload") or {}
-        if event.get("type") == "session_meta" and isinstance(payload.get("id"), str):
-            return payload["id"]
-    return None
+        if event.get("type") == "session_meta":
+            payload = event.get("payload")
+            return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def _outputs(rollout: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(payload.get("call_id") or ""): payload
+        for event in rollout
+        if event.get("type") == "response_item"
+        and (payload := event.get("payload") or {}).get("type") in _OUTPUT_TYPES
+    }
+
+
+def _agent(context: TrajectoryParseContext) -> AtifAgent:
+    return AtifAgent(
+        name="codex-cli", version=context.agent_version, model_name=context.model or None
+    )
 
 
 def _final_message(text: str) -> str | None:

@@ -90,7 +90,8 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
                 children, child_issues = native_events(context, child_path)
                 consumed.add(child_path)
                 issues.extend(child_issues)
-                if not (parent := _sidechain_parent(children)):
+                meta = child_path.with_suffix(".meta.json")
+                if not (parent := _spawning_call(meta)):
                     issues.append(
                         {
                             "reason": "unlinked_subagent",
@@ -98,10 +99,16 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
                         }
                     )
                     continue
+                consumed.add(meta)
                 covered.add(parent)
                 agent_id = child_path.stem.removeprefix("agent-")
                 sidechains.extend(
-                    {**event, "isSidechain": True, "agentId": event.get("agentId") or agent_id}
+                    {
+                        **event,
+                        "isSidechain": True,
+                        "agentId": event.get("agentId") or agent_id,
+                        "parentToolUseID": parent,
+                    }
                     for event in children
                 )
             # A subagent's own record replaces what stdout showed of it.
@@ -671,6 +678,16 @@ def _sidechain_groups(
             raise TrajectoryReferenceError("Claude sidechain event has no agentId")
         groups.setdefault(agent_id, []).append(event)
     return groups
+
+
+def _spawning_call(meta: Path) -> str | None:
+    """The tool call that started a native subagent, as its ``.meta.json`` names it."""
+    try:
+        value = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    call = value.get("toolUseId") if isinstance(value, dict) else None
+    return call if isinstance(call, str) and call else None
 
 
 def _sidechain_parent(events: list[dict[str, Any]]) -> str | None:

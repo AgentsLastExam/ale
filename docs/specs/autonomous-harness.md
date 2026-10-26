@@ -226,6 +226,11 @@ files the parser does not use are named in `parse_issues` and so survive minimal
 retention. ALE converts once, after the final log copy, and then adds transport links,
 exact token enrichment, and retention.
 
+A spawned child session becomes a subagent trajectory (see [Trace](trace.md)) only when
+the native evidence identifies the call that spawned it. Otherwise it stays raw evidence
+with an `unlinked_subagent` issue, because a guessed link would misstate who delegated
+what.
+
 MCP records correlate the native tool-use ID with its tool result and retain the logical
 server, tool, request arguments, and success result or error. A selected tool with no
 matching result is not recorded as a successful call.

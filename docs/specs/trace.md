@@ -70,7 +70,9 @@ Audio bytes remain in `blobs/audio/`, never inline base64. Raw PCM, G.711, realt
 audio streams, and video content parts are outside ATIF v1.8.
 
 Subagents use embedded `subagent_trajectories` with unique `trajectory_id` values and
-resolvable `subagent_trajectory_ref` entries. Same-sandbox native resume extends the same
+resolvable `subagent_trajectory_ref` entries. A subagent is embedded in the trajectory of
+the agent that spawned it and referenced from the spawning call's result; the root's
+`parse_issues` cover the whole tree. Same-sandbox native resume extends the same
 logical session; `continued_trajectory_ref` is used only when a continuation is stored as
 a separate document.
 
