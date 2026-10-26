@@ -46,11 +46,11 @@ ALE integrates these official upstream agent programs:
 
 Each integration installs its program's official distribution; ALE does not install a
 fork or carry agent-program patches. That is the npm package when upstream publishes
-one, as for the four above. Otherwise it is the official release executable, pinned per
-OS and architecture by URL and SHA-256 in the adapter's `release_assets`; when upstream
-ships it inside a tar or zip archive, only that one member is taken, pinned by its own
-SHA-256 too. The Sandbox's own Python downloads it as the agent and installs it only if
-every digest matches, so an unverifiable build never runs. Its integrity is the digest of that whole table. A program
+one. Otherwise it is the official release executable, pinned per OS and architecture by
+URL and SHA-256 in the adapter's `release_assets`; when upstream ships it inside a tar or
+zip archive, only that one member is taken, pinned by its own SHA-256 too. The Sandbox's
+own Python downloads it as the agent and installs it only if every digest matches, so an
+unverifiable build never runs. Its integrity is the digest of that whole table. A program
 upstream distributes only through its own installer is installed by its adapter from one
 pinned artifact: a source installer at one commit, reported as
 `git:<repository>@<commit>`, or an installer package it verifies and unpacks, reported as
@@ -81,10 +81,11 @@ The built-in `cua-desktop` uses the OS's system Python. Task-provided Skills and
 commands must themselves work on Windows.
 
 Every CLI adapter supports local Skills, canonical stdio and Streamable HTTP MCP
-servers, and same-sandbox native resume at their pinned versions. Support is determined
-from the pinned program's verified behavior, not a permanent assumption about a product
-name. In particular, `openclaw@2026.7.1` supports MCP; a future pin that changes this
-must update validation and acceptance together.
+servers, and same-sandbox native resume at its pinned version, except for a limit its
+package README names. Support is determined from the pinned program's verified behavior,
+not a permanent assumption about a product name. In particular, `openclaw@2026.7.1`
+supports MCP; a future pin that changes this must update validation and acceptance
+together.
 
 Claude Code, Codex CLI, and Grok Build support `agent.authentication = "auto" |
 "api-key" | "subscription"`. Subscription state is isolated from ordinary Host agent

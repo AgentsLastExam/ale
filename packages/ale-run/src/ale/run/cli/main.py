@@ -83,7 +83,7 @@ def run(
         typer.Option(
             "--agent",
             help=(
-                "claude-code, codex-cli, grok-build, kimi-code, muse-code, openclaw-cli, "
+                "claude-code, codex-cli, droid, grok-build, kimi-code, muse-code, openclaw-cli, "
                 "qwen-code, zcode, computer-use, oracle or nop"
             ),
         ),

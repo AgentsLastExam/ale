@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from ale.run.environments.log_mirror import LogMirror
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
+from ale.run.harnesses.droid import DroidHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import BlobStore, EpisodeRecording
 from tests.integration.scripted_model import FINAL, ScriptedModel
@@ -42,7 +44,14 @@ class Case:
 
 DIALECTS = ("anthropic", "openai-chat-completions", "openai-responses")
 #: Each shipped native CLI, by test ID, with the dialect and native shell tool it uses.
-CASES: dict[str, Case] = {}
+CASES: dict[str, Case] = {
+    **{
+        f"droid-{dialect}": Case(
+            partial(DroidHarness, gateway_dialect=dialect), dialect, r"^Execute$"
+        )
+        for dialect in DIALECTS
+    },
+}
 
 
 @dataclass

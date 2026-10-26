@@ -1,0 +1,20 @@
+[agent]
+name = "droid"
+model = "claude-opus-4-8"
+version = "0.249.0"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+max_output_tokens = "default"
+disabled_tools = []
+
+[gateway]
+provider = "anthropic"
+dialect = "anthropic"
+
+[gateway.limits]
+max_model_calls = "unlimited"
+max_input_tokens = "unlimited"
+max_output_tokens = "unlimited"
+max_total_tokens = "unlimited"
