@@ -209,7 +209,7 @@ class EvidenceHarness(ClaudeCodeHarness):
             ]
         )
         await sandbox.write_file(
-            f"{session.home}/transcript.jsonl",
+            f"{session.home}/.ale-harness/stdout.log",
             (transcript + "\n").encode(),
             identity=Identity.AGENT,
         )
@@ -234,7 +234,7 @@ async def test_evidence_is_parsed_when_artifacts_are_disabled(
     assert result.verdict.status is Status.COMPLETED
     assert not (result.run_dir / "artifacts").exists()
     assert not (result.run_dir / ".artifact-spool").exists()
-    assert not (result.run_dir / "logs/claude-code/transcript.jsonl").exists()
+    assert not (result.run_dir / "logs/claude-code/stdout.log").exists()
     trajectory = AtifTrajectory.model_validate_json(
         (result.run_dir / "trajectory.json").read_text()
     )

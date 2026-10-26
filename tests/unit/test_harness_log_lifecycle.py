@@ -14,6 +14,11 @@ from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, Trajec
 from ale.core.trajectory import AtifAgent, AtifStep, AtifTrajectory
 from ale.run.environments import standard
 from ale.run.environments.standard import RetainedVerificationEnvironment, StandardEnvironment
+from ale.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
+from ale.run.harnesses.claude_code import ClaudeCodeHarness
+from ale.run.harnesses.codex_cli import CodexCliHarness
+from ale.run.harnesses.grok_build import GrokBuildHarness
+from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
@@ -137,6 +142,76 @@ async def test_polling_only_copies_logs_and_retries_after_a_timeout(tmp_path, mo
             await worker
     assert calls >= 2
     assert not (tmp_path / "trajectory.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("harness", "native_file", "root_event"),
+    [
+        (
+            ClaudeCodeHarness(),
+            ".claude-config/projects/project/session.jsonl",
+            {"type": "assistant", "sessionId": "session", "message": {"content": "done"}},
+        ),
+        (
+            CodexCliHarness(),
+            ".codex-ale/sessions/rollout-x-session.jsonl",
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "instruction"}],
+                },
+            },
+        ),
+        (
+            GrokBuildHarness(),
+            ".grok-ale/sessions/session/chat_history.jsonl",
+            {"type": "assistant", "content": "done"},
+        ),
+        (
+            OpenClawCliHarness(),
+            ".openclaw-ale/agents/main/sessions/session.jsonl",
+            {
+                "type": "message",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+            },
+        ),
+    ],
+)
+def test_minimal_retention_keeps_native_sessions_outside_parser_coverage(
+    tmp_path, harness, native_file, root_event
+):
+    ctx = _context(tmp_path)
+    logs = tmp_path / "logs" / harness.name
+    (tmp_path / "logs/evidence-test").rename(logs)
+    (logs / STDOUT_PATH).parent.mkdir()
+    (logs / STDOUT_PATH).write_text("")
+    (logs / INVOCATIONS_PATH).write_text(
+        json.dumps({"prompt": "instruction", "session_id": "session", "stdout_offset": 0}) + "\n"
+    )
+    root = logs / native_file
+    root.parent.mkdir(parents=True)
+    root.write_text(json.dumps(root_event) + "\n")
+    child = logs / native_file.replace("session/", "child/").replace("session.jsonl", "child.jsonl")
+    child.parent.mkdir(parents=True, exist_ok=True)
+    child.write_text('{"message":"unconverted child evidence"}\n')
+    ctx.agent_run = AgentRun(exit_code=0, final_message="done")
+    ctx.logging_policy = LoggingPolicy(native_logs="minimal")
+
+    StandardEnvironment(harness)._parse_harness_trajectory(ctx)
+
+    trajectory = _read(ctx)
+    assert ctx.trajectory_written
+    assert "unconverted child evidence" not in json.dumps(trajectory)
+    assert trajectory["extra"]["ale"]["parse_issues"] == [
+        {
+            "reason": "unconverted_native_files",
+            "count": 1,
+            "sources": [child.relative_to(logs).as_posix()],
+        }
+    ]
+    assert child.read_text() == '{"message":"unconverted child evidence"}\n'
 
 
 @pytest.mark.asyncio

@@ -9,15 +9,17 @@ from ale.core.harness import EffectiveAgentResources, HarnessSession, Trajectory
 from ale.core.sandbox import SandboxRequest
 from ale.core.taskspec import NetworkPolicy, Resources
 from ale.core.trace import read_jsonl
+from ale.run.environments.log_mirror import LogMirror
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
+from ale.run.harnesses.base import STDOUT_PATH
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
 from ale.run.secrets import provider_credentials
 from tests.support import CONTAINER_BASE, prepare_reference
 
-from .trajectory import LIVE, MODEL
+from .trajectory import LIVE, MODEL, native_session_file
 
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm, LIVE]
 
@@ -97,17 +99,13 @@ async def test_real_claude_launch_and_two_resumes_share_one_native_session(tmp_p
         )
 
         native_id = first.continuation.native_session_id
-        state_path = await sandbox.exec(
-            [
-                "sh",
-                "-c",
-                f'find "$CLAUDE_CONFIG_DIR/projects" -type f -name {native_id}.jsonl -print -quit',
-            ],
-            env=harness._env(session),
+        logs = tmp_path / "logs"
+        mirror = LogMirror(
+            sandbox, home=session.home, os=session.os, paths=harness.logs, target=logs
         )
-        assert state_path.ok and state_path.stdout.strip()
-        native_state = (await sandbox.read_file(state_path.stdout.strip())).decode()
-        (tmp_path / "native-state.jsonl").write_text(native_state)
+        await mirror.sync(final=True)
+        assert not mirror.incomplete
+        native_state = native_session_file(logs, harness.name, native_id).read_text()
         user_messages = []
         for line in native_state.splitlines():
             event = json.loads(line)
@@ -130,10 +128,7 @@ async def test_real_claude_launch_and_two_resumes_share_one_native_session(tmp_p
             1,
         ]
 
-        transcript = (await sandbox.read_file("/home/user/transcript.jsonl")).decode()
-        logs = tmp_path / "logs"
-        logs.mkdir()
-        (logs / "transcript.jsonl").write_text(transcript)
+        transcript = (logs / STDOUT_PATH).read_text()
         trajectory = harness.parse_trajectory(
             TrajectoryParseContext(
                 episode_id="live-native-resume",
@@ -147,14 +142,20 @@ async def test_real_claude_launch_and_two_resumes_share_one_native_session(tmp_p
             )
         )
         assert trajectory.session_id in session_ids
-        assert all(
-            expected in {step.message for step in trajectory.steps if isinstance(step.message, str)}
-            for expected in (
-                "SEGMENT-1",
-                f"SEGMENT-2::{code}",
-                f"SEGMENT-3::{code}",
-            )
-        )
+        # Each turn appears once, in order: its prompt, then its answer.
+        conversation = [
+            step.message
+            for step in trajectory.steps
+            if step.source in {"user", "agent"} and isinstance(step.message, str) and step.message
+        ]
+        assert conversation == [
+            prompts[0],
+            "SEGMENT-1",
+            prompts[1],
+            f"SEGMENT-2::{code}",
+            prompts[2],
+            f"SEGMENT-3::{code}",
+        ]
         results = [
             json.loads(line)
             for line in transcript.splitlines()

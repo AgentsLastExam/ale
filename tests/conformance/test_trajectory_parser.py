@@ -9,6 +9,7 @@ import pytest
 
 from ale.core.errors import TrajectoryReferenceError
 from ale.core.harness import TrajectoryParseContext
+from ale.run.harnesses.base import STDOUT_PATH
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.recording import BlobStore
 
@@ -16,7 +17,8 @@ pytestmark = pytest.mark.unit
 
 
 def parse(tmp_path: Path, events: list[dict], *, incomplete: bool = False):
-    (tmp_path / "transcript.jsonl").write_text(
+    (tmp_path / STDOUT_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / STDOUT_PATH).write_text(
         "".join(json.dumps(event) + "\n" for event in events)
         + ('{"type":"assistant"\n' if incomplete else "")
     )

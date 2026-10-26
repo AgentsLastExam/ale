@@ -91,6 +91,11 @@ from ale_verify import JudgeInvocation, read_result
 
 __all__ = ["RetainedVerificationEnvironment", "StandardEnvironment"]
 
+#: How long past the agent deadline the Host waits. The guest enforces that deadline
+#: itself and stops the agent's process tree before it replies, so evidence capture begins
+#: after the agent stopped; this margin only bounds a guest that no longer replies.
+AGENT_STOP_GRACE_SEC = 60.0
+
 
 #: Where the framework's own machinery goes. Under a root-owned, root-only directory,
 #: which is the whole point: the verify stage holds the scorer and the oracle holds the
@@ -344,7 +349,8 @@ class StandardEnvironment(Environment):
 
         polling = asyncio.create_task(self._poll_logs(logs)) if logs is not None else None
         try:
-            await self._with_deadline(ctx, Phase.AGENT, timeout, launch())
+            backstop = None if timeout is None else timeout + AGENT_STOP_GRACE_SEC
+            await self._with_deadline(ctx, Phase.AGENT, backstop, launch())
         finally:
             if polling is not None:
                 polling.cancel()

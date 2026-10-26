@@ -291,14 +291,18 @@ class AutonomousHarness(Harness):
 
     async def resume(
         self,
-        instruction: str,
+        instruction: str | None,
         continuation: NativeContinuation,
         sandbox: Sandbox,
         session: HarnessSession,
         *,
         timeout_sec: float,
     ) -> AgentRun:
-        """Continue an exact native session using only the new instruction."""
+        """Continue an exact native session.
+
+        An instruction becomes the session's next user message. ``None`` asks the agent to
+        carry on from where it stopped, without new task input.
+        """
         raise AgentUnsupportedError(f"{self.name} does not support native resume")
 
 

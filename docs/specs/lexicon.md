@@ -34,6 +34,7 @@ remains `core/v1`.
 | **Episode** | One complete administration of one selected Task instance by one agent. | not a trial or job |
 | **Run** | One batch invocation of Episodes plus its Run Status Projection. | — |
 | **Harness** | The adapter binding an agent program to ALE. An Autonomous Harness owns its loop; a Policy Harness drives a framework-owned Task environment. | not an agent identity or Task setting |
+| **CLI Harness** | An Autonomous Harness that runs one pinned native command-line agent through `CliHarness`, sharing its prompt delivery, evidence layout, and continuation rules. | not a wrapper for arbitrary commands |
 | **Harness Preset** | Complete version-controlled configuration automatically selected for one Harness. | not an implicit constructor default |
 | **Skill Source** | An explicitly declared local directory containing one Skill or immediate Skill collection. | never ambient host agent state |
 | **MCP Server** | A validated stdio or Streamable HTTP server definition made available to an agent. | not a vendor-native config file |

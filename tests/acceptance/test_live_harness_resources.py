@@ -17,19 +17,19 @@ from .trajectory import (
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm, LIVE]
 
 CASES = (
-    ("grok-build", "grok-4.5", "0.2.112", "session_chat_history.jsonl"),
-    ("codex-cli", "gpt-5-mini", "0.146.0", "transcript.jsonl"),
-    ("openclaw-cli", "gpt-5-mini", "2026.7.1", "transcript.jsonl"),
+    ("grok-build", "grok-4.5", "0.2.112"),
+    ("codex-cli", "gpt-5-mini", "0.146.0"),
+    ("openclaw-cli", "gpt-5-mini", "2026.7.1"),
 )
 
 
 @pytest.mark.parametrize(
-    ("harness", "model", "version", "native_log"),
+    ("harness", "model", "version"),
     CASES,
     ids=[case[0] for case in CASES],
 )
 def test_real_harness_uses_task_skill_and_task_mcp(
-    tmp_path, harness: str, model: str, version: str, native_log: str
+    tmp_path, harness: str, model: str, version: str
 ) -> None:
     task = task_path(
         "ALE_LIVE_RESOURCE_TASK",
@@ -47,7 +47,6 @@ def test_real_harness_uses_task_skill_and_task_mcp(
         model=model,
         harness=harness,
         version=version,
-        native_log=native_log,
     )
 
     calls = [

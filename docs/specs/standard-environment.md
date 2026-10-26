@@ -77,12 +77,14 @@ start. Nothing is hashed or converted while the agent runs, so a run's evidence 
 grows linearly with its logs. The rule is the same for every Harness and guest OS. File
 reads use a second guest connection, so the running command cannot block them.
 
-When the agent stops, ALE stops copying and makes a final copy with its own 300 s
-budget. Session files are appended to, but a CLI may rewrite a small index or repair a
-session in place, so the final copy compares each file's guest digest with its Host copy
-once and copies a rewritten file again. Conversion is a pure function of the copied
-bytes, so it runs once, after the final copy. An interrupted run or an incomplete copy
-produces a trajectory marked incomplete.
+The guest enforces the agent deadline itself and stops the agent's process tree before
+it replies, so the solver has stopped when evidence capture begins; the Host's own
+deadline, 60 s later, only bounds a guest that no longer replies. ALE then stops copying
+and makes a final copy with its own 300 s budget. Session files are appended to, but a
+CLI may rewrite a small index or repair a session in place, so the final copy compares
+each file's guest digest with its Host copy once and copies a rewritten file again.
+Conversion is a pure function of the copied bytes, so it runs once, after the final
+copy. An interrupted run or an incomplete copy produces a trajectory marked incomplete.
 
 When run policy sets `artifacts.collect = "host"`, every Task-declared artifact is
 captured as an immutable file or directory snapshot. Files and directories are selected
