@@ -26,6 +26,7 @@ from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
 from ale.run.harnesses.droid import DroidHarness
+from ale.run.harnesses.forgecode import ForgecodeHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import BlobStore, EpisodeRecording
@@ -49,6 +50,12 @@ CASES: dict[str, Case] = {
     **{
         f"droid-{dialect}": Case(
             partial(DroidHarness, gateway_dialect=dialect), dialect, r"^Execute$"
+        )
+        for dialect in DIALECTS
+    },
+    **{
+        f"forgecode-{dialect}": Case(
+            partial(ForgecodeHarness, gateway_dialect=dialect), dialect, r"^shell$"
         )
         for dialect in DIALECTS
     },
@@ -189,7 +196,12 @@ async def test_cli_runs_a_scripted_episode_through_the_gateway(tmp_path: Path, n
 
 #: CLIs whose delegation tool spawns subagent sessions: the tool, and the arguments that
 #: delegate ``task`` to a child.
-DELEGATION: dict[str, tuple[str, Callable[[str], dict[str, object]]]] = {}
+DELEGATION: dict[str, tuple[str, Callable[[str], dict[str, object]]]] = {
+    "forgecode-openai-chat-completions": (
+        r"^task$",
+        lambda task: {"agent_id": "forge", "tasks": [task]},
+    ),
+}
 
 
 @pytest.mark.parametrize("name", sorted(DELEGATION))

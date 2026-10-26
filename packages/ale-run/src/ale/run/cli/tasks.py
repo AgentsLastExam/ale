@@ -39,6 +39,7 @@ from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.droid import DroidHarness
+from ale.run.harnesses.forgecode import ForgecodeHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.kimi_code import KimiCodeHarness
 from ale.run.harnesses.muse_code import MuseCodeHarness
@@ -140,6 +141,12 @@ def _harness(settings: RunConfig) -> Harness:
                 gateway_dialect=settings.gateway.dialect,
                 settings=settings.agent.settings,
             )
+        case "forgecode":
+            return ForgecodeHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
         case "kimi-code":
             return KimiCodeHarness(
                 cli_version=settings.agent.version,
@@ -174,8 +181,8 @@ def _harness(settings: RunConfig) -> Harness:
         case unknown:
             raise AleError(
                 f"unknown agent {unknown!r}; try claude-code, codex-cli, computer-use, droid, "
-                "grok-build, kimi-code, muse-code, openclaw-cli, pi-cli, qwen-code, zcode, "
-                "oracle or nop"
+                "forgecode, grok-build, kimi-code, muse-code, openclaw-cli, pi-cli, qwen-code, "
+                "zcode, oracle or nop"
             )
 
 

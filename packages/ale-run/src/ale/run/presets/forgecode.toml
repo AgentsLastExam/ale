@@ -1,0 +1,21 @@
+[agent]
+name = "forgecode"
+model = "claude-opus-4-8"
+version = "2.14.0"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+reasoning_effort = "default"
+max_output_tokens = "default"
+max_requests_per_turn = "default"
+
+[gateway]
+provider = "anthropic"
+dialect = "anthropic"
+
+[gateway.limits]
+max_model_calls = "unlimited"
+max_input_tokens = "unlimited"
+max_output_tokens = "unlimited"
+max_total_tokens = "unlimited"
