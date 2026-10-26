@@ -40,6 +40,9 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 
 - Normative specifications live in `docs/specs/` and give, in a sentence or two, the
   reason for each cross-module choice. Guides do not override them.
+- A spec states general principles and cross-module design only. A fact about one
+  Provider, Harness, Gateway dialect or external program goes in that module's README;
+  the spec at most states the rule and links there. See `docs/AGENTS.md`.
 - Changing a contract updates its spec in the same change.
 - Every reportable result carries a complete `RunLock`.
 - API-key and shipped subscription credentials, Judge keys included, remain on the Host
