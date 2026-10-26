@@ -2,7 +2,8 @@
 
 Normative for standard container and VM Tasks. Every solver and dedicated verifier
 declares `image.kind`. Linux uses a Dockerfile or `image.ref`; Windows uses `image.ref`
-directly, or builds `image/run.ps1` on `image.base_ref`.
+directly, or builds `image/run.ps1` on `image.base_ref`. macOS uses an external
+Tart OCI image through the Orchard Provider.
 
 ## What a Linux image needs
 
@@ -61,6 +62,14 @@ framework's Cua Driver, so the Provider waits for a screenshot in every Task ima
 not in the bare base booted to build one. A disk used directly as `image.ref` is not
 prepared by ALE and must carry a current guestd and Cua Driver itself.
 
+## What a macOS image needs
+
+A macOS Task uses an external Tart OCI image with Python 3.12+, the Task account and
+its home, and the applications required by the Task. Desktop Tasks require a logged-in
+session with authorized screenshot and input access. The Orchard Provider's image
+requirements and optional Driver bootstrap are described in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#orchard).
+
 ## ALE base images
 
 - `container-ubuntu22-base` provides an Ubuntu 22.04 GNOME desktop container and the
@@ -72,8 +81,8 @@ prepared by ALE and must carry a current guestd and Cua Driver itself.
   guestd, WinGet, Chocolatey, and the runtimes required by autonomous agents.
   Its licensed disk is not a public ALE artifact.
 
-No base carries Cua Driver, and only the Windows base carries guestd, as the bootstrap
-its Task builds talk to; ALE installs both when it prepares a Task image. The bases do not
+None of these ALE bases carries Cua Driver. Only the Windows base carries guestd, as the
+bootstrap its Task builds talk to; ALE installs both when it prepares a Task image. The bases do not
 contain domain stacks, benchmark data, databases, robotics suites, or Task-specific tools.
 
 Repository sources are separated by responsibility: `images/base/` contains the three
@@ -131,7 +140,7 @@ it is unsupported for Linux and separate verifier declarations. Without local bu
 instructions, the matching Provider resolves the declared ref. Container and VM refs are
 both supported and recorded immutably.
 
-A VM `ref` or Windows `base_ref` may also be an absolute host path to a standalone
+A QEMU VM `ref` or Windows `base_ref` may also be an absolute host path to a standalone
 qcow2. Local disks are structurally checked and their actual file bytes are SHA-256
 hashed at preparation, without contacting a registry. Disks with backing or external data
 files are rejected; convert them to a standalone qcow2 so its identity covers the complete disk.
@@ -147,6 +156,11 @@ image asset bytes. Dirty or unsynchronized assets disable resume and reporting.
 RunLock schema 2 records declaration, preparation, Provider, and exact observed identity;
 it does not invent a whole-disk content digest. Local Linux VMs record OCI and materializer
 identities; local Windows VMs record builder identity and resolved base materials.
+
+macOS requires `image.kind: vm` and an external Tart OCI `image.ref` (tag or SHA-256
+digest). Local paths and image-build recipes are unsupported. Preparation records the
+resolved immutable identity; [Orchard](../../packages/ale-run/src/ale/run/providers/README.md#orchard)
+describes how the Provider resolves and checks it.
 
 ## Reverification
 
@@ -311,10 +325,10 @@ passthrough remains a Provider capability, not a Task image declaration.
 ## Permissions
 
 Setup, artifact collection/restoration, and verification use the framework's elevated
-identity: root on Linux, Administrator on Windows. This applies to shared and separate
-verification independently of the agent's `resources.sudo` setting.
+identity: root on Linux and macOS, Administrator on Windows. This applies to shared and
+separate verification independently of the agent's `resources.sudo` setting.
 
-Directory uploads ignore Host permissions: Linux files use `0644`, directories `0755`,
+Directory uploads ignore Host permissions: POSIX files use `0644`, directories `0755`,
 owned by the selected framework or agent identity. Windows resets ACLs to grant
 SYSTEM/Administrators full control, Users read access, and the selected agent modify
 access for agent uploads. Task entry scripts run through their interpreter, without
@@ -336,6 +350,10 @@ sudo during image preparation. Grants, and their absence, are verified and recor
 Linux sandbox is refused when its guest service is not root, when a requested grant does
 not work, or when an agent that did not request one is root or can use sudo. ALE does not pre-create
 artifacts or repair their ownership: image/setup/agent code owns their type and existence.
+
+On macOS, framework operations use root and agent operations use the Task account.
+A Task declaring `sudo: false` is rejected if that account has elevation rights;
+image authors supply the account and its privileges in advance.
 
 ## Provider contract
 

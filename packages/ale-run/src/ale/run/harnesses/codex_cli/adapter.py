@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 
 from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
 from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
+from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
 from ale.run.harnesses._npm import agent_path, npm_env
 from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
@@ -29,6 +29,7 @@ class CodexCliHarness(CliHarness):
     default_version = DEFAULT_CLI_VERSION
     settings_type = CodexCliSettings
     settings: CodexCliSettings
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS, OperatingSystem.MACOS)
     logs = (LOG_ROOT, ".codex-ale/sessions")
 
     async def install_resources(
@@ -75,6 +76,10 @@ class CodexCliHarness(CliHarness):
                 await stage_cua_desktop(sandbox, session.home)
             lines.append(f"[mcp_servers.{json.dumps(resolved.name)}]")
             if isinstance(server, StdioMcpServer):
+                if resolved.name == CUA_DESKTOP_NAME and session.os is OperatingSystem.MACOS:
+                    # Codex filters the MCP child environment. Forward only the two
+                    # nonsecret locations supplied by the macOS Sandbox provider.
+                    lines.append('env_vars = ["ALE_CUA_DRIVER", "ALE_CUA_DRIVER_SOCKET"]')
                 lines.append(
                     f"command = {json.dumps(server.command.replace('{home}', session.home))}"
                 )

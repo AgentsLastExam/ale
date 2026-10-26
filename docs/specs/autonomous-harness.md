@@ -64,7 +64,7 @@ version's digests are known. An already matching installation may be reused.
 
 Harnesses declare `supported_os` and validate it before Sandbox creation; the CLI also
 checks it before image preparation. The default is Linux only. An npm CLI adapter
-supports Linux and Windows. A release-binary adapter supports exactly the systems its
+declares its supported systems explicitly. A release-binary adapter supports exactly the systems its
 table covers, and its README names any system upstream ships no build for. Unsupported
 systems raise `AgentUnsupportedError` before installation; an architecture with no
 pinned asset raises it during installation.
@@ -169,9 +169,9 @@ sent. Every invocation, launch or resume, appends to `.ale-harness/stdout.log` a
 in `.ale-harness/invocations.jsonl`. Result interpretation sees only the current
 invocation's output, so it cannot reuse the success or session ID of an earlier turn.
 
-The CLI starts from a non-login shell, POSIX `sh` on Linux and Git Bash on Windows, with
+The CLI starts from a non-login shell, POSIX `sh` on Linux and macOS, and Git Bash on Windows, with
 the Sandbox's own `PATH` behind the agent's npm prefix. Profile scripts are not sourced,
-so the measured program's environment is the image's declared one on both systems.
+so the measured program's environment is the image's declared one.
 
 A failed launch retains the process exit code and a bounded, credential-redacted diagnostic
 from native error events and stderr. Stderr warnings must not displace the native failure

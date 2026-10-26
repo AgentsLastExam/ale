@@ -77,8 +77,8 @@ pytestmark = pytest.mark.unit
         ComputerUseHarness(),
     ],
 )
-def test_shipped_harnesses_declare_both_guest_systems(harness) -> None:
-    for operating_system in OperatingSystem:
+def test_shipped_harnesses_declare_linux_and_windows(harness) -> None:
+    for operating_system in (OperatingSystem.LINUX, OperatingSystem.WINDOWS):
         harness.validate_os(operating_system)
 
 
@@ -415,13 +415,19 @@ def test_native_limit_sentinels_are_strict(value) -> None:
         OpenClawCliHarness(settings={"timeout_seconds": value})
 
 
-async def test_resource_translation_uses_episode_local_native_config(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("operating_system", "home"),
+    [(OperatingSystem.LINUX, "/home/agent"), (OperatingSystem.MACOS, "/Users/agent")],
+)
+async def test_resource_translation_uses_episode_local_native_config(
+    tmp_path: Path, operating_system: OperatingSystem, home: str
+) -> None:
     effective = resources(tmp_path)
-    current = session()
+    current = session(os=operating_system, home=home)
     cases = [
-        (GrokBuildHarness(), "/home/agent/.grok-ale/config.toml"),
-        (CodexCliHarness(), "/home/agent/.codex-ale/config.toml"),
-        (OpenClawCliHarness(), "/home/agent/.openclaw-ale/openclaw.json"),
+        (GrokBuildHarness(), f"{home}/.grok-ale/config.toml"),
+        (CodexCliHarness(), f"{home}/.codex-ale/config.toml"),
+        (OpenClawCliHarness(), f"{home}/.openclaw-ale/openclaw.json"),
     ]
     for harness, config_path in cases:
         sandbox = FakeSandbox()

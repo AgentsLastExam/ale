@@ -26,6 +26,7 @@ import io
 import json
 import os
 import queue
+import select
 import shutil
 import socketserver
 import stat
@@ -87,8 +88,16 @@ class Handler:
     def op_health(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
         from gui import has_desktop
 
-        operating_system = "windows" if os.name == "nt" else "linux"
+        operating_system = (
+            "windows" if os.name == "nt" else "macos" if sys.platform == "darwin" else "linux"
+        )
         agent_user = os.environ.get("ALE_AGENT_USER") or _current_user()
+        agent_uid = None
+        if os.name != "nt":
+            import pwd
+
+            with contextlib.suppress(KeyError):
+                agent_uid = pwd.getpwnam(agent_user).pw_uid
         return ok(
             req_id,
             proto=PROTOCOL_VERSION,
@@ -98,6 +107,8 @@ class Handler:
             user=_current_user(),
             agent_user=agent_user,
             agent_home=os.environ.get("ALE_AGENT_HOME") or _home_of(agent_user),
+            framework_uid=os.geteuid() if os.name != "nt" else None,
+            agent_uid=agent_uid,
             gui=has_desktop(),
         )
 
@@ -113,6 +124,9 @@ class Handler:
         env.update(params.get("env") or {})
         cwd = params.get("cwd")
         timeout = params.get("timeout_sec")
+        acknowledged_output = bool(params.get("output_ack"))
+        if acknowledged_output and (os.name == "nt" or self._reader is None):
+            raise ProtocolError(ERR_UNSUPPORTED, "acknowledged output requires a POSIX session")
 
         popen_kwargs: dict[str, Any] = {
             "cwd": cwd,
@@ -157,7 +171,11 @@ class Handler:
         except PermissionError as exc:
             raise ProtocolError(ERR_PERMISSION, str(exc)) from exc
 
-        timed_out = self._stream_process(req_id, proc, timeout)
+        timed_out = (
+            self._stream_acknowledged_process(req_id, proc, timeout)
+            if acknowledged_output
+            else self._stream_process(req_id, proc, timeout)
+        )
         return ok(
             req_id,
             exit_code=None if timed_out else proc.returncode,
@@ -200,6 +218,81 @@ class Handler:
             self._emit(event(req_id, name, b64=base64.b64encode(block).decode("ascii")))
         proc.wait()
         return timed_out
+
+    def _stream_acknowledged_process(
+        self, req_id: int, proc: subprocess.Popen[bytes], timeout: float | None
+    ) -> bool:
+        """Keep one bounded output event in flight across relays without backpressure."""
+        assert self._reader is not None and proc.stdout is not None and proc.stderr is not None
+        input_fd = self._reader.fileno()
+        streams = {proc.stdout.fileno(): "stdout_chunk", proc.stderr.fileno(): "stderr_chunk"}
+        deadline = time.monotonic() + float(timeout) if timeout else None
+        sequence = 0
+        awaiting_ack = False
+        ack = bytearray()
+        finished = False
+        try:
+            while streams or awaiting_ack or proc.poll() is None:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return True
+                ready, _, _ = select.select(
+                    [input_fd, *([] if awaiting_ack else streams)],
+                    [],
+                    [],
+                    min(0.1, remaining) if remaining is not None else 0.1,
+                )
+                if input_fd in ready:
+                    block = os.read(input_fd, 1024)
+                    if not block:
+                        raise _Desync("exec output acknowledgement channel closed")
+                    ack.extend(block)
+                    if len(ack) > 1024:
+                        raise _Desync("exec output acknowledgement exceeds its limit")
+                    if b"\n" in ack:
+                        try:
+                            message = json.loads(ack)
+                        except (ValueError, UnicodeError) as exc:
+                            raise _Desync("invalid exec output acknowledgement") from exc
+                        if (
+                            not awaiting_ack
+                            or not isinstance(message, dict)
+                            or message.get("id") != req_id
+                            or message.get("op") != "exec_output_ack"
+                            or type(message.get("seq")) is not int
+                            or message["seq"] != sequence
+                        ):
+                            raise _Desync("unexpected exec output acknowledgement")
+                        ack.clear()
+                        awaiting_ack = False
+                    continue
+                for descriptor in ready:
+                    block = os.read(descriptor, 64 * 1024)
+                    if not block:
+                        del streams[descriptor]
+                        continue
+                    name = streams.pop(descriptor)
+                    streams[descriptor] = name
+                    sequence += 1
+                    self._emit(
+                        event(
+                            req_id,
+                            name,
+                            b64=base64.b64encode(block).decode("ascii"),
+                            seq=sequence,
+                        )
+                    )
+                    awaiting_ack = True
+                    break
+            proc.wait()
+            finished = True
+            return False
+        finally:
+            if not finished:
+                _terminate(proc)
+                proc.wait()
+            proc.stdout.close()
+            proc.stderr.close()
 
     # --- files --------------------------------------------------------------
 
@@ -391,6 +484,21 @@ class Handler:
         from gui import capture_screen  # local import: headless images need no GUI stack
 
         png = capture_screen()
+        if "path" in params:
+            path = Path(params["path"])
+            if not path.is_absolute() or ".." in path.parts:
+                raise ProtocolError(ERR_BAD_REQUEST, "screenshot path must be absolute")
+            _refuse_links(path.parent)
+            # The Host chooses a unique framework-owned path before capture, so it
+            # can remove the file even when the capture reply is lost or cancelled.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(png)
+            except BaseException:
+                path.unlink(missing_ok=True)
+                raise
+            return ok(req_id, bytes=len(png), sha256=hashlib.sha256(png).hexdigest())
         return ok(req_id, png_b64=base64.b64encode(png).decode("ascii"))
 
     def op_input(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
@@ -751,13 +859,20 @@ def _drop_to(name: str | None, env: dict[str, str]) -> dict[str, Any]:
 
     env["HOME"] = account.pw_dir
     env["USER"] = env["LOGNAME"] = account.pw_name
-    env.setdefault("XDG_RUNTIME_DIR", f"/tmp/runtime-{account.pw_name}")
+    if sys.platform == "darwin":
+        # Framework PATH excludes agent-writable tools. Add them only to the child
+        # whose uid and supplementary groups are changed below.
+        env["PATH"] = f"{account.pw_dir}/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + env.get(
+            "PATH", "/usr/bin:/bin:/usr/sbin:/sbin"
+        )
+    else:
+        env.setdefault("XDG_RUNTIME_DIR", f"/tmp/runtime-{account.pw_name}")
 
     # A desktop image publishes its session bus address for exactly this. Without it a
     # graphical program starts, creates a window nobody maps, and exits successfully —
     # so a task author debugging a GUI setup sees a script that "worked" and a screen
     # that did not change.
-    if "DBUS_SESSION_BUS_ADDRESS" not in env:
+    if sys.platform != "darwin" and "DBUS_SESSION_BUS_ADDRESS" not in env:
         try:
             with open("/tmp/dbus-session-bus-address") as handle:
                 if address := handle.read().strip():
@@ -900,6 +1015,7 @@ def serve_stream(reader: BinaryIO, writer: TextIO, claim: Claim | None = None) -
 
     handler = Handler(emit, reader)
     authenticated = claim is None
+    last_acknowledged_exec: int | None = None
     while raw := reader.readline():
         line = raw.decode("utf-8", "replace").strip()
         if not line:
@@ -917,7 +1033,13 @@ def serve_stream(reader: BinaryIO, writer: TextIO, claim: Claim | None = None) -
             op = message.get("op")
             if not isinstance(op, str):
                 raise ProtocolError(ERR_BAD_REQUEST, "missing op")
-            emit(handler.dispatch(req_id, op, message.get("params") or {}))
+            if op == "exec_output_ack" and req_id == last_acknowledged_exec:
+                # A command deadline may finish before its last output is consumed.
+                continue
+            params = message.get("params") or {}
+            if op == "exec" and params.get("output_ack"):
+                last_acknowledged_exec = req_id
+            emit(handler.dispatch(req_id, op, params))
         except _Desync as exc:
             # The rest of the stream cannot be framed, so no later reply could be trusted.
             emit(err(req_id, ERR_BAD_REQUEST, str(exc)))

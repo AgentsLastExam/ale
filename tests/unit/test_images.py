@@ -197,3 +197,54 @@ async def test_vm_ref_extracts_once_and_publishes_atomically(
     assert copies == 1
     assert Path(first.runtime_ref).read_bytes() == b"qcow2"
     assert not list(tmp_path.glob(".*-*"))
+
+
+@pytest.mark.asyncio
+async def test_registry_tag_resolves_metadata_without_pulling_layers(monkeypatch):
+    from ale.run import images
+
+    calls = []
+    digest = "sha256:" + "b" * 64
+
+    async def run(*argv, **kwargs):
+        calls.append(argv)
+        return 0, digest + "\n", ""
+
+    monkeypatch.setattr(images, "_run", run)
+    assert await images.resolve_registry_reference("registry.example:5443/team/macos:v1") == (
+        "registry.example:5443/team/macos@" + digest
+    )
+    assert calls == [
+        (
+            "docker",
+            "buildx",
+            "imagetools",
+            "inspect",
+            "--format",
+            "{{.Manifest.Digest}}",
+            "registry.example:5443/team/macos:v1",
+        )
+    ]
+    assert await images.resolve_registry_reference("registry.example:5443/team/macos") == (
+        "registry.example:5443/team/macos@" + digest
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing", "denied", "invalid", "timeout"])
+async def test_registry_resolution_reports_safe_actionable_errors(monkeypatch, failure):
+    from ale.run import images
+
+    async def run(*argv, **kwargs):
+        if failure == "missing":
+            raise FileNotFoundError("secret-path")
+        if failure == "timeout":
+            raise ProviderStartError("docker buildx timed out")
+        if failure == "denied":
+            return 1, "", "secret-token"
+        return 0, "not-a-digest secret-token", ""
+
+    monkeypatch.setattr(images, "_run", run)
+    with pytest.raises(ProviderStartError) as error:
+        await images.resolve_registry_reference("registry.example/macos:v1")
+    assert "secret" not in str(error.value)

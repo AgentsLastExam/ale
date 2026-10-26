@@ -54,6 +54,9 @@ only the Gateway, never an address.
 `open` is a deliberate escape hatch: an ordinary bridge with normal egress. A task must
 declare it, and the declaration is recorded in provenance.
 
+The Orchard macOS Provider supports explicit `open` policy only; its infrastructure
+requirements are in [Providers](../../packages/ale-run/src/ale/run/providers/README.md#orchard).
+
 Verified by `tests/integration/test_gateway_isolation.py`, including that a sealed
 sandbox reaches no other host port, by the QEMU Provider unit tests for the runner rules,
 and by the `demo-netprobe` task, which attempts DNS resolution and a raw TCP connection

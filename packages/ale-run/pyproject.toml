@@ -15,6 +15,12 @@ dependencies = [
 [project.scripts]
 ale = "ale.run.cli.main:main"
 
+[project.optional-dependencies]
+macos-ui = [
+    "pillow>=11",
+    "vncdotool==1.4.2",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -29,4 +35,4 @@ ale-verify = { workspace = true }
 packages = ["src/ale"]
 
 [tool.hatch.build]
-artifacts = ["src/ale/run/presets/*.toml"]
+artifacts = ["src/ale/run/presets/*.toml", "src/ale/run/providers/*.swift"]

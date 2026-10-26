@@ -13,6 +13,8 @@ dev = [
     "ruff>=0.8",
     "import-linter>=2.1",
     "pre-commit>=4.0",
+    "vncdotool==1.4.2",
+    "pillow>=11",
 ]
 
 [tool.uv]
@@ -53,6 +55,7 @@ markers = [
     "needs_gui: requires the desktop base image, which is large",
     "needs_llm: requires provider credentials and makes real model calls",
     "needs_kvm: requires hardware virtualisation (/dev/kvm)",
+    "needs_orchard: explicitly opted-in disposable Orchard worker and pinned macOS image",
     "needs_gpu: requires a qualified physical GPU execution path",
     "needs_hf_gated: requires an authorised Hugging Face token for gated datasets",
     "needs_hf_write: requires authenticated Hugging Face dataset and collection writes",

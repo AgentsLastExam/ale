@@ -650,6 +650,11 @@ async def test_vm_reference_uses_provider_acquisition_and_wrong_kind_is_refused(
 
 
 class TestCapabilities:
+    @pytest.mark.asyncio
+    async def test_macos_is_rejected_before_vm_creation(self) -> None:
+        with pytest.raises(ProviderCapabilityError, match="macos unsupported"):
+            await QemuProvider().create(request(os="macos"))
+
     def test_allowlist_is_offered(self) -> None:
         provider = QemuProvider()
         assert NetworkMode.ALLOWLIST in provider.capabilities().network_modes
