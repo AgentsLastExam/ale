@@ -31,7 +31,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 from ale.core.environment import EventSink
 from ale.core.errors import ConfigError
 from ale.core.trace import TransportCall, TransportReplay
-from ale.run.gateway import anthropic, openai_chat_completions, openai_responses
+from ale.run.gateway import anthropic, gemini, openai_chat_completions, openai_responses
 from ale.run.gateway.session import (
     CallUsage,
     GatewayReservation,
@@ -63,18 +63,31 @@ _SSE_KEEPALIVE = b": keep-alive\n\n"
 
 #: Hop-by-hop and auth headers never forwarded upstream: the gateway supplies its own.
 _STRIP = frozenset(
-    {"host", "content-length", "authorization", "x-api-key", "connection", "accept-encoding"}
+    {
+        "host",
+        "content-length",
+        "authorization",
+        "x-api-key",
+        "x-goog-api-key",
+        "connection",
+        "accept-encoding",
+    }
 )
 _DIALECTS = {
     "anthropic": anthropic,
+    "gemini": gemini,
     "openai-chat-completions": openai_chat_completions,
     "openai-responses": openai_responses,
 }
+#: Fixed request paths. Gemini's carry the model and method instead; see ``_GEMINI_ROUTE``.
 REQUEST_PATHS = {
     "anthropic": "/v1/messages",
     "openai-chat-completions": "/v1/chat/completions",
     "openai-responses": "/v1/responses",
 }
+#: Gemini's ``{base}/v1beta/models/{model}:{method}``, at the root or below any prefix: the
+#: client keeps a path in its base URL, and the Gateway forwards none of it.
+_GEMINI_ROUTE = "/{prefix:(?:.*/)?}v1beta/{target:.*}"
 _MAX_OUTPUT_FIELDS = {
     "anthropic": "max_tokens",
     "openai-chat-completions": "max_completion_tokens",
@@ -160,6 +173,8 @@ class Gateway:
     def _build_app(self) -> web.Application:
         app = web.Application(client_max_size=64 * 1024 * 1024)
         app.router.add_get("/healthz", self._healthz)
+        # First, so every `v1beta` path is Gemini's, its model listing included.
+        app.router.add_route("*", _GEMINI_ROUTE, self._gemini)
         # `/models`, `/v1/models`, and a CLI's own catalog path such as `/muse-code/models`.
         app.router.add_get(r"/{prefix:(?:[\w.-]+/)*}models", self._models)
         for path in REQUEST_PATHS.values():
@@ -182,7 +197,7 @@ class Gateway:
 
     async def _messages(self, request: web.Request) -> web.StreamResponse:
         session = self._authenticate(request)
-        if request.path != REQUEST_PATHS[self._dialect_name(session)]:
+        if request.path != REQUEST_PATHS.get(self._dialect_name(session)):
             raise web.HTTPNotFound(
                 text=json.dumps({"type": "error", "error": {"type": "ale_wrong_dialect"}}),
                 content_type="application/json",
@@ -190,7 +205,76 @@ class Gateway:
         started = asyncio.get_running_loop().time()
         body = await request.read()
         payload = self._authoritative(json.loads(body or b"{}"), session)
-        key = GatewaySession.digest(json.dumps(payload, sort_keys=True).encode())
+        return await self._call(
+            request, session, payload, started=started, streaming=bool(payload.get("stream"))
+        )
+
+    async def _gemini(self, request: web.Request) -> web.StreamResponse:
+        """Serve a Gemini API request, refusing what the Gateway cannot account or allow."""
+        started = asyncio.get_running_loop().time()
+        token = request.headers.get("x-goog-api-key") or request.query.get("key", "")
+        session = self.sessions.resolve(token)
+        if session is None:
+            return _google_error(
+                401, "UNAUTHENTICATED", "unknown ALE episode token", "ALE_UNKNOWN_SESSION"
+            )
+        if self._dialect_name(session) != "gemini":
+            return _google_error(
+                404,
+                "NOT_FOUND",
+                f"this episode's Gateway dialect is {self._dialect_name(session)}, not gemini",
+                "ALE_WRONG_DIALECT",
+            )
+        try:
+            payload = json.loads(await request.read() or b"{}")
+        except json.JSONDecodeError:
+            payload = None
+        if not isinstance(payload, dict):
+            return _google_error(
+                400, "INVALID_ARGUMENT", "request body is not a JSON object", "ALE_INVALID_BODY"
+            )
+        payload = self._authoritative(payload, session)
+
+        target = request.match_info["target"]
+        refusal = gemini.policy_refusal(
+            request.method,
+            target,
+            request.query.get("alt"),
+            payload,
+            web_tools=session.provider_web_tools,
+        )
+        if refusal is not None:
+            self._record(
+                session,
+                call_id=f"call_{uuid.uuid4().hex}",
+                request_digest=_request_digest(payload, f"{request.method} {request.path}"),
+                refused=refusal.policy,
+            )
+            return web.json_response(refusal.body(), status=refusal.code)
+        method = target.rpartition(":")[2]
+        streaming = gemini.METHODS[method]
+        # The run's model replaces whichever one the client named, helper models included.
+        path = f"/v1beta/models/{session.model}:{method}" + ("?alt=sse" if streaming else "")
+        return await self._call(
+            request, session, payload, started=started, streaming=streaming, path=path
+        )
+
+    async def _call(
+        self,
+        request: web.Request,
+        session: GatewaySession,
+        payload: dict[str, Any],
+        *,
+        started: float,
+        streaming: bool,
+        path: str | None = None,
+    ) -> web.StreamResponse:
+        """Replay, coalesce or forward one authorized request.
+
+        ``path`` is the upstream path when it varies per call, as Gemini's does; ``None``
+        selects the Gateway's fixed path for the session's dialect.
+        """
+        key = _request_digest(payload, path)
         request_digest = f"sha256:{key}"
 
         replays = session.purpose == "agent"
@@ -215,7 +299,9 @@ class Gateway:
         session.begin(key)
         call_id = f"call_{uuid.uuid4().hex}"
         try:
-            response = await self._forward(request, session, payload, key, call_id, started)
+            response = await self._forward(
+                request, session, payload, key, call_id, started, streaming=streaming, path=path
+            )
         except Exception as exc:
             session.finish(key, None, error=exc)
             raise
@@ -231,6 +317,9 @@ class Gateway:
         key: str,
         call_id: str,
         started: float,
+        *,
+        streaming: bool,
+        path: str | None = None,
     ) -> web.StreamResponse:
         assert self._client is not None
         try:
@@ -241,7 +330,7 @@ class Gateway:
             self._record(
                 session,
                 call_id=call_id,
-                request_digest=GatewaySession.digest(json.dumps(payload, sort_keys=True).encode()),
+                request_digest=_request_digest(payload, path),
                 refused=limit.limit,
             )
             raw = json.dumps(
@@ -249,7 +338,9 @@ class Gateway:
             ).encode()
             self._retain_payload(session, call_id, payload, raw)
             cached = {
-                "status": 429,
+                "status": (
+                    gemini.REFUSAL_STATUS if self._dialect_name(session) == "gemini" else 429
+                ),
                 "body": raw,
                 "streaming": False,
                 "call_id": call_id,
@@ -261,10 +352,9 @@ class Gateway:
         payload = self._normalized_output_limit(payload, session)
         self._retain_payload(session, call_id, payload, None)
 
-        streaming = bool(payload.get("stream"))
         committed = False
         try:
-            upstream = await self._post(request, payload, session)
+            upstream = await self._post(request, payload, session, path)
             try:
                 if streaming:
                     response = await self._stream(
@@ -276,6 +366,7 @@ class Gateway:
                         call_id,
                         reservation,
                         started,
+                        path=path,
                     )
                     committed = True
                     return response
@@ -293,9 +384,8 @@ class Gateway:
                     status=upstream.status,
                     latency_ms=_elapsed_ms(started),
                     response_body=raw,
-                    provider_response_id=parsed.get("id")
-                    if isinstance(parsed.get("id"), str)
-                    else None,
+                    provider_response_id=_response_id(parsed),
+                    path=path,
                 )
                 committed = True
                 cached = {
@@ -317,9 +407,7 @@ class Gateway:
                 self._record(
                     session,
                     call_id=call_id,
-                    request_digest=GatewaySession.digest(
-                        json.dumps(payload, sort_keys=True).encode()
-                    ),
+                    request_digest=_request_digest(payload, path),
                     disposition="failed",
                     latency_ms=_elapsed_ms(started),
                 )
@@ -336,6 +424,8 @@ class Gateway:
         call_id: str,
         reservation: GatewayReservation,
         started: float,
+        *,
+        path: str | None = None,
     ) -> web.StreamResponse:
         """Pass the event stream straight through, counting usage as it goes."""
         # The upstream's own type: one that answers a streamed request with plain JSON
@@ -348,7 +438,10 @@ class Gateway:
 
         chunks: list[bytes] = []
         downstream_open = True
-        async for chunk in _iter_chunks(upstream, keepalive_sec=self.sse_keepalive_sec):
+        # Antigravity CLI rejects an SSE comment as an invalid chunk and fails the turn
+        # without retrying, so a Gemini stream carries the provider's bytes and nothing else.
+        keepalive = None if self._dialect_name(session) == "gemini" else self.sse_keepalive_sec
+        async for chunk in _iter_chunks(upstream, keepalive_sec=keepalive):
             if chunk is None:
                 # Upstream has gone quiet. The heartbeat goes to the connection only: the
                 # recorded body, the usage it is counted from and the bytes a coalesced
@@ -382,6 +475,7 @@ class Gateway:
             latency_ms=_elapsed_ms(started),
             response_body=b"".join(chunks),
             provider_response_id=_stream_response_id(chunks),
+            path=path,
         )
         self._retain_payload(session, call_id, None, b"".join(chunks), streaming=True)
         session.finish(
@@ -421,6 +515,9 @@ class Gateway:
 
     def _authoritative(self, payload: dict[str, Any], session: GatewaySession) -> dict[str, Any]:
         """Impose the run's model rather than trusting the agent's request."""
+        if self._dialect_name(session) == "gemini":
+            # The model is imposed in the path; a body field could only contradict it.
+            return {name: value for name, value in payload.items() if name != "model"}
         authoritative = {**payload, "model": session.model}
         if self._dialect_name(session) == "openai-chat-completions" and authoritative.get("stream"):
             authoritative["stream_options"] = {
@@ -442,8 +539,9 @@ class Gateway:
         latency_ms: int = 0,
         response_body: bytes = b"",
         provider_response_id: str | None = None,
+        path: str | None = None,
     ) -> None:
-        request_digest = GatewaySession.digest(json.dumps(payload, sort_keys=True).encode())
+        request_digest = _request_digest(payload, path)
         if status != 200:
             # A failed call is still a call. Recording it costs one line and is the
             # difference between "the agent stalled" and "the provider was returning
@@ -479,7 +577,11 @@ class Gateway:
         await session.commit(reservation, usage)
 
     async def _post(  # type: ignore[no-untyped-def]
-        self, request: web.Request, payload: dict[str, Any], session: GatewaySession
+        self,
+        request: web.Request,
+        payload: dict[str, Any],
+        session: GatewaySession,
+        path: str | None = None,
     ):
         assert self._client is not None
         if session.upstream is not None:
@@ -490,7 +592,7 @@ class Gateway:
             )
         for attempt in range(2):
             upstream = await self._client.post(
-                f"{self.upstream}{self.upstream_path or REQUEST_PATHS[self.dialect]}",
+                f"{self.upstream}{path or self.upstream_path or REQUEST_PATHS[self.dialect]}",
                 json=payload,
                 headers=await self._upstream_headers(request),
             )
@@ -517,6 +619,8 @@ class Gateway:
         }
         if self.subscription is not None:
             headers.update(await self.subscription.headers())
+        elif self.dialect == "gemini":
+            headers["x-goog-api-key"] = self.api_key
         elif self.dialect == "anthropic" and not self.bearer_auth:
             headers["x-api-key"] = self.api_key
             headers.setdefault("anthropic-version", "2023-06-01")
@@ -726,6 +830,27 @@ def _elapsed_ms(started: float) -> int:
     return int((asyncio.get_running_loop().time() - started) * 1000)
 
 
+def _request_digest(payload: dict[str, Any], path: str | None = None) -> str:
+    """Digest of the authoritative request: its body, plus its path when that varies.
+
+    A Gemini path names the method, so the same body sent to ``generateContent`` and to
+    ``streamGenerateContent`` is two requests, and neither may be replayed as the other.
+    """
+    body = json.dumps(payload, sort_keys=True).encode()
+    return GatewaySession.digest(body if path is None else path.encode() + b"\n" + body)
+
+
+def _response_id(event: dict[str, Any]) -> str | None:
+    """The provider's ID in a response body or stream event (Gemini's is ``responseId``)."""
+    for scope in (event.get("message"), event.get("response"), event):
+        if not isinstance(scope, dict):
+            continue
+        for name in ("id", "responseId"):
+            if isinstance(scope.get(name), str):
+                return scope[name]
+    return None
+
+
 def _stream_response_id(chunks: list[bytes]) -> str | None:
     for line in b"".join(chunks).decode("utf-8", "ignore").splitlines():
         if not line.startswith("data:"):
@@ -734,15 +859,13 @@ def _stream_response_id(chunks: list[bytes]) -> str | None:
             event = json.loads(line.removeprefix("data:").strip())
         except json.JSONDecodeError:
             continue
-        message = event.get("message")
-        if isinstance(message, dict) and isinstance(message.get("id"), str):
-            return message["id"]
-        response = event.get("response")
-        if isinstance(response, dict) and isinstance(response.get("id"), str):
-            return response["id"]
-        if isinstance(event.get("id"), str):
-            return event["id"]
+        if isinstance(event, dict) and (found := _response_id(event)) is not None:
+            return found
     return None
+
+
+def _google_error(code: int, status: str, message: str, reason: str) -> web.Response:
+    return web.json_response(gemini.error_body(code, status, message, reason), status=code)
 
 
 def _atomic_write(path: Path, data: bytes) -> None:

@@ -69,6 +69,7 @@ def load_env(path: Path | None = None, *, override: bool = False) -> dict[str, s
 
 DEFAULTS = {
     "anthropic": ("ANTHROPIC_API_KEY", "https://api.anthropic.com"),
+    "gemini": ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com"),
     "openai-chat-completions": ("OPENAI_API_KEY", "https://api.openai.com"),
     "openai-responses": ("OPENAI_API_KEY", "https://api.openai.com"),
 }

@@ -126,6 +126,12 @@ class GatewaySession:
     Empty means none, which is the default: a task that declared no additional access
     gets none, and cannot acquire any by asking.
     """
+    provider_web_tools: bool = False
+    """Whether calls may use the provider's own web tools, such as search or grounding.
+
+    They reach the web from the provider's side, outside the Sandbox's network policy, so
+    only a Task whose network is open may use them; the default refuses them.
+    """
 
     def may_reach(self, host: str) -> bool:
         """Whether ``host`` is allowlisted, matching subdomains of a declared name.

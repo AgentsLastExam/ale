@@ -156,6 +156,7 @@ class GatewayConfig(BaseModel):
 
     dialect: Literal[
         "anthropic",
+        "gemini",
         "openai-chat-completions",
         "openai-responses",
     ] = "anthropic"

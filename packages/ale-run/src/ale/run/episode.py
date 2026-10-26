@@ -39,7 +39,7 @@ from ale.core.result import FailureInfo as ResultFailureInfo
 from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
 from ale.core.sandbox import Identity, RetainedSandbox, Sandbox, SandboxRequest, SandboxRole
 from ale.core.task import Task
-from ale.core.taskspec import OperatingSystem
+from ale.core.taskspec import NetworkMode, OperatingSystem
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import Status, Verdict
 from ale.run import artifact_files
@@ -508,6 +508,7 @@ async def run_episode(
             model=model,
             limits=limits or Limits(),
             allowed_hosts=allowed_hosts,
+            provider_web_tools=task.spec.network.mode is NetworkMode.OPEN,
             payload_dir=(
                 episode_dir / "logs" / "gateway"
                 if (logging_policy or LoggingPolicy()).transport_payloads == "debug"
