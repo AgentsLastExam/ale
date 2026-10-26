@@ -72,8 +72,8 @@ staged, not by a conventional path or a flag a Task must remember.
 After the solver stops, ALE converts its observed evidence into `trajectory.json`.
 When run policy sets `artifacts.collect = "host"`, every Task-declared artifact is
 captured as an immutable file or directory snapshot. Files and directories are selected
-directly by `artifacts`, including globs. Copying follows links and skips missing or
-uncopyable entries, with bounded traversal; see
+directly by `artifacts`, including globs. Copying never follows links and skips links,
+missing and uncopyable entries, with bounded traversal; see
 [Artifact copying](task-authoring.md#artifact-copying). The verifier owns scoring.
 
 With the default `artifacts.collect = "none"`, ALE does not inspect artifact paths, create a spool,

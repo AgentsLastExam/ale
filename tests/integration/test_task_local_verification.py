@@ -405,7 +405,7 @@ async def test_separate_verifier_image_sources_restore_identically_without_setup
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["shared", "separate"])
-async def test_privileged_artifacts_globs_links_missing_and_directory_at_file_path(tmp_path, mode):
+async def test_privileged_artifacts_glob_and_never_follow_links(tmp_path, mode):
     task = scaffold_task(tmp_path / f"copy-{mode}")
     (task / "instruction.md").write_text("Leave the prepared outputs for verification.\n")
     (task / "task.yaml").write_text(
@@ -438,9 +438,14 @@ async def test_privileged_artifacts_globs_links_missing_and_directory_at_file_pa
         "from ale_verify import write\n"
         "assert os.geteuid() == 0\n"
         "v = {}\n"
-        "content = Path('/root/answers/game.sgf').read_text()\n"
-        "v['protected'] = float(content == 'protected')\n"
-        "v['directory'] = float(Path('/root/answers/result.json').is_dir())\n"
+        # A link the agent left is never followed, so the protected file it points at
+        # cannot reach a separate verifier; a shared verifier sees the sandbox as left.
+        + (
+            "v['link'] = float(not os.path.lexists('/root/answers/game.sgf'))\n"
+            if mode == "separate"
+            else "v['link'] = float(os.path.islink('/root/answers/game.sgf'))\n"
+        )
+        + "v['directory'] = float(Path('/root/answers/result.json').is_dir())\n"
         "v['missing'] = float(not Path('/root/missing').exists())\n"
         "v['overall'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
@@ -449,4 +454,6 @@ async def test_privileged_artifacts_globs_links_missing_and_directory_at_file_pa
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"overall": 1.0}
     entries = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"]
-    assert not any(entry["source"].endswith(("broken.sgf", "/loop")) for entry in entries)
+    assert not any(
+        entry["source"].endswith(("game.sgf", "broken.sgf", "/loop")) for entry in entries
+    )

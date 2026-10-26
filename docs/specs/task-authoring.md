@@ -130,9 +130,10 @@ that same destination; do not declare one path while instructing the agent to us
 ### Artifact copying
 
 `artifacts` accepts absolute file paths, directory paths, and globs such as `*.sgf` or
-`**/*.json`. ALE copies each match according to its actual type, follows links to their
-contents, and skips missing paths, cycles, and copy failures. These are fixed defaults;
-the verifier decides how to score the resulting output. Copying uses the framework's
+`**/*.json`. ALE copies each match according to its actual type and skips links, missing
+paths, and copy failures. No link is followed anywhere on an artifact's path, a directory
+above it included: one the agent made could point at a file only the framework may read.
+These are fixed defaults; the verifier decides how to score the resulting output. Copying uses the framework's
 privileged identity on every supported OS; see [Permissions](sandbox-image.md#permissions).
 
 Run-level `artifacts.collect` defaults to `"none"` (no copy or restore). Set it to `"host"`
