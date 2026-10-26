@@ -22,7 +22,7 @@ Every shipped autonomous harness must include:
 
 Native CLI integrations subclass `CliHarness` in a package containing `adapter.py`,
 `settings.py`, `trajectory.py`, and `README.md`. The base owns everything that is the same
-for every CLI: settings validation, version and integrity, npm installation, prompt
+for every CLI: settings validation, version and integrity, installation, prompt
 delivery, the evidence layout, failure classification, and continuation checks. An
 adapter supplies only native knowledge: its configuration (`install_resources()`), its
 command line (`prepare_command()`), how to read one invocation's stdout
@@ -44,21 +44,36 @@ ALE integrates these official upstream agent programs:
 | `codex-cli` | `@openai/codex@0.146.0` | OpenAI Responses | `reasoning_effort`, `web_search` |
 | `openclaw-cli` | `openclaw@2026.7.1` | OpenAI Responses | `provider`, `thinking`, `timeout_seconds`, `tool_profile`, `tools_allow`, `tools_deny`, `model_params` |
 
-The npm integrations use the official packages above. ALE does not install a fork or
-carry agent-program patches. Bases provide runtimes, not agent CLI packages; they pin
-Node.js 24.15.0. Each run installs and configures the selected CLI before applying the
-Task network policy. `agent.version` selects an exact version; omitting it uses the
-adapter's pinned default. An already matching installation may be reused.
+Each integration installs its program's official distribution; ALE does not install a
+fork or carry agent-program patches. That is the npm package when upstream publishes
+one, as for the four above. Otherwise it is the official release executable, pinned per
+OS and architecture by URL and SHA-256 in the adapter's `release_assets`; when upstream
+ships it inside a tar or zip archive, only that one member is taken, pinned by its own
+SHA-256 too. The Sandbox's own Python downloads it as the agent and installs it only if
+every digest matches, so an unverifiable build never runs. Its integrity is the digest of that whole table. A program
+upstream distributes only through its own installer is installed by its adapter from one
+pinned artifact: a source installer at one commit, reported as
+`git:<repository>@<commit>`, or an installer package it verifies and unpacks, reported as
+the `sha256:` of the files it runs. Bases provide runtimes, not agent CLI packages; they
+pin Node.js 24.15.0. Each run installs and configures the selected CLI before applying the
+Task network policy.
+
+`agent.version` selects an exact version, and omitting it uses the adapter's pinned
+default. A release-binary adapter accepts only its pinned version, because only that
+version's digests are known. An already matching installation may be reused.
 
 Harnesses declare `supported_os` and validate it before Sandbox creation; the CLI also
-checks it before image preparation. The default is Linux only. All four shipped CLI
-adapters explicitly support Linux and Windows; unsupported systems raise
-`AgentUnsupportedError` before installation.
+checks it before image preparation. The default is Linux only. An npm CLI adapter
+supports Linux and Windows. A release-binary adapter supports exactly the systems its
+table covers, and its README names any system upstream ships no build for. Unsupported
+systems raise `AgentUnsupportedError` before installation; an architecture with no
+pinned asset raises it during installation.
 
 On Windows, the base also supplies Git for Windows at `C:/Program Files/Git` and
 puts its `bin` and `usr/bin` directories on `PATH`. Harnesses use Git Bash to launch
-the native Windows CLI packages; WSL is not required. npm installs stay under the
-agent's `.local` directory, and the inherited Windows tool search path is preserved.
+the native Windows CLI packages; WSL is not required. npm installs and release
+binaries stay under the agent's `.local` directory, and the inherited Windows tool
+search path is preserved.
 The built-in `cua-desktop` uses the OS's system Python. Task-provided Skills and MCP
 commands must themselves work on Windows.
 

@@ -57,7 +57,9 @@ Two host-side services, one token:
 
 - **The model gateway** serves API-key and subscription Harness modes. It swaps in the
   selected Host credential, imposes the model, enforces ceilings by refusing the next
-  call, and records every call including the ones that failed upstream.
+  call, and records every call including the ones that failed upstream. A `GET` for a
+  model catalog, at any path ending in `/models`, lists only the imposed model, so a
+  CLI that fetches one before its first call sees what its calls will receive.
 - **The egress proxy** serves `CONNECT` for hosts a task declared, and refuses
   everything else with a 403 naming what was declared.
 
