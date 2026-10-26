@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -534,7 +535,6 @@ def test_native_root_and_linked_child_are_collected_without_duplicate_stream_mes
                 "sessionId": "child-session",
                 "isSidechain": True,
                 "agentId": "child",
-                "parentToolUseID": "delegate",
                 "message": {
                     "id": "child-message",
                     "content": [{"type": "text", "text": "child done"}],
@@ -543,6 +543,7 @@ def test_native_root_and_linked_child_are_collected_without_duplicate_stream_mes
         )
         + "\n"
     )
+    (children / "agent-child.meta.json").write_text(json.dumps({"toolUseId": "delegate"}))
     trajectory = ClaudeCodeHarness().parse_trajectory(
         replace(parse_context(tmp_path), session_id="root")
     )
@@ -597,13 +598,15 @@ def test_stdout_subagent_events_belong_to_the_subagent(tmp_path: Path, native: b
                         "sessionId": "root",
                         "isSidechain": True,
                         "agentId": "child",
-                        "parentToolUseID": "delegate",
                         "message": message,
                     }
                 )
                 + "\n"
                 for kind, message in (("assistant", child_call), ("user", child_result))
             )
+        )
+        (project / "root/subagents/agent-child.meta.json").write_text(
+            json.dumps({"toolUseId": "delegate"})
         )
     stdout_log(tmp_path).write_text(
         "".join(
@@ -628,6 +631,53 @@ def test_stdout_subagent_events_belong_to_the_subagent(tmp_path: Path, native: b
     assert calls(trajectory) == ["delegate"]
     assert trajectory.steps[0].message == "Do the task."
     assert [calls(child) for child in trajectory.subagent_trajectories] == [["child-call"]]
+
+
+#: Trimmed native logs of a live Claude Code 2.1.227 run that delegated once.
+RECORDED = Path(__file__).resolve().parents[1] / "fixtures/harness-logs/claude-code-subagent"
+RECORDED_SESSION = "2ba144fd-7bed-41fc-b484-3ed711cf626b"
+RECORDED_CHILD = (
+    f".claude-config/projects/-home-user/{RECORDED_SESSION}/subagents/agent-ae09f9000c0e7fb01"
+)
+
+
+def recorded_context(tmp_path: Path) -> TrajectoryParseContext:
+    from dataclasses import replace
+
+    shutil.copytree(RECORDED, tmp_path / "logs")
+    return replace(parse_context(tmp_path), logs_dir=tmp_path / "logs", session_id=RECORDED_SESSION)
+
+
+def test_recorded_native_subagent_is_linked_through_its_meta_file(tmp_path: Path) -> None:
+    """2.1.227 names the spawning call in ``agent-<id>.meta.json``, not on the events."""
+    trajectory = ClaudeCodeHarness().parse_trajectory(recorded_context(tmp_path))
+    (subagent,) = trajectory.subagent_trajectories
+    refs = {
+        result.source_call_id: [ref.trajectory_id for ref in result.subagent_trajectory_ref]
+        for step in trajectory.steps
+        for result in (step.observation.results if step.observation else ())
+        if result.subagent_trajectory_ref
+    }
+
+    assert subagent.trajectory_id == "trajectory-subagent-ae09f9000c0e7fb01"
+    assert refs == {"toolu_01BDoP8mfY6TknNF61QcTpwn": [subagent.trajectory_id]}
+    first, write, final = subagent.steps
+    assert first.message.startswith("Write the exact text SUBAGENT_MARKER_7F3A")
+    assert [call.function_name for call in write.tool_calls] == ["Bash"]
+    # Only the native record has the child's reply; stdout stops at its last call.
+    assert final.message == "DONE"
+    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+
+
+def test_native_subagent_without_its_meta_file_stays_reported(tmp_path: Path) -> None:
+    parse = recorded_context(tmp_path)
+    (parse.logs_dir / f"{RECORDED_CHILD}.meta.json").unlink()
+
+    trajectory = ClaudeCodeHarness().parse_trajectory(parse)
+
+    assert trajectory.extra["ale"]["parse_issues"] == [
+        {"reason": "unlinked_subagent", "source": f"{RECORDED_CHILD}.jsonl"}
+    ]
 
 
 def test_resumed_turns_stay_in_order_without_a_repeated_final_answer(tmp_path: Path) -> None:
