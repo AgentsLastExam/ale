@@ -145,7 +145,7 @@ jobs:
       # One -m, not two: a second `-m` replaces the first rather than intersecting, so
       # the earlier form silently ran every non-KVM test including the unit suite.
       # The desktop image is tens of gigabytes, so it stays out of hosted CI.
-      - run: uv run pytest -m "(conformance or integration) and not needs_kvm and not needs_gui"
+      - run: uv run pytest -m "(conformance or integration) and not needs_kvm and not needs_gui and not needs_daytona"
 
   # Hardware virtualisation is not available on hosted runners; this job runs on the
   # self-hosted KVM runner, which never sees a pull request and so never runs a fork's code.

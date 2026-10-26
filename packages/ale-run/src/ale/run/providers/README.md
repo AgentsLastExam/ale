@@ -1,13 +1,16 @@
 # Providers
 
-Providers turn prepared Task images into Sandboxes. ALE ships two backends:
+Providers turn prepared Task images into Sandboxes. ALE ships three backends:
 
 | Module | Backend | Prepared input |
 |---|---|---|
 | `docker.py` | local Docker container | immutable OCI image identity |
 | `qemu.py` | QEMU/KVM guest runner | materialized qcow2 identity |
+| `daytona.py` | Daytona cloud container | immutable OCI image identity, pushed by digest |
 
-Both implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
+`daytona_api.py` is its REST client and `daytona_image.py` adapts and publishes images.
+
+All three implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
 preflight, image verification, lifecycle, command/file transport, egress changes,
 observed identity, resource allocation and optional retention. Harness and Environment
 code must use those contracts rather than backend-specific methods.
@@ -15,3 +18,30 @@ code must use those contracts rather than backend-specific methods.
 The normative contracts are
 [`../../../../../../docs/specs/sandbox-image.md`](../../../../../../docs/specs/sandbox-image.md)
 and [`../../../../../../docs/specs/security.md`](../../../../../../docs/specs/security.md).
+
+## Daytona
+
+Daytona's sandboxes are built for a different trust model than ALE's, so `daytona.py`
+works around several of its defaults to hold the same contract. Each row was measured on a
+live organization (daemon 0.225.2). Operating it is in
+[`docs/guides/daytona.md`](../../../../../../docs/guides/daytona.md).
+
+| Daytona | What the Provider does |
+|---|---|
+| Builds sandboxes only from registries registered with the organization; push credentials expire hourly | `daytona_image.py` adds one layer (`USER root`, and `iptables` if absent), pushes it by digest to Daytona's own registry, and keeps one organization registry entry, `ale-transient`, holding the current credentials. The sandbox is built `FROM` that digest, so nothing is rebuilt remotely |
+| Runs its daemon, and every command sent through it, as the image's final `USER` | That layer's `USER root`, so guestd is root |
+| Replaces the image's entrypoint and command with its own daemon | Starts them itself, detached, as the image's `USER` with its `ENV` and working directory, then waits for the desktop as Docker does |
+| Its daemon listens inside the sandbox (2280, 22220, 22222, 33333, and any other port PID 1 opens) and runs commands for anyone, as root | `iptables` owner rules reject every non-root user, IPv4 and IPv6; a probe as the agent must fail on every local address, or the sandbox is destroyed |
+| Accepts no connection from the sandbox outward; its SSH gateway refuses `-R` | guestd runs over two SSH exec sessions, one for commands and one for file reads. A third carries `guestd/tunnel.py`, which delivers the Gateway on the sandbox's loopback; the sandbox names an index into the Host's list, never an address |
+| Switches `networkBlockAll` and a domain allowlist at runtime (Tier 3 or 4 only), asynchronously | `block` uses `networkBlockAll`. `allowlist` uses `domainAllowList`, each host written `*.host` because a bare entry does not match subdomains; addresses, ports, patterns and more than 100 hosts are refused in `accepts`. Every switch waits for a TLS handshake with a public host the Task did not declare to behave as the setting says |
+| Serves GPUs from its own region, in several models, optionally as spot capacity it may reclaim | Asks for `gpu_types` in order of preference and never spot. The GPUs are read with `nvidia-smi` as the agent and recorded; another count or model, or a GPU the agent cannot open, destroys the sandbox |
+| Rate-limits creates | A create answered 429 made nothing and is retried, honoring `Retry-After`, for up to five minutes. No other failed create is repeated, since it may have made a sandbox |
+| Creates a sandbox even when the caller is cancelled mid-request | Every way out of a start deletes what Daytona made; a create whose reply was lost is found by its unique name |
+| Organizations are shared between tools | Labels live under `ale.run.*`, and listing and destroying act only on those. Every sandbox has a lifetime (`ttlMinutes`), so one a crashed run leaves behind is deleted by Daytona |
+
+Daytona's allowlist, as measured: a name not on the list does not resolve. Ports 80 and
+443 go through Daytona's proxy, which forwards by the name in the TLS handshake or HTTP
+request to that name's own host, so sending an allowed name to another address reaches only
+the allowed host; other ports of unlisted addresses are unreachable. The proxy accepts every
+TCP connection to port 443 before it decides, which is why egress is checked with a TLS
+handshake rather than a connect.

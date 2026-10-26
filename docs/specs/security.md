@@ -43,6 +43,14 @@ Every supported Harness mode reaches its model only through the Gateway. Subscri
 provider hosts are Host-side upstreams and never widen the Sandbox's Task-declared
 egress policy.
 
+Daytona has neither bridge nor runner. It enforces `block` (`networkBlockAll`) and
+`allowlist` (its own domain allowlist) outside the sandbox, where the agent cannot lift
+them, so allowed traffic goes straight from the cloud to its host instead of through the
+Host. Daytona's allowlist matches names with their subdomains, as the proxy does, but also
+passes plain HTTP and other ports of an allowed host. It refuses every connection from the
+sandbox to the Host, so the Host carries the Gateway in over SSH, and the sandbox can name
+only the Gateway, never an address.
+
 `open` is a deliberate escape hatch: an ordinary bridge with normal egress. A task must
 declare it, and the declaration is recorded in provenance.
 
@@ -76,7 +84,8 @@ provider-owned observations.
 Allowlisting is enforced here rather than with `iptables` on the host or a filtering tool
 inside the image, for two reasons: it needs no privilege we would otherwise not require,
 and it does not depend on tooling in an image we did not build. **Traffic that ignores
-the proxy variables has nowhere to go**, so the failure mode is closed.
+the proxy variables has nowhere to go**, so the failure mode is closed. Daytona's own
+allowlist takes this role there, for the same two reasons (section 1).
 
 Matching is on the requested name, with subdomains of a declared host included. It is
 deliberately *not* on a resolved address: a task declares `pypi.org` because that is what
@@ -142,6 +151,10 @@ nothing but trusted image services runs in a cold-booted guest before that conne
 Linux keeps the claimed token in root-only `/run/ale/guestd-token`, so a restarted guest
 service stays claimed while a reboot or a saved disk carries none; Windows keeps it in
 memory. Container guest services are `docker exec` sessions with no listener.
+
+Daytona's in-sandbox daemon runs commands for anyone who connects, as root. The Provider
+blocks every non-root user from it and proves that as the agent before handing the
+sandbox out; an agent granted `resources.sudo` can lift the block, as it can any rule.
 
 Verified by `tests/integration/test_identity.py`: the agent cannot read the guest service,
 cannot write system paths, and cannot elevate unless its task asked; and by
@@ -245,8 +258,10 @@ handle, required evidence capture finishes, known verification credentials are r
 and episode capabilities are revoked. Subscription credentials stay in the
 checkout-local Host profile and therefore require no retained-Sandbox cleanup.
 
-Every Docker sandbox and QEMU runner is labeled with ALE ownership, episode, role,
-requested retention, and allocated GPU identity. Retained resources remain discoverable
+Every Docker sandbox, QEMU runner and Daytona sandbox is labeled with ALE ownership,
+episode, role and requested retention (Docker and QEMU also with allocated GPU identity).
+Daytona's organization may be shared, so listing and destroying act only on sandboxes that
+carry ALE's labels. Retained resources remain discoverable
 through `ale sandbox list` and removable only through a validated ALE-managed handle.
 Live labels also prevent a retained GPU from being assigned to another ALE sandbox.
 Retention does not change rewards or verification records.
@@ -267,7 +282,8 @@ malicious verifier can only spend its episode's Judge session while that episode
 
 **Container escape.** A container sandbox uses Docker's default isolation. A kernel
 exploit reaches the host. Use the VM backend for stronger isolation, and still do not put
-anything on that host you would mind losing.
+anything on that host you would mind losing. On Daytona, Daytona itself sees everything in
+the sandbox and in the image pushed to its registry.
 
 **Traffic analysis, or what is said over an allowlisted tunnel.** Once `CONNECT`
 succeeds the tunnel is opaque by design — the point is to reach a declared host, not to
