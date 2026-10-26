@@ -5,6 +5,7 @@ Adapters are discovered, so a new CLI is held to the same checks as soon as it e
 
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path, PurePosixPath
 
@@ -15,6 +16,7 @@ from ale.core.harness import HarnessSession, ResumeSupport, TrajectoryParseConte
 from ale.core.sandbox import ExecResult
 from ale.core.taskspec import OperatingSystem
 from ale.core.testkit import AutonomousHarnessConformance
+from ale.run.harnesses._release import release_identity
 from ale.run.harnesses.base import LOG_ROOT, PROMPT_PATH, STDOUT_PATH, CliHarness, NativeResult
 from ale.run.recording import BlobStore
 
@@ -80,8 +82,19 @@ def test_definition_is_strict_pinned_and_declares_its_evidence(harness: CliHarne
     AutonomousHarnessConformance.check_empty_resources(harness)
     assert harness.settings_type.model_config.get("extra") == "forbid"
     assert harness.settings_type.model_config.get("frozen") is True
-    assert harness.integrity() == f"npm:{harness.package}@{harness.version()}"
-    assert set(harness.supported_os) == set(OperatingSystem)
+    if harness.release_assets:
+        # A release adapter runs only digest-pinned builds, on exactly the systems they cover.
+        assert harness.integrity() == release_identity(harness.release_assets)
+        assert set(harness.supported_os) == {system for system, _ in harness.release_assets}
+    else:
+        # The npm package, or what an adapter installs from upstream's own installer: its
+        # source at one commit, or the digest of the files it unpacks and runs.
+        assert harness.integrity() == f"npm:{harness.package}@{harness.version()}" or (
+            re.fullmatch(
+                r"git:[\w.-]+/[\w.-]+@[0-9a-f]{40}|sha256:[0-9a-f]{64}", harness.integrity()
+            )
+        )
+        assert set(harness.supported_os) == set(OperatingSystem)
     assert harness.resume_support is ResumeSupport.NATIVE
     assert harness.logs[0] == LOG_ROOT and len(harness.logs) > 1
 

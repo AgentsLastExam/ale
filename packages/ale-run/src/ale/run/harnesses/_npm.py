@@ -10,8 +10,6 @@ from ale.core.errors import AgentError
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import OperatingSystem
 
-_VERSION = re.compile(r"\d+(?:\.\d+)+")
-
 
 async def agent_home(sandbox: Sandbox) -> str:
     if sandbox.request.os is OperatingSystem.WINDOWS:
@@ -96,8 +94,9 @@ async def ensure_npm_cli(
         timeout_sec=60,
         identity=Identity.AGENT,
     )
-    installed = _reported_version(probe.stdout + probe.stderr) if probe.ok else None
-    if installed != version:
+    output = f"{probe.stdout}\n{probe.stderr}"
+    installed = reported_version(output, version) if probe.ok else None
+    if installed is None:
         # As the agent, into its own prefix: an install into root's prefix is one the
         # unprivileged account may not be able to run. `--force` overwrites a same-version
         # residue cleanly.
@@ -124,12 +123,25 @@ async def ensure_npm_cli(
             timeout_sec=60,
             identity=Identity.AGENT,
         )
-        installed = _reported_version(probe.stdout + probe.stderr) if probe.ok else None
-    if installed != version:
-        raise AgentError(f"{binary} reports {installed or 'no version'} after installing {version}")
+        output = f"{probe.stdout}\n{probe.stderr}"
+        installed = reported_version(output, version) if probe.ok else None
+    if installed is None:
+        raise AgentError(version_mismatch(binary, version, output))
     return installed
 
 
-def _reported_version(output: str) -> str | None:
-    match = _VERSION.search(output)
-    return match.group(0) if match else None
+def reported_version(output: str, version: str) -> str | None:
+    """``version`` when the program's ``--version`` output names it as a whole token.
+
+    A whole token, so ``2.1.22`` never matches ``2.1.227`` while a build revision such as
+    ``1.4.13-R6996.1`` can be pinned; a library banner elsewhere in the output is ignored.
+    """
+    named = re.search(rf"(?<![\w.+-])v?{re.escape(version)}(?![\w.+-])", output)
+    return version if named else None
+
+
+def version_mismatch(binary: str, version: str, output: str) -> str:
+    lines = output.strip().splitlines()
+    return (
+        f"{binary} --version does not name {version}: {lines[0][:160] if lines else 'no output'!r}"
+    )
