@@ -84,7 +84,7 @@ def run(
             "--agent",
             help=(
                 "claude-code, codex-cli, droid, forgecode, grok-build, kimi-code, muse-code, "
-                "openclaw-cli, pi-cli, qwen-code, zcode, computer-use, oracle or nop"
+                "openclaw-cli, openhands-cli, pi-cli, qwen-code, zcode, computer-use, oracle or nop"
             ),
         ),
     ] = None,

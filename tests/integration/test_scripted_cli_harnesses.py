@@ -27,6 +27,7 @@ from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
 from ale.run.harnesses.droid import DroidHarness
 from ale.run.harnesses.forgecode import ForgecodeHarness
+from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import BlobStore, EpisodeRecording
@@ -56,6 +57,16 @@ CASES: dict[str, Case] = {
     **{
         f"forgecode-{dialect}": Case(
             partial(ForgecodeHarness, gateway_dialect=dialect), dialect, r"^shell$"
+        )
+        for dialect in DIALECTS
+    },
+    **{
+        # The pinned OpenHands SDK sends exactly the GPT-5 family over Responses.
+        f"openhands-cli-{dialect}": Case(
+            partial(OpenHandsCliHarness, gateway_dialect=dialect),
+            dialect,
+            r"^terminal$",
+            "gpt-5-scripted" if dialect == "openai-responses" else "scripted-model",
         )
         for dialect in DIALECTS
     },
@@ -200,6 +211,15 @@ DELEGATION: dict[str, tuple[str, Callable[[str], dict[str, object]]]] = {
     "forgecode-openai-chat-completions": (
         r"^task$",
         lambda task: {"agent_id": "forge", "tasks": [task]},
+    ),
+    "openhands-cli-openai-chat-completions": (
+        r"^task$",
+        lambda task: {
+            "description": "Delegated work",
+            "prompt": task,
+            "subagent_type": "general-purpose",
+            "security_risk": "LOW",
+        },
     ),
 }
 
