@@ -16,10 +16,11 @@ Create a dedicated setup token without touching the ordinary Claude profile:
 CLAUDE_CONFIG_DIR="$PWD/.ale/auth/claude-code" claude setup-token
 ```
 
-Put the returned value in the checkout's `.env`:
+Put the returned value in the checkout's `.env`, under the `ALE_` name so it never
+collides with a `CLAUDE_CODE_OAUTH_TOKEN` that your own Claude Code reads:
 
 ```dotenv
-CLAUDE_CODE_OAUTH_TOKEN=...
+ALE_CLAUDE_CODE_OAUTH_TOKEN=...
 ```
 
 ### Codex CLI
@@ -51,9 +52,9 @@ uv run ale run TASK --agent grok-build --auth subscription --model grok-4.5
 ```
 
 Harness presets default to `auto`: use the checkout-local subscription when present,
-otherwise use the configured API-key path. `--auth api-key` always selects API-key
-billing. Once subscription mode is selected, authentication or entitlement failure is
-reported; ALE never silently falls back to an API key or another model.
+otherwise use the preset provider's `ALE_<PROVIDER>_API_KEY`. `--auth api-key` always
+selects API-key billing. Once subscription mode is selected, authentication or entitlement
+failure is reported; ALE never silently falls back to an API key or another model.
 
 Episodes may run concurrently:
 
@@ -75,8 +76,10 @@ official CLI → episode Gateway URL + episode token → Host ALE Gateway → pr
 ```
 
 The Sandbox never receives the provider access token, refresh token or `auth.json`.
-Only the Host Gateway's upstream URL and authorization headers change. Model authority,
-request coalescing, configured limits, usage accounting and Transport Trace stay common.
+Only the Host Gateway's upstream URL and authorization headers change. A subscription
+always goes to the provider's own subscription endpoint, never to an
+`ALE_<PROVIDER>_BASE_URL` set for API-key runs. Model authority, request coalescing,
+configured limits, usage accounting and Transport Trace stay common.
 
 ## Limits
 

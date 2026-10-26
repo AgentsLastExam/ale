@@ -21,7 +21,6 @@ import tomllib
 from copy import deepcopy
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
@@ -37,6 +36,7 @@ __all__ = [
     "GatewayLimits",
     "LLMJudgeConfig",
     "LoggingPolicy",
+    "ModelProvider",
     "RunConfig",
     "RunTimeouts",
     "SandboxRetentionConfig",
@@ -151,37 +151,51 @@ class AgentConfig(BaseModel):
     mcp_servers: tuple[McpSource, ...] = ()
 
 
+#: The model vendor whose API the Gateway or a Judge calls. Not a sandbox Provider.
+ModelProvider = Literal["anthropic", "gemini", "openai", "xai"]
+#: A protocol the Gateway serves to the Sandbox and speaks to the provider.
+Dialect = Literal["anthropic", "gemini", "openai-chat-completions", "openai-responses"]
+#: The protocols an LLM Judge client speaks; it has no Gemini client.
+JudgeDialect = Literal["anthropic", "openai-chat-completions", "openai-responses"]
+
+
 class GatewayConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    dialect: Literal[
-        "anthropic",
-        "gemini",
-        "openai-chat-completions",
-        "openai-responses",
-    ] = "anthropic"
+    provider: ModelProvider = Field(
+        default="anthropic",
+        description=(
+            "Whose API the Gateway calls. Its key is ALE_<PROVIDER>_API_KEY and its "
+            "endpoint ALE_<PROVIDER>_BASE_URL, or the provider's own API when that is unset."
+        ),
+    )
+    dialect: Dialect = "anthropic"
     limits: GatewayLimits = GatewayLimits()
     base_url: str = Field(
         default="",
-        description="Upstream endpoint. Empty selects the dialect's standard endpoint.",
+        description="One-off endpoint override. Empty selects the provider's endpoint.",
     )
     api_key_env: str = Field(
         default="",
         description=(
-            "Environment variable holding the upstream key. Empty selects the dialect's "
-            "standard variable. Named rather than passed: a value on a command line is "
-            "in shell history and in every process listing, a variable name is not."
+            "One-off override naming the variable that holds the upstream key; required "
+            "when base_url is not the provider's endpoint. Named rather than passed: a "
+            "value on a command line is in shell history and in every process listing, a "
+            "variable name is not."
         ),
     )
 
 
-class LLMJudgeConfig(BaseModel):
+class _JudgeConfig(BaseModel):
+    """Fields every Judge names; ``provider`` selects its key and endpoint as for the Gateway."""
+
     model_config = ConfigDict(extra="forbid")
 
+    provider: ModelProvider
     model: str = Field(min_length=1)
     reasoning_effort: str = Field(min_length=1)
-    base_url: str = Field(min_length=1)
-    api_key_env: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    # --- validation ---
 
     @field_validator("model", "reasoning_effort")
     @classmethod
@@ -190,18 +204,16 @@ class LLMJudgeConfig(BaseModel):
             raise ValueError("value must not be blank")
         return value
 
-    @field_validator("base_url")
-    @classmethod
-    def _http_url(cls, value: str) -> str:
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("base_url must be an absolute HTTP(S) URL")
-        return value.rstrip("/")
+
+class LLMJudgeConfig(_JudgeConfig):
+    dialect: JudgeDialect = Field(description="The protocol the Judge speaks to its provider.")
 
 
-class AgentJudgeConfig(LLMJudgeConfig):
+class AgentJudgeConfig(_JudgeConfig):
     adapter: Literal["codex-cli", "claude-code"]
     version: str = Field(min_length=1)
+
+    # --- validation ---
 
     @field_validator("version")
     @classmethod
@@ -233,7 +245,7 @@ class DaytonaProviderConfig(BaseModel):
 
     target: str = Field(default="us", min_length=1)
     """The Daytona region sandboxes are created in."""
-    api_key_env: str = Field(default="DAYTONA_API_KEY", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    api_key_env: str = Field(default="ALE_DAYTONA_API_KEY", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     """Names the variable holding the key, so the key itself is never a setting."""
     lifetime_hours: int = Field(default=24, ge=1, le=720, strict=True)
     """Daytona deletes a sandbox this long after creation, so a crashed run cannot leak one."""

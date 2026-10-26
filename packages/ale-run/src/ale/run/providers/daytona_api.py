@@ -43,10 +43,12 @@ class DaytonaApi:
 
     def __init__(self, api_key: str, *, base_url: str | None = None) -> None:
         self._key = api_key
-        self._base = (base_url or os.environ.get("DAYTONA_API_URL") or DEFAULT_API_URL).rstrip("/")
+        self._base = (base_url or os.environ.get("ALE_DAYTONA_API_URL") or DEFAULT_API_URL).rstrip(
+            "/"
+        )
 
     @classmethod
-    def from_environment(cls, variable: str = "DAYTONA_API_KEY") -> DaytonaApi:
+    def from_environment(cls, variable: str = "ALE_DAYTONA_API_KEY") -> DaytonaApi:
         key = os.environ.get(variable, "").strip()
         if not key:
             raise ConfigError(

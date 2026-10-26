@@ -30,6 +30,7 @@ from ale.run.assets import (
     observe_task_assets,
     validate_asset_paths,
 )
+from ale.run.secrets import hf_token
 from ale.run.tasksets.manifest import TaskFolder
 
 
@@ -74,10 +75,8 @@ def write_record(path: Path, value: BaseModel | dict[str, object]) -> None:
 
 
 def _git(root: Path, *args: str) -> str:
-    from huggingface_hub import get_token
-
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_LFS_SKIP_SMUDGE": "1"}
-    token = get_token()
+    token = hf_token()
     if token:
         index = int(env.get("GIT_CONFIG_COUNT", "0"))
         env.update(
@@ -403,7 +402,7 @@ def publish_assets(
         result["status"] = "unchanged"
         write_record(output, result)
         return result
-    api = HfApi()
+    api = HfApi(token=hf_token())
     if not api.repo_info(checkpoint.repo_id, repo_type="dataset").private:
         raise AssetError(f"asset dataset must be private: {checkpoint.repo_id}")
     if target_main:
@@ -473,7 +472,7 @@ def comment_asset_pr(checkpoint: AssetCheckpoint, publication: Path, message: st
         raise AssetError("publication record belongs to a different asset checkpoint")
     if not result.get("pr_number"):
         return
-    api = HfApi()
+    api = HfApi(token=hf_token())
     details = api.get_discussion_details(
         checkpoint.repo_id, result["pr_number"], repo_type="dataset"
     )

@@ -85,8 +85,8 @@ must update validation and acceptance together.
 
 Claude Code, Codex CLI, and Grok Build support `agent.authentication = "auto" |
 "api-key" | "subscription"`. Subscription state is isolated from ordinary Host agent
-homes: Claude reads `CLAUDE_CODE_OAUTH_TOKEN` from the ALE checkout's `.env`; Codex and
-Grok use `<checkout>/.ale/auth/<harness>/auth.json`. Credentials remain on the Host;
+homes: Claude reads `ALE_CLAUDE_CODE_OAUTH_TOKEN` from the ALE checkout's `.env`; Codex
+and Grok use `<checkout>/.ale/auth/<harness>/auth.json`. Credentials remain on the Host;
 every Sandbox receives only its episode Gateway token. OpenClaw and policy Harnesses
 reject explicit subscription authentication.
 
@@ -278,10 +278,12 @@ Adapters classify only their native limits.
 The Gateway supports Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, and
 Gemini `generateContent` for API-key mode; each dialect's routes and request handling
 are in the [Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md). The
-preset supplies the default dialect and upstream provider endpoint; a Harness may accept
-a documented compatible override. Subscription mode uses the same
-Sandbox-side Gateway configuration; only the Host Gateway's upstream authentication changes,
-so model authority, limits,
+preset names the default dialect and its model provider (`gateway.provider`), whose
+`ALE_<PROVIDER>_API_KEY` and `ALE_<PROVIDER>_BASE_URL` select the key and upstream (see
+[Security](security.md#3-provider-credentials-stay-on-the-host)); a Harness may accept a
+documented compatible dialect override. Subscription mode uses the
+same Sandbox-side Gateway configuration; only the Host Gateway's upstream authentication
+changes, so model authority, limits,
 accounting, retry coalescing, and Transport Trace are common to both modes. The ChatGPT
 Codex backend rejects `max_output_tokens`, so ALE accounts the completed response and
 refuses the next call once an output ceiling is reached.

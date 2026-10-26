@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import textwrap
 from pathlib import Path
 
@@ -96,7 +95,7 @@ def judged_task(root: Path) -> Path:
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "mkdir -p /home/user/output\n"
-        'test -z "${JUDGE_KEY-}"\n'
+        'test -z "${ALE_OPENAI_API_KEY-}${ALE_ANTHROPIC_API_KEY-}"\n'
         "printf absent > /home/user/output/setup-key\n"
     )
     (task / "oracle" / "run.sh").write_text(
@@ -111,8 +110,8 @@ def judged_task(root: Path) -> Path:
         "v = {}\n"
         "v['credential_scope'] = checks.text_equals('/home/user/outpu"
         "t/setup-key', 'absent')['score']\n"
-        "v['key_withheld'] = 0.0 if 'JUDGE_KEY' in os.environ else 1."
-        "0\n"
+        "v['key_withheld'] = 0.0 if {'ALE_OPENAI_API_KEY', 'ALE_ANTHROPIC_A"
+        "PI_KEY'} & set(os.environ) else 1.0\n"
         "v['correctness'] = {'no': 0.0, 'yes': 1.0}[judge('llm', 'cor"
         "rectness', prompt='Judge the answer.', files=['/home/user/ou"
         "tput/answer.txt'], output_schema={'type': 'object', 'propert"
@@ -126,7 +125,17 @@ def judged_task(root: Path) -> Path:
     return task
 
 
-async def run_judged_task(tmp_path: Path, provider, *, path: str, crash: bool = False) -> None:  # type: ignore[no-untyped-def]
+#: The model provider and dialect each mock endpoint path stands for.
+_ROUTES = {
+    "/v1/responses": ("openai", "openai-responses"),
+    "/v1/chat/completions": ("openai", "openai-chat-completions"),
+    "/v1/messages": ("anthropic", "anthropic"),
+}
+
+
+async def run_judged_task(  # type: ignore[no-untyped-def]
+    tmp_path: Path, provider, monkeypatch: pytest.MonkeyPatch, *, path: str, crash: bool = False
+) -> None:
     """A Judge in the verifier reaches a Host endpoint through the Gateway, keyless."""
     secret = "sandbox-direct-secret"
     seen: list[str] = []
@@ -162,7 +171,9 @@ async def run_judged_task(tmp_path: Path, provider, *, path: str, crash: bool = 
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
     upstream = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"  # type: ignore[union-attr]
-    os.environ["JUDGE_KEY"] = secret
+    model_provider, dialect = _ROUTES[path]
+    monkeypatch.setenv(f"ALE_{model_provider.upper()}_API_KEY", secret)
+    monkeypatch.setenv(f"ALE_{model_provider.upper()}_BASE_URL", upstream)
     gateway = Gateway()
     gateway_url = await gateway.start()
     task_root = judged_task(tmp_path / "repo")
@@ -180,15 +191,14 @@ async def run_judged_task(tmp_path: Path, provider, *, path: str, crash: bool = 
             gateway_url=gateway_url,
             verification_config=VerificationConfig(
                 llm=LLMJudgeConfig(
+                    provider=model_provider,  # type: ignore[arg-type]
+                    dialect=dialect,  # type: ignore[arg-type]
                     model="gpt-5-mini",
                     reasoning_effort="medium",
-                    base_url=upstream + path,
-                    api_key_env="JUDGE_KEY",
                 )
             ),
         )
     finally:
-        os.environ.pop("JUDGE_KEY", None)
         await gateway.stop()
         await runner.cleanup()
 
@@ -224,23 +234,31 @@ async def run_judged_task(tmp_path: Path, provider, *, path: str, crash: bool = 
 
 @pytest.mark.needs_docker
 @pytest.mark.asyncio
-async def test_responses_judge_runs_through_the_gateway(tmp_path: Path) -> None:
-    await run_judged_task(tmp_path, DockerProvider(), path="/v1/responses")
+async def test_responses_judge_runs_through_the_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await run_judged_task(tmp_path, DockerProvider(), monkeypatch, path="/v1/responses")
 
 
 @pytest.mark.needs_docker
 @pytest.mark.asyncio
-async def test_chat_completions_judge_runs_through_the_gateway(tmp_path: Path) -> None:
-    await run_judged_task(tmp_path, DockerProvider(), path="/v1/chat/completions")
+async def test_chat_completions_judge_runs_through_the_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await run_judged_task(tmp_path, DockerProvider(), monkeypatch, path="/v1/chat/completions")
 
 
 @pytest.mark.needs_docker
 @pytest.mark.asyncio
-async def test_anthropic_messages_judge_runs_through_the_gateway(tmp_path: Path) -> None:
-    await run_judged_task(tmp_path, DockerProvider(), path="/v1/messages")
+async def test_anthropic_messages_judge_runs_through_the_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await run_judged_task(tmp_path, DockerProvider(), monkeypatch, path="/v1/messages")
 
 
 @pytest.mark.needs_docker
 @pytest.mark.asyncio
-async def test_judge_logs_survive_a_later_task_crash(tmp_path: Path) -> None:
-    await run_judged_task(tmp_path, DockerProvider(), path="/v1/responses", crash=True)
+async def test_judge_logs_survive_a_later_task_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await run_judged_task(tmp_path, DockerProvider(), monkeypatch, path="/v1/responses", crash=True)

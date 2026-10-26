@@ -5,18 +5,29 @@ way every reference implementation does it. Two worktrees can then point at diff
 providers without fighting over a shared file, and "what credentials did this run use?"
 is answered by looking at the tree the run came from.
 
-API keys loaded here remain Host-side behind the Gateway. Checkout-local subscription
-credentials are resolved separately and also remain Host-side.
+Every name ALE reads carries an ``ALE_`` prefix, so a checkout's credentials never collide
+with the variables the operator's own tools read. API keys loaded here remain Host-side
+behind the Gateway. Checkout-local subscription credentials are resolved separately and
+also remain Host-side.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 from ale.core.errors import ConfigError
 
-__all__ = ["ENV_FILE", "find_env_file", "load_env", "provider_credentials"]
+__all__ = [
+    "ENV_FILE",
+    "PROVIDER_URLS",
+    "find_env_file",
+    "hf_token",
+    "load_env",
+    "provider_credentials",
+    "provider_endpoint",
+]
 
 ENV_FILE = ".env"
 EXAMPLE_FILE = ".env.example"
@@ -67,35 +78,48 @@ def load_env(path: Path | None = None, *, override: bool = False) -> dict[str, s
     return loaded
 
 
-DEFAULTS = {
-    "anthropic": ("ANTHROPIC_API_KEY", "https://api.anthropic.com"),
-    "gemini": ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com"),
-    "openai-chat-completions": ("OPENAI_API_KEY", "https://api.openai.com"),
-    "openai-responses": ("OPENAI_API_KEY", "https://api.openai.com"),
+#: Each model provider's own API, used when the checkout names no other endpoint for it.
+PROVIDER_URLS = {
+    "anthropic": "https://api.anthropic.com",
+    "gemini": "https://generativelanguage.googleapis.com",
+    "openai": "https://api.openai.com",
+    "xai": "https://api.x.ai",
 }
 
 
-def provider_credentials(
-    key_var: str = "",
-    base_url: str = "",
-    dialect: str = "anthropic",
-) -> tuple[str, str]:
-    """The API key and upstream endpoint the gateway should use.
+def provider_endpoint(provider: str) -> tuple[str, str]:
+    """The variable holding a provider's key, and the endpoint that key belongs to.
 
-    A run names which variable holds its key and states the endpoint that key belongs to.
-    Both are per-run, because one checkout is used against several providers and the
-    alternative — one pair of well-known variable names — means editing the environment
-    between runs and, sooner or later, sending one provider's credential to another.
+    Both come from the provider's name, ``ALE_<PROVIDER>_API_KEY`` and
+    ``ALE_<PROVIDER>_BASE_URL``, so a key is only ever paired with its own provider's URL;
+    an unset URL selects the provider's own API.
+    """
+    prefix = f"ALE_{provider.upper()}"
+    url = os.environ.get(f"{prefix}_BASE_URL", "").strip() or PROVIDER_URLS[provider]
+    return f"{prefix}_API_KEY", url.rstrip("/")
+
+
+def provider_credentials(
+    provider: str,
+    *,
+    base_url: str = "",
+    key_var: str = "",
+) -> tuple[str, str]:
+    """The API key and upstream endpoint the Gateway uses for one provider.
+
+    ``base_url`` and ``key_var`` are one-off overrides (``--base-url``, ``--api-key-env``).
+    An endpoint other than the provider's own must name the variable holding its key, so
+    the provider's key is never sent anywhere else.
 
     The key is named rather than passed. A value on the command line is in the shell's
     history and in every process listing on the machine; a variable name is not.
     """
-    default_key_var, default_base_url = DEFAULTS.get(dialect, DEFAULTS["anthropic"])
+    default_key_var, default_base_url = provider_endpoint(provider)
     if not key_var and base_url and base_url.rstrip("/") != default_base_url:
         raise ConfigError(
-            f"gateway.base_url {base_url!r} is not the {dialect} default endpoint; name the "
-            "variable holding its key with --api-key-env (gateway.api_key_env) so the default "
-            f"{default_key_var} is never sent to another provider"
+            f"gateway.base_url {base_url!r} is not the {provider} endpoint; name the "
+            "variable holding its key with --api-key-env (gateway.api_key_env) so "
+            f"{default_key_var} is never sent to another endpoint"
         )
     key_var = key_var or default_key_var
     key = os.environ.get(key_var, "")
@@ -105,3 +129,12 @@ def provider_credentials(
             f"or name a different variable with --api-key-env."
         )
     return key, (base_url or default_base_url).rstrip("/")
+
+
+def hf_token() -> str | Literal[False]:
+    """The Hugging Face token ALE passes to every Hub call, from ``ALE_HF_TOKEN``.
+
+    ``False`` makes ``huggingface_hub`` look no further, so neither the operator's own
+    ``HF_TOKEN`` nor a cached login decides which account ALE acts as.
+    """
+    return os.environ.get("ALE_HF_TOKEN", "").strip() or False

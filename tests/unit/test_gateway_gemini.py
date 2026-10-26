@@ -503,10 +503,12 @@ class TestDialect:
     def test_a_response_without_usage_is_counted_as_zero(self) -> None:
         assert extract_usage({"candidates": []}) == (CallUsage(), None)
 
-    def test_the_dialect_is_configurable_with_google_defaults(self, monkeypatch) -> None:
-        monkeypatch.setenv("GEMINI_API_KEY", "from-env")
-        assert GatewayConfig(dialect="gemini").dialect == "gemini"
-        assert provider_credentials(dialect="gemini") == (
+    def test_the_gemini_provider_defaults_to_googles_api(self, monkeypatch) -> None:
+        monkeypatch.setenv("ALE_GEMINI_API_KEY", "from-env")
+        monkeypatch.delenv("ALE_GEMINI_BASE_URL", raising=False)
+        config = GatewayConfig(provider="gemini", dialect="gemini")
+        assert (config.provider, config.dialect) == ("gemini", "gemini")
+        assert provider_credentials("gemini") == (
             "from-env",
             "https://generativelanguage.googleapis.com",
         )

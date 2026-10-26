@@ -64,14 +64,8 @@ def test_private_dataset_requires_a_token(
     task = _task_path()
     collection = os.environ.get("ALE_ASSETS_COLLECTION")
     clean_task = _clean_copy(task, tmp_path)
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    from huggingface_hub import HfApi, snapshot_download
-
-    monkeypatch.setattr("huggingface_hub.HfApi", lambda: HfApi(token=False))
-    monkeypatch.setattr(
-        "huggingface_hub.snapshot_download",
-        lambda **kwargs: snapshot_download(token=False, **kwargs),
-    )
+    # Without ALE_HF_TOKEN every Hub call is anonymous; no other login stands in for it.
+    monkeypatch.delenv("ALE_HF_TOKEN", raising=False)
     from huggingface_hub.errors import HfHubHTTPError
 
     with pytest.raises(HfHubHTTPError):

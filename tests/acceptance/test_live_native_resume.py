@@ -19,14 +19,14 @@ from ale.run.recording import EpisodeRecording
 from ale.run.secrets import provider_credentials
 from tests.support import CONTAINER_BASE, prepare_reference
 
-from .trajectory import LIVE, MODEL, native_session_file
+from .trajectory import LIVE, MODELS, native_session_file
 
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm, LIVE]
 
 
 @pytest.mark.asyncio
 async def test_real_claude_launch_and_two_resumes_share_one_native_session(tmp_path) -> None:
-    key, upstream = provider_credentials()
+    key, upstream = provider_credentials("anthropic")
     recording = EpisodeRecording(tmp_path)
     gateway = Gateway(api_key=key, upstream=upstream, host="0.0.0.0")
     gateway_session = None
@@ -34,7 +34,7 @@ async def test_real_claude_launch_and_two_resumes_share_one_native_session(tmp_p
     await gateway.start()
     try:
         gateway_session = gateway.open_session(
-            GatewaySession(episode_id="live-native-resume", model=MODEL),
+            GatewaySession(episode_id="live-native-resume", model=MODELS["anthropic"]),
             recording.transport,
         )
         provider = DockerProvider()
@@ -62,7 +62,7 @@ async def test_real_claude_launch_and_two_resumes_share_one_native_session(tmp_p
             episode_id="live-native-resume",
             gateway_url=sandbox.gateway_url or gateway.base_url,
             token=gateway_session.token,
-            model=MODEL,
+            model=MODELS["anthropic"],
             sandbox_id=sandbox.sandbox_id,
             home="/home/user",
         )
@@ -94,7 +94,7 @@ async def test_real_claude_launch_and_two_resumes_share_one_native_session(tmp_p
         transport = read_jsonl(tmp_path / "trace.transport.jsonl").records
         assert len(transport) == 3
         assert all(
-            record["model"] == MODEL and record["disposition"] == "forwarded"
+            record["model"] == MODELS["anthropic"] and record["disposition"] == "forwarded"
             for record in transport
         )
 
@@ -135,7 +135,7 @@ async def test_real_claude_launch_and_two_resumes_share_one_native_session(tmp_p
                 trajectory_id="live-native-resume-trajectory",
                 instruction=prompts[0],
                 logs_dir=logs,
-                model=MODEL,
+                model=MODELS["anthropic"],
                 agent_version=harness.version(),
                 blobs=recording.blobs,
                 session_id=first.continuation.native_session_id,

@@ -37,7 +37,8 @@ For `run`, `validate`, `prepare`, and `reverify`, `ALE_RUN_CONFIG` selects the d
 TOML when `--config` is absent. An explicit `--config` replaces that default file; `--set`
 overrides values from the selected file. Use `--set section.key=value` for any setting
 without a dedicated flag. Provider API-key
-values belong in the checkout's gitignored `.env`; subscription setup is documented in
+values belong in the checkout's gitignored `.env` under the `ALE_` names in
+[`../../.env.example`](../../.env.example); subscription setup is documented in
 [`../../docs/guides/subscription-auth.md`](../../docs/guides/subscription-auth.md).
 
 The durable runtime contracts are indexed by [`../../docs/README.md`](../../docs/README.md).

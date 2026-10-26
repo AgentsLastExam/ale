@@ -24,7 +24,14 @@ LIVE = pytest.mark.skipif(
     os.environ.get("ALE_RUN_LIVE_ACCEPTANCE") != "1",
     reason="set ALE_RUN_LIVE_ACCEPTANCE=1 to make real model calls",
 )
-MODEL = os.environ.get("ALE_LIVE_MODEL", "claude-sonnet-5")
+#: The model live calls to each provider use. Keys and endpoints are not test knobs: every
+#: live call resolves them as ale does, from ALE_<PROVIDER>_API_KEY and
+#: ALE_<PROVIDER>_BASE_URL in the checkout's .env.
+MODELS = {
+    "anthropic": os.environ.get("ALE_LIVE_ANTHROPIC_MODEL", "claude-sonnet-5"),
+    "openai": os.environ.get("ALE_LIVE_OPENAI_MODEL", "gpt-5.6-luna"),
+    "xai": "grok-4.5",
+}
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
 SHIPPED = (ClaudeCodeHarness(), CodexCliHarness(), GrokBuildHarness(), OpenClawCliHarness())
 WORKSPACE_ROOT = sibling_checkout("ale-tasks-base").parent
@@ -40,7 +47,7 @@ def run_task(
     *,
     run_id: str,
     agent: str = "claude-code",
-    model: str = MODEL,
+    model: str = MODELS["anthropic"],
     settings: tuple[str, ...] = (),
 ) -> Path:
     executable = Path(sys.executable).parent / "ale"
@@ -99,7 +106,7 @@ def native_session_file(
 def audit_episode(
     episode: Path,
     *,
-    model: str = MODEL,
+    model: str = MODELS["anthropic"],
     harness: str = "claude-code",
     version: str = "2.1.227",
 ) -> tuple[
@@ -188,13 +195,10 @@ def llm_audit_episode(episode: Path, *, requirement: str) -> dict[str, Any]:
 
 def llm_audit_evidence(evidence: dict[str, Any], *, requirement: str) -> dict[str, Any]:
     """Judge a live acceptance artifact with an independent model call."""
-    api_key, upstream = provider_credentials(
-        os.environ.get("ALE_LIVE_ANTHROPIC_API_KEY_ENV", ""),
-        os.environ.get("ALE_LIVE_ANTHROPIC_BASE_URL", ""),
-    )
+    api_key, upstream = provider_credentials("anthropic")
     payload = json.dumps(
         {
-            "model": MODEL,
+            "model": MODELS["anthropic"],
             "max_tokens": 1200,
             "messages": [
                 {

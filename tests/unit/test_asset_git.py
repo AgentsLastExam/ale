@@ -137,6 +137,9 @@ def test_publish_keeps_exact_commit_and_resumes_same_draft(
     main = git(asset_remote, "rev-parse", "main")
 
     class Api:
+        def __init__(self, *, token: object) -> None:
+            self.token = token
+
         def repo_info(self, *args: object, **kwargs: object) -> object:
             return SimpleNamespace(private=True)
 
@@ -225,6 +228,9 @@ def test_private_org_repository_and_collection_are_enforced(
     calls: list[tuple[str, object]] = []
 
     class Api:
+        def __init__(self, *, token: object) -> None:
+            calls.append(("token", token))
+
         def create_repo(self, repo: str, **kwargs: object) -> None:
             calls.append((repo, kwargs))
 
@@ -239,6 +245,7 @@ def test_private_org_repository_and_collection_are_enforced(
             calls.append(("collection", args))
 
     monkeypatch.delenv("ALE_ASSETS_COLLECTION", raising=False)
+    monkeypatch.setenv("ALE_HF_TOKEN", "hf-checkout-token")
     if configured is None:
         monkeypatch.delenv("ALE_ASSETS_NAMESPACE", raising=False)
     else:
@@ -248,10 +255,13 @@ def test_private_org_repository_and_collection_are_enforced(
         f"{namespace}/tasks-example",
         f"{namespace}/assets-123",
     )
-    assert calls[0] == (
-        f"{namespace}/tasks-example",
-        {"repo_type": "dataset", "private": True, "exist_ok": True},
-    )
+    assert calls[:2] == [
+        ("token", "hf-checkout-token"),
+        (
+            f"{namespace}/tasks-example",
+            {"repo_type": "dataset", "private": True, "exist_ok": True},
+        ),
+    ]
     AssetCheckpoint(repo_id=f"{namespace}/demo", task_path="tasks/demo", workspace=Path("/w"))
 
 
@@ -337,6 +347,9 @@ def test_publication_retry_does_not_overwrite_an_updated_pr(
     original = asset_git._git
 
     class Api:
+        def __init__(self, *, token: object) -> None:
+            self.token = token
+
         def repo_info(self, *args: object, **kwargs: object) -> object:
             return SimpleNamespace(private=True)
 
@@ -407,6 +420,9 @@ def test_pr_cross_link_preserves_body_and_is_idempotent(
     updates: list[str] = []
 
     class Api:
+        def __init__(self, *, token: object) -> None:
+            self.token = token
+
         def get_discussion_details(self, *args: object, **kwargs: object) -> object:
             return SimpleNamespace(events=[comment])
 

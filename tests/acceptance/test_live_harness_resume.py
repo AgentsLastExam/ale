@@ -22,42 +22,28 @@ from ale.run.recording import EpisodeRecording
 from ale.run.secrets import provider_credentials
 from tests.support import CONTAINER_BASE, prepare_reference
 
-from .trajectory import LIVE, llm_audit_evidence, native_session_file
+from .trajectory import LIVE, MODELS, llm_audit_evidence, native_session_file
 
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm, LIVE]
 
 CASES = (
-    (
-        GrokBuildHarness,
-        "grok-4.5",
-        "XAI_API_KEY",
-        "https://api.x.ai",
-    ),
-    (
-        CodexCliHarness,
-        "gpt-5-mini",
-        "OPENAI_API_KEY",
-        "https://api.openai.com",
-    ),
-    (
-        OpenClawCliHarness,
-        "gpt-5-mini",
-        "OPENAI_API_KEY",
-        "https://api.openai.com",
-    ),
+    (GrokBuildHarness, "xai"),
+    (CodexCliHarness, "openai"),
+    (OpenClawCliHarness, "openai"),
 )
 
 
 @pytest.mark.parametrize(
-    ("factory", "model", "key_var", "upstream_url"),
+    ("factory", "provider"),
     CASES,
     ids=["grok-build", "codex-cli", "openclaw-cli"],
 )
 async def test_real_native_resume_keeps_exact_session_and_only_new_input(
-    tmp_path, factory, model: str, key_var: str, upstream_url: str
+    tmp_path, factory, provider: str
 ) -> None:
     harness = factory()
-    key, upstream = provider_credentials(key_var, upstream_url, "openai-responses")
+    model = MODELS[provider]
+    key, upstream = provider_credentials(provider)
     recording = EpisodeRecording(tmp_path)
     gateway = Gateway(
         api_key=key,

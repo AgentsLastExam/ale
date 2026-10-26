@@ -23,10 +23,12 @@ directory. A linked worktree's directory name is never the dataset name. Dataset
 mirror source paths, for example `tasks/example/verify/assets/expected.json`.
 
 The first asset checkpoint may create the missing private dataset and empty collection.
-It does not upload Task files. An existing public dataset is rejected. Commands use the
-operator's HF authentication, including `HF_TOKEN`; credentials never enter a remote
-Git URL or the Task definition. Git and Git LFS must be installed for local checkpoints
-and uploads. `ALE_ASSETS_COLLECTION` or `--collection`, when supplied for manual sync,
+It does not upload Task files. An existing public dataset is rejected. Commands pass
+`ALE_HF_TOKEN` from the checkout's `.env` explicitly to every Hugging Face call and Git
+request; without it they are anonymous. The operator's own `HF_TOKEN` or cached Hugging
+Face login is never used, so the checkout alone decides which account ALE acts as.
+Credentials never enter a remote Git URL or the Task definition. Git and Git LFS must be
+installed for local checkpoints and uploads. `ALE_ASSETS_COLLECTION` or `--collection`, when supplied for manual sync,
 must identify the namespace's collection titled `assets`; otherwise it is discovered.
 
 ## Local versions

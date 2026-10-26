@@ -47,7 +47,10 @@ import json
 from pathlib import Path
 
 home = Path(__import__('os').environ['ALE_HOME'])
-for name in ('OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'XAI_API_KEY'):
+for name in (
+    'OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'XAI_API_KEY',
+    'ALE_OPENAI_API_KEY', 'ALE_CLAUDE_CODE_OAUTH_TOKEN', 'ALE_XAI_API_KEY',
+):
     assert name not in __import__('os').environ
 auth = home / '.codex-ale/auth.json'
 assert not auth.exists()

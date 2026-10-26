@@ -197,8 +197,8 @@ async def test_no_message_carries_the_key(daytona: tuple[DaytonaApi, Fake]) -> N
 
 
 def test_the_key_comes_from_the_named_variable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
-    with pytest.raises(ConfigError, match="DAYTONA_API_KEY"):
+    monkeypatch.delenv("ALE_DAYTONA_API_KEY", raising=False)
+    with pytest.raises(ConfigError, match="ALE_DAYTONA_API_KEY"):
         DaytonaApi.from_environment()
     monkeypatch.setenv("OTHER_KEY", " abc ")
     assert DaytonaApi.from_environment("OTHER_KEY")._key == "abc"

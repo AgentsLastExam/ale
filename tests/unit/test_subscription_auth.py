@@ -133,7 +133,7 @@ def test_all_subscription_harnesses_use_the_gateway(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     isolated_auth_root(tmp_path, monkeypatch)
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token")
+    monkeypatch.setenv("ALE_CLAUDE_CODE_OAUTH_TOKEN", "oauth-token")
 
     auth = resolve_authentication(AgentConfig(name="claude-code", authentication="subscription"))
     provenance = auth.provenance(source="cli", cli_version="2.1.227")

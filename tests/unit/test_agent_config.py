@@ -13,7 +13,7 @@ from ale.core.errors import ConfigError
 from ale.run.cli.tasks import PRESET_DIR, _config
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.provenance import agent_provenance
-from ale.run.secrets import provider_credentials
+from ale.run.secrets import provider_credentials, provider_endpoint
 
 pytestmark = pytest.mark.unit
 main = import_module("ale.run.cli.main")
@@ -87,8 +87,8 @@ def test_cli_inherits_runtime_configuration_with_explicit_overrides(
     runtime_config = tmp_path / "runtime.toml"
     runtime_config.write_text(
         "[agent]\nname='nop'\n"
-        "[verification.llm]\nmodel='runtime-judge'\nreasoning_effort='medium'\n"
-        "base_url='https://example.test'\napi_key_env='JUDGE_KEY'\n"
+        "[verification.llm]\nprovider='openai'\ndialect='openai-responses'\n"
+        "model='runtime-judge'\nreasoning_effort='medium'\n"
     )
     explicit_config = tmp_path / "explicit.toml"
     explicit_config.write_text(runtime_config.read_text().replace("runtime-judge", "explicit"))
@@ -156,19 +156,49 @@ def test_preset_and_effective_settings_are_recorded() -> None:
     assert provenance.native_limits == {"max_turns": "unlimited"}
 
 
-def test_a_custom_endpoint_must_name_its_own_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_provider_key_pairs_only_with_that_providers_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "default-key")
+    monkeypatch.setenv("ALE_ANTHROPIC_API_KEY", "anthropic-key")
+    monkeypatch.delenv("ALE_ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("ALE_OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("ALE_OPENAI_BASE_URL", "https://gateway.example/")
+    monkeypatch.delenv("ALE_XAI_API_KEY", raising=False)
+
+    assert provider_endpoint("anthropic") == ("ALE_ANTHROPIC_API_KEY", "https://api.anthropic.com")
+    assert provider_credentials("anthropic") == ("anthropic-key", "https://api.anthropic.com")
+    assert provider_credentials("openai") == ("openai-key", "https://gateway.example")
+    with pytest.raises(ConfigError, match="ALE_XAI_API_KEY is not set"):
+        provider_credentials("xai")
+
+
+def test_a_one_off_endpoint_must_name_its_own_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALE_ANTHROPIC_API_KEY", "default-key")
+    monkeypatch.setenv("ALE_ANTHROPIC_BASE_URL", "https://gateway.example")
     monkeypatch.setenv("PROXY_KEY", "proxy-key")
 
     with pytest.raises(ConfigError, match="api-key-env"):
-        provider_credentials("", "https://proxy.example/anthropic", "anthropic")
-    assert provider_credentials("PROXY_KEY", "https://proxy.example/anthropic", "anthropic") == (
-        "proxy-key",
-        "https://proxy.example/anthropic",
-    )
-    assert provider_credentials("", "https://api.anthropic.com/", "anthropic") == (
+        provider_credentials("anthropic", base_url="https://api.anthropic.com")
+    assert provider_credentials(
+        "anthropic", base_url="https://proxy.example/anthropic", key_var="PROXY_KEY"
+    ) == ("proxy-key", "https://proxy.example/anthropic")
+    assert provider_credentials("anthropic", base_url="https://gateway.example/") == (
         "default-key",
-        "https://api.anthropic.com",
+        "https://gateway.example",
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "provider"),
+    [
+        ("claude-code", "anthropic"),
+        ("codex-cli", "openai"),
+        ("grok-build", "xai"),
+        ("openclaw-cli", "openai"),
+    ],
+)
+def test_each_preset_names_its_provider_and_no_endpoint(name: str, provider: str) -> None:
+    gateway = load_run_config(preset_path=PRESET_DIR / f"{name}.toml").gateway
+
+    assert gateway.provider == provider
+    assert gateway.base_url == gateway.api_key_env == ""

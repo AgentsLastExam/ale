@@ -76,7 +76,28 @@ Schema draft 04, 06 or 07; without it the response must still be a JSON object. 
 validation does not insert defaults or coerce values. References must be self-contained;
 external schema downloads are unsupported. Task Python handles all subsequent scoring.
 
-Both Judge kinds use the configured model, endpoint and credentials supplied by the run.
+Both Judge kinds use the model provider, model and reasoning effort configured by the run.
+A Judge names its provider rather than a key or URL, and its key and endpoint resolve as the
+Gateway's do, from `ALE_<PROVIDER>_API_KEY` and `ALE_<PROVIDER>_BASE_URL` (see
+[Security](security.md#3-provider-credentials-stay-on-the-host)). An LLM Judge also names the
+dialect it speaks; an Agent Judge speaks its CLI's (Responses for Codex, Messages for Claude
+Code).
+
+```toml
+[verification.llm]
+provider = "openai"
+dialect = "openai-responses"  # or openai-chat-completions, anthropic
+model = "gpt-5.6-luna"
+reasoning_effort = "medium"
+
+[verification.agent]
+provider = "anthropic"
+adapter = "claude-code"  # or codex-cli
+version = "2.1.227"
+model = "claude-sonnet-5"
+reasoning_effort = "high"
+```
+
 Agent Judge uses the configured exact CLI version, an invocation-specific native home,
 and the framework's elevated identity (root on Linux, Administrator on Windows).
 Tasks may call either Judge repeatedly, interleave ordinary checks, or inspect files
@@ -116,8 +137,9 @@ and that session's token (`ALE_LLM_JUDGE_TOKEN`, `ALE_AGENT_JUDGE_TOKEN`), so co
 wrote cannot read a credential it could spend elsewhere. Judge sessions have no limits and
 never replay a cached response, so a retried verdict samples again; their calls appear in
 the transport trace with `purpose: judge` and are left out of the agent's trajectory and
-usage. A Judge whose key is not set on the Host gets no session. The RunLock records each
-Judge's configured endpoint, not the Gateway address the verifier saw.
+usage. A Judge whose key is not set on the Host gets no session. The RunLock records the
+endpoint each Judge's provider resolved to, with an LLM Judge's request path, not the
+Gateway address the verifier saw.
 
 A Judge supplies evidence for task scoring, so ALE sets no ceiling of its own on how long it thinks or how
 much it writes, and offers no setting for one. An LLM Judge streams its response and sends
