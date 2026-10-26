@@ -26,6 +26,7 @@ from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
 from ale.run.harnesses.droid import DroidHarness
+from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import BlobStore, EpisodeRecording
 from tests.integration.scripted_model import FINAL, ScriptedModel
@@ -48,6 +49,12 @@ CASES: dict[str, Case] = {
     **{
         f"droid-{dialect}": Case(
             partial(DroidHarness, gateway_dialect=dialect), dialect, r"^Execute$"
+        )
+        for dialect in DIALECTS
+    },
+    **{
+        f"pi-cli-{dialect}": Case(
+            partial(PiCliHarness, gateway_dialect=dialect), dialect, r"^bash$"
         )
         for dialect in DIALECTS
     },

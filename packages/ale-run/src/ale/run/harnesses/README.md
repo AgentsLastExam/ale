@@ -15,6 +15,7 @@ an agent-owned rollout against ALE's stepwise Sandbox environment.
 | `muse-code` | autonomous | Meta's OpenAI Responses | yes | no |
 | `zcode` | autonomous | configured dialect; Anthropic Messages by default | yes | no |
 | `droid` | autonomous | Anthropic Messages by default; also Chat Completions or Responses | yes | no |
+| `pi-cli` | autonomous | OpenAI Chat Completions by default; also Anthropic Messages or Responses | yes | no |
 | `computer-use` | policy | Anthropic Messages | no | no |
 | `oracle`, `nop` | built in | none | no | no |
 

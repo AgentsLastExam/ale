@@ -1,0 +1,22 @@
+[agent]
+name = "pi-cli"
+model = "gpt-5.6-luna"
+version = "1.4.0"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+thinking = "default"
+context_window = "default"
+max_output_tokens = "default"
+disabled_tools = []
+
+[gateway]
+provider = "openai"
+dialect = "openai-chat-completions"
+
+[gateway.limits]
+max_model_calls = "unlimited"
+max_input_tokens = "unlimited"
+max_output_tokens = "unlimited"
+max_total_tokens = "unlimited"
