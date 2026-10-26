@@ -42,10 +42,13 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
         " && printf 'world' > /home/user/input/word.txt \\\n"
         " && chown -R user:user /home/user/input /home/user/output\n"
     )
-    built = subprocess.run(
-        ["docker", "buildx", "build", "--load", "--provenance=false", "-q", str(context)],
+    # Named by tag: the ID `-q` prints is not one the containerd image store resolves.
+    built = "ale-test-bare-vm:latest"
+    subprocess.run(
+        ["docker", "buildx", "build", "--load", "--provenance=false", "-q", "-t", built,
+         str(context)],
         capture_output=True, text=True, check=True,
-    ).stdout.strip()  # fmt: skip
+    )  # fmt: skip
     bare = tmp_path / "bare.qcow2"
     await task_images._materialize(built, bare)
     builder = task_images.MATERIALIZER_IMAGE
