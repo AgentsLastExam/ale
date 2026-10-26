@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import TextIO
 
@@ -22,6 +23,7 @@ __all__ = [
     "publish_vm_image",
     "resolve_container_image",
     "resolve_container_reference",
+    "resolve_loaded_image",
     "resolve_local_vm_fixture",
     "resolve_prepared_container_image",
     "resolve_prepared_vm_image",
@@ -68,6 +70,40 @@ async def _run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
         process.returncode or 0,
         stdout.decode("utf-8", "replace"),
         stderr.decode("utf-8", "replace"),
+    )
+
+
+async def resolve_loaded_image(
+    metadata: Mapping[str, object],
+    *,
+    run: Callable[..., Awaitable[tuple[int, str, str]]] | None = None,
+) -> str:
+    """The local image ID of the image a Buildx ``--load`` build just produced.
+
+    Docker's classic image store names an image by its config digest and the containerd
+    store (the default on new Docker installs) by its manifest digest. Buildx reports
+    both, so whichever the daemon resolves is the image.
+    """
+    run = run or _run
+    candidates = [
+        digest
+        for digest in (
+            metadata.get("containerimage.config.digest"),
+            metadata.get("containerimage.digest"),
+        )
+        if isinstance(digest, str) and digest.startswith("sha256:")
+    ]
+    if not candidates:
+        raise ProviderStartError("Buildx metadata has no immutable image digest")
+    for digest in candidates:
+        code, image_id, stderr = await run(
+            "docker", "image", "inspect", "--format", "{{.Id}}", digest, timeout=30
+        )
+        image_id = image_id.strip()
+        if code == 0 and image_id.startswith("sha256:"):
+            return image_id
+    raise ProviderStartError(
+        f"Docker did not load the built Task image: {stderr.strip() or image_id}"
     )
 
 

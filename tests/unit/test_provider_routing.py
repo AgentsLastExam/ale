@@ -138,6 +138,8 @@ async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_hand
     monkeypatch.setattr(cli, "provider_named", Retaining)
 
     assert [item["handle"] for item in await _list_retained_sandboxes()] == [
+        "daytona:a",
+        "daytona:z",
         "docker:a",
         "docker:z",
         "qemu:a",
@@ -145,9 +147,11 @@ async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_hand
     ]
     await _destroy_retained_sandbox("docker:ale-docker")
     await _destroy_retained_sandbox("qemu:ale-qemu")
+    await _destroy_retained_sandbox("daytona:abc")
     assert destroyed == [
         ("docker", "docker:ale-docker"),
         ("qemu", "qemu:ale-qemu"),
+        ("daytona", "daytona:abc"),
     ]
     with pytest.raises(ProviderCapabilityError, match="must start"):
         await _destroy_retained_sandbox("ale-ambiguous")

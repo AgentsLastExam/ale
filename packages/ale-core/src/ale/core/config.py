@@ -20,10 +20,10 @@ import os
 import tomllib
 from copy import deepcopy
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from ale.core.errors import ConfigError
 from ale.core.ids import content_hash
@@ -228,11 +228,33 @@ class SandboxRetentionConfig(BaseModel):
     verifier: Literal["destroy", "keep"] = "destroy"
 
 
+class DaytonaProviderConfig(BaseModel):
+    """Settings for the Daytona container backend. The API key is read from the environment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target: str = Field(default="us", min_length=1)
+    """The Daytona region sandboxes are created in."""
+    api_key_env: str = Field(default="DAYTONA_API_KEY", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    """Names the variable holding the key, so the key itself is never a setting."""
+    lifetime_hours: int = Field(default=24, ge=1, le=720, strict=True)
+    """Daytona deletes a sandbox this long after creation, so a crashed run cannot leak one."""
+    retained_lifetime_hours: int = Field(default=72, ge=1, le=720, strict=True)
+    """The same limit for sandboxes kept with ``sandbox_retention``."""
+    gpu_types: tuple[Annotated[str, Field(min_length=1)], ...] = ("H100",)
+    """GPU models a sandbox that requests GPUs may get, in order of preference.
+
+    Tasks ask for a count only. Daytona pins a sandbox to the first model with capacity, so
+    one model keeps results comparable; empty lets Daytona choose any.
+    """
+
+
 class ContainerProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["docker"] = "docker"
+    provider: Literal["docker", "daytona"] = "docker"
     gpus: tuple[Annotated[int, Field(ge=0, strict=True)], ...] = ()
+    daytona: DaytonaProviderConfig = DaytonaProviderConfig()
 
     @field_validator("gpus")
     @classmethod
@@ -240,6 +262,12 @@ class ContainerProviderConfig(BaseModel):
         if len(set(values)) != len(values):
             raise ValueError("Docker GPU indices must be unique")
         return values
+
+    @model_validator(mode="after")
+    def _gpus_are_docker_only(self) -> Self:
+        if self.gpus and self.provider != "docker":
+            raise ValueError("container.gpus selects Docker devices; it needs provider = docker")
+        return self
 
 
 class VmProviderConfig(BaseModel):

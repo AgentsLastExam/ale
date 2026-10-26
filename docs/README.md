@@ -21,6 +21,7 @@ lasting contract belongs here.
 | Trust boundaries and guarantees | [specs/security.md](specs/security.md) |
 | Develop the engine | [guides/development.md](guides/development.md) |
 | Configure subscription login | [guides/subscription-auth.md](guides/subscription-auth.md) |
+| Run episodes on Daytona | [guides/daytona.md](guides/daytona.md) |
 
 Living specifications describe what is true now and, briefly, why; superseded
 alternatives remain in Git history. Guides explain how to use the contracts without

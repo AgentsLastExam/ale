@@ -256,9 +256,9 @@ Task code.
 
 Each Sandbox owns two fixed guest connections: one for commands and one for file
 discovery and reads. A long-running command must not block periodic log collection.
-Docker uses two stdio guest sessions; QEMU uses two authenticated connections to the
-same guest server and port. Providers close both on startup failure, retention,
-destruction, and image export.
+Docker uses two stdio guest sessions, Daytona two over SSH; QEMU uses two authenticated
+connections to the same guest server and port. Providers close both on startup failure,
+retention, destruction, and image export.
 
 `Sandbox.list_files(path)` returns the regular files at or below an absolute path, sorted,
 with byte sizes; a missing path returns none. `Sandbox.read_file` reads a regular file or
@@ -291,15 +291,22 @@ runner from being mistaken for a container sandbox.
 QEMU enforces Task egress in the runner network namespace, outside both Linux and Windows
 guests. The guest does not need an OS-specific firewall implementation for ALE policy.
 
-Retained handles are always provider-qualified: `docker:<runtime-id>` for containers and
-`qemu:<runtime-id>` for VMs. Unqualified handles are rejected. Listing, destroying and
-attaching are Provider operations, routed by the Provider a handle or RunLock names, so a
-new backend needs no CLI change.
+The Daytona Provider runs Linux container images, with or without GPUs, on Daytona's
+cloud under the same contract; how it meets it there is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#daytona). Two of its
+differences reach other modules: the RunLock's observed image is the digest pushed to
+Daytona's registry, and memory and writable storage must be whole GiB, refused rather
+than rounded.
+
+Retained handles are always provider-qualified: `docker:<runtime-id>` for containers,
+`qemu:<runtime-id>` for VMs and `daytona:<sandbox-id>` for Daytona. Unqualified handles
+are rejected. Listing, destroying and attaching are Provider operations, routed by the
+Provider a handle or RunLock names, so a new backend needs no CLI change.
 
 GPU workload libraries such as CUDA, PyTorch, and simulators remain Task Dockerfile
-responsibility. Tasks request a count only; Provider configuration selects eligible host
-indices and ALE records actual UUIDs. QEMU GPU passthrough remains a Provider capability,
-not a Task image declaration.
+responsibility. Tasks request a count only; Provider configuration selects eligible
+devices (host indices, or models on Daytona) and ALE records actual UUIDs. QEMU GPU
+passthrough remains a Provider capability, not a Task image declaration.
 
 ## Permissions
 
@@ -345,10 +352,11 @@ engine).
 | Agent work runs as `image.user`, framework work as root or Administrator; the agent elevates exactly when `resources.sudo` asks | Provider check in `create`, both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |
-| Framework phases have the network; after `close_egress` the agent reaches its Gateway (and allowlist proxy) and nothing else; `open` Tasks are never sealed; the Gateway address never moves | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |
+| Framework phases have the network; after `close_egress` the agent reaches its Gateway (and, for `allowlist`, the declared hosts) and nothing else; `open` Tasks are never sealed; the Gateway address never moves | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |
 | Resources are applied or rejected; the RunLock records the observed image and allocation | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
 | Destroy is idempotent; retained sandboxes can be listed and destroyed through their Provider | Provider | `test_destroy_is_idempotent`, `test_a_retained_sandbox_can_be_listed_and_destroyed` |
 | A declared desktop can be captured and driven | Provider and image | `test_a_declared_desktop_can_actually_be_used`, `test_a_declared_desktop_accepts_input` |
+| No platform service inside the sandbox gives the agent more than its account | Provider check in `create` | `test_the_agent_cannot_reach_the_platform_daemon` |
 
 `open_egress` and `close_egress` are abstract: a default that did nothing would let a new
 backend run the agent with the network while its RunLock said `block`. A backend that
