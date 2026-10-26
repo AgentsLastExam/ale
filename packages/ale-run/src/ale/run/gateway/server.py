@@ -165,12 +165,25 @@ class Gateway:
     def _build_app(self) -> web.Application:
         app = web.Application(client_max_size=64 * 1024 * 1024)
         app.router.add_get("/healthz", self._healthz)
+        # `/models`, `/v1/models`, and a CLI's own catalog path such as `/muse-code/models`.
+        app.router.add_get(r"/{prefix:(?:[\w.-]+/)*}models", self._models)
         for path in REQUEST_PATHS.values():
             app.router.add_post(path, self._messages)
         return app
 
     async def _healthz(self, request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "dialects": [self.dialect]})
+
+    async def _models(self, request: web.Request) -> web.Response:
+        """The model catalog a session sees: exactly the model its run imposes.
+
+        Some CLIs fetch a catalog before their first call and stop without one. Listing
+        only the run's model keeps the agent's view consistent with what calls receive.
+        """
+        session = self._authenticate(request)
+        return web.json_response(
+            {"object": "list", "data": [{"id": session.model, "object": "model"}]}
+        )
 
     async def _messages(self, request: web.Request) -> web.StreamResponse:
         session = self._authenticate(request)
