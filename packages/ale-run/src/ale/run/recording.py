@@ -13,6 +13,7 @@ import re
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -161,9 +162,17 @@ class BlobStore:
         target = self.episode_dir / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
-            temporary = target.with_name(f".{target.name}.tmp")
-            temporary.write_bytes(data)
-            os.replace(temporary, target)
+            temporary: Path | None = None
+            try:
+                with NamedTemporaryFile(
+                    dir=target.parent, prefix=f".{target.name}.", suffix=".tmp", delete=False
+                ) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(data)
+                os.replace(temporary, target)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
         return BlobRef(
             path=relative.as_posix(),
             media_type=media_type,

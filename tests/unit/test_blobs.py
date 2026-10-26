@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from pydantic import ValidationError
 
 from ale.core.blob import BlobRef, InlineText, MediaClass
+from ale.run import recording
 from ale.run.recording import INLINE_TEXT_LIMIT, BlobStore, EpisodeRecording
 
 pytestmark = pytest.mark.unit
@@ -55,6 +58,42 @@ def test_content_addressing_deduplicates_and_uses_safe_mime_extension(
     assert first == second
     assert first.path.endswith(".png")
     assert len(list((tmp_path / "blobs" / "image").iterdir())) == 1
+
+
+def test_concurrent_same_blob_writes_deduplicate_without_temporary_file_races(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = BlobStore(tmp_path)
+    workers = 8
+    ready = Barrier(workers)
+    replace = recording.os.replace
+
+    def replace_together(source: Path, target: Path) -> None:
+        ready.wait(timeout=5)
+        replace(source, target)
+
+    monkeypatch.setattr(recording.os, "replace", replace_together)
+    payload = b"shared image payload" * 1024
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        writes = [
+            executor.submit(store.put, payload, media_type="image/png") for _ in range(workers)
+        ]
+        refs = [write.result() for write in writes]
+    assert refs == [refs[0]] * workers
+    assert (tmp_path / refs[0].path).read_bytes() == payload
+    assert list((tmp_path / "blobs/image").iterdir()) == [tmp_path / refs[0].path]
+
+
+def test_failed_blob_publication_removes_its_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_replace(source: Path, target: Path) -> None:
+        raise OSError("publication failed")
+
+    monkeypatch.setattr(recording.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="publication failed"):
+        BlobStore(tmp_path).put(b"image", media_type="image/png")
+    assert list((tmp_path / "blobs/image").iterdir()) == []
 
 
 def test_media_classes_cover_large_payload_families() -> None:
