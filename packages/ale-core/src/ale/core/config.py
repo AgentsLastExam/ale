@@ -119,7 +119,7 @@ class ArtifactPolicy(BaseModel):
 
 
 class LoggingPolicy(BaseModel):
-    """Explicit retention choices; canonical evidence is never disabled."""
+    """Evidence collection and retention; canonical records are always written."""
 
     model_config = ConfigDict(extra="forbid")
 

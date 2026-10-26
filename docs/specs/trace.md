@@ -53,9 +53,10 @@ All ALE extensions live under `extra.ale`:
 - `attachments`: non-image BlobRefs;
 - `mcp`: logical MCP server and tool;
 - `normalized_action`: CUA action correlated with the same MCP call;
-- `incomplete` and `incomplete_reason`: valid observed prefix after interruption, or
-  `conversion_failed` when the Harness parser raised and only the instruction and final
-  message could be recorded;
+- `incomplete` and `incomplete_reason`: a valid prefix after interruption
+  (`agent_interrupted`) or an incomplete copy (`collection_failed`), or
+  `conversion_failed` when the parser raised and the trajectory fell back to the
+  instruction and final message;
 - `parse_issues`: bounded `{reason, detail}` records of native evidence the parser could not
   convert.
 
@@ -211,8 +212,9 @@ transport_payloads = "digests"
 token_data = "none"
 ```
 
-- `native_logs="minimal"` deletes successfully converted native logs after ATIF
-  validation. `debug` retains byte-faithful logs under `logs/<harness>/`.
+- `native_logs="minimal"` deletes the mirrored Harness logs under `logs/<harness>/` after
+  a complete final conversion with no parse issues; `debug` keeps them. Nothing is
+  deleted while the agent runs.
 - Conversion failure or interruption always retains available native evidence.
 - `transport_payloads="debug"` may retain provider payload evidence under
   `logs/gateway/`; `digests` is the default.

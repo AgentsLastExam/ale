@@ -71,6 +71,12 @@ from ale.core.trace import (
 )
 from ale.core.trajectory import AtifAgent, AtifMetrics, AtifTrajectory, TrajectoryBuilder
 from ale.core.verdict import Verdict
+from ale.run.environments.log_mirror import (
+    FINAL_SYNC_TIMEOUT_SEC,
+    SYNC_INTERVAL_SEC,
+    SYNC_TIMEOUT_SEC,
+    LogMirror,
+)
 from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
 from ale.run.harnesses.builtin import oracle_dir
 from ale.run.recording import (
@@ -141,14 +147,25 @@ class StandardEnvironment(Environment):
             self.harness.validate_os(spec.os)
             self.harness.validate_resources(ctx.agent_resources)
         sandbox = await self._timed(ctx, Phase.PROVISION, self._provision(ctx))
+        logs = (
+            LogMirror(
+                sandbox,
+                home=ctx.home,
+                os=spec.os,
+                paths=self.harness.logs,
+                target=ctx.run_dir / "logs" / self.harness.name,
+            )
+            if self.agent_enabled and self.harness.logs
+            else None
+        )
         try:
             await self._with_deadline(
                 ctx, Phase.SETUP, spec.timeouts.setup, self._setup(task, ctx, sandbox)
             )
             if self.agent_enabled:
-                await self._agent(task, ctx, sandbox)
+                await self._agent(task, ctx, sandbox, logs=logs)
             try:
-                await self._capture_solver_evidence(ctx, sandbox)
+                await self._capture_solver_evidence(ctx, sandbox, logs=logs)
             except BaseException:
                 ctx.failure_phase = Phase.AGENT
                 raise
@@ -171,7 +188,9 @@ class StandardEnvironment(Environment):
             )
         finally:
             # Teardown runs on every path, including cancellation.
-            await asyncio.shield(self._timed(ctx, Phase.TEARDOWN, self._teardown(ctx, sandbox)))
+            await asyncio.shield(
+                self._timed(ctx, Phase.TEARDOWN, self._teardown(ctx, sandbox, logs=logs))
+            )
 
         ctx.verified_rewards = rewards
         return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
@@ -259,7 +278,14 @@ class StandardEnvironment(Environment):
             if folder.stage_entry("setup", ctx.spec.os):
                 await self._run_stage(ctx, sandbox, target, Phase.SETUP)
 
-    async def _agent(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
+    async def _agent(
+        self,
+        task: Task,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        *,
+        logs: LogMirror | None = None,
+    ) -> None:
         spec = ctx.spec
         ctx.agent_started = True
         timeout = self.timeouts.agent or spec.timeouts.agent
@@ -316,7 +342,27 @@ class StandardEnvironment(Environment):
                     detail = run.final_message or "no diagnostic output"
                     raise AgentError(f"{harness.name} exited {run.exit_code}: {detail}")
 
-        await self._with_deadline(ctx, Phase.AGENT, timeout, launch())
+        polling = asyncio.create_task(self._poll_logs(logs)) if logs is not None else None
+        try:
+            await self._with_deadline(ctx, Phase.AGENT, timeout, launch())
+        finally:
+            if polling is not None:
+                polling.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await polling
+
+    async def _poll_logs(self, logs: LogMirror) -> None:
+        """Copy what the agent appended to its logs while it runs; conversion waits."""
+        while True:
+            await asyncio.sleep(SYNC_INTERVAL_SEC)
+            try:
+                async with asyncio.timeout(SYNC_TIMEOUT_SEC):
+                    await logs.sync()
+            except Exception as exc:
+                logging.getLogger("ale.execution").warning(
+                    "periodic harness log copy failed; will retry",
+                    extra={"ale_data": {"error": type(exc).__name__}},
+                )
 
     async def _stage_mcp_files(
         self, ctx: EpisodeContext, sandbox: Sandbox
@@ -641,7 +687,13 @@ class StandardEnvironment(Environment):
         atomic_write_json(ctx.run_dir / "verification.json", result, sort_keys=False)
         return result
 
-    async def _capture_solver_evidence(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
+    async def _capture_solver_evidence(
+        self,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        *,
+        logs: LogMirror | None = None,
+    ) -> None:
         if ctx.solver_evidence_captured:
             return
         logger = logging.getLogger("ale.execution")
@@ -649,31 +701,21 @@ class StandardEnvironment(Environment):
         # harness went about producing it are different questions with different owners:
         # the task declares the first because only it knows what its output is, and the
         # harness declares the second because only it knows what it writes.
-        for name in getattr(self.harness, "logs", ()):
+        collection_failed = False
+        if logs is not None and ctx.agent_started:
             try:
-                await ctx.artifacts.collect_file(
-                    sandbox,
-                    _sandbox_path(ctx.spec.os, ctx.home, *PurePosixPath(name).parts),
-                    f"{self.harness.name}/{name}",
-                )
-                logger.info(
-                    "native log collected",
-                    extra={"ale_data": {"harness": self.harness.name, "name": name}},
-                )
+                async with asyncio.timeout(FINAL_SYNC_TIMEOUT_SEC):
+                    await logs.sync(final=True)
             except Exception as exc:
+                collection_failed = True
                 logger.warning(
-                    "native log collection failed",
-                    extra={
-                        "ale_data": {
-                            "harness": self.harness.name,
-                            "name": name,
-                            "error": str(exc),
-                        }
-                    },
+                    "final harness log copy failed",
+                    extra={"ale_data": {"error": type(exc).__name__}},
                 )
+            collection_failed = collection_failed or logs.incomplete
 
         if ctx.agent_started and not ctx.trajectory_written:
-            self._parse_harness_trajectory(ctx)
+            self._parse_harness_trajectory(ctx, collection_failed=collection_failed)
 
         if ctx.artifacts.enabled:
             for index, path in enumerate(ctx.spec.artifacts):
@@ -689,14 +731,20 @@ class StandardEnvironment(Environment):
 
         ctx.solver_evidence_captured = True
 
-    async def _teardown(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
+    async def _teardown(
+        self,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        *,
+        logs: LogMirror | None = None,
+    ) -> None:
         # Best-effort interrupted evidence does not replace the primary failure.
         if ctx.agent_started and not ctx.solver_evidence_captured:
             try:
-                await self._capture_solver_evidence(ctx, sandbox)
+                await self._capture_solver_evidence(ctx, sandbox, logs=logs)
             except Exception as exc:
                 logging.getLogger("ale.execution").warning(
-                    "interrupted solver evidence cleanup failed",
+                    "interrupted solver evidence capture failed",
                     extra={"ale_data": {"error": str(exc)}},
                 )
         await self._sanitize_for_retention(ctx, sandbox)
@@ -743,10 +791,32 @@ class StandardEnvironment(Environment):
             )
         return await sandbox.exec(["rm", "-rf", "--", *paths])
 
-    def _parse_harness_trajectory(self, ctx: EpisodeContext) -> None:
+    def _parse_harness_trajectory(
+        self, ctx: EpisodeContext, *, collection_failed: bool = False
+    ) -> None:
+        """The one conversion, after the final log copy, with links, accounting and retention."""
+        trajectory = self._convert_harness_trajectory(ctx, collection_failed=collection_failed)
+        self._persist_trajectory(ctx, trajectory)
+        ctx.trajectory_written = True
+        ale = (trajectory.extra or {}).get("ale") or {}
+        if (
+            ctx.agent_run is not None
+            and not ale.get("incomplete")
+            and not ale.get("parse_issues")
+            and ctx.logging_policy.native_logs == "minimal"
+        ):
+            shutil.rmtree(ctx.run_dir / "logs" / self.harness.name, ignore_errors=True)
+
+    def _convert_harness_trajectory(
+        self, ctx: EpisodeContext, *, collection_failed: bool = False
+    ) -> AtifTrajectory:
         assert ctx.blobs is not None
-        assert ctx.trajectory is not None
         run = ctx.agent_run
+        incomplete_reason: str | None = None
+        if run is None:
+            incomplete_reason = "agent_interrupted"
+        elif collection_failed:
+            incomplete_reason = "collection_failed"
         context = TrajectoryParseContext(
             episode_id=ctx.episode_id,
             trajectory_id=ctx.trajectory_id,
@@ -755,34 +825,33 @@ class StandardEnvironment(Environment):
             model=ctx.session.model,
             agent_version=ctx.agent_version or self.harness.version(),
             blobs=ctx.blobs,
-            session_id=getattr(getattr(run, "continuation", None), "native_session_id", None),
-            final_message=getattr(run, "final_message", None),
-            incomplete=run is None,
-            incomplete_reason="agent_interrupted" if run is None else None,
+            session_id=run.continuation.native_session_id if run and run.continuation else None,
+            final_message=run.final_message if run else None,
+            incomplete=incomplete_reason is not None,
+            incomplete_reason=incomplete_reason,
         )
-        converted = True
         try:
             trajectory = self.harness.parse_trajectory(context)
         except Exception as exc:
             # The agent finished; a converter defect must not decide its score. Keep the
             # minimal truthful trajectory, say why, and keep the native evidence.
-            converted = False
             detail = Redactor((ctx.session.token,))(f"{type(exc).__name__}: {exc}")[:500]
             logging.getLogger("ale.execution").warning(
                 "trajectory conversion failed",
                 extra={"ale_data": {"harness": self.harness.name, "error": detail}},
             )
-            trajectory = _with_parse_issue(
-                Harness.parse_trajectory(
-                    self.harness,
-                    replace(context, incomplete=True, incomplete_reason="conversion_failed"),
-                ),
+            fallback = Harness.parse_trajectory(
+                self.harness,
+                replace(context, incomplete=True, incomplete_reason="conversion_failed"),
+            )
+            # The fallback is what the parser could not replace, whatever else happened.
+            return _with_parse_issue(
+                _mark_incomplete(fallback, "conversion_failed"),
                 {"reason": "conversion_failed", "detail": detail},
             )
-        self._persist_trajectory(ctx, trajectory)
-        ctx.trajectory_written = True
-        if converted and run is not None and ctx.logging_policy.native_logs == "minimal":
-            shutil.rmtree(ctx.run_dir / "logs" / self.harness.name, ignore_errors=True)
+        if incomplete_reason is not None:
+            trajectory = _mark_incomplete(trajectory, incomplete_reason)
+        return trajectory
 
     def _persist_trajectory(self, ctx: EpisodeContext, trajectory: AtifTrajectory) -> None:
         """Correlate only observed provider/native IDs, then persist before links."""
@@ -1186,6 +1255,14 @@ def _with_parse_issue(trajectory: AtifTrajectory, issue: dict[str, object]) -> A
     extra = dict(trajectory.extra or {})
     ale = dict(extra.get("ale") or {})
     ale["parse_issues"] = [*ale.get("parse_issues", ()), issue]
+    extra["ale"] = ale
+    return trajectory.model_copy(update={"extra": extra})
+
+
+def _mark_incomplete(trajectory: AtifTrajectory, reason: str) -> AtifTrajectory:
+    extra = dict(trajectory.extra or {})
+    ale = dict(extra.get("ale") or {})
+    ale.update(incomplete=True, incomplete_reason=reason)
     extra["ale"] = ale
     return trajectory.model_copy(update={"extra": extra})
 

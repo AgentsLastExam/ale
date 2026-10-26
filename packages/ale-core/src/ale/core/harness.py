@@ -197,7 +197,10 @@ class Harness(ABC):
     supported_os: tuple[OperatingSystem, ...] = (OperatingSystem.LINUX,)
 
     logs: tuple[str, ...] = ()
-    """Files this harness writes about its own run, relative to the agent's home.
+    """Files or directories this harness writes about its own run, relative to the agent's home.
+
+    ALE mirrors them into ``logs/<harness>/`` at the same relative paths while the agent
+    runs, and once more after it stops; the parser reads that mirror.
 
     Not artifacts. An artifact is what the *agent produced* while doing the task, and the
     task declares it because only the task knows what its own output is. These are what

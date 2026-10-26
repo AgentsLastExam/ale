@@ -165,16 +165,18 @@ lookup is invalid.
 
 ### Collect and Parse
 
-Declare evidence paths in `Harness.logs`, relative to the agent home. ALE collects them
-regardless of task artifact policy before releasing the sandbox.
+`Harness.logs` declares, relative to the agent home, the files and directories that
+hold a Harness's own record of a run. The Environment mirrors them
+(see [Standard Environment](standard-environment.md#evidence-capture)) and the parser
+reads the mirror at the same relative paths; it never sees the Sandbox.
 
 `parse_trajectory()` is pure host-side code. For identical collected bytes it returns an
 identical schema-valid ATIF v1.8 trajectory. It preserves valid events before malformed
 or truncated input, returns bounded parse issues under `extra.ale`, and never writes
 Gateway transport records. A parser that raises does not decide the episode: ALE records
-the minimal truthful trajectory with `incomplete_reason: conversion_failed` and a
-`parse_issues` entry, keeps the native logs regardless of retention policy, and continues to
-artifact capture and verification.
+a minimal truthful trajectory, the instruction and final message, with
+`incomplete_reason: conversion_failed` and a `parse_issues` entry, keeps the native logs
+regardless of retention policy, and continues to artifact capture and verification.
 
 MCP records correlate the native tool-use ID with its tool result and retain the logical
 server, tool, request arguments, and success result or error. A selected tool with no

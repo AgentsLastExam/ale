@@ -385,18 +385,6 @@ class _Artifacts(ArtifactSink):
         except Exception as exc:
             logger.warning("artifact skipped: %s: %s", source, exc)
 
-    async def collect_file(self, sandbox: Sandbox, source: str, name: str) -> Path:
-        """One file rather than a directory, for a harness's own logs.
-
-        Kept out of ``artifacts/``: what the agent produced and how the harness went about
-        producing it are different things, and a reader who mixes them cannot tell which
-        is which.
-        """
-        target = self.run_dir / "logs" / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(await sandbox.read_file(source))
-        return target
-
     def path(self, name: str) -> Path:
         return self.root / name
 

@@ -48,7 +48,7 @@ remains `core/v1`.
 | **Execution Trace** | The append-only record of framework phases, commands, Task-stage output, policies, and diagnostics. | not agent-owned tool activity |
 | **Episode Result** | The sole terminal outcome: status, complete named rewards when verified, stats, bounded failure, phase timing, and timestamps. | not a scalar reward |
 | **Blob** | An immutable episode-local content-addressed payload referenced by path, media type, size, and digest. | not ordinary short inline text or a Task artifact |
-| **Native Log** | Optional Harness-native evidence retained according to Run policy and used to construct canonical trajectory. | not canonical while unparsed and not a Task artifact |
+| **Native Log** | A Harness's own record of a run, declared in `Harness.logs`, mirrored to the Host while the agent runs, and parsed into the canonical trajectory. | not canonical while unparsed and not a Task artifact |
 | **Run Status Projection** | The rebuildable Run-level view of queued, running, phase, terminal, interrupted, rewards, and bounded failure state. | not an Episode evidence store |
 | **RunLock** | Schema-2 provenance binding declaration, prepared image, actual Provider observation, Task, data, agent, framework, and effective configuration to a result. | not a qcow2 byte-hash cache |
 | **Workspace** | The image-declared agent home. Tasks write their own absolute paths; ALE does not add a hidden prefix. | not a repository or fixed framework directory layout |

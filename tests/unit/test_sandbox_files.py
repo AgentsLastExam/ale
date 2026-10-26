@@ -193,6 +193,41 @@ async def test_provider_reads_use_a_separate_guest_connection(tmp_path: Path, ba
             await asyncio.gather(*(client.close() for client in clients))
 
 
+@pytest.mark.asyncio
+async def test_log_mirror_follows_appends_and_rewrites_through_a_real_guest(
+    tmp_path: Path,
+) -> None:
+    from ale.core.taskspec import OperatingSystem
+    from ale.run.environments.log_mirror import LogMirror
+
+    transport = StdioTransport([sys.executable, guestd.__file__, "--stdio"])
+    await transport.start()
+    client = GuestClient(transport)
+    sandbox = DockerSandbox.__new__(DockerSandbox)
+    sandbox._client = sandbox._file_client = client
+    home, host = tmp_path / "home", tmp_path / "host"
+    log = home / ".ale-harness" / "stdout.log"
+    log.parent.mkdir(parents=True)
+    (home / ".ale-harness" / "link").symlink_to(tmp_path)
+    log.write_bytes(b"first\n")
+    mirror = LogMirror(
+        sandbox, home=str(home), os=OperatingSystem.LINUX, paths=(".ale-harness",), target=host
+    )
+    try:
+        await mirror.sync()
+        with log.open("ab") as stream:
+            stream.write(b"second\n")
+        await mirror.sync()
+        assert (host / ".ale-harness/stdout.log").read_bytes() == b"first\nsecond\n"
+        log.write_bytes(b"FIRST\nsecond\n")  # Same size, rewritten in place.
+        await mirror.sync(final=True)
+        assert (host / ".ale-harness/stdout.log").read_bytes() == b"FIRST\nsecond\n"
+        assert sorted(path.name for path in (host / ".ale-harness").iterdir()) == ["stdout.log"]
+        assert not mirror.incomplete
+    finally:
+        await client.close()
+
+
 def test_guest_writes_replace_links_instead_of_writing_through_them(tmp_path: Path) -> None:
     handler = guestd.Handler(lambda _: None)
     protected = tmp_path / "protected"
