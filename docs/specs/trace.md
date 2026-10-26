@@ -71,10 +71,8 @@ audio streams, and video content parts are outside ATIF v1.8.
 
 Subagents use embedded `subagent_trajectories` with unique `trajectory_id` values and
 resolvable `subagent_trajectory_ref` entries. A subagent is embedded in the trajectory of
-the agent that spawned it, so a nested subagent sits inside its parent's, and the
-reference is on the result of the spawning tool call. Its `trajectory_id` is the parent's
-followed by `-subagent-` and the native child ID, which is unique within one parent; the
-root's `parse_issues` cover the whole tree. Same-sandbox native resume extends the same
+the agent that spawned it and referenced from the spawning call's result; the root's
+`parse_issues` cover the whole tree. Same-sandbox native resume extends the same
 logical session; `continued_trajectory_ref` is used only when a continuation is stored as
 a separate document.
 
