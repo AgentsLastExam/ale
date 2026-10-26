@@ -37,6 +37,7 @@ from ale.run.framework import (
     windows_framework_identity,
     with_framework,
 )
+from ale.run.images import resolve_loaded_image
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.qemu import RUNNER_IMAGE, QemuProvider
 from ale.run.sources import cache_root
@@ -701,29 +702,7 @@ async def _build_oci(*, context: Path, source_digest: str, source: str) -> _OciB
         except (OSError, json.JSONDecodeError) as exc:
             raise ProviderStartError(f"Buildx wrote invalid metadata: {exc}") from exc
 
-    # The classic image store names an image by its config digest, the containerd store
-    # (Docker 29's default) by its manifest digest; whichever this daemon uses resolves.
-    candidates = [
-        digest
-        for digest in (
-            metadata.get("containerimage.config.digest"),
-            metadata.get("containerimage.digest"),
-        )
-        if isinstance(digest, str) and digest.startswith("sha256:")
-    ]
-    if not candidates:
-        raise ProviderStartError("Buildx metadata has no immutable image digest")
-    for built_identity in candidates:
-        code, image_id, stderr = await _run(
-            "docker", "image", "inspect", "--format", "{{.Id}}", built_identity, timeout=30
-        )
-        image_id = image_id.strip()
-        if code == 0 and image_id.startswith("sha256:"):
-            break
-    else:
-        raise ProviderStartError(
-            f"Docker did not load the built Task image: {stderr.strip() or image_id}"
-        )
+    image_id = await resolve_loaded_image(metadata, run=_run)
     return _OciBuild(
         input_identity=input_identity,
         image_source_identity=source_digest,
