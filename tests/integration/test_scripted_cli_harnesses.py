@@ -27,6 +27,7 @@ from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
 from ale.run.harnesses.droid import DroidHarness
 from ale.run.harnesses.forgecode import ForgecodeHarness
+from ale.run.harnesses.hermes import HermesHarness
 from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.providers.docker import DockerProvider
@@ -57,6 +58,12 @@ CASES: dict[str, Case] = {
     **{
         f"forgecode-{dialect}": Case(
             partial(ForgecodeHarness, gateway_dialect=dialect), dialect, r"^shell$"
+        )
+        for dialect in DIALECTS
+    },
+    **{
+        f"hermes-{dialect}": Case(
+            partial(HermesHarness, gateway_dialect=dialect), dialect, r"^terminal$"
         )
         for dialect in DIALECTS
     },
@@ -211,6 +218,10 @@ DELEGATION: dict[str, tuple[str, Callable[[str], dict[str, object]]]] = {
     "forgecode-openai-chat-completions": (
         r"^task$",
         lambda task: {"agent_id": "forge", "tasks": [task]},
+    ),
+    "hermes-openai-chat-completions": (
+        r"^delegate_task$",
+        lambda task: {"tasks": [{"goal": task, "context": "Use the terminal tool."}]},
     ),
     "openhands-cli-openai-chat-completions": (
         r"^task$",

@@ -1,0 +1,20 @@
+[agent]
+name = "hermes"
+model = "gpt-5.6-luna"
+version = "0.22.5"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+max_turns = "default"
+reasoning_effort = "default"
+
+[gateway]
+provider = "openai"
+dialect = "openai-chat-completions"
+
+[gateway.limits]
+max_model_calls = "unlimited"
+max_input_tokens = "unlimited"
+max_output_tokens = "unlimited"
+max_total_tokens = "unlimited"
