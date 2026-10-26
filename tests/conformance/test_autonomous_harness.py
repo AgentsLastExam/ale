@@ -106,13 +106,6 @@ async def test_unsupported_os_fails_before_sandbox_creation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gateway_session_launch_and_cleanup_are_conforming() -> None:
-    harness = MinimalHarness()
-    current = session()
-    run = await harness.launch("hello", None, current, timeout_sec=1)  # type: ignore[arg-type]
+async def test_gateway_session_launch_is_conforming() -> None:
+    run = await MinimalHarness().launch("hello", None, session(), timeout_sec=1)  # type: ignore[arg-type]
     assert run.final_message == "hello"
-    await AutonomousHarnessConformance.check_cleanup_is_idempotent(
-        harness,
-        None,  # type: ignore[arg-type]
-        current,
-    )

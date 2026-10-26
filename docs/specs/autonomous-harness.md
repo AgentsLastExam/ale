@@ -185,13 +185,6 @@ including discovery, custom, web, MCP, and multi-agent calls. It may flatten a n
 orchestration wrapper into its observed child calls when the native log does not emit a
 separate wrapper result; that mapping must be deterministic and covered by acceptance.
 
-### Cleanup
-
-`cleanup()` runs after evidence collection and before sandbox release. It must be
-idempotent and tolerate partial preparation, launch failure, cancellation, and success.
-It removes only harness-owned episode-local temporary state. Sandbox destruction belongs
-to the Environment.
-
 ## Resources
 
 Task and Run resources form one deterministic union. The harness receives resolved,
@@ -277,7 +270,6 @@ A new adapter is complete only when:
 - unknown settings and unsupported resources fail before provisioning;
 - concurrent episodes have distinct paths, config, logs, and native state;
 - every API-key and subscription model request uses the Gateway session;
-- cleanup is idempotent;
 - the evidence parser is deterministic;
 - preset, settings, resources, versions, limits, and termination are present in
   provenance;

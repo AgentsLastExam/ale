@@ -28,7 +28,7 @@ remains `core/v1`.
 | **Framework Verification Library** (`ale_verify`) | The engine-owned Python package staged for verify; it provides optional checks, Judges returning data, and atomic JSON result writing. | not a repository Kit, Host verification service, Gateway client, or plugin |
 | **Judge Invocation** | One attributable LLM or agent Judge execution with its resolved configuration, attempts, usage, verdict, and evidence links. | not a Task manifest declaration or reusable profile |
 | **Verification Result** | The Task-authored JSON object saved as `verification.json`; only `overall` has scoring semantics. | not the Episode Result or solver trajectory |
-| **Artifact snapshot** | Immutable regular-file/directory solver evidence captured after Harness cleanup and before verification, with exact source path, type, mode, and content identity. | not post-verifier bytes or an implicit workspace copy |
+| **Artifact snapshot** | Immutable regular-file/directory solver evidence captured after the solver stops and before verification, with exact source path, type, mode, and content identity. | not post-verifier bytes or an implicit workspace copy |
 | **Separate verifier** | A fresh verifier sandbox using reused solver content, a Task-local verifier build, or a resolved external image, with independently requested resources and exact artifact restoration. | not a second setup run or a copy of the whole solver filesystem |
 | **Retained sandbox** | An ALE-managed, sanitized debug sandbox returned with a durable Provider handle and cleanup command when run policy requests `keep`. | not Task-controlled or an unmanaged leaked container |
 | **Episode** | One complete administration of one selected Task instance by one agent. | not a trial or job |

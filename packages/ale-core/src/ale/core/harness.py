@@ -268,10 +268,6 @@ class Harness(ABC):
             builder.add(source="agent", message=context.final_message)
         return builder.build()
 
-    async def cleanup(self, sandbox: Sandbox, session: HarnessSession) -> None:
-        """Release episode-local harness state. Must be safe to call repeatedly."""
-        return None
-
 
 class AutonomousHarness(Harness):
     """The agent owns its loop."""

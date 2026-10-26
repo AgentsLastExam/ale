@@ -645,26 +645,6 @@ class StandardEnvironment(Environment):
         if ctx.solver_evidence_captured:
             return
         logger = logging.getLogger("ale.execution")
-        if self.agent_enabled:
-            session = ctx.session.model_copy(
-                update={
-                    "gateway_url": sandbox.gateway_url or ctx.session.gateway_url,
-                    "home": ctx.home,
-                    "sandbox_id": sandbox.sandbox_id,
-                    "resources_digest": ctx.agent_resources.digest,
-                }
-            )
-            cleanup_error: Exception | None = None
-            try:
-                await self.harness.cleanup(
-                    _RecordedSandbox(ctx, sandbox, component="harness-cleanup"),
-                    session,
-                )
-            except Exception as exc:
-                cleanup_error = exc
-            if cleanup_error is not None:
-                raise cleanup_error
-            logger.info("harness cleanup completed")
         # The harness's own logs, in their own place. What the agent produced and how the
         # harness went about producing it are different questions with different owners:
         # the task declares the first because only it knows what its output is, and the
