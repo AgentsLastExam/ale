@@ -10,6 +10,6 @@ from pathlib import Path
 
 #: The files a sandbox's guest service consists of, and where the engine reads them.
 SOURCE = Path(__file__).resolve().parent
-FILES = ("main.py", "protocol.py", "gui.py", "windows.py")
+FILES = ("main.py", "protocol.py", "gui.py", "windows.py", "tunnel.py")
 #: The port a VM's guest service listens on, forwarded to an ephemeral Host port.
 PORT = 7411
