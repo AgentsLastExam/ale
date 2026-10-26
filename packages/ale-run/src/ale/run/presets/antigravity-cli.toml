@@ -1,0 +1,21 @@
+[agent]
+name = "antigravity-cli"
+model = "gemini-4-argon"
+version = "1.4.7"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+effort = "high"
+
+[gateway]
+dialect = "gemini"
+base_url = "https://generativelanguage.googleapis.com"
+api_key_env = "GEMINI_API_KEY"
+
+[gateway.limits]
+max_model_calls = "unlimited"
+max_input_tokens = "unlimited"
+max_output_tokens = "unlimited"
+max_total_tokens = "unlimited"
+max_cost_usd = "unlimited"

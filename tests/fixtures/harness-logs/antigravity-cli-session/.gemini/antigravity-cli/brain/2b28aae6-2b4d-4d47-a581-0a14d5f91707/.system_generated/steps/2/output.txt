@@ -1,0 +1,5 @@
+Command exited with code 2.
+
+Command output:
+hi
+ls: cannot access '/nonexistent': No such file or directory

@@ -10,6 +10,7 @@ an agent-owned rollout against ALE's stepwise Sandbox environment.
 | `codex-cli` | autonomous | OpenAI Responses | yes | yes |
 | `grok-build` | autonomous | configured Responses dialect | yes | yes |
 | `openclaw-cli` | autonomous | OpenAI Responses | yes | no |
+| `antigravity-cli` | autonomous | Gemini `generateContent` | yes | no |
 | `computer-use` | policy | Anthropic Messages | no | no |
 | `oracle`, `nop` | built in | none | no | no |
 
@@ -31,7 +32,7 @@ Only the Host Gateway's upstream authentication changes. See
 The normative integration contract is
 [`../../../../../../docs/specs/autonomous-harness.md`](../../../../../../docs/specs/autonomous-harness.md).
 
-The four native CLIs subclass `CliHarness` in `base.py`, which owns their common
+The native CLIs subclass `CliHarness` in `base.py`, which owns their common
 invocation, evidence layout, and continuation checks; each package keeps only its native
 command line, configuration, result reading, and parser. The pinned versions and the
 rules every CLI follows are in the specification; each package README notes only what is

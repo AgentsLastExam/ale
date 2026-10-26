@@ -69,6 +69,7 @@ def context(tmp_path: Path, **updates: object) -> TrajectoryParseContext:
 
 def test_every_shipped_cli_is_discovered() -> None:
     assert {harness.name for harness in HARNESSES} >= {
+        "antigravity-cli",
         "claude-code",
         "codex-cli",
         "grok-build",

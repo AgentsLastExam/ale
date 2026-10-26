@@ -35,6 +35,7 @@ from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
+from ale.run.harnesses.antigravity_cli import AntigravityCliHarness
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
@@ -128,9 +129,15 @@ def _harness(settings: RunConfig) -> Harness:
                 cli_version=settings.agent.version,
                 settings=settings.agent.settings,
             )
+        case "antigravity-cli":
+            _require_gateway_dialect(settings, "gemini")
+            return AntigravityCliHarness(
+                cli_version=settings.agent.version,
+                settings=settings.agent.settings,
+            )
         case unknown:
             raise AleError(
-                f"unknown agent {unknown!r}; try claude-code, codex-cli, "
+                f"unknown agent {unknown!r}; try antigravity-cli, claude-code, codex-cli, "
                 "computer-use, grok-build, openclaw-cli, oracle or nop"
             )
 

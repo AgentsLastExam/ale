@@ -43,6 +43,7 @@ ALE integrates these official upstream agent programs:
 | `grok-build` | `@xai-official/grok@0.2.112` | OpenAI Responses by default; Messages, Chat Completions, or Responses configurable | `max_turns`, `reasoning_effort`, `disabled_tools` |
 | `codex-cli` | `@openai/codex@0.146.0` | OpenAI Responses | `reasoning_effort`, `web_search` |
 | `openclaw-cli` | `openclaw@2026.7.1` | OpenAI Responses | `provider`, `thinking`, `timeout_seconds`, `tool_profile`, `tools_allow`, `tools_deny`, `model_params` |
+| `antigravity-cli` | Antigravity CLI `agy` 1.4.7 release | Gemini `generateContent` | `effort` |
 
 Each integration installs its program's official distribution; ALE does not install a
 fork or carry agent-program patches. That is the npm package when upstream publishes
@@ -77,7 +78,7 @@ search path is preserved.
 The built-in `cua-desktop` uses the OS's system Python. Task-provided Skills and MCP
 commands must themselves work on Windows.
 
-All four adapters support local Skills, canonical stdio and Streamable HTTP MCP
+Every CLI adapter supports local Skills, canonical stdio and Streamable HTTP MCP
 servers, and same-sandbox native resume at their pinned versions. Support is determined
 from the pinned program's verified behavior, not a permanent assumption about a product
 name. In particular, `openclaw@2026.7.1` supports MCP; a future pin that changes this
@@ -87,8 +88,8 @@ Claude Code, Codex CLI, and Grok Build support `agent.authentication = "auto" |
 "api-key" | "subscription"`. Subscription state is isolated from ordinary Host agent
 homes: Claude reads `CLAUDE_CODE_OAUTH_TOKEN` from the ALE checkout's `.env`; Codex and
 Grok use `<checkout>/.ale/auth/<harness>/auth.json`. Credentials remain on the Host;
-every Sandbox receives only its episode Gateway token. OpenClaw and policy Harnesses
-reject explicit subscription authentication.
+every Sandbox receives only its episode Gateway token. Other Harnesses reject explicit
+subscription authentication.
 
 ## Settings
 
@@ -164,7 +165,9 @@ the agent deadline. It must:
 `CliHarness` writes each prompt as UTF-8 to `.ale-harness/prompt.md` and the CLI reads
 that file through stdin or its native prompt-file option, so the prompt never passes
 through argv, an environment variable, or shell quoting and reaches the model exactly as
-sent. Every invocation, launch or resume, appends to `.ale-harness/stdout.log` and
+sent. Antigravity CLI reads a headless prompt from stdin only as its documented
+stream-json message, so the Sandbox's Python first wraps the file's exact text in that one
+JSON line. Every invocation, launch or resume, appends to `.ale-harness/stdout.log` and
 `.ale-harness/stderr.log` and records its prompt, requested session ID, and stream offsets
 in `.ale-harness/invocations.jsonl`. Result interpretation sees only the current
 invocation's output, so it cannot reuse the success or session ID of an earlier turn.
