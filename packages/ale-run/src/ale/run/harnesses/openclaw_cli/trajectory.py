@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import base64
 import json
-from pathlib import PurePosixPath
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ale.core.harness import TrajectoryParseContext
@@ -16,6 +17,7 @@ from ale.core.trajectory import (
     AtifMetrics,
     AtifObservation,
     AtifObservationResult,
+    AtifSubagentTrajectoryRef,
     AtifToolCall,
     AtifTrajectory,
     TrajectoryBuilder,
@@ -32,6 +34,16 @@ from ale.run.harnesses.base import (
 
 #: ALE always runs OpenClaw as agent `main`.
 SESSIONS = ".openclaw-ale/agents/main/sessions"
+#: OpenClaw's index of the sessions in `SESSIONS`, by session key.
+INDEX = f"{SESSIONS}/sessions.json"
+
+
+@dataclass(frozen=True)
+class _Session:
+    """What the session index says about one session key."""
+
+    session_id: str
+    spawned_by: str | None
 
 
 def is_session_file(path: PurePosixPath, session_id: str) -> bool:
@@ -78,8 +90,10 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
     ]
     events: list[dict[str, Any]] = []
     issues: list[dict[str, Any]] = []
+    consumed: set[Path] = set()
     if len(matches) == 1:
         events, issues = native_events(context, matches[0])
+        consumed.add(matches[0])
     else:
         issues.append({"reason": "native_session_unavailable", "session_id": expected})
     transcripts = {
@@ -87,7 +101,10 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         for path in files
         if _is_transcript(PurePosixPath(path.relative_to(context.logs_dir).as_posix()))
     }
-    issues.extend(unconverted(context, transcripts - set(matches[:1])))
+    # Without the root transcript no spawn can be found, so every child stays raw evidence.
+    index = _session_index(context, issues) if events else {}
+    subagents, spawned = _subagents(context, expected, events, index, transcripts, issues, consumed)
+    issues.extend(unconverted(context, transcripts - consumed))
     # Each native prompt is one invocation, in order; any invocation after the last one the
     # session holds is rebuilt from its own stdout.
     native_turns = max(
@@ -96,15 +113,11 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
     )
     if events and native_turns < len(recorded):
         issues.append({"reason": "prompt_not_in_native_session", "invocation": native_turns + 1})
-    results = _results(events, context)
+    results = _results(events, context, spawned)
     builder = TrajectoryBuilder(
         trajectory_id=context.trajectory_id,
         session_id=expected,
-        agent=AtifAgent(
-            name="openclaw-cli",
-            version=context.agent_version,
-            model_name=context.model or None,
-        ),
+        agent=_agent(context),
         extra=_extra(context, issues),
     )
     turn = 0
@@ -118,58 +131,10 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
             continue
         if not _is_message(event, "assistant"):
             continue
-        message = event.get("message") or {}
-        blocks = message.get("content") or []
         if not turn:
             builder.add(source="user", message=recorded[0].prompt)
             turn = 1
-        text: list[str] = []
-        reasoning: list[str] = []
-        calls: list[AtifToolCall] = []
-        observations: list[AtifObservationResult] = []
-        for block in blocks if isinstance(blocks, list) else ():
-            if not isinstance(block, dict):
-                continue
-            kind = block.get("type")
-            if kind == "text":
-                text.append(str(block.get("text") or ""))
-            elif kind == "thinking":
-                reasoning.append(str(block.get("thinking") or ""))
-            elif kind in {"toolCall", "tool_use"}:
-                call_id = str(block.get("id") or "")
-                name = str(block.get("name") or "")
-                calls.append(
-                    AtifToolCall(
-                        tool_call_id=call_id,
-                        function_name=name,
-                        arguments=_arguments(block.get("arguments") or block.get("input")),
-                        extra=_mcp_extra(name),
-                    )
-                )
-                if call_id in results:
-                    observations.append(results[call_id])
-        usage = message.get("usage") or {}
-        cost = (usage.get("cost") or {}).get("total") if isinstance(usage, dict) else None
-        for key in ("input", "output", "cacheRead"):
-            totals[key] += int(usage.get(key) or 0)
-        totals["cost"] += float(cost or 0.0)
-        builder.add(
-            source="agent",
-            message="\n".join(text),
-            reasoning_content="\n".join(reasoning) or None,
-            tool_calls=calls or None,
-            observation=AtifObservation(results=observations) if observations else None,
-            metrics=(
-                AtifMetrics(
-                    prompt_tokens=int(usage.get("input") or 0),
-                    completion_tokens=int(usage.get("output") or 0),
-                    cached_tokens=int(usage.get("cacheRead") or 0),
-                    cost_usd=float(cost) if cost is not None else None,
-                )
-                if usage
-                else None
-            ),
-        )
+        _assistant_step(builder, event, results, totals)
     if events and not turn:
         builder.add(source="user", message=recorded[0].prompt)
         turn = 1
@@ -183,18 +148,9 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         _failure(builder, envelope)
     if not any(step.source == "agent" for step in builder.steps) and context.final_message:
         builder.add(source="agent", message=context.final_message)
-    final_metrics = (
-        AtifFinalMetrics(
-            total_prompt_tokens=int(totals["input"]),
-            total_completion_tokens=int(totals["output"]),
-            total_cached_tokens=int(totals["cacheRead"]),
-            total_cost_usd=float(totals["cost"]),
-            total_steps=len(builder.steps),
-        )
-        if any(totals.values())
-        else None
+    trajectory = builder.build(
+        final_metrics=_final_metrics(builder, totals), subagent_trajectories=subagents or None
     )
-    trajectory = builder.build(final_metrics=final_metrics)
     if not events:
         extra = dict(trajectory.extra or {})
         ale = dict(extra.get("ale") or {})
@@ -204,6 +160,227 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         extra["ale"] = ale
         trajectory = trajectory.model_copy(update={"extra": extra})
     return trajectory
+
+
+def _subagents(
+    context: TrajectoryParseContext,
+    session_id: str | None,
+    events: list[dict[str, Any]],
+    index: dict[str, _Session],
+    transcripts: set[Path],
+    issues: list[dict[str, Any]],
+    consumed: set[Path],
+) -> tuple[list[AtifTrajectory], dict[str, list[AtifSubagentTrajectoryRef]]]:
+    """The sessions ``session_id`` spawned, converted, with references keyed by spawning call.
+
+    The session index names each child's transcript and the session key that spawned it,
+    and the ``sessions_spawn`` result names the key of the child it started. A child that
+    no spawn result names stays raw evidence with a parse issue.
+    """
+    parents = {key for key, entry in index.items() if entry.session_id == session_id}
+    # Only a mirrored transcript is read, whatever session ID the index claims.
+    by_name = {path.name: path for path in transcripts}
+    children = {
+        key: path
+        for key, entry in index.items()
+        if entry.spawned_by in parents
+        and (path := by_name.get(f"{entry.session_id}.jsonl")) is not None
+        and path not in consumed
+    }
+    embedded: list[AtifTrajectory] = []
+    refs: dict[str, list[AtifSubagentTrajectoryRef]] = {}
+    for call_id, key in _spawn_results(events):
+        # Two keys may name one transcript; it is converted once.
+        if (path := children.pop(key, None)) is None or path in consumed:
+            continue
+        child_id = index[key].session_id
+        consumed.add(path)
+        child_events, child_issues = native_events(context, path)
+        child = _session_trajectory(
+            replace(
+                context,
+                trajectory_id=f"{context.trajectory_id}-subagent-{child_id}",
+                session_id=child_id,
+            ),
+            child_events,
+            index,
+            transcripts,
+            issues,
+            consumed,
+        )
+        if child is None:
+            # Spawned, but nothing of its conversation was recorded.
+            consumed.discard(path)
+            continue
+        issues.extend(child_issues)
+        embedded.append(child)
+        refs.setdefault(call_id, []).append(
+            AtifSubagentTrajectoryRef(trajectory_id=child.trajectory_id, session_id=child_id)
+        )
+    issues.extend(
+        {"reason": "unlinked_subagent", "source": path.relative_to(context.logs_dir).as_posix()}
+        for path in sorted(set(children.values()) - consumed)
+    )
+    return embedded, refs
+
+
+def _session_trajectory(
+    context: TrajectoryParseContext,
+    events: list[dict[str, Any]],
+    index: dict[str, _Session],
+    transcripts: set[Path],
+    issues: list[dict[str, Any]],
+    consumed: set[Path],
+) -> AtifTrajectory | None:
+    """A spawned session's transcript, which no ALE invocation or printed result describes.
+
+    Its first user message is the task its parent delegated, as OpenClaw framed it.
+    """
+    subagents, spawned = _subagents(
+        context, context.session_id, events, index, transcripts, issues, consumed
+    )
+    results = _results(events, context, spawned)
+    builder = TrajectoryBuilder(
+        trajectory_id=context.trajectory_id,
+        session_id=context.session_id,
+        agent=_agent(context),
+        extra=_extra(context, []),
+    )
+    totals = {"input": 0, "output": 0, "cacheRead": 0, "cost": 0.0}
+    for event in events:
+        if text := _user_text(event):
+            builder.add(source="user", message=text)
+        elif _is_message(event, "assistant"):
+            _assistant_step(builder, event, results, totals)
+    if not builder.steps:
+        return None
+    return builder.build(
+        final_metrics=_final_metrics(builder, totals), subagent_trajectories=subagents or None
+    )
+
+
+def _spawn_results(events: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Each ``sessions_spawn`` call that started a session, in order, with that session's key."""
+    calls = {
+        str(block.get("id") or "")
+        for event in events
+        if _is_message(event, "assistant")
+        for block in event["message"].get("content") or ()
+        if isinstance(block, dict) and block.get("type") in {"toolCall", "tool_use"}
+    }
+    found = []
+    for event in events:
+        if not _is_message(event, "toolResult"):
+            continue
+        message = event["message"]
+        call_id = str(message.get("toolCallId") or "")
+        details = message.get("details")
+        if (
+            message.get("toolName") == "sessions_spawn"
+            and call_id in calls
+            and isinstance(details, dict)
+            and isinstance(details.get("childSessionKey"), str)
+        ):
+            found.append((call_id, details["childSessionKey"]))
+    return found
+
+
+def _session_index(
+    context: TrajectoryParseContext, issues: list[dict[str, Any]]
+) -> dict[str, _Session]:
+    """``sessions.json``: each session key's transcript and, if spawned, its parent's key."""
+    path = context.logs_dir / INDEX
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except ValueError as exc:
+        issues.append({"source": INDEX, "reason": "malformed_json", "detail": str(exc)[:500]})
+        return {}
+    return {
+        key: _Session(
+            entry["sessionId"],
+            entry.get("spawnedBy") if isinstance(entry.get("spawnedBy"), str) else None,
+        )
+        for key, entry in (value.items() if isinstance(value, dict) else ())
+        if isinstance(entry, dict) and isinstance(entry.get("sessionId"), str)
+    }
+
+
+def _assistant_step(
+    builder: TrajectoryBuilder,
+    event: dict[str, Any],
+    results: dict[str, AtifObservationResult],
+    totals: dict[str, float],
+) -> None:
+    """One assistant message as an agent step, adding its usage to ``totals``."""
+    message = event.get("message") or {}
+    blocks = message.get("content") or []
+    text: list[str] = []
+    reasoning: list[str] = []
+    calls: list[AtifToolCall] = []
+    observations: list[AtifObservationResult] = []
+    for block in blocks if isinstance(blocks, list) else ():
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            text.append(str(block.get("text") or ""))
+        elif kind == "thinking":
+            reasoning.append(str(block.get("thinking") or ""))
+        elif kind in {"toolCall", "tool_use"}:
+            call_id = str(block.get("id") or "")
+            name = str(block.get("name") or "")
+            calls.append(
+                AtifToolCall(
+                    tool_call_id=call_id,
+                    function_name=name,
+                    arguments=_arguments(block.get("arguments") or block.get("input")),
+                    extra=_mcp_extra(name),
+                )
+            )
+            if call_id in results:
+                observations.append(results[call_id])
+    usage = message.get("usage") or {}
+    cost = (usage.get("cost") or {}).get("total") if isinstance(usage, dict) else None
+    for key in ("input", "output", "cacheRead"):
+        totals[key] += int(usage.get(key) or 0)
+    totals["cost"] += float(cost or 0.0)
+    builder.add(
+        source="agent",
+        message="\n".join(text),
+        reasoning_content="\n".join(reasoning) or None,
+        tool_calls=calls or None,
+        observation=AtifObservation(results=observations) if observations else None,
+        metrics=(
+            AtifMetrics(
+                prompt_tokens=int(usage.get("input") or 0),
+                completion_tokens=int(usage.get("output") or 0),
+                cached_tokens=int(usage.get("cacheRead") or 0),
+                cost_usd=float(cost) if cost is not None else None,
+            )
+            if usage
+            else None
+        ),
+    )
+
+
+def _final_metrics(builder: TrajectoryBuilder, totals: dict[str, float]) -> AtifFinalMetrics | None:
+    if not any(totals.values()):
+        return None
+    return AtifFinalMetrics(
+        total_prompt_tokens=int(totals["input"]),
+        total_completion_tokens=int(totals["output"]),
+        total_cached_tokens=int(totals["cacheRead"]),
+        total_cost_usd=float(totals["cost"]),
+        total_steps=len(builder.steps),
+    )
+
+
+def _agent(context: TrajectoryParseContext) -> AtifAgent:
+    return AtifAgent(
+        name="openclaw-cli", version=context.agent_version, model_name=context.model or None
+    )
 
 
 def _is_message(event: dict[str, Any], role: str) -> bool:
@@ -259,8 +436,11 @@ def _native_error(envelope: dict[str, Any]) -> str | None:
 
 
 def _results(
-    events: list[dict[str, Any]], context: TrajectoryParseContext
+    events: list[dict[str, Any]],
+    context: TrajectoryParseContext,
+    spawned: dict[str, list[AtifSubagentTrajectoryRef]],
 ) -> dict[str, AtifObservationResult]:
+    """Each call's result; a call that spawned sessions also references their trajectories."""
     results: dict[str, AtifObservationResult] = {}
     for event in events:
         if event.get("type") == "tool_result":
@@ -294,6 +474,8 @@ def _results(
                 content=_block_content(value, context),
                 extra={"ale": {"is_error": True}} if error else None,
             )
+    for call_id, refs in spawned.items():
+        results[call_id] = results[call_id].model_copy(update={"subagent_trajectory_ref": refs})
     return results
 
 
