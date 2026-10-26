@@ -12,7 +12,7 @@ from typing import Any
 from ale.core.errors import AgentError
 from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
 from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
+from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
 from ale.run.harnesses._npm import agent_path, npm_env
 from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
@@ -28,6 +28,7 @@ class OpenClawCliHarness(CliHarness):
     """Runs OpenClaw's local ``agent`` command inside the sandbox, always as agent ``main``."""
 
     name = "openclaw-cli"
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS, OperatingSystem.MACOS)
     package = "openclaw"
     binary = "openclaw"
     default_version = DEFAULT_CLI_VERSION
@@ -127,6 +128,15 @@ class OpenClawCliHarness(CliHarness):
                         key: value.replace("{home}", session.home)
                         for key, value in server.environment.items()
                     }
+                if resolved.name == CUA_DESKTOP_NAME and session.os is OperatingSystem.MACOS:
+                    # OpenClaw filters the MCP child environment; config expands these
+                    # references from the framework-provided launch environment.
+                    native.setdefault("env", {}).update(
+                        {
+                            "ALE_CUA_DRIVER": "${ALE_CUA_DRIVER}",
+                            "ALE_CUA_DRIVER_SOCKET": "${ALE_CUA_DRIVER_SOCKET}",
+                        }
+                    )
             else:
                 native = {"url": server.url, "transport": "streamable-http"}
             config["mcp"]["servers"][resolved.name] = native

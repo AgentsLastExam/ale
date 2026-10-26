@@ -10,7 +10,7 @@ from pathlib import PurePosixPath
 from ale.core.errors import AgentError, AgentRefusalError, ConfigError, HarnessLimitError
 from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
 from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer, StreamableHttpMcpServer
+from ale.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
 from ale.core.trajectory import AtifTrajectory
 from ale.run.harnesses._npm import agent_path, npm_env
 from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
@@ -39,6 +39,7 @@ class ClaudeCodeHarness(CliHarness):
     default_version = DEFAULT_CLI_VERSION
     settings_type = ClaudeCodeSettings
     settings: ClaudeCodeSettings
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS, OperatingSystem.MACOS)
     logs = (LOG_ROOT, ".claude-config/projects")
 
     async def install_resources(

@@ -10,16 +10,16 @@ It talks Anthropic's computer-use tool, so the model's own action vocabulary is 
 format and there is no prompt engineering to get wrong. Traffic goes to the gateway like
 every other harness's, which is what puts its calls in the transport trace.
 
-Coordinates are the one real conversion. The model is told the screen is 1000x1000 so it
-answers in the space our actions already use; the guest scales to real pixels at dispatch.
-Telling it the true resolution and rescaling here would put a rounding step between what
-the model meant and what we recorded.
+Claude's computer toolset uses screenshot pixels. Convert those coordinates to ALE's
+normalised action space; the guest scales them back to display pixels at dispatch.
+Generic computer tools continue to declare the normalised space directly.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import struct
 from typing import Any
 
 from ale.core.env import Observation, TaskEnv
@@ -33,8 +33,19 @@ from ._diagnostics import error_text
 
 __all__ = ["ComputerUseHarness", "translate_action"]
 
-#: The normalised space we hand the model, matching our own action coordinates.
+#: The normalised space used by ALE desktop actions and generic computer tools.
 GRID = 1000
+
+#: Members whose results or stateful inputs ALE's stepwise environment cannot represent.
+_DISABLED_MEMBERS = (
+    "zoom",
+    "middle_click",
+    "triple_click",
+    "left_mouse_down",
+    "left_mouse_up",
+    "cursor_position",
+    "hold_key",
+)
 
 #: Anthropic's computer-use action names mapped onto ours. Anything missing is refused
 #: rather than approximated: dispatching something near what the model asked for is how a
@@ -59,10 +70,8 @@ _ACTIONS = {
 def _computer_tool(model: str) -> dict[str, Any]:
     if model.lower().startswith("claude"):
         return {
-            "type": "computer_20250124",
-            "name": "computer",
-            "display_width_px": GRID,
-            "display_height_px": GRID,
+            "type": "computer_toolset_20260801",
+            "configs": {name: {"enabled": False} for name in _DISABLED_MEMBERS},
         }
     return {
         "name": "computer",
@@ -133,14 +142,59 @@ def translate_action(raw: dict[str, Any]) -> DesktopAction | None:
         keys=tuple(part.strip() for part in key_parts) or None,
         direction=raw.get("scroll_direction"),
         amount=raw.get("scroll_amount"),
+        duration_ms=raw.get("duration_ms"),
     )
+
+
+def _toolset_actions(
+    name: str, arguments: dict[str, Any], screen_size: tuple[int, int] | None
+) -> list[DesktopAction]:
+    if name in _DISABLED_MEMBERS or name not in _ACTIONS:
+        raise AgentError(f"unsupported computer-use member {name!r}")
+    raw = dict(arguments, action=name)
+    if name not in {"type", "key"} and raw.get("text"):
+        raise AgentError("computer-use mouse modifiers are not supported")
+    if name == "left_click_drag":
+        raw["to"] = raw.get("coordinate")
+        raw["coordinate"] = raw.get("start_coordinate")
+    for key in ("coordinate", "to"):
+        coordinate = raw.get(key)
+        if coordinate is None:
+            continue
+        if screen_size is None:
+            raise AgentError("computer-use coordinates require a screenshot first")
+        if (
+            not isinstance(coordinate, list)
+            or len(coordinate) != 2
+            or any(
+                not isinstance(v, (int, float)) or not 0 <= v < size
+                for v, size in zip(coordinate, screen_size, strict=True)
+            )
+        ):
+            raise AgentError("computer-use coordinates are outside the screenshot")
+        raw[key] = [v * GRID / size for v, size in zip(coordinate, screen_size, strict=True)]
+    if name in {"mouse_move", "left_click_drag"} and (
+        raw.get("coordinate") is None or (name == "left_click_drag" and raw.get("to") is None)
+    ):
+        raise AgentError("computer-use mouse actions require explicit coordinates")
+    repeat = raw.get("repeat", 1) if name == "key" else 1
+    if type(repeat) is not int or not 1 <= repeat <= 100:
+        raise AgentError("computer-use key repeat must be between 1 and 100")
+    if name == "wait":
+        duration = raw.get("duration")
+        if not isinstance(duration, (int, float)) or not 0 <= duration <= 300:
+            raise AgentError("computer-use wait duration must be between 0 and 300 seconds")
+        raw["duration_ms"] = round(duration * 1000)
+    action = translate_action(raw)
+    assert action is not None
+    return [action] * repeat
 
 
 class ComputerUseHarness(StepwisePolicy):
     """Claude, driving a desktop one observation at a time."""
 
     name = "computer-use"
-    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS, OperatingSystem.MACOS)
 
     def __init__(self, model: str = "claude-opus-4-8", max_tokens: int = 2048) -> None:
         self.model = model
@@ -148,6 +202,7 @@ class ComputerUseHarness(StepwisePolicy):
         self._messages: list[dict[str, Any]] = []
         self._session: HarnessSession | None = None
         self._pending_tool_id: str | None = None
+        self._screen_size: tuple[int, int] | None = None
 
     def version(self) -> str:
         return self.model
@@ -167,6 +222,8 @@ class ComputerUseHarness(StepwisePolicy):
     async def start(self, session: HarnessSession) -> None:
         self._session = session
         self._messages = []
+        self._pending_tool_id = None
+        self._screen_size = None
 
     async def decide(self, observation: Observation) -> list[DesktopAction]:
         if self._session is None:
@@ -179,20 +236,27 @@ class ComputerUseHarness(StepwisePolicy):
         # and dropping it would make every step look like the first.
         self._messages.append({"role": "assistant", "content": reply.get("content", [])})
 
-        actions: list[DesktopAction] = []
-        used_tool = False
-        for block in reply.get("content", []):
-            if block.get("type") != "tool_use":
-                continue
-            used_tool = True
-            self._pending_tool_id = block.get("id")
-            action = translate_action(block.get("input") or {})
-            if action is not None:
-                actions.append(action)
-
         # No tool call means the model answered in prose rather than acting, which is how
         # it signals it is done.
-        return actions if used_tool else []
+        calls = [block for block in reply["content"] if block.get("type") == "tool_use"]
+        if not calls:
+            return []
+        if len(calls) != 1:
+            raise AgentError("computer-use requires one tool call per turn")
+        block = calls[0]
+        if not isinstance(block.get("id"), str) or not block["id"]:
+            raise AgentError("computer-use tool call has no id")
+        self._pending_tool_id = block["id"]
+        if self.model.lower().startswith("claude"):
+            if block.get("toolset_name") != "computer":
+                raise AgentError("computer-use received an unexpected toolset")
+            return _toolset_actions(
+                block.get("name", ""), block.get("input") or {}, self._screen_size
+            )
+        if block.get("name") != "computer":
+            raise AgentError("computer-use received an unexpected tool")
+        action = translate_action(block.get("input") or {})
+        return [action] if action is not None else []
 
     # --- internals ---
 
@@ -205,6 +269,17 @@ class ComputerUseHarness(StepwisePolicy):
         """
         image: dict[str, Any]
         if observation.screenshot_png:
+            if self.model.lower().startswith("claude"):
+                png = observation.screenshot_png
+                if (
+                    len(png) < 24
+                    or not png.startswith(b"\x89PNG\r\n\x1a\n")
+                    or png[12:16] != b"IHDR"
+                ):
+                    raise AgentError("computer-use received an invalid PNG screenshot")
+                self._screen_size = struct.unpack(">II", png[16:24])
+                if 0 in self._screen_size:
+                    raise AgentError("computer-use received an empty screenshot")
             image = {
                 "type": "image",
                 "source": {
@@ -221,6 +296,8 @@ class ComputerUseHarness(StepwisePolicy):
                 "tool_use_id": self._pending_tool_id,
                 "content": [image],
             }
+            if self.model.lower().startswith("claude"):
+                block["toolset_name"] = "computer"
             self._pending_tool_id = None
             return {"role": "user", "content": [block]}
 
@@ -239,12 +316,12 @@ class ComputerUseHarness(StepwisePolicy):
             "max_tokens": self.max_tokens,
             "messages": self._messages,
             "tools": [_computer_tool(self.model)],
+            "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
         }
         headers = {
             "authorization": f"Bearer {session.token}",
             "content-type": "application/json",
             "anthropic-version": "2023-06-01",
-            "anthropic-beta": "computer-use-2025-01-24",
         }
         url = session.gateway_url.rstrip("/") + "/v1/messages"
 

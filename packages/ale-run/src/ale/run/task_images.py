@@ -130,6 +130,13 @@ async def prepare_task_image_result(
     spec = task.spec.image
     provider = providers.get(spec.kind)
     folder = _task_folder(task)
+    if task.spec.os is OperatingSystem.MACOS and (
+        folder.image_dockerfile is not None or folder.image_script is not None
+    ):
+        raise TaskDefinitionError(
+            "macOS image preparation requires an existing image.ref; "
+            "image build scripts are unsupported"
+        )
     if task.spec.os is OperatingSystem.WINDOWS and folder.image_script is not None:
         if spec.kind is not ImageKind.VM or spec.base_ref is None:
             raise TaskDefinitionError("image/run.ps1 requires image.kind=vm and image.base_ref")
@@ -231,6 +238,10 @@ async def prepare_verifier_image_result(
         return None
 
     dockerfile = _task_folder(task).verifier_dockerfile
+    if task.spec.os is OperatingSystem.MACOS and dockerfile is not None:
+        raise TaskDefinitionError(
+            "macOS verifier images require an existing image.ref; verify/Dockerfile is unsupported"
+        )
     if dockerfile is None and verify.image is None:
         image = task.prepared_image
         if image is None:

@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from ale.core.errors import AgentError, ConfigError
 from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
 from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
+from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
 from ale.run.agent_resources import continuation_fingerprint
 from ale.run.harnesses._npm import (
@@ -44,6 +44,7 @@ class GrokBuildHarness(CliHarness):
     """Runs Grok Build's headless mode inside the sandbox."""
 
     name = "grok-build"
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS, OperatingSystem.MACOS)
     package = "@xai-official/grok"
     binary = "grok"
     default_version = DEFAULT_CLI_VERSION

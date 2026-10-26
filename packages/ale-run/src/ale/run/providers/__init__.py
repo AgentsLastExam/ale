@@ -39,6 +39,12 @@ class ProviderRegistry:
                 from ale.run.providers.docker import DockerProvider
 
                 provider = DockerProvider(gpus=config.gpus)
+        elif self.settings.vm.provider == "orchard":
+            from ale.run.providers.orchard import OrchardProvider
+
+            orchard_config = self.settings.vm.orchard
+            assert orchard_config is not None
+            provider = OrchardProvider(orchard_config)
         else:
             from ale.run.providers.qemu import QemuProvider
 

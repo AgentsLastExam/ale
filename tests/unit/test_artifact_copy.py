@@ -83,7 +83,10 @@ def test_globs_directories_and_skips_links(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_copy_restore_skips_missing_and_links_and_preserves_bytes_types_and_modes(tmp_path):
+@pytest.mark.parametrize("operating_system", [OperatingSystem.LINUX, OperatingSystem.MACOS])
+async def test_copy_restore_skips_missing_and_links_and_preserves_bytes_types_and_modes(
+    tmp_path, operating_system
+):
     output = tmp_path / "output"
     output.mkdir()
     (output / "file.txt").write_bytes(b"data\x00\xff")
@@ -93,6 +96,7 @@ async def test_copy_restore_skips_missing_and_links_and_preserves_bytes_types_an
     (output / "link.txt").symlink_to("file.txt")
     (output / "loop").symlink_to(output, target_is_directory=True)
     sandbox = LocalSandbox()
+    sandbox.request = SimpleNamespace(os=operating_system)
     sink = _Artifacts(tmp_path / "run")
     await sink.collect(sandbox, str(tmp_path / "missing"), "missing")
     await sink.collect(sandbox, str(output), "output")

@@ -430,9 +430,15 @@ class _Artifacts(ArtifactSink):
                     await sandbox.write_file(
                         source, target.read_bytes(), identity=Identity.FRAMEWORK
                     )
-                if sandbox.request.os is OperatingSystem.LINUX:
+                if sandbox.request.os is not OperatingSystem.WINDOWS:
                     mode = await sandbox.exec(
-                        ["chmod", f"{int(entry['mode']):o}", "--", source],
+                        [
+                            python,
+                            "-c",
+                            "import os,sys; os.chmod(sys.argv[1], int(sys.argv[2]))",
+                            source,
+                            str(int(entry["mode"])),
+                        ],
                         identity=Identity.FRAMEWORK,
                     )
                     if not mode.ok:

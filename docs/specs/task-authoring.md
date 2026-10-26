@@ -33,9 +33,12 @@ tasks/my_task/
 ```
 
 Required files are `task.yaml`, `instruction.md`, and the verify/oracle entry for the
-declared OS: `run.sh` for Linux or `run.ps1` for Windows. Linux builds `image/Dockerfile`
+declared OS: `run.sh` for Linux/macOS or `run.ps1` for Windows. Linux builds `image/Dockerfile`
 or uses `image.ref`. Windows builds `image/run.ps1` on `image.base_ref`, or directly uses
-`image.ref` without an image script. `ref` and `base_ref` are mutually exclusive.
+`image.ref` without an image script. macOS uses an external Tart OCI image (tag or digest)
+with `image.kind: vm`; image-build scripts and Dockerfiles are not supported. Its stage
+entries use `run.sh` and POSIX paths. See [macOS on Orchard](../guides/macos-orchard.md).
+`ref` and `base_ref` are mutually exclusive.
 
 Task source, scripts, manifests, and ordinary small fixtures are tracked by Git. `assets/` is for
 data managed separately from source because of its size or lifecycle. Assets live under the stage
@@ -62,7 +65,7 @@ its nesting; omit optional sections that the Task does not use.
 spec_type: core/v1                 # required; current Task schema
 name: my-task                      # required stable ID, unique in its Task collection
 environment: core/standard         # optional; this is the only supported Environment
-os: linux                           # optional: linux | windows; default: linux
+os: linux                           # optional: linux | windows | macos; default: linux
 
 image:                              # required initial sandbox image
   kind: container                   # required: container | vm

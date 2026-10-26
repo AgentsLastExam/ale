@@ -10,9 +10,9 @@ import pytest
 
 from ale.core.errors import ProviderStartError, TaskDefinitionError
 from ale.core.ids import content_hash
-from ale.core.sandbox import ImageRef, PreparedTaskImage
+from ale.core.sandbox import Capabilities, ImageRef, PreparedTaskImage
 from ale.core.task import Task
-from ale.core.taskspec import ImageKind, VerifySpec
+from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, VerifySpec
 from ale.run.cli.tasks import _prepare_images
 from ale.run.task_images import (
     _materialize,
@@ -76,6 +76,11 @@ class _Provider:
     def __init__(self, kind: ImageKind) -> None:
         self.kind = kind
         self.inputs: list[ImageRef | PreparedTaskImage] = []
+
+    def capabilities(self) -> Capabilities:
+        return Capabilities(
+            operating_systems=frozenset(OperatingSystem), network_modes=frozenset(NetworkMode)
+        )
 
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
         assert image.kind is self.kind
@@ -666,3 +671,26 @@ async def test_failed_vm_materialization_leaves_no_reusable_artifact(
         await _materialize("ale-vm:fixture", disk)
     assert not disk.exists()
     assert not list(tmp_path.glob(".final-*"))
+
+
+@pytest.mark.asyncio
+async def test_macos_external_images_skip_linux_framework_preparation(write_task_repo) -> None:
+    reference = "ghcr.io/example/macos@sha256:" + "a" * 64
+    repository = write_task_repo(
+        image={"kind": "vm", "ref": reference, "user": "admin"},
+        verifier_image={"kind": "vm", "ref": reference, "user": "admin"},
+        with_image_dockerfile=False,
+        manifest_suffix="os: macos\n",
+    )
+    task = load_tasks(repository / "tasks/demo")[0]
+    registry = _Registry()
+    solver = await prepare_task_image_result(task, registry)  # type: ignore[arg-type]
+    verifier = await prepare_verifier_image(task, registry)  # type: ignore[arg-type]
+    assert solver.image.source == "external-ref"
+    assert verifier is not None and verifier.source == "external-ref"
+    assert [step.name for step in solver.steps] == [
+        "lint",
+        "reference-resolution",
+        "artifact-check",
+    ]
+    assert LAYERED == []
