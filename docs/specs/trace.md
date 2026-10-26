@@ -6,7 +6,7 @@ other files may carry only stable identifiers, references, or small run-level pr
 | Artifact | Owns | Does not own |
 |---|---|---|
 | `trajectory.json` | agent-visible messages, reasoning actually exposed, tool calls/results, images, audio, subagents | setup/verify commands, rewards, aggregate usage |
-| `trace.transport.jsonl` | Gateway calls in API-key and subscription modes (verification Judge calls marked `purpose: judge`), retries, refusals, usage, cost when price is known, call-to-step links | full conversation messages |
+| `trace.transport.jsonl` | Gateway calls in API-key and subscription modes (verification Judge calls marked `purpose: judge`), retries, refusals, token usage, call-to-step links | full conversation messages |
 | `trace.execution.jsonl` | framework phases, task/framework commands, output, policy, cleanup failures | agent-owned tool calls, rewards |
 | `result.json` | terminal status, all named rewards, failure, phase timings | conversation, provenance |
 | `verification.json` | the complete Task-authored result, including nested details | terminal status, solver trajectory, native Agent transcript |
@@ -86,15 +86,14 @@ Only the Gateway writes `trace.transport.jsonl`. Every complete line has
 `schema_version`, monotonic `seq`, timestamp, episode ID, and one of:
 
 - `call`: stable `call_id`, model, request/response digests, provider response ID,
-  usage, cost, stop reason, latency, and `forwarded`/`failed`/`refused` disposition.
+  token usage, stop reason, latency, and `forwarded`/`failed`/`refused` disposition.
   `input_tokens` counts every input token in every dialect, and `cache_read_tokens` and
-  `cache_write_tokens` say how many of them the provider's prompt cache served or stored.
-  `cost_usd` is a list-price estimate for an exact model ID, or `null` when that model has
-  no listed price; it is never a guessed or zero cost;
-- `replay`: the original call ID, request digest, replay reason, and `charged=false`;
+  `cache_write_tokens` say how many of them the provider's prompt cache served or stored;
+- `replay`: the original call ID, request digest, replay reason, and `charged=false`, since
+  a replay counts toward neither usage nor limits;
 - `trajectory_link`: call ID, trajectory ID, and ATIF step ID.
 
-Retries never double-charge. Only a successful provider response (2xx) or a Gateway refusal is replayed
+Retries are never counted twice. Only a successful provider response (2xx) or a Gateway refusal is replayed
 to a retry of the same request; after a provider error (5xx, or a provider 429) the retry is forwarded
 and recorded as a new `call`. A streamed 2xx response counts as successful only when it reached its
 dialect's terminal event (`message_stop`, a completed or incomplete Responses result, or `[DONE]`)
@@ -105,7 +104,7 @@ copy of the conversation.
 Subscription traffic takes the same path:
 Claude Code, Codex CLI, and Grok Build send every model call to the Gateway, which only
 changes how it authenticates upstream, so those calls are recorded here like API-key calls.
-Provider billing remains external; `cost_usd` is an ALE estimate only when pricing is known.
+Provider billing remains external, so ALE records tokens and model calls, never price.
 
 ## Execution trace
 

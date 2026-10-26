@@ -7,7 +7,6 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
-PositiveFloat = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 
 
 class ClaudeCodeSettings(BaseModel):
@@ -16,7 +15,6 @@ class ClaudeCodeSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     max_turns: PositiveInt | Literal["default", "unlimited"] = "unlimited"
-    max_budget_usd: PositiveFloat | Literal["default", "unlimited"] = "unlimited"
     permission_mode: Literal[
         "default",
         "manual",

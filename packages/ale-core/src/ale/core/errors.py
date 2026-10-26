@@ -219,7 +219,7 @@ class PhaseTimeoutError(AleError):
 
 
 class BudgetExceededError(AleError):
-    """A turn, token or cost ceiling was reached; the gateway refused to continue."""
+    """A turn, token or model-call ceiling was reached; the gateway refused to continue."""
 
     layer = "gateway"
 

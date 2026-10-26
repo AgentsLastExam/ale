@@ -35,7 +35,7 @@ class Status(StrEnum):
     """A phase exceeded its declared timeout."""
 
     BUDGET_EXCEEDED = "budget_exceeded"
-    """A turn, token or cost ceiling stopped the episode."""
+    """A turn, token or model-call ceiling stopped the episode."""
 
     CANCELLED = "cancelled"
     """An operator or a signal stopped the episode."""

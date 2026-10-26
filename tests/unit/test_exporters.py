@@ -135,8 +135,8 @@ def test_prime_verifiers_record_preserves_messages_tools_calls_and_rewards() -> 
             "model": "model",
             "timestamp": "2026-07-29T00:00:00Z",
             "input_tokens": 10,
+            "cache_read_tokens": 4,
             "output_tokens": 2,
-            "cost_usd": 0.01,
             "latency_ms": 100,
             "stop_reason": "tool_use",
             "disposition": "forwarded",
@@ -154,6 +154,11 @@ def test_prime_verifiers_record_preserves_messages_tools_calls_and_rewards() -> 
         "tool",
     ]
     assert record["calls"][0]["node"] == 2 - 1
+    assert record["calls"][0]["usage"] == {
+        "prompt_tokens": 6,
+        "completion_tokens": 2,
+        "cached_input_tokens": 4,
+    }
     assert record["rewards"] == result.rewards
     assert record["metrics"] == result.metrics
     assert "reward" not in record

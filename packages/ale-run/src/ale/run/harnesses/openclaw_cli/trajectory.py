@@ -36,6 +36,8 @@ from ale.run.harnesses.base import (
 SESSIONS = ".openclaw-ale/agents/main/sessions"
 #: OpenClaw's index of the sessions in `SESSIONS`, by session key.
 INDEX = f"{SESSIONS}/sessions.json"
+#: The token counts of a native ``usage`` record; any native price report is ignored.
+_USAGE_KEYS = ("input", "cacheRead", "cacheWrite", "output")
 
 
 @dataclass(frozen=True)
@@ -121,7 +123,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         extra=_extra(context, issues),
     )
     turn = 0
-    totals = {"input": 0, "output": 0, "cacheRead": 0, "cost": 0.0}
+    totals = dict.fromkeys(_USAGE_KEYS, 0)
     for event in events:
         if text := _user_text(event):
             if turn:
@@ -246,7 +248,7 @@ def _session_trajectory(
         agent=_agent(context),
         extra=_extra(context, []),
     )
-    totals = {"input": 0, "output": 0, "cacheRead": 0, "cost": 0.0}
+    totals = dict.fromkeys(_USAGE_KEYS, 0)
     for event in events:
         if text := _user_text(event):
             builder.add(source="user", message=text)
@@ -311,9 +313,12 @@ def _assistant_step(
     builder: TrajectoryBuilder,
     event: dict[str, Any],
     results: dict[str, AtifObservationResult],
-    totals: dict[str, float],
+    totals: dict[str, int],
 ) -> None:
-    """One assistant message as an agent step, adding its usage to ``totals``."""
+    """One assistant message as an agent step, adding its usage to ``totals``.
+
+    Native ``input`` excludes cache reads and writes; ATIF prompt tokens include both.
+    """
     message = event.get("message") or {}
     blocks = message.get("content") or []
     text: list[str] = []
@@ -342,10 +347,11 @@ def _assistant_step(
             if call_id in results:
                 observations.append(results[call_id])
     usage = message.get("usage") or {}
-    cost = (usage.get("cost") or {}).get("total") if isinstance(usage, dict) else None
-    for key in ("input", "output", "cacheRead"):
-        totals[key] += int(usage.get(key) or 0)
-    totals["cost"] += float(cost or 0.0)
+    tokens = dict.fromkeys(_USAGE_KEYS, 0)
+    if isinstance(usage, dict):
+        for key in _USAGE_KEYS:
+            tokens[key] = int(usage.get(key) or 0)
+            totals[key] += tokens[key]
     builder.add(
         source="agent",
         message="\n".join(text),
@@ -354,10 +360,9 @@ def _assistant_step(
         observation=AtifObservation(results=observations) if observations else None,
         metrics=(
             AtifMetrics(
-                prompt_tokens=int(usage.get("input") or 0),
-                completion_tokens=int(usage.get("output") or 0),
-                cached_tokens=int(usage.get("cacheRead") or 0),
-                cost_usd=float(cost) if cost is not None else None,
+                prompt_tokens=_prompt_tokens(tokens),
+                completion_tokens=tokens["output"],
+                cached_tokens=tokens["cacheRead"],
             )
             if usage
             else None
@@ -365,14 +370,17 @@ def _assistant_step(
     )
 
 
-def _final_metrics(builder: TrajectoryBuilder, totals: dict[str, float]) -> AtifFinalMetrics | None:
+def _prompt_tokens(tokens: dict[str, int]) -> int:
+    return tokens["input"] + tokens["cacheRead"] + tokens["cacheWrite"]
+
+
+def _final_metrics(builder: TrajectoryBuilder, totals: dict[str, int]) -> AtifFinalMetrics | None:
     if not any(totals.values()):
         return None
     return AtifFinalMetrics(
-        total_prompt_tokens=int(totals["input"]),
-        total_completion_tokens=int(totals["output"]),
-        total_cached_tokens=int(totals["cacheRead"]),
-        total_cost_usd=float(totals["cost"]),
+        total_prompt_tokens=_prompt_tokens(totals),
+        total_completion_tokens=totals["output"],
+        total_cached_tokens=totals["cacheRead"],
         total_steps=len(builder.steps),
     )
 

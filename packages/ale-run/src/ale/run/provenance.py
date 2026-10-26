@@ -142,11 +142,7 @@ def agent_provenance(
         else None
     )
     harness_settings = settings.agent.settings if settings else {}
-    native_limits = {
-        key: value
-        for key, value in harness_settings.items()
-        if key in {"max_turns", "max_budget_usd"}
-    }
+    native_limits = {key: value for key, value in harness_settings.items() if key == "max_turns"}
     resource_records = (
         tuple(
             AgentResourceProvenance(

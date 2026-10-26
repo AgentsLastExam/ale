@@ -243,7 +243,7 @@ class TestConfigLayering:
         ("text", "expected"),
         [
             ("agent.settings.max_turns=50", 50),
-            ("gateway.limits.max_cost_usd=2.5", 2.5),
+            ("timeouts.agent=1800.5", 1800.5),
             ("resume=false", False),
             ("agent.model=claude-opus-4-8", "claude-opus-4-8"),
             ('agent.model="quoted value"', "quoted value"),
@@ -265,7 +265,7 @@ class TestConfigLayering:
 
     def test_config_hash_tracks_effective_values(self) -> None:
         one = RunConfig()
-        two = RunConfig(gateway={"limits": GatewayLimits(max_cost_usd=1.0)})  # type: ignore[arg-type]
+        two = RunConfig(gateway={"limits": GatewayLimits(max_total_tokens=1_000)})  # type: ignore[arg-type]
         assert one.config_hash != two.config_hash
         assert one.config_hash == RunConfig().config_hash
 
@@ -286,7 +286,6 @@ class TestConfigLayering:
             "max_input_tokens": "unlimited",
             "max_output_tokens": "unlimited",
             "max_total_tokens": "unlimited",
-            "max_cost_usd": "unlimited",
         }
 
     @pytest.mark.parametrize(

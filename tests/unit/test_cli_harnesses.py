@@ -1052,6 +1052,8 @@ def test_openclaw_subagent_keeps_its_delegated_task_and_tool_calls(tmp_path: Pat
     assert result.content[0].text.startswith("Successfully wrote 12 bytes")
     assert final.message.startswith("Wrote the exact string `SPAWN_MARKER`")
     assert subagent.final_metrics.total_prompt_tokens == 21113
+    # Every native usage record carries a price; ALE reports tokens only.
+    assert "cost" not in trajectory.model_dump_json()
 
 
 @pytest.mark.parametrize(("harness", "fixture", "root", "child", "spawn"), SUBAGENT_RUNS)
@@ -1320,7 +1322,13 @@ def test_openclaw_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
                                     "arguments": {"nonce": "abc"},
                                 }
                             ],
-                            "usage": {"input": 10, "output": 2},
+                            "usage": {
+                                "input": 10,
+                                "cacheRead": 30,
+                                "cacheWrite": 5,
+                                "output": 2,
+                                "cost": {"total": 0.25},
+                            },
                         },
                     }
                 ),
@@ -1342,7 +1350,12 @@ def test_openclaw_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
     assert trajectory.steps[0].message == "Use the task MCP."
     assert trajectory.steps[1].tool_calls[0].extra["ale"]["mcp"]["tool"] == "derive_fragment"
     assert trajectory.steps[1].observation.results[0].content[0].text == "xyz"
-    assert trajectory.final_metrics.total_prompt_tokens == 10
+    # Native input excludes the cache; ATIF prompt tokens include reads and writes.
+    metrics = trajectory.steps[1].metrics
+    assert (metrics.prompt_tokens, metrics.cached_tokens, metrics.completion_tokens) == (45, 30, 2)
+    assert trajectory.final_metrics.total_prompt_tokens == 45
+    assert trajectory.final_metrics.total_cached_tokens == 30
+    assert "cost" not in trajectory.model_dump_json()
 
 
 def test_openclaw_reports_other_transcripts_but_not_what_it_keeps_beside_them(

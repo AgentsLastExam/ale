@@ -32,7 +32,6 @@ from ale.core.environment import EventSink
 from ale.core.errors import ConfigError
 from ale.core.trace import TransportCall, TransportReplay
 from ale.run.gateway import anthropic, openai_chat_completions, openai_responses
-from ale.run.gateway.pricing import estimate_cost, price_for
 from ale.run.gateway.session import (
     CallUsage,
     GatewayReservation,
@@ -148,10 +147,6 @@ class Gateway:
         self, session: GatewaySession, trace: EventSink | None = None
     ) -> GatewaySession:
         """Register an episode. Its token is valid until :meth:`close_session`."""
-        if session.limits.max_cost_usd is not None and price_for(session.model) is None:
-            raise ConfigError(
-                f"finite max_cost_usd requires known pricing for model {session.model!r}"
-            )
         if trace is not None:
             self._traces[session.token] = trace
         return self.sessions.open(session)
@@ -470,7 +465,6 @@ class Gateway:
             usage, stop_reason = self._dialect(session).usage_from_stream(streamed)
         else:
             usage, stop_reason = self._dialect(session).extract_usage(parsed)
-        cost = estimate_cost(session.model, usage)
         self._record(
             session,
             call_id=call_id,
@@ -479,16 +473,10 @@ class Gateway:
             response_digest=GatewaySession.digest(response_body) if response_body else None,
             provider_response_id=provider_response_id,
             usage=usage,
-            cost_usd=cost,
             stop_reason=stop_reason,
             latency_ms=latency_ms,
         )
-        await session.commit(
-            reservation,
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cost_usd=cost or 0.0,
-        )
+        await session.commit(reservation, usage)
 
     async def _post(  # type: ignore[no-untyped-def]
         self, request: web.Request, payload: dict[str, Any], session: GatewaySession
@@ -586,7 +574,6 @@ class Gateway:
         response_digest: str | None = None,
         provider_response_id: str | None = None,
         usage: CallUsage | None = None,
-        cost_usd: float | None = None,
         stop_reason: str | None = None,
         refused: str | None = None,
         upstream_status: int | None = None,
@@ -607,7 +594,6 @@ class Gateway:
                 cache_read_tokens=usage.cache_read_tokens if usage else 0,
                 cache_write_tokens=usage.cache_write_tokens if usage else 0,
                 output_tokens=usage.output_tokens if usage else 0,
-                cost_usd=cost_usd,
                 stop_reason=stop_reason,
                 disposition=disposition or ("refused" if refused is not None else "forwarded"),  # type: ignore[arg-type]
                 refusal_limit=refused,

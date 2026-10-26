@@ -39,7 +39,7 @@ ALE integrates these official upstream agent programs:
 
 | Harness | Pinned package | Gateway dialect | Public settings |
 |---------|----------------|-----------------|-----------------|
-| `claude-code` | `@anthropic-ai/claude-code@2.1.227` | Anthropic Messages | `max_turns`, `max_budget_usd`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `append_system_prompt`, `effort` |
+| `claude-code` | `@anthropic-ai/claude-code@2.1.227` | Anthropic Messages | `max_turns`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `append_system_prompt`, `effort` |
 | `grok-build` | `@xai-official/grok@0.2.112` | OpenAI Responses by default; Messages, Chat Completions, or Responses configurable | `max_turns`, `reasoning_effort`, `disabled_tools` |
 | `codex-cli` | `@openai/codex@0.146.0` | OpenAI Responses | `reasoning_effort`, `web_search` |
 | `openclaw-cli` | `openclaw@2026.7.1` | OpenAI Responses | `provider`, `thinking`, `timeout_seconds`, `tool_profile`, `tools_allow`, `tools_deny`, `model_params` |
@@ -260,10 +260,9 @@ the MCP client contract may not.
 
 Keep ownership explicit:
 
-- Gateway limits own model calls, provider-reported input tokens, output tokens, total
-  tokens, and estimated provider cost in both API-key and subscription modes.
-- Harness settings own native controls such as Claude `max_turns` and
-  `max_budget_usd`.
+- Gateway limits own model calls, provider-reported input tokens, output tokens, and
+  total tokens in both API-key and subscription modes.
+- Harness settings own native controls such as Claude `max_turns`.
 - Environment timeouts own setup, agent, and verify wall time.
 
 Do not emulate a Gateway limit in an adapter or hide a native limit under a Gateway
@@ -285,12 +284,11 @@ accounting, retry coalescing, and Transport Trace are common to both modes. The 
 Codex backend rejects `max_output_tokens`, so ALE accounts the completed response and
 refuses the next call once an output ceiling is reached.
 
-The Gateway does not pre-count input tokens or reserve worst-case token/cost budgets.
+The Gateway does not pre-count input tokens or reserve worst-case token budgets.
 It completes the current request, accounts provider-reported usage, and refuses the next
-request after an input-token, output-token, total-token, or cost ceiling is reached.
+request after an input-token, output-token, or total-token ceiling is reached.
 Input tokens include prompt-cache reads and writes, so a cache-heavy agent cannot stay
-under an input or total ceiling by caching. A finite cost ceiling requires the run model to
-have a listed price.
+under an input or total ceiling by caching.
 Model-call limits remain exact because they require no estimation. This policy applies
 equally to all three dialects.
 

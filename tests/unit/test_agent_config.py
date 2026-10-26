@@ -26,7 +26,6 @@ def test_selecting_claude_loads_the_complete_preset() -> None:
     assert settings.agent.version == "2.1.227"
     assert settings.agent.settings == {
         "max_turns": "unlimited",
-        "max_budget_usd": "unlimited",
         "permission_mode": "bypassPermissions",
         "allowed_tools": [],
         "disallowed_tools": [],
@@ -154,10 +153,7 @@ def test_preset_and_effective_settings_are_recorded() -> None:
     assert provenance.preset
     assert provenance.preset.name == "claude-code"
     assert provenance.settings["max_turns"] == "unlimited"
-    assert provenance.native_limits == {
-        "max_turns": "unlimited",
-        "max_budget_usd": "unlimited",
-    }
+    assert provenance.native_limits == {"max_turns": "unlimited"}
 
 
 def test_a_custom_endpoint_must_name_its_own_key(
