@@ -1,16 +1,26 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import io
 import json
+import os
 import re
 import shlex
+import subprocess
+import sys
+import tarfile
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
 from ale.core.config import load_run_config
 from ale.core.errors import (
     AgentError,
+    AgentUnsupportedError,
     ConfigError,
     NativeContinuationError,
     SubscriptionProviderLimitError,
@@ -25,6 +35,14 @@ from ale.core.harness import (
 from ale.core.sandbox import ExecResult, SandboxFile
 from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.run.cli.tasks import PRESET_DIR, _harness
+from ale.run.harnesses import _release
+from ale.run.harnesses._npm import reported_version
+from ale.run.harnesses._release import (
+    ReleaseAsset,
+    ReleaseAssets,
+    ensure_release_binary,
+    release_identity,
+)
 from ale.run.harnesses.base import (
     CONTINUE_PROMPT,
     INVOCATIONS_PATH,
@@ -1247,3 +1265,227 @@ async def test_resume_requires_the_exact_native_session_in_the_sandbox() -> None
     sandbox.files[f"/home/agent/.codex-ale/sessions/rollout-{NATIVE_ID}.jsonl.bak"] = b""
     with pytest.raises(NativeContinuationError, match="absent"):
         await harness.resume("second", first.continuation, sandbox, session(), timeout_sec=60)
+
+
+INSTALLED_BYTES = b"#!/bin/sh\necho 'fixture 2.0.0'\n"
+INSTALLED_SHA256 = hashlib.sha256(INSTALLED_BYTES).hexdigest()
+
+
+class ReleasedHarness(ClaudeCodeHarness):
+    """Claude Code's adapter, distributed as a pinned release binary instead of npm."""
+
+    release_assets: ClassVar[ReleaseAssets] = {
+        (OperatingSystem.LINUX, "x86_64"): ReleaseAsset(
+            "https://example.test/fixture-linux-x86_64", INSTALLED_SHA256
+        ),
+        (OperatingSystem.LINUX, "aarch64"): ReleaseAsset(
+            "https://example.test/fixture-linux-aarch64", "b" * 64
+        ),
+    }
+
+
+def test_release_identity_pins_the_whole_table_in_any_order() -> None:
+    reordered = dict(reversed(list(ReleasedHarness.release_assets.items())))
+    assert release_identity(reordered) == ReleasedHarness().integrity()
+    assert ReleasedHarness().integrity().startswith("sha256:")
+    changed = {
+        **ReleasedHarness.release_assets,
+        (OperatingSystem.LINUX, "aarch64"): ReleaseAsset(
+            "https://example.test/fixture-linux-aarch64", "c" * 64
+        ),
+    }
+    assert release_identity(changed) != ReleasedHarness().integrity()
+
+
+def test_release_assets_must_be_https_and_hex_and_only_the_pinned_version_runs() -> None:
+    with pytest.raises(ValueError, match="https"):
+        ReleaseAsset("http://example.test/fixture", INSTALLED_SHA256)
+    with pytest.raises(ValueError, match="hex"):
+        ReleaseAsset("https://example.test/fixture", INSTALLED_SHA256.upper())
+    assert ReleasedHarness(cli_version=ReleasedHarness.default_version).version()
+    with pytest.raises(ConfigError, match="pins release digests"):
+        ReleasedHarness(cli_version="0.0.1")
+
+
+class ReleaseSandbox:
+    """Answers the installer's commands; records what it ran."""
+
+    def __init__(self, machine: str, *, reports: str = "fixture 2.0.0", banner: str = "") -> None:
+        self.request = SimpleNamespace(os=OperatingSystem.LINUX)
+        self.machine = machine
+        self.reports = reports
+        self.banner = banner
+        self.commands: list[list[str]] = []
+
+    async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+        argv = [str(part) for part in argv]
+        self.commands.append(argv)
+        if argv[-1] == 'printf %s "$HOME"':
+            return ExecResult(exit_code=0, stdout="/home/user")
+        if argv[-1] == "uname -m":
+            return ExecResult(exit_code=0, stdout=f"{self.machine}\n")
+        if argv[-1] == "--version":
+            return ExecResult(exit_code=0, stdout=self.reports, stderr=self.banner)
+        return ExecResult(exit_code=0)
+
+
+@pytest.mark.parametrize(("machine", "url"), [("x86_64", "x86_64"), ("arm64", "aarch64")])
+async def test_release_install_picks_the_asset_for_the_sandbox_platform(
+    machine: str, url: str
+) -> None:
+    sandbox = ReleaseSandbox(machine)
+    assets = ReleasedHarness.release_assets
+    version = await ensure_release_binary(
+        sandbox,  # type: ignore[arg-type]
+        binary="fixture",
+        version="2.0.0",
+        assets=assets,
+    )
+    assert version == "2.0.0"
+    (install,) = [command for command in sandbox.commands if command[:2] == ["python3", "-c"]]
+    assert install[3:] == [
+        f"https://example.test/fixture-linux-{url}",
+        assets[(OperatingSystem.LINUX, url)].sha256,
+        "/home/user/.local/bin/fixture",
+        "",
+        "",
+    ]
+
+
+async def test_release_install_fails_closed_on_an_unknown_platform_or_wrong_version() -> None:
+    with pytest.raises(AgentUnsupportedError, match="no official release for linux/riscv64"):
+        await ensure_release_binary(
+            ReleaseSandbox("riscv64"),  # type: ignore[arg-type]
+            binary="fixture",
+            version="2.0.0",
+            assets=ReleasedHarness.release_assets,
+        )
+    # The program's own version is read before a library banner on stderr, as OpenHands
+    # CLI prints "OpenHands SDK v1.21.0" there.
+    assert (
+        await ensure_release_binary(
+            ReleaseSandbox("x86_64", banner="Fixture SDK v9.9.9\n"),  # type: ignore[arg-type]
+            binary="fixture",
+            version="2.0.0",
+            assets=ReleasedHarness.release_assets,
+        )
+        == "2.0.0"
+    )
+    with pytest.raises(AgentError, match=r"does not name 2\.0\.0: 'fixture 1\.9\.0'"):
+        await ensure_release_binary(
+            ReleaseSandbox("x86_64", reports="fixture 1.9.0"),  # type: ignore[arg-type]
+            binary="fixture",
+            version="2.0.0",
+            assets=ReleasedHarness.release_assets,
+        )
+
+
+@pytest.mark.parametrize(
+    ("output", "version", "named"),
+    [
+        ("2.1.227 (Claude Code)\n", "2.1.227", True),
+        ("2.1.227 (Claude Code)\n", "2.1.22", False),
+        ("Muse Code 1.4.13 (1.4.13-R6996.1)\n", "1.4.13-R6996.1", True),
+        ("OpenHands CLI 1.16.0\nOpenHands SDK v1.21.0\n", "1.21.1", False),
+        ("forge v2.14.0\n", "2.14.0", True),
+        ("", "2.14.0", False),
+    ],
+)
+def test_the_version_output_must_name_the_pinned_version_as_a_token(
+    output: str, version: str, named: bool
+) -> None:
+    assert (reported_version(output, version) == version) is named
+
+
+def _install(
+    source: str, digest: str, target: Path, member: str = "", member_digest: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """The in-Sandbox installer, run here by this interpreter."""
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _release._INSTALL,
+            source,
+            digest,
+            str(target),
+            member,
+            member_digest,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_release_installer_verifies_reuses_and_replaces_links(tmp_path: Path) -> None:
+    source = tmp_path / "download"
+    source.write_bytes(INSTALLED_BYTES)
+    target = tmp_path / "home/.local/bin/fixture"
+
+    refused = _install(source.as_uri(), "a" * 64, target)
+    assert refused.returncode != 0 and "not the pinned" in refused.stderr
+    assert not target.exists() and list(target.parent.iterdir()) == []
+
+    assert _install(source.as_uri(), INSTALLED_SHA256, target).returncode == 0
+    assert target.read_bytes() == INSTALLED_BYTES and os.access(target, os.X_OK)
+    # A matching file is reused without fetching anything.
+    assert _install("file:///nonexistent", INSTALLED_SHA256, target).returncode == 0
+
+    protected = tmp_path / "protected"
+    protected.write_bytes(b"system")
+    target.unlink()
+    target.symlink_to(protected)
+    assert _install(source.as_uri(), INSTALLED_SHA256, target).returncode == 0
+    assert not target.is_symlink() and target.read_bytes() == INSTALLED_BYTES
+    assert protected.read_bytes() == b"system"
+
+
+@pytest.mark.parametrize("kind", ["tar", "zip"])
+def test_release_installer_takes_only_the_pinned_member_of_an_archive(
+    tmp_path: Path, kind: str
+) -> None:
+    archive = tmp_path / f"release.{kind}"
+    if kind == "tar":
+        with tarfile.open(archive, "w:gz") as bundle:
+            for name, data in (("cli", INSTALLED_BYTES), ("../escape", b"outside")):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                bundle.addfile(info, io.BytesIO(data))
+    else:
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("cli", INSTALLED_BYTES)
+            bundle.writestr("../escape", b"outside")
+    archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    target = tmp_path / "home/.local/bin/fixture"
+
+    wrong = _install(archive.as_uri(), archive_digest, target, "cli", "a" * 64)
+    assert wrong.returncode != 0 and "cli in" in wrong.stderr and not target.exists()
+    missing = _install(archive.as_uri(), archive_digest, target, "absent", INSTALLED_SHA256)
+    assert missing.returncode != 0 and not target.exists()
+
+    assert (
+        _install(archive.as_uri(), archive_digest, target, "cli", INSTALLED_SHA256).returncode == 0
+    )
+    assert target.read_bytes() == INSTALLED_BYTES and os.access(target, os.X_OK)
+    assert sorted(path.name for path in target.parent.iterdir()) == ["fixture"]
+    assert not (tmp_path / "home/.local/escape").exists() and not (tmp_path / "escape").exists()
+    # The installed member is what a later install compares, not the archive.
+    assert (
+        _install("file:///nonexistent", archive_digest, target, "cli", INSTALLED_SHA256).returncode
+        == 0
+    )
+
+
+def test_an_archive_member_is_pinned_with_its_own_digest() -> None:
+    with pytest.raises(ValueError, match="archive member"):
+        ReleaseAsset("https://example.test/a.tar.gz", INSTALLED_SHA256, member="cli")
+    with pytest.raises(ValueError, match="archive member"):
+        ReleaseAsset("https://example.test/a.tar.gz", INSTALLED_SHA256, member_sha256="b" * 64)
+    plain = {(OperatingSystem.LINUX, "x86_64"): ReleaseAsset("https://example.test/a", "a" * 64)}
+    packed = {
+        (OperatingSystem.LINUX, "x86_64"): ReleaseAsset(
+            "https://example.test/a", "a" * 64, member="cli", member_sha256="b" * 64
+        )
+    }
+    assert release_identity(plain) != release_identity(packed)

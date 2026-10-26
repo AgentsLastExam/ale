@@ -38,6 +38,7 @@ from ale.core.taskspec import OperatingSystem
 from ale.run.agent_resources import continuation_fingerprint
 from ale.run.harnesses._diagnostics import failure_detail
 from ale.run.harnesses._npm import agent_path, bash_command, ensure_npm_cli
+from ale.run.harnesses._release import ReleaseAssets, ensure_release_binary, release_identity
 from ale.run.subscription import classify_subscription_error
 
 LOG_ROOT = ".ale-harness"
@@ -78,7 +79,11 @@ class Invocation:
 
 
 class CliHarness(AutonomousHarness):
-    """Run a pinned npm CLI identically for every adapter; native behavior stays explicit.
+    """Run a pinned CLI identically for every adapter; native behavior stays explicit.
+
+    The program comes from its official npm package, or, when ``release_assets`` is set,
+    from its official release binary for the Sandbox's OS and architecture, accepted only
+    when its SHA-256 matches the pinned one.
 
     The prompt reaches the CLI as a file, through stdin or a native prompt-file option,
     so its bytes never pass through argv, an environment variable or shell quoting. The
@@ -87,8 +92,12 @@ class CliHarness(AutonomousHarness):
     """
 
     package: ClassVar[str]
+    """The official program: its npm package, or the upstream source of its releases."""
     binary: ClassVar[str]
     default_version: ClassVar[str]
+    release_assets: ClassVar[ReleaseAssets] = {}
+    """Pinned release executables of ``default_version`` by OS and architecture; empty
+    installs from npm. Such an adapter supports exactly the systems this table covers."""
     settings_type: ClassVar[type[BaseModel]]
     settings: BaseModel
 
@@ -101,6 +110,12 @@ class CliHarness(AutonomousHarness):
         cli_version: str | None = None,
         settings: BaseModel | dict[str, Any] | None = None,
     ) -> None:
+        if self.release_assets and cli_version not in (None, self.default_version):
+            # A digest pins one build; another version would run unverified bytes.
+            raise ConfigError(
+                f"{self.name} pins release digests for {self.default_version} only, "
+                f"not {cli_version}"
+            )
         self.cli_version = cli_version
         try:
             self.settings = (
@@ -115,6 +130,8 @@ class CliHarness(AutonomousHarness):
         return self.cli_version or self.default_version
 
     def integrity(self) -> str:
+        if self.release_assets:
+            return release_identity(self.release_assets)
         return f"npm:{self.package}@{self.version()}"
 
     def validate_resources(self, resources: EffectiveAgentResources) -> None:
@@ -122,6 +139,10 @@ class CliHarness(AutonomousHarness):
         return None
 
     async def install(self, sandbox: Sandbox) -> str:
+        if self.release_assets:
+            return await ensure_release_binary(
+                sandbox, binary=self.binary, version=self.version(), assets=self.release_assets
+            )
         return await ensure_npm_cli(
             sandbox, package=self.package, binary=self.binary, version=self.version()
         )
