@@ -18,7 +18,8 @@ from ale.core.errors import (
     TrajectoryReferenceError,
 )
 from ale.core.harness import HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import ExecResult
+from ale.core.sandbox import ExecResult, SandboxFile
+from ale.run.harnesses.base import STDOUT_PATH
 from ale.run.harnesses.builtin import NopHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.recording import BlobStore
@@ -73,29 +74,29 @@ def test_invalid_limit_values_fail(value: object) -> None:
 
 
 def test_native_limits_are_classified_and_gateway_refusals_left_to_the_gateway() -> None:
-    gateway = ClaudeCodeHarness()._classify(
-        '{"type":"ale_limit_reached","ale":{"limit":"max_total_tokens","value":400000}}',
-        1,
+    gateway = ClaudeCodeHarness().classify_failure(
+        '{"type":"ale_limit_reached","ale":{"limit":"max_total_tokens","value":400000}}'
     )
-    native = ClaudeCodeHarness(settings={"max_turns": 12})._classify(
-        "Error: reached max turns",
-        1,
+    native = ClaudeCodeHarness(settings={"max_turns": 12}).classify_failure(
+        "Error: reached max turns"
     )
 
     assert not isinstance(gateway, BudgetExceededError)
     assert isinstance(native, HarnessLimitError)
     assert native.layer == "harness"
     assert native.limit == "max_turns"
-    structured = ClaudeCodeHarness(settings={"max_turns": 12})._classify("error_max_turns", 0)
+    structured = ClaudeCodeHarness(settings={"max_turns": 12}).classify_failure("error_max_turns")
     assert isinstance(structured, HarnessLimitError)
 
 
 class FakeSandbox:
+    """Claude as far as the base can see: it echoes its prompt and keeps its session file."""
+
     def __init__(self, sandbox_id: str = "sandbox") -> None:
         self.sandbox_id = sandbox_id
         self.commands: list[str] = []
         self.prompts: list[str] = []
-        self.transcript = b""
+        self.files: dict[str, bytes] = {}
         self.has_state = True
         self.environments: list[dict[str, str]] = []
 
@@ -103,24 +104,38 @@ class FakeSandbox:
         command = " ".join(str(part) for part in argv)
         self.commands.append(command)
         self.environments.append(env or {})
-        if "find " in command:
-            return ExecResult(exit_code=0 if self.has_state else 1)
-        if "claude " not in command:
+        if argv[-1] == 'printf %s "$PATH"':
+            return ExecResult(exit_code=0, stdout="/usr/bin:/bin")
+        if "2>> " not in command:
+            for path in re.findall(r": > (\S+)", command):
+                self.files[path] = b""
             return ExecResult(exit_code=0)
-        prompt = next(value for key, value in (env or {}).items() if key.startswith("ALE_PROMPT_"))
+        prompt = self.files["/home/agent/.ale-harness/prompt.md"].decode()
         self.prompts.append(prompt)
         match = re.search(r"--(?:session-id|resume) ([^ ]+)", command)
         assert match
         session_id = match.group(1).strip("'")
+        self.files[f"/home/agent/.claude-config/projects/home/{session_id}.jsonl"] = b"{}\n"
         line = (
             json.dumps({"type": "result", "session_id": session_id, "result": prompt}).encode()
             + b"\n"
         )
-        self.transcript = self.transcript + line if " >> " in command else line
+        self.files["/home/agent/.ale-harness/stdout.log"] += line
         return ExecResult(exit_code=0)
 
-    async def read_file(self, path):  # type: ignore[no-untyped-def]
-        return self.transcript
+    async def read_file(self, path, *, offset=0, length=None):
+        data = self.files[str(path)]
+        return data[offset:] if length is None else data[offset : offset + length]
+
+    async def write_file(self, path, data, **kwargs):
+        self.files[str(path)] = data
+
+    async def list_files(self, path):
+        return tuple(
+            SandboxFile(path=name, size=len(data))
+            for name, data in sorted(self.files.items())
+            if name.startswith(str(path) + "/") and (self.has_state or "/projects/" not in name)
+        )
 
 
 def native_session(**updates: object) -> HarnessSession:
@@ -232,6 +247,12 @@ async def test_unsupported_native_resume_is_explicit() -> None:
         )
 
 
+def stdout_log(tmp_path: Path) -> Path:
+    path = tmp_path / STDOUT_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def parse_context(tmp_path: Path) -> TrajectoryParseContext:
     return TrajectoryParseContext(
         episode_id="episode",
@@ -247,7 +268,7 @@ def parse_context(tmp_path: Path) -> TrajectoryParseContext:
 def test_stream_json_parser_preserves_atif_tool_grouping_and_parse_issues(
     tmp_path: Path,
 ) -> None:
-    transcript = tmp_path / "transcript.jsonl"
+    transcript = stdout_log(tmp_path)
     transcript.write_text(
         "\n".join(
             [
@@ -349,7 +370,7 @@ def test_stream_json_parser_preserves_atif_tool_grouping_and_parse_issues(
 
 
 def test_stream_json_parser_keeps_missing_result_absent(tmp_path: Path) -> None:
-    (tmp_path / "transcript.jsonl").write_text(
+    stdout_log(tmp_path).write_text(
         json.dumps(
             {
                 "type": "assistant",
@@ -374,7 +395,7 @@ def test_stream_json_parser_keeps_missing_result_absent(tmp_path: Path) -> None:
 
 
 def test_stream_json_parser_rejects_orphan_results(tmp_path: Path) -> None:
-    (tmp_path / "transcript.jsonl").write_text(
+    stdout_log(tmp_path).write_text(
         json.dumps(
             {
                 "type": "user",
@@ -400,7 +421,7 @@ def test_stream_json_parser_externalizes_document_and_binary_results(
 ) -> None:
     document = base64.b64encode(b"%PDF-demo").decode()
     binary = base64.b64encode(b"\x00\x01\x02").decode()
-    (tmp_path / "transcript.jsonl").write_text(
+    stdout_log(tmp_path).write_text(
         "\n".join(
             [
                 json.dumps(
@@ -462,3 +483,231 @@ def test_stream_json_parser_externalizes_document_and_binary_results(
     assert all((tmp_path / ref["path"]).is_file() for ref in refs)
     assert document not in parsed.model_dump_json()
     assert binary not in parsed.model_dump_json()
+
+
+def test_native_root_and_linked_child_are_collected_without_duplicate_stream_messages(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    native_root = tmp_path / ".claude-config/projects/project"
+    native_root.mkdir(parents=True)
+    root_events = [
+        {
+            "type": "assistant",
+            "sessionId": "root",
+            "message": {
+                "id": "root-message",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "delegate",
+                        "name": "Task",
+                        "input": {"prompt": "child task"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "sessionId": "root",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "delegate", "content": "child done"}
+                ],
+            },
+        },
+    ]
+    serialized = "".join(json.dumps(event) + "\n" for event in root_events)
+    (native_root / "root.jsonl").write_text(serialized)
+    stdout_log(tmp_path).write_text(serialized)
+    (native_root / "unrelated.jsonl").write_text(
+        json.dumps({"type": "assistant", "message": {"content": "ignore me"}})
+    )
+    children = native_root / "root/subagents"
+    children.mkdir(parents=True)
+    (children / "agent-child.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "sessionId": "child-session",
+                "isSidechain": True,
+                "agentId": "child",
+                "parentToolUseID": "delegate",
+                "message": {
+                    "id": "child-message",
+                    "content": [{"type": "text", "text": "child done"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    trajectory = ClaudeCodeHarness().parse_trajectory(
+        replace(parse_context(tmp_path), session_id="root")
+    )
+    calls = [call for step in trajectory.steps for call in step.tool_calls or []]
+    assert [call.tool_call_id for call in calls] == ["delegate"]
+    assert len(trajectory.subagent_trajectories) == 1
+    assert trajectory.subagent_trajectories[0].steps[-1].message == "child done"
+    assert "ignore me" not in trajectory.model_dump_json()
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_stdout_subagent_events_belong_to_the_subagent(tmp_path: Path, native: bool) -> None:
+    """Stream-json marks a subagent's messages with ``parent_tool_use_id`` only."""
+    from dataclasses import replace
+
+    delegate = {
+        "id": "root-message",
+        "content": [
+            {"type": "tool_use", "id": "delegate", "name": "Task", "input": {"prompt": "child"}}
+        ],
+    }
+    delegated = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "delegate", "content": "child done"}],
+    }
+    child_call = {
+        "id": "child-message",
+        "content": [{"type": "tool_use", "id": "child-call", "name": "Bash", "input": {}}],
+    }
+    child_result = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "child-call", "content": "a b"}],
+    }
+    if native:
+        project = tmp_path / ".claude-config/projects/project"
+        (project / "root/subagents").mkdir(parents=True)
+        (project / "root.jsonl").write_text(
+            "".join(
+                json.dumps({"type": kind, "sessionId": "root", "message": message}) + "\n"
+                for kind, message in (
+                    ("user", {"role": "user", "content": "Do the task."}),
+                    ("assistant", delegate),
+                    ("user", delegated),
+                )
+            )
+        )
+        (project / "root/subagents/agent-child.jsonl").write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "type": kind,
+                        "sessionId": "root",
+                        "isSidechain": True,
+                        "agentId": "child",
+                        "parentToolUseID": "delegate",
+                        "message": message,
+                    }
+                )
+                + "\n"
+                for kind, message in (("assistant", child_call), ("user", child_result))
+            )
+        )
+    stdout_log(tmp_path).write_text(
+        "".join(
+            json.dumps({"session_id": "root", "parent_tool_use_id": parent, **event}) + "\n"
+            for parent, event in (
+                (None, {"type": "system", "subtype": "init"}),
+                (None, {"type": "assistant", "message": delegate}),
+                ("delegate", {"type": "assistant", "message": child_call}),
+                ("delegate", {"type": "user", "message": child_result}),
+                (None, {"type": "user", "message": delegated}),
+                (None, {"type": "result", "result": "done"}),
+            )
+        )
+    )
+    trajectory = ClaudeCodeHarness().parse_trajectory(
+        replace(parse_context(tmp_path), session_id="root")
+    )
+
+    def calls(document) -> list[str]:  # type: ignore[no-untyped-def]
+        return [call.tool_call_id for step in document.steps for call in step.tool_calls or []]
+
+    assert calls(trajectory) == ["delegate"]
+    assert trajectory.steps[0].message == "Do the task."
+    assert [calls(child) for child in trajectory.subagent_trajectories] == [["child-call"]]
+
+
+def test_resumed_turns_stay_in_order_without_a_repeated_final_answer(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    def assistant(message_id: str, text: str) -> dict[str, object]:
+        return {
+            "type": "assistant",
+            "sessionId": "root",
+            "message": {"id": message_id, "content": [{"type": "text", "text": text}]},
+        }
+
+    def user(text: str) -> dict[str, object]:
+        return {"type": "user", "sessionId": "root", "message": {"role": "user", "content": text}}
+
+    native = tmp_path / ".claude-config/projects/project/root.jsonl"
+    native.parent.mkdir(parents=True)
+    native.write_text(
+        "".join(
+            json.dumps(event) + "\n"
+            for event in (
+                user("first"),
+                assistant("a", "ONE"),
+                user("second"),
+                assistant("b", "TWO"),
+            )
+        )
+    )
+    segments = [
+        [
+            {"type": "system", "subtype": "init", "session_id": "root"},
+            assistant("a", "ONE"),
+            {"type": "result", "session_id": "root", "result": "ONE"},
+        ],
+        [
+            {"type": "system", "subtype": "init", "session_id": "root"},
+            assistant("b", "TWO"),
+            {"type": "result", "session_id": "root", "result": "TWO"},
+        ],
+    ]
+    stdout = [
+        "".join(json.dumps(event) + "\n" for event in segment).encode() for segment in segments
+    ]
+    stdout_log(tmp_path).write_bytes(b"".join(stdout))
+    (tmp_path / ".ale-harness/invocations.jsonl").write_text(
+        json.dumps({"prompt": "first", "session_id": "root", "stdout_offset": 0})
+        + "\n"
+        + json.dumps({"prompt": "second", "session_id": "root", "stdout_offset": len(stdout[0])})
+        + "\n"
+    )
+    trajectory = ClaudeCodeHarness().parse_trajectory(
+        replace(parse_context(tmp_path), session_id="root")
+    )
+    assert [(step.source, step.message) for step in trajectory.steps] == [
+        ("user", "first"),
+        ("agent", "ONE"),
+        ("user", "second"),
+        ("agent", "TWO"),
+    ]
+
+
+def test_without_a_native_session_each_turn_starts_with_its_recorded_prompt(
+    tmp_path: Path,
+) -> None:
+    first = json.dumps({"type": "result", "session_id": "root", "result": "ONE"}) + "\n"
+    second = json.dumps({"type": "result", "session_id": "root", "result": "TWO"}) + "\n"
+    stdout_log(tmp_path).write_text(first + second)
+    (tmp_path / ".ale-harness/invocations.jsonl").write_text(
+        json.dumps({"prompt": "first", "stdout_offset": 0})
+        + "\n"
+        + json.dumps({"prompt": "second", "stdout_offset": len(first)})
+        + "\n"
+    )
+    trajectory = ClaudeCodeHarness().parse_trajectory(parse_context(tmp_path))
+    assert [(step.source, step.message) for step in trajectory.steps] == [
+        ("user", "first"),
+        ("agent", "ONE"),
+        ("user", "second"),
+        ("agent", "TWO"),
+    ]
+    assert trajectory.extra["ale"]["parse_issues"] == [
+        {"reason": "native_session_unavailable", "session_id": "root"}
+    ]

@@ -197,7 +197,10 @@ class Harness(ABC):
     supported_os: tuple[OperatingSystem, ...] = (OperatingSystem.LINUX,)
 
     logs: tuple[str, ...] = ()
-    """Files this harness writes about its own run, relative to the agent's home.
+    """Files or directories this harness writes about its own run, relative to the agent's home.
+
+    ALE mirrors them into ``logs/<harness>/`` at the same relative paths while the agent
+    runs, and once more after it stops; the parser reads that mirror.
 
     Not artifacts. An artifact is what the *agent produced* while doing the task, and the
     task declares it because only the task knows what its own output is. These are what
@@ -268,10 +271,6 @@ class Harness(ABC):
             builder.add(source="agent", message=context.final_message)
         return builder.build()
 
-    async def cleanup(self, sandbox: Sandbox, session: HarnessSession) -> None:
-        """Release episode-local harness state. Must be safe to call repeatedly."""
-        return None
-
 
 class AutonomousHarness(Harness):
     """The agent owns its loop."""
@@ -292,14 +291,18 @@ class AutonomousHarness(Harness):
 
     async def resume(
         self,
-        instruction: str,
+        instruction: str | None,
         continuation: NativeContinuation,
         sandbox: Sandbox,
         session: HarnessSession,
         *,
         timeout_sec: float,
     ) -> AgentRun:
-        """Continue an exact native session using only the new instruction."""
+        """Continue an exact native session.
+
+        An instruction becomes the session's next user message. ``None`` asks the agent to
+        carry on from where it stopped, without new task input.
+        """
         raise AgentUnsupportedError(f"{self.name} does not support native resume")
 
 

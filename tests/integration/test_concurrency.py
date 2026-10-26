@@ -113,11 +113,17 @@ async def test_one_claude_definition_has_no_episode_mutable_paths_or_versions() 
     )
 
     async def launch_environment(index: int) -> dict[str, str]:
+        async def run(argv, **kwargs):  # type: ignore[no-untyped-def]
+            if "2>> " in argv[-1]:
+                return ExecResult(exit_code=1, stderr="native program failed")
+            return ExecResult(exit_code=0, stdout="/usr/bin:/bin")
+
         sandbox = AsyncMock(spec=Sandbox)
-        sandbox.exec.return_value = ExecResult(exit_code=1, stderr="native program failed")
+        sandbox.exec.side_effect = run
         sandbox.read_file.return_value = b""
+        sandbox.list_files.return_value = ()
         session = base.model_copy(update={"episode_id": str(index), "home": f"/home/agent-{index}"})
-        with pytest.raises(AgentError):
+        with pytest.raises(AgentError, match="native program failed"):
             await harness.launch("work", sandbox, session, timeout_sec=60)
         return sandbox.exec.call_args.kwargs["env"]
 

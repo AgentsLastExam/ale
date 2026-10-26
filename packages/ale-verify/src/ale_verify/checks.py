@@ -272,7 +272,7 @@ def _trajectory() -> dict[str, object]:
         raise RuntimeError("ALE_TRAJECTORY_PATH is not configured")
     with open(path, encoding="utf-8") as handle:
         payload = json.load(handle)
-    if payload.get("schema_version") != "ATIF-v1.7" or not isinstance(payload.get("steps"), list):
+    if payload.get("schema_version") != "ATIF-v1.8" or not isinstance(payload.get("steps"), list):
         raise ValueError("trusted trajectory is malformed")
     return payload
 

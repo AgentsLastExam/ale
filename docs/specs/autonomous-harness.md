@@ -20,6 +20,15 @@ Every shipped autonomous harness must include:
 9. provenance integration; and
 10. separately marked live acceptance for model-dependent behavior.
 
+Native CLI integrations subclass `CliHarness` in a package containing `adapter.py`,
+`settings.py`, `trajectory.py`, and `README.md`. The base owns everything that is the same
+for every CLI: settings validation, version and integrity, npm installation, prompt
+delivery, the evidence layout, failure classification, and continuation checks. An
+adapter supplies only native knowledge: its configuration (`install_resources()`), its
+command line (`prepare_command()`), how to read one invocation's stdout
+(`read_result()`), which files belong to a session (`is_session_file()`), and its pure
+parser. Other autonomous Harnesses subclass `AutonomousHarness` directly.
+
 There is no central capability registry. If configured behavior is unsupported, the
 adapter must raise a typed error before provisioning. It must never ignore a field or
 resource.
@@ -137,6 +146,18 @@ the agent deadline. It must:
 - return `AgentRun`;
 - classify known refusals and native limits with typed errors.
 
+`CliHarness` writes each prompt as UTF-8 to `.ale-harness/prompt.md` and the CLI reads
+that file through stdin or its native prompt-file option, so the prompt never passes
+through argv, an environment variable, or shell quoting and reaches the model exactly as
+sent. Every invocation, launch or resume, appends to `.ale-harness/stdout.log` and
+`.ale-harness/stderr.log` and records its prompt, requested session ID, and stream offsets
+in `.ale-harness/invocations.jsonl`. Result interpretation sees only the current
+invocation's output, so it cannot reuse the success or session ID of an earlier turn.
+
+The CLI starts from a non-login shell, POSIX `sh` on Linux and Git Bash on Windows, with
+the Sandbox's own `PATH` behind the agent's npm prefix. Profile scripts are not sourced,
+so the measured program's environment is the image's declared one on both systems.
+
 A failed launch retains the process exit code and a bounded, credential-redacted diagnostic
 from native error events and stderr. Stderr warnings must not displace the native failure
 reason; ordinary assistant messages and tool output are not failure diagnostics. A terminal
@@ -151,9 +172,12 @@ limits, retry coalescing, and Transport Trace stay common.
 ### Resume
 
 Resume is optional and rejected explicitly by default. Native resume, when implemented,
-uses the exact `NativeContinuation` and only the new instruction. It requires the same
-live sandbox and matching harness, episode, sandbox, model, settings, and resource
-fingerprint.
+uses the exact `NativeContinuation`. An instruction becomes the session's next user
+message; `None` asks the agent to carry on without new task input. No shipped CLI can
+continue a headless session without a message, so `CliHarness` then sends the fixed
+`Continue from where you left off.`, recorded like any other prompt. Resume requires the
+same live sandbox, a session file the adapter recognizes by its exact ID, and matching
+harness, episode, sandbox, model, settings, and resource fingerprint.
 
 An adapter must never use a "latest session" selector, replay the transcript, resume in
 another sandbox, or silently start a new conversation. This release has one scope only:
@@ -165,16 +189,27 @@ lookup is invalid.
 
 ### Collect and Parse
 
-Declare evidence paths in `Harness.logs`, relative to the agent home. ALE collects them
-regardless of task artifact policy before releasing the sandbox.
+`Harness.logs` declares, relative to the agent home, the files and directories that
+hold a Harness's own record of a run. A CLI declares `.ale-harness` and its native
+session directories, including child-session locations. The Environment mirrors them
+(see [Standard Environment](standard-environment.md#evidence-capture)) and the parser
+reads the mirror at the same relative paths; it never sees the Sandbox.
 
 `parse_trajectory()` is pure host-side code. For identical collected bytes it returns an
-identical schema-valid ATIF v1.7 trajectory. It preserves valid events before malformed
+identical schema-valid ATIF v1.8 trajectory. It preserves valid events before malformed
 or truncated input, returns bounded parse issues under `extra.ale`, and never writes
 Gateway transport records. A parser that raises does not decide the episode: ALE records
-the minimal truthful trajectory with `incomplete_reason: conversion_failed` and a
-`parse_issues` entry, keeps the native logs regardless of retention policy, and continues to
-artifact capture and verification.
+a minimal truthful trajectory, the instruction and final message, with
+`incomplete_reason: conversion_failed` and a `parse_issues` entry, keeps the native logs
+regardless of retention policy, and continues to artifact capture and verification.
+
+A CLI trajectory is the native session's conversation in native order. Stdout adds only
+what the session lacks, such as terminal results and failures, at the point it occurred.
+When the session is unavailable, each turn is rebuilt from its recorded prompt and its
+own stdout, and a `parse_issues` entry says so; nothing is invented. Mirrored session
+files the parser does not use are named in `parse_issues` and so survive minimal
+retention. ALE converts once, after the final log copy, and then adds transport links,
+exact token enrichment, and retention.
 
 MCP records correlate the native tool-use ID with its tool result and retain the logical
 server, tool, request arguments, and success result or error. A selected tool with no
@@ -184,13 +219,6 @@ The parser must preserve every native agent-visible call form used by the pinned
 including discovery, custom, web, MCP, and multi-agent calls. It may flatten a native
 orchestration wrapper into its observed child calls when the native log does not emit a
 separate wrapper result; that mapping must be deterministic and covered by acceptance.
-
-### Cleanup
-
-`cleanup()` runs after evidence collection and before sandbox release. It must be
-idempotent and tolerate partial preparation, launch failure, cancellation, and success.
-It removes only harness-owned episode-local temporary state. Sandbox destruction belongs
-to the Environment.
 
 ## Resources
 
@@ -273,11 +301,12 @@ A new adapter is complete only when:
 - its current official documentation, release, package name, runtime requirements,
   settings, resource mechanisms, and native resume semantics have been researched;
 - the official program accepts the generated native configuration;
-- `AutonomousHarnessConformance` checks pass;
+- `AutonomousHarnessConformance` checks pass, and a `CliHarness` adapter also passes the
+  shared CLI suite in `tests/conformance/test_shipped_autonomous_harnesses.py`, which
+  discovers every shipped adapter;
 - unknown settings and unsupported resources fail before provisioning;
 - concurrent episodes have distinct paths, config, logs, and native state;
 - every API-key and subscription model request uses the Gateway session;
-- cleanup is idempotent;
 - the evidence parser is deterministic;
 - preset, settings, resources, versions, limits, and termination are present in
   provenance;

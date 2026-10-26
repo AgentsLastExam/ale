@@ -20,7 +20,7 @@ stops at that boundary and creates no sandbox.
 ## Phase order
 
 ```text
-provision -> setup -> agent/oracle -> Harness cleanup -> evidence capture
+provision -> setup -> agent/oracle -> final evidence capture
           -> shared or separate verify -> teardown/retention -> result
 ```
 
@@ -69,16 +69,32 @@ staged, not by a conventional path or a flag a Task must remember.
 
 ### Evidence capture
 
-After the solver stops, the Harness performs idempotent cleanup and ALE converts its
-observed evidence into `trajectory.json`. When run policy sets `artifacts.collect =
-"host"`, every Task-declared artifact is captured as an immutable file or directory
-snapshot. Files and directories are selected directly by `artifacts`, including globs.
-Copying follows links and skips missing or uncopyable entries, with bounded traversal;
-see [Artifact copying](task-authoring.md#artifact-copying). The verifier owns scoring.
+While the agent runs, ALE copies the files and directories the Harness declares in
+`Harness.logs` into `logs/<harness>/` every 60 seconds, so the evidence outlives a
+Sandbox lost before the agent finishes. Each copy treats the logs as append-only: it
+transfers the bytes beyond the Host copy, and a file that shrank is copied again from its
+start. Nothing is hashed or converted while the agent runs, so a run's evidence cost
+grows linearly with its logs. The rule is the same for every Harness and guest OS. File
+reads use a second guest connection, so the running command cannot block them.
 
-With the default `artifacts.collect = "none"`, ALE does not inspect artifact paths, create a spool,
-copy bytes, or restore anything. A separate verifier that needs solver output therefore
-requires host artifact collection.
+The guest enforces the agent deadline itself and stops the agent's process tree before
+it replies, so the solver has stopped when evidence capture begins; the Host's own
+deadline, 60 s later, only bounds a guest that no longer replies. ALE then stops copying
+and makes a final copy with its own 300 s budget. Session files are appended to, but a
+CLI may rewrite a small index or repair a session in place, so the final copy compares
+each file's guest digest with its Host copy once and copies a rewritten file again.
+Conversion is a pure function of the copied bytes, so it runs once, after the final
+copy. An interrupted run or an incomplete copy produces a trajectory marked incomplete.
+
+When run policy sets `artifacts.collect = "host"`, every Task-declared artifact is
+captured as an immutable file or directory snapshot. Files and directories are selected
+directly by `artifacts`, including globs. Copying never follows links and skips links,
+missing and uncopyable entries, with bounded traversal; see
+[Artifact copying](task-authoring.md#artifact-copying). The verifier owns scoring.
+
+With the default `artifacts.collect = "none"`, ALE does not inspect artifact paths,
+create a spool, copy bytes, or restore anything. A separate verifier that needs solver
+output therefore requires host artifact collection.
 
 ### Verify
 

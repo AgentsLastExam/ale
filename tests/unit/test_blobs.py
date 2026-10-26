@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from pydantic import ValidationError
 
 from ale.core.blob import BlobRef, InlineText, MediaClass
+from ale.run import recording
 from ale.run.recording import INLINE_TEXT_LIMIT, BlobStore, EpisodeRecording
 
 pytestmark = pytest.mark.unit
@@ -57,6 +60,64 @@ def test_content_addressing_deduplicates_and_uses_safe_mime_extension(
     assert len(list((tmp_path / "blobs" / "image").iterdir())) == 1
 
 
+def test_concurrent_same_blob_writes_deduplicate_without_temporary_file_races(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = BlobStore(tmp_path)
+    workers = 8
+    ready = Barrier(workers)
+    replace = recording.os.replace
+
+    def replace_together(source: Path, target: Path) -> None:
+        ready.wait(timeout=5)
+        replace(source, target)
+
+    monkeypatch.setattr(recording.os, "replace", replace_together)
+    payload = b"shared image payload" * 1024
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        writes = [
+            executor.submit(store.put, payload, media_type="image/png") for _ in range(workers)
+        ]
+        refs = [write.result() for write in writes]
+    assert refs == [refs[0]] * workers
+    assert (tmp_path / refs[0].path).read_bytes() == payload
+    assert list((tmp_path / "blobs/image").iterdir()) == [tmp_path / refs[0].path]
+
+
+def test_failed_blob_publication_removes_its_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_replace(source: Path, target: Path) -> None:
+        raise OSError("publication failed")
+
+    monkeypatch.setattr(recording.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="publication failed"):
+        BlobStore(tmp_path).put(b"image", media_type="image/png")
+    assert list((tmp_path / "blobs/image").iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("media_type", "extension"),
+    [
+        ("audio/wav", "wav"),
+        ("audio/mpeg", "mp3"),
+        ("audio/mp4", "m4a"),
+        ("audio/aac", "aac"),
+        ("audio/ogg", "ogg"),
+        ("audio/flac", "flac"),
+        ("audio/webm", "webm"),
+        ("audio/aiff", "aiff"),
+    ],
+)
+def test_atif_audio_blobs_have_stable_extensions(
+    tmp_path: Path, media_type: str, extension: str
+) -> None:
+    ref = BlobStore(tmp_path).put(b"recorded audio", media_type=media_type)
+    assert ref.path.startswith("blobs/audio/")
+    assert ref.path.endswith(f".{extension}")
+    assert (tmp_path / ref.path).read_bytes() == b"recorded audio"
+
+
 def test_media_classes_cover_large_payload_families() -> None:
     assert {item.value for item in MediaClass} == {
         "image",
@@ -74,7 +135,7 @@ def test_recording_verifies_referenced_blob_bytes(tmp_path: Path) -> None:
     recording.trajectory_path.write_text(
         json.dumps(
             {
-                "schema_version": "ATIF-v1.7",
+                "schema_version": "ATIF-v1.8",
                 "agent": {"name": "x", "version": "1"},
                 "steps": [
                     {

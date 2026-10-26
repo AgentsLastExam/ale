@@ -37,6 +37,7 @@ __all__ = [
     "ResourceAllocation",
     "RetainedSandbox",
     "Sandbox",
+    "SandboxFile",
     "SandboxRequest",
     "SandboxRole",
     "SandboxState",
@@ -315,6 +316,15 @@ class RetainedSandbox(BaseModel):
     gpu_devices: tuple[str, ...] = ()
 
 
+class SandboxFile(BaseModel):
+    """One regular guest file observed by :meth:`Sandbox.list_files`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str
+    size: int = Field(ge=0)
+
+
 class Sandbox(ABC):
     """One isolated execution instance.
 
@@ -369,8 +379,25 @@ class Sandbox(ABC):
         self, path: str, data: bytes, *, identity: Identity = Identity.FRAMEWORK
     ) -> None: ...
 
+    # File reads never follow links: a link the agent made can point at anything the
+    # framework identity may read. They proceed while a command is running, so evidence
+    # can be collected from a live agent.
+
     @abstractmethod
-    async def read_file(self, path: str) -> bytes: ...
+    async def read_file(self, path: str, *, offset: int = 0, length: int | None = None) -> bytes:
+        """Read bytes of a regular file."""
+
+    @abstractmethod
+    async def list_files(self, path: str) -> tuple[SandboxFile, ...]:
+        """The regular files at or below an absolute path, sorted; none when it is missing."""
+
+    @abstractmethod
+    async def file_digest(self, path: str, *, length: int) -> str:
+        """``sha256:<hex>`` of a regular file's first ``length`` bytes, computed in place.
+
+        Lets a caller check that a copy it already holds is still a prefix of the file
+        without transferring the file again.
+        """
 
     @abstractmethod
     async def open_egress(self) -> None:

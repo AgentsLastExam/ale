@@ -13,6 +13,7 @@ import re
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -48,6 +49,14 @@ INLINE_TEXT_LIMIT = 16 * 1024
 _EXTENSIONS = {
     "application/json": "json",
     "application/pdf": "pdf",
+    "audio/aac": "aac",
+    "audio/aiff": "aiff",
+    "audio/flac": "flac",
+    "audio/mp4": "m4a",
+    "audio/mpeg": "mp3",
+    "audio/ogg": "ogg",
+    "audio/wav": "wav",
+    "audio/webm": "webm",
     "image/gif": "gif",
     "image/jpeg": "jpg",
     "image/png": "png",
@@ -161,9 +170,17 @@ class BlobStore:
         target = self.episode_dir / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
-            temporary = target.with_name(f".{target.name}.tmp")
-            temporary.write_bytes(data)
-            os.replace(temporary, target)
+            temporary: Path | None = None
+            try:
+                with NamedTemporaryFile(
+                    dir=target.parent, prefix=f".{target.name}.", suffix=".tmp", delete=False
+                ) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(data)
+                os.replace(temporary, target)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
         return BlobRef(
             path=relative.as_posix(),
             media_type=media_type,

@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Protocol
 
 from ale.core.errors import GuestUnreachableError, OutputStreamError, ProviderStartError
-from ale.core.sandbox import ExecOutputSink
+from ale.core.sandbox import ExecOutputSink, SandboxFile
 
 __all__ = ["GuestClient", "StdioTransport", "TcpTransport", "Transport"]
 
@@ -319,23 +319,24 @@ class GuestClient:
             bool(data.get("timed_out")),
         )
 
-    async def write_file(
-        self, path: str, data: bytes, *, mode: str | None = None, run_as: str | None = None
-    ) -> None:
+    async def write_file(self, path: str, data: bytes, *, run_as: str | None = None) -> None:
         """Write ``data`` to ``path``, appending pieces that fit the guest's message limit."""
         for offset in range(0, max(len(data), 1), _WRITE_CHUNK_BYTES):
             piece = data[offset : offset + _WRITE_CHUNK_BYTES]
             params: dict[str, Any] = {"path": path, "b64": base64.b64encode(piece).decode("ascii")}
             if offset:
                 params["append"] = True
-            if mode:
-                params["mode"] = mode
             if run_as:
                 params["run_as"] = run_as
             await self.call("write_file", params)
 
-    async def read_file(self, path: str) -> bytes:
-        _, events = await self.call("read_file", {"path": path})
+    async def read_file(self, path: str, *, offset: int = 0, length: int | None = None) -> bytes:
+        if offset < 0 or (length is not None and length < 0):
+            raise ValueError("file offset and length must be nonnegative")
+        params: dict[str, Any] = {"path": path, "offset": offset}
+        if length is not None:
+            params["length"] = length
+        _, events = await self.call("read_file", params)
         return b"".join(
             base64.b64decode(event["data"]["b64"])
             for event in events
@@ -393,9 +394,13 @@ class GuestClient:
         data, _ = await self.call("stat", {"path": path})
         return bool(data.get("exists"))
 
-    async def list_files(self, path: str) -> tuple[str, ...]:
+    async def list_files(self, path: str) -> tuple[SandboxFile, ...]:
         data, _ = await self.call("list_files", {"path": path})
-        return tuple(str(item) for item in data.get("files", ()))
+        return tuple(SandboxFile.model_validate(item) for item in data["files"])
+
+    async def file_digest(self, path: str, *, length: int) -> str:
+        data, _ = await self.call("file_digest", {"path": path, "length": length})
+        return str(data["digest"])
 
     async def disk_usage(self, path: str) -> tuple[int, int, int]:
         data, _ = await self.call("disk_usage", {"path": path})

@@ -239,10 +239,9 @@ before a Judge changes the live workspace.
 
 Run configuration, not Task content, decides whether solver and verifier sandboxes are
 destroyed or retained. Default is destroy. Before a kept sandbox receives a durable
-handle, Harness cleanup and required evidence capture finish, known verification
-credentials are removed, and episode capabilities are revoked. Harness cleanup normally
-removes temporary CLI state. Subscription credentials stay in the checkout-local Host
-profile and therefore require no retained-Sandbox cleanup.
+handle, required evidence capture finishes, known verification credentials are removed,
+and episode capabilities are revoked. Subscription credentials stay in the
+checkout-local Host profile and therefore require no retained-Sandbox cleanup.
 
 Every Docker sandbox and QEMU runner is labeled with ALE ownership, episode, role,
 requested retention, and allocated GPU identity. Retained resources remain discoverable

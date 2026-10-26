@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import hashlib
 import hmac
 import io
 import json
@@ -32,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, BinaryIO, TextIO
 
@@ -205,19 +207,19 @@ class Handler:
         path = Path(_require(params, "path"))
         data = base64.b64decode(_require(params, "b64"))
         append = bool(params.get("append"))
+        owner = _owner_of(params.get("run_as"))
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with path.open("ab" if append else "wb") as handle:
+            with os.fdopen(_open_for_write(path, append=append), "wb") as handle:
                 handle.write(data)
+                if owner is not None:
+                    # Written by the service, which is root, so ownership is set
+                    # explicitly. A file the agent is meant to change but cannot is the
+                    # failure the identity model exists to prevent, and it surfaces far
+                    # from its cause.
+                    os.fchown(handle.fileno(), *owner)
         except PermissionError as exc:
             raise ProtocolError(ERR_PERMISSION, str(exc)) from exc
-        if os.name != "nt" and (mode := params.get("mode")) is not None:
-            os.chmod(path, int(mode, 8) if isinstance(mode, str) else mode)
-        if (owner := _owner_of(params.get("run_as"))) is not None:
-            # Written by the service, which is root, so ownership is set explicitly.
-            # A file the agent is meant to change but cannot is the failure the identity
-            # model exists to prevent, and it surfaces far from its cause.
-            os.chown(path, *owner)
         return ok(req_id, bytes=len(data))
 
     def op_put_tree(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
@@ -287,21 +289,36 @@ class Handler:
         return ok(req_id, files=files, bytes=total)
 
     def op_read_file(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
-        path = Path(_require(params, "path"))
         offset = int(params.get("offset") or 0)
         length = params.get("length")
-        try:
-            with path.open("rb") as handle:
-                handle.seek(offset)
-                data = handle.read(int(length)) if length else handle.read()
-        except FileNotFoundError as exc:
-            raise ProtocolError(ERR_NOT_FOUND, str(exc)) from exc
-        except PermissionError as exc:
-            raise ProtocolError(ERR_PERMISSION, str(exc)) from exc
-        for start in range(0, len(data), CHUNK_BYTES):
-            block = data[start : start + CHUNK_BYTES]
-            self._emit(event(req_id, "chunk", b64=base64.b64encode(block).decode("ascii")))
-        return ok(req_id, bytes=len(data), eof=not length or len(data) < int(length))
+        if offset < 0 or (length is not None and int(length) < 0):
+            raise ProtocolError(ERR_BAD_REQUEST, "file offset and length must be nonnegative")
+        remaining = None if length is None else int(length)
+        copied = 0
+        with _open_regular(Path(_require(params, "path"))) as handle:
+            handle.seek(offset)
+            while remaining is None or remaining > 0:
+                block = handle.read(
+                    CHUNK_BYTES if remaining is None else min(CHUNK_BYTES, remaining)
+                )
+                if not block:
+                    break
+                self._emit(event(req_id, "chunk", b64=base64.b64encode(block).decode("ascii")))
+                copied += len(block)
+                if remaining is not None:
+                    remaining -= len(block)
+        return ok(req_id, bytes=copied, eof=length is None or copied < int(length))
+
+    def op_file_digest(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
+        remaining = int(_require(params, "length"))
+        if remaining < 0:
+            raise ProtocolError(ERR_BAD_REQUEST, "digest length must be nonnegative")
+        digest = hashlib.sha256()
+        with _open_regular(Path(_require(params, "path"))) as handle:
+            while remaining > 0 and (block := handle.read(min(CHUNK_BYTES, remaining))):
+                digest.update(block)
+                remaining -= len(block)
+        return ok(req_id, digest=f"sha256:{digest.hexdigest()}")
 
     def op_stat(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
         path = Path(_require(params, "path"))
@@ -318,19 +335,37 @@ class Handler:
 
     def op_mkdirs(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
         path = Path(_require(params, "path"))
+        # A link where the directory belongs is replaced, as put_tree replaces one.
+        _clear_link(path)
         path.mkdir(parents=True, exist_ok=True)
         if (owner := _owner_of(params.get("run_as"))) is not None:
-            os.chown(path, *owner)
+            os.chown(path, *owner, follow_symlinks=False)
         return ok(req_id)
 
     def op_list_files(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
         root = Path(_require(params, "path"))
-        if not root.is_dir():
-            raise ProtocolError(ERR_NOT_FOUND, f"not a directory: {root}")
-        return ok(
-            req_id,
-            files=[path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()],
-        )
+        if not root.is_absolute() or ".." in root.parts:
+            raise ProtocolError(ERR_BAD_REQUEST, "file listings require an absolute path")
+        _refuse_links(root)
+        files: list[dict[str, Any]] = []
+        pending = [root]
+        while pending:
+            path = pending.pop()
+            try:
+                info = os.lstat(path)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if _is_link(info):
+                continue
+            if stat.S_ISREG(info.st_mode):
+                files.append({"path": str(path), "size": info.st_size})
+            elif stat.S_ISDIR(info.st_mode):
+                try:
+                    with os.scandir(path) as children:
+                        pending.extend(Path(child.path) for child in children)
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+        return ok(req_id, files=sorted(files, key=lambda item: item["path"]))
 
     def op_disk_usage(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
         usage = shutil.disk_usage(Path(_require(params, "path")))
@@ -338,9 +373,15 @@ class Handler:
 
     def op_remove(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
         path = Path(_require(params, "path"))
-        if path.is_dir():
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return ok(req_id)
+        if _is_link(info):
+            _clear_link(path)
+        elif stat.S_ISDIR(info.st_mode):
             shutil.rmtree(path, ignore_errors=True)
-        elif path.exists():
+        else:
             path.unlink()
         return ok(req_id)
 
@@ -369,6 +410,91 @@ def _require(params: dict[str, Any], key: str) -> Any:
     if key not in params:
         raise ProtocolError(ERR_BAD_REQUEST, f"missing parameter: {key}")
     return params[key]
+
+
+def _is_link(info: os.stat_result) -> bool:
+    # A Windows junction is a reparse point rather than a symbolic link, but leads
+    # elsewhere just the same.
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def _refuse_links(path: Path) -> None:
+    """Refuse a read whose path passes through a link anywhere.
+
+    A read hands the Host bytes as root, and every directory below the agent's home is the
+    agent's to replace with a link, so no part of the path is followed. A missing part is
+    left for the read itself to report.
+    """
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            info = os.lstat(current)
+        except (FileNotFoundError, NotADirectoryError):
+            return
+        if _is_link(info):
+            raise ProtocolError(ERR_BAD_REQUEST, f"path passes through a link: {current}")
+
+
+def _clear_link(path: Path) -> None:
+    """Remove a link at ``path`` itself, leaving what it points at alone."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if not _is_link(info):
+        return
+    # A Windows link to a directory is itself a directory entry.
+    if getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_DIRECTORY", 0):
+        os.rmdir(path)
+    else:
+        os.unlink(path)
+
+
+def _open_for_write(path: Path, *, append: bool) -> int:
+    """Open ``path`` for writing without writing through a link left there.
+
+    The service is root and may hand the file to the agent afterwards, so a symbolic or
+    hard link at ``path`` is replaced, as put_tree replaces one, rather than letting the
+    write and chown land on what it points at. The path's parents resolve normally.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    if append:
+        flags |= os.O_APPEND
+    _clear_link(path)
+    descriptor = os.open(path, flags, 0o666)
+    info = os.fstat(descriptor)
+    if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+        if not append:
+            os.ftruncate(descriptor, 0)
+        return descriptor
+    os.close(descriptor)
+    if append:
+        raise ProtocolError(ERR_BAD_REQUEST, f"not a regular file: {path}")
+    os.unlink(path)
+    return os.open(path, flags | os.O_EXCL, 0o666)
+
+
+@contextlib.contextmanager
+def _open_regular(path: Path) -> Iterator[BinaryIO]:
+    """Open a regular file for reading, refusing a link anywhere on ``path``."""
+    try:
+        _refuse_links(path)
+        # O_NOFOLLOW and O_NONBLOCK keep a link or FIFO swapped in after the check from
+        # being followed or from blocking the service.
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(path, flags), "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ProtocolError(ERR_BAD_REQUEST, f"not a regular file: {path}")
+            yield handle
+    except FileNotFoundError as exc:
+        raise ProtocolError(ERR_NOT_FOUND, str(exc)) from exc
+    except PermissionError as exc:
+        raise ProtocolError(ERR_PERMISSION, str(exc)) from exc
 
 
 # --- streamed uploads ---------------------------------------------------------

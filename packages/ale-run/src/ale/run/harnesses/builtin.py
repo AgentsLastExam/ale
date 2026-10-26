@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import PurePath, PurePosixPath, PureWindowsPath
 
 from ale.core.env import Observation, StepResult
+from ale.core.errors import PhaseTimeoutError
 from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, StepwisePolicy
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import OperatingSystem
@@ -142,6 +143,8 @@ class OracleHarness(AutonomousHarness):
             # is published, so the gate would be blind to the one thing it must catch.
             identity=Identity.AGENT,
         )
+        if result.timed_out:
+            raise PhaseTimeoutError("agent", timeout_sec)
         return AgentRun(
             exit_code=result.exit_code,
             final_message=(

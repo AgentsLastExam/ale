@@ -27,7 +27,7 @@ def test_multiple_agent_judges_allow_later_checks_without_touching_solver_trajec
     verdict = tmp_path / "rewards.json"
     config = tmp_path / "config.json"
     trajectory = tmp_path / "trajectory.json"
-    trajectory.write_text('{"schema_version":"ATIF-v1.7","steps":[]}')
+    trajectory.write_text('{"schema_version":"ATIF-v1.8","steps":[]}')
     before = trajectory.read_bytes()
     config.write_text(
         '{"agent":{"adapter":"codex-cli","version":"1.0.0","model":"m",'

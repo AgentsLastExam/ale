@@ -50,6 +50,10 @@ def npm_command(home: str, *args: str) -> list[str]:
 
 
 async def npm_env(sandbox: Sandbox, home: str) -> dict[str, str]:
+    """The agent's own npm prefix ahead of the Sandbox's inherited search path.
+
+    Inherited on both systems, so a tool the image put on its ``PATH`` stays reachable.
+    """
     home = str(agent_path(home))
     prefix = f"{home}/.local"
     if is_windows(home):
@@ -65,8 +69,11 @@ async def npm_env(sandbox: Sandbox, home: str) -> dict[str, str]:
             "npm_config_cache": f"{prefix}/.npm-cache",
             "CLAUDE_CODE_GIT_BASH_PATH": "C:/Program Files/Git/bin/bash.exe",
         }
+    result = await sandbox.exec(["sh", "-c", 'printf %s "$PATH"'], identity=Identity.AGENT)
+    if not result.ok or not result.stdout.strip():
+        raise AgentError("could not resolve the agent PATH")
     return {
-        "PATH": f"{prefix}/bin:/usr/local/bin:/usr/bin:/bin",
+        "PATH": f"{prefix}/bin:{result.stdout.strip()}",
         "npm_config_cache": f"{prefix}/.npm-cache",
     }
 
@@ -91,6 +98,9 @@ async def ensure_npm_cli(
     )
     installed = _reported_version(probe.stdout + probe.stderr) if probe.ok else None
     if installed != version:
+        # As the agent, into its own prefix: an install into root's prefix is one the
+        # unprivileged account may not be able to run. `--force` overwrites a same-version
+        # residue cleanly.
         result = await sandbox.exec(
             npm_command(
                 home,

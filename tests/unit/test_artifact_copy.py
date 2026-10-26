@@ -13,7 +13,7 @@ import pytest
 
 from ale.core.sandbox import ExecResult, Identity
 from ale.core.taskspec import OperatingSystem, TaskManifestV1
-from ale.run.artifact_files import inspect
+from ale.run.artifact_files import inspect, read
 from ale.run.episode import _Artifacts
 
 pytestmark = pytest.mark.unit
@@ -42,7 +42,19 @@ class LocalSandbox:
         Path(path).write_bytes(data)
 
 
-def test_globs_directories_links_and_cycles(tmp_path):
+def test_a_link_above_the_artifact_is_not_followed_either(tmp_path):
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    (protected / "result.txt").write_text("secret")
+    (tmp_path / "output").symlink_to(protected, target_is_directory=True)
+    for pattern in ("output/result.txt", "output/*.txt"):
+        result = inspect(str(tmp_path / pattern))
+        assert result == {"entries": [], "skipped": [f"{tmp_path / 'output'}: link"]}
+    with pytest.raises(ValueError, match="is a link"):
+        read(str(tmp_path / "output" / "result.txt"))
+
+
+def test_globs_directories_and_skips_links(tmp_path):
     output = tmp_path / "output"
     output.mkdir()
     (output / "file.sgf").write_text("game")
@@ -51,6 +63,7 @@ def test_globs_directories_links_and_cycles(tmp_path):
     (output / "file-link.sgf").symlink_to("file.sgf")
     (output / "dir-link.sgf").symlink_to("directory.sgf")
     (output / "directory.sgf" / "cycle").symlink_to(output, target_is_directory=True)
+    (output / "escape.sgf").symlink_to("/etc/hostname")
     (output / "broken.sgf").symlink_to("missing")
     os.mkfifo(output / "pipe.sgf")
     result = inspect(str(output / "*.sgf"))
@@ -58,18 +71,19 @@ def test_globs_directories_links_and_cycles(tmp_path):
         Path(entry["source"]).relative_to(output).as_posix(): entry["kind"]
         for entry in result["entries"]
     }
-    assert entries["file-link.sgf"] == "file"
-    assert entries["dir-link.sgf"] == "directory"
-    assert entries["directory.sgf"] == "directory"
-    assert entries["dir-link.sgf/inside"] == "file"
-    assert "broken.sgf" not in entries
-    assert "pipe.sgf" not in entries
-    assert len(entries) < 40
-    assert any("cycle" in reason for reason in result["skipped"])
+    assert entries == {
+        "file.sgf": "file",
+        "directory.sgf": "directory",
+        "directory.sgf/inside": "file",
+    }
+    skipped = "\n".join(result["skipped"])
+    for name in ("file-link.sgf", "dir-link.sgf", "cycle", "escape.sgf", "broken.sgf"):
+        assert f"{name}: link" in skipped
+    assert "pipe.sgf: special file" in skipped
 
 
 @pytest.mark.asyncio
-async def test_copy_restore_skips_missing_and_preserves_bytes_types_empty_dirs_and_modes(tmp_path):
+async def test_copy_restore_skips_missing_and_links_and_preserves_bytes_types_and_modes(tmp_path):
     output = tmp_path / "output"
     output.mkdir()
     (output / "file.txt").write_bytes(b"data\x00\xff")
@@ -87,8 +101,7 @@ async def test_copy_restore_skips_missing_and_preserves_bytes_types_empty_dirs_a
     (output / "stale.txt").write_text("stale")
     await sink.restore(sandbox)
     assert (output / "file.txt").read_bytes() == b"data\x00\xff"
-    assert (output / "link.txt").read_bytes() == b"data\x00\xff"
-    assert not (output / "link.txt").is_symlink()
+    assert not (output / "link.txt").exists()
     assert (output / "file.txt").stat().st_mode & 0o777 == 0o640
     assert (output / "expected-file.json").is_dir()
     assert (output / "empty").is_dir()

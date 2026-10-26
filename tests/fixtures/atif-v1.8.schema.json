@@ -66,9 +66,55 @@
       "title": "Agent",
       "type": "object"
     },
+    "AudioSource": {
+      "additionalProperties": false,
+      "description": "Audio source specification for audio stored as files or at remote URLs.\n\nAdded in ATIF-v1.8. Mirrors ``ImageSource`` so that consumers can treat any\nreferenced media the same way, with one addition: ``duration_sec``. Duration\nis worth recording because several providers bill audio per second and\ndataset statistics need it, and unlike an image's dimensions it cannot be\nrecovered without decoding the file.",
+      "properties": {
+        "duration_sec": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional duration of the audio in seconds. Useful for cost accounting and dataset statistics; omit when unknown.",
+          "title": "Duration Sec"
+        },
+        "media_type": {
+          "description": "MIME type of the audio",
+          "enum": [
+            "audio/wav",
+            "audio/mpeg",
+            "audio/mp4",
+            "audio/aac",
+            "audio/ogg",
+            "audio/flac",
+            "audio/webm",
+            "audio/aiff"
+          ],
+          "title": "Media Type",
+          "type": "string"
+        },
+        "path": {
+          "description": "Location of the audio. Can be a relative or absolute file path, or a URL.",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "media_type",
+        "path"
+      ],
+      "title": "AudioSource",
+      "type": "object"
+    },
     "ContentPart": {
       "additionalProperties": false,
-      "description": "A single content part within a multimodal message.\n\nUsed when a message or observation contains mixed content types (text and images).\nFor text-only content, a plain string can still be used instead of a ContentPart array.",
+      "description": "A single content part within a multimodal message.\n\nUsed when a message or observation contains mixed content types (text,\nimages, or audio). For text-only content, a plain string can still be used\ninstead of a ContentPart array.",
       "properties": {
         "source": {
           "anyOf": [
@@ -76,11 +122,15 @@
               "$ref": "#/$defs/ImageSource"
             },
             {
+              "$ref": "#/$defs/AudioSource"
+            },
+            {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Image source (file reference). Required when type='image'."
+          "description": "Media source (file reference). Required when type='image' or type='audio', and must match that type.",
+          "title": "Source"
         },
         "text": {
           "anyOf": [
@@ -99,7 +149,8 @@
           "description": "The type of content",
           "enum": [
             "text",
-            "image"
+            "image",
+            "audio"
           ],
           "title": "Type",
           "type": "string"
@@ -783,7 +834,7 @@
           "title": "Notes"
         },
         "schema_version": {
-          "default": "ATIF-v1.7",
+          "default": "ATIF-v1.8",
           "description": "String defining ATIF compatibility",
           "enum": [
             "ATIF-v1.0",
@@ -793,7 +844,8 @@
             "ATIF-v1.4",
             "ATIF-v1.5",
             "ATIF-v1.6",
-            "ATIF-v1.7"
+            "ATIF-v1.7",
+            "ATIF-v1.8"
           ],
           "title": "Schema Version",
           "type": "string"

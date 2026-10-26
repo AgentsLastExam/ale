@@ -7,11 +7,16 @@ import os
 import subprocess
 import sys
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
 
+from ale.run.harnesses.base import STDOUT_PATH
+from ale.run.harnesses.claude_code import ClaudeCodeHarness
+from ale.run.harnesses.codex_cli import CodexCliHarness
+from ale.run.harnesses.grok_build import GrokBuildHarness
+from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.secrets import provider_credentials
 from tests.support import sibling_checkout
 
@@ -21,6 +26,7 @@ LIVE = pytest.mark.skipif(
 )
 MODEL = os.environ.get("ALE_LIVE_MODEL", "claude-sonnet-5")
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
+SHIPPED = (ClaudeCodeHarness(), CodexCliHarness(), GrokBuildHarness(), OpenClawCliHarness())
 WORKSPACE_ROOT = sibling_checkout("ale-tasks-base").parent
 
 
@@ -73,13 +79,29 @@ def jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def native_session_file(
+    logs: Path, harness: str, session_id: str, *, grok_file: str = "chat_history.jsonl"
+) -> Path:
+    """Resolve the exact recorded session; a newer or child session cannot substitute."""
+    assert session_id
+    adapter = next(item for item in SHIPPED if item.name == harness)
+    matches = [
+        path
+        for path in logs.rglob("*")
+        if path.is_file()
+        and adapter.is_session_file(PurePosixPath(path.relative_to(logs).as_posix()), session_id)
+        and (harness != "grok-build" or path.name == grok_file)
+    ]
+    assert len(matches) == 1, (harness, session_id, matches)
+    return matches[0]
+
+
 def audit_episode(
     episode: Path,
     *,
     model: str = MODEL,
     harness: str = "claude-code",
     version: str = "2.1.227",
-    native_log: str = "transcript.jsonl",
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -90,7 +112,9 @@ def audit_episode(
     trajectory = json.loads((episode / "trajectory.json").read_text())
     execution = jsonl(episode / "trace.execution.jsonl")
     result = json.loads((episode / "result.json").read_text())
-    native = jsonl(episode / "logs" / harness / native_log)
+    logs = episode / "logs" / harness
+    assert (logs / STDOUT_PATH).stat().st_size > 0
+    native = jsonl(native_session_file(logs, harness, trajectory["session_id"]))
     lock = json.loads((episode / "lock.json").read_text())
 
     calls = [record for record in transport if record["kind"] == "call"]
@@ -108,7 +132,7 @@ def audit_episode(
     assert verify_commands and verify_commands[-1]["outcome"] == "succeeded"
     assert result["status"] == "completed"
     assert result["rewards"] and all(value == 1.0 for value in result["rewards"].values())
-    assert trajectory["schema_version"] == "ATIF-v1.7"
+    assert trajectory["schema_version"] == "ATIF-v1.8"
     assert trajectory["steps"][0]["source"] == "user"
     assert lock["agent"]["harness"] == harness
     assert lock["agent"]["model"] == model

@@ -254,6 +254,23 @@ Task code.
 
 ## Runtime behavior
 
+Each Sandbox owns two fixed guest connections: one for commands and one for file
+discovery and reads. A long-running command must not block periodic log collection.
+Docker uses two stdio guest sessions; QEMU uses two authenticated connections to the
+same guest server and port. Providers close both on startup failure, retention,
+destruction, and image export.
+
+`Sandbox.list_files(path)` returns the regular files at or below an absolute path, sorted,
+with byte sizes; a missing path returns none. `Sandbox.read_file` reads a regular file or
+a byte range of one, and `Sandbox.file_digest(path, length=n)` returns the SHA-256 of a
+file's first `n` bytes, computed in the guest, so a caller can check that a copy it holds
+is still a prefix without transferring it again. None of the three passes through a
+symbolic link or Windows reparse point anywhere on its path, and a listing skips those
+below it: the agent may replace any directory below its home with a link, and one could
+point at a file only the framework may read. On Windows a file cannot be deleted or
+renamed over while the service holds it open; reads are short, and the shipped CLIs
+append to their session files rather than replacing them.
+
 Given a conforming image, the Docker Provider:
 
 - starts the exact prepared content without replacing its command, adding the framework
@@ -298,7 +315,9 @@ requiring executable bits. Artifact collection/restoration does not use these de
 Every Provider streams the tree through guestd's `put_tree`, which applies these rules as
 it writes, so they have one implementation rather than one per backend. Links arrive as
 links; a link or hard link already at a destination is replaced, never written through,
-because the writer is root.
+because the writer is root. Single-file writes, `mkdirs` and `remove` treat a link at
+their path the same way and leave its target alone; their parents, like an upload's,
+are framework-chosen paths and resolve normally.
 
 Solver and oracle use the image's agent account. Windows guestd runs elevated in that
 account's interactive session and launches agent commands with the desktop's limited
@@ -325,6 +344,7 @@ engine).
 |---|---|---|
 | Agent work runs as `image.user`, framework work as root or Administrator; the agent elevates exactly when `resources.sudo` asks | Provider check in `create`, both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
+| File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |
 | Framework phases have the network; after `close_egress` the agent reaches its Gateway (and allowlist proxy) and nothing else; `open` Tasks are never sealed; the Gateway address never moves | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |
 | Resources are applied or rejected; the RunLock records the observed image and allocation | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
 | Destroy is idempotent; retained sandboxes can be listed and destroyed through their Provider | Provider | `test_destroy_is_idempotent`, `test_a_retained_sandbox_can_be_listed_and_destroyed` |

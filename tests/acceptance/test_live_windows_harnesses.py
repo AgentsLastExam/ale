@@ -16,13 +16,14 @@ from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
+from ale.run.harnesses.base import STDOUT_PATH
 from ale.run.providers.qemu import QemuProvider
 from ale.run.secrets import provider_credentials
 from ale.run.tasksets.manifest import load_task_folder
 from tests.support import provider_registry
 
 from .test_cross_os_standard_task import _write_task
-from .trajectory import LIVE
+from .trajectory import LIVE, native_session_file
 
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_kvm, pytest.mark.needs_llm, LIVE]
 
@@ -97,4 +98,6 @@ async def test_windows_native_harness_completes_a_file_task(
     assert result.verdict.rewards == {"overall": 1.0}
     trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
     assert any(step.get("tool_calls") for step in trajectory["steps"])
-    assert (result.run_dir / "logs" / name / "transcript.jsonl").stat().st_size > 0
+    assert (result.run_dir / "logs" / name / STDOUT_PATH).stat().st_size > 0
+    native = native_session_file(result.run_dir / "logs" / name, name, trajectory["session_id"])
+    assert native.stat().st_size > 0

@@ -13,7 +13,6 @@ from ale.core.harness import (
     ResumeSupport,
     TrajectoryParseContext,
 )
-from ale.core.sandbox import Sandbox
 
 __all__ = ["AutonomousHarnessConformance"]
 
@@ -46,15 +45,6 @@ class AutonomousHarnessConformance:
     @staticmethod
     def check_parser_is_pure(harness: AutonomousHarness, context: TrajectoryParseContext) -> None:
         assert harness.parse_trajectory(context) == harness.parse_trajectory(context)
-
-    @staticmethod
-    async def check_cleanup_is_idempotent(
-        harness: AutonomousHarness,
-        sandbox: Sandbox,
-        session: HarnessSession,
-    ) -> None:
-        await harness.cleanup(sandbox, session)
-        await harness.cleanup(sandbox, session)
 
     @staticmethod
     def check_native_continuation(

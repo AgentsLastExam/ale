@@ -20,7 +20,8 @@ same lifecycle:
 2. translate declared Skills and MCP servers;
 3. send model calls through the episode Gateway token;
 4. launch as the image-declared agent user;
-5. retain native evidence and deterministically convert it to ATIF;
+5. declare its own logs, which ALE mirrors while it runs, and convert them to ATIF
+   deterministically;
 6. bind native continuation to the original Sandbox and effective configuration.
 
 API-key and subscription runs generate the same Sandbox-side Gateway configuration.
@@ -29,3 +30,9 @@ Only the Host Gateway's upstream authentication changes. See
 
 The normative integration contract is
 [`../../../../../../docs/specs/autonomous-harness.md`](../../../../../../docs/specs/autonomous-harness.md).
+
+The four native CLIs subclass `CliHarness` in `base.py`, which owns their common
+invocation, evidence layout, and continuation checks; each package keeps only its native
+command line, configuration, result reading, and parser. The pinned versions and the
+rules every CLI follows are in the specification; each package README notes only what is
+particular to that CLI.
