@@ -88,7 +88,9 @@ Only the Gateway writes `trace.transport.jsonl`. Every complete line has
 - `call`: stable `call_id`, model, request/response digests, provider response ID,
   token usage, stop reason, latency, and `forwarded`/`failed`/`refused` disposition.
   `input_tokens` counts every input token in every dialect, and `cache_read_tokens` and
-  `cache_write_tokens` say how many of them the provider's prompt cache served or stored;
+  `cache_write_tokens` say how many of them the provider's prompt cache served or stored.
+  A refused call's `refusal_limit` names the ceiling, or the request policy
+  (`web_tools`, `unsupported_method`) that refused it;
 - `replay`: the original call ID, request digest, replay reason, and `charged=false`, since
   a replay counts toward neither usage nor limits;
 - `trajectory_link`: call ID, trajectory ID, and ATIF step ID.
@@ -96,7 +98,7 @@ Only the Gateway writes `trace.transport.jsonl`. Every complete line has
 Retries are never counted twice. Only a successful provider response (2xx) or a Gateway refusal is replayed
 to a retry of the same request; after a provider error (5xx, or a provider 429) the retry is forwarded
 and recorded as a new `call`. A streamed 2xx response counts as successful only when it reached its
-dialect's terminal event (`message_stop`, a completed or incomplete Responses result, or `[DONE]`)
+dialect's terminal event, listed in the [Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md),
 without an in-band error; an interrupted or failed stream is forwarded again on retry. Failed and refused calls remain visible. Default records
 contain digests and accounting metadata, not provider request/response bodies or a second
 copy of the conversation.

@@ -275,9 +275,11 @@ error the agent program reported, to that limit: the episode ends `budget_exceed
 `gateway` termination. Refusals carry `x-should-retry: false` so SDKs stop retrying them.
 Adapters classify only their native limits.
 
-The Gateway supports Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses
-for API-key mode. The preset supplies the default dialect and upstream provider endpoint;
-a Harness may accept a documented compatible override. Subscription mode uses the same
+The Gateway supports Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, and
+Gemini `generateContent` for API-key mode; each dialect's routes and request handling
+are in the [Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md). The
+preset supplies the default dialect and upstream provider endpoint; a Harness may accept
+a documented compatible override. Subscription mode uses the same
 Sandbox-side Gateway configuration; only the Host Gateway's upstream authentication changes,
 so model authority, limits,
 accounting, retry coalescing, and Transport Trace are common to both modes. The ChatGPT
@@ -290,19 +292,21 @@ request after an input-token, output-token, or total-token ceiling is reached.
 Input tokens include prompt-cache reads and writes, so a cache-heavy agent cannot stay
 under an input or total ceiling by caching.
 Model-call limits remain exact because they require no estimation. This policy applies
-equally to all three dialects.
+equally to every dialect.
 
 It accounts for every upstream call made by the agent program, including CLI-owned
 discovery or compaction calls. If the CLI disconnects from a streaming response early,
-the Gateway still drains the upstream response and commits usage. Chat streaming requests
-force `stream_options.include_usage=true`, and legacy `max_tokens` is normalized to
-`max_completion_tokens` before forwarding. A request without an output ceiling is forwarded
-without one; the Gateway never invents a default that would truncate reasoning or output.
+the Gateway still drains the upstream response and commits usage. Beyond imposing the
+model, a request is changed only where its dialect requires it, for example so usage is
+reported; the Gateway README lists each change. A
+request without an output ceiling is forwarded without one; the Gateway never invents a
+default that would truncate reasoning or output.
 
 A streaming response can stay silent for minutes when the provider buffers part of it (a
 `tool_use` input is held back until the whole parameter is generated). After 15 s of upstream
 silence the Gateway writes an SSE comment line to the client; comment lines are ignored by
 event-stream parsers, so the events, the accounted usage and any replayed body are unchanged.
+A dialect whose clients reject comment lines gets none.
 The Claude Code adapter also raises the CLI's HTTP idle timeout and stream watchdog to
 600 s, well past the quiet spans this has caused, so the keep-alive is not the only thing
 standing between the CLI and a response the Gateway is still receiving.

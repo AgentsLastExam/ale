@@ -72,8 +72,37 @@ Two host-side services, one token:
   everything else with a 403 naming what was declared.
 
 Both authenticate the same per-episode token and share one session registry. The Gateway
-uses bearer authentication; standard proxy clients send the same token through Basic
-proxy authentication.
+reads it wherever the dialect's clients send their key, such as a bearer header or the
+dialect's own key header; standard proxy clients send it through Basic proxy
+authentication.
+
+The Gateway forwards only calls it records and that leave nothing stored with the
+provider:
+
+- **The model is imposed wherever the dialect names it**, in the body or in the URL, on
+  every call, a CLI's own helper-model calls included: a run that also sampled a second
+  model would not measure what it says it does.
+- **Nothing that stores state with the provider is forwarded**, such as uploaded files or
+  explicitly cached content. Such an object lives under the Host's provider account, not
+  the episode, so it would:
+  - be visible to, and usable by, any later episode on the same credential, so episodes
+    would no longer be independent;
+  - outlive the episode, leaving ALE to track and delete it and a crashed run to leave it
+    behind;
+  - consume storage that the Gateway's call and token records do not measure.
+
+  The provider's automatic prompt caching is unaffected: it exposes nothing to reuse and
+  is recorded as cache-read tokens. Each dialect forwards only the methods it lists and
+  refuses the rest in the provider's error format, so an unchecked method cannot slip
+  through.
+- **Provider-side network tools follow the Task's network policy.** These are tools the
+  provider runs on its own side that reach the web, such as search grounding. They act
+  outside the Sandbox's network policy, so a request that asks for one is forwarded only
+  for a Task whose network is `open`.
+
+A policy refusal is recorded as a `refused` call naming the policy and, unlike a limit,
+does not end the episode. Each dialect's routes, authentication and policies are in the
+[Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md).
 
 In subscription mode the provider CLI still runs in the Sandbox, but it receives only
 the episode token and model Gateway URL. The Host Gateway reads checkout-local auth,
@@ -177,7 +206,8 @@ non-zero if any scoring path exists during setup.
 ## 6. Limits end episodes rather than stalling them
 
 API-key and subscription token and model-call ceilings are enforced by the Gateway
-refusing the next call with a 429, and an agent phase that fails after a refusal ends as
+refusing the next call with an error the client does not retry, a 429 unless a dialect's
+clients retry that regardless, and an agent phase that fails after a refusal ends as
 `budget_exceeded` for every Harness and authentication mode. Some subscription endpoints expose less request-side
 control; in particular, Codex rejects `max_output_tokens`, so ALE accounts the completed
 response and refuses a later call after the ceiling. Harness-native limits and phase
