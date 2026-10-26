@@ -744,3 +744,18 @@ class TestDialect:
         body = refusal_body("max_cost_usd", 5.0)
         assert body["type"] == "error"
         assert body["error"]["type"] == "ale_limit_reached"
+
+
+@pytest.mark.parametrize("path", ["/models", "/v1/models", "/muse-code/models"])
+async def test_model_catalog_lists_only_the_imposed_model(stack, path: str) -> None:
+    gateway, upstream, session, _ = stack
+    async with ClientSession() as client:
+        async with client.get(
+            f"{gateway.base_url}{path}", headers={"authorization": f"Bearer {session.token}"}
+        ) as response:
+            assert response.status == 200
+            catalog = await response.json()
+        async with client.get(f"{gateway.base_url}{path}") as anonymous:
+            assert anonymous.status == 401
+    assert catalog == {"object": "list", "data": [{"id": "claude-opus-4-8", "object": "model"}]}
+    assert upstream.calls == 0
