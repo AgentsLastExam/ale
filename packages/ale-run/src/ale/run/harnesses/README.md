@@ -12,6 +12,7 @@ an agent-owned rollout against ALE's stepwise Sandbox environment.
 | `openclaw-cli` | autonomous | OpenAI Responses | yes | no |
 | `kimi-code` | autonomous | configured dialect; Chat Completions by default | yes | no |
 | `qwen-code` | autonomous | configured dialect; Chat Completions by default | yes | no |
+| `muse-code` | autonomous | Meta's OpenAI Responses | yes | no |
 | `computer-use` | policy | Anthropic Messages | no | no |
 | `oracle`, `nop` | built in | none | no | no |
 

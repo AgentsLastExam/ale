@@ -195,6 +195,7 @@ def test_a_one_off_endpoint_must_name_its_own_key(monkeypatch: pytest.MonkeyPatc
         ("codex-cli", "openai"),
         ("grok-build", "xai"),
         ("kimi-code", "moonshot"),
+        ("muse-code", "meta"),
         ("openclaw-cli", "openai"),
         ("qwen-code", "qwen"),
     ],

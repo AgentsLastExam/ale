@@ -40,6 +40,7 @@ from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.kimi_code import KimiCodeHarness
+from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
 from ale.run.ledger import Ledger, episode_identity
@@ -136,6 +137,13 @@ def _harness(settings: RunConfig) -> Harness:
                 gateway_dialect=settings.gateway.dialect,
                 settings=settings.agent.settings,
             )
+        case "muse-code":
+            # Muse speaks Meta's own Responses API, so the Gateway must use that dialect.
+            _require_gateway_dialect(settings, "openai-responses")
+            return MuseCodeHarness(
+                cli_version=settings.agent.version,
+                settings=settings.agent.settings,
+            )
         case "qwen-code":
             return QwenCodeHarness(
                 cli_version=settings.agent.version,
@@ -144,8 +152,8 @@ def _harness(settings: RunConfig) -> Harness:
             )
         case unknown:
             raise AleError(
-                f"unknown agent {unknown!r}; try claude-code, codex-cli, "
-                "computer-use, grok-build, kimi-code, openclaw-cli, qwen-code, oracle or nop"
+                f"unknown agent {unknown!r}; try claude-code, codex-cli, computer-use, "
+                "grok-build, kimi-code, muse-code, openclaw-cli, qwen-code, oracle or nop"
             )
 
 

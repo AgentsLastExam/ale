@@ -34,6 +34,7 @@ from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
 from ale.run.harnesses.kimi_code import KimiCodeHarness
+from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
@@ -234,8 +235,10 @@ class ScriptedUpstream:
     async def _responses(self, request: web.Request) -> web.StreamResponse:
         _, (kind, value) = await self._next(request)
         number = len(self.requests)
+        sequence = iter(range(1 << 16))
 
         def event(data: dict[str, Any]) -> str:
+            data = {**data, "sequence_number": next(sequence)}
             return f"event: {data['type']}\ndata: {json.dumps(data)}\n\n"
 
         if kind == "tool":
@@ -313,7 +316,13 @@ class ScriptedUpstream:
             "status": "completed",
             "model": MODEL,
             "output": [item],
-            "usage": {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
+            "usage": {
+                "input_tokens": 11,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 7,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 18,
+            },
         }
         return await self._sse(
             request,
@@ -340,6 +349,8 @@ class Case:
     check_config: Callable[[Sandbox, HarnessSession], Awaitable[None]]
     #: The native calls that reach the MCP tool, when the CLI defers it behind others.
     mcp_calls: tuple[tuple[str, Any], ...] = ()
+    #: The offered tool that marks an agent-loop request, when it is not the shell itself.
+    marker: str | None = None
 
 
 async def _kimi_doctor(sandbox: Sandbox, session: HarnessSession) -> None:
@@ -376,6 +387,22 @@ async def _qwen_mcp_list(sandbox: Sandbox, session: HarnessSession) -> None:
     assert "proof: python3 /home/user/mcp.py (stdio) - Connected" in result.stdout
 
 
+async def _muse_skills(sandbox: Sandbox, session: HarnessSession) -> None:
+    result = await sandbox.exec(
+        [f"{session.home}/.local/bin/muse", "skills", "list", "--json"],
+        env={
+            "XDG_CONFIG_HOME": f"{session.home}/.config",
+            "XDG_DATA_HOME": f"{session.home}/.local/share",
+        },
+        cwd=session.home,
+        identity=Identity.AGENT,
+        timeout_sec=120,
+    )
+    assert result.ok, result.stdout + result.stderr
+    listed = json.loads(result.stdout)
+    assert SKILL in {skill.get("name") for skill in listed["skills"]}
+
+
 DIALECTS = ("openai-chat-completions", "anthropic", "openai-responses")
 CASES = {
     **{
@@ -404,6 +431,16 @@ CASES = {
         )
         for dialect in DIALECTS
     },
+    # Muse speaks only Meta's Responses API and offers its tools in a `muse` namespace.
+    # Reminder agents are off: their own model calls would race the scripted loop.
+    "muse-code-openai-responses": Case(
+        factory=lambda dialect: MuseCodeHarness(settings={"reminders": False}),
+        dialect="openai-responses",
+        shell=("bash", {"command": "echo shell-proof"}),
+        mcp_tool="mcp__proof__echo",
+        check_config=_muse_skills,
+        marker="muse",
+    ),
 }
 
 
@@ -456,7 +493,7 @@ async def test_cli_runs_through_the_gateway_with_resources_and_resumes(
             ("text", "SECOND-DONE"),
             ("text", "THIRD-DONE"),
         ],
-        marker=case.shell[0],
+        marker=case.marker or case.shell[0],
     )
     await upstream.start()
     gateway = Gateway(api_key=HOST_SECRET, upstream=upstream.url, dialect=case.dialect)
