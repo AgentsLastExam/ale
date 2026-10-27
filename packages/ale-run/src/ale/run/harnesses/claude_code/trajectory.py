@@ -213,10 +213,8 @@ def _parse_events(
                 raise TrajectoryReferenceError("Claude tool result has no tool_use_id")
             if call_id in results:
                 raise TrajectoryReferenceError(f"duplicate Claude tool result for {call_id!r}")
-            results[call_id] = (
-                event.get("tool_use_result", part.get("content")),
-                part.get("is_error") is True,
-            )
+            # Stdout's ``tool_use_result`` is a client-side copy the model never sees.
+            results[call_id] = (part.get("content"), part.get("is_error") is True)
 
     root_extra: dict[str, Any] = {}
     if issues:
