@@ -627,6 +627,70 @@ def test_stdout_subagent_events_belong_to_the_subagent(tmp_path: Path, native: b
     assert [calls(child) for child in trajectory.subagent_trajectories] == [["child-call"]]
 
 
+@pytest.mark.parametrize("native", [True, False])
+def test_tool_result_is_what_the_model_saw(tmp_path: Path, native: bool) -> None:
+    """Claude Code's client-side result copy never replaces the model-visible result."""
+    from dataclasses import replace
+
+    call = {
+        "id": "call-message",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "mcp-call",
+                "name": "mcp__task-proof__derive_fragment",
+                "input": {"nonce": "N"},
+            }
+        ],
+    }
+    visible = '{"fragment":"F"}'
+    result = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "mcp-call", "content": visible}],
+    }
+    if native:
+        project = tmp_path / ".claude-config/projects/project"
+        project.mkdir(parents=True)
+        (project / "root.jsonl").write_text(
+            "".join(
+                json.dumps({"sessionId": "root", **event}) + "\n"
+                for event in (
+                    {"type": "user", "message": {"role": "user", "content": "Do the task."}},
+                    {"type": "assistant", "message": call},
+                    {
+                        "type": "user",
+                        "message": result,
+                        "toolUseResult": visible,
+                        "mcpMeta": {"structuredContent": {"fragment": "F"}},
+                    },
+                )
+            )
+        )
+    stdout_log(tmp_path).write_text(
+        "".join(
+            json.dumps({"session_id": "root", "parent_tool_use_id": None, **event}) + "\n"
+            for event in (
+                {"type": "assistant", "message": call},
+                {
+                    "type": "user",
+                    "message": result,
+                    "tool_use_result": {
+                        "content": visible,
+                        "structuredContent": {"fragment": "F"},
+                    },
+                },
+                {"type": "result", "result": "done"},
+            )
+        )
+    )
+    trajectory = ClaudeCodeHarness().parse_trajectory(
+        replace(parse_context(tmp_path), session_id="root")
+    )
+
+    [observation] = [step.observation for step in trajectory.steps if step.observation]
+    assert [item.content for item in observation.results] == [visible]
+
+
 #: Trimmed native logs of a live Claude Code 2.1.227 run that delegated once.
 RECORDED = Path(__file__).resolve().parents[1] / "fixtures/harness-logs/claude-code-subagent"
 RECORDED_SESSION = "2ba144fd-7bed-41fc-b484-3ed711cf626b"
