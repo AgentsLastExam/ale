@@ -101,7 +101,7 @@ class Resources(BaseModel):
     model_config = _FROZEN
 
     cpus: int = Field(default=1, ge=1)
-    memory_mb: int = Field(default=1024, ge=128)
+    memory_mb: int = Field(default=4096, ge=128)
     storage_mb: int | None = Field(default=None, ge=256)
     gpus: int = Field(default=0, ge=0)
     sudo: bool = False
