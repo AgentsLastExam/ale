@@ -37,7 +37,7 @@ def test_real_claude_uses_task_skill_and_task_mcp(tmp_path) -> None:
     result = calls[0]["result"]
     assert result is not None
     assert call["arguments"]["nonce"]
-    fragment = json.loads(result["content"])["structuredContent"]["fragment"]
+    fragment = json.loads(result["content"])["fragment"]
 
     pairs = native_mcp_pairs(native)
     assert pairs[call["tool_call_id"]]["use"]["input"] == call["arguments"]

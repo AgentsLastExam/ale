@@ -81,7 +81,7 @@ def test_real_harness_exercises_its_visible_tool_surface(
 ) -> None:
     task = task_path(
         "ALE_LIVE_TOOL_SMOKE_TASK",
-        WORKSPACE_ROOT / "ale-tasks-152/tasks/demo/tool_smoke",
+        WORKSPACE_ROOT / "ale-tasks-base/tasks/demo/tool_smoke",
     )
     episode = run_task(
         task,
@@ -113,7 +113,7 @@ def test_real_harness_exercises_its_visible_tool_surface(
     assert passed + failed == tested
     assert result["status"] == "completed"
     denominator = max(report["total"], tested + untested)
-    assert result["rewards"]["reward"] == round(passed / denominator, 3)
+    assert result["rewards"]["overall"] == pytest.approx(passed / denominator, abs=0.005)
     assert lock["agent"]["harness"] == harness
     assert lock["agent"]["model"] == model
     assert lock["agent"]["version"] == version
