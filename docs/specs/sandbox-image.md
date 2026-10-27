@@ -80,6 +80,14 @@ screenshot in every sandbox it boots.
 How the install works, and what it costs, is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#qemu).
 
+## What a macOS image needs
+
+A macOS Task uses an external Tart OCI image with Python 3.12+, the Task account and
+its home, and the applications required by the Task. Desktop Tasks require a logged-in
+session with authorized screenshot and input access. The Orchard Provider's image
+requirements are described in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#orchard).
+
 ## ALE base images
 
 - `container-ubuntu22-base` provides an Ubuntu 22.04 GNOME desktop container and the
@@ -171,6 +179,11 @@ cache keys include the actual image asset bytes. Dirty or unsynchronized assets 
 RunLock schema 2 records declaration, preparation, Provider, and exact observed identity;
 it does not invent a whole-disk content digest. Local Linux VMs record OCI and materializer
 identities; local Windows VMs record builder identity and resolved base materials.
+
+macOS requires `image.kind: vm` and an external Tart OCI `image.ref` (tag or SHA-256
+digest). Local paths and image-build recipes are unsupported. Preparation records the
+resolved immutable identity; [Orchard](../../packages/ale-run/src/ale/run/providers/README.md#orchard)
+describes how the Provider resolves and checks it.
 
 ## Reverification
 
@@ -373,6 +386,10 @@ not work, or when an agent that did not request one can still use sudo.
 
 ALE does not pre-create artifacts or repair their ownership: image/setup/agent code owns
 their type and existence.
+
+On macOS, framework operations use root and agent operations use the Task account.
+A Task declaring `sudo: false` is rejected if that account has elevation rights;
+image authors supply the account and its privileges in advance.
 
 ## Provider contract
 

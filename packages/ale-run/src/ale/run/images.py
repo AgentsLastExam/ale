@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
@@ -27,6 +28,7 @@ __all__ = [
     "resolve_local_vm_fixture",
     "resolve_prepared_container_image",
     "resolve_prepared_vm_image",
+    "resolve_registry_reference",
     "resolve_vm_image",
 ]
 
@@ -105,6 +107,42 @@ async def resolve_loaded_image(
     raise ProviderStartError(
         f"Docker did not load the built Task image: {stderr.strip() or image_id}"
     )
+
+
+async def resolve_registry_reference(reference: str) -> str:
+    """Pin a registry tag using manifest metadata, without pulling image layers.
+
+    Buildx uses the Host's Docker registry credentials and needs no Docker daemon.
+    Keep raw CLI diagnostics out of errors: credential helpers may print secrets.
+    """
+    try:
+        code, output, _ = await _run(
+            "docker",
+            "buildx",
+            "imagetools",
+            "inspect",
+            "--format",
+            "{{.Manifest.Digest}}",
+            reference,
+            timeout=60,
+        )
+    except OSError:
+        raise ProviderStartError(
+            "Resolving an OCI tag requires Docker CLI with Buildx on the ALE Host; "
+            "install them or supply a digest-pinned image reference"
+        ) from None
+    if code != 0:
+        raise ProviderStartError(
+            "Could not resolve OCI image metadata; check Docker Buildx availability, "
+            "the image reference and Host registry access (docker login)"
+        )
+    digest = output.strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ProviderStartError("Registry metadata did not supply a valid SHA-256 image digest")
+    # A port belongs to the registry, while the optional tag follows the last slash.
+    registry, _, name = reference.rpartition("/")
+    repository = name.partition("@")[0].partition(":")[0]
+    return f"{registry}/{repository}@{digest}"
 
 
 async def resolve_container_image(image: ImageRef) -> PreparedTaskImage:
