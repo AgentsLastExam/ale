@@ -1,0 +1,24 @@
+schema_version = "1.4+ale.1"
+artifacts = ["/Users/admin/output"]
+
+[task]
+name = "agentslastexam/macos-desktop-smoke"
+keywords = ["macos", "smoke", "desktop"]
+
+[metadata]
+network_justification = "Orchard supports open networking only; no external research is needed."
+
+[environment]
+os = "macos"
+vm_image = "ghcr.io/cirruslabs/macos-tahoe-base@sha256:4aaa751fa7538902d73c767f27a066fc87e83f183069da4e4b5022863abd4c77"
+cpus = 2
+memory_mb = 4096
+
+[agent]
+user = "admin"
+timeout_sec = 600
+network_mode = "public"
+sudo = true
+
+[verifier]
+timeout_sec = 120

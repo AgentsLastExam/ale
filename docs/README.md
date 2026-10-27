@@ -12,6 +12,7 @@ This directory is the maintained description of ALE.
 | Build Windows Task images and prepare reusable MSIX assets | [guides/windows-task-images.md](guides/windows-task-images.md) |
 | Task asset versions, local checkpoints, and Hugging Face publication | [specs/task-assets.md](specs/task-assets.md) |
 | Episode protocol: phases of one episode | [specs/episode-protocol.md](specs/episode-protocol.md) |
+| Configure Orchard/Tart and run macOS Tasks | [guides/macos-orchard.md](guides/macos-orchard.md) |
 | Sandbox and image contract | [specs/sandbox-image.md](specs/sandbox-image.md) |
 | Verification API and records | [specs/verification.md](specs/verification.md) |
 | Harness integration | [specs/autonomous-harness.md](specs/autonomous-harness.md) |
