@@ -444,7 +444,7 @@ class OrchardProvider(Provider):
         except ProviderStartError as exc:
             raise ProviderStartError(
                 f"Orchard preflight failed: {exc}. Check the controller endpoint, TLS and "
-                "credentials"
+                "credentials; start local services with scripts/setup_macos.py if needed"
             ) from None
         finally:
             await client.close()
