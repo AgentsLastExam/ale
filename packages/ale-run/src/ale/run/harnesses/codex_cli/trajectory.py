@@ -38,6 +38,8 @@ _CALL_TYPES = frozenset(
     ("function_call", "custom_tool_call", "web_search_call", "tool_search_call")
 )
 _OUTPUT_TYPES = frozenset(("function_call_output", "custom_tool_call_output", "tool_search_output"))
+#: The only records a code-mode script's own calls leave in a rollout: each one's end.
+_SCRIPT_CALL_TYPES = frozenset(("mcp_tool_call_end", "patch_apply_end"))
 #: Every other mirrored rollout, with the issues reading it raised.
 _Rollouts = dict[Path, tuple[list[dict[str, Any]], list[dict[str, Any]]]]
 #: How a code-mode script calls ``spawn_agent``.
@@ -102,10 +104,11 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         and (event.get("item") or {}).get("type") == "mcp_tool_call"
     ]
     outputs = _outputs(rollout)
+    model_calls = _model_call_ids(rollout)
     used_mcp: set[int] = set()
     for event in rollout:
         payload = event.get("payload") or {}
-        if event.get("type") != "response_item":
+        if event.get("type") != "response_item" and not _scripted(event, model_calls):
             continue
         kind = payload.get("type")
         if kind == "message" and payload.get("role") == "user":
@@ -115,7 +118,11 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
                 builder.add(source="user", message=recorded[native_turns].prompt)
                 native_turns += 1
             continue
-        if kind not in _CALL_TYPES and kind != "reasoning" and payload.get("role") != "assistant":
+        if (
+            kind not in _CALL_TYPES | _SCRIPT_CALL_TYPES
+            and kind != "reasoning"
+            and payload.get("role") != "assistant"
+        ):
             continue
         if not native_turns:
             # The conversation began without the prompt ALE sent; keep it and say so.
@@ -232,12 +239,14 @@ def _thread_trajectory(
         extra=_extra(context, []),
     )
     outputs = _outputs(rollout)
+    model_calls = _model_call_ids(rollout)
     for event in rollout:
         payload = event.get("payload") or {}
         if event.get("type") == "event_msg" and payload.get("type") == "user_message":
             builder.add(source="user", message=str(payload.get("message") or ""))
-        elif event.get("type") == "response_item":
-            # Only stdout carries the real server name of an MCP call, and only the root's.
+        elif event.get("type") == "response_item" or _scripted(event, model_calls):
+            # Only stdout carries the real server name of a model's MCP call, and only the
+            # root's.
             _agent_item(builder, payload, outputs, spawned, [], set(), context)
     if not builder.steps:
         return None
@@ -286,6 +295,16 @@ def _agent_item(
     elif kind == "reasoning":
         if summary := _summary(payload):
             builder.add(source="agent", message="", reasoning_content=summary)
+    elif kind in _SCRIPT_CALL_TYPES:
+        call, observation = _script_call(payload, context)
+        # A script, not a model inference, chose this call: ATIF's zero-LLM dispatch step.
+        builder.add(
+            source="agent",
+            message="",
+            tool_calls=[call],
+            observation=observation,
+            llm_call_count=0,
+        )
     elif kind in _CALL_TYPES:
         call, observation = _native_call(payload, outputs, transcript_mcp, used_mcp, context)
         if observation is not None and (refs := spawned.get(call.tool_call_id)):
@@ -494,6 +513,64 @@ def _native_call(
         if value is not None
         else None,
     )
+
+
+def _model_call_ids(rollout: list[dict[str, Any]]) -> set[str]:
+    """The IDs of the calls the model itself made, read as ``_native_call`` reads them."""
+    return {
+        str(payload.get("call_id") or payload.get("id") or "")
+        for event in rollout
+        if event.get("type") == "response_item"
+        and (payload := event.get("payload") or {}).get("type") in _CALL_TYPES
+    }
+
+
+def _scripted(event: dict[str, Any], model_calls: set[str]) -> bool:
+    """Whether ``event`` ends a call a code-mode script made, under an ID no model call has.
+
+    A model's own MCP or patch call leaves the same end record under its call's ID; that
+    call is already its step.
+    """
+    payload = event.get("payload") or {}
+    return (
+        event.get("type") == "event_msg"
+        and payload.get("type") in _SCRIPT_CALL_TYPES
+        and str(payload.get("call_id") or "") not in model_calls
+    )
+
+
+def _script_call(
+    payload: dict[str, Any], context: TrajectoryParseContext
+) -> tuple[AtifToolCall, AtifObservation | None]:
+    """A script's call, from the end record that is all the rollout keeps of it."""
+    call_id = str(payload.get("call_id") or "")
+    if payload.get("type") == "patch_apply_end":
+        output = "\n".join(str(payload[key]) for key in ("stdout", "stderr") if payload.get(key))
+        return (
+            AtifToolCall(
+                tool_call_id=call_id,
+                function_name="apply_patch",
+                arguments={"changes": payload.get("changes") or {}},
+            ),
+            _observation(call_id, output, error=payload.get("success") is not True),
+        )
+    invocation = _dict(payload.get("invocation"))
+    server = str(invocation.get("server") or "")
+    tool = str(invocation.get("tool") or "")
+    call = AtifToolCall(
+        tool_call_id=call_id,
+        function_name=f"mcp__{server}__{tool}",
+        arguments=_dict(invocation.get("arguments") or {}),
+        extra={"ale": {"mcp": {"server": server, "tool": tool}}},
+    )
+    # The result is a serialized Rust `Result`: the tool's reply, or why the call failed.
+    outcome = _dict(payload.get("result"))
+    if "Ok" in outcome:
+        error = _dict(outcome["Ok"]).get("isError") is True
+        return call, _observation(call_id, _result_content(outcome["Ok"], context), error=error)
+    if "Err" in outcome:
+        return call, _observation(call_id, str(outcome["Err"]), error=True)
+    return call, None
 
 
 def _observation(

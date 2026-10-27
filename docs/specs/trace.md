@@ -44,7 +44,9 @@ before atomic replacement:
 Step IDs start at 1 and are contiguous. The complete instruction is the first
 agent-visible user content. Native tool-use/result events are grouped into one agent
 step; every observation `source_call_id` resolves to a tool call in that step. An empty
-result is valid, while a missing result remains absent.
+result is valid, while a missing result remains absent. A call that a tool's own program
+made, rather than a model inference, is a separate agent step with `llm_call_count: 0`,
+ATIF's mark for a deterministic dispatch, so no export treats it as sampled model output.
 
 All ALE extensions live under `extra.ale`:
 

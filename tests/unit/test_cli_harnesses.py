@@ -740,6 +740,22 @@ def test_codex_parser_uses_complete_native_function_call_evidence(tmp_path: Path
                         },
                     }
                 ),
+                # A model's own call leaves the end record a code-mode script's call does.
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "mcp_tool_call_end",
+                            "call_id": "call-mcp",
+                            "invocation": {
+                                "server": "task-proof",
+                                "tool": "derive_fragment",
+                                "arguments": {"nonce": "abc"},
+                            },
+                            "result": {"Ok": {"content": [{"type": "text", "text": "xyz"}]}},
+                        },
+                    }
+                ),
                 json.dumps(
                     {
                         "type": "response_item",
@@ -793,6 +809,20 @@ def test_codex_parser_uses_complete_native_function_call_evidence(tmp_path: Path
                             "call_id": "call-patch",
                             "name": "apply_patch",
                             "input": "*** Begin Patch\n*** End Patch\n",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "patch_apply_end",
+                            "call_id": "call-patch",
+                            "stdout": "Success",
+                            "stderr": "",
+                            "success": True,
+                            "changes": {},
+                            "status": "completed",
                         },
                     }
                 ),
@@ -1175,6 +1205,79 @@ def test_codex_nested_spawn_agent_calls_nest_their_trajectories(tmp_path: Path) 
     assert child.steps[1].tool_calls[0].function_name == "multi_agent.spawn_agent"
     assert [step.message for step in grandchild.steps] == ["Help child"]
     assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+
+
+#: A live run whose model reached the task MCP and apply_patch only through code mode.
+CODEX_CODE_MODE = "01a17aa2-58ee-7882-9f73-6ab166273bf8"
+
+
+def test_codex_code_mode_script_calls_are_steps_no_inference_chose(tmp_path: Path) -> None:
+    trajectory = CodexCliHarness().parse_trajectory(
+        recorded_context(tmp_path, "codex-cli-code-mode", CODEX_CODE_MODE)
+    )
+    steps = trajectory.steps
+    dispatched = [index for index, step in enumerate(steps) if step.llm_call_count == 0]
+    mcp, patch = (steps[index] for index in dispatched)
+
+    # Each follows the model's `exec` call whose script made it.
+    assert [steps[index - 1].tool_calls[0].tool_call_id for index in dispatched] == [
+        "call_f5d76122ee93482098edfd8309715220",
+        "call_8e205589d5184b6d86b26001801a078d",
+    ]
+    (call,) = mcp.tool_calls
+    (result,) = mcp.observation.results
+    assert call.tool_call_id == result.source_call_id == "exec-e30d2965-8a6d-4b1a-b243-b84034fb4eb4"
+    assert call.function_name == "mcp__task-proof__derive_fragment"
+    assert call.arguments == {"nonce": "AE3D40E9BE7E3CB6"}
+    assert call.extra == {"ale": {"mcp": {"server": "task-proof", "tool": "derive_fragment"}}}
+    assert result.content[0].text == '{"fragment": "C6E6F113A4AC048710451E9B"}'
+    assert result.extra is None
+    (call,) = patch.tool_calls
+    assert call.function_name == "apply_patch"
+    assert call.arguments == {
+        "changes": {
+            "/home/user/output/result.txt": {
+                "type": "add",
+                "content": "SKILL-R7::AE3D40E9BE7E3CB6::C6E6F113A4AC048710451E9B\n",
+            }
+        }
+    }
+    assert patch.observation.results[0].content == (
+        "Success. Updated the following files:\nA /home/user/output/result.txt\n"
+    )
+    # Every call a model inference chose is an `exec` script.
+    assert {
+        call.function_name
+        for step in steps
+        if step.llm_call_count is None
+        for call in step.tool_calls or ()
+    } == {"exec"}
+    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+
+
+def test_codex_code_mode_failed_script_calls_are_errors(tmp_path: Path) -> None:
+    parse = recorded_context(tmp_path, "codex-cli-code-mode", CODEX_CODE_MODE)
+    rollout = next((parse.logs_dir / CODEX_DAY).glob(f"*-{CODEX_CODE_MODE}.jsonl"))
+    records = [json.loads(line) for line in rollout.read_text().splitlines()]
+    for record in records:
+        payload = record["payload"]
+        if payload.get("type") == "mcp_tool_call_end":
+            payload["result"] = {"Err": "tool call timed out"}
+        elif payload.get("type") == "patch_apply_end":
+            payload.update(stdout="", stderr="patch rejected", success=False, status="failed")
+    write_jsonl(rollout, records)
+
+    trajectory = CodexCliHarness().parse_trajectory(parse)
+
+    assert [
+        (result.content, result.extra)
+        for step in trajectory.steps
+        if step.llm_call_count == 0
+        for result in step.observation.results
+    ] == [
+        ("tool call timed out", {"ale": {"is_error": True}}),
+        ("patch rejected", {"ale": {"is_error": True}}),
+    ]
 
 
 def test_openclaw_nested_spawns_nest_their_trajectories(tmp_path: Path) -> None:
