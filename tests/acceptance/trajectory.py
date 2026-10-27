@@ -64,6 +64,10 @@ def run_task(
         "--run-id",
         run_id,
         "--no-resume",
+        # A subscription login in the checkout's .ale/auth would otherwise win; live runs
+        # always test the API-key route the .env describes.
+        "--auth",
+        "api-key",
     ]
     for setting in settings:
         command.extend(("--set", setting))
@@ -199,7 +203,7 @@ def llm_audit_evidence(evidence: dict[str, Any], *, requirement: str) -> dict[st
     payload = json.dumps(
         {
             "model": MODELS["anthropic"],
-            "max_tokens": 1200,
+            "max_tokens": 4000,
             "messages": [
                 {
                     "role": "user",
@@ -239,7 +243,12 @@ def llm_audit_evidence(evidence: dict[str, Any], *, requirement: str) -> dict[st
     ).strip()
     if text.startswith("```"):
         text = text.strip("`").removeprefix("json").strip()
-    audit = json.loads(text)
+    reply = f"stop_reason={body.get('stop_reason')!r} usage={body.get('usage')!r} text={text!r}"
+    assert body.get("stop_reason") == "end_turn", f"audit reply did not finish: {reply}"
+    try:
+        audit = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise AssertionError(f"audit reply is not JSON ({error}): {reply}") from error
     assert audit.get("valid") is True, audit
     assert audit.get("evidence"), audit
     return audit

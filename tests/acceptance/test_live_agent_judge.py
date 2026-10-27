@@ -13,6 +13,7 @@ from ale.core.lock import TaskSource
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
+from ale.run.gateway.server import Gateway
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
@@ -66,19 +67,27 @@ async def test_live_agent_judge_records_transcript_without_an_extra_trajectory(
     )
     settings = RunConfig(verification=verification)
     harness = OracleHarness()
-    result = await run_episode(
-        task,
-        StandardEnvironment(harness),
-        provider_registry(DockerProvider()),
-        run_dir=tmp_path,
-        provenance=ProvenanceInputs(
-            source=TaskSource(kind="local", path=str(task_path)),
-            agent=agent_provenance(harness, "", settings, EffectiveAgentResources()),
-            gateway=gateway_provenance(settings),
-            config_hash=settings.config_hash,
-        ),
-        verification_config=verification,
-    )
+    # A verifier reaches its Judge only through a Gateway session, which holds the key.
+    gateway = Gateway()
+    gateway_url = await gateway.start()
+    try:
+        result = await run_episode(
+            task,
+            StandardEnvironment(harness),
+            provider_registry(DockerProvider()),
+            gateway=gateway,
+            gateway_url=gateway_url,
+            run_dir=tmp_path,
+            provenance=ProvenanceInputs(
+                source=TaskSource(kind="local", path=str(task_path)),
+                agent=agent_provenance(harness, "", settings, EffectiveAgentResources()),
+                gateway=gateway_provenance(settings),
+                config_hash=settings.config_hash,
+            ),
+            verification_config=verification,
+        )
+    finally:
+        await gateway.stop()
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"overall": 1.0}
     record = json.loads((result.run_dir / "verification.json").read_text())
