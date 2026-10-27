@@ -83,8 +83,9 @@ def run(
         typer.Option(
             "--agent",
             help=(
-                "claude-code, codex-cli, grok-build, kimi-code, muse-code, openclaw-cli, "
-                "qwen-code, zcode, computer-use, oracle or nop"
+                "claude-code, codex-cli, droid, forgecode, grok-build, hermes, kimi-code, "
+                "muse-code, openclaw-cli, openhands-cli, pi-cli, qwen-code, zcode, "
+                "computer-use, oracle or nop"
             ),
         ),
     ] = None,

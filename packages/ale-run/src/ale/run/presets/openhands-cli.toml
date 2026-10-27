@@ -1,0 +1,18 @@
+[agent]
+name = "openhands-cli"
+model = "claude-opus-4-8"
+version = "1.16.0"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+
+[gateway]
+provider = "anthropic"
+dialect = "anthropic"
+
+[gateway.limits]
+max_model_calls = "unlimited"
+max_input_tokens = "unlimited"
+max_output_tokens = "unlimited"
+max_total_tokens = "unlimited"
