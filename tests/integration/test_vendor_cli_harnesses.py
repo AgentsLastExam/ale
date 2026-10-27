@@ -36,6 +36,7 @@ from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
 from ale.run.harnesses.kimi_code import KimiCodeHarness
 from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
+from ale.run.harnesses.zcode import ZCodeHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
 from tests.support import CONTAINER_BASE, prepare_reference
@@ -403,6 +404,31 @@ async def _muse_skills(sandbox: Sandbox, session: HarnessSession) -> None:
     assert SKILL in {skill.get("name") for skill in listed["skills"]}
 
 
+async def _zcode_skills(sandbox: Sandbox, session: HarnessSession) -> None:
+    result = await sandbox.exec(
+        [
+            "node",
+            f"{session.home}/.local/lib/zcode/zcode.cjs",
+            "skills",
+            "list",
+            "--cwd",
+            session.home,
+            "--json",
+        ],
+        env={
+            "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": (
+                f"{session.home}/.local/lib/zcode/zcode-builtin.json"
+            ),
+            "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE": f"{session.home}/.zcode-ale/provider.json",
+        },
+        identity=Identity.AGENT,
+        timeout_sec=120,
+    )
+    assert result.ok, result.stdout + result.stderr
+    listed = json.loads(result.stdout)
+    assert SKILL in {skill.get("name") for skill in listed["skills"]}
+
+
 DIALECTS = ("openai-chat-completions", "anthropic", "openai-responses")
 CASES = {
     **{
@@ -428,6 +454,16 @@ CASES = {
                 ("tool_search", {"query": "select:mcp__proof__echo"}),
                 ("tool_call", {"name": "mcp__proof__echo", "arguments": {"text": "mcp-proof"}}),
             ),
+        )
+        for dialect in DIALECTS
+    },
+    **{
+        f"zcode-{dialect}": Case(
+            factory=lambda dialect: ZCodeHarness(gateway_dialect=dialect),
+            dialect=dialect,
+            shell=("Bash", {"command": "echo shell-proof", "description": "Print proof"}),
+            mcp_tool="mcp__proof__echo",
+            check_config=_zcode_skills,
         )
         for dialect in DIALECTS
     },

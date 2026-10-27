@@ -43,6 +43,7 @@ from ale.run.harnesses.kimi_code import KimiCodeHarness
 from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
+from ale.run.harnesses.zcode import ZCodeHarness
 from ale.run.ledger import Ledger, episode_identity
 from ale.run.lint import lint_repository
 from ale.run.provenance import (
@@ -150,10 +151,16 @@ def _harness(settings: RunConfig) -> Harness:
                 gateway_dialect=settings.gateway.dialect,
                 settings=settings.agent.settings,
             )
+        case "zcode":
+            return ZCodeHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
         case unknown:
             raise AleError(
                 f"unknown agent {unknown!r}; try claude-code, codex-cli, computer-use, "
-                "grok-build, kimi-code, muse-code, openclaw-cli, qwen-code, oracle or nop"
+                "grok-build, kimi-code, muse-code, openclaw-cli, qwen-code, zcode, oracle or nop"
             )
 
 

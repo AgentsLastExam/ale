@@ -1,0 +1,21 @@
+[agent]
+name = "zcode"
+model = "GLM-5.3"
+version = "0.17.0"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+disallowed_tools = []
+workflow_mode = "default"
+toolsearch_mode = "default"
+
+[gateway]
+provider = "zai"
+dialect = "anthropic"
+
+[gateway.limits]
+max_model_calls = "unlimited"
+max_input_tokens = "unlimited"
+max_output_tokens = "unlimited"
+max_total_tokens = "unlimited"

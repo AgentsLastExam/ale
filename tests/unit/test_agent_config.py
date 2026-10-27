@@ -198,6 +198,7 @@ def test_a_one_off_endpoint_must_name_its_own_key(monkeypatch: pytest.MonkeyPatc
         ("muse-code", "meta"),
         ("openclaw-cli", "openai"),
         ("qwen-code", "qwen"),
+        ("zcode", "zai"),
     ],
 )
 def test_each_preset_names_its_provider_and_no_endpoint(name: str, provider: str) -> None:
