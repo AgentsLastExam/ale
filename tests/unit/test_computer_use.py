@@ -7,6 +7,7 @@ happened, so each case here pins one shape of the computer-use tool's vocabulary
 from __future__ import annotations
 
 import asyncio
+import struct
 from collections.abc import Sequence
 from typing import Any
 
@@ -91,7 +92,11 @@ async def test_concurrent_rollouts_keep_their_own_conversation(
 
 
 def test_computer_tool_uses_native_claude_and_generic_compatible_schemas() -> None:
-    assert _computer_tool("claude-opus-4-8")["type"] == "computer_20250124"
+    native = _computer_tool("claude-opus-5-5")
+    assert native["type"] == "computer_toolset_20260801"
+    assert not {"name", "display_width_px", "display_height_px"} & native.keys()
+    assert native["configs"]["zoom"] == {"enabled": False}
+    assert native["configs"]["cursor_position"] == {"enabled": False}
     generic = _computer_tool("qwen3.5-plus")
     assert "type" not in generic
     assert {"screenshot", "type", "key"} <= set(
@@ -109,7 +114,7 @@ def test_a_click_keeps_its_coordinate() -> None:
 
 
 def test_coordinates_need_no_rescaling() -> None:
-    """The model is told the screen is 1000x1000, which is the space our actions use."""
+    """Generic computer tools continue to use ALE's normalized coordinate space."""
     assert GRID == 1000
     action = translate_action({"action": "mouse_move", "coordinate": [GRID, 0]})
     assert action is not None and action.coordinate == (GRID, 0)
@@ -152,3 +157,126 @@ def test_a_drag_carries_both_ends() -> None:
 def test_an_unknown_action_is_refused_not_guessed() -> None:
     with pytest.raises(AgentError, match="unsupported"):
         translate_action({"action": "teleport", "coordinate": [1, 2]})
+
+
+# Only the PNG header is needed to exercise coordinate-space metadata.
+PNG = b"\x89PNG\r\n\x1a\n" + struct.pack(">I4sII", 13, b"IHDR", 1440, 900)
+
+
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "qwen3.5-plus"])
+async def test_computer_protocol_round_trip(model):
+    native = model.startswith("claude")
+    requests = []
+
+    async def reply(request):
+        body = await request.json()
+        requests.append(body)
+        assert "anthropic-beta" not in request.headers
+        assert body["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+        if len(requests) == 1:
+            block = {"type": "tool_use", "id": "click-1", "input": {"coordinate": [720, 450]}}
+            if native:
+                block.update(name="left_click", toolset_name="computer")
+            else:
+                block["name"] = "computer"
+                block["input"]["action"] = "left_click"
+            return web.json_response({"content": [block]})
+        if len(requests) == 2:
+            block = {
+                "type": "tool_use",
+                "id": "shot-2",
+                "name": "computer",
+                "input": {"action": "screenshot"},
+            }
+            if native:
+                block.update(name="screenshot", toolset_name="computer", input={})
+            return web.json_response({"content": [block]})
+        return web.json_response({"content": [{"type": "text", "text": "done"}]})
+
+    app = web.Application()
+    app.router.add_post("/v1/messages", reply)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    try:
+        port = site._server.sockets[0].getsockname()[1]
+        harness = ComputerUseHarness(model=model)
+        await harness.start(
+            HarnessSession(
+                episode_id="test", model=model, gateway_url=f"http://127.0.0.1:{port}", token="test"
+            )
+        )
+        actions = await harness.decide(Observation(step=0, instruction="Click", screenshot_png=PNG))
+        assert actions[0].coordinate == ((500, 500) if native else (720, 450))
+        assert (await harness.decide(Observation(step=1)))[0].type == "screenshot"
+        assert await harness.decide(Observation(step=2, screenshot_png=PNG)) == []
+        result = requests[1]["messages"][-1]["content"][0]
+        assert result["tool_use_id"] == "click-1"
+        assert result.get("toolset_name") == ("computer" if native else None)
+        assert result["content"][0]["type"] == "text"
+        result = requests[2]["messages"][-1]["content"][0]
+        assert result["tool_use_id"] == "shot-2"
+        assert result.get("toolset_name") == ("computer" if native else None)
+        assert result["content"][0]["source"]["media_type"] == "image/png"
+    finally:
+        await runner.cleanup()
+
+
+async def toolset_decision(monkeypatch, content, screenshot=PNG):
+    harness = ComputerUseHarness(model="claude-opus-5-5")
+    await harness.start(
+        HarnessSession(
+            episode_id="test", model=harness.model, gateway_url="http://gateway", token="test"
+        )
+    )
+
+    async def reply():
+        return {"content": content}
+
+    monkeypatch.setattr(harness, "_ask", reply)
+    return await harness.decide(Observation(step=0, screenshot_png=screenshot))
+
+
+def member(name, **arguments):
+    return {
+        "type": "tool_use",
+        "id": "tool-1",
+        "toolset_name": "computer",
+        "name": name,
+        "input": arguments,
+    }
+
+
+async def test_native_drag_repeat_and_wait_keep_their_meaning(monkeypatch):
+    actions = await toolset_decision(
+        monkeypatch, [member("left_click_drag", start_coordinate=[144, 90], coordinate=[720, 450])]
+    )
+    assert actions[0].coordinate == (100, 100)
+    assert actions[0].to == (500, 500)
+    repeated = await toolset_decision(monkeypatch, [member("key", text="Tab", repeat=3)])
+    assert len(repeated) == 3 and all(a.keys == ("Tab",) for a in repeated)
+    waiting = await toolset_decision(monkeypatch, [member("wait", duration=1.25)])
+    assert waiting[0].duration_ms == 1250
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        [member("screenshot"), member("key", text="Tab")],
+        [{**member("screenshot"), "toolset_name": "browser"}],
+        [member("zoom", region=[0, 0, 20, 20])],
+        [member("left_click", coordinate=[1440, 0])],
+        [member("left_click", coordinate=[10, 10], text="shift")],
+        [member("key", text="Tab", repeat=0)],
+        [member("wait", duration=301)],
+    ],
+)
+async def test_unsupported_native_calls_fail_explicitly(monkeypatch, blocks):
+    with pytest.raises(AgentError):
+        await toolset_decision(monkeypatch, blocks)
+
+
+async def test_native_coordinates_require_observed_dimensions(monkeypatch):
+    with pytest.raises(AgentError, match="screenshot"):
+        await toolset_decision(monkeypatch, [member("left_click", coordinate=[10, 10])], None)

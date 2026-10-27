@@ -63,6 +63,7 @@ class ImageKind(StrEnum):
 class OperatingSystem(StrEnum):
     LINUX = "linux"
     WINDOWS = "windows"
+    MACOS = "macos"
 
 
 def _task_path(path: str, operating_system: OperatingSystem) -> PurePosixPath | PureWindowsPath:

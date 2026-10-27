@@ -33,8 +33,8 @@ my-task/
 ```
 
 Required files are `task.toml`, `instruction.md`, and the tests and solution entries for the
-Task OS: `tests/test.sh` and `solution/solve.sh` on Linux, `test.ps1` and `solve.ps1` on
-Windows. `[environment]` decides what `environment/` builds. A container Task builds
+Task OS: `tests/test.sh` and `solution/solve.sh` on Linux and macOS, `test.ps1` and `solve.ps1`
+on Windows. `[environment]` decides what `environment/` builds. A container Task builds
 `environment/Dockerfile` or uses `docker_image`. A Linux VM Task sets `vm = true` to build
 `environment/Dockerfile`, or uses `vm_image`. A Windows Task builds `environment/build.ps1` on
 `vm_base`, or uses `vm_image` alone. Every image build has `environment/` as its context,
@@ -66,7 +66,7 @@ keywords = ["document-analysis"]            # descriptive
 network_justification = "the Task reads one publisher's live catalog"
 
 [environment]                               # the solver's machine
-os = "linux"                                # linux | windows; default linux
+os = "linux"                                # linux | windows | macos; default linux
 vm = false                                  # ALE; a Linux VM built from a Dockerfile
 # docker_image = "registry.example/image:tag"  # a container image used directly
 # vm_image = "/path/to/disk.qcow2"          # ALE; a VM image used directly
