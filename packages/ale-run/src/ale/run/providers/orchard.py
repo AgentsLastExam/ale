@@ -42,6 +42,7 @@ from ale.core.sandbox import (
 from ale.core.taskspec import NetworkMode, OperatingSystem
 from ale.run import guestd
 from ale.run.images import resolve_registry_reference
+from ale.run.providers import orchard_permissions
 from ale.run.providers.orchard_client import OrchardClient
 from ale.run.providers.orchard_desktop import await_desktop
 from ale.run.providers.privileges import verify_identities
@@ -437,6 +438,7 @@ class OrchardProvider(Provider):
         )
 
     async def preflight(self) -> None:
+        orchard_permissions.preflight(self.config)
         client = self._new_client()
         try:
             await client.start()
@@ -499,6 +501,11 @@ class OrchardProvider(Provider):
         else:
             reference = f"{match['repository']}@{match['digest']}"
         digest, prepared = _identity(reference)
+        if self.config.desktop_bootstrap is not None:
+            prepared = (
+                "sha256:"
+                + hashlib.sha256((prepared + orchard_permissions.identity()).encode()).hexdigest()
+            )
         result = PreparedTaskImage(
             kind=ImageKind.VM,
             source="external-ref",
@@ -514,6 +521,10 @@ class OrchardProvider(Provider):
 
     def accepts(self, request: SandboxRequest) -> None:
         super().accepts(request)
+        if self.config.desktop_bootstrap is not None and not request.sudo:
+            raise ProviderCapabilityError(
+                "UI bootstrap currently requires the task's logged-in admin account with sudo=true"
+            )
         if request.resources.gpus:
             raise ProviderCapabilityError("Orchard GPU allocations are not supported")
         if request.retention != "destroy":
@@ -649,6 +660,10 @@ class OrchardProvider(Provider):
                     or record.get("assignedMemory") != request.resources.memory_mb
                 ):
                     raise ProviderStartError("Orchard assigned resources differ from request")
+                if self.config.desktop_bootstrap is not None:
+                    await orchard_permissions.install_driver(
+                        client, name, request.user, self.config, deadline
+                    )
                 bootstrap = await client.exec(
                     name,
                     [
@@ -734,6 +749,10 @@ class OrchardProvider(Provider):
                 storage = total // (1024 * 1024)
                 if request.resources.storage_mb and storage < request.resources.storage_mb:
                     raise ProviderCapabilityError("VM root disk is smaller than requested storage")
+                if self.config.desktop_bootstrap is not None:
+                    await orchard_permissions.authorize_driver(
+                        client, name, uid, request.user, self.config
+                    )
                 if self.config.driver_path and self.config.socket_path:
                     await await_desktop(
                         guest,

@@ -85,7 +85,7 @@ How the install works, and what it costs, is in
 A macOS Task uses an external Tart OCI image with Python 3.12+, the Task account and
 its home, and the applications required by the Task. Desktop Tasks require a logged-in
 session with authorized screenshot and input access. The Orchard Provider's image
-requirements are described in
+requirements and optional Driver bootstrap are described in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#orchard).
 
 ## ALE base images

@@ -13,6 +13,8 @@ dev = [
     "ruff>=0.8",
     "import-linter>=2.1",
     "pre-commit>=4.0",
+    "vncdotool==1.4.2",
+    "pillow>=11",
 ]
 
 [tool.uv]
