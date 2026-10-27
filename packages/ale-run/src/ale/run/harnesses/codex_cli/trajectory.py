@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import re
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -34,17 +34,35 @@ from ale.run.harnesses.base import (
 )
 
 SESSIONS = ".codex-ale/sessions"
+#: Where `CODEX_ROLLOUT_TRACE_ROOT` points: one bundle per `codex exec` process.
+TRACES = ".codex-ale/rollout-traces"
 _CALL_TYPES = frozenset(
     ("function_call", "custom_tool_call", "web_search_call", "tool_search_call")
 )
 _OUTPUT_TYPES = frozenset(("function_call_output", "custom_tool_call_output", "tool_search_output"))
-#: The only records a code-mode script's own calls leave in a rollout: each one's end.
-_SCRIPT_CALL_TYPES = frozenset(("mcp_tool_call_end", "patch_apply_end"))
+#: The only payload paths a trace event may name; any other would read outside its bundle.
+_TRACE_PAYLOAD = re.compile(r"payloads/[0-9]+\.json")
 #: Every other mirrored rollout, with the issues reading it raised.
 _Rollouts = dict[Path, tuple[list[dict[str, Any]], list[dict[str, Any]]]]
 #: How a code-mode script calls ``spawn_agent``.
 _SPAWN_TOOL = "multi_agent_v1__spawn_agent"
 _DATA_URL = re.compile(r"data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)")
+#: A thread's script calls as steps' calls and results, keyed by the model call each followed.
+_ScriptSteps = dict[str, list[tuple[AtifToolCall, AtifObservation | None]]]
+
+
+@dataclass
+class _TracedCall:
+    """One call a code-mode script made, as a rollout trace bundle records it."""
+
+    thread: str
+    #: The model call it followed, which places it in time.
+    after: str
+    #: The ``exec`` call whose script made it.
+    caller: str
+    started: dict[str, Any]
+    runtime: dict[str, Any] = field(default_factory=dict)
+    ended: dict[str, Any] = field(default_factory=dict)
 
 
 def is_session_file(path: PurePosixPath, session_id: str) -> bool:
@@ -87,8 +105,10 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
     threads = {
         path: native_events(context, path) for path in files if rollout and path not in consumed
     }
-    subagents, spawned = _subagents(context, expected, rollout, threads, issues, consumed)
-    issues.extend(unconverted(context, set(files) - consumed))
+    traces = mirrored_files(context, TRACES)
+    scripted = _script_calls(context, expected, traces, issues, consumed) if rollout else {}
+    subagents, spawned = _subagents(context, expected, rollout, threads, scripted, issues, consumed)
+    issues.extend(unconverted(context, (set(files) | set(traces)) - consumed))
     builder = TrajectoryBuilder(
         trajectory_id=context.trajectory_id, session_id=expected, agent=_agent(context)
     )
@@ -104,11 +124,11 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         and (event.get("item") or {}).get("type") == "mcp_tool_call"
     ]
     outputs = _outputs(rollout)
-    model_calls = _model_call_ids(rollout)
+    scripts = _scripts(scripted, expected, rollout, issues)
     used_mcp: set[int] = set()
     for event in rollout:
         payload = event.get("payload") or {}
-        if event.get("type") != "response_item" and not _scripted(event, model_calls):
+        if event.get("type") != "response_item":
             continue
         kind = payload.get("type")
         if kind == "message" and payload.get("role") == "user":
@@ -118,18 +138,15 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
                 builder.add(source="user", message=recorded[native_turns].prompt)
                 native_turns += 1
             continue
-        if (
-            kind not in _CALL_TYPES | _SCRIPT_CALL_TYPES
-            and kind != "reasoning"
-            and payload.get("role") != "assistant"
-        ):
+        if kind not in _CALL_TYPES and kind != "reasoning" and payload.get("role") != "assistant":
             continue
         if not native_turns:
             # The conversation began without the prompt ALE sent; keep it and say so.
             issues.append({"reason": "prompt_not_in_native_session", "invocation": 1})
             builder.add(source="user", message=recorded[0].prompt)
             native_turns = 1
-        _agent_item(builder, payload, outputs, spawned, transcript_mcp, used_mcp, context)
+        _agent_item(builder, payload, outputs, spawned, scripts, transcript_mcp, used_mcp, context)
+    _unplaced(scripts, expected, issues)
     if native_turns:
         _errors(builder, turns[native_turns - 1])
     if rollout and native_turns < len(recorded):
@@ -164,6 +181,7 @@ def _subagents(
     thread_id: str | None,
     rollout: list[dict[str, Any]],
     threads: _Rollouts,
+    scripted: dict[str, _ScriptSteps],
     issues: list[dict[str, Any]],
     consumed: set[Path],
 ) -> tuple[list[AtifTrajectory], dict[str, list[AtifSubagentTrajectoryRef]]]:
@@ -200,6 +218,7 @@ def _subagents(
                 ),
                 events,
                 threads,
+                scripted,
                 issues,
                 consumed,
             )
@@ -223,6 +242,7 @@ def _thread_trajectory(
     context: TrajectoryParseContext,
     rollout: list[dict[str, Any]],
     threads: _Rollouts,
+    scripted: dict[str, _ScriptSteps],
     issues: list[dict[str, Any]],
     consumed: set[Path],
 ) -> AtifTrajectory | None:
@@ -231,7 +251,9 @@ def _thread_trajectory(
     Each input its parent sent is recorded as a ``user_message`` event; the context
     Codex injects into the conversation is not, so it stays out as it does for the root.
     """
-    subagents, spawned = _subagents(context, context.session_id, rollout, threads, issues, consumed)
+    subagents, spawned = _subagents(
+        context, context.session_id, rollout, threads, scripted, issues, consumed
+    )
     builder = TrajectoryBuilder(
         trajectory_id=context.trajectory_id,
         session_id=context.session_id,
@@ -239,15 +261,16 @@ def _thread_trajectory(
         extra=_extra(context, []),
     )
     outputs = _outputs(rollout)
-    model_calls = _model_call_ids(rollout)
+    scripts = _scripts(scripted, context.session_id, rollout, issues)
     for event in rollout:
         payload = event.get("payload") or {}
         if event.get("type") == "event_msg" and payload.get("type") == "user_message":
             builder.add(source="user", message=str(payload.get("message") or ""))
-        elif event.get("type") == "response_item" or _scripted(event, model_calls):
+        elif event.get("type") == "response_item":
             # Only stdout carries the real server name of a model's MCP call, and only the
             # root's.
-            _agent_item(builder, payload, outputs, spawned, [], set(), context)
+            _agent_item(builder, payload, outputs, spawned, scripts, [], set(), context)
+    _unplaced(scripts, context.session_id, issues)
     if not builder.steps:
         return None
     return builder.build(subagent_trajectories=subagents or None)
@@ -283,11 +306,15 @@ def _agent_item(
     payload: dict[str, Any],
     outputs: dict[str, dict[str, Any]],
     spawned: dict[str, list[AtifSubagentTrajectoryRef]],
+    scripts: _ScriptSteps,
     transcript_mcp: list[dict[str, Any]],
     used_mcp: set[int],
     context: TrajectoryParseContext,
 ) -> None:
-    """An agent message, reasoning summary, or call from a rollout, as one step."""
+    """An agent message, reasoning summary, or call from a rollout, as one step.
+
+    A call is followed by the calls code-mode scripts made before the model's next call.
+    """
     kind = payload.get("type")
     if kind == "message":
         if payload.get("role") == "assistant" and (text := _text(payload)):
@@ -295,16 +322,6 @@ def _agent_item(
     elif kind == "reasoning":
         if summary := _summary(payload):
             builder.add(source="agent", message="", reasoning_content=summary)
-    elif kind in _SCRIPT_CALL_TYPES:
-        call, observation = _script_call(payload, context)
-        # A script, not a model inference, chose this call: ATIF's zero-LLM dispatch step.
-        builder.add(
-            source="agent",
-            message="",
-            tool_calls=[call],
-            observation=observation,
-            llm_call_count=0,
-        )
     elif kind in _CALL_TYPES:
         call, observation = _native_call(payload, outputs, transcript_mcp, used_mcp, context)
         if observation is not None and (refs := spawned.get(call.tool_call_id)):
@@ -313,6 +330,15 @@ def _agent_item(
                 results=[result.model_copy(update={"subagent_trajectory_ref": refs})]
             )
         builder.add(source="agent", message="", tool_calls=[call], observation=observation)
+        for scripted_call, result in scripts.pop(call.tool_call_id, ()):
+            # A script, not a model inference, chose this call: ATIF's zero-LLM dispatch step.
+            builder.add(
+                source="agent",
+                message="",
+                tool_calls=[scripted_call],
+                observation=result,
+                llm_call_count=0,
+            )
 
 
 def _errors(builder: TrajectoryBuilder, events: list[dict[str, Any]]) -> None:
@@ -501,10 +527,8 @@ def _native_call(
             value = item.get("result") if item.get("result") is not None else error
         function_name = f"mcp__{server}__{name}"
         extra = {"ale": {"mcp": {"server": server, "tool": name}}}
-    elif namespace == "multi_agent_v1":
-        function_name = f"multi_agent.{name}"
     else:
-        function_name = f"{namespace}.{name}" if namespace else name
+        function_name = _function_name(namespace, name)
     return (
         AtifToolCall(
             tool_call_id=call_id, function_name=function_name, arguments=arguments, extra=extra
@@ -515,62 +539,164 @@ def _native_call(
     )
 
 
-def _model_call_ids(rollout: list[dict[str, Any]]) -> set[str]:
-    """The IDs of the calls the model itself made, read as ``_native_call`` reads them."""
-    return {
-        str(payload.get("call_id") or payload.get("id") or "")
-        for event in rollout
-        if event.get("type") == "response_item"
-        and (payload := event.get("payload") or {}).get("type") in _CALL_TYPES
-    }
+def _function_name(namespace: str, name: str) -> str:
+    """The name of a tool outside MCP, as the model and scripts both call it."""
+    if namespace == "multi_agent_v1":
+        return f"multi_agent.{name}"
+    return f"{namespace}.{name}" if namespace else name
 
 
-def _scripted(event: dict[str, Any], model_calls: set[str]) -> bool:
-    """Whether ``event`` ends a call a code-mode script made, under an ID no model call has.
+def _script_calls(
+    context: TrajectoryParseContext,
+    thread_id: str | None,
+    traces: list[Path],
+    issues: list[dict[str, Any]],
+    consumed: set[Path],
+) -> dict[str, _ScriptSteps]:
+    """The calls code-mode scripts made, for every thread the trace of ``thread_id`` covers.
 
-    A model's own MCP or patch call leaves the same end record under its call's ID; that
-    call is already its step.
+    The rollout keeps none of them but an MCP call's or a patch's end. Each ``codex exec``
+    process, a resume included, writes its own bundle, ``trace-<trace id>-<thread id>``,
+    shared by the threads it spawns. A traced thread is present even with no script call.
     """
-    payload = event.get("payload") or {}
-    return (
-        event.get("type") == "event_msg"
-        and payload.get("type") in _SCRIPT_CALL_TYPES
-        and str(payload.get("call_id") or "") not in model_calls
-    )
+    found: dict[str, _ScriptSteps] = {}
+    for log in traces:
+        bundle = log.parent
+        if (
+            not thread_id
+            or log.name != "trace.jsonl"
+            or bundle.parent != context.logs_dir / TRACES
+            or not bundle.name.endswith(f"-{thread_id}")
+        ):
+            continue
+        consumed.update(path for path in traces if bundle in path.parents)
+        events, trace_issues = native_events(context, log)
+        issues.extend(trace_issues)
+        cells: dict[tuple[str, str], str] = {}
+        latest: dict[str, str] = {}
+        calls: dict[str, _TracedCall] = {}
+        for event in events:
+            payload = event.get("payload") or {}
+            thread = str(event.get("thread_id") or "")
+            if thread:
+                found.setdefault(thread, {})
+            kind = payload.get("type")
+            if kind == "code_cell_started":
+                call_id = str(payload.get("model_visible_call_id") or "")
+                cells[thread, str(payload.get("runtime_cell_id"))] = latest[thread] = call_id
+            elif kind == "tool_call_started":
+                requester = _dict(payload.get("requester"))
+                if requester.get("type") == "model":
+                    latest[thread] = str(payload.get("model_visible_call_id") or "")
+                elif requester.get("type") == "code_cell":
+                    cell = (thread, str(requester.get("runtime_cell_id")))
+                    calls[str(payload.get("tool_call_id"))] = _TracedCall(
+                        thread, latest.get(thread, ""), cells.get(cell, ""), payload
+                    )
+            elif (call := calls.get(str(payload.get("tool_call_id")))) is not None:
+                if kind in {"tool_call_runtime_started", "tool_call_runtime_ended"}:
+                    call.runtime = payload
+                elif kind == "tool_call_ended":
+                    call.ended = payload
+        for call in calls.values():
+            found.setdefault(call.thread, {}).setdefault(call.after, []).append(
+                _script_call(context, bundle, call, issues)
+            )
+    return found
+
+
+def _scripts(
+    scripted: dict[str, _ScriptSteps],
+    thread_id: str | None,
+    rollout: list[dict[str, Any]],
+    issues: list[dict[str, Any]],
+) -> _ScriptSteps:
+    """``thread_id``'s script calls; a thread that ran scripts with no trace says so."""
+    if thread_id in scripted:
+        return scripted[thread_id]
+    if any(
+        event.get("type") == "response_item"
+        and (payload := event.get("payload") or {}).get("type") == "custom_tool_call"
+        and payload.get("name") == "exec"
+        for event in rollout
+    ):
+        issues.append({"reason": "rollout_trace_unavailable", "session_id": thread_id})
+    return {}
+
+
+def _unplaced(scripts: _ScriptSteps, thread_id: str | None, issues: list[dict[str, Any]]) -> None:
+    """Script calls that followed no model call the rollout kept stay raw evidence."""
+    if count := sum(len(calls) for calls in scripts.values()):
+        issues.append({"reason": "unplaced_script_calls", "session_id": thread_id, "count": count})
 
 
 def _script_call(
-    payload: dict[str, Any], context: TrajectoryParseContext
+    context: TrajectoryParseContext,
+    bundle: Path,
+    call: _TracedCall,
+    issues: list[dict[str, Any]],
 ) -> tuple[AtifToolCall, AtifObservation | None]:
-    """A script's call, from the end record that is all the rollout keeps of it."""
-    call_id = str(payload.get("call_id") or "")
-    if payload.get("type") == "patch_apply_end":
-        output = "\n".join(str(payload[key]) for key in ("stdout", "stderr") if payload.get(key))
-        return (
-            AtifToolCall(
-                tool_call_id=call_id,
-                function_name="apply_patch",
-                arguments={"changes": payload.get("changes") or {}},
-            ),
-            _observation(call_id, output, error=payload.get("success") is not True),
+    """A script's call and what the script got back, named as the model would call it."""
+    call_id = str(call.started.get("tool_call_id") or "")
+    request = _trace_payload(context, bundle, call.started.get("invocation_payload"), issues)
+    name = str(request.get("tool_name") or "")
+    namespace = str(request.get("tool_namespace") or "")
+    body = _dict(request.get("payload"))
+    if body.get("type") == "custom":
+        arguments = {"input": body.get("input")}
+    else:
+        arguments = _dict(body.get("arguments") or {})
+    extra: dict[str, Any] = {"caller": call.caller} if call.caller else {}
+    if namespace.startswith("mcp__"):
+        # The namespace sanitizes the server name; Codex's record of the run keeps it.
+        runtime = _trace_payload(context, bundle, call.runtime.get("runtime_payload"), issues)
+        server = str(
+            _dict(runtime.get("invocation")).get("server") or namespace.removeprefix("mcp__")
         )
-    invocation = _dict(payload.get("invocation"))
-    server = str(invocation.get("server") or "")
-    tool = str(invocation.get("tool") or "")
-    call = AtifToolCall(
+        function_name = f"mcp__{server}__{name}"
+        extra["mcp"] = {"server": server, "tool": name}
+    else:
+        function_name = _function_name(namespace, name)
+    tool_call = AtifToolCall(
         tool_call_id=call_id,
-        function_name=f"mcp__{server}__{tool}",
-        arguments=_dict(invocation.get("arguments") or {}),
-        extra={"ale": {"mcp": {"server": server, "tool": tool}}},
+        function_name=function_name,
+        arguments=arguments,
+        extra={"ale": extra} if extra else None,
     )
-    # The result is a serialized Rust `Result`: the tool's reply, or why the call failed.
-    outcome = _dict(payload.get("result"))
-    if "Ok" in outcome:
-        error = _dict(outcome["Ok"]).get("isError") is True
-        return call, _observation(call_id, _result_content(outcome["Ok"], context), error=error)
-    if "Err" in outcome:
-        return call, _observation(call_id, str(outcome["Err"]), error=True)
-    return call, None
+    result = _trace_payload(context, bundle, call.ended.get("result_payload"), issues)
+    if result.get("type") == "code_mode_response":
+        value = result.get("value")
+        content = (
+            _result_content(value, context)
+            if isinstance(value, dict | str)
+            else json.dumps(value, ensure_ascii=False, default=str)
+        )
+        error = call.ended.get("status") != "completed" or (
+            isinstance(value, dict) and value.get("isError") is True
+        )
+        return tool_call, _observation(call_id, content, error=error)
+    if result.get("type") == "error":
+        return tool_call, _observation(call_id, str(result.get("error") or ""), error=True)
+    return tool_call, None
+
+
+def _trace_payload(
+    context: TrajectoryParseContext, bundle: Path, ref: Any, issues: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The payload a trace event names, read only from its own bundle's payload files."""
+    if not isinstance(ref, dict) or not ref.get("path"):
+        return {}
+    path = str(ref["path"])
+    source = f"{bundle.relative_to(context.logs_dir).as_posix()}/{path}"
+    if not _TRACE_PAYLOAD.fullmatch(path) or not (bundle / path).is_file():
+        issues.append({"reason": "trace_payload_unavailable", "source": source})
+        return {}
+    try:
+        value = json.loads((bundle / path).read_text(encoding="utf-8", errors="replace"))
+    except json.JSONDecodeError as exc:
+        issues.append({"reason": "invalid_trace_payload", "source": source, "detail": str(exc)})
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _observation(

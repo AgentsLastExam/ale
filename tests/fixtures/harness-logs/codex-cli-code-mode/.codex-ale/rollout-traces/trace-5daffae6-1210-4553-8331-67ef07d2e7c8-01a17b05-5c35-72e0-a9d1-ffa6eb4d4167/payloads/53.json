@@ -1,0 +1,8 @@
+{
+  "tool_name": "exec_command",
+  "tool_namespace": null,
+  "payload": {
+    "type": "function",
+    "arguments": "{\"cmd\":\"truncate -s -1 /home/user/output/result.txt && wc -c /home/user/output/result.txt && od -An -tx1 -c /home/user/output/result.txt\",\"yield_time_ms\":10000,\"max_output_tokens\":4000}"
+  }
+}

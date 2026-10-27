@@ -1,0 +1,14 @@
+{
+  "response": {
+    "Result": {
+      "cell_id": "2",
+      "content_items": [
+        {
+          "type": "input_text",
+          "text": "[{\"name\":\"mcp__task_proof__derive_fragment\",\"description\":\"Derive the task fragment for an exact nonce.\\n\\nexec tool declaration:\\n```ts\\ndeclare const tools: { mcp__task_proof__derive_fragment(args: { nonce: string; }): Promise<CallToolResult>; };\\n```\"}]"
+        }
+      ],
+      "error_text": null
+    }
+  }
+}

@@ -47,6 +47,8 @@ step; every observation `source_call_id` resolves to a tool call in that step. A
 result is valid, while a missing result remains absent. A call that a tool's own program
 made, rather than a model inference, is a separate agent step with `llm_call_count: 0`,
 ATIF's mark for a deterministic dispatch, so no export treats it as sampled model output.
+It stands where it happened, after the model call that preceded it, and names the call
+that ran the program, since a program can outlive the model call that started it.
 
 All ALE extensions live under `extra.ale`:
 
@@ -54,6 +56,7 @@ All ALE extensions live under `extra.ale`:
 - `transport_call_ids`: Gateway calls correlated after parsing;
 - `attachments`: non-image BlobRefs;
 - `mcp`: logical MCP server and tool;
+- `caller`: on a call a tool's program made, the `tool_call_id` of the call that ran it;
 - `normalized_action`: CUA action correlated with the same MCP call;
 - `incomplete` and `incomplete_reason`: a valid prefix after interruption
   (`agent_interrupted`) or an incomplete copy (`collection_failed`), or

@@ -621,8 +621,14 @@ def test_codex_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
     assert trajectory.final_metrics.total_prompt_tokens == 10
 
 
-def test_codex_declares_native_session_evidence() -> None:
-    assert CodexCliHarness().logs == (LOG_ROOT, ".codex-ale/sessions")
+async def test_codex_traces_its_run_where_its_evidence_is_mirrored() -> None:
+    harness = CodexCliHarness()
+    prepared = await harness.prepare_command(
+        "/home/agent/.ale-harness/prompt.md", FakeSandbox(), session(), native_session_id=None
+    )
+
+    assert harness.logs == (LOG_ROOT, ".codex-ale/sessions", ".codex-ale/rollout-traces")
+    assert prepared.env["CODEX_ROLLOUT_TRACE_ROOT"] == "/home/agent/.codex-ale/rollout-traces"
 
 
 async def test_codex_does_not_export_a_post_exit_session_copy() -> None:
@@ -981,6 +987,10 @@ CODEX_DAY = ".codex-ale/sessions/2026/10/26"
 OPENCLAW_ROOT = "b8ca4087-ea61-4187-86ee-8de3c6436da0"
 OPENCLAW_CHILD = "b4b72c4f-3edd-4104-94a6-b8a0278f938c"
 OPENCLAW_SESSIONS = ".openclaw-ale/agents/main/sessions"
+#: The Codex run predates its rollout trace, which alone records what its scripts called.
+UNTRACED = {
+    "codex-cli-subagent": [{"reason": "rollout_trace_unavailable", "session_id": CODEX_ROOT}]
+}
 SUBAGENT_RUNS = [
     pytest.param(
         CodexCliHarness(),
@@ -1043,7 +1053,8 @@ def test_recorded_subagents_are_embedded_and_referenced_from_their_spawn(
     assert subagent_refs(trajectory) == {spawn: [subagent.trajectory_id]}
     assert subagent.agent == trajectory.agent
     # Converted, the child is no longer unused evidence.
-    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+    issues = (trajectory.extra or {}).get("ale", {}).get("parse_issues", [])
+    assert issues == UNTRACED.get(fixture, [])
 
 
 def test_codex_subagent_follows_every_input_its_parent_sent(tmp_path: Path) -> None:
@@ -1120,6 +1131,7 @@ def test_a_child_no_spawn_result_names_stays_reported(
     assert trajectory.extra["ale"]["parse_issues"] == [
         {"reason": "unlinked_subagent", "source": orphan},
         {"reason": "unconverted_native_files", "count": 1, "sources": [orphan]},
+        *UNTRACED.get(fixture, []),
     ]
 
 
@@ -1142,12 +1154,13 @@ def test_a_child_claimed_twice_is_converted_once(
         alias = dict(next(entry for entry in entries.values() if entry["sessionId"] == child))
         entries["agent:main:subagent:alias"] = alias
         index.write_text(json.dumps(entries))
-        expected = None
+        expected = []
 
     trajectory = harness.parse_trajectory(parse)
 
     assert [item.session_id for item in trajectory.subagent_trajectories] == [child]
-    assert (trajectory.extra or {}).get("ale", {}).get("parse_issues") == expected
+    issues = (trajectory.extra or {}).get("ale", {}).get("parse_issues", [])
+    assert issues == expected + UNTRACED.get(fixture, [])
 
 
 def test_codex_nested_spawn_agent_calls_nest_their_trajectories(tmp_path: Path) -> None:
@@ -1207,77 +1220,165 @@ def test_codex_nested_spawn_agent_calls_nest_their_trajectories(tmp_path: Path) 
     assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
 
 
-#: A live run whose model reached the task MCP and apply_patch only through code mode.
-CODEX_CODE_MODE = "01a17aa2-58ee-7882-9f73-6ab166273bf8"
+#: A live run whose model reached every tool, the task MCP included, only through code mode.
+CODEX_CODE_MODE = "01a17b05-5c35-72e0-a9d1-ffa6eb4d4167"
+CODEX_TRACE = (
+    f".codex-ale/rollout-traces/trace-5daffae6-1210-4553-8331-67ef07d2e7c8-{CODEX_CODE_MODE}"
+)
+
+
+def script_steps(trajectory: AtifTrajectory) -> list[tuple[str, str, str]]:
+    """Each script call with the model call before it and the call whose script made it."""
+    steps = trajectory.steps
+    return [
+        (
+            steps[index - 1].tool_calls[0].tool_call_id,
+            call.function_name,
+            call.extra["ale"].get("caller"),
+        )
+        for index, step in enumerate(steps)
+        if step.llm_call_count == 0
+        for call in step.tool_calls
+    ]
 
 
 def test_codex_code_mode_script_calls_are_steps_no_inference_chose(tmp_path: Path) -> None:
     trajectory = CodexCliHarness().parse_trajectory(
         recorded_context(tmp_path, "codex-cli-code-mode", CODEX_CODE_MODE)
     )
-    steps = trajectory.steps
-    dispatched = [index for index, step in enumerate(steps) if step.llm_call_count == 0]
-    mcp, patch = (steps[index] for index in dispatched)
-
-    # Each follows the model's `exec` call whose script made it.
-    assert [steps[index - 1].tool_calls[0].tool_call_id for index in dispatched] == [
-        "call_f5d76122ee93482098edfd8309715220",
-        "call_8e205589d5184b6d86b26001801a078d",
-    ]
-    (call,) = mcp.tool_calls
-    (result,) = mcp.observation.results
-    assert call.tool_call_id == result.source_call_id == "exec-e30d2965-8a6d-4b1a-b243-b84034fb4eb4"
-    assert call.function_name == "mcp__task-proof__derive_fragment"
-    assert call.arguments == {"nonce": "AE3D40E9BE7E3CB6"}
-    assert call.extra == {"ale": {"mcp": {"server": "task-proof", "tool": "derive_fragment"}}}
-    assert result.content[0].text == '{"fragment": "C6E6F113A4AC048710451E9B"}'
-    assert result.extra is None
-    (call,) = patch.tool_calls
-    assert call.function_name == "apply_patch"
-    assert call.arguments == {
-        "changes": {
-            "/home/user/output/result.txt": {
-                "type": "add",
-                "content": "SKILL-R7::AE3D40E9BE7E3CB6::C6E6F113A4AC048710451E9B\n",
-            }
-        }
+    calls = {
+        call.tool_call_id: (call, step.observation.results[0])
+        for step in trajectory.steps
+        if step.llm_call_count == 0
+        for call in step.tool_calls
     }
-    assert patch.observation.results[0].content == (
-        "Success. Updated the following files:\nA /home/user/output/result.txt\n"
-    )
+
+    # Each follows the model's `exec` call whose script made it, and names it.
+    assert script_steps(trajectory) == [
+        (caller, name, caller)
+        for caller, name in (
+            ("call_f486c05afb754e228a28681f8785f422", "exec_command"),
+            ("call_83aaa886c7b04a93a1b18e92abd7e4bc", "exec_command"),
+            ("call_8c2ca2814913420698b8d5b8d5eb7ae2", "mcp__task-proof__derive_fragment"),
+            ("call_53c879dbc97a4964b34c42e36ab5ef78", "exec_command"),
+            ("call_6ccf49e4cad040da838200a9d2984257", "apply_patch"),
+            ("call_e853fe470bd34028ad266a218c2481ad", "exec_command"),
+        )
+    ]
+    command, result = calls["exec-95450d95-88b5-49c6-9a78-acde873a848f"]
+    assert command.arguments == {
+        "cmd": "sed -n '1p' /home/user/input/nonce.txt",
+        "yield_time_ms": 10000,
+        "max_output_tokens": 2000,
+    }
+    assert json.loads(result.content) == {
+        "chunk_id": "5cb8ec",
+        "wall_time_seconds": 3.195e-6,
+        "exit_code": 0,
+        "original_token_count": 5,
+        "output": "079D3A1B7FA1D27A\n",
+    }
+    mcp, result = calls["exec-a558b456-1ae8-42a7-9fd4-13afb0b76af3"]
+    assert mcp.arguments == {"nonce": "079D3A1B7FA1D27A"}
+    # The trace's namespace sanitizes the server name; Codex's record of the call keeps it.
+    assert mcp.extra["ale"]["mcp"] == {"server": "task-proof", "tool": "derive_fragment"}
+    assert result.content[0].text == '{"fragment": "D86D9BA1C205E7EAFEFB7092"}'
+    assert result.extra is None
+    patch, result = calls["exec-69213efd-691b-4647-aa3a-3193a440d4f8"]
+    assert patch.arguments == {
+        "input": "*** Begin Patch\n*** Add File: /home/user/output/result.txt\n"
+        "+SKILL-R7::079D3A1B7FA1D27A::D86D9BA1C205E7EAFEFB7092\n*** End Patch"
+    }
+    # What the script got back, which for a patch is nothing.
+    assert result.content == "{}"
     # Every call a model inference chose is an `exec` script.
     assert {
         call.function_name
-        for step in steps
+        for step in trajectory.steps
         if step.llm_call_count is None
         for call in step.tool_calls or ()
     } == {"exec"}
     assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
 
 
-def test_codex_code_mode_failed_script_calls_are_errors(tmp_path: Path) -> None:
+def test_codex_script_call_after_a_later_model_call_follows_that_call(tmp_path: Path) -> None:
     parse = recorded_context(tmp_path, "codex-cli-code-mode", CODEX_CODE_MODE)
-    rollout = next((parse.logs_dir / CODEX_DAY).glob(f"*-{CODEX_CODE_MODE}.jsonl"))
-    records = [json.loads(line) for line in rollout.read_text().splitlines()]
-    for record in records:
-        payload = record["payload"]
-        if payload.get("type") == "mcp_tool_call_end":
-            payload["result"] = {"Err": "tool call timed out"}
-        elif payload.get("type") == "patch_apply_end":
-            payload.update(stdout="", stderr="patch rejected", success=False, status="failed")
-    write_jsonl(rollout, records)
+    log = parse.logs_dir / CODEX_TRACE / "trace.jsonl"
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    # The first script yielded, so its command ran only after the model's next `exec`.
+    first = [event for event in events if event["seq"] in range(8, 13)]
+    rest = [event for event in events if event not in first]
+    later = next(i for i, event in enumerate(rest) if event["seq"] == 16) + 1
+    write_jsonl(log, rest[:later] + first + rest[later:])
 
     trajectory = CodexCliHarness().parse_trajectory(parse)
 
-    assert [
-        (result.content, result.extra)
+    assert script_steps(trajectory)[0] == (
+        "call_90980f229de541ce968866efca394af3",
+        "exec_command",
+        "call_f486c05afb754e228a28681f8785f422",
+    )
+    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+
+
+def test_codex_code_mode_failed_script_calls_are_errors(tmp_path: Path) -> None:
+    parse = recorded_context(tmp_path, "codex-cli-code-mode", CODEX_CODE_MODE)
+    payloads = parse.logs_dir / CODEX_TRACE / "payloads"
+    # The MCP tool reported an error; the patch never ran.
+    reply = {"content": [{"type": "text", "text": "unknown nonce"}], "isError": True}
+    (payloads / "32.json").write_text(json.dumps({"type": "code_mode_response", "value": reply}))
+    (payloads / "48.json").write_text(json.dumps({"type": "error", "error": "patch rejected"}))
+
+    trajectory = CodexCliHarness().parse_trajectory(parse)
+    results = {
+        result.source_call_id: result
         for step in trajectory.steps
         if step.llm_call_count == 0
         for result in step.observation.results
-    ] == [
-        ("tool call timed out", {"ale": {"is_error": True}}),
-        ("patch rejected", {"ale": {"is_error": True}}),
+    }
+
+    mcp = results["exec-a558b456-1ae8-42a7-9fd4-13afb0b76af3"]
+    assert (mcp.content[0].text, mcp.extra) == ("unknown nonce", {"ale": {"is_error": True}})
+    patch = results["exec-69213efd-691b-4647-aa3a-3193a440d4f8"]
+    assert (patch.content, patch.extra) == ("patch rejected", {"ale": {"is_error": True}})
+
+
+def test_codex_code_mode_without_its_trace_says_so(tmp_path: Path) -> None:
+    parse = recorded_context(tmp_path, "codex-cli-code-mode", CODEX_CODE_MODE)
+    shutil.rmtree(parse.logs_dir / CODEX_TRACE)
+
+    trajectory = CodexCliHarness().parse_trajectory(parse)
+
+    assert script_steps(trajectory) == []
+    assert trajectory.extra["ale"]["parse_issues"] == [
+        {"reason": "rollout_trace_unavailable", "session_id": CODEX_CODE_MODE}
     ]
+
+
+def test_codex_trace_reads_only_its_own_payload_files(tmp_path: Path) -> None:
+    parse = recorded_context(tmp_path, "codex-cli-code-mode", CODEX_CODE_MODE)
+    log = parse.logs_dir / CODEX_TRACE / "trace.jsonl"
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    for event in events:
+        if event["payload"].get("tool_call_id") == "exec-95450d95-88b5-49c6-9a78-acde873a848f":
+            for ref in event["payload"].values():
+                if isinstance(ref, dict) and "path" in ref:
+                    ref["path"] = "../../../.ale-harness/invocations.jsonl"
+    write_jsonl(log, events)
+
+    trajectory = CodexCliHarness().parse_trajectory(parse)
+    (step,) = [
+        step
+        for step in trajectory.steps
+        if step.llm_call_count == 0
+        and step.tool_calls[0].tool_call_id == "exec-95450d95-88b5-49c6-9a78-acde873a848f"
+    ]
+
+    assert (step.tool_calls[0].arguments, step.observation) == ({}, None)
+    # Neither the arguments nor the result were read.
+    source = f"{CODEX_TRACE}/../../../.ale-harness/invocations.jsonl"
+    unavailable = {"reason": "trace_payload_unavailable", "source": source}
+    assert trajectory.extra["ale"]["parse_issues"] == [unavailable, unavailable]
 
 
 def test_openclaw_nested_spawns_nest_their_trajectories(tmp_path: Path) -> None:

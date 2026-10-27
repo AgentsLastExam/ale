@@ -1,0 +1,29 @@
+{
+  "call_id": "exec-9a17c7c9-0b3d-47d2-9c3b-f65adf2cbd22",
+  "process_id": "87272",
+  "turn_id": "01a17b05-5c49-78e0-9783-72262a688780",
+  "completed_at_ms": 1793065322623,
+  "command": [
+    "/bin/bash",
+    "-lc",
+    "mkdir -p /home/user/output && stat -c '%F %s bytes' /home/user/output/result.txt 2>/dev/null || true"
+  ],
+  "cwd": "/home/user",
+  "parsed_cmd": [
+    {
+      "type": "unknown",
+      "cmd": "mkdir -p /home/user/output && stat -c '%F %s bytes' /home/user/output/result.txt 2>/dev/null || true"
+    }
+  ],
+  "source": "unified_exec_startup",
+  "stdout": "",
+  "stderr": "",
+  "aggregated_output": "",
+  "exit_code": 0,
+  "duration": {
+    "secs": 0,
+    "nanos": 1711
+  },
+  "formatted_output": "",
+  "status": "completed"
+}

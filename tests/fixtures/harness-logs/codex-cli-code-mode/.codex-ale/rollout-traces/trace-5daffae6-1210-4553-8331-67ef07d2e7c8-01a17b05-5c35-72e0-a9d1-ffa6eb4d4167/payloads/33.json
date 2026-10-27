@@ -1,0 +1,14 @@
+{
+  "response": {
+    "Result": {
+      "cell_id": "5",
+      "content_items": [
+        {
+          "type": "input_text",
+          "text": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"fragment\\\": \\\"D86D9BA1C205E7EAFEFB7092\\\"}\"}],\"structuredContent\":{\"fragment\":\"D86D9BA1C205E7EAFEFB7092\"}}"
+        }
+      ],
+      "error_text": null
+    }
+  }
+}

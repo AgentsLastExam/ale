@@ -1,0 +1,10 @@
+{
+  "type": "code_mode_response",
+  "value": {
+    "chunk_id": "5cb8ec",
+    "wall_time_seconds": 3.195e-6,
+    "exit_code": 0,
+    "original_token_count": 5,
+    "output": "079D3A1B7FA1D27A\n"
+  }
+}

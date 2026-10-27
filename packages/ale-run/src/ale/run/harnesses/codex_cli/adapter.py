@@ -29,7 +29,7 @@ class CodexCliHarness(CliHarness):
     default_version = DEFAULT_CLI_VERSION
     settings_type = CodexCliSettings
     settings: CodexCliSettings
-    logs = (LOG_ROOT, ".codex-ale/sessions")
+    logs = (LOG_ROOT, ".codex-ale/sessions", trajectory.TRACES)
 
     async def install_resources(
         self,
@@ -127,6 +127,8 @@ class CodexCliHarness(CliHarness):
         env = {
             **await npm_env(sandbox, session.home),
             "CODEX_HOME": str(agent_path(session.home) / ".codex-ale"),
+            # The rollout keeps no record of a code-mode script's shell commands; this does.
+            "CODEX_ROLLOUT_TRACE_ROOT": str(agent_path(session.home) / trajectory.TRACES),
             "NO_COLOR": "1",
             "ALE_GATEWAY_TOKEN": session.token,
         }
