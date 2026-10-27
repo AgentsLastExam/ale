@@ -1,0 +1,19 @@
+{
+  "call_id": "exec-0c1cb09e-5bd9-470a-baf3-10181ad9b28b",
+  "process_id": "37632",
+  "turn_id": "01a17b05-5c49-78e0-9783-72262a688780",
+  "started_at_ms": 1793065326792,
+  "command": [
+    "/bin/bash",
+    "-lc",
+    "truncate -s -1 /home/user/output/result.txt && wc -c /home/user/output/result.txt && od -An -tx1 -c /home/user/output/result.txt"
+  ],
+  "cwd": "/home/user",
+  "parsed_cmd": [
+    {
+      "type": "unknown",
+      "cmd": "truncate -s -1 /home/user/output/result.txt && wc -c /home/user/output/result.txt && od -An -tx1 -c /home/user/output/result.txt"
+    }
+  ],
+  "source": "unified_exec_startup"
+}

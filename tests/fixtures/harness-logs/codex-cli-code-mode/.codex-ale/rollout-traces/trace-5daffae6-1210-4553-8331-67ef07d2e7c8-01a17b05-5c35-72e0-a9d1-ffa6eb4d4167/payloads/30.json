@@ -1,0 +1,10 @@
+{
+  "call_id": "exec-a558b456-1ae8-42a7-9fd4-13afb0b76af3",
+  "invocation": {
+    "server": "task-proof",
+    "tool": "derive_fragment",
+    "arguments": {
+      "nonce": "079D3A1B7FA1D27A"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "response": {
+    "Result": {
+      "cell_id": "6",
+      "content_items": [
+        {
+          "type": "input_text",
+          "text": ""
+        }
+      ],
+      "error_text": null
+    }
+  }
+}

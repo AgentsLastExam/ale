@@ -1,0 +1,31 @@
+{
+  "call_id": "exec-95450d95-88b5-49c6-9a78-acde873a848f",
+  "process_id": "96354",
+  "turn_id": "01a17b05-5c49-78e0-9783-72262a688780",
+  "completed_at_ms": 1793065318187,
+  "command": [
+    "/bin/bash",
+    "-lc",
+    "sed -n '1p' /home/user/input/nonce.txt"
+  ],
+  "cwd": "/home/user",
+  "parsed_cmd": [
+    {
+      "type": "read",
+      "cmd": "sed -n 1p /home/user/input/nonce.txt",
+      "name": "nonce.txt",
+      "path": "/home/user/input/nonce.txt"
+    }
+  ],
+  "source": "unified_exec_startup",
+  "stdout": "079D3A1B7FA1D27A\n",
+  "stderr": "",
+  "aggregated_output": "079D3A1B7FA1D27A\n",
+  "exit_code": 0,
+  "duration": {
+    "secs": 0,
+    "nanos": 3195
+  },
+  "formatted_output": "079D3A1B7FA1D27A\n",
+  "status": "completed"
+}

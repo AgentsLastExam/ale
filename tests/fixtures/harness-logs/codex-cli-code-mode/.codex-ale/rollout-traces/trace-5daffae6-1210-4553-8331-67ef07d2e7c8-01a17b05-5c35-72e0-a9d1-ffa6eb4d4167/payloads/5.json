@@ -1,0 +1,8 @@
+{
+  "tool_name": "exec_command",
+  "tool_namespace": null,
+  "payload": {
+    "type": "function",
+    "arguments": "{\"cmd\":\"sed -n '1,240p' /home/user/.codex-ale/skills/resource-proof/SKILL.md\",\"yield_time_ms\":10000,\"max_output_tokens\":12000}"
+  }
+}

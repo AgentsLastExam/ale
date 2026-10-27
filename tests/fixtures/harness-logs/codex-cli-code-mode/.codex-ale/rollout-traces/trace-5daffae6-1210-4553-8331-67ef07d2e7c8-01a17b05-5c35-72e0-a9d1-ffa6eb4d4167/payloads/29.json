@@ -1,0 +1,8 @@
+{
+  "tool_name": "derive_fragment",
+  "tool_namespace": "mcp__task_proof",
+  "payload": {
+    "type": "function",
+    "arguments": "{\"nonce\":\"079D3A1B7FA1D27A\"}"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "tool_name": "exec_command",
+  "tool_namespace": null,
+  "payload": {
+    "type": "function",
+    "arguments": "{\"cmd\":\"mkdir -p /home/user/output && stat -c '%F %s bytes' /home/user/output/result.txt 2>/dev/null || true\",\"yield_time_ms\":10000,\"max_output_tokens\":2000}"
+  }
+}
