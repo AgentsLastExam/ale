@@ -5,6 +5,7 @@ import pytest
 from .trajectory import (
     LIVE,
     WORKSPACE_ROOT,
+    artifact,
     audit_episode,
     llm_audit_episode,
     native_mcp_pairs,
@@ -53,7 +54,7 @@ def test_real_claude_uses_cua_desktop_to_solve_screen_task(tmp_path) -> None:
     assert normalized["type"] == "screenshot"
     init = next(event for event in native if event.get("subtype") == "init")
     assert {"name": "cua-desktop", "status": "connected"} in init["mcp_servers"]
-    assert (episode / "artifacts/output/code.txt").read_text().strip()
+    assert artifact(episode, "/home/user/output/code.txt").read_text().strip()
     resource = next(item for item in lock["agent"]["resources"] if item["name"] == "cua-desktop")
     assert resource["kind"] == "mcp" and resource["source_layers"] == ["cli"]
     llm_audit_episode(

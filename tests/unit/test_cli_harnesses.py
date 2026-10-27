@@ -513,6 +513,14 @@ async def test_openclaw_declares_explicit_reasoning_support(tmp_path: Path) -> N
     assert rendered["models"]["providers"]["openai"]["models"][0]["reasoning"] is True
 
 
+async def test_openclaw_runs_without_its_respawning_launcher() -> None:
+    prepared = await OpenClawCliHarness().prepare_command(
+        "/home/agent/.ale-harness/prompt.md", FakeSandbox(), session(), native_session_id=None
+    )
+
+    assert prepared.env["OPENCLAW_NO_RESPAWN"] == "1"
+
+
 def native_path(tmp_path: Path, relative: str) -> Path:
     path = tmp_path / relative
     path.parent.mkdir(parents=True, exist_ok=True)

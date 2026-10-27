@@ -8,6 +8,7 @@ from .trajectory import (
     LIVE,
     MODELS,
     WORKSPACE_ROOT,
+    artifact,
     audit_episode,
     llm_audit_episode,
     run_task,
@@ -62,8 +63,8 @@ def test_real_harness_uses_task_skill_and_task_mcp(
     assert call["arguments"]["nonce"]
     assert native
 
-    receipt = json.loads((episode / "artifacts/output/mcp-call.json").read_text())
-    answer = (episode / "artifacts/output/result.txt").read_text()
+    receipt = json.loads(artifact(episode, "/home/user/output/mcp-call.json").read_text())
+    answer = artifact(episode, "/home/user/output/result.txt").read_text()
     assert receipt["nonce"] == call["arguments"]["nonce"]
     assert answer == f"SKILL-R7::{receipt['nonce']}::{receipt['fragment']}"
     assert {(item["kind"], item["name"]) for item in lock["agent"]["resources"]} == {

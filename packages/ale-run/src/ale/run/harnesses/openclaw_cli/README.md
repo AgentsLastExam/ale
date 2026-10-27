@@ -10,3 +10,10 @@ index, `sessions.json`, maps that key to the child's session ID and to the key o
 session that spawned it. A child's first user message is the task as OpenClaw delegated
 it. Any other transcript there is named in `parse_issues`; the session index, runtime
 traces, locks and cached prompts beside them are not.
+
+OpenClaw 2026.7.1 holds about 250–400 MB while it works and briefly reaches about 700 MB
+as it starts and runs tools. The Linux base image's desktop already uses about 650 MB, so
+in a 1 GiB Sandbox the kernel OOM-kills the CLI part-way through a turn; run it in at
+least 2 GiB. ALE sets `OPENCLAW_NO_RESPAWN=1` because OpenClaw's launcher otherwise runs
+the CLI as a second, detached Node process and exits 1 without a message when that child
+dies from a signal. An OOM kill now reports exit code 137.
