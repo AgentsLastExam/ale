@@ -71,7 +71,7 @@ image:                              # required initial sandbox image
 
 resources:                          # optional solver allocation; defaults shown
   cpus: 1                           # integer >= 1
-  memory_mb: 1024                   # integer >= 128
+  memory_mb: 4096                   # integer >= 128
   storage_mb: null                  # null or integer >= 256; writable storage request
   gpus: 0                           # integer >= 0; GPU count, not physical indices
   sudo: false                       # true gives the agent account working sudo (admin on Windows)
@@ -105,7 +105,7 @@ verify:                             # optional; shared verification is the defau
     ref: registry.example/verifier:tag # omit ref when verify/Dockerfile exists
   resources:                        # required for separate verification
     cpus: 1
-    memory_mb: 1024
+    memory_mb: 4096
     storage_mb: null
     gpus: 0
 
@@ -159,6 +159,10 @@ to image, setup, verification, network, artifacts, or tools is a different Task.
 the evaluated agent and oracle; its enforcement is specified in [Security](security.md).
 The quality standard owns resource feasibility and network-policy selection. An open-network
 justification uses `metadata.network_justification`.
+
+`resources` is the whole Sandbox's allocation. The image's own processes, such as the GUI base
+images' desktop, share it with the agent and every program the agent starts, so the default
+memory leaves an agent CLI room above the desktop. A Task that needs more declares it.
 
 ## image/
 

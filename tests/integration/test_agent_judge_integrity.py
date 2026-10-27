@@ -103,7 +103,7 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
     (task_root / "task.yaml").write_text(
         (task_root / "task.yaml")
         .read_text()
-        .replace("memory_mb: 1024", "memory_mb: 512")
+        .replace("memory_mb: 4096", "memory_mb: 512")
         .replace("verify: 120", "verify: 120")
     )
     (task_root / "instruction.md").write_text(

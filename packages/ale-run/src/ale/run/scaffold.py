@@ -17,7 +17,7 @@ name: {name}
 image:
   kind: container
 
-resources: {{cpus: 1, memory_mb: 1024}}
+resources: {{cpus: 1, memory_mb: 4096}}
 network: {{mode: block}}
 timeouts: {{setup: 60, agent: 300, verify: 120}}
 artifacts: [/home/user/output]
