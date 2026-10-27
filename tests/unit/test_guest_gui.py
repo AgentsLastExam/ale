@@ -134,3 +134,28 @@ def test_wait_preserves_explicit_duration(monkeypatch, duration, seconds):
     monkeypatch.setattr(gui.time, "sleep", sleeps.append)
     gui.dispatch_actions([{"type": "wait", "duration_ms": duration}])
     assert sleeps == [seconds]
+
+
+@pytest.mark.parametrize("stored", [False, True])
+def test_screenshot_can_return_a_private_file_instead_of_inline_data(monkeypatch, tmp_path, stored):
+    import hashlib
+    import sys
+
+    from ale.run.guestd.main import Handler
+
+    png = b"\x89PNG\r\n\x1a\n" + b"pixels" * 800_000
+    monkeypatch.setitem(sys.modules, "gui", gui)
+    monkeypatch.setattr(gui, "capture_screen", lambda: png)
+    path = tmp_path.resolve() / "screenshot.png"
+    result = Handler(lambda event: pytest.fail("unexpected output event")).dispatch(
+        1, "screenshot", {"path": str(path)} if stored else {}
+    )["data"]
+    if stored:
+        assert result == {"bytes": len(png), "sha256": hashlib.sha256(png).hexdigest()}
+        assert path.read_bytes() == png
+        assert path.stat().st_mode & 0o777 == 0o600
+        with pytest.raises(FileExistsError):
+            Handler(lambda event: None).dispatch(2, "screenshot", {"path": str(path)})
+    else:
+        assert base64.b64decode(result["png_b64"]) == png
+        assert not path.exists()
