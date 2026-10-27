@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -40,6 +41,42 @@ class GuiUnavailable(RuntimeError):
 
 class DesktopIdentityError(GuiUnavailable):
     """The configured desktop does not belong to the task account."""
+
+
+def probe_macos_desktop(agent_user: str, driver_path: str, socket_path: str) -> None:
+    """Capture through the same client as agent tools, as the actual task account.
+
+    A socket's owner is a prerequisite, not an attestation of the server process's
+    identity. macOS images must run their preauthorized Driver in this login session.
+    This probe neither changes TCC grants nor starts a service in another session.
+    """
+    import pwd
+
+    if sys.platform != "darwin":
+        raise DesktopIdentityError("the desktop probe requires macOS")
+    try:
+        uid = pwd.getpwnam(agent_user).pw_uid
+    except KeyError as exc:
+        raise DesktopIdentityError("the task account does not exist") from exc
+    if uid == 0 or os.geteuid() != uid:
+        raise DesktopIdentityError("the desktop probe must execute as the non-root task account")
+    if _binary() != driver_path or _socket() != socket_path:
+        raise DesktopIdentityError("agent and framework desktop configuration differ")
+    try:
+        console_uid = os.stat("/dev/console").st_uid
+        if console_uid == 0:
+            raise GuiUnavailable("the task account has no logged-in desktop yet")
+        if console_uid != uid:
+            raise DesktopIdentityError("the console desktop belongs to a different task account")
+        socket_info = os.lstat(socket_path)
+        if not stat.S_ISSOCK(socket_info.st_mode):
+            raise DesktopIdentityError("the configured Driver path must be a Unix socket")
+        if socket_info.st_uid != uid:
+            raise DesktopIdentityError("the Driver socket owner differs from the task account")
+    except OSError as exc:
+        raise GuiUnavailable(f"the desktop console or socket is not accessible: {exc}") from exc
+    if not capture_screen().startswith(b"\x89PNG\r\n\x1a\n"):
+        raise GuiUnavailable("the Driver did not return a PNG desktop capture")
 
 
 def _binary() -> str:

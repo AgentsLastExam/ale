@@ -16,10 +16,12 @@ is a boolean.
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 import tomllib
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
 
@@ -37,6 +39,7 @@ __all__ = [
     "GatewayLimits",
     "LLMJudgeConfig",
     "LoggingPolicy",
+    "OrchardProviderConfig",
     "RunConfig",
     "RunTimeouts",
     "SandboxRetentionConfig",
@@ -268,10 +271,109 @@ class ContainerProviderConfig(BaseModel):
         return self
 
 
+class OrchardProviderConfig(BaseModel):
+    """Host-side connection settings for existing Orchard-managed macOS images."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str = Field(min_length=1)
+    username_env: str = Field(default="ALE_ORCHARD_USERNAME", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    password_env: str = Field(default="ALE_ORCHARD_PASSWORD", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    ca_file: Path | None = None
+    server_hostname: str | None = Field(default=None, min_length=1)
+    gateway_host: str | None = Field(default=None, min_length=1)
+    python_path: str = "/opt/homebrew/bin/python3"
+    driver_path: str | None = None
+    socket_path: str | None = None
+    provision_timeout_sec: float = Field(default=1800, gt=0, allow_inf_nan=False)
+    boot_timeout_sec: float = Field(default=180, gt=0, allow_inf_nan=False)
+
+    # --- validation ---
+
+    @field_validator("endpoint")
+    @classmethod
+    def _endpoint(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("Orchard endpoint must be an HTTPS URL without credentials or query")
+        # Force malformed ports to fail while parsing configuration.
+        _ = parsed.port
+        return value.rstrip("/")
+
+    @field_validator("python_path", "driver_path", "socket_path")
+    @classmethod
+    def _guest_path(cls, value: str | None) -> str | None:
+        if value is not None:
+            path = PurePosixPath(value)
+            if not path.is_absolute() or ".." in path.parts or "\x00" in value:
+                raise ValueError("Orchard guest paths must be absolute POSIX paths without '..'")
+        return value
+
+    @field_validator("server_hostname", "gateway_host")
+    @classmethod
+    def _nonblank_connection_value(cls, value: str | None) -> str | None:
+        if value is not None and (not value.strip() or value != value.strip()):
+            raise ValueError("Orchard connection values must not be blank or padded")
+        return value
+
+    @field_validator("gateway_host")
+    @classmethod
+    def _reachable_gateway_host(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            name = value.lower().rstrip(".")
+            if (
+                name == "localhost"
+                or name.endswith(".localhost")
+                or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", name)
+            ):
+                raise ValueError(
+                    "gateway_host must be a remote hostname or IP address without a port"
+                ) from None
+        else:
+            mapped = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) else None
+            if (
+                address.is_loopback
+                or address.is_unspecified
+                or (mapped is not None and (mapped.is_loopback or mapped.is_unspecified))
+            ):
+                raise ValueError(
+                    "gateway_host must be reachable from the remote VM, not loopback or unspecified"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _desktop_pair(self) -> Self:
+        if (self.driver_path is None) != (self.socket_path is None):
+            raise ValueError("Orchard driver_path and socket_path must be configured together")
+        return self
+
+
 class VmProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["qemu"] = "qemu"
+    provider: Literal["qemu", "orchard"] = "qemu"
+    orchard: OrchardProviderConfig | None = None
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _provider_settings(self) -> Self:
+        if self.provider == "orchard" and self.orchard is None:
+            raise ValueError("vm.provider=orchard requires vm.orchard connection settings")
+        if self.provider != "orchard" and self.orchard is not None:
+            raise ValueError("vm.orchard requires vm.provider=orchard")
+        return self
 
 
 _SCHEDULING_FIELDS = frozenset({"episodes", "episode_retries", "resume", "concurrency"})

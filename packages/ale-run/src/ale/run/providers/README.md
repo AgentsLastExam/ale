@@ -1,16 +1,17 @@
 # Providers
 
-Providers turn prepared Task images into Sandboxes. ALE ships three backends:
+Providers turn prepared Task images into Sandboxes. ALE ships the following backends:
 
 | Module | Backend | Prepared input |
 |---|---|---|
 | `docker.py` | local Docker container | immutable OCI image identity |
 | `qemu.py` | QEMU/KVM guest runner | materialized qcow2 identity |
 | `daytona.py` | Daytona cloud container | immutable OCI image identity, pushed by digest |
+| `orchard.py` | macOS VM on Orchard/Tart | digest-pinned external OCI image |
 
 `daytona_api.py` is its REST client and `daytona_image.py` adapts and publishes images.
 
-All three implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
+They implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
 preflight, image verification, lifecycle, command/file transport, egress changes,
 observed identity, resource allocation and optional retention. Harness and Environment
 code must use those contracts rather than backend-specific methods.
@@ -45,3 +46,44 @@ request to that name's own host, so sending an allowed name to another address r
 the allowed host; other ports of unlisted addresses are unreachable. The proxy accepts every
 TCP connection to port 443 before it decides, which is why egress is checked with a TLS
 handshake rather than a connect.
+
+## Orchard
+
+Orchard creates a fresh Tart VM per Sandbox. Select it with `vm.provider = "orchard"`;
+QEMU remains the default. Local Apple Silicon deployments are validated; remote workers
+are unvalidated. Setup, configuration and cleanup are in the
+[macOS guide](../../../../../../docs/guides/macos-orchard.md).
+
+Images provide Python 3.12+, the Task account and its home, required applications, and
+an execution account with passwordless sudo for guest bootstrap. ALE installs guestd
+in each new VM without changing the shared image; it does not build macOS images.
+Desktop Tasks use a preauthorized CuaDriver service in the Task account's login session.
+
+Preparation resolves OCI tags through registry manifest metadata without downloading
+VM disks or checking the worker cache. VM creation uses that pinned digest even if the
+tag changes afterward. Provisioning checks the controller-reported image digest and
+CPU/memory allocation; this trusts Orchard rather than independently measuring the disk.
+Both stages check authenticated cluster access and an eligible ARM64 Tart worker.
+Orchard owns scheduling; provisioning and guest readiness have separate deadlines.
+
+`orchard_desktop.py` verifies actual capture as the Task account before the solver
+starts. Desktop input uses native screenshot pixels; cursor read-back uses logical
+points, following the Driver's coordinate contract.
+
+Commands and file reads use separate authenticated WebSocket exec channels. File reads
+are bounded, screenshot transfers are integrity-checked, and command output is
+acknowledged after Host consumption to avoid overrunning the relay's output queue.
+For local default NAT, the Provider discovers the Host Gateway address from the guest's
+IPv4 route; `gateway_host` overrides it for other network layouts.
+
+Only explicit `network.mode: open` is supported. Restricted networking needs integration
+and validation across Orchard/Tart versions and worker network configurations. GPU,
+retention, snapshot and reset requests are rejected. Orchard credentials remain on the
+Host; Orchard/Tart and the selected image are trusted infrastructure.
+
+Cleanup checks the VM name and UID, waits for worker stop acknowledgement, then deletes
+it. Ambiguous creation requires operator reconciliation rather than adopting a same-name
+VM. Deletion is not conditional, so the controller must not replace names during cleanup.
+Worker disk garbage collection is asynchronous. Cancellation, command timeout or lost
+command transport tears down the VM; uncollected evidence can be lost. Cleanup errors
+are recorded separately from execution failures.

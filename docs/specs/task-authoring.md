@@ -37,7 +37,7 @@ declared OS: `run.sh` for Linux/macOS or `run.ps1` for Windows. Linux builds `im
 or uses `image.ref`. Windows builds `image/run.ps1` on `image.base_ref`, or directly uses
 `image.ref` without an image script. macOS uses an external Tart OCI image (tag or digest)
 with `image.kind: vm`; image-build scripts and Dockerfiles are not supported. Its stage
-entries use `run.sh` and POSIX paths.
+entries use `run.sh` and POSIX paths. See [macOS on Orchard](../guides/macos-orchard.md).
 `ref` and `base_ref` are mutually exclusive.
 
 Task source, scripts, manifests, and ordinary small fixtures are tracked by Git. `assets/` is for
