@@ -1,0 +1,22 @@
+spec_type: core/v1
+name: macos-desktop-smoke
+os: macos
+image:
+  kind: vm
+  ref: ghcr.io/cirruslabs/macos-tahoe-base@sha256:4aaa751fa7538902d73c767f27a066fc87e83f183069da4e4b5022863abd4c77
+  user: admin
+resources:
+  cpus: 2
+  memory_mb: 4096
+  sudo: true
+network:
+  mode: open
+timeouts:
+  setup: 120
+  agent: 600
+  verify: 120
+artifacts:
+  - /Users/admin/output
+metadata:
+  tags: [macos, smoke, desktop]
+  network_justification: Orchard uses open networking; no external research is needed.

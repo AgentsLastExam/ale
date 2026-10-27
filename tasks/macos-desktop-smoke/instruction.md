@@ -1,0 +1,1 @@
+Use the desktop tools to inspect the open TextEdit document. Type exactly `ALE desktop verified` into result.txt and save using Command+S. Take a screenshot after saving. Do not use shell or file-writing tools to create the answer.
