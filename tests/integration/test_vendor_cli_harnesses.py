@@ -34,6 +34,7 @@ from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
 from ale.run.harnesses.kimi_code import KimiCodeHarness
+from ale.run.harnesses.qwen_code import QwenCodeHarness
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
 from tests.support import CONTAINER_BASE, prepare_reference
@@ -83,9 +84,14 @@ for line in sys.stdin:
 
 @dataclass
 class ScriptedUpstream:
-    """Answers requests that offer tools from a script, in order; others get plain text."""
+    """Answers the agent loop's requests from a script, in order; others get plain text.
+
+    A request belongs to the agent loop when it offers the ``marker`` tool, which keeps a
+    CLI's own side requests, such as titling or memory extraction, off the script.
+    """
 
     steps: list[tuple[str, Any]]
+    marker: str
     requests: list[dict[str, Any]] = field(default_factory=list)
     url: str = ""
     _runner: web.AppRunner | None = None
@@ -115,7 +121,11 @@ class ScriptedUpstream:
                 "body": body,
             }
         )
-        if body.get("tools") and self.steps:
+        offered = {
+            tool.get("name") or (tool.get("function") or {}).get("name")
+            for tool in body.get("tools") or ()
+        }
+        if self.marker in offered and self.steps:
             return body, self.steps.pop(0)
         return body, ("text", "ok")
 
@@ -328,6 +338,8 @@ class Case:
     shell: tuple[str, dict[str, Any]]
     mcp_tool: str
     check_config: Callable[[Sandbox, HarnessSession], Awaitable[None]]
+    #: The native calls that reach the MCP tool, when the CLI defers it behind others.
+    mcp_calls: tuple[tuple[str, Any], ...] = ()
 
 
 async def _kimi_doctor(sandbox: Sandbox, session: HarnessSession) -> None:
@@ -344,15 +356,54 @@ async def _kimi_doctor(sandbox: Sandbox, session: HarnessSession) -> None:
     assert "All checked config files are valid." in result.stdout
 
 
-CASES = {
-    f"kimi-code-{dialect}": Case(
-        factory=lambda dialect: KimiCodeHarness(gateway_dialect=dialect),
-        dialect=dialect,
-        shell=("Bash", {"command": "echo shell-proof"}),
-        mcp_tool="mcp__proof__echo",
-        check_config=_kimi_doctor,
+async def _qwen_mcp_list(sandbox: Sandbox, session: HarnessSession) -> None:
+    home = f"{session.home}/.qwen-ale"
+    result = await sandbox.exec(
+        ["sh", "-c", "qwen mcp list"],
+        env={
+            "PATH": f"{session.home}/.local/bin:/usr/local/bin:/usr/bin:/bin",
+            "QWEN_HOME": home,
+            "QWEN_RUNTIME_DIR": home,
+            "QWEN_CODE_SYSTEM_SETTINGS_PATH": f"{home}/system-settings.json",
+            "QWEN_CODE_SYSTEM_DEFAULTS_PATH": f"{home}/system-defaults.json",
+            "QWEN_CODE_MODELS_DEV_REFRESH": "off",
+            "NO_COLOR": "1",
+        },
+        identity=Identity.AGENT,
+        timeout_sec=120,
     )
-    for dialect in ("openai-chat-completions", "anthropic", "openai-responses")
+    assert result.ok, result.stdout + result.stderr
+    assert "proof: python3 /home/user/mcp.py (stdio) - Connected" in result.stdout
+
+
+DIALECTS = ("openai-chat-completions", "anthropic", "openai-responses")
+CASES = {
+    **{
+        f"kimi-code-{dialect}": Case(
+            factory=lambda dialect: KimiCodeHarness(gateway_dialect=dialect),
+            dialect=dialect,
+            shell=("Bash", {"command": "echo shell-proof"}),
+            mcp_tool="mcp__proof__echo",
+            check_config=_kimi_doctor,
+        )
+        for dialect in DIALECTS
+    },
+    **{
+        f"qwen-code-{dialect}": Case(
+            factory=lambda dialect: QwenCodeHarness(gateway_dialect=dialect),
+            dialect=dialect,
+            shell=("run_shell_command", {"command": "echo shell-proof"}),
+            mcp_tool="mcp__proof__echo",
+            check_config=_qwen_mcp_list,
+            # Qwen defers MCP tools: they are reviewed with tool_search, then called
+            # through tool_call.
+            mcp_calls=(
+                ("tool_search", {"query": "select:mcp__proof__echo"}),
+                ("tool_call", {"name": "mcp__proof__echo", "arguments": {"text": "mcp-proof"}}),
+            ),
+        )
+        for dialect in DIALECTS
+    },
 }
 
 
@@ -396,14 +447,16 @@ async def test_cli_runs_through_the_gateway_with_resources_and_resumes(
 ) -> None:
     harness = case.factory(case.dialect)
     first_prompt = "Use the shell, then the MCP tool.\nSecond line: 'quoted' $HOME"
+    mcp_calls = case.mcp_calls or ((case.mcp_tool, {"text": "mcp-proof"}),)
     upstream = ScriptedUpstream(
         [
             ("tool", case.shell),
-            ("tool", (case.mcp_tool, {"text": "mcp-proof"})),
+            *(("tool", call) for call in mcp_calls),
             ("text", "FIRST-DONE"),
             ("text", "SECOND-DONE"),
             ("text", "THIRD-DONE"),
-        ]
+        ],
+        marker=case.shell[0],
     )
     await upstream.start()
     gateway = Gateway(api_key=HOST_SECRET, upstream=upstream.url, dialect=case.dialect)

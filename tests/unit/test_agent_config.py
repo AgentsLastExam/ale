@@ -196,6 +196,7 @@ def test_a_one_off_endpoint_must_name_its_own_key(monkeypatch: pytest.MonkeyPatc
         ("grok-build", "xai"),
         ("kimi-code", "moonshot"),
         ("openclaw-cli", "openai"),
+        ("qwen-code", "qwen"),
     ],
 )
 def test_each_preset_names_its_provider_and_no_endpoint(name: str, provider: str) -> None:
