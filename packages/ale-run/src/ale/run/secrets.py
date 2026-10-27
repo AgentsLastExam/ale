@@ -82,8 +82,12 @@ def load_env(path: Path | None = None, *, override: bool = False) -> dict[str, s
 PROVIDER_URLS = {
     "anthropic": "https://api.anthropic.com",
     "gemini": "https://generativelanguage.googleapis.com",
+    "meta": "https://api.meta.ai",
+    "moonshot": "https://api.moonshot.ai",
     "openai": "https://api.openai.com",
+    "qwen": "https://maas.qwencloudapi.com/compatible-mode",
     "xai": "https://api.x.ai",
+    "zai": "https://api.z.ai/api/anthropic",
 }
 
 

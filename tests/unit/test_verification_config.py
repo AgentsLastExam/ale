@@ -47,7 +47,7 @@ _LLM = {
     [
         {**_LLM, "model": ""},
         {**_LLM, "reasoning_effort": " "},
-        {**_LLM, "provider": "meta"},
+        {**_LLM, "provider": "example"},
         {**_LLM, "dialect": "gemini"},
         {key: value for key, value in _LLM.items() if key != "provider"},
         {key: value for key, value in _LLM.items() if key != "dialect"},
