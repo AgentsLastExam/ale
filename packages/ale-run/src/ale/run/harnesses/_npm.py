@@ -42,6 +42,22 @@ def bash_command(home: str, command: str, *, login: bool = True) -> list[str]:
     return ["bash", "-lc", command] if login else ["sh", "-c", command]
 
 
+async def run_posix(sandbox: Sandbox, home: str, *argv: str | PurePosixPath) -> None:
+    """Run a POSIX file utility such as ``mkdir`` or ``chmod`` as the agent; fail on error.
+
+    Windows has no such utilities of its own, so there it runs through Git Bash, as
+    :func:`bash_command` does.
+    """
+    words = [str(word) for word in argv]
+    result = await sandbox.exec(
+        bash_command(home, shlex.join(words)) if is_windows(home) else words,
+        identity=Identity.AGENT,
+    )
+    if not result.ok:
+        detail = (result.stderr or result.stdout).strip()[-800:]
+        raise AgentError(f"{shlex.join(words)} failed: {detail or f'exit {result.exit_code}'}")
+
+
 def npm_command(home: str, *args: str) -> list[str]:
     argv = ["npm", *args]
     return bash_command(home, shlex.join(argv), login=False) if is_windows(home) else argv

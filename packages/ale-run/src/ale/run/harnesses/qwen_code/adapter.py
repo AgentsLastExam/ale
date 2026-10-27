@@ -15,7 +15,7 @@ from ale.core.harness import EffectiveAgentResources, HarnessSession, Trajectory
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, npm_env
+from ale.run.harnesses._npm import agent_path, npm_env, run_posix
 from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
@@ -72,15 +72,13 @@ class QwenCodeHarness(CliHarness):
     ) -> None:
         qwen_home = agent_path(session.home) / trajectory.HOME
         skills_root = qwen_home / "skills"
-        await sandbox.exec(["mkdir", "-p", str(skills_root)], identity=Identity.AGENT)
+        await run_posix(sandbox, session.home, "mkdir", "-p", skills_root)
         for skill in resources.skills:
             target = skills_root / skill.name
             await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
             if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+                executables = (target / path for path in skill.executable_files)
+                await run_posix(sandbox, session.home, "chmod", "+x", *executables)
 
         protocol, provider, suffix, wire_api = _PROVIDERS[self.gateway_dialect]
         route: dict[str, Any] = {

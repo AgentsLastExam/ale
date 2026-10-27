@@ -14,7 +14,7 @@ from ale.core.harness import EffectiveAgentResources, HarnessSession, Trajectory
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, npm_env
+from ale.run.harnesses._npm import agent_path, npm_env, run_posix
 from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
@@ -52,18 +52,20 @@ class OpenClawCliHarness(CliHarness):
         state = agent_path(session.home) / ".openclaw-ale"
         workspace = state / "workspace"
         skills_root = workspace / "skills"
-        await sandbox.exec(
-            ["mkdir", "-p", str(skills_root), str(agent_path(session.home) / trajectory.SESSIONS)],
-            identity=Identity.AGENT,
+        await run_posix(
+            sandbox,
+            session.home,
+            "mkdir",
+            "-p",
+            skills_root,
+            agent_path(session.home) / trajectory.SESSIONS,
         )
         for skill in resources.skills:
             target = skills_root / skill.name
             await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
             if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+                executables = (target / path for path in skill.executable_files)
+                await run_posix(sandbox, session.home, "chmod", "+x", *executables)
 
         model_ref = f"{self.settings.provider}/{session.model}"
         model_entry: dict[str, Any] = {"agentRuntime": {"id": "openclaw"}}

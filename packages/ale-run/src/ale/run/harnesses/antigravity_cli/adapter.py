@@ -12,7 +12,7 @@ from ale.core.harness import EffectiveAgentResources, HarnessSession, Trajectory
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, is_windows, npm_env
+from ale.run.harnesses._npm import agent_path, is_windows, npm_env, run_posix
 from ale.run.harnesses._release import ReleaseAsset
 from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -99,9 +99,7 @@ class AntigravityCliHarness(CliHarness):
         gemini = agent_path(session.home) / ".gemini"
         skills_root = gemini / "antigravity-cli" / "skills"
         # As the agent, so agy can create its own state beside the files written here.
-        await sandbox.exec(
-            ["mkdir", "-p", str(skills_root), str(gemini / "config")], identity=Identity.AGENT
-        )
+        await run_posix(sandbox, session.home, "mkdir", "-p", skills_root, gemini / "config")
         # API-key mode, documented: the key comes from GEMINI_API_KEY at launch.
         await sandbox.write_file(
             gemini / "antigravity-cli" / "settings.json",
@@ -112,10 +110,8 @@ class AntigravityCliHarness(CliHarness):
             target = skills_root / skill.name
             await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
             if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+                executables = (target / path for path in skill.executable_files)
+                await run_posix(sandbox, session.home, "chmod", "+x", *executables)
         servers: dict[str, dict[str, Any]] = {}
         for resolved in resources.mcp_servers:
             server = resolved.server
