@@ -5,9 +5,31 @@ Supply an image meeting the [macOS image requirements](../specs/sandbox-image.md
 Supported capabilities and cleanup behavior follow the
 [sandbox contract](../specs/sandbox-image.md#runtime-behavior).
 
+## Install and start locally
+
+On Apple Silicon, run the setup script from the ALE checkout:
+
+```bash
+uv run scripts/setup_macos.py
+uv run scripts/setup_macos.py --check
+source "$HOME/.local/share/ale/macos/credentials.env"
+```
+
+Setup pins Orchard **0.55.0** and Tart **2.41.1**, verifies release checksums, and starts
+an isolated controller and worker with private state and TLS configuration. Existing
+services and system trust settings are unchanged. To reuse installed binaries at these
+versions, pass `--orchard-path` and `--tart-path`. Signature failures require a trusted,
+working binary; setup does not bypass macOS security checks.
+
+State defaults to `~/.local/share/ale/macos`; use `--state-dir` to choose another directory.
+Keep the generated `credentials.env` private. Initialization is repeatable; rerun it
+after reboot because services have no login/startup registration. An existing cluster
+can skip local setup and use the connection configuration below.
+
 ## Configure the connection and image
 
-Create a private run configuration for an existing Orchard cluster:
+Local setup writes `run.toml` in its state directory. For an existing cluster, create
+a private run configuration:
 
 ```toml
 [vm]
@@ -116,3 +138,12 @@ for desktop tests. The suite creates fresh VMs and checks cleanup.
 ALE tears down episode VMs. If cleanup fails, inspect the reported VM name and UID in
 Orchard before reconciling it; do not delete a same-name replacement. Uncollected guest
 logs and outputs can be lost when execution is interrupted.
+
+After this local deployment's Tasks have finished, remove its services and state:
+
+```bash
+uv run scripts/setup_macos.py --cleanup
+```
+
+Cleanup refuses remaining VMs. Resolve them first; other deployments and services are
+left unchanged.
