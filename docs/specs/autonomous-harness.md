@@ -58,6 +58,9 @@ the `sha256:` of the files it runs. Bases provide runtimes, not agent CLI packag
 pin Node.js 24.15.0. Each run installs and configures the selected CLI before applying the
 Task network policy.
 
+Every other adapter gives its pin, Gateway dialects and public settings in its own README,
+listed in the [Harness index](../../packages/ale-run/src/ale/run/harnesses/README.md).
+
 `agent.version` selects an exact version, and omitting it uses the adapter's pinned
 default. A release-binary adapter accepts only its pinned version, because only that
 version's digests are known. An already matching installation may be reused.
@@ -77,7 +80,7 @@ search path is preserved.
 The built-in `cua-desktop` uses the OS's system Python. Task-provided Skills and MCP
 commands must themselves work on Windows.
 
-All four adapters support local Skills, canonical stdio and Streamable HTTP MCP
+Every CLI adapter supports local Skills, canonical stdio and Streamable HTTP MCP
 servers, and same-sandbox native resume at their pinned versions. Support is determined
 from the pinned program's verified behavior, not a permanent assumption about a product
 name. In particular, `openclaw@2026.7.1` supports MCP; a future pin that changes this
@@ -87,8 +90,8 @@ Claude Code, Codex CLI, and Grok Build support `agent.authentication = "auto" |
 "api-key" | "subscription"`. Subscription state is isolated from ordinary Host agent
 homes: Claude reads `ALE_CLAUDE_CODE_OAUTH_TOKEN` from the ALE checkout's `.env`; Codex
 and Grok use `<checkout>/.ale/auth/<harness>/auth.json`. Credentials remain on the Host;
-every Sandbox receives only its episode Gateway token. OpenClaw and policy Harnesses
-reject explicit subscription authentication.
+every Sandbox receives only its episode Gateway token. Other Harnesses reject explicit
+subscription authentication.
 
 ## Settings
 
@@ -164,7 +167,10 @@ the agent deadline. It must:
 `CliHarness` writes each prompt as UTF-8 to `.ale-harness/prompt.md` and the CLI reads
 that file through stdin or its native prompt-file option, so the prompt never passes
 through argv, an environment variable, or shell quoting and reaches the model exactly as
-sent. Every invocation, launch or resume, appends to `.ale-harness/stdout.log` and
+sent. A CLI that takes a prompt only as an argument is the exception: it receives the
+file's exact bytes as one argument, expanded from the file and never re-quoted, so the
+OS's argument limits bound the prompt and a longer one fails at launch instead of being
+truncated. Every invocation, launch or resume, appends to `.ale-harness/stdout.log` and
 `.ale-harness/stderr.log` and records its prompt, requested session ID, and stream offsets
 in `.ale-harness/invocations.jsonl`. Result interpretation sees only the current
 invocation's output, so it cannot reuse the success or session ID of an earlier turn.

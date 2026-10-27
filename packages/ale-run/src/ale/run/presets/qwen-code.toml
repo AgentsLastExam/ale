@@ -1,0 +1,22 @@
+[agent]
+name = "qwen-code"
+model = "qwen3.8-max"
+version = "0.26.1"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+max_session_turns = "unlimited"
+reasoning_effort = "default"
+context_window_size = "default"
+modalities = "default"
+
+[gateway]
+provider = "qwen"
+dialect = "openai-chat-completions"
+
+[gateway.limits]
+max_model_calls = "unlimited"
+max_input_tokens = "unlimited"
+max_output_tokens = "unlimited"
+max_total_tokens = "unlimited"

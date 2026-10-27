@@ -1,0 +1,29 @@
+{
+  "agentId": "general-purpose-call_2",
+  "agentType": "general-purpose",
+  "description": "child task",
+  "parentSessionId": "a47044d0-0034-4676-be60-b837055bbad4",
+  "toolUseId": "call_2",
+  "parentAgentId": null,
+  "createdAt": "2026-10-26T04:48:10.407Z",
+  "status": "completed",
+  "isBackgrounded": false,
+  "lastUpdatedAt": "2026-10-26T04:48:10.652Z",
+  "resolvedApprovalMode": "yolo",
+  "persistedCliFlags": {
+    "approvalMode": "yolo",
+    "bare": false,
+    "safeMode": false,
+    "sandbox": null,
+    "screenReader": false,
+    "model": "scripted-model",
+    "authType": "openai",
+    "baseUrl": "http://ale-gateway.internal:38565/v1",
+    "maxSessionTurns": -1,
+    "maxToolCalls": -1,
+    "maxSubagentDepth": 5
+  },
+  "subagentName": "general-purpose",
+  "resumeCount": 0,
+  "depth": 0
+}

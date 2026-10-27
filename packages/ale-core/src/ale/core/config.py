@@ -152,7 +152,7 @@ class AgentConfig(BaseModel):
 
 
 #: The model vendor whose API the Gateway or a Judge calls. Not a sandbox Provider.
-ModelProvider = Literal["anthropic", "gemini", "openai", "xai"]
+ModelProvider = Literal["anthropic", "gemini", "meta", "moonshot", "openai", "qwen", "xai", "zai"]
 #: A protocol the Gateway serves to the Sandbox and speaks to the provider.
 Dialect = Literal["anthropic", "gemini", "openai-chat-completions", "openai-responses"]
 #: The protocols an LLM Judge client speaks; it has no Gemini client.

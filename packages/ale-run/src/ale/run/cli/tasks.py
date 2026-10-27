@@ -39,7 +39,11 @@ from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
+from ale.run.harnesses.kimi_code import KimiCodeHarness
+from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
+from ale.run.harnesses.qwen_code import QwenCodeHarness
+from ale.run.harnesses.zcode import ZCodeHarness
 from ale.run.ledger import Ledger, episode_identity
 from ale.run.lint import lint_repository
 from ale.run.provenance import (
@@ -128,10 +132,35 @@ def _harness(settings: RunConfig) -> Harness:
                 cli_version=settings.agent.version,
                 settings=settings.agent.settings,
             )
+        case "kimi-code":
+            return KimiCodeHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
+        case "muse-code":
+            # Muse speaks Meta's own Responses API, so the Gateway must use that dialect.
+            _require_gateway_dialect(settings, "openai-responses")
+            return MuseCodeHarness(
+                cli_version=settings.agent.version,
+                settings=settings.agent.settings,
+            )
+        case "qwen-code":
+            return QwenCodeHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
+        case "zcode":
+            return ZCodeHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
         case unknown:
             raise AleError(
-                f"unknown agent {unknown!r}; try claude-code, codex-cli, "
-                "computer-use, grok-build, openclaw-cli, oracle or nop"
+                f"unknown agent {unknown!r}; try claude-code, codex-cli, computer-use, "
+                "grok-build, kimi-code, muse-code, openclaw-cli, qwen-code, zcode, oracle or nop"
             )
 
 

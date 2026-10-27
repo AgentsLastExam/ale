@@ -82,7 +82,10 @@ def run(
         str | None,
         typer.Option(
             "--agent",
-            help="claude-code, codex-cli, grok-build, openclaw-cli, computer-use, oracle or nop",
+            help=(
+                "claude-code, codex-cli, grok-build, kimi-code, muse-code, openclaw-cli, "
+                "qwen-code, zcode, computer-use, oracle or nop"
+            ),
         ),
     ] = None,
     model: Annotated[str | None, typer.Option("--model")] = None,
