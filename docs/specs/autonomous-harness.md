@@ -171,7 +171,9 @@ through argv, an environment variable, or shell quoting and reaches the model ex
 sent. A CLI that takes a prompt only as an argument is the exception: it receives the
 file's exact bytes as one argument, expanded from the file and never re-quoted, so the
 OS's argument limits bound the prompt and a longer one fails at launch instead of being
-truncated. Every invocation, launch or resume, appends to `.ale-harness/stdout.log` and
+truncated. A CLI that reads a headless prompt from stdin only inside a structured message
+gets the file's exact text wrapped into that message by the Sandbox's Python first. Every
+invocation, launch or resume, appends to `.ale-harness/stdout.log` and
 `.ale-harness/stderr.log` and records its prompt, requested session ID, and stream offsets
 in `.ale-harness/invocations.jsonl`. Result interpretation sees only the current
 invocation's output, so it cannot reuse the success or session ID of an earlier turn.

@@ -1,0 +1,19 @@
+[agent]
+name = "antigravity-cli"
+model = "gemini-4-argon"
+version = "1.4.7"
+skills = []
+mcp_servers = []
+
+[agent.settings]
+effort = "high"
+
+[gateway]
+provider = "gemini"
+dialect = "gemini"
+
+[gateway.limits]
+max_model_calls = "unlimited"
+max_input_tokens = "unlimited"
+max_output_tokens = "unlimited"
+max_total_tokens = "unlimited"
