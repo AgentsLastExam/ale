@@ -49,6 +49,22 @@ INVOCATIONS_PATH = f"{LOG_ROOT}/invocations.jsonl"
 #: Sent by a resume without new task input. None of the headless CLIs can continue a
 #: session without a message, so the request is explicit and recorded like any prompt.
 CONTINUE_PROMPT = "Continue from where you left off."
+#: Set on Windows for a CLI that takes its prompt as an argument: Git Bash would otherwise
+#: rewrite a prompt that looks like a POSIX path before the native program sees it.
+PROMPT_ARGUMENT_WINDOWS_ENV = {"MSYS2_ARG_CONV_EXCL": "*"}
+
+
+def prompt_argument(prompt_path: str) -> tuple[str, str]:
+    """Shell that reads the prompt file into ``$prompt``, and the word that passes it on.
+
+    For a CLI that accepts a prompt only as an argument: the word is one argument expanded
+    from the file's exact bytes and never re-quoted. The trailing ``.`` keeps the newlines
+    command substitution would strip.
+    """
+    return (
+        f'prompt="$(cat -- {shlex.quote(prompt_path)}; printf .)"; prompt="${{prompt%.}}"; ',
+        '"$prompt"',
+    )
 
 
 @dataclass(frozen=True)
