@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -28,11 +29,12 @@ from ale.run.secrets import provider_credentials, provider_endpoint
 
 pytestmark = pytest.mark.unit
 
-FIXTURE = Path(__file__).parents[1] / "fixtures" / "harness-logs" / "zcode-subagent"
-SESSION_ID = "sess_486319d0-9eaf-4388-a4d7-c4f5a1effc7d"
-CHILD_ID = "sess_subagent_agent_e53d28b2-2b36-4dda-aa3f-856a4da3bfc5"
+SESSION_ID = "session-1"
+CHILD_ID = "child-1"
 PROVIDER = "/home/agent/.zcode-ale/provider.json"
 CONFIG = "/home/agent/.zcode/cli/config.json"
+DB = ".zcode/cli/db/db.sqlite"
+PROMPTS = ("delegate", "second")
 
 
 def test_preset_is_complete_and_speaks_messages_to_zai() -> None:
@@ -320,9 +322,14 @@ async def test_resume_asks_the_store_for_the_exact_top_level_session() -> None:
     assert not await ZCodeHarness()._session_exists(FakeSandbox(1), session(), SESSION_ID)  # type: ignore[arg-type]
 
 
+def stdout(response: str) -> str:
+    """One invocation's stdout, which ends in its result."""
+    return json.dumps({"type": "result", "sessionId": SESSION_ID, "response": response}) + "\n"
+
+
 def test_result_reading_uses_the_terminal_result_or_the_failed_turn() -> None:
     harness = ZCodeHarness()
-    result = harness.read_result((FIXTURE / ".ale-harness/stdout.log").read_text())
+    result = harness.read_result(stdout("PARENT-DONE") + stdout("SECOND-DONE"))
     assert result.session_id == SESSION_ID
     assert result.final_message == "SECOND-DONE"
     assert result.error is None
@@ -364,7 +371,7 @@ def context(logs: Path, tmp_path: Path, **updates: object) -> TrajectoryParseCon
     values: dict[str, object] = {
         "episode_id": "episode",
         "trajectory_id": "trajectory",
-        "instruction": "Delegate, then look at large.png",
+        "instruction": PROMPTS[0],
         "logs_dir": logs,
         "model": "scripted-model",
         "agent_version": "0.17.0",
@@ -374,21 +381,128 @@ def context(logs: Path, tmp_path: Path, **updates: object) -> TrajectoryParseCon
     return TrajectoryParseContext(**(values | updates))  # type: ignore[arg-type]
 
 
-def copy_fixture(tmp_path: Path) -> Path:
+def write_run(logs: Path, *outputs: str) -> None:
+    """One recorded invocation per prompt, each with its own part of stdout."""
+    lines: list[str] = []
+    offset = 0
+    for prompt, output in zip(PROMPTS, outputs, strict=True):
+        lines.append(json.dumps({"prompt": prompt, "stdout_offset": offset}) + "\n")
+        offset += len(output.encode())
+    (logs / ".ale-harness").mkdir(parents=True, exist_ok=True)
+    (logs / ".ale-harness/invocations.jsonl").write_text("".join(lines))
+    (logs / ".ale-harness/stdout.log").write_text("".join(outputs))
+
+
+Message = tuple[dict[str, object], list[dict[str, object]]]
+
+
+def user(text: str, **metadata: object) -> Message:
+    return {"role": "user", "metadata": metadata}, [{"type": "text", "text": text}]
+
+
+def assistant(*parts: dict[str, object]) -> Message:
+    return {"role": "assistant"}, list(parts)
+
+
+def text_part(text: str) -> dict[str, object]:
+    return {"type": "text", "text": text}
+
+
+def tool(
+    call_id: str, name: str, args: dict[str, object], output: str, **state: object
+) -> dict[str, object]:
+    """A tool part holding the call's completed outcome."""
+    outcome = {"status": "completed", "input": args, "output": output, **state}
+    return {"type": "tool", "callID": call_id, "tool": name, "state": outcome}
+
+
+def child_messages() -> list[Message]:
+    """A subagent's conversation: the delegated task, then one command."""
+    return [
+        user("run child"),
+        assistant(
+            tool("call-3", "Bash", {"command": "echo hi"}, "hi"),
+            {"type": "step-finish", "tokens": {"input": 7}},
+        ),
+    ]
+
+
+def add_messages(store: sqlite3.Connection, session_id: str, *messages: Message) -> None:
+    """Append messages, each with its parts, to a session in ZCode's store."""
+    (count,) = store.execute(
+        "select count(*) from message where session_id = ?", (session_id,)
+    ).fetchone()
+    for sequence, (data, parts) in enumerate(messages, count):
+        message_id = f"{session_id}-{sequence}"
+        store.execute(
+            "insert into message values (?, ?, ?, ?)",
+            (message_id, session_id, sequence, json.dumps(data)),
+        )
+        store.executemany(
+            "insert into part values (?, ?, ?, ?)",
+            [
+                (f"{message_id}-{index}", message_id, index, json.dumps(part))
+                for index, part in enumerate(parts)
+            ],
+        )
+
+
+def write_spawn(logs: Path, parent: str, call_id: str, child: str) -> None:
+    """The metadata naming the session and call that spawned ``child``."""
+    path = logs / f".zcode/cli/agents/{parent}/agent-{child}/metadata.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"parentSessionId": parent, "parentToolUseId": call_id, "childSessionId": child})
+    )
+
+
+def zcode_logs(tmp_path: Path) -> Path:
+    """Two turns; the first spawns a subagent session and then reads an image."""
     logs = tmp_path / "logs"
-    shutil.copytree(FIXTURE, logs)
+    write_run(logs, stdout("PARENT-DONE"), stdout("SECOND-DONE"))
+    (logs / DB).parent.mkdir(parents=True)
+    image = {"mime": "image/png", "url": f"zcode-artifact://{SESSION_ID}/image-1"}
+    store = sqlite3.connect(logs / DB)
+    with store:
+        store.executescript(
+            "create table session (id text, parent_id text);"
+            "create table message (id text, session_id text, sequence integer, data text);"
+            "create table part (id text, message_id text, sequence integer, data text);"
+        )
+        store.executemany(
+            "insert into session values (?, ?)", [(SESSION_ID, None), (CHILD_ID, SESSION_ID)]
+        )
+        add_messages(
+            store,
+            SESSION_ID,
+            user(PROMPTS[0]),
+            user("agent types", source="agent_listing_delta", visibility="model-only"),
+            assistant(tool("call-1", "Agent", {"prompt": "run child"}, "CHILD-DONE")),
+            assistant(
+                tool("call-2", "Read", {"file_path": "a.png"}, "1x1 pixels", attachments=[image])
+            ),
+            assistant(text_part("PARENT-DONE"), {"type": "step-finish", "tokens": {"input": 5}}),
+            user(PROMPTS[1]),
+            assistant(text_part("SECOND-DONE")),
+        )
+        add_messages(store, CHILD_ID, *child_messages())
+    store.close()
+    write_spawn(logs, SESSION_ID, "call-1", CHILD_ID)
+    artifact = logs / f".zcode/cli/artifacts/{SESSION_ID}/call-2-image-1.txt"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("data:image/png;base64," + base64.b64encode(b"png").decode())
     return logs
 
 
 def test_parser_follows_the_store_and_embeds_its_subagent(tmp_path: Path) -> None:
-    parse = context(FIXTURE, tmp_path)
+    parse = context(zcode_logs(tmp_path), tmp_path)
     AutonomousHarnessConformance.check_parser_is_pure(ZCodeHarness(), parse)
     trajectory = ZCodeHarness().parse_trajectory(parse)
 
     assert trajectory.session_id == SESSION_ID
     assert trajectory.extra is None
     assert [(step.source, step.message) for step in trajectory.steps if not step.tool_calls] == [
-        ("user", "Delegate, then look at large.png"),
+        ("user", "delegate"),
         ("agent", "PARENT-DONE"),
         ("user", "second"),
         ("agent", "SECOND-DONE"),
@@ -400,11 +514,9 @@ def test_parser_follows_the_store_and_embeds_its_subagent(tmp_path: Path) -> Non
     assert result.subagent_trajectory_ref is not None
     assert result.subagent_trajectory_ref[0].trajectory_id == child.trajectory_id
     assert child.trajectory_id == f"trajectory-subagent-{CHILD_ID}"
-    assert [(step.source, step.message) for step in child.steps if not step.tool_calls] == [
-        ("user", "Run echo child-proof"),
-        ("agent", "CHILD-DONE"),
-    ]
-    assert child.steps[1].observation.results[0].content == "child-proof"  # type: ignore[union-attr]
+    assert [step.source for step in child.steps] == ["user", "agent"]
+    assert child.steps[0].message == "run child"
+    assert child.steps[1].observation.results[0].content == "hi"  # type: ignore[union-attr]
 
     (image_result,) = trajectory.steps[2].observation.results  # type: ignore[union-attr]
     assert isinstance(image_result.content, list)
@@ -412,11 +524,11 @@ def test_parser_follows_the_store_and_embeds_its_subagent(tmp_path: Path) -> Non
     assert image.type == "image" and image.source is not None
     assert (tmp_path / "episode" / image.source.path).is_file()
     assert trajectory.final_metrics is not None
-    assert trajectory.final_metrics.total_prompt_tokens == 44
+    assert trajectory.final_metrics.total_prompt_tokens == 5
 
 
 def test_unlinked_subagents_and_missing_attachments_are_reported(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
+    logs = zcode_logs(tmp_path)
     shutil.rmtree(logs / ".zcode/cli/agents")
     shutil.rmtree(logs / ".zcode/cli/artifacts")
 
@@ -430,67 +542,29 @@ def test_unlinked_subagents_and_missing_attachments_are_reported(tmp_path: Path)
     assert "[attachment unavailable: zcode-artifact://" in str(image_result.content)
 
 
-GRANDCHILD_ID = "sess_subagent_agent_0d9a1c55-6a1e-4e4a-9a51-3f2b8c0e7d11"
+GRANDCHILD_ID = "child-2"
 
 
 def add_grandchild(logs: Path, *, spawned: bool) -> None:
-    """A session below the subagent, as a copy of the subagent's own conversation.
+    """A session below the subagent, with the subagent's own conversation.
 
     ``spawned`` also has the subagent spawn it as the root spawned the subagent: the call
     in a message of its own, and the metadata naming that call and the new session.
     """
-    store = sqlite3.connect(logs / ".zcode/cli/db/db.sqlite")
+    store = sqlite3.connect(logs / DB)
     with store:
-        store.execute("create temp table copied as select * from session where id = ?", (CHILD_ID,))
-        store.execute("update copied set id = ?, parent_id = ?", (GRANDCHILD_ID, CHILD_ID))
-        store.execute("insert into session select * from copied")
-        store.execute(
-            "insert into message (id, session_id, time_created, time_updated, data, sequence) "
-            "select 'nested_' || id, ?, time_created, time_updated, data, sequence "
-            "from message where session_id = ?",
-            (GRANDCHILD_ID, CHILD_ID),
-        )
-        store.execute(
-            "insert into part (id, message_id, session_id, time_created, time_updated, data, "
-            "sequence) select 'nested_' || id, 'nested_' || message_id, ?, time_created, "
-            "time_updated, data, sequence from part where session_id = ?",
-            (GRANDCHILD_ID, CHILD_ID),
-        )
+        store.execute("insert into session values (?, ?)", (GRANDCHILD_ID, CHILD_ID))
+        add_messages(store, GRANDCHILD_ID, *child_messages())
         if spawned:
-            (message_id,) = store.execute(
-                "select message_id from part where session_id = ? and data like ?",
-                (SESSION_ID, '%"callID":"call_1"%'),
-            ).fetchone()
-            store.execute(
-                "insert into message (id, session_id, time_created, time_updated, data, "
-                "sequence) select 'spawn_' || id, ?, time_created, time_updated, data, 9 "
-                "from message where id = ?",
-                (CHILD_ID, message_id),
-            )
-            store.execute(
-                "insert into part (id, message_id, session_id, time_created, time_updated, "
-                "data, sequence) select 'spawn_' || id, 'spawn_' || message_id, ?, "
-                "time_created, time_updated, replace(data, '\"call_1\"', '\"call_9\"'), "
-                "sequence from part where message_id = ?",
-                (CHILD_ID, message_id),
-            )
+            spawn = tool("call-9", "Agent", {"prompt": "run child"}, "CHILD-DONE")
+            add_messages(store, CHILD_ID, assistant(spawn))
     store.close()
     if spawned:
-        agent = logs / f".zcode/cli/agents/{CHILD_ID}/agent_nested"
-        agent.mkdir(parents=True)
-        (agent / "metadata.json").write_text(
-            json.dumps(
-                {
-                    "parentSessionId": CHILD_ID,
-                    "parentToolUseId": "call_9",
-                    "childSessionId": GRANDCHILD_ID,
-                }
-            )
-        )
+        write_spawn(logs, CHILD_ID, "call-9", GRANDCHILD_ID)
 
 
 def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
+    logs = zcode_logs(tmp_path)
     add_grandchild(logs, spawned=True)
 
     trajectory = ZCodeHarness().parse_trajectory(context(logs, tmp_path, incomplete=True))
@@ -502,7 +576,7 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
     spawned = next(
         step
         for step in helper.steps
-        if [call.tool_call_id for call in step.tool_calls or ()] == ["call_9"]
+        if [call.tool_call_id for call in step.tool_calls or ()] == ["call-9"]
     )
     (result,) = spawned.observation.results  # type: ignore[union-attr]
     assert result.subagent_trajectory_ref is not None
@@ -513,7 +587,7 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
 
 
 def test_an_unlinked_session_below_a_subagent_is_reported_on_the_root(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
+    logs = zcode_logs(tmp_path)
     add_grandchild(logs, spawned=False)
 
     trajectory = ZCodeHarness().parse_trajectory(context(logs, tmp_path))
@@ -526,18 +600,13 @@ def test_an_unlinked_session_below_a_subagent_is_reported_on_the_root(tmp_path: 
 
 
 def test_a_failed_turn_is_recorded_at_its_end(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
-    stdout = logs / ".ale-harness/stdout.log"
-    lines = stdout.read_text().splitlines()
-    index = max(i for i, line in enumerate(lines) if '"type":"result"' in line)
-    lines[index] = json.dumps(
-        {
-            "type": "turn.failed",
-            "sessionId": SESSION_ID,
-            "payload": {"error": {"message": "Provider rejected the model request."}},
-        }
-    )
-    stdout.write_text("\n".join(lines) + "\n")
+    logs = zcode_logs(tmp_path)
+    failed = {
+        "type": "turn.failed",
+        "sessionId": SESSION_ID,
+        "payload": {"error": {"message": "Provider rejected the model request."}},
+    }
+    write_run(logs, stdout("PARENT-DONE"), json.dumps(failed) + "\n")
 
     trajectory = ZCodeHarness().parse_trajectory(context(logs, tmp_path))
 
@@ -548,13 +617,13 @@ def test_a_failed_turn_is_recorded_at_its_end(tmp_path: Path) -> None:
 
 
 def test_without_the_store_each_turn_comes_from_its_prompt_and_stdout(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
-    shutil.rmtree(logs / ".zcode/cli/db")
+    logs = tmp_path / "logs"
+    write_run(logs, stdout("PARENT-DONE"), stdout("SECOND-DONE"))
 
     trajectory = ZCodeHarness().parse_trajectory(context(logs, tmp_path))
 
     assert [(step.source, step.message) for step in trajectory.steps] == [
-        ("user", "Delegate, then look at large.png"),
+        ("user", "delegate"),
         ("agent", "PARENT-DONE"),
         ("user", "second"),
         ("agent", "SECOND-DONE"),

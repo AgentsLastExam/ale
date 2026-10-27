@@ -1,8 +1,0 @@
-{
-  "tool_name": "exec_command",
-  "tool_namespace": null,
-  "payload": {
-    "type": "function",
-    "arguments": "{\"cmd\":\"sed -n '1p' /home/user/input/nonce.txt\",\"yield_time_ms\":10000,\"max_output_tokens\":2000}"
-  }
-}

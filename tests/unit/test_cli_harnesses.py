@@ -987,51 +987,9 @@ def test_codex_children_stay_raw_evidence_without_the_root_rollout(tmp_path: Pat
     ]
 
 
-#: Trimmed native logs of live runs whose agent spawned one subagent.
-RECORDED = Path(__file__).resolve().parents[1] / "fixtures/harness-logs"
-CODEX_ROOT = "01a175a9-0f81-7b93-ae65-da0c2a7ec6ac"
-CODEX_CHILD = "01a175aa-61f6-7471-af90-411c882937d6"
+#: Where Codex keeps one day's rollouts, each named `rollout-<timestamp>-<thread id>.jsonl`.
 CODEX_DAY = ".codex-ale/sessions/2026/10/26"
-OPENCLAW_ROOT = "b8ca4087-ea61-4187-86ee-8de3c6436da0"
-OPENCLAW_CHILD = "b4b72c4f-3edd-4104-94a6-b8a0278f938c"
 OPENCLAW_SESSIONS = ".openclaw-ale/agents/main/sessions"
-#: The Codex run predates its rollout trace, which alone records what its scripts called.
-UNTRACED = {
-    "codex-cli-subagent": [{"reason": "rollout_trace_unavailable", "session_id": CODEX_ROOT}]
-}
-SUBAGENT_RUNS = [
-    pytest.param(
-        CodexCliHarness(),
-        "codex-cli-subagent",
-        CODEX_ROOT,
-        CODEX_CHILD,
-        "call_24f034d96a464402a1c632612af5143f",
-        id="codex",
-    ),
-    pytest.param(
-        OpenClawCliHarness(),
-        "openclaw-cli-subagent",
-        OPENCLAW_ROOT,
-        OPENCLAW_CHILD,
-        "call_3fe4e2d219214d5ebfdd437eab53b560|fc_00c55f0336e05945016adea32167bc81998148cd9e86f8d902",
-        id="openclaw",
-    ),
-]
-
-
-def recorded_context(tmp_path: Path, fixture: str, session_id: str) -> TrajectoryParseContext:
-    """A finished run over a private copy of recorded logs, which a test may add to."""
-    shutil.copytree(RECORDED / fixture, tmp_path / "logs")
-    return TrajectoryParseContext(
-        episode_id="episode",
-        trajectory_id="trajectory",
-        instruction="Goal: test every tool available to you and produce a structured report.",
-        logs_dir=tmp_path / "logs",
-        model="test-model",
-        agent_version="1.0",
-        blobs=BlobStore(tmp_path),
-        session_id=session_id,
-    )
 
 
 def subagent_refs(trajectory: AtifTrajectory) -> dict[str, list[str]]:
@@ -1049,126 +1007,266 @@ def write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
 
 
-@pytest.mark.parametrize(("harness", "fixture", "root", "child", "spawn"), SUBAGENT_RUNS)
-def test_recorded_subagents_are_embedded_and_referenced_from_their_spawn(
-    tmp_path: Path, harness, fixture: str, root: str, child: str, spawn: str
+def codex_message(role: str, text: str) -> dict[str, object]:
+    part = "output_text" if role == "assistant" else "input_text"
+    return {
+        "type": "response_item",
+        "payload": {"type": "message", "role": role, "content": [{"type": part, "text": text}]},
+    }
+
+
+def codex_subagent_run(tmp_path: Path) -> TrajectoryParseContext:
+    """Thread ``session``, whose code-mode script ``spawn`` started thread ``child``.
+
+    The script then sent the child a second input.
+    """
+    script = (
+        "const child = await tools.multi_agent_v1__spawn_agent({message: 'Wait.'});\n"
+        "await tools.multi_agent_v1__send_input({target: child.agent_id, message: 'Reply.'});"
+    )
+    write_jsonl(
+        tmp_path / f"{CODEX_DAY}/rollout-2026-10-26T00-00-00-session.jsonl",
+        [
+            {"type": "session_meta", "payload": {"id": "session"}},
+            codex_message("user", "Use the task MCP."),
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "spawn",
+                    "name": "exec",
+                    "input": script,
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "spawn",
+                    "output": '{"agent_id": "child"}',
+                },
+            },
+        ],
+    )
+    write_jsonl(
+        tmp_path / f"{CODEX_DAY}/rollout-2026-10-26T00-00-01-child.jsonl",
+        [
+            {"type": "session_meta", "payload": {"id": "child", "parent_thread_id": "session"}},
+            codex_message("user", "<environment_context/>"),
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "Wait."}},
+            codex_message("assistant", "Waiting."),
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "Reply."}},
+            codex_message("assistant", "DONE"),
+        ],
+    )
+    return context(tmp_path, "codex")
+
+
+def openclaw_subagent_run(tmp_path: Path) -> TrajectoryParseContext:
+    """Session ``session``, whose ``sessions_spawn`` call ``spawn`` started session ``child``."""
+    sessions = tmp_path / OPENCLAW_SESSIONS
+    write_jsonl(
+        sessions / "session.jsonl",
+        [
+            {"type": "message", "message": {"role": "user", "content": "Use the task MCP."}},
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "spawn",
+                            "name": "sessions_spawn",
+                            "arguments": {"task": "Write the marker."},
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "spawn",
+                    "toolName": "sessions_spawn",
+                    "content": [{"type": "text", "text": "accepted"}],
+                    "details": {"childSessionKey": "agent:main:subagent:run-1"},
+                },
+            },
+        ],
+    )
+    write_jsonl(
+        sessions / "child.jsonl",
+        [
+            {
+                "type": "message",
+                "message": {"role": "user", "content": "[Subagent Task] Write the marker."},
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "write",
+                            "name": "write",
+                            "arguments": {"path": "marker.txt", "content": "MARKER"},
+                        }
+                    ],
+                    "usage": {"input": 10, "output": 1, "cost": {"total": 0.01}},
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "write",
+                    "content": [{"type": "text", "text": "Wrote 6 bytes."}],
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Wrote the marker."}],
+                    "usage": {"input": 20, "output": 1},
+                },
+            },
+        ],
+    )
+    (sessions / "sessions.json").write_text(
+        json.dumps(
+            {
+                "agent:main:explicit:session": {"sessionId": "session"},
+                "agent:main:subagent:run-1": {
+                    "sessionId": "child",
+                    "spawnedBy": "agent:main:explicit:session",
+                },
+            }
+        )
+    )
+    return context(tmp_path, "openclaw")
+
+
+#: A thread whose model ran `exec` scripts says when no rollout trace records their calls.
+UNTRACED = {"reason": "rollout_trace_unavailable", "session_id": "session"}
+SUBAGENT_RUNS = [
+    pytest.param(CodexCliHarness(), codex_subagent_run, [UNTRACED], id="codex"),
+    pytest.param(OpenClawCliHarness(), openclaw_subagent_run, [], id="openclaw"),
+]
+
+
+@pytest.mark.parametrize(("harness", "run", "untraced"), SUBAGENT_RUNS)
+def test_subagents_are_embedded_and_referenced_from_their_spawn(
+    tmp_path: Path, harness, run, untraced: list[dict[str, str]]
 ) -> None:
-    trajectory = harness.parse_trajectory(recorded_context(tmp_path, fixture, root))
+    trajectory = harness.parse_trajectory(run(tmp_path))
     (subagent,) = trajectory.subagent_trajectories
 
-    assert subagent.trajectory_id == f"trajectory-subagent-{child}"
-    assert subagent.session_id == child
-    assert subagent_refs(trajectory) == {spawn: [subagent.trajectory_id]}
+    assert subagent.trajectory_id == f"{trajectory.trajectory_id}-subagent-child"
+    assert subagent.session_id == "child"
+    assert subagent_refs(trajectory) == {"spawn": [subagent.trajectory_id]}
     assert subagent.agent == trajectory.agent
     # Converted, the child is no longer unused evidence.
     issues = (trajectory.extra or {}).get("ale", {}).get("parse_issues", [])
-    assert issues == UNTRACED.get(fixture, [])
+    assert issues == untraced
 
 
 def test_codex_subagent_follows_every_input_its_parent_sent(tmp_path: Path) -> None:
-    trajectory = CodexCliHarness().parse_trajectory(
-        recorded_context(tmp_path, "codex-cli-subagent", CODEX_ROOT)
-    )
+    trajectory = CodexCliHarness().parse_trajectory(codex_subagent_run(tmp_path))
     (subagent,) = trajectory.subagent_trajectories
 
-    # Spawned, messaged, closed, resumed and messaged again; injected context stays out.
+    # Spawned, then messaged again; injected context stays out.
     assert [(step.source, step.message) for step in subagent.steps] == [
-        (
-            "user",
-            "Wait for a follow-up message. After receiving it, respond exactly AGENT_MARKER "
-            "and do not modify files.",
-        ),
-        ("agent", "Waiting for your follow-up message."),
-        ("agent", "Waiting for your follow-up message."),
-        ("user", "Follow-up: provide the requested marker now."),
-        ("agent", "AGENT_MARKER"),
-        ("user", "You have been resumed. Respond exactly RESUMED_MARKER."),
-        ("agent", "RESUMED_MARKER"),
+        ("user", "Wait."),
+        ("agent", "Waiting."),
+        ("user", "Reply."),
+        ("agent", "DONE"),
     ]
 
 
 def test_openclaw_subagent_keeps_its_delegated_task_and_tool_calls(tmp_path: Path) -> None:
-    trajectory = OpenClawCliHarness().parse_trajectory(
-        recorded_context(tmp_path, "openclaw-cli-subagent", OPENCLAW_ROOT)
-    )
+    trajectory = OpenClawCliHarness().parse_trajectory(openclaw_subagent_run(tmp_path))
     (subagent,) = trajectory.subagent_trajectories
     first, write, final = subagent.steps
 
-    assert first.source == "user"
-    assert first.message.startswith("[Subagent Context] You are running as a subagent")
+    assert (first.source, first.message) == ("user", "[Subagent Task] Write the marker.")
     assert [call.function_name for call in write.tool_calls] == ["write"]
     (result,) = write.observation.results
-    assert result.content[0].text.startswith("Successfully wrote 12 bytes")
-    assert final.message.startswith("Wrote the exact string `SPAWN_MARKER`")
-    assert subagent.final_metrics.total_prompt_tokens == 21113
-    # Every native usage record carries a price; ALE reports tokens only.
+    assert result.content[0].text == "Wrote 6 bytes."
+    assert final.message == "Wrote the marker."
+    assert subagent.final_metrics.total_prompt_tokens == 30
+    # A native usage record carries a price; ALE reports tokens only.
     assert "cost" not in trajectory.model_dump_json()
 
 
-@pytest.mark.parametrize(("harness", "fixture", "root", "child", "spawn"), SUBAGENT_RUNS)
+@pytest.mark.parametrize(("harness", "run", "untraced"), SUBAGENT_RUNS)
 def test_a_child_no_spawn_result_names_stays_reported(
-    tmp_path: Path, harness, fixture: str, root: str, child: str, spawn: str
+    tmp_path: Path, harness, run, untraced: list[dict[str, str]]
 ) -> None:
-    parse = recorded_context(tmp_path, fixture, root)
-    if fixture.startswith("codex"):
+    parse = run(tmp_path)
+    if isinstance(harness, CodexCliHarness):
         orphan = f"{CODEX_DAY}/rollout-2026-10-26T00-50-00-orphan.jsonl"
         write_jsonl(
-            parse.logs_dir / orphan,
+            tmp_path / orphan,
             [
-                {"type": "session_meta", "payload": {"id": "orphan", "parent_thread_id": root}},
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "orphan", "parent_thread_id": "session"},
+                },
                 {"type": "event_msg", "payload": {"type": "user_message", "message": "hi"}},
             ],
         )
     else:
         orphan = f"{OPENCLAW_SESSIONS}/orphan.jsonl"
-        index = parse.logs_dir / OPENCLAW_SESSIONS / "sessions.json"
+        index = tmp_path / OPENCLAW_SESSIONS / "sessions.json"
         entries = json.loads(index.read_text())
         entries["agent:main:subagent:orphan"] = {
             "sessionId": "orphan",
-            "spawnedBy": f"agent:main:explicit:{root}",
+            "spawnedBy": "agent:main:explicit:session",
         }
         index.write_text(json.dumps(entries))
         write_jsonl(
-            parse.logs_dir / orphan,
+            tmp_path / orphan,
             [{"type": "message", "message": {"role": "user", "content": "hi"}}],
         )
 
     trajectory = harness.parse_trajectory(parse)
 
-    assert [item.session_id for item in trajectory.subagent_trajectories] == [child]
+    assert [item.session_id for item in trajectory.subagent_trajectories] == ["child"]
     assert trajectory.extra["ale"]["parse_issues"] == [
         {"reason": "unlinked_subagent", "source": orphan},
         {"reason": "unconverted_native_files", "count": 1, "sources": [orphan]},
-        *UNTRACED.get(fixture, []),
+        *untraced,
     ]
 
 
-@pytest.mark.parametrize(("harness", "fixture", "root", "child", "spawn"), SUBAGENT_RUNS)
+@pytest.mark.parametrize(("harness", "run", "untraced"), SUBAGENT_RUNS)
 def test_a_child_claimed_twice_is_converted_once(
-    tmp_path: Path, harness, fixture: str, root: str, child: str, spawn: str
+    tmp_path: Path, harness, run, untraced: list[dict[str, str]]
 ) -> None:
-    parse = recorded_context(tmp_path, fixture, root)
-    if fixture.startswith("codex"):
-        rollout = next((parse.logs_dir / CODEX_DAY).glob(f"*-{child}.jsonl"))
-        duplicate = f"{CODEX_DAY}/rollout-2026-10-26T00-50-00-{child}.jsonl"
-        shutil.copy(rollout, parse.logs_dir / duplicate)
+    parse = run(tmp_path)
+    if isinstance(harness, CodexCliHarness):
+        rollout = next((tmp_path / CODEX_DAY).glob("*-child.jsonl"))
+        duplicate = f"{CODEX_DAY}/rollout-2026-10-26T00-50-00-child.jsonl"
+        shutil.copy(rollout, tmp_path / duplicate)
         expected = [
             {"reason": "unlinked_subagent", "source": duplicate},
             {"reason": "unconverted_native_files", "count": 1, "sources": [duplicate]},
         ]
     else:
-        index = parse.logs_dir / OPENCLAW_SESSIONS / "sessions.json"
+        index = tmp_path / OPENCLAW_SESSIONS / "sessions.json"
         entries = json.loads(index.read_text())
-        alias = dict(next(entry for entry in entries.values() if entry["sessionId"] == child))
-        entries["agent:main:subagent:alias"] = alias
+        entries["agent:main:subagent:alias"] = entries["agent:main:subagent:run-1"]
         index.write_text(json.dumps(entries))
         expected = []
 
     trajectory = harness.parse_trajectory(parse)
 
-    assert [item.session_id for item in trajectory.subagent_trajectories] == [child]
+    assert [item.session_id for item in trajectory.subagent_trajectories] == ["child"]
     issues = (trajectory.extra or {}).get("ale", {}).get("parse_issues", [])
-    assert issues == expected + UNTRACED.get(fixture, [])
+    assert issues == expected + untraced
 
 
 def test_codex_nested_spawn_agent_calls_nest_their_trajectories(tmp_path: Path) -> None:
@@ -1228,11 +1326,109 @@ def test_codex_nested_spawn_agent_calls_nest_their_trajectories(tmp_path: Path) 
     assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
 
 
-#: A live run whose model reached every tool, the task MCP included, only through code mode.
-CODEX_CODE_MODE = "01a17b05-5c35-72e0-a9d1-ffa6eb4d4167"
-CODEX_TRACE = (
-    f".codex-ale/rollout-traces/trace-5daffae6-1210-4553-8331-67ef07d2e7c8-{CODEX_CODE_MODE}"
-)
+#: Thread ``session``'s rollout trace bundle, named `trace-<trace id>-<thread id>`.
+CODEX_TRACE = ".codex-ale/rollout-traces/trace-1-session"
+
+
+def codex_code_mode_run(tmp_path: Path) -> TrajectoryParseContext:
+    """Model calls ``exec-<n>``, each running a script that made call ``script-<n>``.
+
+    The scripts ran a command, called the task MCP and applied a patch. The rollout keeps
+    only the ``exec`` calls; the trace records each script's call, with what it sent, what
+    its MCP server reported and what it got back in its bundle's payload files.
+    """
+    scripts = {
+        "exec-1": "await tools.exec_command({cmd: 'cat nonce.txt'});",
+        "exec-2": "await tools.mcp__task_proof__derive_fragment({nonce: 'N1'});",
+        "exec-3": "await tools.apply_patch('*** Begin Patch\\n*** End Patch');",
+    }
+    write_jsonl(
+        tmp_path / f"{CODEX_DAY}/rollout-2026-10-26T00-00-00-session.jsonl",
+        [
+            {"type": "session_meta", "payload": {"id": "session"}},
+            codex_message("user", "Use the task MCP."),
+            *(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "call_id": call,
+                        "name": "exec",
+                        "input": script,
+                    },
+                }
+                for call, script in scripts.items()
+            ),
+        ],
+    )
+    bundle = tmp_path / CODEX_TRACE
+    payloads = {
+        1: {
+            "tool_name": "exec_command",
+            "payload": {"type": "function", "arguments": '{"cmd": "cat nonce.txt"}'},
+        },
+        2: {"type": "code_mode_response", "value": {"exit_code": 0, "output": "N1\n"}},
+        3: {
+            "tool_name": "derive_fragment",
+            "tool_namespace": "mcp__task_proof",
+            "payload": {"type": "function", "arguments": '{"nonce": "N1"}'},
+        },
+        4: {"invocation": {"server": "task-proof"}},
+        5: {"type": "code_mode_response", "value": {"content": [{"type": "text", "text": "F1"}]}},
+        6: {
+            "tool_name": "apply_patch",
+            "payload": {"type": "custom", "input": "*** Begin Patch\n*** End Patch"},
+        },
+        7: {"type": "code_mode_response", "value": {}},
+    }
+    (bundle / "payloads").mkdir(parents=True)
+    for number, payload in payloads.items():
+        (bundle / f"payloads/{number}.json").write_text(json.dumps(payload))
+
+    def traced(kind: str, **fields: object) -> dict[str, object]:
+        return {"thread_id": "session", "payload": {"type": kind, **fields}}
+
+    def cell(number: int) -> dict[str, object]:
+        return traced(
+            "code_cell_started", runtime_cell_id=str(number), model_visible_call_id=f"exec-{number}"
+        )
+
+    def started(number: int, payload: int) -> dict[str, object]:
+        return traced(
+            "tool_call_started",
+            tool_call_id=f"script-{number}",
+            requester={"type": "code_cell", "runtime_cell_id": str(number)},
+            invocation_payload={"path": f"payloads/{payload}.json"},
+        )
+
+    def ended(number: int, payload: int) -> dict[str, object]:
+        return traced(
+            "tool_call_ended",
+            tool_call_id=f"script-{number}",
+            status="completed",
+            result_payload={"path": f"payloads/{payload}.json"},
+        )
+
+    write_jsonl(
+        bundle / "trace.jsonl",
+        [
+            cell(1),
+            started(1, 1),
+            ended(1, 2),
+            cell(2),
+            started(2, 3),
+            traced(
+                "tool_call_runtime_ended",
+                tool_call_id="script-2",
+                runtime_payload={"path": "payloads/4.json"},
+            ),
+            ended(2, 5),
+            cell(3),
+            started(3, 6),
+            ended(3, 7),
+        ],
+    )
+    return context(tmp_path, "codex")
 
 
 def script_steps(trajectory: AtifTrajectory) -> list[tuple[str, str, str]]:
@@ -1251,9 +1447,7 @@ def script_steps(trajectory: AtifTrajectory) -> list[tuple[str, str, str]]:
 
 
 def test_codex_code_mode_script_calls_are_steps_no_inference_chose(tmp_path: Path) -> None:
-    trajectory = CodexCliHarness().parse_trajectory(
-        recorded_context(tmp_path, "codex-cli-code-mode", CODEX_CODE_MODE)
-    )
+    trajectory = CodexCliHarness().parse_trajectory(codex_code_mode_run(tmp_path))
     calls = {
         call.tool_call_id: (call, step.observation.results[0])
         for step in trajectory.steps
@@ -1263,40 +1457,21 @@ def test_codex_code_mode_script_calls_are_steps_no_inference_chose(tmp_path: Pat
 
     # Each follows the model's `exec` call whose script made it, and names it.
     assert script_steps(trajectory) == [
-        (caller, name, caller)
-        for caller, name in (
-            ("call_f486c05afb754e228a28681f8785f422", "exec_command"),
-            ("call_83aaa886c7b04a93a1b18e92abd7e4bc", "exec_command"),
-            ("call_8c2ca2814913420698b8d5b8d5eb7ae2", "mcp__task-proof__derive_fragment"),
-            ("call_53c879dbc97a4964b34c42e36ab5ef78", "exec_command"),
-            ("call_6ccf49e4cad040da838200a9d2984257", "apply_patch"),
-            ("call_e853fe470bd34028ad266a218c2481ad", "exec_command"),
-        )
+        ("exec-1", "exec_command", "exec-1"),
+        ("exec-2", "mcp__task-proof__derive_fragment", "exec-2"),
+        ("exec-3", "apply_patch", "exec-3"),
     ]
-    command, result = calls["exec-95450d95-88b5-49c6-9a78-acde873a848f"]
-    assert command.arguments == {
-        "cmd": "sed -n '1p' /home/user/input/nonce.txt",
-        "yield_time_ms": 10000,
-        "max_output_tokens": 2000,
-    }
-    assert json.loads(result.content) == {
-        "chunk_id": "5cb8ec",
-        "wall_time_seconds": 3.195e-6,
-        "exit_code": 0,
-        "original_token_count": 5,
-        "output": "079D3A1B7FA1D27A\n",
-    }
-    mcp, result = calls["exec-a558b456-1ae8-42a7-9fd4-13afb0b76af3"]
-    assert mcp.arguments == {"nonce": "079D3A1B7FA1D27A"}
+    command, result = calls["script-1"]
+    assert command.arguments == {"cmd": "cat nonce.txt"}
+    assert json.loads(result.content) == {"exit_code": 0, "output": "N1\n"}
+    mcp, result = calls["script-2"]
+    assert mcp.arguments == {"nonce": "N1"}
     # The trace's namespace sanitizes the server name; Codex's record of the call keeps it.
     assert mcp.extra["ale"]["mcp"] == {"server": "task-proof", "tool": "derive_fragment"}
-    assert result.content[0].text == '{"fragment": "D86D9BA1C205E7EAFEFB7092"}'
+    assert result.content[0].text == "F1"
     assert result.extra is None
-    patch, result = calls["exec-69213efd-691b-4647-aa3a-3193a440d4f8"]
-    assert patch.arguments == {
-        "input": "*** Begin Patch\n*** Add File: /home/user/output/result.txt\n"
-        "+SKILL-R7::079D3A1B7FA1D27A::D86D9BA1C205E7EAFEFB7092\n*** End Patch"
-    }
+    patch, result = calls["script-3"]
+    assert patch.arguments == {"input": "*** Begin Patch\n*** End Patch"}
     # What the script got back, which for a patch is nothing.
     assert result.content == "{}"
     # Every call a model inference chose is an `exec` script.
@@ -1310,32 +1485,32 @@ def test_codex_code_mode_script_calls_are_steps_no_inference_chose(tmp_path: Pat
 
 
 def test_codex_script_call_after_a_later_model_call_follows_that_call(tmp_path: Path) -> None:
-    parse = recorded_context(tmp_path, "codex-cli-code-mode", CODEX_CODE_MODE)
-    log = parse.logs_dir / CODEX_TRACE / "trace.jsonl"
+    parse = codex_code_mode_run(tmp_path)
+    log = tmp_path / CODEX_TRACE / "trace.jsonl"
     events = [json.loads(line) for line in log.read_text().splitlines()]
     # The first script yielded, so its command ran only after the model's next `exec`.
-    first = [event for event in events if event["seq"] in range(8, 13)]
+    first = [event for event in events if event["payload"].get("tool_call_id") == "script-1"]
     rest = [event for event in events if event not in first]
-    later = next(i for i, event in enumerate(rest) if event["seq"] == 16) + 1
-    write_jsonl(log, rest[:later] + first + rest[later:])
+    later = next(
+        index
+        for index, event in enumerate(rest)
+        if event["payload"].get("model_visible_call_id") == "exec-2"
+    )
+    write_jsonl(log, rest[: later + 1] + first + rest[later + 1 :])
 
     trajectory = CodexCliHarness().parse_trajectory(parse)
 
-    assert script_steps(trajectory)[0] == (
-        "call_90980f229de541ce968866efca394af3",
-        "exec_command",
-        "call_f486c05afb754e228a28681f8785f422",
-    )
+    assert script_steps(trajectory)[0] == ("exec-2", "exec_command", "exec-1")
     assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
 
 
 def test_codex_code_mode_failed_script_calls_are_errors(tmp_path: Path) -> None:
-    parse = recorded_context(tmp_path, "codex-cli-code-mode", CODEX_CODE_MODE)
-    payloads = parse.logs_dir / CODEX_TRACE / "payloads"
+    parse = codex_code_mode_run(tmp_path)
+    payloads = tmp_path / CODEX_TRACE / "payloads"
     # The MCP tool reported an error; the patch never ran.
     reply = {"content": [{"type": "text", "text": "unknown nonce"}], "isError": True}
-    (payloads / "32.json").write_text(json.dumps({"type": "code_mode_response", "value": reply}))
-    (payloads / "48.json").write_text(json.dumps({"type": "error", "error": "patch rejected"}))
+    (payloads / "5.json").write_text(json.dumps({"type": "code_mode_response", "value": reply}))
+    (payloads / "7.json").write_text(json.dumps({"type": "error", "error": "patch rejected"}))
 
     trajectory = CodexCliHarness().parse_trajectory(parse)
     results = {
@@ -1345,46 +1520,45 @@ def test_codex_code_mode_failed_script_calls_are_errors(tmp_path: Path) -> None:
         for result in step.observation.results
     }
 
-    mcp = results["exec-a558b456-1ae8-42a7-9fd4-13afb0b76af3"]
+    mcp = results["script-2"]
     assert (mcp.content[0].text, mcp.extra) == ("unknown nonce", {"ale": {"is_error": True}})
-    patch = results["exec-69213efd-691b-4647-aa3a-3193a440d4f8"]
+    patch = results["script-3"]
     assert (patch.content, patch.extra) == ("patch rejected", {"ale": {"is_error": True}})
 
 
 def test_codex_code_mode_without_its_trace_says_so(tmp_path: Path) -> None:
-    parse = recorded_context(tmp_path, "codex-cli-code-mode", CODEX_CODE_MODE)
-    shutil.rmtree(parse.logs_dir / CODEX_TRACE)
+    parse = codex_code_mode_run(tmp_path)
+    shutil.rmtree(tmp_path / CODEX_TRACE)
 
     trajectory = CodexCliHarness().parse_trajectory(parse)
 
     assert script_steps(trajectory) == []
-    assert trajectory.extra["ale"]["parse_issues"] == [
-        {"reason": "rollout_trace_unavailable", "session_id": CODEX_CODE_MODE}
-    ]
+    assert trajectory.extra["ale"]["parse_issues"] == [UNTRACED]
 
 
 def test_codex_trace_reads_only_its_own_payload_files(tmp_path: Path) -> None:
-    parse = recorded_context(tmp_path, "codex-cli-code-mode", CODEX_CODE_MODE)
-    log = parse.logs_dir / CODEX_TRACE / "trace.jsonl"
+    parse = codex_code_mode_run(tmp_path)
+    outside = json.dumps({"type": "code_mode_response", "value": "outside"})
+    (tmp_path / "outside.json").write_text(outside)
+    log = tmp_path / CODEX_TRACE / "trace.jsonl"
     events = [json.loads(line) for line in log.read_text().splitlines()]
     for event in events:
-        if event["payload"].get("tool_call_id") == "exec-95450d95-88b5-49c6-9a78-acde873a848f":
+        if event["payload"].get("tool_call_id") == "script-1":
             for ref in event["payload"].values():
                 if isinstance(ref, dict) and "path" in ref:
-                    ref["path"] = "../../../.ale-harness/invocations.jsonl"
+                    ref["path"] = "../../../outside.json"
     write_jsonl(log, events)
 
     trajectory = CodexCliHarness().parse_trajectory(parse)
     (step,) = [
         step
         for step in trajectory.steps
-        if step.llm_call_count == 0
-        and step.tool_calls[0].tool_call_id == "exec-95450d95-88b5-49c6-9a78-acde873a848f"
+        if step.llm_call_count == 0 and step.tool_calls[0].tool_call_id == "script-1"
     ]
 
     assert (step.tool_calls[0].arguments, step.observation) == ({}, None)
     # Neither the arguments nor the result were read.
-    source = f"{CODEX_TRACE}/../../../.ale-harness/invocations.jsonl"
+    source = f"{CODEX_TRACE}/../../../outside.json"
     unavailable = {"reason": "trace_payload_unavailable", "source": source}
     assert trajectory.extra["ale"]["parse_issues"] == [unavailable, unavailable]
 

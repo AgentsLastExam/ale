@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import base64
 import json
-import shutil
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -18,12 +18,12 @@ from ale.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
-FIXTURE = Path(__file__).parents[1] / "fixtures" / "harness-logs" / "qwen-code-subagent"
-SESSION_ID = "a47044d0-0034-4676-be60-b837055bbad4"
-PROJECT = ".qwen-ale/projects/-home-user"
+SESSION_ID = "session-1"
+PROJECT = ".qwen-ale/projects/project-1"
 CHAT = f"{PROJECT}/chats/{SESSION_ID}.jsonl"
-CHILD = f"{PROJECT}/subagents/{SESSION_ID}/agent-general-purpose-call_2"
+CHILD = f"{PROJECT}/subagents/{SESSION_ID}/agent-child-1"
 SETTINGS = "/home/agent/.qwen-ale/system-settings.json"
+PROMPTS = ("delegate", "second")
 
 
 def test_preset_is_complete_and_uses_chat_completions() -> None:
@@ -203,9 +203,13 @@ async def test_windows_command_uses_native_paths() -> None:
     assert command.script.endswith(" < C:/Users/Agent/.ale-harness/prompt.md")
 
 
+def stdout(reply: str) -> str:
+    """One invocation's stdout, which ends in its result."""
+    return json.dumps({"type": "result", "session_id": SESSION_ID, "result": reply}) + "\n"
+
+
 def test_result_reading_uses_the_terminal_result() -> None:
-    stdout = (FIXTURE / ".ale-harness/stdout.log").read_text()
-    result = QwenCodeHarness().read_result(stdout)
+    result = QwenCodeHarness().read_result(stdout("PARENT-DONE") + stdout("SECOND-DONE"))
     assert result.session_id == SESSION_ID
     assert result.final_message == "SECOND-DONE"
     assert result.error is None
@@ -263,7 +267,7 @@ def context(logs: Path, tmp_path: Path, **updates: object) -> TrajectoryParseCon
     values: dict[str, object] = {
         "episode_id": "episode",
         "trajectory_id": "trajectory",
-        "instruction": "Delegate, then look at large.png",
+        "instruction": PROMPTS[0],
         "logs_dir": logs,
         "model": "scripted-model",
         "agent_version": "0.26.1",
@@ -273,14 +277,103 @@ def context(logs: Path, tmp_path: Path, **updates: object) -> TrajectoryParseCon
     return TrajectoryParseContext(**(values | updates))  # type: ignore[arg-type]
 
 
-def copy_fixture(tmp_path: Path) -> Path:
+def write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+
+def write_run(logs: Path, *outputs: str) -> None:
+    """One recorded invocation per prompt, each with its own part of stdout."""
+    records: list[dict[str, object]] = []
+    offset = 0
+    for prompt, output in zip(PROMPTS, outputs, strict=True):
+        records.append({"prompt": prompt, "stdout_offset": offset})
+        offset += len(output.encode())
+    write_jsonl(logs / ".ale-harness/invocations.jsonl", records)
+    (logs / ".ale-harness/stdout.log").write_text("".join(outputs))
+
+
+def prompt(text: str) -> dict[str, object]:
+    """A prompt ALE sent, with the blank line Qwen appends to one read from stdin."""
+    return {
+        "type": "user",
+        "provenance": "real_user",
+        "message": {"parts": [{"text": text + "\n\n"}]},
+    }
+
+
+def function_call(
+    call_id: str, name: str, args: dict[str, object], **fields: object
+) -> dict[str, object]:
+    part = {"functionCall": {"id": call_id, "name": name, "args": args}}
+    return {"type": "assistant", "message": {"parts": [part]}, **fields}
+
+
+def function_response(call_id: str, output: str, **fields: object) -> dict[str, object]:
+    part = {"functionResponse": {"id": call_id, "response": {"output": output}, **fields}}
+    return {"type": "tool_result", "message": {"parts": [part]}}
+
+
+def assistant_text(text: str, **fields: object) -> dict[str, object]:
+    return {"type": "assistant", "message": {"parts": [{"text": text}]}, **fields}
+
+
+def spawning(call_id: str) -> list[dict[str, object]]:
+    """An agent call through the deferred-tool wrapper, and its result."""
+    args = {"name": "agent", "arguments": {"prompt": "run child"}}
+    return [function_call(call_id, "tool_call", args), function_response(call_id, "CHILD-DONE")]
+
+
+def child_transcript(agent: str) -> list[dict[str, object]]:
+    """A subagent's conversation: the delegated task, then one command."""
+    return [
+        {"type": "user", "agentId": agent, "message": {"parts": [{"text": "run child"}]}},
+        function_call(
+            "call-3",
+            "run_shell_command",
+            {"command": "echo hi"},
+            usageMetadata={"promptTokenCount": 7},
+        ),
+        function_response("call-3", "hi"),
+    ]
+
+
+def child_meta(agent: str, call_id: str, parent: str | None = None) -> str:
+    """A subagent's metadata: its session, the agent that spawned it and the spawning call."""
+    return json.dumps(
+        {
+            "agentId": agent,
+            "parentSessionId": SESSION_ID,
+            "parentAgentId": parent,
+            "toolUseId": call_id,
+        }
+    )
+
+
+def qwen_logs(tmp_path: Path) -> Path:
+    """Two turns; the first spawns ``child-1`` and then reads an image."""
     logs = tmp_path / "logs"
-    shutil.copytree(FIXTURE, logs)
+    write_run(logs, stdout("PARENT-DONE"), stdout("SECOND-DONE"))
+    image = {"inlineData": {"mimeType": "image/png", "data": base64.b64encode(b"png").decode()}}
+    write_jsonl(
+        logs / CHAT,
+        [
+            prompt(PROMPTS[0]),
+            *spawning("call-1"),
+            function_call("call-2", "read_file", {"file_path": "a.png"}),
+            function_response("call-2", "1x1 pixels", parts=[image]),
+            assistant_text("PARENT-DONE", usageMetadata={"promptTokenCount": 5}),
+            prompt(PROMPTS[1]),
+            assistant_text("SECOND-DONE"),
+        ],
+    )
+    write_jsonl(logs / f"{CHILD}.jsonl", child_transcript("child-1"))
+    (logs / f"{CHILD}.meta.json").write_text(child_meta("child-1", "call-1"))
     return logs
 
 
 def test_parser_follows_the_session_and_embeds_its_subagent(tmp_path: Path) -> None:
-    parse = context(FIXTURE, tmp_path)
+    parse = context(qwen_logs(tmp_path), tmp_path)
     AutonomousHarnessConformance.check_parser_is_pure(QwenCodeHarness(), parse)
     trajectory = QwenCodeHarness().parse_trajectory(parse)
 
@@ -288,32 +381,32 @@ def test_parser_follows_the_session_and_embeds_its_subagent(tmp_path: Path) -> N
     assert trajectory.extra is None
     # Qwen appends a blank line to a prompt read from stdin; the turn is the prompt sent.
     assert [(step.source, step.message) for step in trajectory.steps if not step.tool_calls] == [
-        ("user", "Delegate, then look at large.png"),
+        ("user", "delegate"),
         ("agent", "PARENT-DONE"),
         ("user", "second"),
         ("agent", "SECOND-DONE"),
     ]
-    spawn = trajectory.steps[2]
+    spawn = trajectory.steps[1]
     (call,) = spawn.tool_calls or ()
     assert call.function_name == "agent"
     assert call.extra == {"ale": {"native_tool": "tool_call"}}
-    assert call.arguments["subagent_type"] == "general-purpose"
+    assert call.arguments == {"prompt": "run child"}
     (result,) = spawn.observation.results  # type: ignore[union-attr]
     assert result.content == "CHILD-DONE"
     assert result.subagent_trajectory_ref is not None
     (child,) = trajectory.subagent_trajectories or ()
     assert result.subagent_trajectory_ref[0].trajectory_id == child.trajectory_id
-    assert child.trajectory_id == "trajectory-subagent-general-purpose-call_2"
-    assert [step.source for step in child.steps] == ["user", "agent", "agent"]
-    assert "child-proof" in str(child.steps[1].observation.results[0].content)  # type: ignore[union-attr]
+    assert child.trajectory_id == "trajectory-subagent-child-1"
+    assert [step.source for step in child.steps] == ["user", "agent"]
+    assert child.steps[1].observation.results[0].content == "hi"  # type: ignore[union-attr]
 
-    (image_result,) = trajectory.steps[3].observation.results  # type: ignore[union-attr]
+    (image_result,) = trajectory.steps[2].observation.results  # type: ignore[union-attr]
     assert isinstance(image_result.content, list)
     image = image_result.content[1]
     assert image.type == "image" and image.source is not None
     assert (tmp_path / "episode" / image.source.path).is_file()
     assert trajectory.final_metrics is not None
-    assert trajectory.final_metrics.total_prompt_tokens == 55
+    assert trajectory.final_metrics.total_prompt_tokens == 5
 
 
 def test_mcp_calls_through_the_deferred_tool_wrapper_keep_server_and_tool(
@@ -370,35 +463,22 @@ def test_mcp_calls_through_the_deferred_tool_wrapper_keep_server_and_tool(
 
 
 def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
-    child_id, nested_id = "general-purpose-call_2", "general-purpose-call_9"
-    nested = f"{PROJECT}/subagents/{SESSION_ID}/agent-{nested_id}"
-    child = logs / f"{CHILD}.jsonl"
-    (logs / f"{nested}.jsonl").write_text(child.read_text().replace(child_id, nested_id))
-    meta = json.loads((logs / f"{CHILD}.meta.json").read_text())
-    (logs / f"{nested}.meta.json").write_text(
-        json.dumps(meta | {"agentId": nested_id, "toolUseId": "call_9", "parentAgentId": child_id})
-    )
-    # The child spawns as the session did: the call, then its result.
-    spawn = [
-        line.replace("call_2", "call_9")
-        for line in (logs / CHAT).read_text().splitlines(keepends=True)
-        if '"id":"call_2"' in line
-    ]
-    assert len(spawn) == 2
-    with child.open("a") as stream:
-        stream.writelines(spawn)
+    logs = qwen_logs(tmp_path)
+    nested = f"{PROJECT}/subagents/{SESSION_ID}/agent-child-2"
+    write_jsonl(logs / f"{CHILD}.jsonl", [*child_transcript("child-1"), *spawning("call-9")])
+    write_jsonl(logs / f"{nested}.jsonl", child_transcript("child-2"))
+    (logs / f"{nested}.meta.json").write_text(child_meta("child-2", "call-9", parent="child-1"))
 
     trajectory = QwenCodeHarness().parse_trajectory(context(logs, tmp_path, incomplete=True))
 
     assert "parse_issues" not in trajectory.extra["ale"]  # type: ignore[index]
     (helper,) = trajectory.subagent_trajectories or ()
     (inner,) = helper.subagent_trajectories or ()
-    assert inner.trajectory_id == f"trajectory-subagent-{child_id}-subagent-{nested_id}"
+    assert inner.trajectory_id == "trajectory-subagent-child-1-subagent-child-2"
     spawned = next(
         step
         for step in helper.steps
-        if [call.tool_call_id for call in step.tool_calls or ()] == ["call_9"]
+        if [call.tool_call_id for call in step.tool_calls or ()] == ["call-9"]
     )
     (result,) = spawned.observation.results  # type: ignore[union-attr]
     assert result.subagent_trajectory_ref is not None
@@ -409,10 +489,8 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
 
 
 def test_unlinked_subagents_stay_raw_evidence(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
-    meta = logs / f"{CHILD}.meta.json"
-    data = json.loads(meta.read_text())
-    meta.write_text(json.dumps({**data, "toolUseId": "call_missing"}))
+    logs = qwen_logs(tmp_path)
+    (logs / f"{CHILD}.meta.json").write_text(child_meta("child-1", "call-missing"))
 
     trajectory = QwenCodeHarness().parse_trajectory(context(logs, tmp_path))
 
@@ -426,17 +504,14 @@ def test_unlinked_subagents_stay_raw_evidence(tmp_path: Path) -> None:
 
 
 def test_a_failed_turn_is_recorded_at_its_end(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
-    stdout = logs / ".ale-harness/stdout.log"
-    lines = stdout.read_text().splitlines()
-    index = max(i for i, line in enumerate(lines) if '"type":"result"' in line)
-    failed = json.loads(lines[index]) | {
-        "subtype": "error_during_execution",
+    logs = qwen_logs(tmp_path)
+    failed = {
+        "type": "result",
+        "session_id": SESSION_ID,
         "is_error": True,
         "error": {"message": "[API Error: 400 refused]"},
     }
-    lines[index] = json.dumps(failed)
-    stdout.write_text("\n".join(lines) + "\n")
+    write_run(logs, stdout("PARENT-DONE"), json.dumps(failed) + "\n")
 
     trajectory = QwenCodeHarness().parse_trajectory(context(logs, tmp_path))
 
@@ -447,13 +522,13 @@ def test_a_failed_turn_is_recorded_at_its_end(tmp_path: Path) -> None:
 
 
 def test_without_the_session_each_turn_comes_from_its_prompt_and_stdout(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
-    shutil.rmtree(logs / ".qwen-ale")
+    logs = tmp_path / "logs"
+    write_run(logs, stdout("PARENT-DONE"), stdout("SECOND-DONE"))
 
     trajectory = QwenCodeHarness().parse_trajectory(context(logs, tmp_path))
 
     assert [(step.source, step.message) for step in trajectory.steps] == [
-        ("user", "Delegate, then look at large.png"),
+        ("user", "delegate"),
         ("agent", "PARENT-DONE"),
         ("user", "second"),
         ("agent", "SECOND-DONE"),

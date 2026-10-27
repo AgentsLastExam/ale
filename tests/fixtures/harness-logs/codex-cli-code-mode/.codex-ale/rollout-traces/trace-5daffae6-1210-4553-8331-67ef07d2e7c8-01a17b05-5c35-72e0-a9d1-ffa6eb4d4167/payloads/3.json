@@ -1,7 +1,0 @@
-{
-  "type": "task_started",
-  "turn_id": "01a17b05-5c49-78e0-9783-72262a688780",
-  "started_at": 1793065311,
-  "model_context_window": 258400,
-  "collaboration_mode_kind": "default"
-}
