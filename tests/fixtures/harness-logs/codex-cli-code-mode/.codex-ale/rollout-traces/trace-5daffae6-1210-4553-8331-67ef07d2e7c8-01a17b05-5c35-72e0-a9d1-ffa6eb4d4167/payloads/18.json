@@ -1,9 +1,0 @@
-{
-  "response": {
-    "Result": {
-      "cell_id": "3",
-      "content_items": [],
-      "error_text": "SyntaxError: Invalid or unexpected token"
-    }
-  }
-}

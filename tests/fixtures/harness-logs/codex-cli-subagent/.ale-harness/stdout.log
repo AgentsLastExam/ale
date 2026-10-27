@@ -1,5 +1,0 @@
-{"type": "thread.started", "thread_id": "01a175a9-0f81-7b93-ae65-da0c2a7ec6ac"}
-{"type": "turn.started"}
-{"type": "item.completed", "item": {"id": "item_25", "type": "collab_tool_call", "tool": "spawn_agent", "sender_thread_id": "01a175a9-0f81-7b93-ae65-da0c2a7ec6ac", "receiver_thread_ids": ["01a175aa-61f6-7471-af90-411c882937d6"], "prompt": "Wait for a follow-up message. After receiving it, respond exactly AGENT_MARKER and do not modify files.", "agents_states": {"01a175aa-61f6-7471-af90-411c882937d6": {"status": "pending_init", "message": null}}, "status": "completed"}}
-{"type": "item.completed", "item": {"id": "item_42", "type": "agent_message", "text": "Completed. The report is at [tool_report.json](/home/user/output/tool_report.json).\n\n15 tools passed, 0 failed, and 1 was untested because it requires human interaction. Total: 16."}}
-{"type": "turn.completed", "usage": {"input_tokens": 753366, "cached_input_tokens": 692992, "cache_write_input_tokens": 0, "output_tokens": 13851, "reasoning_output_tokens": 8111}}

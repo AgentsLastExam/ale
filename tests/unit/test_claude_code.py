@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import json
 import re
-import shutil
 from pathlib import Path
 
 import pytest
@@ -691,24 +690,84 @@ def test_tool_result_is_what_the_model_saw(tmp_path: Path, native: bool) -> None
     assert [item.content for item in observation.results] == [visible]
 
 
-#: Trimmed native logs of a live Claude Code 2.1.227 run that delegated once.
-RECORDED = Path(__file__).resolve().parents[1] / "fixtures/harness-logs/claude-code-subagent"
-RECORDED_SESSION = "2ba144fd-7bed-41fc-b484-3ed711cf626b"
-RECORDED_CHILD = (
-    f".claude-config/projects/-home-user/{RECORDED_SESSION}/subagents/agent-ae09f9000c0e7fb01"
-)
+#: The native log of the one subagent of session ``parent-1``, without its suffix.
+CHILD_LOG = ".claude-config/projects/project/parent-1/subagents/agent-child-1"
 
 
-def recorded_context(tmp_path: Path) -> TrajectoryParseContext:
+def delegated_run(tmp_path: Path) -> TrajectoryParseContext:
+    """Session ``parent-1``, whose ``Agent`` call ``spawn-1`` ran one subagent.
+
+    Only the subagent's ``.meta.json`` names that call, and stdout stops at its last call.
+    """
     from dataclasses import replace
 
-    shutil.copytree(RECORDED, tmp_path / "logs")
-    return replace(parse_context(tmp_path), logs_dir=tmp_path / "logs", session_id=RECORDED_SESSION)
+    spawn = {
+        "id": "parent-message",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "spawn-1",
+                "name": "Agent",
+                "input": {"prompt": "Write the marker."},
+            }
+        ],
+    }
+    spawned = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "spawn-1", "content": "DONE"}],
+    }
+    child_call = {
+        "id": "child-message-1",
+        "content": [{"type": "tool_use", "id": "child-call", "name": "Bash", "input": {}}],
+    }
+    child_result = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "child-call", "content": ""}],
+    }
+    child_reply = {"id": "child-message-2", "content": [{"type": "text", "text": "DONE"}]}
+
+    def native(*events: tuple[str, dict[str, object]]) -> str:
+        return "".join(
+            json.dumps({"type": kind, "sessionId": "parent-1", "message": message}) + "\n"
+            for kind, message in events
+        )
+
+    project = tmp_path / ".claude-config/projects/project"
+    (project / "parent-1/subagents").mkdir(parents=True)
+    (project / "parent-1.jsonl").write_text(
+        native(
+            ("user", {"role": "user", "content": "Do the task."}),
+            ("assistant", spawn),
+            ("user", spawned),
+        )
+    )
+    (tmp_path / f"{CHILD_LOG}.jsonl").write_text(
+        native(
+            ("user", {"role": "user", "content": "Write the marker."}),
+            ("assistant", child_call),
+            ("user", child_result),
+            ("assistant", child_reply),
+        )
+    )
+    (tmp_path / f"{CHILD_LOG}.meta.json").write_text(json.dumps({"toolUseId": "spawn-1"}))
+    stdout_log(tmp_path).write_text(
+        "".join(
+            json.dumps(event) + "\n"
+            for event in (
+                {"type": "assistant", "message": spawn},
+                {"type": "assistant", "parent_tool_use_id": "spawn-1", "message": child_call},
+                {"type": "user", "parent_tool_use_id": "spawn-1", "message": child_result},
+                {"type": "user", "message": spawned},
+                {"type": "result", "result": "Delegated.", "total_cost_usd": 0.01},
+            )
+        )
+    )
+    return replace(parse_context(tmp_path), session_id="parent-1")
 
 
-def test_recorded_native_subagent_is_linked_through_its_meta_file(tmp_path: Path) -> None:
+def test_native_subagent_is_linked_through_its_meta_file(tmp_path: Path) -> None:
     """2.1.227 names the spawning call in ``agent-<id>.meta.json``, not on the events."""
-    trajectory = ClaudeCodeHarness().parse_trajectory(recorded_context(tmp_path))
+    trajectory = ClaudeCodeHarness().parse_trajectory(delegated_run(tmp_path))
     (subagent,) = trajectory.subagent_trajectories
     refs = {
         result.source_call_id: [ref.trajectory_id for ref in result.subagent_trajectory_ref]
@@ -717,10 +776,10 @@ def test_recorded_native_subagent_is_linked_through_its_meta_file(tmp_path: Path
         if result.subagent_trajectory_ref
     }
 
-    assert subagent.trajectory_id == "trajectory-subagent-ae09f9000c0e7fb01"
-    assert refs == {"toolu_01BDoP8mfY6TknNF61QcTpwn": [subagent.trajectory_id]}
+    assert subagent.trajectory_id == "trajectory-subagent-child-1"
+    assert refs == {"spawn-1": [subagent.trajectory_id]}
     first, write, final = subagent.steps
-    assert first.message.startswith("Write the exact text SUBAGENT_MARKER_7F3A")
+    assert (first.source, first.message) == ("user", "Write the marker.")
     assert [call.function_name for call in write.tool_calls] == ["Bash"]
     # Only the native record has the child's reply; stdout stops at its last call.
     assert final.message == "DONE"
@@ -730,13 +789,13 @@ def test_recorded_native_subagent_is_linked_through_its_meta_file(tmp_path: Path
 
 
 def test_native_subagent_without_its_meta_file_stays_reported(tmp_path: Path) -> None:
-    parse = recorded_context(tmp_path)
-    (parse.logs_dir / f"{RECORDED_CHILD}.meta.json").unlink()
+    parse = delegated_run(tmp_path)
+    (tmp_path / f"{CHILD_LOG}.meta.json").unlink()
 
     trajectory = ClaudeCodeHarness().parse_trajectory(parse)
 
     assert trajectory.extra["ale"]["parse_issues"] == [
-        {"reason": "unlinked_subagent", "source": f"{RECORDED_CHILD}.jsonl"}
+        {"reason": "unlinked_subagent", "source": f"{CHILD_LOG}.jsonl"}
     ]
 
 

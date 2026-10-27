@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import base64
 import json
-import shutil
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -18,14 +18,10 @@ from ale.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
-FIXTURES = Path(__file__).parents[1] / "fixtures" / "harness-logs"
-RUN = FIXTURES / "muse-code-run"
-RUN_ID = "c2a583fb-5ab2-44d0-9a18-84b5fccbf2ac"
+RUN_ID = "parent-1"
 RUN_LOG = f".local/share/muse/sessions/2026/10/26/{RUN_ID}/session.jsonl"
-SPAWN = FIXTURES / "muse-code-subagent"
-SPAWN_ID = "01a17674-a411-7e50-9322-53c66e75930d"
-SPAWN_LOG = f".local/share/muse/sessions/2026/10/26/{SPAWN_ID}/session.jsonl"
-CHILD_ID = "01a17674-a591-7ae0-a66b-37670faa9a02"
+CHILD_ID = "child-1"
+CHILD_LOG = str(PurePosixPath(RUN_LOG).parent / "subagent" / CHILD_ID / "session.jsonl")
 SETTINGS = "/home/agent/.config/muse/settings.json"
 
 
@@ -189,9 +185,19 @@ async def test_windows_command_runs_the_native_executable() -> None:
     assert command.env["XDG_DATA_HOME"] == "C:/Users/Agent/.local/share"
 
 
+def terminal(session_id: str, reply: str) -> str:
+    """The stdout line with which Muse ends a completed run."""
+    record = {
+        "stream": {"kind": "session", "id": session_id},
+        "payload_type": "run.terminal.completed",
+        "payload": {"text": reply},
+    }
+    return json.dumps(record) + "\n"
+
+
 def test_result_reading_uses_the_terminal_record() -> None:
     harness = MuseCodeHarness()
-    result = harness.read_result((RUN / ".ale-harness/stdout.log").read_text())
+    result = harness.read_result(terminal(RUN_ID, "FIRST-DONE") + terminal(RUN_ID, "SECOND-DONE"))
     assert result.session_id == RUN_ID
     assert result.final_message == "SECOND-DONE"
     assert result.error is None
@@ -200,7 +206,7 @@ def test_result_reading_uses_the_terminal_record() -> None:
             {
                 "stream": {"kind": "session", "id": RUN_ID},
                 "payload_type": "run.terminal.failed",
-                "payload": {"terminal": "failed", "reason": "API error 500", "text": ""},
+                "payload": {"reason": "API error 500"},
             }
         )
         + "\n"
@@ -250,10 +256,7 @@ def test_session_files_match_only_the_exact_session() -> None:
     harness = MuseCodeHarness()
     sessions = ".local/share/muse/sessions"
     assert harness.is_session_file(PurePosixPath(RUN_LOG), RUN_ID)
-    assert harness.is_session_file(
-        PurePosixPath(sessions, f"2026/10/26/{SPAWN_ID}/subagent/{CHILD_ID}/session.jsonl"),
-        SPAWN_ID,
-    )
+    assert harness.is_session_file(PurePosixPath(CHILD_LOG), RUN_ID)
     assert not harness.is_session_file(PurePosixPath(RUN_LOG), RUN_ID[:-1])
     assert not harness.is_session_file(
         PurePosixPath(sessions, f".msp-view-g6/{RUN_ID}/x/journal.bin"), RUN_ID
@@ -265,7 +268,7 @@ def context(logs: Path, tmp_path: Path, **updates: object) -> TrajectoryParseCon
     values: dict[str, object] = {
         "episode_id": "episode",
         "trajectory_id": "trajectory",
-        "instruction": "Use the shell, the MCP tool, then look at large.png",
+        "instruction": "Use the tools.",
         "logs_dir": logs,
         "model": "muse-spark-1.3",
         "agent_version": "1.4.13-R6996.1",
@@ -275,104 +278,204 @@ def context(logs: Path, tmp_path: Path, **updates: object) -> TrajectoryParseCon
     return TrajectoryParseContext(**(values | updates))  # type: ignore[arg-type]
 
 
+def write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+
+def run(kind: str, **event: object) -> dict[str, object]:
+    """One event of a run in a Muse session log."""
+    return {
+        "payload_type": "runtime.session",
+        "payload": {"kind": "run", "event": {"kind": kind, **event}},
+    }
+
+
+def write_turns(logs: Path, requested: str | None, *turns: tuple[str, str]) -> None:
+    """One recorded invocation per prompt, its stdout ending in the reply."""
+    records: list[dict[str, object]] = []
+    stdout = ""
+    for prompt, reply in turns:
+        records.append({"prompt": prompt, "session_id": requested, "stdout_offset": len(stdout)})
+        stdout += terminal(RUN_ID, reply)
+    write_jsonl(logs / ".ale-harness/invocations.jsonl", records)
+    (logs / ".ale-harness/stdout.log").write_text(stdout)
+
+
+def spawning_session(
+    prompt: str, child_id: str, *, attested: bool = True
+) -> list[dict[str, object]]:
+    """A session whose one response runs a command and spawns ``child_id``."""
+    calls = [
+        {"call_id": "call-1", "name": "bash", "args": "{}"},
+        {"call_id": "call-2", "name": "subagent_spawn", "args": "{}"},
+    ]
+    start = {
+        "payload_type": "subagent.control.start_attested",
+        "payload": {
+            "record": {"dispatched_via_tool_call_id": "call-2", "subagent_session_id": child_id}
+        },
+    }
+    results = [
+        {"tool_call_id": "call-1", "text": "ok"},
+        {"tool_call_id": "call-2", "text": "accepted"},
+    ]
+    return [
+        run("started", prompt=prompt),
+        run("assistant_tool_calls_committed", response_id="r1", tool_calls=calls),
+        *([start] if attested else []),
+        run("tool_result_batch_committed", results=results),
+    ]
+
+
+def working_session() -> list[dict[str, object]]:
+    """A subagent session that runs one command, then replies."""
+    return [
+        run("started", prompt="Role: helper"),
+        run(
+            "assistant_tool_calls_committed",
+            response_id="r1",
+            tool_calls=[{"call_id": "call-1", "name": "bash", "args": "{}"}],
+        ),
+        run("tool_result_batch_committed", results=[{"tool_call_id": "call-1", "text": "ok"}]),
+        run("assistant_message_committed", response_id="r2", text="helper done"),
+    ]
+
+
+def write_spawn(logs: Path, child: list[dict[str, object]], *, attested: bool = True) -> Path:
+    """A launch whose agent spawns ``child``, then replies once Muse delivers its result.
+
+    Returns the child's session log.
+    """
+    write_turns(logs, None, ("Spawn a helper.", "parent done"))
+    write_jsonl(
+        logs / RUN_LOG,
+        [
+            *spawning_session("Spawn a helper.", CHILD_ID, attested=attested),
+            run("started"),
+            run("inbox_item_drained", delivery_snapshot={"body": "summary: helper done"}),
+            run("assistant_message_committed", response_id="r2", text="parent done"),
+        ],
+    )
+    write_jsonl(logs / CHILD_LOG, child)
+    return logs / CHILD_LOG
+
+
 def test_parser_follows_the_session_log(tmp_path: Path) -> None:
-    parse = context(RUN, tmp_path)
+    logs = tmp_path / "logs"
+    write_turns(logs, RUN_ID, ("Use the tools.", "FIRST-DONE"), ("second", "SECOND-DONE"))
+    calls = [
+        {"call_id": "call-1", "name": "bash", "args": "{}"},
+        {"call_id": "call-2", "name": "mcp__proof__echo", "args": "{}"},
+        {"call_id": "call-3", "name": "read_file", "args": "{}"},
+    ]
+    results = [
+        {"tool_call_id": "call-1", "text": "ok"},
+        {"tool_call_id": "call-2", "text": "echo:proof"},
+        {"tool_call_id": "call-3", "text": "large.png"},
+    ]
+    png = {"media_type": "image/png", "base64_data": base64.b64encode(b"png").decode()}
+    framed = run("assistant_message_committed", response_id="r2", text="FIRST-DONE")
+    second = {"id": "started-2", **run("started", prompt="second")}
+    write_jsonl(
+        logs / RUN_LOG,
+        [
+            run("started", prompt="Use the tools."),
+            # Muse records a response's usage before its tool calls but after its text.
+            run("model_completed", usage={"input_tokens": 10}),
+            run("assistant_tool_calls_committed", response_id="r1", tool_calls=calls),
+            run("tool_result_batch_committed", results=results),
+            run("tool_result_model_visible_content", call_id="call-3", content=[png]),
+            # A record may sit inside a retained frame, and the same record may recur.
+            {"children": [{"record_json": json.dumps(framed)}]},
+            run("model_completed", usage={"input_tokens": 20}),
+            second,
+            second,
+            run("assistant_message_committed", response_id="r3", text="SECOND-DONE"),
+            run("model_completed", usage={"input_tokens": 30}),
+        ],
+    )
+    parse = context(logs, tmp_path)
     AutonomousHarnessConformance.check_parser_is_pure(MuseCodeHarness(), parse)
     trajectory = MuseCodeHarness().parse_trajectory(parse)
 
     assert trajectory.session_id == RUN_ID
     assert trajectory.extra is None
     assert [(step.source, step.message) for step in trajectory.steps if not step.tool_calls] == [
-        ("user", "Use the shell, the MCP tool, then look at large.png"),
+        ("user", "Use the tools."),
         ("agent", "FIRST-DONE"),
         ("user", "second"),
         ("agent", "SECOND-DONE"),
     ]
-    calls = {
-        call.function_name: (call, step.observation.results[0])  # type: ignore[union-attr]
-        for step in trajectory.steps
-        for call in step.tool_calls or ()
-    }
-    assert set(calls) == {"bash", "mcp__proof__echo", "read_file"}
-    assert '"exit_code": 0' in str(calls["bash"][1].content)
-    mcp_call, mcp_result = calls["mcp__proof__echo"]
-    assert mcp_call.extra == {"ale": {"mcp": {"server": "proof", "tool": "echo"}}}
-    assert mcp_result.content == "echo:mcp-proof"
-    image_result = calls["read_file"][1]
-    assert isinstance(image_result.content, list)
-    image = image_result.content[1]
-    assert image.type == "image" and image.source is not None
-    assert (tmp_path / "episode" / image.source.path).is_file()
-    assert all(step.metrics is not None for step in trajectory.steps if step.source == "agent")
+    (acting,) = [step for step in trajectory.steps if step.tool_calls]
+    assert [(call.function_name, call.extra) for call in acting.tool_calls or ()] == [
+        ("bash", None),
+        ("mcp__proof__echo", {"ale": {"mcp": {"server": "proof", "tool": "echo"}}}),
+        ("read_file", None),
+    ]
+    shell, echo, image = acting.observation.results  # type: ignore[union-attr]
+    assert (shell.content, echo.content) == ("ok", "echo:proof")
+    assert isinstance(image.content, list)
+    text, picture = image.content
+    assert text.text == "large.png"
+    assert picture.type == "image" and picture.source is not None
+    assert (tmp_path / "episode" / picture.source.path).read_bytes() == b"png"
+    agent = [step for step in trajectory.steps if step.source == "agent"]
+    assert [step.metrics.prompt_tokens for step in agent] == [10, 20, 30]  # type: ignore[union-attr]
     assert trajectory.final_metrics is not None
-    assert trajectory.final_metrics.total_prompt_tokens == 55
+    assert trajectory.final_metrics.total_prompt_tokens == 60
 
 
 def test_parser_embeds_the_subagent_its_call_started(tmp_path: Path) -> None:
-    trajectory = MuseCodeHarness().parse_trajectory(
-        context(SPAWN, tmp_path, instruction="Spawn a helper.", session_id=None)
-    )
+    logs = tmp_path / "logs"
+    write_spawn(logs, working_session())
 
-    assert trajectory.session_id == SPAWN_ID
+    trajectory = MuseCodeHarness().parse_trajectory(context(logs, tmp_path, session_id=None))
+
+    assert trajectory.session_id == RUN_ID
     assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+    # Muse delivers the subagent's result to the parent before the parent's next reply.
+    assert [(step.source, step.message) for step in trajectory.steps] == [
+        ("user", "Spawn a helper."),
+        ("agent", ""),
+        ("system", "summary: helper done"),
+        ("agent", "parent done"),
+    ]
     spawn = trajectory.steps[1]
-    assert [call.function_name for call in spawn.tool_calls or ()] == ["subagent_spawn"]
-    (result,) = spawn.observation.results  # type: ignore[union-attr]
+    assert [call.function_name for call in spawn.tool_calls or ()] == ["bash", "subagent_spawn"]
+    shell, spawned = spawn.observation.results  # type: ignore[union-attr]
     (child,) = trajectory.subagent_trajectories or ()
-    assert result.subagent_trajectory_ref is not None
-    assert result.subagent_trajectory_ref[0].trajectory_id == child.trajectory_id
+    assert shell.subagent_trajectory_ref is None
+    assert spawned.subagent_trajectory_ref is not None
+    assert spawned.subagent_trajectory_ref[0].trajectory_id == child.trajectory_id
     assert child.trajectory_id == f"trajectory-subagent-{CHILD_ID}"
     assert [(step.source, step.message) for step in child.steps] == [
-        ("user", "Role: helper\nObjective: Say done."),
-        ("agent", "FAKE-FINAL-2"),
+        ("user", "Role: helper"),
+        ("agent", ""),
+        ("agent", "helper done"),
     ]
-    # Muse delivers the subagent's result to the parent before the parent's next reply.
-    delivery = next(step for step in trajectory.steps if step.source == "system")
-    assert "summary: FAKE-FINAL-2" in str(delivery.message)
-    assert trajectory.steps[-1].message == "FAKE-FINAL-4"
+    assert [call.function_name for call in child.steps[1].tool_calls or ()] == ["bash"]
+    (result,) = child.steps[1].observation.results  # type: ignore[union-attr]
+    assert result.content == "ok"
 
 
 def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
-    shutil.copytree(SPAWN, logs)
-    root = logs / SPAWN_LOG
-    child = root.parent / "subagent" / CHILD_ID / "session.jsonl"
-    grandchild_id = "01a17674-a591-7ae0-a66b-37670faa9a03"
-    grandchild = child.parent / "subagent" / grandchild_id / "session.jsonl"
-    grandchild.parent.mkdir(parents=True)
-    grandchild.write_text(child.read_text().replace(CHILD_ID, grandchild_id))
-    # The child spawns as its parent did: the call, its start attestation and its result.
-    spawn = [
-        line.replace(CHILD_ID, grandchild_id)
-        .replace(SPAWN_ID, CHILD_ID)
-        .replace('"call_1"', '"call_nested"')
-        .replace('"resp_1"', '"resp_nested"')
-        for line in root.read_text().splitlines(keepends=True)
-        if '"call_1"' in line
-        and any(
-            kind in line
-            for kind in (
-                "assistant_tool_calls_committed",
-                "subagent.control.start_attested",
-                "tool_result_batch_committed",
-            )
-        )
-    ]
-    assert len(spawn) == 3
-    with child.open("a") as stream:
-        stream.writelines(spawn)
+    child = write_spawn(logs, spawning_session("Role: helper", "grandchild-1"))
+    write_jsonl(child.parent / "subagent/grandchild-1/session.jsonl", working_session())
 
     trajectory = MuseCodeHarness().parse_trajectory(
-        context(logs, tmp_path, instruction="Spawn a helper.", session_id=None, incomplete=True)
+        context(logs, tmp_path, session_id=None, incomplete=True)
     )
 
     assert "parse_issues" not in trajectory.extra["ale"]  # type: ignore[index]
     (helper,) = trajectory.subagent_trajectories or ()
     (nested,) = helper.subagent_trajectories or ()
-    assert nested.trajectory_id == f"trajectory-subagent-{CHILD_ID}-subagent-{grandchild_id}"
-    (result,) = next(step for step in helper.steps if step.tool_calls).observation.results  # type: ignore[union-attr]
-    assert result.subagent_trajectory_ref is not None
-    assert result.subagent_trajectory_ref[0].trajectory_id == nested.trajectory_id
+    assert nested.trajectory_id == f"trajectory-subagent-{CHILD_ID}-subagent-grandchild-1"
+    shell, spawned = helper.steps[1].observation.results  # type: ignore[union-attr]
+    assert shell.subagent_trajectory_ref is None
+    assert spawned.subagent_trajectory_ref is not None
+    assert spawned.subagent_trajectory_ref[0].trajectory_id == nested.trajectory_id
     # An interrupted run leaves every session in it incomplete.
     for subagent in (helper, nested):
         assert subagent.extra == {"ale": {"incomplete": True, "incomplete_reason": "interrupted"}}
@@ -380,75 +483,38 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
 
 def test_a_subagent_without_its_start_attestation_stays_raw_evidence(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
-    shutil.copytree(SPAWN, logs)
-    root = logs / SPAWN_LOG
-    root.write_text(
-        "".join(
-            line
-            for line in root.read_text().splitlines(keepends=True)
-            if "subagent.control.start_attested" not in line
-        )
-    )
+    write_spawn(logs, working_session(), attested=False)
 
-    trajectory = MuseCodeHarness().parse_trajectory(
-        context(logs, tmp_path, instruction="Spawn a helper.", session_id=None)
-    )
+    trajectory = MuseCodeHarness().parse_trajectory(context(logs, tmp_path, session_id=None))
 
     assert trajectory.subagent_trajectories is None
-    source = str(PurePosixPath(SPAWN_LOG).parent / "subagent" / CHILD_ID / "session.jsonl")
     assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
-        {"reason": "unlinked_subagent", "source": source},
-        {"reason": "unconverted_native_files", "count": 1, "sources": [source]},
+        {"reason": "unlinked_subagent", "source": CHILD_LOG},
+        {"reason": "unconverted_native_files", "count": 1, "sources": [CHILD_LOG]},
     ]
-    (result,) = trajectory.steps[1].observation.results  # type: ignore[union-attr]
-    assert result.subagent_trajectory_ref is None
+    results = trajectory.steps[1].observation.results  # type: ignore[union-attr]
+    assert [result.subagent_trajectory_ref for result in results] == [None, None]
 
 
 def test_reminder_agents_stay_raw_evidence_without_being_unlinked(tmp_path: Path) -> None:
     # Muse runs its reminder agents on its own, with no call of the model to start them, and
     # keeps their logs below the session as it does a subagent's.
     logs = tmp_path / "logs"
-    shutil.copytree(RUN, logs)
-    root = logs / RUN_LOG
-    reminder_id = "01a17668-4626-75d1-b7ea-7feebe24ea39"
-    linked = {
-        "id": "01a17668-462c-7e03-996c-1989ae653473",
-        "stream": {"kind": "session", "id": RUN_ID},
-        "recorded_at": 1792987907628713,
-        "payload_type": "runtime.session",
-        "payload": {
-            "kind": "run",
-            "event": {
-                "kind": "memory_reminder_child_session_linked",
-                "child_session_id": reminder_id,
-                "child_session_log_path": f"subagent/{reminder_id}/session.jsonl",
-                "parent_session_id": RUN_ID,
-                "reminder_agent_id": "goal-reminder",
-            },
-        },
-    }
-    with root.open("a") as stream:
-        stream.write(json.dumps(linked) + "\n")
-    reminder = root.parent / "subagent" / reminder_id / "session.jsonl"
-    reminder.parent.mkdir(parents=True)
-    reminder.write_text(
-        json.dumps(
-            {
-                "id": "r1",
-                "stream": {"kind": "session", "id": reminder_id},
-                "payload_type": "runtime.session",
-                "payload": {"kind": "run", "event": {"kind": "started"}},
-            }
-        )
-        + "\n"
+    write_jsonl(
+        logs / RUN_LOG,
+        [
+            run("started", prompt="Use the tools."),
+            run("memory_reminder_child_session_linked", child_session_id="reminder-1"),
+        ],
     )
+    reminder = str(PurePosixPath(RUN_LOG).parent / "subagent/reminder-1/session.jsonl")
+    write_jsonl(logs / reminder, [run("started")])
 
     trajectory = MuseCodeHarness().parse_trajectory(context(logs, tmp_path))
 
     assert trajectory.subagent_trajectories is None
-    source = str(PurePosixPath(RUN_LOG).parent / "subagent" / reminder_id / "session.jsonl")
     assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
-        {"reason": "unconverted_native_files", "count": 1, "sources": [source]}
+        {"reason": "unconverted_native_files", "count": 1, "sources": [reminder]}
     ]
 
 
@@ -519,16 +585,15 @@ def test_tool_failures_and_failed_runs_are_recorded(tmp_path: Path) -> None:
 
 def test_without_the_session_each_turn_comes_from_its_prompt_and_stdout(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
-    shutil.copytree(RUN, logs)
-    shutil.rmtree(logs / ".local")
+    write_turns(logs, RUN_ID, ("Use the tools.", "FIRST-DONE"), ("second", "SECOND-DONE"))
 
     trajectory = MuseCodeHarness().parse_trajectory(context(logs, tmp_path))
 
     assert [(step.source, step.message) for step in trajectory.steps] == [
-        ("user", "Use the shell, the MCP tool, then look at large.png"),
+        ("user", "Use the tools."),
         ("agent", "FIRST-DONE"),
         ("user", "second"),
         ("agent", "SECOND-DONE"),
     ]
     ale = trajectory.extra["ale"]  # type: ignore[index]
-    assert {"reason": "native_session_unavailable", "session_id": RUN_ID} in ale["parse_issues"]
+    assert ale["parse_issues"] == [{"reason": "native_session_unavailable", "session_id": RUN_ID}]

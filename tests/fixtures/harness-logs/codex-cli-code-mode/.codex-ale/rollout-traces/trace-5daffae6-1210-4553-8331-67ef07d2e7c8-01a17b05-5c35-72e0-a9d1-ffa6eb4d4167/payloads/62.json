@@ -1,9 +1,0 @@
-{
-  "type": "task_complete",
-  "turn_id": "01a17b05-5c49-78e0-9783-72262a688780",
-  "last_agent_message": "Completed. `/home/user/output/result.txt` contains the exact required line with no trailing newline.",
-  "started_at": 1793065311,
-  "completed_at": 1793065328,
-  "duration_ms": 17289,
-  "time_to_first_token_ms": 1406
-}

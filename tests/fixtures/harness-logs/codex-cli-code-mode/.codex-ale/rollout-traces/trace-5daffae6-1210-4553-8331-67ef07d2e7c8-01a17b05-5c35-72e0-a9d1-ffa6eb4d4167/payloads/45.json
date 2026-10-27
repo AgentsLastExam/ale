@@ -1,8 +1,0 @@
-{
-  "tool_name": "apply_patch",
-  "tool_namespace": null,
-  "payload": {
-    "type": "custom",
-    "input": "*** Begin Patch\n*** Add File: /home/user/output/result.txt\n+SKILL-R7::079D3A1B7FA1D27A::D86D9BA1C205E7EAFEFB7092\n*** End Patch"
-  }
-}

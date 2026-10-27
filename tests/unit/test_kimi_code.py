@@ -20,10 +20,10 @@ from ale.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
-FIXTURE = Path(__file__).parents[1] / "fixtures" / "harness-logs" / "kimi-code-subagent"
-SESSION_ID = "session_5a699082-f31b-4aa2-966b-a4f7fbd76900"
-SESSION_DIR = f".kimi-ale/sessions/wd_user_b98d692c4574/{SESSION_ID}"
+SESSION_ID = "session-1"
+SESSION_DIR = f".kimi-ale/sessions/wd-1/{SESSION_ID}"
 CONFIG = "/home/agent/.kimi-ale/config.toml"
+PROMPTS = ("delegate", "second")
 
 
 def test_preset_is_complete_and_selects_the_native_chat_protocol() -> None:
@@ -218,9 +218,17 @@ async def test_the_prompt_file_reaches_the_cli_as_its_exact_bytes(tmp_path: Path
     assert argv[-1] == f"--prompt={prompt}"
 
 
+def stdout(reply: str) -> str:
+    """One invocation's stdout: its reply, then the hint naming the session to resume."""
+    events = [
+        {"role": "assistant", "content": reply},
+        {"role": "meta", "type": "session.resume_hint", "session_id": SESSION_ID},
+    ]
+    return "".join(json.dumps(event) + "\n" for event in events)
+
+
 def test_result_reading_uses_the_resume_hint_and_last_reply() -> None:
-    stdout = (FIXTURE / ".ale-harness/stdout.log").read_text()
-    result = KimiCodeHarness().read_result(stdout)
+    result = KimiCodeHarness().read_result(stdout("PARENT-DONE") + stdout("SECOND-DONE"))
     assert result.session_id == SESSION_ID
     assert result.final_message == "SECOND-DONE"
     assert result.error is None
@@ -274,7 +282,7 @@ def context(logs: Path, tmp_path: Path, **updates: object) -> TrajectoryParseCon
     values: dict[str, object] = {
         "episode_id": "episode",
         "trajectory_id": "trajectory",
-        "instruction": "Delegate, then look at large.png",
+        "instruction": PROMPTS[0],
         "logs_dir": logs,
         "model": "scripted-model",
         "agent_version": "2.3.2",
@@ -284,21 +292,108 @@ def context(logs: Path, tmp_path: Path, **updates: object) -> TrajectoryParseCon
     return TrajectoryParseContext(**(values | updates))  # type: ignore[arg-type]
 
 
-def copy_fixture(tmp_path: Path) -> Path:
+def write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+
+def write_run(logs: Path, *outputs: str) -> None:
+    """One recorded invocation per prompt, each with its own part of stdout."""
+    records: list[dict[str, object]] = []
+    offset = 0
+    for prompt, output in zip(PROMPTS, outputs, strict=True):
+        records.append({"prompt": prompt, "stdout_offset": offset})
+        offset += len(output.encode())
+    write_jsonl(logs / ".ale-harness/invocations.jsonl", records)
+    (logs / ".ale-harness/stdout.log").write_text("".join(outputs))
+
+
+def prompt(agent: str, text: str, **fields: object) -> dict[str, object]:
+    record = {"type": "turn.prompt", "agentId": agent, "input": [{"type": "text", "text": text}]}
+    return record | fields
+
+
+def step(
+    agent: str, *events: dict[str, object], usage: dict[str, int] | None = None
+) -> list[dict[str, object]]:
+    """One native step: its loop events between the step's begin and end."""
+    loop = [{"type": "step.begin"}, *events, {"type": "step.end", "usage": usage}]
+    return [
+        {"type": "context.append_loop_event", "agentId": agent, "event": event} for event in loop
+    ]
+
+
+def tool(
+    call_id: str, name: str, args: dict[str, object], output: object, **result: object
+) -> list[dict[str, object]]:
+    return [
+        {"type": "tool.call", "toolCallId": call_id, "name": name, "args": args},
+        {"type": "tool.result", "toolCallId": call_id, "result": {"output": output, **result}},
+    ]
+
+
+def text_part(text: str) -> dict[str, object]:
+    return {"type": "content.part", "part": {"type": "text", "text": text}}
+
+
+def spawning(agent: str, call_id: str, child: str) -> list[dict[str, object]]:
+    """A step whose Agent call spawned ``child``, and the record of that spawn."""
+    return [
+        *step(agent, *tool(call_id, "Agent", {"prompt": "run child"}, "CHILD-DONE")),
+        {
+            "type": "subagent.spawned",
+            "parentAgentId": agent,
+            "parentToolCallId": call_id,
+            "subagentId": child,
+        },
+    ]
+
+
+def child_wire(agent: str) -> list[dict[str, object]]:
+    """A subagent's conversation: the delegated task, then one command."""
+    return [
+        prompt(agent, "run child"),
+        *step(
+            agent, *tool("call-3", "Bash", {"command": "echo hi"}, "hi"), usage={"inputOther": 7}
+        ),
+    ]
+
+
+def kimi_logs(tmp_path: Path) -> Path:
+    """Two turns; the first spawns ``child-1`` and then reads an image."""
     logs = tmp_path / "logs"
-    shutil.copytree(FIXTURE, logs)
+    write_run(logs, stdout("PARENT-DONE"), stdout("SECOND-DONE"))
+    agents = logs / SESSION_DIR / "agents"
+    image = [{"type": "image_url", "imageUrl": {"url": "blobref:image/png;blob-1"}}]
+    write_jsonl(
+        agents / "main/wire.jsonl",
+        [
+            prompt("main", PROMPTS[0], origin={"kind": "user"}),
+            *spawning("main", "call-1", "child-1"),
+            *step(
+                "main",
+                *tool("call-2", "ReadMediaFile", {"path": "a.png"}, image, note="1x1 pixels"),
+            ),
+            *step("main", text_part("PARENT-DONE"), usage={"inputOther": 5}),
+            prompt("main", PROMPTS[1], origin={"kind": "user"}),
+            *step("main", text_part("SECOND-DONE")),
+        ],
+    )
+    (agents / "main/blobs").mkdir()
+    (agents / "main/blobs/blob-1").write_bytes(b"png")
+    write_jsonl(agents / "child-1/wire.jsonl", child_wire("child-1"))
     return logs
 
 
 def test_parser_follows_the_native_session_and_embeds_its_subagent(tmp_path: Path) -> None:
-    parse = context(FIXTURE, tmp_path)
+    parse = context(kimi_logs(tmp_path), tmp_path)
     AutonomousHarnessConformance.check_parser_is_pure(KimiCodeHarness(), parse)
     trajectory = KimiCodeHarness().parse_trajectory(parse)
 
     assert trajectory.session_id == SESSION_ID
     assert trajectory.extra is None
     assert [(step.source, step.message) for step in trajectory.steps if not step.tool_calls] == [
-        ("user", "Delegate, then look at large.png"),
+        ("user", "delegate"),
         ("agent", "PARENT-DONE"),
         ("user", "second"),
         ("agent", "SECOND-DONE"),
@@ -307,13 +402,13 @@ def test_parser_follows_the_native_session_and_embeds_its_subagent(tmp_path: Pat
     assert [call.function_name for call in spawn.tool_calls or ()] == ["Agent"]
     (result,) = spawn.observation.results  # type: ignore[union-attr]
     assert result.subagent_trajectory_ref is not None
-    assert result.subagent_trajectory_ref[0].trajectory_id == "trajectory-subagent-agent-0"
+    assert result.subagent_trajectory_ref[0].trajectory_id == "trajectory-subagent-child-1"
     (child,) = trajectory.subagent_trajectories or ()
-    assert child.trajectory_id == "trajectory-subagent-agent-0"
-    assert child.session_id == "agent-0"
-    assert [step.source for step in child.steps] == ["user", "agent", "agent"]
-    assert child.steps[0].message == "Run echo child-proof"
-    assert child.steps[1].observation.results[0].content == "child-proof\n"  # type: ignore[union-attr]
+    assert child.trajectory_id == "trajectory-subagent-child-1"
+    assert child.session_id == "child-1"
+    assert [step.source for step in child.steps] == ["user", "agent"]
+    assert child.steps[0].message == "run child"
+    assert child.steps[1].observation.results[0].content == "hi"  # type: ignore[union-attr]
 
     image_step = trajectory.steps[2]
     (image_result,) = image_step.observation.results  # type: ignore[union-attr]
@@ -321,19 +416,17 @@ def test_parser_follows_the_native_session_and_embeds_its_subagent(tmp_path: Pat
     image = next(part for part in image_result.content if part.type == "image")
     assert image.source is not None and image.source.media_type == "image/png"
     assert (tmp_path / "episode" / image.source.path).is_file()
-    assert "Original dimensions: 48x48" in image_result.content[-1].text  # type: ignore[operator]
+    assert image_result.content[-1].text == "1x1 pixels"
     assert trajectory.final_metrics is not None
-    assert trajectory.final_metrics.total_prompt_tokens == 44
+    assert trajectory.final_metrics.total_prompt_tokens == 5
 
 
 def test_unlinked_subagents_and_missing_media_stay_raw_evidence(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
+    logs = kimi_logs(tmp_path)
     wire = logs / SESSION_DIR / "agents/main/wire.jsonl"
     wire.write_text(
         "".join(
-            line + "\n"
-            for line in wire.read_text().splitlines()
-            if '"type":"subagent.spawned"' not in line
+            line + "\n" for line in wire.read_text().splitlines() if "subagent.spawned" not in line
         )
     )
     shutil.rmtree(logs / SESSION_DIR / "agents/main/blobs")
@@ -342,7 +435,7 @@ def test_unlinked_subagents_and_missing_media_stay_raw_evidence(tmp_path: Path) 
 
     assert trajectory.subagent_trajectories is None
     issues = trajectory.extra["ale"]["parse_issues"]  # type: ignore[index]
-    child = f"{SESSION_DIR}/agents/agent-0/wire.jsonl"
+    child = f"{SESSION_DIR}/agents/child-1/wire.jsonl"
     assert {"reason": "unlinked_subagent", "source": child} in issues
     assert any(
         issue["reason"] == "unconverted_native_files" and child in issue["sources"]
@@ -354,30 +447,20 @@ def test_unlinked_subagents_and_missing_media_stay_raw_evidence(tmp_path: Path) 
 
 
 def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
+    logs = kimi_logs(tmp_path)
     agents = logs / SESSION_DIR / "agents"
-    child = agents / "agent-0/wire.jsonl"
-    (agents / "agent-1").mkdir()
-    (agents / "agent-1/wire.jsonl").write_text(child.read_text().replace("agent-0", "agent-1"))
-    # The child spawns as main did: the step with its call, the spawn and the call's result.
-    spawn = [
-        line.replace("agent-0", "agent-1")
-        .replace('"main"', '"agent-0"')
-        .replace("call_1", "call_9")
-        for line in (agents / "main/wire.jsonl").read_text().splitlines(keepends=True)
-        if "82722bdb-b30c-418a-965a-24fc2a50b15d" in line
-        or '"parentToolCallId":"call_1"' in line
-        or ('"tool.result"' in line and '"toolCallId":"call_1"' in line)
-    ]
-    with child.open("a") as stream:
-        stream.writelines(spawn)
+    write_jsonl(
+        agents / "child-1/wire.jsonl",
+        [*child_wire("child-1"), *spawning("child-1", "call-9", "child-2")],
+    )
+    write_jsonl(agents / "child-2/wire.jsonl", child_wire("child-2"))
 
     trajectory = KimiCodeHarness().parse_trajectory(context(logs, tmp_path, incomplete=True))
 
     assert "parse_issues" not in trajectory.extra["ale"]  # type: ignore[index]
     (helper,) = trajectory.subagent_trajectories or ()
     (nested,) = helper.subagent_trajectories or ()
-    assert nested.trajectory_id == "trajectory-subagent-agent-0-subagent-agent-1"
+    assert nested.trajectory_id == "trajectory-subagent-child-1-subagent-child-2"
     spawned = next(
         step
         for step in helper.steps
@@ -392,20 +475,15 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
 
 
 def test_a_failed_turn_is_recorded_where_it_happened(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
-    wire = logs / SESSION_DIR / "agents/main/wire.jsonl"
-    lines = wire.read_text().splitlines()
+    logs = kimi_logs(tmp_path)
     failed = {
         "type": "turn.ended",
         "agentId": "main",
-        "turnId": 1,
         "reason": "failed",
         "error": {"code": "provider.api_error", "message": "400 refused"},
-        "time": 1792989077200,
     }
-    index = max(i for i, line in enumerate(lines) if '"type":"turn.ended"' in line)
-    lines[index] = json.dumps(failed)
-    wire.write_text("\n".join(lines) + "\n")
+    with (logs / SESSION_DIR / "agents/main/wire.jsonl").open("a") as stream:
+        stream.write(json.dumps(failed) + "\n")
 
     trajectory = KimiCodeHarness().parse_trajectory(context(logs, tmp_path))
 
@@ -414,13 +492,13 @@ def test_a_failed_turn_is_recorded_where_it_happened(tmp_path: Path) -> None:
 
 
 def test_without_the_session_each_turn_comes_from_its_prompt_and_stdout(tmp_path: Path) -> None:
-    logs = copy_fixture(tmp_path)
-    shutil.rmtree(logs / ".kimi-ale")
+    logs = tmp_path / "logs"
+    write_run(logs, stdout("PARENT-DONE"), stdout("SECOND-DONE"))
 
     trajectory = KimiCodeHarness().parse_trajectory(context(logs, tmp_path))
 
     assert [(step.source, step.message) for step in trajectory.steps] == [
-        ("user", "Delegate, then look at large.png"),
+        ("user", "delegate"),
         ("agent", "PARENT-DONE"),
         ("user", "second"),
         ("agent", "SECOND-DONE"),
