@@ -197,8 +197,9 @@ class GuestClient:
     complete result instead of a stream to reassemble.
     """
 
-    def __init__(self, transport: Transport) -> None:
+    def __init__(self, transport: Transport, *, acknowledge_exec_output: bool = False) -> None:
         self._transport = transport
+        self._acknowledge_exec_output = acknowledge_exec_output
         self._lock = asyncio.Lock()
         self._next_id = 0
         self._health: dict[str, Any] | None = None
@@ -227,6 +228,8 @@ class GuestClient:
                     await self._transport.send(block)
             events: list[dict[str, Any]] = []
             callback_error: BaseException | None = None
+            output_sequence = 0
+            acknowledged_output = op == "exec" and bool((params or {}).get("output_ack"))
             while True:
                 line = await asyncio.wait_for(self._transport.recv(), timeout=timeout_sec)
                 if not line:
@@ -235,13 +238,34 @@ class GuestClient:
                 if message.get("id") != req_id:
                     continue  # a stale reply from an abandoned call
                 if "event" in message:
+                    if acknowledged_output:
+                        output_sequence += 1
+                        sequence = (message.get("data") or {}).get("seq")
+                        if type(sequence) is not int or sequence != output_sequence:
+                            raise GuestUnreachableError(
+                                "guest output acknowledgement sequence is invalid"
+                            )
                     if event_callback is None:
                         events.append(message)
                     elif callback_error is None:
                         try:
                             await event_callback(message)
+                        except asyncio.CancelledError:
+                            # Cancellation must reach the Provider's termination path;
+                            # treating it as a sink error can leave the command running.
+                            raise
                         except BaseException as exc:
                             callback_error = exc
+                    if acknowledged_output:
+                        await self._transport.send(
+                            _line(
+                                {
+                                    "id": req_id,
+                                    "op": "exec_output_ack",
+                                    "seq": output_sequence,
+                                }
+                            )
+                        )
                     continue
                 if message.get("ok"):
                     if callback_error is not None:
@@ -271,6 +295,8 @@ class GuestClient:
         output_sink: ExecOutputSink | None = None,
     ) -> tuple[int | None, str, str, bool]:
         params: dict[str, Any] = {}
+        if self._acknowledge_exec_output:
+            params["output_ack"] = True
         if run_as:
             params["run_as"] = run_as
         if argv:
@@ -411,7 +437,14 @@ class GuestClient:
         return base64.b64decode(data["png_b64"])
 
     async def inject_input(self, actions: Sequence[dict[str, Any]]) -> int:
-        data, _ = await self.call("input", {"actions": list(actions)}, timeout_sec=120)
+        actions = list(actions)
+        # Keep the transport allowance in addition to intentional guest-side waits.
+        wait_ms = sum(
+            500 if action.get("duration_ms") is None else action["duration_ms"]
+            for action in actions
+            if action.get("type") == "wait"
+        )
+        data, _ = await self.call("input", {"actions": actions}, timeout_sec=120 + wait_ms / 1000)
         return int(data.get("applied", 0))
 
     async def close(self) -> None:
