@@ -76,6 +76,14 @@ framework's Cua Driver, so the Provider waits for a screenshot in every sandbox 
 How the install works, and what it costs, is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#qemu).
 
+## What a macOS image needs
+
+A macOS Task uses an external Tart OCI image with Python 3.12+, the Task account and
+its home, and the applications required by the Task. Desktop Tasks require a logged-in
+session with authorized screenshot and input access. The Orchard Provider's image
+requirements are described in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#orchard).
+
 ## ALE base images
 
 - `container-ubuntu22-base` provides an Ubuntu 22.04 GNOME desktop container and the
@@ -353,9 +361,10 @@ token, unless the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a 
 desktop session are required; the Provider checks both framework and agent privileges
 before Task execution. A Windows Task image is rebuilt when the framework changes, and a
 direct `vm_image` disk is framed like any other. Linux configures requested
-sudo during image preparation. Grants, and their absence, are verified and recorded: a
-Linux sandbox is refused when its guest service is not root, when a requested grant does
-not work, or when an agent that did not request one is root or can use sudo. ALE does not pre-create
+sudo during image preparation; a macOS image brings its account's grants itself. Grants,
+and their absence, are verified and recorded: a Linux or macOS sandbox is refused when its
+guest service is not root, when a requested grant does not work, or when an agent that did
+not request one is root or can use sudo. ALE does not pre-create
 artifacts or repair their ownership: image/setup/agent code owns their type and existence.
 
 ## Provider contract
