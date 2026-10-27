@@ -279,6 +279,13 @@ def _load_folder(folder: TaskFolder) -> Iterator[ManifestTask]:
             raise TaskDefinitionError(
                 "Windows verification must reuse the solver image or use a ref"
             )
+    elif manifest.os is OperatingSystem.MACOS:
+        if folder.image_dockerfile is not None or folder.image_script is not None:
+            raise TaskDefinitionError(
+                "macOS Tasks require an existing image.ref without image build scripts"
+            )
+        if folder.verifier_dockerfile is not None:
+            raise TaskDefinitionError("macOS verification must reuse the solver image or use a ref")
     elif folder.image_script is not None and folder.image_dockerfile is None:
         raise TaskDefinitionError("image/run.ps1 requires os: windows")
     if manifest.image.base_ref is not None and (

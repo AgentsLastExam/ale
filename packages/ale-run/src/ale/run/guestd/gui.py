@@ -38,6 +38,10 @@ class GuiUnavailable(RuntimeError):
     """The image has no reachable Cua Driver desktop service."""
 
 
+class DesktopIdentityError(GuiUnavailable):
+    """The configured desktop does not belong to the task account."""
+
+
 def _binary() -> str:
     configured = os.environ.get("ALE_CUA_DRIVER")
     if not configured and os.name == "nt" and os.path.isfile(_WINDOWS_DRIVER):
@@ -60,6 +64,16 @@ def has_desktop() -> bool:
     """
     if os.name == "nt":
         return os.path.isfile(_WINDOWS_DRIVER)
+    if sys.platform == "darwin":
+        # macOS images supply a preauthorized service in the logged-in agent session.
+        # Declaring that service does not attest capture permission; readiness probes it.
+        if not os.environ.get("ALE_CUA_DRIVER_SOCKET"):
+            return False
+        try:
+            _binary()
+        except GuiUnavailable:
+            return False
+        return True
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) or os.path.lexists(
         _DISPLAY_MANAGER
     )
@@ -78,9 +92,29 @@ def _invoke(tool: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     command = [_binary(), "call", tool, json.dumps(arguments or {}, separators=(",", ":"))]
     if socket := _socket():
         command += ["--socket", socket]
+    options: dict[str, Any] = {}
+    if sys.platform == "darwin" and os.geteuid() == 0:
+        import pwd
+
+        try:
+            account = pwd.getpwnam(os.environ["ALE_AGENT_USER"])
+        except KeyError as exc:
+            raise DesktopIdentityError("the desktop requires an existing task account") from exc
+        if account.pw_uid == 0:
+            raise DesktopIdentityError("the desktop requires a non-root task account")
+        # Driver belongs to the logged-in task account, including for stepwise calls
+        # from root guestd. Keep framework commands and the parent environment intact.
+        options = {
+            "preexec_fn": _demote(account),
+            "env": dict(
+                os.environ, HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name
+            ),
+        }
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=60, check=False, **options
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
         raise GuiUnavailable(f"cua-driver {tool} failed: {exc}") from exc
     if result.returncode != 0:
         raise GuiUnavailable(
@@ -109,7 +143,7 @@ def _start_server() -> bool:
     capture and input reach the screen the agent sees. Windows starts it with the session.
     """
     global _server
-    if os.name == "nt" or os.environ.get("ALE_CUA_DRIVER_SOCKET"):
+    if os.name == "nt" or sys.platform == "darwin" or os.environ.get("ALE_CUA_DRIVER_SOCKET"):
         return False
     if _server is not None and _server.poll() is None:
         return False
@@ -264,7 +298,16 @@ def screen_size() -> tuple[int, int]:
 
 
 def _to_pixels(coordinate: list[int] | tuple[int, int]) -> tuple[int, int]:
-    width, height = screen_size()
+    if sys.platform == "darwin":
+        # macOS desktop input takes native screenshot pixels. get_screen_size
+        # and get_cursor_position return logical points; the Driver converts
+        # input pixels to points itself. Its scale_factor can under-report Retina.
+        payload = _call("get_desktop_state")
+        width, height = payload.get("screenshot_width"), payload.get("screenshot_height")
+        if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
+            raise GuiUnavailable("cua-driver omitted valid desktop screenshot dimensions")
+    else:
+        width, height = screen_size()
     x, y = coordinate
     return round(x * width / COORDINATE_SPACE), round(y * height / COORDINATE_SPACE)
 
@@ -294,6 +337,8 @@ def capture_screen() -> bytes:
 
 def _point(action: dict[str, Any], key: str = "coordinate") -> tuple[int, int]:
     coordinate = action.get(key)
+    if coordinate is None and key == "coordinate":
+        coordinate = cursor_position()
     if not isinstance(coordinate, (list, tuple)) or len(coordinate) != 2:
         raise GuiUnavailable(f"desktop action requires a two-value {key}")
     return _to_pixels(coordinate)
@@ -322,6 +367,8 @@ def dispatch_actions(actions: list[dict[str, Any]]) -> int:
             end_x, end_y = _point(action, "to")
             start = action.get("coordinate")
             start_x, start_y = _to_pixels(start) if start else cursor_position()
+            if not start and sys.platform == "darwin":
+                start_x, start_y = _to_pixels((start_x, start_y))
             _call(
                 "drag",
                 {
@@ -334,8 +381,7 @@ def dispatch_actions(actions: list[dict[str, Any]]) -> int:
                 },
             )
         elif kind == "scroll":
-            coordinate = action.get("coordinate")
-            x, y = _to_pixels(coordinate) if coordinate else cursor_position()
+            x, y = _point(action)
             _call(
                 "scroll",
                 {
@@ -355,7 +401,8 @@ def dispatch_actions(actions: list[dict[str, Any]]) -> int:
             elif keys:
                 _call("press_key", {"key": keys[0], "scope": "desktop"})
         elif kind == "wait":
-            time.sleep((action.get("duration_ms") or 500) / 1000)
+            duration = action.get("duration_ms")
+            time.sleep((500 if duration is None else duration) / 1000)
         elif kind in {"mouse_down", "mouse_up", "key_down", "key_up"}:
             raise GuiUnavailable(f"cua-driver does not expose the stateful action {kind}")
         else:

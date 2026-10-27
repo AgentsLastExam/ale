@@ -87,8 +87,16 @@ class Handler:
     def op_health(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
         from gui import has_desktop
 
-        operating_system = "windows" if os.name == "nt" else "linux"
+        operating_system = (
+            "windows" if os.name == "nt" else "macos" if sys.platform == "darwin" else "linux"
+        )
         agent_user = os.environ.get("ALE_AGENT_USER") or _current_user()
+        agent_uid = None
+        if os.name != "nt":
+            import pwd
+
+            with contextlib.suppress(KeyError):
+                agent_uid = pwd.getpwnam(agent_user).pw_uid
         return ok(
             req_id,
             proto=PROTOCOL_VERSION,
@@ -98,6 +106,8 @@ class Handler:
             user=_current_user(),
             agent_user=agent_user,
             agent_home=os.environ.get("ALE_AGENT_HOME") or _home_of(agent_user),
+            framework_uid=os.geteuid() if os.name != "nt" else None,
+            agent_uid=agent_uid,
             gui=has_desktop(),
         )
 
@@ -751,13 +761,20 @@ def _drop_to(name: str | None, env: dict[str, str]) -> dict[str, Any]:
 
     env["HOME"] = account.pw_dir
     env["USER"] = env["LOGNAME"] = account.pw_name
-    env.setdefault("XDG_RUNTIME_DIR", f"/tmp/runtime-{account.pw_name}")
+    if sys.platform == "darwin":
+        # Framework PATH excludes agent-writable tools. Add them only to the child
+        # whose uid and supplementary groups are changed below.
+        env["PATH"] = f"{account.pw_dir}/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + env.get(
+            "PATH", "/usr/bin:/bin:/usr/sbin:/sbin"
+        )
+    else:
+        env.setdefault("XDG_RUNTIME_DIR", f"/tmp/runtime-{account.pw_name}")
 
     # A desktop image publishes its session bus address for exactly this. Without it a
     # graphical program starts, creates a window nobody maps, and exits successfully —
     # so a task author debugging a GUI setup sees a script that "worked" and a screen
     # that did not change.
-    if "DBUS_SESSION_BUS_ADDRESS" not in env:
+    if sys.platform != "darwin" and "DBUS_SESSION_BUS_ADDRESS" not in env:
         try:
             with open("/tmp/dbus-session-bus-address") as handle:
                 if address := handle.read().strip():

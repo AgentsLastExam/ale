@@ -847,6 +847,7 @@ async def _prepare_images(
         key = content_hash(
             {
                 "role": "solver",
+                "os": task.spec.os,
                 "kind": spec.kind,
                 "local": task.image_source_digest,
                 "ref": spec.ref,
@@ -885,6 +886,7 @@ async def _prepare_images(
         verifier_key = content_hash(
             {
                 "role": "verifier",
+                "os": task.spec.os,
                 "kind": verify.image.kind,
                 "local": task.verifier_image_source_digest,
                 "ref": verify.image.ref,

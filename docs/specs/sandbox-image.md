@@ -311,10 +311,10 @@ passthrough remains a Provider capability, not a Task image declaration.
 ## Permissions
 
 Setup, artifact collection/restoration, and verification use the framework's elevated
-identity: root on Linux, Administrator on Windows. This applies to shared and separate
-verification independently of the agent's `resources.sudo` setting.
+identity: root on Linux and macOS, Administrator on Windows. This applies to shared and
+separate verification independently of the agent's `resources.sudo` setting.
 
-Directory uploads ignore Host permissions: Linux files use `0644`, directories `0755`,
+Directory uploads ignore Host permissions: POSIX files use `0644`, directories `0755`,
 owned by the selected framework or agent identity. Windows resets ACLs to grant
 SYSTEM/Administrators full control, Users read access, and the selected agent modify
 access for agent uploads. Task entry scripts run through their interpreter, without

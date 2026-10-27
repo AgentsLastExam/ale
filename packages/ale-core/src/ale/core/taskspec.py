@@ -46,6 +46,7 @@ class ImageKind(StrEnum):
 class OperatingSystem(StrEnum):
     LINUX = "linux"
     WINDOWS = "windows"
+    MACOS = "macos"
 
 
 def _task_path(path: str, operating_system: OperatingSystem) -> PurePosixPath | PureWindowsPath:
@@ -326,6 +327,11 @@ class TaskManifestV1(BaseModel):
             raise ValueError("variant names must be unique")
         return self
 
+    @model_validator(mode="after")
+    def _valid_images(self) -> Self:
+        _validate_macos_image_kinds(self.os, self.image, self.verify.image)
+        return self
+
 
 class TaskSpec(BaseModel):
     """One rendered base or variant instance used by the runtime."""
@@ -349,11 +355,6 @@ class TaskSpec(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     extras: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
-    @model_validator(mode="after")
-    def _valid_artifacts(self) -> Self:
-        _validate_artifact_paths(self.artifacts, self.os)
-        return self
-
     @property
     def spec_hash(self) -> str:
         return content_hash(self.model_dump(mode="json"))
@@ -361,3 +362,27 @@ class TaskSpec(BaseModel):
     @property
     def label(self) -> str:
         return str(self.name) if self.variant == "base" else f"{self.name}@{self.variant}"
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _valid_artifacts(self) -> Self:
+        _validate_artifact_paths(self.artifacts, self.os)
+        return self
+
+    @model_validator(mode="after")
+    def _valid_images(self) -> Self:
+        _validate_macos_image_kinds(self.os, self.image, self.verify.image)
+        return self
+
+
+def _validate_macos_image_kinds(
+    operating_system: OperatingSystem, image: ImageSpec, verifier_image: ImageSpec | None
+) -> None:
+    if operating_system is not OperatingSystem.MACOS:
+        return
+    for role, candidate in (("solver", image), ("verifier", verifier_image)):
+        if candidate is None:
+            continue
+        if candidate.kind is not ImageKind.VM:
+            raise ValueError(f"macOS {role} images require image.kind: vm")
