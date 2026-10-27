@@ -446,6 +446,33 @@ def _cua_driver(platform: str) -> Path:
     return files
 
 
+MACOS_DRIVER_SHA256 = "c64017d5878d022df34137082fb918ae0d4304e28890569ff14458f1a54fd361"
+
+
+def macos_driver_archive() -> bytes:
+    """Preserve the signed app bundle; flattened binary extraction cannot do that."""
+    asset = f"cua-driver-rs-{CUA_DRIVER_VERSION}-darwin-arm64.tar.gz"
+    root = cache_root() / "cua-driver" / CUA_DRIVER_VERSION
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / asset
+    with (root / "download.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if path.is_file():
+            payload = path.read_bytes()
+            if hashlib.sha256(payload).hexdigest() == MACOS_DRIVER_SHA256:
+                return payload
+        url = f"https://github.com/trycua/cua/releases/download/cua-driver-rs-v{CUA_DRIVER_VERSION}/{asset}"
+        try:
+            with urllib.request.urlopen(url, timeout=120) as response:
+                payload = response.read(128 * 1024 * 1024 + 1)
+        except OSError:
+            raise ProviderStartError("could not download the pinned macOS Cua Driver") from None
+        if hashlib.sha256(payload).hexdigest() != MACOS_DRIVER_SHA256:
+            raise ProviderStartError("macOS Cua Driver archive checksum mismatch")
+        path.write_bytes(payload)
+        return payload
+
+
 def _archive_files(asset: str, payload: bytes) -> Iterator[tuple[str, bytes]]:
     """The regular files of a release archive, by base name only."""
     if asset.endswith(".zip"):

@@ -824,6 +824,44 @@ async def test_invalid_gateway_discovery_cleans_up_vm(backend, route):
     assert len(api.deleted) == 1
 
 
+@pytest.mark.parametrize("fail_authorization", [False, True])
+async def test_bootstrap_installs_authorizes_then_probes_and_cleans_failure(
+    backend, monkeypatch, fail_authorization
+):
+    provider, api, guest = backend
+    provider.config = OrchardProviderConfig(
+        endpoint="https://orchard.example", desktop_bootstrap={}
+    )
+    guest.sudo = True
+    monkeypatch.setattr(orchard.orchard_permissions, "preflight", lambda config: None)
+    steps = []
+
+    async def install(*args):
+        steps.append("install")
+
+    async def authorize(*args):
+        steps.append("authorize")
+        if fail_authorization:
+            raise ProviderStartError("UI failed")
+
+    async def probe(*args, **kwargs):
+        steps.append("actual_capture")
+
+    monkeypatch.setattr(orchard.orchard_permissions, "install_driver", install)
+    monkeypatch.setattr(orchard.orchard_permissions, "authorize_driver", authorize)
+    monkeypatch.setattr(orchard, "await_desktop", probe)
+    req = await request(provider, sudo=True)
+    if fail_authorization:
+        with pytest.raises(ProviderStartError, match="UI failed"):
+            await provider.create(req)
+        assert steps == ["install", "authorize"]
+        assert len(api.deleted) == 1
+    else:
+        sandbox = await provider.create(req)
+        assert steps == ["install", "authorize", "actual_capture"]
+        await sandbox.destroy()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [None, "short", "corrupt", "oversize", "cancel", "capture"])
 async def test_screenshots_use_bounded_reads_and_always_remove_the_guest_file(
@@ -878,6 +916,60 @@ async def test_screenshots_use_bounded_reads_and_always_remove_the_guest_file(
     assert removed[0].startswith("/opt/ale/screenshot-")
     if failure in ("oversize", "capture"):
         assert not reads
+
+
+@pytest.mark.asyncio
+async def test_large_screenshot_round_trip_over_bounded_guest_responses(
+    backend, monkeypatch, tmp_path
+):
+    import io
+    import json
+    import random
+    import sys
+
+    from PIL import Image
+
+    from ale.run.guestd import gui
+    from ale.run.guestd.main import Handler
+    from ale.run.transport import GuestClient
+
+    buffer = io.BytesIO()
+    Image.frombytes("RGB", (1400, 1200), random.Random(1).randbytes(1400 * 1200 * 3)).save(
+        buffer, format="PNG"
+    )
+    png = buffer.getvalue()
+    assert len(png) > 4 * 1024**2
+    monkeypatch.setitem(sys.modules, "gui", gui)
+    monkeypatch.setattr(gui, "capture_screen", lambda: png)
+    monkeypatch.setattr(orchard, "_ROOT", str(tmp_path.resolve()))
+    provider, _, _ = backend
+    sandbox = await provider.create(await request(provider))
+
+    class BoundedTransport:
+        def __init__(self):
+            self.frames = []
+            self.largest = 0
+            self.handler = Handler(self.emit)
+
+        def emit(self, message):
+            frame = json.dumps(message)
+            self.largest = max(self.largest, len(frame))
+            assert len(frame) < 100_000, "unbounded guest response"
+            self.frames.append(frame)
+
+        async def send(self, data):
+            message = json.loads(data)
+            self.emit(self.handler.dispatch(message["id"], message["op"], message["params"]))
+
+        async def recv(self):
+            return self.frames.pop(0)
+
+    transport = BoundedTransport()
+    sandbox._client = GuestClient(transport)
+    sandbox._file_client = sandbox._client
+    assert await sandbox.screenshot() == png
+    assert transport.largest < 100_000
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.asyncio

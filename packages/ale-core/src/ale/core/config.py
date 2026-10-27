@@ -271,6 +271,17 @@ class ContainerProviderConfig(BaseModel):
         return self
 
 
+class OrchardDesktopBootstrap(BaseModel):
+    """Explicit consent to install Driver and grant permissions in fresh VMs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    password_env: str = Field(
+        default="ALE_MACOS_ADMIN_PASSWORD", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
+    )
+    retries: int = Field(default=3, ge=0, le=3)
+
+
 class OrchardProviderConfig(BaseModel):
     """Host-side connection settings for existing Orchard-managed macOS images."""
 
@@ -283,6 +294,7 @@ class OrchardProviderConfig(BaseModel):
     server_hostname: str | None = Field(default=None, min_length=1)
     gateway_host: str | None = Field(default=None, min_length=1)
     python_path: str = "/opt/homebrew/bin/python3"
+    desktop_bootstrap: OrchardDesktopBootstrap | None = None
     driver_path: str | None = None
     socket_path: str | None = None
     provision_timeout_sec: float = Field(default=1800, gt=0, allow_inf_nan=False)
@@ -354,6 +366,12 @@ class OrchardProviderConfig(BaseModel):
 
     @model_validator(mode="after")
     def _desktop_pair(self) -> Self:
+        if self.desktop_bootstrap is not None:
+            driver = "/Applications/CuaDriver.app/Contents/MacOS/cua-driver"
+            socket = "/tmp/ale-cua-driver.sock"
+            if self.driver_path not in (None, driver) or self.socket_path not in (None, socket):
+                raise ValueError("desktop_bootstrap installs its own Driver and socket paths")
+            self.driver_path, self.socket_path = driver, socket
         if (self.driver_path is None) != (self.socket_path is None):
             raise ValueError("Orchard driver_path and socket_path must be configured together")
         return self

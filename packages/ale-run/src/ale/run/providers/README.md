@@ -57,7 +57,8 @@ are unvalidated. Setup, configuration and cleanup are in the
 Images provide Python 3.12+, the Task account and its home, required applications, and
 an execution account with passwordless sudo for guest bootstrap. ALE installs guestd
 in each new VM without changing the shared image; it does not build macOS images.
-Desktop Tasks use a preauthorized CuaDriver service in the Task account's login session.
+Desktop Tasks use either a preauthorized CuaDriver service in the Task account's login
+session or the optional `desktop_bootstrap` flow described in the guide.
 
 Preparation resolves OCI tags through registry manifest metadata without downloading
 VM disks or checking the worker cache. VM creation uses that pinned digest even if the
@@ -66,9 +67,13 @@ CPU/memory allocation; this trusts Orchard rather than independently measuring t
 Both stages check authenticated cluster access and an eligible ARM64 Tart worker.
 Orchard owns scheduling; provisioning and guest readiness have separate deadlines.
 
-`orchard_desktop.py` verifies actual capture as the Task account before the solver
-starts. Desktop input uses native screenshot pixels; cursor read-back uses logical
-points, following the Driver's coordinate contract.
+`orchard_permissions.py` installs the pinned, signed Driver and authorizes it through
+System Settings. The `macos_permission_*` helpers isolate Host-side VNC/OCR dependencies
+from guestd. Passwords travel through a private pipe and verified TLS, never command
+arguments or Run records. SIP and TCC databases are unchanged. Helpers and tunnels close
+on success, failure and cancellation; `orchard_desktop.py` verifies actual capture as
+the Task account before the solver starts. Desktop input uses native screenshot pixels;
+cursor read-back uses logical points, following the Driver's coordinate contract.
 
 Commands and file reads use separate authenticated WebSocket exec channels. File reads
 are bounded, screenshot transfers are integrity-checked, and command output is
