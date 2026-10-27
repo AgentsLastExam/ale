@@ -9,6 +9,7 @@ from .trajectory import (
     LIVE,
     MODELS,
     WORKSPACE_ROOT,
+    artifact,
     jsonl,
     llm_audit_evidence,
     native_session_file,
@@ -99,7 +100,7 @@ def test_real_harness_exercises_its_visible_tool_surface(
     native = jsonl(
         native_session_file(episode / "logs" / harness, harness, trajectory["session_id"])
     )
-    report = json.loads((episode / "artifacts/output/tool_report.json").read_text())
+    report = json.loads(artifact(episode, "/home/user/output/tool_report.json").read_text())
 
     tested = len(report["tools_tested"])
     passed = len(report["tools_passed"])

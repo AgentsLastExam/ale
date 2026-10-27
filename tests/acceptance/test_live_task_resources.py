@@ -4,10 +4,14 @@ import json
 
 import pytest
 
+from ale.run.harnesses.base import STDOUT_PATH
+
 from .trajectory import (
     LIVE,
     WORKSPACE_ROOT,
+    artifact,
     audit_episode,
+    jsonl,
     llm_audit_episode,
     native_mcp_pairs,
     run_task,
@@ -42,7 +46,9 @@ def test_real_claude_uses_task_skill_and_task_mcp(tmp_path) -> None:
     pairs = native_mcp_pairs(native)
     assert pairs[call["tool_call_id"]]["use"]["input"] == call["arguments"]
     assert "result" in pairs[call["tool_call_id"]]
-    init = next(event for event in native if event.get("subtype") == "init")
+    # Only the stream-json output reports what the session loaded.
+    stream = jsonl(episode / "logs/claude-code" / STDOUT_PATH)
+    init = next(event for event in stream if event.get("subtype") == "init")
     assert "resource-proof" in init["skills"]
     assert {"name": "task-proof", "status": "connected"} in init["mcp_servers"]
     assert any(
@@ -54,8 +60,8 @@ def test_real_claude_uses_task_skill_and_task_mcp(tmp_path) -> None:
         if isinstance(part, dict)
     )
 
-    receipt = json.loads((episode / "artifacts/output/mcp-call.json").read_text())
-    answer = (episode / "artifacts/output/result.txt").read_text()
+    receipt = json.loads(artifact(episode, "/home/user/output/mcp-call.json").read_text())
+    answer = artifact(episode, "/home/user/output/result.txt").read_text()
     assert receipt == {"nonce": call["arguments"]["nonce"], "fragment": fragment}
     assert answer == f"SKILL-R7::{receipt['nonce']}::{fragment}"
     assert {(item["kind"], item["name"]) for item in lock["agent"]["resources"]} == {
