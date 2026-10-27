@@ -87,6 +87,15 @@ class HarnessSession(BaseModel):
     authentication: Literal["api-key", "subscription"] = "api-key"
     profile_slot_id: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     sandbox_id: str = ""
+    provider_web_tools: bool = Field(
+        default=False,
+        description=(
+            "Whether the agent may use tools its model provider runs on its own side that "
+            "reach the network, such as hosted web search. They act outside the Sandbox's "
+            "network policy, so only a Task whose network is open allows them, and the "
+            "harness turns them off otherwise."
+        ),
+    )
     resources_digest: str = (
         "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     )

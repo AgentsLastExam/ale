@@ -236,13 +236,7 @@ class Gateway:
         payload = self._authoritative(payload, session)
 
         target = request.match_info["target"]
-        refusal = gemini.policy_refusal(
-            request.method,
-            target,
-            request.query.get("alt"),
-            payload,
-            web_tools=session.provider_web_tools,
-        )
+        refusal = gemini.policy_refusal(request.method, target, request.query.get("alt"))
         if refusal is not None:
             self._record(
                 session,

@@ -134,6 +134,8 @@ class GrokBuildHarness(CliHarness):
         lines = [
             "[models]",
             f"default = {_toml(session.model)}",
+            # Search otherwise asks the built-in grok-4.5 entry, which has no Gateway route.
+            f"web_search = {_toml(session.model)}",
             "",
             f"[model.{_toml(session.model)}]",
             f"model = {_toml(session.model)}",
@@ -234,6 +236,8 @@ class GrokBuildHarness(CliHarness):
             "--resume" if native_session_id is not None else "--session-id",
             requested,
         ]
+        if not session.provider_web_tools:
+            argv.append("--disable-web-search")
         if self.settings.reasoning_effort != "default":
             argv.extend(["--reasoning-effort", self.settings.reasoning_effort])
         if isinstance(self.settings.max_turns, int):

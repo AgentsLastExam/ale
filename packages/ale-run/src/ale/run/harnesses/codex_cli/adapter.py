@@ -55,6 +55,8 @@ class CodexCliHarness(CliHarness):
             "check_for_update_on_startup = false",
             'approval_policy = "never"',
             'sandbox_mode = "danger-full-access"',
+            # Codex searches by default, on OpenAI's side.
+            f"web_search = {json.dumps(self._web_search(session))}",
         ]
         if self.settings.reasoning_effort != "default":
             lines.append(f"model_reasoning_effort = {json.dumps(self.settings.reasoning_effort)}")
@@ -97,6 +99,9 @@ class CodexCliHarness(CliHarness):
             identity=Identity.AGENT,
         )
 
+    def _web_search(self, session: HarnessSession) -> str:
+        return "live" if self.settings.web_search and session.provider_web_tools else "disabled"
+
     async def prepare_command(
         self,
         prompt_path: str,
@@ -114,8 +119,6 @@ class CodexCliHarness(CliHarness):
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
         ]
-        if self.settings.web_search:
-            argv.append("--search")
         if native_session_id is not None:
             argv.extend(["resume", native_session_id])
         # `-` reads the prompt from stdin.

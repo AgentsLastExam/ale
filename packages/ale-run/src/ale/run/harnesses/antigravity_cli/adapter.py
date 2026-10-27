@@ -70,6 +70,13 @@ _REQUEST = (
 REQUEST_PATH = f"{LOG_ROOT}/request.jsonl"
 #: Credentials and backends agy would otherwise prefer over the Gateway's API-key mode.
 _AMBIENT = ("GOOGLE_API_KEY", "AGY_ADC_AUTH", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_CLOUD_PROJECT")
+#: The verdict agy's PreToolUse hook prints for a `search_web` call, as a Python script so
+#: the hook's command does not depend on the shell agy runs it with.
+_DENY_SEARCH = "print({!r})\n".format(
+    json.dumps(
+        {"decision": "deny", "reason": "Web search is off because this Task's network is not open."}
+    )
+)
 
 
 class AntigravityCliHarness(CliHarness):
@@ -141,6 +148,23 @@ class AntigravityCliHarness(CliHarness):
             (json.dumps({"mcpServers": servers}, indent=2, ensure_ascii=False) + "\n").encode(),
             identity=Identity.AGENT,
         )
+        if not session.provider_web_tools:
+            # search_web asks Google Search on Google's side, and no agy setting removes it;
+            # a global hook denies every call instead, subagents' included.
+            deny = gemini / "config" / "deny-search-web.py"
+            await sandbox.write_file(deny, _DENY_SEARCH.encode(), identity=Identity.AGENT)
+            python = "python" if is_windows(session.home) else "python3"
+            hook = {"type": "command", "command": f'{python} -I "{deny}"', "timeout": 10}
+            hooks = {
+                "ale-provider-web-tools": {
+                    "PreToolUse": [{"matcher": "search_web", "hooks": [hook]}]
+                }
+            }
+            await sandbox.write_file(
+                gemini / "config" / "hooks.json",
+                (json.dumps(hooks, indent=2) + "\n").encode(),
+                identity=Identity.AGENT,
+            )
 
     async def prepare_command(
         self,

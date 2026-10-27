@@ -95,14 +95,18 @@ provider:
   is recorded as cache-read tokens. Each dialect forwards only the methods it lists and
   refuses the rest in the provider's error format, so an unchecked method cannot slip
   through.
-- **Provider-side network tools follow the Task's network policy.** These are tools the
-  provider runs on its own side that reach the web, such as search grounding. They act
-  outside the Sandbox's network policy, so a request that asks for one is forwarded only
-  for a Task whose network is `open`.
 
 A policy refusal is recorded as a `refused` call naming the policy and, unlike a limit,
 does not end the episode. Each dialect's routes, authentication and policies are in the
 [Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md).
+
+Provider-side network tools are turned off by the harness. A provider may run a tool on
+its own side that reaches the network, such as hosted web search, so that access never
+passes the Sandbox's network policy. Unless the Task's network is `open`, each harness
+turns every such tool off in its program's own configuration, as
+`HarnessSession.provider_web_tools` says; its README names the tools and the switch. The
+program then never asks its provider to run the tool, and the Gateway stays free of
+per-provider tool lists.
 
 In subscription mode the provider CLI still runs in the Sandbox, but it receives only
 the episode token and model Gateway URL. The Host Gateway reads checkout-local auth,
@@ -334,6 +338,10 @@ the sandbox and in the image pushed to its registry.
 **Traffic analysis, or what is said over an allowlisted tunnel.** Once `CONNECT`
 succeeds the tunnel is opaque by design — the point is to reach a declared host, not to
 inspect the conversation. An allowlisted host is a trusted host.
+
+**A provider-side network tool requested around the harness.** The Gateway does not
+inspect requests for provider-side network tools (§2). An agent that writes such a
+request itself with its episode token reaches the provider's search.
 
 **Exfiltration through the model service.** An agent can put anything it likes in a
 prompt. The Gateway records API-key and subscription calls but does not police their

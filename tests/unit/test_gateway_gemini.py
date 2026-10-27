@@ -259,39 +259,6 @@ class TestAuthentication:
 
 class TestPolicy:
     @pytest.mark.parametrize(
-        "tools",
-        [
-            [{"googleSearch": {}}],
-            [{"google_search": {}}],
-            [{"functionDeclarations": [{"name": "run"}]}, {"urlContext": {}}],
-        ],
-    )
-    async def test_grounding_is_refused(self, stack, tools: list[dict]) -> None:
-        """Google would search the web outside the Task's network policy, billed apart."""
-        gateway, upstream, session, trace = stack
-
-        reply = await send(gateway, GENERATE, {**BODY, "tools": tools}, token=session.token)
-
-        error = google_error(reply, 400, "FAILED_PRECONDITION")
-        assert "grounding needs a Task with open network" in error["message"]
-        assert upstream.seen == []
-        (record,) = records(trace)
-        assert (record["disposition"], record["refusal_limit"]) == ("refused", "web_tools")
-        assert session.refusal is None, "a policy refusal is not a budget"
-
-    async def test_grounding_is_forwarded_for_a_task_with_open_network(self, stack) -> None:
-        """An open Task may reach the web anyway, so Google may do it on its behalf."""
-        gateway, upstream, session, _ = stack
-        session.provider_web_tools = True
-
-        reply = await send(
-            gateway, GENERATE, {**BODY, "tools": [{"googleSearch": {}}]}, token=session.token
-        )
-
-        assert reply.status == 200
-        assert len(upstream.seen) == 1
-
-    @pytest.mark.parametrize(
         ("method", "prefix", "target"),
         [
             ("POST", "", f"models/{HELPER}:embedContent"),

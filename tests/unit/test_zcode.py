@@ -140,6 +140,34 @@ async def test_configuration_routes_the_model_through_the_gateway(
     ]
 
 
+@pytest.mark.parametrize(
+    ("dialect", "open_network", "native"),
+    [
+        ("anthropic", True, True),
+        ("anthropic", False, False),
+        ("openai-responses", True, False),
+    ],
+)
+async def test_native_web_search_follows_the_task_network(
+    dialect: str, open_network: bool, native: bool
+) -> None:
+    """ZCode grants WebSearch by vendor URL, so the run's model rule decides it."""
+    sandbox = FakeSandbox()
+    await ZCodeHarness(gateway_dialect=dialect).install_resources(
+        sandbox,  # type: ignore[arg-type]
+        session(provider_web_tools=open_network),
+        EffectiveAgentResources(),
+    )
+    rules = json.loads(sandbox.files[PROVIDER])["config"]["modelConfigRules"]
+    assert rules["providerModelRules"] == [
+        {
+            "providerId": "ale",
+            "modelId": "test-model",
+            "config": {"properties": {"supportsNativeWebSearch": native}},
+        }
+    ]
+
+
 async def test_without_mcp_servers_the_run_configuration_keeps_native_defaults() -> None:
     sandbox = FakeSandbox()
     await ZCodeHarness().install_resources(sandbox, session(), EffectiveAgentResources())  # type: ignore[arg-type]

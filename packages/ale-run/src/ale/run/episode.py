@@ -508,7 +508,6 @@ async def run_episode(
             model=model,
             limits=limits or Limits(),
             allowed_hosts=allowed_hosts,
-            provider_web_tools=task.spec.network.mode is NetworkMode.OPEN,
             payload_dir=(
                 episode_dir / "logs" / "gateway"
                 if (logging_policy or LoggingPolicy()).transport_payloads == "debug"
@@ -560,6 +559,7 @@ async def run_episode(
             os=task.spec.os,
             authentication=authentication,
             profile_slot_id=profile_slot_id,
+            provider_web_tools=task.spec.network.mode is NetworkMode.OPEN,
         ),
         agent_resources=agent_resources or EffectiveAgentResources(),
         task_source=task.source,

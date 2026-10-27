@@ -17,3 +17,11 @@ in a 1 GiB Sandbox the kernel OOM-kills the CLI part-way through a turn; run it 
 least 2 GiB. ALE sets `OPENCLAW_NO_RESPAWN=1` because OpenClaw's launcher otherwise runs
 the CLI as a second, detached Node process and exits 1 without a message when that child
 dies from a signal. An OOM kill now reports exit code 137.
+
+OpenClaw 2026.7.1 puts OpenAI's hosted `web_search` in a request only when the model's
+base URL is `api.openai.com` itself, and no setting extends that to another URL, so behind
+the Gateway it never does. Its `web_search` is then a local function whose backends
+(Brave, Gemini, Perplexity and others) each need a key of their own, which a Sandbox never
+holds, so it reports that no provider is available, in `open` Tasks too. `x_search` would
+call xAI from the Sandbox with an xAI key and is not offered without one; `web_fetch`
+fetches from inside the Sandbox. All of them stay under the Sandbox's network policy.

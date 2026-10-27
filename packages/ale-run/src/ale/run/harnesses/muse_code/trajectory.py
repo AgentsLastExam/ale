@@ -172,6 +172,9 @@ class _Conversation:
         failures: dict[str, str] = {}
         awaiting: _Step | None = None
         usage: AtifMetrics | None = None
+        # The response in progress, and the provider-run calls it made before its first commit.
+        current: _Step | None = None
+        provided: list[tuple[AtifToolCall, AtifObservationResult]] = []
         for record in records:
             payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
             event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
@@ -209,6 +212,11 @@ class _Conversation:
                         step.metrics, usage = usage, None
                     else:
                         awaiting = step
+                current = step
+                for call, result in provided:
+                    step.calls.append(call)
+                    step.results[call.tool_call_id] = result
+                provided.clear()
                 if kind == "assistant_message_committed":
                     step.message += str(event.get("text") or "")
                 elif kind == "assistant_tool_calls_committed":
@@ -219,6 +227,20 @@ class _Conversation:
                             owner[call.tool_call_id] = step
                 elif isinstance(event.get("text"), str):
                     step.reasoning.append(event["text"])
+            elif kind == "model_response_created":
+                # Calls of a response that committed nothing else stand on their own.
+                if provided:
+                    steps.append(_provided_step(provided))
+                    provided = []
+                current = None
+            elif kind == "provider_tool_call_completed":
+                # A tool the provider ran inside the response, such as hosted web search.
+                call, result = _provided(event)
+                if current is None:
+                    provided.append((call, result))
+                else:
+                    current.calls.append(call)
+                    current.results[call.tool_call_id] = result
             elif kind == "model_completed":
                 # Muse commits a response's tool calls after its usage, so usage belongs
                 # to the response in progress, or else to the next one.
@@ -260,6 +282,8 @@ class _Conversation:
             elif kind == "terminal" and event.get("terminal") not in (None, "completed"):
                 reason = event.get("reason") or f"Muse run {event.get('terminal')}"
                 steps.append(_Step("system", str(reason), _timestamp(record)))
+        if provided:
+            steps.append(_provided_step(provided))
         for call_id, reason in failures.items():
             holder = owner.get(call_id)
             if holder is None:
@@ -419,6 +443,36 @@ def _call(raw: dict[str, Any]) -> AtifToolCall:
         function_name=name,
         arguments=arguments if isinstance(arguments, dict) else {"value": arguments},
         extra=extra,
+    )
+
+
+def _provided(event: dict[str, Any]) -> tuple[AtifToolCall, AtifObservationResult]:
+    """A provider-run call: its action as arguments, its status and results as the result."""
+    call_id = str(event.get("call_id") or "")
+    action = event.get("action")
+    status = str(event.get("status") or "completed")
+    outcome: dict[str, Any] = {"status": status}
+    if event.get("results") is not None:
+        outcome["results"] = event["results"]
+    return (
+        AtifToolCall(
+            tool_call_id=call_id,
+            function_name=str(event.get("name") or ""),
+            arguments=action if isinstance(action, dict) else {},
+        ),
+        AtifObservationResult(
+            source_call_id=call_id,
+            content=json.dumps(outcome, ensure_ascii=False, default=str),
+            extra=None if status == "completed" else {"ale": {"is_error": True}},
+        ),
+    )
+
+
+def _provided_step(provided: list[tuple[AtifToolCall, AtifObservationResult]]) -> _Step:
+    return _Step(
+        "agent",
+        calls=[call for call, _ in provided],
+        results={call.tool_call_id: result for call, result in provided},
     )
 
 

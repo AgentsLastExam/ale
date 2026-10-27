@@ -426,6 +426,61 @@ def test_parser_follows_the_session_log(tmp_path: Path) -> None:
     assert trajectory.final_metrics.total_prompt_tokens == 60
 
 
+def test_provider_run_calls_join_the_response_that_made_them(tmp_path: Path) -> None:
+    """Hosted web search runs inside a response, and Muse records it apart from its calls."""
+    logs = tmp_path / "logs"
+    write_turns(logs, None, ("Search the web.", "2.34.2"))
+    search = {"type": "search", "query": "requests pypi"}
+    page = {"type": "open_page", "url": "https://pypi.org/project/requests/"}
+    hits = [{"title": "requests", "url": "https://pypi.org/project/requests/"}]
+    write_jsonl(
+        logs / RUN_LOG,
+        [
+            run("started", prompt="Search the web."),
+            run("model_response_created"),
+            # A search may come before anything else its response commits.
+            run(
+                "provider_tool_call_completed",
+                call_id="ws-1",
+                name="web_search",
+                action=search,
+                status="completed",
+                results=hits,
+            ),
+            run("assistant_message_committed", response_id="r1", text="Searching."),
+            run(
+                "provider_tool_call_completed",
+                call_id="ws-2",
+                name="web_search",
+                action=page,
+                status="failed",
+            ),
+            run(
+                "assistant_tool_calls_committed",
+                response_id="r1",
+                tool_calls=[{"call_id": "call-1", "name": "bash", "args": "{}"}],
+            ),
+            run("tool_result_batch_committed", results=[{"tool_call_id": "call-1", "text": "ok"}]),
+            run("model_response_created"),
+            run("assistant_message_committed", response_id="r2", text="2.34.2"),
+        ],
+    )
+    trajectory = MuseCodeHarness().parse_trajectory(context(logs, tmp_path))
+
+    assert trajectory.extra is None
+    (acting,) = [step for step in trajectory.steps if step.tool_calls]
+    assert acting.message == "Searching."
+    assert [
+        (call.tool_call_id, call.function_name, call.arguments) for call in acting.tool_calls or ()
+    ] == [("ws-1", "web_search", search), ("ws-2", "web_search", page), ("call-1", "bash", {})]
+    found, opened, shell = acting.observation.results  # type: ignore[union-attr]
+    assert json.loads(str(found.content)) == {"status": "completed", "results": hits}
+    assert found.extra is None
+    assert opened.extra == {"ale": {"is_error": True}}
+    assert shell.content == "ok"
+    assert trajectory.steps[-1].message == "2.34.2"
+
+
 def test_parser_embeds_the_subagent_its_call_started(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
     write_spawn(logs, working_session())

@@ -29,23 +29,6 @@ __all__ = [
 #: run's model and leaves nothing stored with Google; any other method is refused.
 METHODS = {"generateContent": False, "streamGenerateContent": True, "countTokens": False}
 
-#: Tools Google runs on its own side. They reach the web outside the Task's network
-#: policy and are billed apart from tokens. The API accepts both JSON spellings of a
-#: field, so both are matched.
-_GROUNDING_TOOLS = frozenset(
-    {
-        "googleSearch",
-        "google_search",
-        "googleSearchRetrieval",
-        "google_search_retrieval",
-        "urlContext",
-        "url_context",
-        "googleMaps",
-        "google_maps",
-    }
-)
-
-
 #: Antigravity CLI retries a 429 for minutes but fails a 400 at once, and a Gateway
 #: refusal does not lift by waiting, so Gemini refusals are 400 ``FAILED_PRECONDITION``.
 REFUSAL_STATUS = 400
@@ -65,14 +48,7 @@ class PolicyRefusal:
         return error_body(self.code, self.status, self.message, f"ALE_{self.policy.upper()}")
 
 
-def policy_refusal(
-    http_method: str,
-    target: str,
-    alt: str | None,
-    payload: dict[str, Any],
-    *,
-    web_tools: bool = False,
-) -> PolicyRefusal | None:
+def policy_refusal(http_method: str, target: str, alt: str | None) -> PolicyRefusal | None:
     """Why the request for ``v1beta/{target}`` must not be forwarded, if it must not."""
     resource, _, method = target.rpartition(":")
     model = resource.removeprefix("models/")
@@ -91,17 +67,6 @@ def policy_refusal(
             400,
             "INVALID_ARGUMENT",
             "the ALE Gateway streams only server-sent events; send alt=sse",
-        )
-    tools = payload.get("tools")
-    entries = tools if isinstance(tools, list) else [tools]
-    named = {name for tool in entries if isinstance(tool, dict) for name in tool}
-    if not web_tools and (grounding := sorted(named & _GROUNDING_TOOLS)):
-        return PolicyRefusal(
-            "web_tools",
-            REFUSAL_STATUS,
-            "FAILED_PRECONDITION",
-            f"grounding needs a Task with open network; the ALE Gateway refuses "
-            f"{', '.join(grounding)}",
         )
     return None
 
