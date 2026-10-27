@@ -88,6 +88,10 @@ _CUA_DRIVER = {
         f"cua-driver-rs-{CUA_DRIVER_VERSION}-windows-x86_64-binary.zip",
         "5edaa74d0afa1b55a9668dbc4f32736507bd2bd4d75b18ca1dc8881bb12402b5",
     ),
+    "macos": (
+        f"cua-driver-rs-{CUA_DRIVER_VERSION}-darwin-arm64.tar.gz",
+        "5f71191c082ca07c9dfc13b7c9a6eec60a82818c245a93534cc0eb7911471d72",
+    ),
 }
 _CUA_DRIVER_BINARY = {"linux": "cua-driver", "windows": "cua-driver.exe"}
 #: Run inside the VM builder to install the Windows framework into a disk.
@@ -450,9 +454,26 @@ def _only(names: tuple[str, ...]):  # type: ignore[no-untyped-def]
     return lambda directory, entries: [entry for entry in entries if entry not in names]
 
 
-def _cua_driver(platform: str) -> Path:
-    """The pinned Cua Driver release files, downloaded once and verified against the release."""
+def _cua_driver_asset(platform: str) -> bytes:
+    """The pinned Cua Driver release asset, verified against the release."""
     asset, sha256 = _CUA_DRIVER[platform]
+    url = (
+        "https://github.com/trycua/cua/releases/download/"
+        f"cua-driver-rs-v{CUA_DRIVER_VERSION}/{asset}"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=300) as response:
+            payload = response.read()
+    except OSError as exc:
+        raise ProviderStartError(f"could not download Cua Driver: {exc}") from exc
+    if hashlib.sha256(payload).hexdigest() != sha256:
+        raise ProviderStartError("downloaded Cua Driver does not match its pinned checksum")
+    return payload
+
+
+def _cua_driver(platform: str) -> Path:
+    """The pinned Cua Driver release files, downloaded once."""
+    asset, _ = _CUA_DRIVER[platform]
     root = cache_root() / "cua-driver" / CUA_DRIVER_VERSION
     files = root / platform
     if files.is_dir():
@@ -462,19 +483,8 @@ def _cua_driver(platform: str) -> Path:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if files.is_dir():
             return files
-        url = (
-            "https://github.com/trycua/cua/releases/download/"
-            f"cua-driver-rs-v{CUA_DRIVER_VERSION}/{asset}"
-        )
-        try:
-            with urllib.request.urlopen(url, timeout=300) as response:
-                payload = response.read()
-        except OSError as exc:
-            raise ProviderStartError(f"could not download Cua Driver: {exc}") from exc
-        if hashlib.sha256(payload).hexdigest() != sha256:
-            raise ProviderStartError("downloaded Cua Driver does not match its pinned checksum")
         partial = Path(tempfile.mkdtemp(prefix=f".{platform}-", dir=root))
-        for name, data in _archive_files(asset, payload):
+        for name, data in _archive_files(asset, _cua_driver_asset(platform)):
             (partial / name).write_bytes(data)
         binary = partial / _CUA_DRIVER_BINARY[platform]
         if not binary.is_file():
@@ -483,6 +493,26 @@ def _cua_driver(platform: str) -> Path:
         binary.chmod(0o755)
         partial.rename(files)
     return files
+
+
+MACOS_DRIVER_SHA256 = _CUA_DRIVER["macos"][1]
+
+
+def macos_driver_archive() -> bytes:
+    """Preserve the signed app bundle; flattened binary extraction cannot do that."""
+    asset, sha256 = _CUA_DRIVER["macos"]
+    root = cache_root() / "cua-driver" / CUA_DRIVER_VERSION
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / asset
+    with (root / "download.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if path.is_file():
+            payload = path.read_bytes()
+            if hashlib.sha256(payload).hexdigest() == sha256:
+                return payload
+        payload = _cua_driver_asset("macos")
+        path.write_bytes(payload)
+        return payload
 
 
 def _archive_files(asset: str, payload: bytes) -> Iterator[tuple[str, bytes]]:

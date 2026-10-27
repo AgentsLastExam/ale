@@ -93,8 +93,8 @@ Provide root bootstrap access and Python 3.12+ at `python_path`, protected
 from unprivileged writes. Make `python3` available through `/usr/local/bin` or
 `/opt/homebrew/bin`; the four CLI Harnesses also need Node/npm at the
 [required runtime version](../specs/autonomous-harness.md#shipped-integrations). Supply the Task account,
-applications and licenses, with no preexisting model credentials. For desktop Tasks,
-configure both Driver paths and preauthorize the service.
+applications and licenses, with no preexisting model credentials. For desktop Tasks, either configure both Driver paths and preauthorize the service,
+or opt into installation and UI authorization below.
 
 Declare the image in `task.toml`:
 
@@ -121,6 +121,47 @@ account must have no elevation rights. Orchard supports `network_mode = "public"
 [standard Task layout](../specs/task-authoring.md) with `.sh` stage entries; the reward goes to
 `/opt/ale/logs/verifier`, because the macOS root volume is read-only. Install stable
 dependencies when preparing the image.
+
+## Install and authorize Driver in each VM
+
+For a local Mac controller/worker, use an otherwise compatible Tart base without
+CuaDriver installed. No ALE base-image patch or pregranted Driver permissions are
+required. The image still needs Python 3.12+, the logged-in admin account, root
+bootstrap access and Screen Sharing. The UI prototype supports English/light mode
+and US keyboard input; it is not a universal macOS permissions installer.
+
+Install the optional Host dependencies (`ale-run[macos-ui]`; in this developer
+workspace `uv sync` includes the test dependencies) and Xcode command-line tools.
+Add to your private run TOML:
+
+```toml
+[vm.orchard.desktop_bootstrap]
+password_env = "ALE_MACOS_ADMIN_PASSWORD"
+retries = 3
+```
+
+Set `vm.orchard.boot_timeout_sec` to e.g. 600 seconds in the existing Orchard section.
+Supply the named password via your credential mechanism. It is the logged-in Task
+admin account's password, used for Screen Sharing and the Settings authorization
+sheet; never put it in a TOML or command argument. Declare `[agent].sudo = true`.
+Leave `driver_path` and `socket_path` unset: ALE selects its installed bundle and
+socket. ALE downloads the Cua Driver release it pins for every platform, verifies the
+archive checksum and installed app signature, and starts it in the Task account. The base
+is unchanged.
+
+Apple Vision OCR is compiled in a temporary Host directory. Permission UI screenshots
+come only from the scoped VNC connection. Missing or all-black frames fail the attempt.
+Screenshots and helper processes are scoped to provisioning. The normal desktop probe then verifies an
+actual PNG from the Driver in the intended account. A UI grant is not enough.
+ALE connects VNC before starting `cua-driver permissions grant` as the Task account.
+The grant command runs concurrently with VNC handling of the System Settings grants
+and the separate first-use direct-capture consent. After the command succeeds, ALE
+restores its configured Driver service endpoint and verifies capture through that
+endpoint. A pending grant is reused during UI retries; failure or cancellation tears
+down the owned VM, including any permission-request processes still running there.
+Failure stops provisioning and invokes owned-VM cleanup; no solver starts with
+unverified permissions. Three retries means four total UI attempts, bounded by the
+same boot deadline. Remote workers and arbitrary app authorization are unqualified.
 
 ## Run and validate
 
