@@ -33,11 +33,12 @@ my-task/
 ```
 
 Required files are `task.toml`, `instruction.md`, and the tests and solution entries for the
-Task OS: `tests/test.sh` and `solution/solve.sh` on Linux, `test.ps1` and `solve.ps1` on
-Windows. `[environment]` decides what `environment/` builds. A container Task builds
+Task OS: `tests/test.sh` and `solution/solve.sh` on Linux and macOS, `test.ps1` and `solve.ps1`
+on Windows. `[environment]` decides what `environment/` builds. A container Task builds
 `environment/Dockerfile` or uses `docker_image`. A Linux VM Task sets `vm = true` to build
 `environment/Dockerfile`, or uses `vm_image`. A Windows Task builds `environment/build.ps1` on
-`vm_base`, or uses `vm_image` alone. Every image build has `environment/` as its context,
+`vm_base`, or uses `vm_image` alone. A macOS Task uses `vm_image` alone; ALE builds no macOS
+image. Every image build has `environment/` as its context,
 `setup/` excluded. A Linux image named directly wins over a build definition.
 
 ## task.toml
@@ -66,7 +67,7 @@ keywords = ["document-analysis"]            # descriptive
 network_justification = "the Task reads one publisher's live catalog"
 
 [environment]                               # the solver's machine
-os = "linux"                                # linux | windows; default linux
+os = "linux"                                # linux | windows | macos; default linux
 vm = false                                  # ALE; a Linux VM built from a Dockerfile
 # docker_image = "registry.example/image:tag"  # a container image used directly
 # vm_image = "/path/to/disk.qcow2"          # ALE; a VM image used directly
@@ -115,8 +116,8 @@ env = {}                                    # replaces [environment].env
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
 ```
 
-`vm = true` is needed only for a Linux VM built from a Dockerfile: `os = "windows"`, `vm_image`
-and `vm_base` already mean a VM. `vm_image` and `vm_base` are mutually exclusive; `vm_base`
+`vm = true` is needed only for a Linux VM built from a Dockerfile: an `os` other than Linux,
+`vm_image` and `vm_base` already mean a VM. `vm_image` and `vm_base` are mutually exclusive; `vm_base`
 requires Windows and `environment/build.ps1`. `[agent].workdir` is below the agent's home when
 relative, so a Task need not spell its home per OS. It must be a directory when the agent
 starts; stages keep their fixed directories.
@@ -138,6 +139,7 @@ These values differ from Harbor's:
   `[agent].network_mode` is `no-network`, not `public`; `build_timeout_sec` is 3600, not 600.
 - `os = "windows"` is a VM with `.ps1` stage entries, because ALE runs Windows in VMs, where
   PowerShell is always available; Harbor's is a Windows container with `.bat` entries.
+- `os = "macos"` is ALE's: a macOS VM with `.sh` stage entries, which Harbor does not run.
 - `artifacts` may be globs, and nothing is collected undeclared, where Harbor always collects
   `/logs/artifacts`.
 - `${NAME}` in an `env` table resolves from the checkout's `.env`, not the process environment,
@@ -361,7 +363,8 @@ that run; the RunLock records what the run used. See
 ## tests/
 
 `tests/test.sh` (or Windows `tests/test.ps1`) evaluates the final outcome and writes its
-`reward` to `/logs/verifier/reward.json` (Windows `C:\logs\verifier\reward.json`). Verifier
+`reward` to `/logs/verifier/reward.json` (Windows `C:\logs\verifier\reward.json`; macOS, whose
+root volume is read-only, `/opt/ale/logs/verifier/reward.json`). Verifier
 implementation conventionally lives in `tests/verify.py`. ALE uploads the whole directory to
 its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
 directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal

@@ -305,7 +305,7 @@ def test_windows_build_script_tracks_source_and_ignores_assets(tmp_path: Path) -
         ("missing-base", r"build\.ps1 requires \[environment\]\.vm_base"),
         ("missing-script", r"vm_base requires environment/build\.ps1"),
         ("container", "docker_image is a container image"),
-        ("verifier-dockerfile", "Windows verifier"),
+        ("verifier-dockerfile", "only a Linux verifier"),
     ],
 )
 def test_windows_image_contract_rejects_invalid_sources(

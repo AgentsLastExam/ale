@@ -3,7 +3,7 @@
 Normative for standard container and VM Tasks. Every solver and dedicated verifier runs
 in a container or a VM. Linux builds a Dockerfile (a VM with `[environment].vm = true`) or
 uses an image directly (`docker_image`, `vm_image`); Windows uses `vm_image` directly, or builds
-`environment/build.ps1` on `vm_base`.
+`environment/build.ps1` on `vm_base`; macOS uses `vm_image` directly.
 
 ## What a Linux image needs
 
@@ -332,10 +332,10 @@ passthrough remains a Provider capability, not a Task image declaration.
 ## Permissions
 
 Setup, artifact collection/restoration, and verification use the framework's elevated
-identity: root on Linux, Administrator on Windows. This applies to shared and separate
-verification independently of the agent's `[agent].sudo` setting.
+identity: root on Linux and macOS, Administrator on Windows. This applies to shared and
+separate verification independently of the agent's `[agent].sudo` setting.
 
-Directory uploads ignore Host permissions: Linux files use `0644`, directories `0755`,
+Directory uploads ignore Host permissions: POSIX files use `0644`, directories `0755`,
 owned by the selected framework or agent identity. Windows resets ACLs to grant
 SYSTEM/Administrators full control, Users read access, and the selected agent modify
 access for agent uploads. Task entry scripts run through their interpreter, without

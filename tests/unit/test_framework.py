@@ -516,6 +516,7 @@ def test_the_windows_identity_follows_everything_it_installs(
 def test_a_desktop_is_decided_by_the_images_own_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(gui.sys, "platform", "linux")
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     manager = tmp_path / "display-manager.service"
