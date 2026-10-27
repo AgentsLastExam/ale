@@ -143,6 +143,10 @@ Failure stops provisioning and invokes owned-VM cleanup; no solver starts with
 unverified permissions. Three retries means four total UI attempts, bounded by the
 same boot deadline. Remote workers and arbitrary app authorization are unqualified.
 
+`tasks/macos-desktop-smoke` is a standard ALE fixture for this path. Its oracle uses
+Driver screenshot, keyboard input and Save in TextEdit, and the verifier checks the
+saved content. The oracle is deterministic; it does not invoke an LLM.
+
 ## Run and validate
 
 Run against a complete Task using your deployment configuration:

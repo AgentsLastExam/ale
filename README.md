@@ -38,6 +38,7 @@ uv run ale run /path/to/task --agent nop
 | Configure subscription login | [`docs/guides/subscription-auth.md`](docs/guides/subscription-auth.md) |
 | Design and author a Task | [`docs/specs/task-quality-standard.md`](docs/specs/task-quality-standard.md), [`docs/specs/task-authoring.md`](docs/specs/task-authoring.md) |
 | Navigate specifications and decisions | [`docs/README.md`](docs/README.md) |
+| Run macOS Tasks | [`docs/guides/macos-orchard.md`](docs/guides/macos-orchard.md) |
 | Develop ALE | [`docs/guides/development.md`](docs/guides/development.md) |
 
 ## Repository layout
