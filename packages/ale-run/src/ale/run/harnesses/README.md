@@ -19,6 +19,7 @@ an agent-owned rollout against ALE's stepwise Sandbox environment.
 | `forgecode` | autonomous | Anthropic Messages by default; also Chat Completions or Responses | yes | no |
 | `openhands-cli` | autonomous | Anthropic Messages by default; follows the model family | yes | no |
 | `hermes` | autonomous | OpenAI Chat Completions by default; also Anthropic Messages or Responses | yes | no |
+| `antigravity-cli` | autonomous | Gemini `generateContent` | yes | no |
 | `computer-use` | policy | Anthropic Messages | no | no |
 | `oracle`, `nop` | built in | none | no | no |
 
