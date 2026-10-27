@@ -194,6 +194,10 @@ class OpenClawCliHarness(CliHarness):
             "OPENCLAW_WORKSPACE_DIR": str(state / "workspace"),
             "ALE_GATEWAY_TOKEN": session.token,
             "NO_COLOR": "1",
+            # Run the CLI in this process. Its respawning launcher would add a second
+            # Node process and report any signal death of the CLI, such as an OOM kill,
+            # as a bare exit 1.
+            "OPENCLAW_NO_RESPAWN": "1",
         }
         return CliCommand(shlex.join(argv), env, requested)
 
