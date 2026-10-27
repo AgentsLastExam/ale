@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Literal
 from ale.core.config import resolve_asset_collection
 from ale.core.errors import AssetError
 from ale.core.task import Task, TaskAssetObservation, TaskSourceContext
+from ale.run.secrets import hf_token
 from ale.run.tasksets.manifest import TaskFolder, load_tasks
 
 if TYPE_CHECKING:
@@ -153,7 +154,7 @@ def pull_assets(
     if not force:
         for selection in selections:
             _require_absent_assets(selection.tasks)
-    api = HfApi()
+    api = HfApi(token=hf_token())
     results: list[AssetSyncResult] = []
     for selection in selections:
         remote_repo_id = asset_repo_id(selection.repository_name)
@@ -169,6 +170,7 @@ def pull_assets(
             try:
                 snapshot_download(
                     repo_id=remote_repo_id,
+                    token=hf_token(),
                     repo_type="dataset",
                     revision=commit,
                     allow_patterns=[f"{_task_path(task)}/*/assets/**" for task in selection.tasks],
@@ -276,7 +278,7 @@ def asset_collection(api: HfApi, collection: str | None = None, *, create: bool)
 def ensure_asset_repository(repository_name: str, collection: str | None = None) -> tuple[str, str]:
     from huggingface_hub import HfApi
 
-    api = HfApi()
+    api = HfApi(token=hf_token())
     repo_id = asset_repo_id(repository_name)
     api.create_repo(repo_id, repo_type="dataset", private=True, exist_ok=True)
     if not api.repo_info(repo_id, repo_type="dataset").private:

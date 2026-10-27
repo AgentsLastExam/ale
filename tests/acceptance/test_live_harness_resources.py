@@ -6,6 +6,7 @@ import pytest
 
 from .trajectory import (
     LIVE,
+    MODELS,
     WORKSPACE_ROOT,
     audit_episode,
     llm_audit_episode,
@@ -17,9 +18,9 @@ from .trajectory import (
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm, LIVE]
 
 CASES = (
-    ("grok-build", "grok-4.5", "0.2.112"),
-    ("codex-cli", "gpt-5-mini", "0.146.0"),
-    ("openclaw-cli", "gpt-5-mini", "2026.7.1"),
+    ("grok-build", MODELS["xai"], "0.2.112"),
+    ("codex-cli", MODELS["openai"], "0.146.0"),
+    ("openclaw-cli", MODELS["openai"], "2026.7.1"),
 )
 
 

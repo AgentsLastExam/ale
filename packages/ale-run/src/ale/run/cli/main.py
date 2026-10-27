@@ -92,11 +92,17 @@ def run(
     ] = None,
     base_url: Annotated[
         str,
-        typer.Option("--base-url", help="Model endpoint; defaults to Anthropic's"),
+        typer.Option(
+            "--base-url",
+            help="One-off model endpoint; defaults to the preset provider's endpoint",
+        ),
     ] = "",
     api_key_env: Annotated[
         str,
-        typer.Option("--api-key-env", help="Which .env variable holds the key for it"),
+        typer.Option(
+            "--api-key-env",
+            help="Which .env variable holds the key for --base-url",
+        ),
     ] = "",
     config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
     overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,

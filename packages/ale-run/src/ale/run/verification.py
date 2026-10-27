@@ -17,6 +17,7 @@ from ale.core.errors import ConfigError, TaskDefinitionError
 from ale.core.ids import content_hash
 from ale.run.gateway.server import REQUEST_PATHS, Gateway
 from ale.run.gateway.session import GatewaySession, Upstream
+from ale.run.secrets import provider_endpoint
 from ale_verify import ConfigurationError, endpoint_identity, judge_route, probe_judge
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "judge_kinds",
     "open_judge_sessions",
     "preflight_judges",
+    "resolved_judges",
     "verifier_judge_config",
 ]
 
@@ -114,6 +116,30 @@ def judge_kinds(verify_dirs: Iterable[Path]) -> frozenset[str]:
     return frozenset(kinds)
 
 
+def resolved_judges(config: VerificationConfig) -> dict[str, dict[str, str]]:
+    """Each configured Judge as ``ale_verify`` reads it: its provider's endpoint and key name.
+
+    A Judge names only its provider, so its key and URL resolve exactly as the Gateway's do,
+    from ``ALE_<PROVIDER>_API_KEY`` and ``ALE_<PROVIDER>_BASE_URL``. An LLM Judge's endpoint
+    carries its dialect's path, which is how ``ale_verify`` learns the protocol; an Agent
+    Judge's protocol follows from its CLI.
+    """
+    resolved: dict[str, dict[str, str]] = {}
+    for kind in _JUDGE_KINDS:
+        section = getattr(config, kind)
+        if section is None:
+            continue
+        key_var, base_url = provider_endpoint(section.provider)
+        if kind == "llm":
+            base_url += REQUEST_PATHS[section.dialect]
+        resolved[kind] = {
+            **section.model_dump(mode="json", exclude={"provider", "dialect"}),
+            "base_url": base_url,
+            "api_key_env": key_var,
+        }
+    return resolved
+
+
 async def preflight_judges(verify_dirs: Iterable[Path], config: VerificationConfig) -> None:
     """Stop before any agent runs when a verifier's Judge cannot answer.
 
@@ -121,15 +147,15 @@ async def preflight_judges(verify_dirs: Iterable[Path], config: VerificationConf
     mistake into a batch of failed, paid-for episodes. One tiny request per Judge kind
     proves the endpoint, key and model first.
     """
+    judges = resolved_judges(config)
     for kind in sorted(judge_kinds(verify_dirs)):
-        section = getattr(config, kind)
-        if section is None:
+        if kind not in judges:
             raise ConfigError(
                 f"a selected verifier calls the {kind} Judge, but verification.{kind} "
                 "is not configured"
             )
         try:
-            await asyncio.to_thread(probe_judge, kind, section.model_dump(mode="json"))
+            await asyncio.to_thread(probe_judge, kind, judges[kind])
         except ConfigurationError as error:
             raise ConfigError(f"{kind} Judge preflight failed: {error}") from error
 
@@ -145,9 +171,8 @@ def judge_endpoints(config: VerificationConfig) -> dict[str, str]:
     Gateway's, on a port that changes every run.
     """
     return {
-        kind: endpoint_identity(section.base_url)
-        for kind in _JUDGE_KINDS
-        if (section := getattr(config, kind)) is not None
+        kind: endpoint_identity(section["base_url"])
+        for kind, section in resolved_judges(config).items()
     }
 
 
@@ -161,15 +186,14 @@ def open_judge_sessions(
     not set gets no session, and fails in the verifier if a Task calls it.
     """
     sessions: dict[str, GatewaySession] = {}
-    for kind in _TOKEN_ENV:
-        section = getattr(config, kind)
-        if section is None or not (key := os.environ.get(section.api_key_env, "")):
+    for kind, section in resolved_judges(config).items():
+        if not (key := os.environ.get(section["api_key_env"], "")):
             continue
-        protocol, endpoint = judge_route(kind, section.model_dump(mode="json"))
+        protocol, endpoint = judge_route(kind, section)
         sessions[kind] = gateway.open_session(
             GatewaySession(
                 episode_id=episode_id,
-                model=section.model,
+                model=section["model"],
                 purpose="judge",
                 upstream=Upstream(dialect=protocol, endpoint=endpoint, api_key=key),
             ),
@@ -180,9 +204,9 @@ def open_judge_sessions(
 
 def verifier_judge_config(
     config: VerificationConfig, tokens: dict[str, str], gateway_url: str | None
-) -> tuple[dict[str, object], dict[str, str]]:
+) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
     """The Judge configuration and environment a verifier sees: the Gateway, not the key."""
-    payload = config.model_dump(mode="json", exclude_none=True)
+    payload = resolved_judges(config)
     env: dict[str, str] = {}
     for kind, section in payload.items():
         token = tokens.get(kind)

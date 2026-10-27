@@ -11,33 +11,15 @@ from ale.run.gateway.session import GatewaySession
 from ale.run.recording import EpisodeRecording
 from ale.run.secrets import provider_credentials
 
-from .trajectory import LIVE
+from .trajectory import LIVE, MODELS
 
 pytestmark = [pytest.mark.needs_llm, LIVE]
 
-CASES = (
-    ("xai", "XAI_API_KEY", "https://api.x.ai", "grok-4.5"),
-    ("openai", "OPENAI_API_KEY", "https://api.openai.com", "gpt-5-mini"),
-)
 
-
-@pytest.mark.parametrize(
-    ("provider", "key_var", "upstream_url", "model"),
-    CASES,
-    ids=[case[0] for case in CASES],
-)
-async def test_real_chat_endpoint_through_gateway(
-    tmp_path,
-    provider: str,
-    key_var: str,
-    upstream_url: str,
-    model: str,
-) -> None:
-    key, upstream = provider_credentials(
-        key_var,
-        upstream_url,
-        "openai-chat-completions",
-    )
+@pytest.mark.parametrize("provider", ["xai", "openai"])
+async def test_real_chat_endpoint_through_gateway(tmp_path, provider: str) -> None:
+    model = MODELS[provider]
+    key, upstream = provider_credentials(provider)
     recording = EpisodeRecording(tmp_path)
     gateway = Gateway(
         api_key=key,

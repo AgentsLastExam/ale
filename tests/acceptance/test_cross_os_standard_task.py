@@ -29,7 +29,7 @@ from ale.run.tasksets.manifest import load_task_folder
 from ale.run.tools import resolved_cua_desktop, stage_cua_desktop
 from tests.support import CONTAINER_BASE, provider_registry
 
-from .trajectory import LIVE, llm_audit_evidence
+from .trajectory import LIVE, MODELS, llm_audit_evidence
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -436,11 +436,8 @@ async def test_real_llm_reads_and_edits_the_windows_desktop(tmp_path: Path) -> N
         pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows qcow2")
 
     task = load_task_folder(_write_windows_gui_task(tmp_path / "tasks"))
-    model = os.environ.get("ALE_LIVE_WINDOWS_MODEL", "claude-opus-4-8")
-    api_key, upstream = provider_credentials(
-        os.environ.get("ALE_LIVE_ANTHROPIC_API_KEY_ENV", ""),
-        os.environ.get("ALE_LIVE_ANTHROPIC_BASE_URL", ""),
-    )
+    model = MODELS["anthropic"]
+    api_key, upstream = provider_credentials("anthropic")
     gateway = Gateway(api_key=api_key, upstream=upstream, dialect="anthropic", host="0.0.0.0")
     await gateway.start()
     try:

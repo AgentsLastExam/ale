@@ -44,7 +44,7 @@ _PROVIDERS: dict[str, tuple[Provider, str | None, str]] = {
         "anthropic",
         None,
         "run claude setup-token with checkout-local CLAUDE_CONFIG_DIR, then put "
-        "CLAUDE_CODE_OAUTH_TOKEN in this checkout's .env",
+        "ALE_CLAUDE_CODE_OAUTH_TOKEN in this checkout's .env",
     ),
     "codex-cli": (
         "openai",
@@ -126,7 +126,7 @@ def resolve_authentication(agent: AgentConfig) -> ResolvedAuthentication:
     profile = auth_root() / agent.name / filename if filename else None
     token = ""
     if agent.name == "claude-code":
-        token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+        token = os.environ.get("ALE_CLAUDE_CODE_OAUTH_TOKEN", "").strip()
     available = bool(token) if profile is None else profile.is_file()
 
     if requested == "api-key" or (requested == "auto" and not available):

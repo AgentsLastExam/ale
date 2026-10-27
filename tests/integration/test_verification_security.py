@@ -41,7 +41,7 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     secret = "verify-only-provider-secret"
-    monkeypatch.setenv("JUDGE_KEY", secret)
+    monkeypatch.setenv("ALE_OPENAI_API_KEY", secret)
     task_root = scaffold_task(tmp_path / "scope")
     (task_root / "setup").mkdir()
     (task_root / "instruction.md").write_text("${greeting}. Do nothing.\n")
@@ -49,7 +49,7 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "mkdir -p /home/user/output\n"
-        'test -z "${JUDGE_KEY-}${ALE_LLM_JUDGE_TOKEN-}"\n'
+        'test -z "${ALE_OPENAI_API_KEY-}${ALE_LLM_JUDGE_TOKEN-}"\n'
         "printf absent > /home/user/output/setup-key\n"
     )
     (task_root / "oracle" / "run.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
@@ -62,7 +62,7 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
         "v = {}\n"
         "v['setup_scope'] = checks.text_equals('/home/user/output/setup-key', 'absent')['score']\n"
         "v['verify_scope'] = float(bool(os.environ.get('ALE_LLM_JUDGE_TOKE"
-        "N')) and 'JUDGE_KEY' not in os.environ)\n"
+        "N')) and 'ALE_OPENAI_API_KEY' not in os.environ)\n"
         "v['no_host_callback'] = float(not any((name in os.environ for nam"
         "e in ('ALE_VERIFICATION_URL', 'ALE_VERIFICATION_TOKEN'))))\n"
         "sys.stderr.write(os.environ['ALE_LLM_JUDGE_TOKEN'])\n"
@@ -84,10 +84,10 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
             gateway_url=gateway_url,
             verification_config=VerificationConfig(
                 llm=LLMJudgeConfig(
+                    provider="openai",
+                    dialect="openai-responses",
                     model="gpt-5-mini",
                     reasoning_effort="medium",
-                    base_url="https://api.openai.com",
-                    api_key_env="JUDGE_KEY",
                 )
             ),
         )
@@ -107,7 +107,7 @@ async def test_record_containing_a_verify_credential_is_not_collected(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     secret = "record-leak-provider-secret"
-    monkeypatch.setenv("JUDGE_KEY", secret)
+    monkeypatch.setenv("ALE_OPENAI_API_KEY", secret)
     task_root = scaffold_task(tmp_path / "leak")
     (task_root / "setup").mkdir()
     (task_root / "instruction.md").write_text("${greeting}. Do nothing.\n")
@@ -122,7 +122,7 @@ async def test_record_containing_a_verify_credential_is_not_collected(
         "import os\n"
         "from ale_verify import write\n"
         "v = {}\n"
-        "v['score'] = {'score': 1.0, 'raw_value': os.environ['JUDGE_KEY']}['score']\n"
+        "v['score'] = {'score': 1.0, 'raw_value': os.environ['ALE_OPENAI_API_KEY']}['score']\n"
         "v['overall'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
@@ -136,10 +136,10 @@ async def test_record_containing_a_verify_credential_is_not_collected(
         run_dir=tmp_path / "runs",
         verification_config=VerificationConfig(
             llm=LLMJudgeConfig(
+                provider="openai",
+                dialect="openai-responses",
                 model="gpt-5-mini",
                 reasoning_effort="medium",
-                base_url="https://api.openai.com",
-                api_key_env="JUDGE_KEY",
             )
         ),
     )

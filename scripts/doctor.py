@@ -163,7 +163,7 @@ def check_secrets(root: Path) -> list[Result]:
                 WARN,
                 "secrets",
                 f"{path} missing — live agent runs and gated assets will fail",
-                "cp .env.example .env  (then fill in ANTHROPIC_API_KEY)",
+                "cp .env.example .env  (then fill in ALE_ANTHROPIC_API_KEY)",
             )
         ]
     keys = {
@@ -171,7 +171,7 @@ def check_secrets(root: Path) -> list[Result]:
         for line in path.read_text().splitlines()
         if "=" in line and not line.lstrip().startswith("#")
     }
-    missing = sorted({"ANTHROPIC_API_KEY"} - {k for k in keys if k})
+    missing = sorted({"ALE_ANTHROPIC_API_KEY"} - {k for k in keys if k})
     if missing:
         return [
             Result(WARN, "secrets", f"{path} lacks {', '.join(missing)}", f"add them to {path}")

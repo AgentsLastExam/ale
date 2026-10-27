@@ -94,7 +94,7 @@ def test_the_registry_builds_the_configured_container_provider() -> None:
 
 def test_the_api_key_is_named_not_stored() -> None:
     config = RunConfig.model_validate({"container": {"provider": "daytona"}})
-    assert config.container.daytona.api_key_env == "DAYTONA_API_KEY"
+    assert config.container.daytona.api_key_env == "ALE_DAYTONA_API_KEY"
     assert "dtn" not in config.model_dump_json()
 
 
@@ -634,7 +634,7 @@ class ListingApi:
 async def test_a_sandbox_daytona_is_deleting_is_no_longer_retained(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DAYTONA_API_KEY", "key")
+    monkeypatch.setenv("ALE_DAYTONA_API_KEY", "key")
     provider = DaytonaProvider()
     provider._api_client = ListingApi()  # type: ignore[assignment]
     records = await provider.list_retained()
@@ -645,7 +645,7 @@ async def test_a_sandbox_daytona_is_deleting_is_no_longer_retained(
 async def test_without_a_key_there_is_nothing_of_daytonas_to_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
+    monkeypatch.delenv("ALE_DAYTONA_API_KEY", raising=False)
     assert await DaytonaProvider().list_retained() == []
 
 

@@ -12,13 +12,21 @@ just bootstrap
 uv run ale --help
 ```
 
-Run a Task with a provider API key named in the checkout's `.env`:
+Copy `.env.example` to `.env` and fill the key of the provider you use. Each Harness
+calls its preset's provider with `ALE_<PROVIDER>_API_KEY`, at `ALE_<PROVIDER>_BASE_URL`
+when set and the provider's own API otherwise:
+
+```bash
+uv run ale run /path/to/task --agent claude-code --model claude-sonnet-5
+```
+
+For a one-off endpoint, name the `.env` variable holding its key:
 
 ```bash
 uv run ale run /path/to/task --agent claude-code \
   --model qwen3.7-max \
   --base-url https://dashscope.aliyuncs.com/apps/anthropic \
-  --api-key-env QWEN_API_KEY
+  --api-key-env ALE_QWEN_API_KEY
 ```
 
 Or exercise the complete pipeline without a model credential:

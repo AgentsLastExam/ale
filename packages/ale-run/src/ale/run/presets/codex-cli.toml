@@ -11,9 +11,8 @@ reasoning_effort = "default"
 web_search = false
 
 [gateway]
+provider = "openai"
 dialect = "openai-responses"
-base_url = "https://api.openai.com"
-api_key_env = "OPENAI_API_KEY"
 
 [gateway.limits]
 max_model_calls = "unlimited"

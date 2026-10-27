@@ -81,10 +81,10 @@ def test_multiple_agent_judges_allow_later_checks_without_touching_solver_trajec
 
 @pytest.mark.needs_docker
 @pytest.mark.parametrize(
-    ("adapter", "binary_name", "model", "base_url"),
+    ("adapter", "binary_name", "model", "model_provider"),
     (
-        ("codex-cli", "codex", "gpt-5", "https://example.test"),
-        ("claude-code", "claude", "claude-sonnet-4", "https://example.test"),
+        ("codex-cli", "codex", "gpt-5", "openai"),
+        ("claude-code", "claude", "claude-sonnet-4", "anthropic"),
     ),
 )
 @pytest.mark.asyncio
@@ -94,10 +94,11 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
     adapter: str,
     binary_name: str,
     model: str,
-    base_url: str,
+    model_provider: str,
 ) -> None:
     secret = "agent-direct-secret"
-    monkeypatch.setenv("JUDGE_KEY", secret)
+    monkeypatch.setenv(f"ALE_{model_provider.upper()}_API_KEY", secret)
+    monkeypatch.setenv(f"ALE_{model_provider.upper()}_BASE_URL", "https://example.test")
     task_root = scaffold_task(tmp_path / "agent-integrity")
     (task_root / "task.yaml").write_text(
         (task_root / "task.yaml")
@@ -172,12 +173,11 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
             collect_artifacts=True,
             verification_config=VerificationConfig(
                 agent=AgentJudgeConfig(
+                    provider=model_provider,  # type: ignore[arg-type]
                     adapter=adapter,  # type: ignore[arg-type]
                     version="1.0.0",
                     model=model,
                     reasoning_effort="high",
-                    base_url=base_url,
-                    api_key_env="JUDGE_KEY",
                 )
             ),
         )

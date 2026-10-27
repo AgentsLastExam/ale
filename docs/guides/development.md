@@ -43,11 +43,11 @@ is the one condition under which installs silently degrade to copies.
 | Task checkouts and guest disks | `~/.cache/ale` (`ALE_CACHE_DIR`) | a new worktree can reuse operator-managed runtime artifacts |
 | Task asset sync state | each Task repository's `.ale-cache/` | generated commit/dirty marker; ignored by Git |
 | Task assets | each Task's `{image,setup,verify,oracle}/assets/` | direct development paths; explicit HF pull/push/status |
-| Secrets | checkout `.env` (`ALE_ENV_FILE` overrides) | solver keys stay on the Host; configured Judge keys exist only for the verifier command |
+| Secrets | checkout `.env` (`ALE_ENV_FILE` overrides) | `ALE_`-prefixed names from [`.env.example`](../../.env.example); provider and Judge keys stay on the Host Gateway |
 | Default run configuration | `ALE_RUN_CONFIG` points to a run TOML | used when `--config` is absent; see [`ale-run`](../../packages/ale-run/README.md) for precedence |
 
 Set `ALE_REPO_PATH` to the absolute active engine checkout for engine discovery. Configure
-`HF_TOKEN` when synchronizing private Task assets. The `assets` collection of
+`ALE_HF_TOKEN` when synchronizing private Task assets. The `assets` collection of
 `agents-last-exam`, or of `ALE_ASSETS_NAMESPACE` when set, is discovered automatically; see
 [Task assets](../specs/task-assets.md). Runtime never downloads assets, and Tasks without
 stage-local assets require no collection or token.

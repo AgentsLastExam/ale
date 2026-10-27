@@ -12,3 +12,7 @@ allowed_tools = []
 disallowed_tools = []
 append_system_prompt = "default"
 effort = "default"
+
+[gateway]
+provider = "anthropic"
+dialect = "anthropic"

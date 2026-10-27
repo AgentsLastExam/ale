@@ -125,27 +125,43 @@ than tighten it.
 
 In API-key mode the provider key lives in the host's gitignored `.env`, which `ale` reads
 once when it starts, for every command; a variable already set in the environment (an
-explicit `KEY=… ale run`, or a CI secret) takes precedence. The Sandbox
-receives a URL and a bearer token that is worthless anywhere else and is revoked when the
-episode ends — verified by `test_a_revoked_session_loses_its_egress`.
+explicit `KEY=… ale run`, or a CI secret) takes precedence. Every credential and endpoint
+ALE reads carries an `ALE_` prefix, so a checkout's values and the variables the
+operator's own tools read, such as `ANTHROPIC_BASE_URL` for their own Claude Code, never
+override each other.
 
-Subscription access and refresh credentials remain in checkout-local Host state. The
-Gateway replaces the episode token with current provider authorization only after
-authenticating the session. Framework-authored result, trace, and RunLock fields contain
-neither raw credential nor profile path.
+The upstream follows the model provider. A Harness preset names it with
+`gateway.provider`, and the Gateway sends
+`ALE_<PROVIDER>_API_KEY` to `ALE_<PROVIDER>_BASE_URL`, or to the provider's own API when
+that URL is unset. Both names derive from the provider so that a key is only ever paired
+with its own provider's endpoint, and a run that changes provider cannot carry another
+provider's key along. `--base-url` and `--api-key-env` (`gateway.base_url`,
+`gateway.api_key_env`) override this for one run; an endpoint other than the provider's
+must name the variable holding its key, by name rather than value, so the key stays out of
+shell history and process listings.
+
+The Sandbox receives a URL and a bearer token that is worthless anywhere else and is
+revoked when the episode ends — verified by `test_a_revoked_session_loses_its_egress`.
+
+Subscription access and refresh credentials remain in checkout-local Host state:
+`ALE_CLAUDE_CODE_OAUTH_TOKEN` in `.env`, and `.ale/auth/<harness>/auth.json` for Codex and
+Grok. They go only to the provider's own subscription endpoint, never to
+`ALE_<PROVIDER>_BASE_URL`. The Gateway replaces the episode token with current provider
+authorization only after authenticating the session. Framework-authored result, trace,
+and RunLock fields contain neither raw credential nor profile path.
 
 Verification is a separate trusted phase after solver exit. `[verification.llm]` and
-`[verification.agent]` name an environment variable, model, endpoint, and reasoning
-effort at run level. ALE resolves and injects the key only for the OS-specific
-verification entry, registers the value for output/transcript redaction, and removes the
-sandbox after verification. The key is absent from provisioning, setup, the
-solver environment, staged configuration, result, record, and RunLock.
+`[verification.agent]` name a model provider, model and reasoning effort at run level, and
+the LLM Judge also its dialect; their keys and endpoints resolve by the same provider rule
+as the Gateway's. Each episode opens one Gateway session per configured Judge holding that
+key. The verifier receives only the Gateway's address and the session's token, which ALE
+injects only for the OS-specific verification entry, registers for output/transcript
+redaction, and revokes when the episode ends. The key itself never enters a Sandbox and is
+absent from provisioning, setup, the solver and verification environments, staged
+configuration, result, record, and RunLock.
 
-LLM and Agent Judges call their configured endpoints directly from the active
-verification sandbox, whether shared with the solver or separate. There is no
-Verification Service, Host callback, or Judge Gateway session.
-This deliberately trusts reviewed Task verifier code with the configured Judge
-credential; a malicious Task author is outside this threat model.
+This deliberately trusts reviewed Task verifier code with the episode's Judge sessions; a
+malicious Task author is outside this threat model.
 
 ## 4. The agent cannot change what it is measured under
 

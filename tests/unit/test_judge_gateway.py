@@ -13,7 +13,7 @@ from ale.core.trace import read_jsonl
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.recording import EpisodeRecording
-from ale.run.verification import open_judge_sessions, verifier_judge_config
+from ale.run.verification import judge_endpoints, open_judge_sessions, verifier_judge_config
 
 pytestmark = pytest.mark.unit
 
@@ -46,17 +46,19 @@ async def test_a_judge_session_reaches_its_own_endpoint_and_never_replays(
     await site.start()
     upstream = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/judge"
 
-    monkeypatch.setenv("JUDGE_KEY", JUDGE_KEY)
+    monkeypatch.setenv("ALE_OPENAI_API_KEY", JUDGE_KEY)
+    monkeypatch.setenv("ALE_OPENAI_BASE_URL", upstream)
     config = VerificationConfig.model_validate(
         {
             "llm": {
+                "provider": "openai",
+                "dialect": "openai-responses",
                 "model": "judge-model",
                 "reasoning_effort": "medium",
-                "base_url": f"{upstream}/v1/responses",
-                "api_key_env": "JUDGE_KEY",
             }
         }
     )
+    assert judge_endpoints(config) == {"llm": f"{upstream}/v1/responses"}
     gateway = Gateway(host="127.0.0.1")
     url = await gateway.start()
     recording = EpisodeRecording(tmp_path)
@@ -64,7 +66,12 @@ async def test_a_judge_session_reaches_its_own_endpoint_and_never_replays(
         sessions = open_judge_sessions(gateway, config, episode_id="e1", trace=recording.transport)
         token = sessions["llm"].token
         payload, env = verifier_judge_config(config, {"llm": token}, url)
-        assert payload["llm"]["base_url"] == f"{url}/v1/responses"  # type: ignore[index]
+        assert payload["llm"] == {
+            "model": "judge-model",
+            "reasoning_effort": "medium",
+            "base_url": f"{url}/v1/responses",
+            "api_key_env": "ALE_LLM_JUDGE_TOKEN",
+        }
         assert env == {"ALE_LLM_JUDGE_TOKEN": token}
         assert JUDGE_KEY not in json.dumps(payload)
 
@@ -96,21 +103,22 @@ async def test_a_judge_session_reaches_its_own_endpoint_and_never_replays(
 
 
 def test_a_judge_without_its_key_gets_no_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("JUDGE_KEY", raising=False)
+    monkeypatch.delenv("ALE_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ALE_ANTHROPIC_BASE_URL", raising=False)
     config = VerificationConfig.model_validate(
         {
             "agent": {
+                "provider": "anthropic",
                 "adapter": "claude-code",
                 "version": "2.0.0",
                 "model": "claude-x",
                 "reasoning_effort": "high",
-                "base_url": "https://api.anthropic.com",
-                "api_key_env": "JUDGE_KEY",
             }
         }
     )
+    assert judge_endpoints(config) == {"agent": "https://api.anthropic.com"}
     assert open_judge_sessions(Gateway(), config, episode_id="e", trace=None) == {}  # type: ignore[arg-type]
     payload, env = verifier_judge_config(config, {"agent": "tok"}, "http://gw:1")
-    assert payload["agent"]["base_url"] == "http://gw:1"  # type: ignore[index]
+    assert payload["agent"]["base_url"] == "http://gw:1"
     assert env == {"ALE_AGENT_JUDGE_TOKEN": "tok"}
     assert GatewaySession(episode_id="e", model="m").purpose == "agent"

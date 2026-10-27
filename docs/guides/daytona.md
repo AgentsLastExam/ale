@@ -15,7 +15,7 @@ holds ALE's guarantees on Daytona is in
 - **An API key** from the Daytona dashboard, in the checkout's `.env`:
 
   ```bash
-  DAYTONA_API_KEY=<your key>
+  ALE_DAYTONA_API_KEY=<your key>
   ```
 
   The key stays on the Host. To use another variable, set
@@ -104,7 +104,7 @@ Nothing else is created: no snapshots, so Daytona's snapshot quota is not used.
 
 | Message | Cause |
 |---|---|
-| `Daytona rejected the API key` | `DAYTONA_API_KEY` is wrong or for another organization |
+| `Daytona rejected the API key` | `ALE_DAYTONA_API_KEY` is wrong or for another organization |
 | `would not change the sandbox's network settings at runtime` | the organization is below Tier 3 |
 | `is not a whole number of GiB` | the Task's memory or storage is not a multiple of 1024 MB |
 | `Daytona's allowlist takes domain names` | the Task's allowlist names an address, a port or a pattern |

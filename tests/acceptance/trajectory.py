@@ -24,7 +24,14 @@ LIVE = pytest.mark.skipif(
     os.environ.get("ALE_RUN_LIVE_ACCEPTANCE") != "1",
     reason="set ALE_RUN_LIVE_ACCEPTANCE=1 to make real model calls",
 )
-MODEL = os.environ.get("ALE_LIVE_MODEL", "claude-sonnet-5")
+#: The model live calls to each provider use. Keys and endpoints are not test knobs: every
+#: live call resolves them as ale does, from ALE_<PROVIDER>_API_KEY and
+#: ALE_<PROVIDER>_BASE_URL in the checkout's .env.
+MODELS = {
+    "anthropic": os.environ.get("ALE_LIVE_ANTHROPIC_MODEL", "claude-sonnet-5"),
+    "openai": os.environ.get("ALE_LIVE_OPENAI_MODEL", "gpt-5.6-luna"),
+    "xai": "grok-4.5",
+}
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
 SHIPPED = (ClaudeCodeHarness(), CodexCliHarness(), GrokBuildHarness(), OpenClawCliHarness())
 WORKSPACE_ROOT = sibling_checkout("ale-tasks-base").parent
@@ -40,7 +47,7 @@ def run_task(
     *,
     run_id: str,
     agent: str = "claude-code",
-    model: str = MODEL,
+    model: str = MODELS["anthropic"],
     settings: tuple[str, ...] = (),
 ) -> Path:
     executable = Path(sys.executable).parent / "ale"
@@ -57,6 +64,10 @@ def run_task(
         "--run-id",
         run_id,
         "--no-resume",
+        # A subscription login in the checkout's .ale/auth would otherwise win; live runs
+        # always test the API-key route the .env describes.
+        "--auth",
+        "api-key",
     ]
     for setting in settings:
         command.extend(("--set", setting))
@@ -99,7 +110,7 @@ def native_session_file(
 def audit_episode(
     episode: Path,
     *,
-    model: str = MODEL,
+    model: str = MODELS["anthropic"],
     harness: str = "claude-code",
     version: str = "2.1.227",
 ) -> tuple[
@@ -188,14 +199,11 @@ def llm_audit_episode(episode: Path, *, requirement: str) -> dict[str, Any]:
 
 def llm_audit_evidence(evidence: dict[str, Any], *, requirement: str) -> dict[str, Any]:
     """Judge a live acceptance artifact with an independent model call."""
-    api_key, upstream = provider_credentials(
-        os.environ.get("ALE_LIVE_ANTHROPIC_API_KEY_ENV", ""),
-        os.environ.get("ALE_LIVE_ANTHROPIC_BASE_URL", ""),
-    )
+    api_key, upstream = provider_credentials("anthropic")
     payload = json.dumps(
         {
-            "model": MODEL,
-            "max_tokens": 1200,
+            "model": MODELS["anthropic"],
+            "max_tokens": 4000,
             "messages": [
                 {
                     "role": "user",
@@ -235,7 +243,12 @@ def llm_audit_evidence(evidence: dict[str, Any], *, requirement: str) -> dict[st
     ).strip()
     if text.startswith("```"):
         text = text.strip("`").removeprefix("json").strip()
-    audit = json.loads(text)
+    reply = f"stop_reason={body.get('stop_reason')!r} usage={body.get('usage')!r} text={text!r}"
+    assert body.get("stop_reason") == "end_turn", f"audit reply did not finish: {reply}"
+    try:
+        audit = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise AssertionError(f"audit reply is not JSON ({error}): {reply}") from error
     assert audit.get("valid") is True, audit
     assert audit.get("evidence"), audit
     return audit

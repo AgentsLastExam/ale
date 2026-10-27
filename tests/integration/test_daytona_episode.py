@@ -3,7 +3,7 @@
 Setup, the agent's stage, artifact collection and verification each take their own turn
 with the sandbox, and each turn depends on something the conformance suite checks one piece
 at a time: who runs, what is uploaded, and when the network is open. Creates billable
-sandboxes, so it needs ``DAYTONA_API_KEY``.
+sandboxes, so it needs ``ALE_DAYTONA_API_KEY``.
 """
 
 from __future__ import annotations
@@ -30,7 +30,9 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.needs_docker,
     pytest.mark.needs_daytona,
-    pytest.mark.skipif(not os.environ.get("DAYTONA_API_KEY"), reason="DAYTONA_API_KEY is not set"),
+    pytest.mark.skipif(
+        not os.environ.get("ALE_DAYTONA_API_KEY"), reason="ALE_DAYTONA_API_KEY is not set"
+    ),
 ]
 
 REACH = (

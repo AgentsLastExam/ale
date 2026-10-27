@@ -195,9 +195,9 @@ async def _run_one(
         else:
             try:
                 api_key, upstream = provider_credentials(
-                    settings.gateway.api_key_env,
-                    settings.gateway.base_url,
-                    settings.gateway.dialect,
+                    settings.gateway.provider,
+                    base_url=settings.gateway.base_url,
+                    key_var=settings.gateway.api_key_env,
                 )
             except AleError as error:
                 typer.echo(f"{error}", err=True)

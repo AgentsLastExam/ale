@@ -12,11 +12,15 @@ from ale.core.lock import TaskSource
 from ale.core.verdict import Status
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
+from ale.run.gateway.server import REQUEST_PATHS, Gateway
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
+from ale.run.secrets import provider_endpoint
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry, sibling_checkout
+
+from .trajectory import MODELS
 
 pytestmark = [
     pytest.mark.needs_docker,
@@ -26,72 +30,59 @@ pytestmark = [
 TASKS = sibling_checkout("ale-tasks-base")
 
 CASES = (
-    (
-        "responses",
-        "https://api.openai.com",
-        "OPENAI_API_KEY",
-        "ALE_LIVE_OPENAI_MODEL",
-        "gpt-5.4-mini",
-    ),
-    (
-        "chat-completions",
-        "https://api.openai.com/v1/chat/completions",
-        "OPENAI_API_KEY",
-        "ALE_LIVE_OPENAI_CHAT_MODEL",
-        "gpt-5.4-mini",
-    ),
-    (
-        "messages",
-        "https://api.anthropic.com",
-        "ANTHROPIC_API_KEY",
-        "ALE_LIVE_ANTHROPIC_MODEL",
-        "claude-sonnet-5",
-    ),
+    ("openai", "openai-responses"),
+    ("openai", "openai-chat-completions"),
+    ("anthropic", "anthropic"),
 )
 
 
 @pytest.mark.parametrize(
-    ("protocol", "base_url", "key_env", "model_env", "default_model"),
+    ("provider", "dialect"),
     CASES,
+    ids=["responses", "chat-completions", "messages"],
 )
 @pytest.mark.asyncio
 async def test_live_llm_judge_record_and_transport(
     tmp_path: Path,
-    protocol: str,
-    base_url: str,
-    key_env: str,
-    model_env: str,
-    default_model: str,
+    provider: str,
+    dialect: str,
 ) -> None:
+    key_env, base_url = provider_endpoint(provider)
     if not os.environ.get(key_env):
         pytest.skip(f"no {key_env}")
-    if protocol == "messages":
-        base_url = os.environ.get("ALE_LIVE_ANTHROPIC_BASE_URL", base_url)
     task_path = TASKS / "tasks" / "demo" / "verification_llm_judge"
     task = load_tasks(task_path)[0]
     verification = VerificationConfig(
         llm=LLMJudgeConfig(
-            model=os.environ.get(model_env, default_model),
+            provider=provider,  # type: ignore[arg-type]
+            dialect=dialect,  # type: ignore[arg-type]
+            model=MODELS[provider],
             reasoning_effort="medium",
-            base_url=base_url,
-            api_key_env=key_env,
         )
     )
     settings = RunConfig(verification=verification)
     harness = OracleHarness()
-    result = await run_episode(
-        task,
-        StandardEnvironment(harness),
-        provider_registry(DockerProvider()),
-        run_dir=tmp_path,
-        provenance=ProvenanceInputs(
-            source=TaskSource(kind="local", path=str(task_path)),
-            agent=agent_provenance(harness, "", settings, EffectiveAgentResources()),
-            gateway=gateway_provenance(settings),
-            config_hash=settings.config_hash,
-        ),
-        verification_config=verification,
-    )
+    # A verifier reaches its Judge only through a Gateway session, which holds the key.
+    gateway = Gateway()
+    gateway_url = await gateway.start()
+    try:
+        result = await run_episode(
+            task,
+            StandardEnvironment(harness),
+            provider_registry(DockerProvider()),
+            gateway=gateway,
+            gateway_url=gateway_url,
+            run_dir=tmp_path,
+            provenance=ProvenanceInputs(
+                source=TaskSource(kind="local", path=str(task_path)),
+                agent=agent_provenance(harness, "", settings, EffectiveAgentResources()),
+                gateway=gateway_provenance(settings),
+                config_hash=settings.config_hash,
+            ),
+            verification_config=verification,
+        )
+    finally:
+        await gateway.stop()
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"overall": 1.0}
     assert (result.run_dir / "result.json").is_file()
@@ -109,8 +100,7 @@ async def test_live_llm_judge_record_and_transport(
     assert result.lock is not None
     assert len(result.lock.judges) == 1
     assert result.lock.judges[0].kind == "llm"
-    assert result.lock.judges[0].endpoint_identity == base_url
-    assert protocol in {"responses", "chat-completions", "messages"}
+    assert result.lock.judges[0].endpoint_identity == base_url + REQUEST_PATHS[dialect]
     secret = os.environ[key_env]
     for path in result.run_dir.rglob("*"):
         if path.is_file():

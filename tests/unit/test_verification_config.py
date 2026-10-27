@@ -15,18 +15,17 @@ def test_verification_sections_are_optional_and_strict() -> None:
         {
             "verification": {
                 "llm": {
+                    "provider": "anthropic",
+                    "dialect": "anthropic",
                     "model": "judge-model",
                     "reasoning_effort": "medium",
-                    "base_url": "https://example.test",
-                    "api_key_env": "JUDGE_API_KEY",
                 },
                 "agent": {
+                    "provider": "openai",
                     "adapter": "codex-cli",
                     "version": "1.2.3",
                     "model": "agent-model",
                     "reasoning_effort": "high",
-                    "base_url": "https://example.test",
-                    "api_key_env": "AGENT_JUDGE_API_KEY",
                 },
             }
         }
@@ -35,18 +34,23 @@ def test_verification_sections_are_optional_and_strict() -> None:
     assert configured.verification.agent.adapter == "codex-cli"
 
 
+_LLM = {
+    "provider": "openai",
+    "dialect": "openai-responses",
+    "model": "m",
+    "reasoning_effort": "low",
+}
+
+
 @pytest.mark.parametrize(
     "llm",
     [
-        {"model": "", "reasoning_effort": "medium", "base_url": "https://x", "api_key_env": "K"},
-        {"model": "m", "reasoning_effort": "", "base_url": "https://x", "api_key_env": "K"},
-        {"model": "m", "reasoning_effort": "medium", "base_url": "not-a-url", "api_key_env": "K"},
-        {
-            "model": "m",
-            "reasoning_effort": "medium",
-            "base_url": "https://x",
-            "api_key_env": "not valid",
-        },
+        {**_LLM, "model": ""},
+        {**_LLM, "reasoning_effort": " "},
+        {**_LLM, "provider": "meta"},
+        {**_LLM, "dialect": "gemini"},
+        {key: value for key, value in _LLM.items() if key != "provider"},
+        {key: value for key, value in _LLM.items() if key != "dialect"},
     ],
 )
 def test_invalid_judge_configuration_is_rejected(llm: dict[str, str]) -> None:
@@ -54,22 +58,10 @@ def test_invalid_judge_configuration_is_rejected(llm: dict[str, str]) -> None:
         RunConfig.model_validate({"verification": {"llm": llm}})
 
 
-def test_config_hash_contains_only_the_credential_variable_name() -> None:
-    config = RunConfig.model_validate(
-        {
-            "verification": {
-                "llm": {
-                    "model": "m",
-                    "reasoning_effort": "low",
-                    "base_url": "https://example.test",
-                    "api_key_env": "SECRET_NAME",
-                }
-            }
-        }
-    )
+def test_judges_name_a_provider_never_a_key_or_endpoint() -> None:
+    config = RunConfig.model_validate({"verification": {"llm": _LLM}})
     dumped = config.model_dump(mode="json")
-    assert dumped["verification"]["llm"]["api_key_env"] == "SECRET_NAME"
-    assert "credential-value" not in str(dumped)
+    assert dumped["verification"]["llm"] == _LLM
 
 
 @pytest.mark.parametrize("adapter", ["codex", "claude", "openclaw-cli", ""])
@@ -79,44 +71,32 @@ def test_agent_adapter_is_closed(adapter: str) -> None:
             {
                 "verification": {
                     "agent": {
+                        "provider": "openai",
                         "adapter": adapter,
                         "version": "1.2.3",
                         "model": "m",
                         "reasoning_effort": "medium",
-                        "base_url": "https://example.test",
-                        "api_key_env": "KEY",
                     }
                 }
             }
         )
 
 
-@pytest.mark.parametrize("field", ["profile", "dialect", "gateway", "harness", "retry_count"])
+@pytest.mark.parametrize(
+    "field", ["base_url", "api_key_env", "profile", "gateway", "harness", "retry_count"]
+)
 def test_legacy_verification_fields_are_forbidden(field: str) -> None:
     with pytest.raises(ValidationError):
-        RunConfig.model_validate(
-            {
-                "verification": {
-                    "llm": {
-                        "model": "m",
-                        "reasoning_effort": "medium",
-                        "base_url": "https://example.test",
-                        "api_key_env": "KEY",
-                        field: "legacy",
-                    }
-                }
-            }
-        )
+        RunConfig.model_validate({"verification": {"llm": {**_LLM, field: "legacy"}}})
 
 
 @pytest.mark.parametrize("version", [None, "latest", "1", "1.2", "^1.2.3", "1.2.x"])
 def test_agent_judge_requires_exact_numeric_semver(version: str | None) -> None:
     agent = {
+        "provider": "openai",
         "adapter": "codex-cli",
         "model": "m",
         "reasoning_effort": "medium",
-        "base_url": "https://example.test",
-        "api_key_env": "KEY",
     }
     if version is not None:
         agent["version"] = version

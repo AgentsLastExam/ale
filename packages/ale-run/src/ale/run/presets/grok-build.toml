@@ -12,9 +12,8 @@ reasoning_effort = "high"
 disabled_tools = []
 
 [gateway]
+provider = "xai"
 dialect = "openai-responses"
-base_url = "https://api.x.ai"
-api_key_env = "XAI_API_KEY"
 
 [gateway.limits]
 max_model_calls = "unlimited"

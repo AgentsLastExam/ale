@@ -134,10 +134,10 @@ def test_validate_accepts_run_level_judge_config(
     config = tmp_path / "verification.toml"
     config.write_text(
         "[verification.llm]\n"
+        'provider = "openai"\n'
+        'dialect = "openai-responses"\n'
         'model = "gpt-test"\n'
         'reasoning_effort = "medium"\n'
-        'base_url = "https://api.openai.com"\n'
-        'api_key_env = "TEST_JUDGE_KEY"\n'
     )
     observed = {}
 

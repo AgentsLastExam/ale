@@ -23,7 +23,7 @@ from ale.run.tasksets.manifest import load_task_folder
 from tests.support import provider_registry
 
 from .test_cross_os_standard_task import _write_task
-from .trajectory import LIVE, native_session_file
+from .trajectory import LIVE, MODELS, native_session_file
 
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_kvm, pytest.mark.needs_llm, LIVE]
 
@@ -61,12 +61,8 @@ async def test_windows_native_harness_completes_a_file_task(
             return resumed
 
         monkeypatch.setattr(type(harness), "launch", launch_and_resume)
-    model = os.environ.get("ALE_LIVE_WINDOWS_MODEL", config.agent.model)
-    api_key, upstream = provider_credentials(
-        os.environ.get("ALE_LIVE_WINDOWS_API_KEY_ENV", config.gateway.api_key_env),
-        os.environ.get("ALE_LIVE_WINDOWS_BASE_URL", config.gateway.base_url),
-        config.gateway.dialect,
-    )
+    model = MODELS[config.gateway.provider]
+    api_key, upstream = provider_credentials(config.gateway.provider)
     task_root = _write_task(tmp_path / "tasks", OperatingSystem.WINDOWS)
     (task_root / "instruction.md").write_text(
         "Read C:/Users/user/input/seed.txt, then write '${greeting} <word> verified' to "

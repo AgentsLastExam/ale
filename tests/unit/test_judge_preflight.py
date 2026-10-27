@@ -16,10 +16,10 @@ from ale_verify import ConfigurationError
 pytestmark = pytest.mark.unit
 
 LLM = {
+    "provider": "openai",
+    "dialect": "openai-chat-completions",
     "model": "judge-model",
     "reasoning_effort": "medium",
-    "base_url": "https://judge.test",
-    "api_key_env": "JUDGE_KEY",
 }
 
 
@@ -57,13 +57,26 @@ async def test_preflight_probes_each_used_kind_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     probed = []
-    monkeypatch.setattr(verification, "probe_judge", lambda kind, config: probed.append(kind))
+    monkeypatch.setattr(
+        verification, "probe_judge", lambda kind, config: probed.append((kind, config))
+    )
+    monkeypatch.setenv("ALE_OPENAI_BASE_URL", "https://judge.test/")
     dirs = [
         verifier(tmp_path / name, 'from ale_verify import judge\njudge("llm", "q")\n')
         for name in ("a", "b")
     ]
     await preflight_judges(dirs, VerificationConfig.model_validate({"llm": LLM}))
-    assert probed == ["llm"]
+    assert probed == [
+        (
+            "llm",
+            {
+                "model": "judge-model",
+                "reasoning_effort": "medium",
+                "base_url": "https://judge.test/v1/chat/completions",
+                "api_key_env": "ALE_OPENAI_API_KEY",
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio

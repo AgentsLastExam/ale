@@ -3,43 +3,23 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from .trajectory import LIVE, MODEL, run_task
+from .trajectory import LIVE, MODELS, run_task
 
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm, LIVE]
 
 TASK = Path(__file__).resolve().parents[1] / "fixtures/tasks/subagent-smoke"
 MARKER = "SUBAGENT_MARKER_7F3A"
-#: Harness -> (ALE_LIVE_<provider>_* upstream, model variable, default model, settings).
+#: Harness -> (model, settings).
 CASES = {
-    "claude-code": ("ANTHROPIC", "ALE_LIVE_MODEL", MODEL, ()),
-    "codex-cli": ("OPENAI", "ALE_LIVE_OPENAI_MODEL", "gpt-5.4-mini", ()),
-    "openclaw-cli": (
-        "OPENAI",
-        "ALE_LIVE_OPENAI_MODEL",
-        "gpt-5.4-mini",
-        ('agent.settings.thinking="off"',),
-    ),
+    "claude-code": (MODELS["anthropic"], ()),
+    "codex-cli": (MODELS["openai"], ()),
+    "openclaw-cli": (MODELS["openai"], ('agent.settings.thinking="off"',)),
 }
-
-
-def _upstream(provider: str) -> tuple[str, ...]:
-    """The API-key endpoint the checkout names for a provider; the preset's when it names none.
-
-    API-key mode is explicit, because ``auto`` prefers a stored subscription login, whose
-    calls this test neither meters nor needs.
-    """
-    flags = ['agent.authentication="api-key"']
-    if key_env := os.environ.get(f"ALE_LIVE_{provider}_API_KEY_ENV"):
-        flags.append(f'gateway.api_key_env="{key_env}"')
-    if base_url := os.environ.get(f"ALE_LIVE_{provider}_BASE_URL"):
-        flags.append(f'gateway.base_url="{base_url}"')
-    return tuple(flags)
 
 
 def _refs(trajectory: dict[str, Any]) -> dict[str, str]:
@@ -58,14 +38,14 @@ def _calls(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
 
 @pytest.mark.parametrize("harness", sorted(CASES))
 def test_real_subagent_work_lands_in_its_own_trajectory(tmp_path: Path, harness: str) -> None:
-    provider, model_env, default_model, settings = CASES[harness]
+    model, settings = CASES[harness]
     episode = run_task(
         TASK,
         tmp_path,
         run_id=f"live-{harness}-subagent",
         agent=harness,
-        model=os.environ.get(model_env, default_model),
-        settings=(*settings, *_upstream(provider)),
+        model=model,
+        settings=settings,
     )
     result = json.loads((episode / "result.json").read_text())
     trajectory = json.loads((episode / "trajectory.json").read_text())

@@ -13,7 +13,8 @@ pytestmark = pytest.mark.integration
 
 
 class FakeApi:
-    def __init__(self) -> None:
+    def __init__(self, *, token: object = None) -> None:
+        self.token = token
         self.revision: object = None
 
     def get_collection(self, slug: str) -> object:
@@ -38,10 +39,13 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
     preserved.write_text("keep")
 
     api = FakeApi()
-    monkeypatch.setattr("huggingface_hub.HfApi", lambda: api)
+    tokens: list[object] = []
+    monkeypatch.setenv("ALE_HF_TOKEN", "hf-checkout-token")
+    monkeypatch.setattr("huggingface_hub.HfApi", lambda *, token: tokens.append(token) or api)
 
     def snapshot_download(**kwargs: object) -> str:
         assert kwargs["revision"] == "a" * 40
+        assert kwargs["token"] == "hf-checkout-token"
         target = Path(str(kwargs["local_dir"])) / "tasks/one/image/assets"
         target.mkdir(parents=True)
         (target / "remote.txt").write_text("remote")
@@ -54,6 +58,7 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
         revision="a" * 40,
     )
     assert result.commit == "a" * 40
+    assert tokens == ["hf-checkout-token"]
     assert api.revision == "a" * 40
     assert (repository / "tasks/one/image/assets/remote.txt").read_text() == "remote"
     assert preserved.read_text() == "keep"
@@ -79,7 +84,7 @@ def test_pull_rejects_empty_existing_assets_before_contacting_hf(
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
     (repository / "tasks/one/image/assets").mkdir()
 
-    def forbidden() -> None:
+    def forbidden(**kwargs: object) -> None:
         pytest.fail("existing assets must be rejected before contacting HF")
 
     monkeypatch.setattr("huggingface_hub.HfApi", forbidden)

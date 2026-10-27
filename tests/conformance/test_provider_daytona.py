@@ -1,6 +1,6 @@
 """The Daytona backend against the shared Provider contract.
 
-Creates real, billable sandboxes on Daytona, so it runs only when ``DAYTONA_API_KEY`` is
+Creates real, billable sandboxes on Daytona, so it runs only when ``ALE_DAYTONA_API_KEY`` is
 set and is selected with ``-m needs_daytona``. Daytona allocates whole GiB; the request
 hook rounds the suite's small default resources up to that, which the Provider itself
 refuses to do. ``ALE_TEST_DAYTONA_GPU=1`` also runs the suite on GPU sandboxes.
@@ -27,7 +27,9 @@ pytestmark = [
     pytest.mark.conformance,
     pytest.mark.needs_docker,
     pytest.mark.needs_daytona,
-    pytest.mark.skipif(not os.environ.get("DAYTONA_API_KEY"), reason="DAYTONA_API_KEY is not set"),
+    pytest.mark.skipif(
+        not os.environ.get("ALE_DAYTONA_API_KEY"), reason="ALE_DAYTONA_API_KEY is not set"
+    ),
 ]
 
 
