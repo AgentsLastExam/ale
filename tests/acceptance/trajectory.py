@@ -47,9 +47,12 @@ def run_task(
     *,
     run_id: str,
     agent: str = "claude-code",
-    model: str = MODELS["anthropic"],
+    model: str | None = MODELS["anthropic"],
     settings: tuple[str, ...] = (),
+    options: tuple[str, ...] = (),
+    timeout: float = 900,
 ) -> Path:
+    """Run one episode through ``ale run``; ``model=None`` keeps the agent preset's."""
     executable = Path(sys.executable).parent / "ale"
     command = [
         str(executable),
@@ -57,8 +60,8 @@ def run_task(
         str(reference),
         "--agent",
         agent,
-        "--model",
-        model,
+        *(("--model", model) if model is not None else ()),
+        *options,
         "--runs-dir",
         str(runs_dir),
         "--run-id",
@@ -79,7 +82,7 @@ def run_task(
         cwd=ENGINE_ROOT,
         text=True,
         capture_output=True,
-        timeout=900,
+        timeout=timeout,
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr

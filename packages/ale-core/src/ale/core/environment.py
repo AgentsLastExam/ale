@@ -12,7 +12,7 @@ budgets are enforced) hold for every domain by construction rather than by revie
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from ale.core.blob import BlobSink
 from ale.core.config import LoggingPolicy, VerificationConfig
 from ale.core.harness import AgentRun, EffectiveAgentResources, HarnessSession
-from ale.core.lock import AleVerifyProvenance, LimitTermination, SandboxProvenance
+from ale.core.lock import AleVerifyProvenance, LimitTermination, ResumedFrom, SandboxProvenance
 from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
 from ale.core.sandbox import (
     PreparedTaskImage,
@@ -68,6 +68,12 @@ class SandboxLease(Protocol):
     """
 
     async def acquire(self, request: SandboxRequest) -> Sandbox: ...
+
+    async def adopt(
+        self, request: SandboxRequest, attach: Callable[[SandboxRequest], Awaitable[Sandbox]]
+    ) -> Sandbox:
+        """Lease a retained Sandbox that ``attach`` reconnects for ``request``."""
+        ...
 
     async def release(self, sandbox: Sandbox) -> None: ...
 
@@ -174,6 +180,8 @@ class EpisodeContext:
     resolved_image: ResolvedImage | None = None
     """Resolved when the Sandbox is provisioned; an image tag alone proves nothing."""
     resource_allocation: ResourceAllocation | None = None
+    resumed_from: ResumedFrom | None = None
+    """The earlier episode this one continues, set when its retained solver is adopted."""
 
     agent_version: str | None = None
     """What the agent turned out to be, once it was installed.

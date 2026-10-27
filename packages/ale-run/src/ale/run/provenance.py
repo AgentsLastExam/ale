@@ -34,6 +34,7 @@ from ale.core.lock import (
     JudgeProvenance,
     LimitTermination,
     ResourceProvenance,
+    ResumedFrom,
     RunLock,
     SandboxProvenance,
     TaskProvenance,
@@ -222,6 +223,7 @@ def build_lock(
     ale_verify: AleVerifyProvenance | None = None,
     termination: LimitTermination | None = None,
     sandbox_outcomes: tuple[SandboxOutcome, ...] = (),
+    resumed_from: ResumedFrom | None = None,
     seed: int = 0,
 ) -> RunLock:
     """Bind one episode's result to everything that produced it."""
@@ -269,6 +271,7 @@ def build_lock(
         ),
         termination=termination,
         sandbox_outcomes=sandbox_outcomes,
+        resumed_from=resumed_from,
     )
 
 

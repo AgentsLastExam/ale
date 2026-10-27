@@ -15,11 +15,12 @@ from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config, 
 from ale.core.errors import AleError, ConfigError, ProviderCapabilityError, TaskDefinitionError
 from ale.core.harness import EffectiveAgentResources, Harness
 from ale.core.ids import content_hash
-from ale.core.lock import AssetProvenance, RunLock
+from ale.core.lock import AssetProvenance, ResumedFrom, RunLock
 from ale.core.result import ResultRecord
 from ale.core.sandbox import ImageKind, PreparedTaskImage, Sandbox, SandboxRequest, SandboxRole
 from ale.core.task import TaskAssetObservation
 from ale.core.taskspec import OperatingSystem, VerificationMode
+from ale.core.trajectory import AtifTrajectory
 from ale.core.validation import (
     TaskValidationObservation,
     ValidationAttempt,
@@ -30,7 +31,11 @@ from ale.core.validation import (
 from ale.core.verdict import Status, Verdict
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.assets import observe_task_assets
-from ale.run.environments.standard import RetainedVerificationEnvironment, StandardEnvironment
+from ale.run.environments.standard import (
+    Resume,
+    RetainedVerificationEnvironment,
+    StandardEnvironment,
+)
 from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
@@ -221,6 +226,7 @@ async def _run_one(
     runs_dir: Path,
     run_id: str | None = None,
     require_reportable: bool = False,
+    continue_from: Path | None = None,
 ) -> int:
     try:
         authentication = resolve_authentication(settings.agent)
@@ -248,6 +254,11 @@ async def _run_one(
             harness.validate_os(task.spec.os)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
+        resume = (
+            _continuation(continue_from, tasks, settings, harness)
+            if continue_from is not None
+            else None
+        )
     except AleError as error:
         typer.echo(f"{error}", err=True)
         return EXIT_BAD_REFERENCE
@@ -261,9 +272,11 @@ async def _run_one(
     needs_model = settings.agent.name not in {"oracle", "nop"}
 
     if needs_model:
+        # A kept Sandbox keeps the Gateway address it was given.
+        port = (resume.gateway_port if resume is not None else None) or 0
         if authentication.mode == "subscription":
             assert subscription is not None
-            gateway = Gateway(subscription=subscription, host=_gateway_host())
+            gateway = Gateway(subscription=subscription, host=_gateway_host(), port=port)
         else:
             try:
                 api_key, upstream = provider_credentials(
@@ -279,8 +292,13 @@ async def _run_one(
                 upstream=upstream,
                 dialect=settings.gateway.dialect,
                 host=_gateway_host(),
+                port=port,
             )
-        gateway_url = await gateway.start()
+        try:
+            gateway_url = await _start_gateway(gateway)
+        except AleError as error:
+            typer.echo(f"{error}", err=True)
+            return EXIT_BAD_REFERENCE
         limits = Limits(
             **{
                 key: None if value == "unlimited" else value
@@ -323,7 +341,10 @@ async def _run_one(
             return await run_episode(
                 task,
                 StandardEnvironment(
-                    harness, max_steps=settings.agent.max_steps, timeouts=settings.timeouts
+                    harness,
+                    max_steps=settings.agent.max_steps,
+                    timeouts=settings.timeouts,
+                    resume=resume,
                 ),
                 providers,
                 run_dir=run_dir,
@@ -352,7 +373,11 @@ async def _run_one(
         async with gate:
             ledger.mark_running(episode_id)
             result = await run_episode_with_retries(
-                execute, retries=settings.episode_retries, on_retry=_report_retry
+                execute,
+                # A continuation changes the retained solver it adopts; another attempt
+                # would start from a different state.
+                retries=0 if resume is not None else settings.episode_retries,
+                on_retry=_report_retry,
             )
         ledger.finish_episode(result.episode_id, result.record)
 
@@ -405,6 +430,7 @@ async def _run_one(
                 reuse_hash=settings.reuse_hash,
                 resources_digest=agent_resources.digest,
                 assets=task.asset_observation,
+                resumed_from=resume.source.episode_id if resume is not None else None,
             )
             done = (
                 sum(
@@ -663,6 +689,84 @@ def _retained_source_episodes(
     if not episodes:
         raise ValueError(f"no retained solver episode found under {source_run}")
     return tuple(episodes)
+
+
+def _continuation(
+    episode_dir: Path, tasks: list[ManifestTask], settings: RunConfig, harness: Harness
+) -> Resume:
+    """The retained solver and native session an earlier episode left for this run."""
+    if len(tasks) != 1 or settings.episodes != 1:
+        raise ConfigError("--continue-from continues one episode of one Task")
+    task = tasks[0]
+    episode_dir = episode_dir.expanduser().resolve()
+    trajectory_path = episode_dir / "trajectory.json"
+    try:
+        result = ResultRecord.model_validate_json((episode_dir / "result.json").read_text())
+        lock = RunLock.model_validate_json((episode_dir / "lock.json").read_text())
+        trajectory = (
+            AtifTrajectory.model_validate_json(trajectory_path.read_text())
+            if trajectory_path.is_file()
+            else None
+        )
+    except (OSError, ValueError) as exc:
+        raise TaskDefinitionError(f"{episode_dir} holds no complete episode: {exc}") from exc
+    retained = next(
+        (
+            sandbox
+            for sandbox in result.sandboxes
+            if "solver" in sandbox.roles and sandbox.outcome == "retained"
+        ),
+        None,
+    )
+    handle = retained.handle if retained is not None else None
+    if result.continuation is None or retained is None or handle is None:
+        raise TaskDefinitionError(
+            f"episode {result.episode_id} left no retained solver and native session"
+        )
+    # The native session is read by the same program; the Sandbox is the Task's image as
+    # the earlier agent left it, and a running Sandbox keeps its resources and its role.
+    recorded_and_current = {
+        "harness": (result.continuation.harness, harness.name),
+        "CLI version": (lock.agent.version, harness.version()),
+        "prepared solver image": (
+            lock.image.prepared_identity,
+            task.prepared_image.prepared_identity if task.prepared_image is not None else None,
+        ),
+        "resources": (
+            lock.resources.requested if lock.resources is not None else None,
+            task.spec.resources,
+        ),
+        "verification mode": (
+            "verifier" in retained.roles,
+            task.spec.verify.environment_mode is VerificationMode.SHARED,
+        ),
+    }
+    for name, (recorded, current) in recorded_and_current.items():
+        if recorded != current:
+            raise TaskDefinitionError(
+                f"episode {result.episode_id} cannot be continued here: its {name} differs"
+            )
+    return Resume(
+        source=ResumedFrom(
+            episode_id=result.episode_id, handle=handle, continuation=result.continuation
+        ),
+        attach=lambda request: _attach_retained(handle, request, lock),
+        trajectory=trajectory,
+        gateway_port=retained.gateway_port,
+    )
+
+
+async def _start_gateway(gateway: Gateway) -> str:
+    """Serve the Gateway; a fixed port is a continuation's and must be free."""
+    try:
+        return await gateway.start()
+    except OSError as exc:
+        if not gateway.port:
+            raise
+        raise ConfigError(
+            f"the kept solver was given the Gateway at port {gateway.port}, which is in use: "
+            f"{exc.strerror or exc}"
+        ) from exc
 
 
 async def _attach_retained(

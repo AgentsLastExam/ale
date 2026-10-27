@@ -19,7 +19,7 @@ import json
 import logging
 import shutil
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
@@ -32,6 +32,7 @@ from ale.core.errors import (
     BudgetExceededError,
     EnvironmentError_,
     PhaseTimeoutError,
+    ProviderCapabilityError,
     TaskError,
     TrajectoryConversionError,
     VerificationInfrastructureError,
@@ -44,7 +45,7 @@ from ale.core.harness import (
     PolicyHarness,
     TrajectoryParseContext,
 )
-from ale.core.lock import AleVerifyProvenance, SandboxProvenance
+from ale.core.lock import AleVerifyProvenance, ResumedFrom, SandboxProvenance
 from ale.core.result import PhaseTiming
 from ale.core.sandbox import (
     ExecOutputSink,
@@ -69,7 +70,14 @@ from ale.core.trace import (
     TrajectoryLink,
     read_jsonl,
 )
-from ale.core.trajectory import AtifAgent, AtifMetrics, AtifTrajectory, TrajectoryBuilder
+from ale.core.trajectory import (
+    AtifAgent,
+    AtifFinalMetrics,
+    AtifMetrics,
+    AtifStep,
+    AtifTrajectory,
+    TrajectoryBuilder,
+)
 from ale.core.verdict import Verdict
 from ale.run.environments.log_mirror import (
     FINAL_SYNC_TIMEOUT_SEC,
@@ -89,7 +97,7 @@ from ale.run.recording import (
 from ale.run.verification import installed_ale_verify, verifier_judge_config
 from ale_verify import JudgeInvocation, read_result
 
-__all__ = ["RetainedVerificationEnvironment", "StandardEnvironment"]
+__all__ = ["Resume", "RetainedVerificationEnvironment", "StandardEnvironment"]
 
 #: How long past the agent deadline the Host waits. The guest enforces that deadline
 #: itself and stops the agent's process tree before it replies, so evidence capture begins
@@ -126,6 +134,30 @@ def _sandbox_path(operating_system: OperatingSystem, root: str, *parts: str) -> 
     return str(path_type(root).joinpath(*parts))
 
 
+def _powershell(command: str) -> list[str]:
+    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]
+
+
+def _powershell_list(values: Sequence[str]) -> str:
+    return "@(" + ",".join("'" + value.replace("'", "''") + "'" for value in values) + ")"
+
+
+@dataclass(frozen=True)
+class Resume:
+    """Continue an earlier episode in its retained solver instead of launching anew.
+
+    ``attach`` reconnects the retained Sandbox for this episode's request; ``trajectory``
+    is the earlier episode's, which tells where this episode's part of the native session
+    begins. ``gateway_port`` is the port the retained Sandbox was given for the Gateway,
+    where the run serves its own, since an agent may keep its endpoint in its session.
+    """
+
+    source: ResumedFrom
+    attach: Callable[[SandboxRequest], Awaitable[Sandbox]]
+    trajectory: AtifTrajectory | None
+    gateway_port: int | None = None
+
+
 class StandardEnvironment(Environment):
     """Linear provision → setup → agent → verify flow."""
 
@@ -139,12 +171,14 @@ class StandardEnvironment(Environment):
         stall_limit: int = DEFAULT_STALL_LIMIT,
         agent_enabled: bool = True,
         timeouts: RunTimeouts | None = None,
+        resume: Resume | None = None,
     ) -> None:
         self.harness = harness
         self.max_steps = max_steps
         self.stall_limit = stall_limit
         self.agent_enabled = agent_enabled
         self.timeouts = timeouts or RunTimeouts()
+        self.resume = resume
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
         spec = task.spec
@@ -228,7 +262,22 @@ class StandardEnvironment(Environment):
             sudo=spec.resources.sudo,
             user=spec.image.user,
         )
-        sandbox = await ctx.sandboxes.acquire(request)
+        if self.resume is None:
+            sandbox = await ctx.sandboxes.acquire(request)
+        else:
+            resume = self.resume
+
+            async def attach(request: SandboxRequest) -> Sandbox:
+                # Checked before the lease owns it: a refused Sandbox is not ours to destroy.
+                attached = await resume.attach(request)
+                await _require_agent_episode(attached, spec.os, resume.source.episode_id)
+                return attached
+
+            sandbox = await ctx.sandboxes.adopt(request, attach)
+            # Claimed before anything changes it, so the earlier episode's records no
+            # longer lead to this Sandbox, whatever happens to this episode.
+            await _write_agent_episode(sandbox, spec.os, ctx.episode_id)
+            ctx.resumed_from = resume.source
         ctx.resolved_image = sandbox.resolved_image
         ctx.resource_allocation = sandbox.allocation
         # Derived from the account the image declared, not configured anywhere. A run
@@ -330,18 +379,25 @@ class StandardEnvironment(Environment):
         await self._seal(ctx, sandbox)
 
         async def launch() -> None:
+            recorded = _RecordedSandbox(
+                ctx,
+                sandbox,
+                component="harness-launch",
+                actor="task" if harness.name == "oracle" else "framework",
+            )
             with _limit_terminated(ctx):
-                run = await harness.launch(
-                    spec.instruction,
-                    _RecordedSandbox(
-                        ctx,
-                        sandbox,
-                        component="harness-launch",
-                        actor="task" if harness.name == "oracle" else "framework",
-                    ),
-                    session,
-                    timeout_sec=timeout,
-                )
+                if self.resume is None:
+                    run = await harness.launch(
+                        spec.instruction, recorded, session, timeout_sec=timeout
+                    )
+                else:
+                    run = await harness.resume(
+                        spec.instruction,
+                        self.resume.source.continuation,
+                        recorded,
+                        session,
+                        timeout_sec=timeout,
+                    )
                 ctx.agent_run = run
                 if run.exit_code != 0:
                     detail = run.final_message or "no diagnostic output"
@@ -557,40 +613,13 @@ class StandardEnvironment(Environment):
 
         layout = _layout(ctx.spec.os)
         verify_root = layout.path("verify")
-        if ctx.spec.os is OperatingSystem.WINDOWS:
-            # Preserve the base's writable stage directory under the protected ALE root.
-            removed = await sandbox.exec(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    f"Get-ChildItem -LiteralPath '{verify_root}' -Force -ErrorAction Stop | "
-                    "Remove-Item -Recurse -Force -ErrorAction Stop",
-                ]
-            )
-        else:
-            removed = await self._remove_paths(ctx, sandbox, (str(verify_root),))
+        removed = await self._clear_stages(ctx, sandbox, ("verify",))
         if not removed.ok:
             raise TaskError(
                 "could not clear the previous verify stage: "
                 + (removed.stderr.strip() or f"exit {removed.exit_code}")
             )
         await sandbox.upload_dir(str(verify_dir), str(verify_root))
-        cleared = await self._remove_paths(
-            ctx,
-            sandbox,
-            tuple(
-                str(layout.path("verify", name))
-                for name in (
-                    "result.json",
-                    "llm-judge.jsonl",
-                    "agent-judge.jsonl",
-                )
-            ),
-        )
-        if not cleared.ok:
-            raise TaskError("could not clear previous verification outputs")
         trajectory = ctx.run_dir / "trajectory.json"
         if trajectory.is_file():
             await sandbox.write_file(
@@ -761,21 +790,51 @@ class StandardEnvironment(Environment):
         if sandbox.request.retention == "destroy":
             ctx.sandboxes.mark_sanitized(sandbox, succeeded=True)
             return True
-        layout = _layout(ctx.spec.os)
-        paths = [
-            str(layout.path("verify", "config.json")),
-            str(layout.path("verify", "agent")),
-            str(layout.path("verify", "agent-tools")),
-            _sandbox_path(ctx.spec.os, ctx.home, ".codex", "auth.json"),
-            _sandbox_path(ctx.spec.os, ctx.home, ".claude", ".credentials.json"),
-        ]
-        result = await self._remove_paths(ctx, sandbox, paths)
-        ctx.sandboxes.mark_sanitized(
-            sandbox,
-            succeeded=result.ok,
-            reason=None if result.ok else result.stderr.strip() or "credential sanitation failed",
+        # A retained solver may be handed to another agent, so no stage of this Task
+        # stays behind, only the agent's own state.
+        result = await self._clear_stages(ctx, sandbox, ("setup", "verify"))
+        if result.ok:
+            result = await self._remove_paths(
+                ctx,
+                sandbox,
+                (
+                    str(oracle_dir(ctx.home, ctx.spec.os)),
+                    _sandbox_path(ctx.spec.os, ctx.home, ".codex", "auth.json"),
+                    _sandbox_path(ctx.spec.os, ctx.home, ".claude", ".credentials.json"),
+                ),
+            )
+        reason = None if result.ok else result.stderr.strip() or "retention sanitation failed"
+        solver = sandbox.request.role is not SandboxRole.VERIFIER
+        if reason is None and self.agent_enabled and solver:
+            try:
+                await _write_agent_episode(sandbox, ctx.spec.os, ctx.episode_id)
+            except Exception as exc:
+                reason = f"could not record the agent's episode: {exc}"
+        ctx.sandboxes.mark_sanitized(sandbox, succeeded=reason is None, reason=reason)
+        return reason is None
+
+    async def _clear_stages(
+        self,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        names: Sequence[str],
+    ) -> ExecResult:
+        """Empty the framework's stage directories.
+
+        A Windows base creates each one with its own ACL under the protected ALE root, so
+        there only its contents go.
+        """
+        paths = [str(_layout(ctx.spec.os).path(name)) for name in names]
+        if ctx.spec.os is not OperatingSystem.WINDOWS:
+            return await self._remove_paths(ctx, sandbox, paths)
+        return await sandbox.exec(
+            _powershell(
+                f"foreach ($stage in {_powershell_list(paths)}) {{ "
+                "if (Test-Path -LiteralPath $stage) { "
+                "Get-ChildItem -LiteralPath $stage -Force -ErrorAction Stop | "
+                "Remove-Item -Recurse -Force -ErrorAction Stop } }"
+            )
         )
-        return result.ok
 
     async def _remove_paths(
         self,
@@ -783,17 +842,15 @@ class StandardEnvironment(Environment):
         sandbox: Sandbox,
         paths: Sequence[str],
     ) -> ExecResult:
+        """Remove paths, skipping missing ones as ``rm -rf`` does; any other failure fails."""
         if ctx.spec.os is OperatingSystem.WINDOWS:
-            quoted = ",".join("'" + path.replace("'", "''") + "'" for path in paths)
+            # Not -ErrorAction SilentlyContinue: it hides the error but still exits 1.
             return await sandbox.exec(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    f"Remove-Item -LiteralPath @({quoted}) -Recurse -Force "
-                    "-ErrorAction SilentlyContinue",
-                ]
+                _powershell(
+                    f"foreach ($path in {_powershell_list(paths)}) {{ "
+                    "if (Test-Path -LiteralPath $path) { "
+                    "Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop } }"
+                )
             )
         return await sandbox.exec(["rm", "-rf", "--", *paths])
 
@@ -838,6 +895,8 @@ class StandardEnvironment(Environment):
         )
         try:
             trajectory = self.harness.parse_trajectory(context)
+            if self.resume is not None:
+                trajectory = _continued_segment(trajectory, self.resume)
         except Exception as exc:
             # The agent finished; a converter defect must not decide its score. Keep the
             # minimal truthful trajectory, say why, and keep the native evidence.
@@ -1182,6 +1241,7 @@ class RetainedVerificationEnvironment(StandardEnvironment):
         self.timeouts = timeouts or RunTimeouts()
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
+        await _require_agent_episode(self.solver, ctx.spec.os, self.solver.request.episode_id)
         ctx.resolved_image = self.solver.resolved_image
         ctx.resource_allocation = self.solver.allocation
         ctx.sandbox_identity = self.sandbox_identity
@@ -1236,6 +1296,130 @@ class RetainedVerificationEnvironment(StandardEnvironment):
         )
         ctx.verified_rewards = rewards
         return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
+
+
+def _agent_episode_path(operating_system: OperatingSystem) -> str:
+    """Names the episode whose agent last ran in a solver Sandbox."""
+    return str(_layout(operating_system).path("agent-episode"))
+
+
+async def _write_agent_episode(
+    sandbox: Sandbox, operating_system: OperatingSystem, episode_id: str
+) -> None:
+    await sandbox.write_file(_agent_episode_path(operating_system), episode_id.encode())
+
+
+async def _require_agent_episode(
+    sandbox: Sandbox, operating_system: OperatingSystem, episode_id: str
+) -> None:
+    """A retained solver serves only the episode whose agent state it still holds.
+
+    Once a later episode continued it, the earlier episode's handle no longer describes it.
+    A refused Sandbox is left retained as it was, only disconnected.
+    """
+    try:
+        holder: str | None = (
+            await sandbox.read_file(_agent_episode_path(operating_system))
+        ).decode()
+    except Exception:
+        holder = None
+    if holder == episode_id:
+        return
+    await sandbox.retain(roles=("solver",), reason="refused: it holds another episode's state")
+    raise ProviderCapabilityError(
+        f"retained sandbox {sandbox.sandbox_id} holds "
+        + (f"episode {holder}'s" if holder else "no recorded episode's")
+        + f" agent state, not {episode_id}'s"
+    )
+
+
+def _continued_segment(trajectory: AtifTrajectory, resume: Resume) -> AtifTrajectory:
+    """This episode's part of a native session an earlier episode began.
+
+    The native session holds every turn so far, and the parser converts all of them. The
+    earlier steps are the earlier episodes' and are dropped, so each episode's trajectory,
+    like its transport trace and limits, covers what it ran itself.
+    """
+    source = resume.trajectory
+    link: dict[str, object] = {
+        "episode_id": resume.source.episode_id,
+        "trajectory_id": source.trajectory_id if source is not None else None,
+    }
+    before: int | None = None
+    if source is not None:
+        # A first episode began the session; a continuation says where its own part
+        # began, unless it could not tell.
+        earlier = ((source.extra or {}).get("ale") or {}).get("resumed_from")
+        prior = 0 if earlier is None else earlier.get("native_steps")
+        if prior is not None and len(trajectory.steps) > prior + len(source.steps):
+            end = prior + len(source.steps)
+            if _same_step(trajectory.steps[end - 1], source.steps[-1]):
+                before = end
+    if before is None:
+        issue = {
+            "reason": "continuation_boundary_not_found",
+            "detail": "the earlier episodes' steps are kept: their end was not found",
+        }
+        return _with_ale(_with_parse_issue(trajectory, issue), resumed_from=link)
+
+    steps = [
+        step.model_copy(update={"step_id": index})
+        for index, step in enumerate(trajectory.steps[before:], start=1)
+    ]
+    referenced = {
+        ref.trajectory_id
+        for step in steps
+        for result in (step.observation.results if step.observation else ())
+        for ref in result.subagent_trajectory_ref or ()
+    }
+    subagents = [
+        child
+        for child in trajectory.subagent_trajectories or ()
+        if child.trajectory_id in referenced
+    ]
+    segment = trajectory.model_copy(
+        update={
+            "steps": steps,
+            "subagent_trajectories": subagents or None,
+            "final_metrics": _segment_metrics(steps),
+        }
+    )
+    return _with_ale(segment, resumed_from={**link, "native_steps": before})
+
+
+def _same_step(parsed: AtifStep, recorded: AtifStep) -> bool:
+    def calls(step: AtifStep) -> list[str]:
+        return [call.tool_call_id for call in step.tool_calls or ()]
+
+    return (parsed.source, parsed.message, calls(parsed)) == (
+        recorded.source,
+        recorded.message,
+        calls(recorded),
+    )
+
+
+def _segment_metrics(steps: list[AtifStep]) -> AtifFinalMetrics:
+    """Token totals only when every model-backed step reported its usage."""
+    agent = [step for step in steps if step.source == "agent" and step.llm_call_count != 0]
+    if not agent or any(step.metrics is None for step in agent):
+        return AtifFinalMetrics(total_steps=len(steps))
+
+    def total(name: str) -> int | None:
+        values = [getattr(step.metrics, name) for step in agent]
+        return None if any(value is None for value in values) else sum(values)
+
+    return AtifFinalMetrics(
+        total_prompt_tokens=total("prompt_tokens"),
+        total_completion_tokens=total("completion_tokens"),
+        total_cached_tokens=total("cached_tokens"),
+        total_steps=len(steps),
+    )
+
+
+def _with_ale(trajectory: AtifTrajectory, **fields: object) -> AtifTrajectory:
+    extra = dict(trajectory.extra or {})
+    extra["ale"] = {**(extra.get("ale") or {}), **fields}
+    return trajectory.model_copy(update={"extra": extra})
 
 
 @contextlib.contextmanager

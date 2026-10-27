@@ -21,6 +21,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
+from urllib.parse import urlsplit
 
 from ale.core.config import LoggingPolicy, SandboxRetentionConfig, VerificationConfig
 from ale.core.environment import ArtifactSink, Budget, Environment, EpisodeContext, Phase
@@ -158,25 +159,30 @@ class _Lease:
         self.retained: list[tuple[_LeaseEntry, SandboxOutcome]] = []
 
     async def acquire(self, request: SandboxRequest) -> Sandbox:
-        roles: tuple[Literal["solver", "verifier"], ...]
-        if request.role is SandboxRole.SHARED:
-            roles = ("solver", "verifier")
-            policy = (
-                "keep"
-                if self.retention.solver == "keep" or self.retention.verifier == "keep"
-                else "destroy"
-            )
-        elif request.role is SandboxRole.VERIFIER:
-            roles = ("verifier",)
-            policy = self.retention.verifier
-        else:
-            roles = ("solver",)
-            policy = self.retention.solver
-        request = request.model_copy(update={"retention": policy})
+        roles, policy = self._policy(request)
         provider = self.providers.get(request.image_kind)
-        sandbox = await provider.create(request)
+        sandbox = await provider.create(request.model_copy(update={"retention": policy}))
         self.live.append(_LeaseEntry(sandbox, provider.name, roles, policy))
         return sandbox
+
+    async def adopt(
+        self, request: SandboxRequest, attach: Callable[[SandboxRequest], Awaitable[Sandbox]]
+    ) -> Sandbox:
+        """Take over a retained Sandbox: this episode's retention decides its fate."""
+        roles, policy = self._policy(request)
+        sandbox = await attach(request.model_copy(update={"retention": policy}))
+        self.live.append(_LeaseEntry(sandbox, sandbox.allocation.provider, roles, policy))
+        return sandbox
+
+    def _policy(
+        self, request: SandboxRequest
+    ) -> tuple[tuple[Literal["solver", "verifier"], ...], Literal["destroy", "keep"]]:
+        if request.role is SandboxRole.SHARED:
+            keep = self.retention.solver == "keep" or self.retention.verifier == "keep"
+            return ("solver", "verifier"), "keep" if keep else "destroy"
+        if request.role is SandboxRole.VERIFIER:
+            return ("verifier",), self.retention.verifier
+        return ("solver",), self.retention.solver
 
     async def release(self, sandbox: Sandbox) -> None:
         entry = self._find(sandbox)
@@ -289,6 +295,11 @@ def _retained_outcome(entry: _LeaseEntry, retained: RetainedSandbox) -> SandboxO
         reason=retained.reason,
         cleanup_command=retained.cleanup_command,
         gpu_devices=retained.gpu_devices,
+        gateway_port=(
+            urlsplit(entry.sandbox.request.gateway_url).port
+            if entry.sandbox.request.gateway_url
+            else None
+        ),
     )
 
 
@@ -705,6 +716,7 @@ async def run_episode(
         finished_at=finished_at,
         phases=tuple(ctx.phases),
         sandboxes=tuple(lease.outcomes),
+        continuation=ctx.agent_run.continuation if ctx.agent_run is not None else None,
     )
     recording.write_result(record)
     recording.execution.append(
@@ -778,6 +790,7 @@ def _write_lock(
         ale_verify=ctx.ale_verify_provenance,
         termination=ctx.limit_termination,
         sandbox_outcomes=ctx.sandbox_outcomes,
+        resumed_from=ctx.resumed_from,
         seed=seed,
     )
     return lock

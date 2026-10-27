@@ -147,15 +147,12 @@ class EffectiveAgentResources(BaseModel):
 
 
 class NativeContinuation(BaseModel):
-    """Exact native session state, valid only in its original live sandbox."""
+    """One harness's exact native session, which continues wherever its files are."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     harness: str
-    native_session_id: str
-    episode_id: str
-    sandbox_id: str
-    fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    native_session_id: str = Field(min_length=1)
 
 
 class AgentRun(BaseModel):

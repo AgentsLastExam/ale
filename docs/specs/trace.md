@@ -8,7 +8,7 @@ other files may carry only stable identifiers, references, or small run-level pr
 | `trajectory.json` | agent-visible messages, reasoning actually exposed, tool calls/results, images, audio, subagents | setup/verify commands, rewards, aggregate usage |
 | `trace.transport.jsonl` | Gateway calls in API-key and subscription modes (verification Judge calls marked `purpose: judge`), retries, refusals, token usage, call-to-step links | full conversation messages |
 | `trace.execution.jsonl` | framework phases, task/framework commands, output, policy, cleanup failures | agent-owned tool calls, rewards |
-| `result.json` | terminal status, all named rewards, failure, phase timings | conversation, provenance |
+| `result.json` | terminal status, all named rewards, failure, phase timings, the agent's native continuation | conversation, provenance |
 | `verification.json` | the complete Task-authored result, including nested details | terminal status, solver trajectory, native Agent transcript |
 | `lock.json` | immutable provenance and enforced termination limits | live run state |
 
@@ -77,9 +77,13 @@ audio streams, and video content parts are outside ATIF v1.8.
 Subagents use embedded `subagent_trajectories` with unique `trajectory_id` values and
 resolvable `subagent_trajectory_ref` entries. A subagent is embedded in the trajectory of
 the agent that spawned it and referenced from the spawning call's result; the root's
-`parse_issues` cover the whole tree. Same-sandbox native resume extends the same
-logical session; `continued_trajectory_ref` is used only when a continuation is stored as
-a separate document.
+`parse_issues` cover the whole tree. Native resume within an episode extends its
+trajectory. An episode that continues an earlier one records only its own part of the
+native session: it keeps the session's `session_id`, and `extra.ale.resumed_from` names
+the earlier episode and trajectory and, once their end is found, `native_steps`, the
+session's steps before this episode. If it is not found, the whole session is kept with a
+`continuation_boundary_not_found` parse issue. `continued_trajectory_ref` is not used, as
+the earlier episode's trajectory is final when a later one continues it.
 
 Optional token IDs, masks, log probabilities, sampling metadata, reasoning, and metrics
 are written only from exact observed evidence. ALE never retokenizes text or fabricates

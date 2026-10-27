@@ -35,7 +35,6 @@ from ale.core.harness import (
 )
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import OperatingSystem
-from ale.run.agent_resources import continuation_fingerprint
 from ale.run.harnesses._diagnostics import failure_detail
 from ale.run.harnesses._npm import agent_path, bash_command, ensure_npm_cli
 from ale.run.harnesses._release import ReleaseAssets, ensure_release_binary, release_identity
@@ -209,13 +208,9 @@ class CliHarness(AutonomousHarness):
     ) -> AgentRun:
         if self.resume_support is not ResumeSupport.NATIVE:
             raise AgentUnsupportedError(f"{self.name} does not support native resume")
-        if continuation.harness != self.name or continuation.episode_id != session.episode_id:
-            raise NativeContinuationError("continuation belongs to a different harness or episode")
-        if not session.sandbox_id or continuation.sandbox_id != session.sandbox_id:
-            raise NativeContinuationError("continuation requires the original live sandbox")
-        if continuation.fingerprint != self._fingerprint(session):
+        if continuation.harness != self.name:
             raise NativeContinuationError(
-                "model, settings, or effective resources changed since launch"
+                f"continuation belongs to {continuation.harness}, not {self.name}"
             )
         if not await self._session_exists(sandbox, session, continuation.native_session_id):
             raise NativeContinuationError(
@@ -227,16 +222,6 @@ class CliHarness(AutonomousHarness):
             session,
             continuation.native_session_id,
             timeout_sec,
-        )
-
-    def _fingerprint(self, session: HarnessSession) -> str:
-        return continuation_fingerprint(
-            harness=self.name,
-            model=session.model,
-            settings=self.settings.model_dump(mode="json"),
-            resources_digest=session.resources_digest,
-            authentication=session.authentication,
-            profile_slot_id=session.profile_slot_id,
         )
 
     async def _session_exists(
@@ -336,13 +321,7 @@ class CliHarness(AutonomousHarness):
         return AgentRun(
             exit_code=0,
             final_message=native.final_message,
-            continuation=NativeContinuation(
-                harness=self.name,
-                native_session_id=native.session_id,
-                episode_id=session.episode_id,
-                sandbox_id=session.sandbox_id,
-                fingerprint=self._fingerprint(session),
-            ),
+            continuation=NativeContinuation(harness=self.name, native_session_id=native.session_id),
         )
 
 

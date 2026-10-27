@@ -81,7 +81,7 @@ The built-in `cua-desktop` uses the OS's system Python. Task-provided Skills and
 commands must themselves work on Windows.
 
 Every CLI adapter supports local Skills, canonical stdio and Streamable HTTP MCP
-servers, and same-sandbox native resume at its pinned version, except for a limit its
+servers, and native resume at its pinned version, except for a limit its
 package README names. Support is determined from the pinned program's verified behavior,
 not a permanent assumption about a product name. In particular, `openclaw@2026.7.1`
 supports MCP; a future pin that changes this must update validation and acceptance
@@ -196,16 +196,18 @@ limits, retry coalescing, and Transport Trace stay common.
 ### Resume
 
 Resume is optional and rejected explicitly by default. Native resume, when implemented,
-uses the exact `NativeContinuation`. An instruction becomes the session's next user
-message; `None` asks the agent to carry on without new task input. No shipped CLI can
-continue a headless session without a message, so `CliHarness` then sends the fixed
-`Continue from where you left off.`, recorded like any other prompt. Resume requires the
-same live sandbox, a session file the adapter recognizes by its exact ID, and matching
-harness, episode, sandbox, model, settings, and resource fingerprint.
+uses the exact `NativeContinuation`: the Harness and its native session ID. An
+instruction becomes the session's next user message; `None` asks the agent to carry on
+without new task input. No shipped CLI can continue a headless session without a
+message, so `CliHarness` then sends the fixed `Continue from where you left off.`,
+recorded like any other prompt. Resume requires the same Harness and a session file the
+adapter recognizes by its exact ID in the Sandbox it is given. The session is the
+agent's files, so it continues in a later episode that adopted the retained solver
+([Standard Environment](standard-environment.md#continuation)); model, settings and
+resources may differ there, and that episode's RunLock records its own.
 
-An adapter must never use a "latest session" selector, replay the transcript, resume in
-another sandbox, or silently start a new conversation. This release has one scope only:
-the original live sandbox.
+An adapter must never use a "latest session" selector, replay the transcript, copy a
+session into another Sandbox, or silently start a new conversation.
 
 If the native program can create child sessions, collected evidence must select the
 requested root session by exact native ID. A substring match or "first/latest session"

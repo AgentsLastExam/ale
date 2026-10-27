@@ -26,6 +26,7 @@ CLI → Task loading/image preparation → Episode → StandardEnvironment
 
 ```bash
 uv run ale run TASK --agent claude-code
+uv run ale run NEXT_TASK --agent claude-code --continue-from runs/RUN/EPISODE
 uv run ale validate TASK
 uv run ale lint TASK
 uv run ale prepare TASK
