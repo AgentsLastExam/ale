@@ -187,25 +187,26 @@ async def test_native_resume_uses_exact_id_and_only_new_input() -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_resume_rejects_drift_other_sandbox_and_missing_state() -> None:
+async def test_native_resume_follows_the_session_files_and_rejects_another_harness() -> None:
     harness = ClaudeCodeHarness()
     sandbox = FakeSandbox()
     current = native_session()
     first = await harness.launch("first", sandbox, current, timeout_sec=10)  # type: ignore[arg-type]
     assert first.continuation is not None
 
-    with pytest.raises(NativeContinuationError, match="original live sandbox"):
+    # The session is files in the agent home: another episode, Sandbox or setting resumes it.
+    moved = await ClaudeCodeHarness(settings={"effort": "high"}).resume(
+        "next",
+        first.continuation,
+        sandbox,  # type: ignore[arg-type]
+        native_session(episode_id="later", sandbox_id="other"),
+        timeout_sec=10,
+    )
+    assert moved.continuation == first.continuation
+    with pytest.raises(NativeContinuationError, match="belongs to codex-cli"):
         await harness.resume(
             "next",
-            first.continuation,
-            sandbox,  # type: ignore[arg-type]
-            native_session(sandbox_id="other"),
-            timeout_sec=10,
-        )
-    with pytest.raises(NativeContinuationError, match="changed"):
-        await ClaudeCodeHarness(settings={"effort": "high"}).resume(
-            "next",
-            first.continuation,
+            first.continuation.model_copy(update={"harness": "codex-cli"}),
             sandbox,  # type: ignore[arg-type]
             current,
             timeout_sec=10,

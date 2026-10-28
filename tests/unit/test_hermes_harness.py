@@ -102,6 +102,8 @@ async def test_command_streams_events_and_exports_the_sessions(
         native_session_id=native_session_id,
     )
     assert command.session_id == native_session_id
+    # A background gateway an earlier invocation started would serve with its old token.
+    assert command.script.startswith("/home/agent/.local/bin/hermes gateway stop < /dev/null")
     assert (
         "/home/agent/.local/bin/hermes chat --query-file /home/agent/.ale-harness/prompt.md "
         "--format stream-json --yolo"
@@ -604,5 +606,6 @@ async def test_windows_runs_the_launcher_the_installer_publishes() -> None:
         session(home="C:/Users/agent", os=OperatingSystem.WINDOWS),
         native_session_id=None,
     )
-    assert command.script.count("C:/Users/agent/.hermes-ale/bin/hermes.exe ") == 2
+    # gateway stop, chat and sessions export.
+    assert command.script.count("C:/Users/agent/.hermes-ale/bin/hermes.exe ") == 3
     assert command.env["HERMES_HOME"] == "C:/Users/agent/.hermes-ale"

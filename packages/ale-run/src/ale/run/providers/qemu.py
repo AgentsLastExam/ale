@@ -1167,8 +1167,6 @@ class QemuProvider(Provider):
             or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
         ):
             raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
-        if labels.get(EPISODE_LABEL) != request.episode_id:
-            raise ProviderCapabilityError(f"{handle!r} belongs to a different episode")
         if not record.get("State", {}).get("Running"):
             raise ProviderStartError(f"retained sandbox {handle!r} is not running")
         storage = labels.get(STORAGE_LABEL, "")

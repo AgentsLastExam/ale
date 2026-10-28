@@ -8,6 +8,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ale.core.harness import NativeContinuation
 from ale.core.verdict import Status
 
 __all__ = ["FailureInfo", "PhaseTiming", "ResultRecord", "SandboxOutcome"]
@@ -51,6 +52,8 @@ class SandboxOutcome(BaseModel):
     reason: str | None = None
     cleanup_command: str | None = None
     gpu_devices: tuple[str, ...] = ()
+    #: The Gateway port a retained Sandbox was given; a continuation serves its Gateway there.
+    gateway_port: int | None = None
 
 
 class ResultRecord(BaseModel):
@@ -66,6 +69,9 @@ class ResultRecord(BaseModel):
     finished_at: datetime
     phases: tuple[PhaseTiming, ...] = ()
     sandboxes: tuple[SandboxOutcome, ...] = ()
+    continuation: NativeContinuation | None = None
+    """The agent's native session as the episode left it, which a later episode may continue
+    from the retained solver."""
 
     @field_validator("rewards")
     @classmethod

@@ -75,19 +75,22 @@ def episode_identity(
     reuse_hash: str,
     resources_digest: str = "",
     assets: TaskAssetObservation | None = None,
+    resumed_from: str | None = None,
 ) -> str:
-    return content_hash(
-        {
-            "spec": spec.spec_hash,
-            "task": task_digest,
-            "image": image_digest,
-            "agent": agent,
-            "seed": seed,
-            "config": reuse_hash,
-            "resources": resources_digest,
-            "assets": asdict(assets) if assets is not None else None,
-        }
-    )
+    fields: dict[str, object] = {
+        "spec": spec.spec_hash,
+        "task": task_digest,
+        "image": image_digest,
+        "agent": agent,
+        "seed": seed,
+        "config": reuse_hash,
+        "resources": resources_digest,
+        "assets": asdict(assets) if assets is not None else None,
+    }
+    if resumed_from is not None:
+        # Continuing different episodes is different work, even with the same Task.
+        fields["resumed_from"] = resumed_from
+    return content_hash(fields)
 
 
 @dataclass(frozen=True)

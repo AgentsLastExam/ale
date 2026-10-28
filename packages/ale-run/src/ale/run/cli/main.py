@@ -137,11 +137,20 @@ def run(
             help="Fail unless every episode's provenance could back a published result",
         ),
     ] = False,
+    continue_from: Annotated[
+        Path | None,
+        typer.Option(
+            "--continue-from",
+            help="Episode directory whose retained solver and agent session this run continues",
+        ),
+    ] = None,
 ) -> None:
     """Run a task and report its verdict.
 
     Re-invoking with the same ``--run-id`` continues where an interrupted run stopped:
-    episodes are matched by what they are, not by when they ran.
+    episodes are matched by what they are, not by when they ran. ``--continue-from``
+    instead gives the Task's instruction to the agent of an earlier episode whose solver
+    was kept, in that Sandbox and native session.
     """
     flags = [*(overrides or []), f"episodes={episodes}", f"concurrency={concurrency}"]
     if episode_retries is not None:
@@ -155,7 +164,9 @@ def run(
     if api_key_env:
         flags.append(f"gateway.api_key_env={api_key_env}")
     settings = _config(config, flags, agent=agent, model=model)
-    exit_code = asyncio.run(_run_one(reference, settings, runs_dir, run_id, require_reportable))
+    exit_code = asyncio.run(
+        _run_one(reference, settings, runs_dir, run_id, require_reportable, continue_from)
+    )
     raise typer.Exit(exit_code)
 
 

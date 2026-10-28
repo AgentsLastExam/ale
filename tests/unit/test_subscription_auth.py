@@ -19,7 +19,6 @@ from ale.core.errors import (
     SubscriptionUnavailableError,
 )
 from ale.core.lock import AuthenticationProvenance
-from ale.run.agent_resources import continuation_fingerprint
 from ale.run.cli.main import app
 from ale.run.subscription import (
     SubscriptionCredential,
@@ -201,22 +200,6 @@ def test_authentication_provenance_has_no_raw_credential_field() -> None:
 
     payload = record.model_dump(mode="json")
     assert not ({"token", "secret", "credential_value", "profile_path"} & payload.keys())
-
-
-def test_continuation_fingerprint_binds_authentication_and_profile() -> None:
-    values = {
-        "harness": "codex-cli",
-        "model": "gpt-5.6-luna",
-        "settings": {},
-        "resources_digest": "sha256:" + "a" * 64,
-    }
-    api = continuation_fingerprint(**values)
-    subscription = continuation_fingerprint(
-        **values,
-        authentication="subscription",
-        profile_slot_id="sha256:" + "b" * 64,
-    )
-    assert api != subscription
 
 
 async def test_codex_credential_supplies_host_headers(

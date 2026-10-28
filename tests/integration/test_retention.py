@@ -455,7 +455,7 @@ async def test_sanitation_failure_destroys_sandbox_without_changing_reward(
     original_exec = DockerSandbox.exec
 
     async def fail_sanitation(self, argv, **kwargs):  # type: ignore[no-untyped-def]
-        if list(argv[:3]) == ["rm", "-rf", "--"] and "/opt/ale/verify/config.json" in argv:
+        if list(argv[:3]) == ["rm", "-rf", "--"] and "/opt/ale/setup" in argv:
             return ExecResult(exit_code=1, stderr="simulated sanitation failure")
         return await original_exec(self, argv, **kwargs)
 

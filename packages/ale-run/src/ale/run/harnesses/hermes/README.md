@@ -19,6 +19,12 @@ checks, the model catalog, shared telemetry, logins adopted from other agents an
 installs during the run. Hermes still probes several model-information paths at start;
 the Gateway answers them 404 and Hermes continues.
 
+Each turn runs in a background `hermes gateway run` that the first chat starts and that
+outlives it with that chat's environment, Gateway token included, so every invocation first
+runs `hermes gateway stop` and the chat starts one of its own. A session freezes its route,
+the Gateway URL among it, and `--resume` refuses a different `--model` or `--base-url`; a
+continuing episode reaches it because its Gateway keeps the kept Sandbox's port.
+
 Hermes keeps sessions in SQLite and chooses a new session's ID itself, which the
 invocation's `result` event reports; `--resume` continues that exact session. After every
 invocation `hermes sessions export` writes every session of the episode home to

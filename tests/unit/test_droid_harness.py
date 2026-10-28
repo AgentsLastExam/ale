@@ -184,16 +184,6 @@ async def test_command_selects_the_session_model_and_removes_account_tools(
     assert command.env["FACTORY_DROID_AUTO_UPDATE_ENABLED"] == "false"
 
 
-def test_settings_and_dialect_bind_the_continuation() -> None:
-    current = session()
-    fingerprints = {
-        DroidHarness()._fingerprint(current),
-        DroidHarness(gateway_dialect="openai-responses")._fingerprint(current),
-        DroidHarness(settings={"disabled_tools": ["Read"]})._fingerprint(current),
-    }
-    assert len(fingerprints) == 3
-
-
 def stream(*events: dict[str, object]) -> str:
     return "".join(json.dumps(event) + "\n" for event in events)
 

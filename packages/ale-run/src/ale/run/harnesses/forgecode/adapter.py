@@ -16,7 +16,6 @@ from ale.core.harness import EffectiveAgentResources, HarnessSession, Trajectory
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
-from ale.run.agent_resources import continuation_fingerprint
 from ale.run.harnesses._npm import agent_path, npm_env
 from ale.run.harnesses._release import ReleaseAsset, ReleaseAssets
 from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
@@ -256,19 +255,6 @@ class ForgecodeHarness(CliHarness):
                 int(limit.group(1)),
             )
         return AgentError(detail)
-
-    def _fingerprint(self, session: HarnessSession) -> str:
-        return continuation_fingerprint(
-            harness=self.name,
-            model=session.model,
-            settings={
-                **self.settings.model_dump(mode="json"),
-                "gateway_dialect": self.gateway_dialect,
-            },
-            resources_digest=session.resources_digest,
-            authentication=session.authentication,
-            profile_slot_id=session.profile_slot_id,
-        )
 
 
 async def _write(sandbox: Sandbox, path: PurePosixPath, text: str) -> None:

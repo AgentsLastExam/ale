@@ -54,7 +54,4 @@ class AutonomousHarnessConformance:
     ) -> None:
         assert harness.resume_support is ResumeSupport.NATIVE
         assert continuation.harness == harness.name
-        assert continuation.episode_id == session.episode_id
-        assert continuation.sandbox_id == session.sandbox_id
         assert continuation.native_session_id
-        assert continuation.fingerprint.startswith("sha256:")

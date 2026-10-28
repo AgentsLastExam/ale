@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ale.core.config import RunTimeouts
 from ale.core.errors import ProvenanceIncompleteError
+from ale.core.harness import NativeContinuation
 from ale.core.ids import TaskId
 from ale.core.result import SandboxOutcome
 from ale.core.sandbox import ResourceAllocation
@@ -37,6 +38,7 @@ __all__ = [
     "JudgeProvenance",
     "LimitTermination",
     "ResourceProvenance",
+    "ResumedFrom",
     "RunLock",
     "SandboxProvenance",
     "TaskProvenance",
@@ -137,6 +139,16 @@ class ResourceProvenance(BaseModel):
 
     requested: Resources
     effective: ResourceAllocation
+
+
+class ResumedFrom(BaseModel):
+    """The earlier episode whose retained solver and native session this episode continued."""
+
+    model_config = _FROZEN
+
+    episode_id: str
+    handle: str
+    continuation: NativeContinuation
 
 
 class AuthenticationProvenance(BaseModel):
@@ -298,6 +310,7 @@ class RunLock(BaseModel):
     timeouts: RunTimeouts = RunTimeouts()
     sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
     termination: LimitTermination | None = None
+    resumed_from: ResumedFrom | None = None
 
     def missing_for_report(self) -> list[str]:
         """Reasons this lock cannot back a reported result.

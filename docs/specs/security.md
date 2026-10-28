@@ -277,15 +277,18 @@ not make arbitrary remote MCP authentication implicit; that remains a separate c
 
 `cua-desktop` follows the same opt-in MCP path. It is not automatically injected.
 
-## 9. Native continuation stays in one live sandbox
+## 9. Native continuation follows the retained solver
 
-A native continuation binds the harness, model, validated settings, effective resource
-digest, episode ID, sandbox ID, and exact native session ID. Resume sends only the new
-instruction and selects that exact session.
+A native continuation names the harness and the exact native session ID. Resume sends
+only the new instruction and selects that exact session, in the episode's own Sandbox or
+in a retained solver a later episode adopted. Continuation fails when the native state is
+absent or belongs to another harness. There is no "latest session" selector, transcript
+replay fallback, or copying of native state between Sandboxes.
 
-Continuation fails when the sandbox was destroyed, the native state is absent, any bound
-input changed, or the request names another episode or sandbox. There is no "latest
-session" selector, transcript replay fallback, or configurable disk/global resume scope.
+A retained solver records the episode whose agent state it holds. Reverification and
+continuation attach only for that episode, and a continuing episode claims the solver
+before its agent starts, so an earlier record never leads to a Sandbox a later agent
+changed.
 
 ## 10. Root agent judges do not redefine solver output
 
@@ -300,8 +303,10 @@ before a Judge changes the live workspace.
 
 Run configuration, not Task content, decides whether solver and verifier sandboxes are
 destroyed or retained. Default is destroy. Before a kept sandbox receives a durable
-handle, required evidence capture finishes, known verification credentials are removed,
-and episode capabilities are revoked. Subscription credentials stay in the
+handle, required evidence capture finishes, every stage of its Task (`setup/`, `verify/`
+and the oracle) and known credentials are removed, and episode capabilities are revoked.
+A later episode may hand the solver to another evaluated agent, which must not find
+verification there. Subscription credentials stay in the
 checkout-local Host profile and therefore require no retained-Sandbox cleanup.
 
 Every Docker sandbox, QEMU runner and Daytona sandbox is labeled with ALE ownership,
