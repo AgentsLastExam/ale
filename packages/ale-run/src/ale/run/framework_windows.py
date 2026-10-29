@@ -206,17 +206,17 @@ def service_key(hives: Path, python: str, user: str, runner_address: str) -> str
 
 
 def merge(hive: Path, registry_text: str) -> None:
-    """Apply ``registry_text`` to a downloaded SYSTEM hive."""
+    """Apply ``registry_text`` to a downloaded hive, a file named as the hive is (SYSTEM)."""
     with tempfile.NamedTemporaryFile("w", suffix=".reg", encoding="utf-8", newline="") as file:
         file.write(registry_text)
         file.flush()
         done = subprocess.run(
-            ["hivexregedit", "--merge", "--prefix", "HKEY_LOCAL_MACHINE\\SYSTEM",
+            ["hivexregedit", "--merge", "--prefix", f"HKEY_LOCAL_MACHINE\\{hive.name}",
              str(hive), file.name],
             capture_output=True, text=True, check=False,
         )  # fmt: skip
     if done.returncode != 0:
-        raise Lacks(f"could not register the framework service: {done.stderr.strip()}")
+        raise Lacks(f"could not edit the {hive.name} hive: {done.stderr.strip()}")
 
 
 if __name__ == "__main__":

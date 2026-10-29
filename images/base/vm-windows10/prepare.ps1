@@ -1,7 +1,6 @@
 param(
     [string]$AgentUser = "user",
-    [string]$PythonVersion = "3.12.10",
-    [switch]$Compact
+    [string]$PythonVersion = "3.12.10"
 )
 
 $ErrorActionPreference = "Stop"
@@ -102,6 +101,7 @@ Get-Process -Name "vmtoolsd", "vmwaretray" -ErrorAction SilentlyContinue | `
 if (-not (Test-Path "$env:ProgramData\ALE\debloat.done")) {
     throw "Windows base cleanup did not complete; inspect C:\ProgramData\ALE\debloat.log."
 }
+Remove-Item "$env:ProgramData\ALE\debloat.done", "$env:ProgramData\ALE\debloat.log" -Force
 & "$PSScriptRoot\tools.ps1"
 
 # The screen, filesystem and timestamps must begin every episode in one predictable locale.
@@ -211,22 +211,15 @@ powercfg.exe /change hibernate-timeout-ac 0
 powercfg.exe /change hibernate-timeout-dc 0
 Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" `
     -Name HiberbootEnabled -Value 0 -Force
+# Zeroed at shutdown, so a saved disk carries no page file contents to store.
+Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" `
+    -Name ClearPageFileAtShutdown -Value 1 -Type DWord -Force
 Set-ItemProperty "HKCU:\Control Panel\Desktop" -Name ScreenSaveActive -Value "0" -Force
 Set-ItemProperty "HKCU:\Control Panel\Desktop" -Name ScreenSaveTimeOut -Value "0" -Force
 Remove-Item "$env:TEMP\*", "$env:SystemRoot\Temp\*" -Recurse -Force `
     -ErrorAction SilentlyContinue
 Optimize-Volume -DriveLetter C -ReTrim -ErrorAction SilentlyContinue
 
-if ($Compact) {
-    $archive = "$work\SDelete.zip"
-    Invoke-WebRequest "https://download.sysinternals.com/files/SDelete.zip" -OutFile $archive
-    Expand-Archive $archive "$work\sdelete" -Force
-    $sdelete = "$work\sdelete\sdelete64.exe"
-    if ((Get-AuthenticodeSignature $sdelete).Status -ne "Valid") {
-        throw "SDelete signature is not valid."
-    }
-    & $sdelete -accepteula -z C:
-}
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host "ALE Windows base preparation completed. Shut down completely (Fast Startup is off)."

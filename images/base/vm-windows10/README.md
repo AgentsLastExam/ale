@@ -13,20 +13,26 @@ the licensed Windows bytes remain in private storage.
    directory and run:
 
 ```powershell
-.\prepare.ps1 -AgentUser user -Compact
+.\prepare.ps1 -AgentUser user
 ```
 
-The recipe installs pinned Python, WinGet, Chocolatey, Node.js/npm and Git Bash.
-It removes GCP/VMware integration and inherited domain
-applications, cleans their stale data and uninstall inventory, cleans stable system state, and optionally
-zeroes free space. The recipe fixes the system at en-US and UTC; disables update,
-rollback, recovery, sleep, hibernation, automatic maintenance and background prompt paths;
-and clears the seed user's credentials, profiles, history, stale startup tasks and window
-placement. It installs no part of ALE's framework. Shut the guest down completely
-(Fast Startup is off) before exporting the disk: ALE edits the disk offline and cannot
-write to one left hibernated.
+The recipe installs pinned Python, WinGet, Chocolatey, Node.js/npm and Git Bash. It
+removes GCP/VMware integration and inherited domain applications, cleans their stale data
+and uninstall inventory, and cleans stable system state. The recipe fixes the system at
+en-US and UTC; disables update, rollback, recovery, sleep, hibernation, automatic
+maintenance and background prompt paths; and clears the seed user's credentials, profiles,
+history, caches, stale startup tasks, window placement and its own per-user Python. The
+page file is zeroed at every shutdown, so neither the base nor a Task image saved from it
+stores its contents. The recipe installs no part of ALE's framework, and removes what an
+earlier recipe installed. Shut the guest down completely (Fast Startup is off) before
+exporting the disk: ALE edits the disk offline and cannot write to one left hibernated.
 
-Back on the Host, compact the prepared disk with qcow2's zstd compression:
+Back on the Host, finish and compress the prepared disk. `compact.sh` runs `finalize.py`
+in ALE's VM builder, which edits the disk in place while Windows is off: it disables
+Defender and the Security Center that would warn about it (Tamper Protection keeps them on
+while Windows runs), deletes their data, the last cumulative update's unpacked copy under
+`servicing\LCU` and the page file, and zeroes free space. Then it compresses the disk with
+qcow2's zstd compression:
 
 ```bash
 uv run images/base/vm-windows10/compact.sh input.qcow2 output.qcow2
@@ -37,8 +43,8 @@ Every episode cold-boots a fresh qcow2 overlay; ALE does not create ready snapsh
 warm pool.
 
 ```bash
-uv run ale vm-image push output.qcow2 ghcr.io/agentslastexam/vm-windows10-base:0.1.1
-uv run ale vm-image pull ghcr.io/agentslastexam/vm-windows10-base:0.1.1 output.qcow2
+uv run ale vm-image push output.qcow2 ghcr.io/agentslastexam/vm-windows10-base:0.1.2
+uv run ale vm-image pull ghcr.io/agentslastexam/vm-windows10-base:0.1.2 output.qcow2
 ```
 
 A GUI base is not qualified by an oracle-only Task. Before publication, run a real visual
