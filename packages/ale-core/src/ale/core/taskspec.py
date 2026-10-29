@@ -18,9 +18,7 @@ __all__ = [
     "NetworkMode",
     "NetworkPolicy",
     "OperatingSystem",
-    "PhaseTimeoutOverride",
     "PhaseTimeouts",
-    "ResourceOverride",
     "Resources",
     "SkillSource",
     "StdioMcpServer",
@@ -29,7 +27,6 @@ __all__ = [
     "TaskMcpSource",
     "TaskSpec",
     "ToolProvision",
-    "VariantOverride",
     "VerificationMode",
     "VerifierResources",
     "VerifySpec",
@@ -107,16 +104,6 @@ class Resources(BaseModel):
     sudo: bool = False
 
 
-class ResourceOverride(BaseModel):
-    model_config = _FROZEN
-
-    cpus: int | None = Field(default=None, ge=1)
-    memory_mb: int | None = Field(default=None, ge=128)
-    storage_mb: int | None = Field(default=None, ge=256)
-    gpus: int | None = Field(default=None, ge=0)
-    sudo: bool | None = None
-
-
 class NetworkMode(StrEnum):
     BLOCK = "block"
     ALLOWLIST = "allowlist"
@@ -141,21 +128,8 @@ class NetworkPolicy(BaseModel):
 class PhaseTimeouts(BaseModel):
     model_config = _FROZEN
 
-    setup: float = Field(default=120, gt=0)
     agent: float = Field(default=900, gt=0)
     verify: float = Field(default=300, gt=0)
-
-    @property
-    def total(self) -> float:
-        return self.setup + self.agent + self.verify
-
-
-class PhaseTimeoutOverride(BaseModel):
-    model_config = _FROZEN
-
-    setup: float | None = Field(default=None, gt=0)
-    agent: float | None = Field(default=None, gt=0)
-    verify: float | None = Field(default=None, gt=0)
 
 
 class SkillSource(BaseModel):
@@ -278,22 +252,6 @@ class VerifySpec(BaseModel):
         return self
 
 
-class VariantOverride(BaseModel):
-    model_config = _FROZEN
-
-    name: TaskId
-    params: dict[str, Any] = Field(default_factory=dict)
-    resources: ResourceOverride = ResourceOverride()
-    timeouts: PhaseTimeoutOverride = PhaseTimeoutOverride()
-
-    @field_validator("name")
-    @classmethod
-    def _not_base(cls, value: TaskId) -> TaskId:
-        if value == "base":
-            raise ValueError("variant name 'base' is reserved for the top-level Task")
-        return value
-
-
 class TaskManifestV1(BaseModel):
     """The strict authored shape of ``task.yaml``."""
 
@@ -302,41 +260,30 @@ class TaskManifestV1(BaseModel):
     spec_type: Literal["core/v1"]
     name: TaskId
     os: OperatingSystem = OperatingSystem.LINUX
-    environment: Literal["core/standard"] = "core/standard"
     image: ImageSpec
     resources: Resources = Resources()
     network: NetworkPolicy = NetworkPolicy()
     timeouts: PhaseTimeouts = PhaseTimeouts()
     artifacts: tuple[str, ...] = ()
     tools: ToolProvision = ToolProvision()
-    params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
-    variants: tuple[VariantOverride, ...] = ()
     metadata: dict[str, Any] = Field(default_factory=dict)
     extras: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
-    def _check_artifacts(self) -> None:
-        _validate_artifact_paths(self.artifacts, self.os)
-
     @model_validator(mode="after")
-    def _valid_manifest(self) -> Self:
-        self._check_artifacts()
-        names = [variant.name for variant in self.variants]
-        if len(names) != len(set(names)):
-            raise ValueError("variant names must be unique")
+    def _valid_artifacts(self) -> Self:
+        _validate_artifact_paths(self.artifacts, self.os)
         return self
 
 
 class TaskSpec(BaseModel):
-    """One rendered base or variant instance used by the runtime."""
+    """The Task's manifest and instruction as the runtime uses them."""
 
     model_config = _FROZEN
 
     spec_type: Literal["core/v1"] = "core/v1"
     name: TaskId
     os: OperatingSystem = OperatingSystem.LINUX
-    variant: str = Field(default="base", min_length=1)
-    environment: Literal["core/standard"] = "core/standard"
     image: ImageSpec
     instruction: str
     resources: Resources = Resources()
@@ -344,7 +291,6 @@ class TaskSpec(BaseModel):
     timeouts: PhaseTimeouts = PhaseTimeouts()
     artifacts: tuple[str, ...] = ()
     tools: ToolProvision = ToolProvision()
-    params: dict[str, Any] = Field(default_factory=dict)
     verify: VerifySpec = VerifySpec()
     metadata: dict[str, Any] = Field(default_factory=dict)
     extras: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -357,7 +303,3 @@ class TaskSpec(BaseModel):
     @property
     def spec_hash(self) -> str:
         return content_hash(self.model_dump(mode="json"))
-
-    @property
-    def label(self) -> str:
-        return str(self.name) if self.variant == "base" else f"{self.name}@{self.variant}"

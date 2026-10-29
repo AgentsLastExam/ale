@@ -5,11 +5,8 @@ image:
 
 resources: {cpus: 2, memory_mb: 4096}
 network: {mode: block}
-timeouts: {setup: 300, agent: 600, verify: 300}
+timeouts: {agent: 600, verify: 300}
 artifacts: [/home/user/output]
-
-params:
-  greeting: hello
 
 metadata:
   tags: []

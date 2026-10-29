@@ -47,7 +47,7 @@ from ale.run import artifact_files
 from ale.run.assets import observe_task_assets
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, Limits, SessionRegistry
-from ale.run.protocol.episode_protocol import EpisodeProtocol
+from ale.run.protocol.episode_protocol import SETUP_TIMEOUT_SEC, EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, build_lock, judge_provenance
 from ale.run.providers import ProviderRegistry
 from ale.run.recording import EpisodeRecording
@@ -563,7 +563,10 @@ async def run_episode(
         run_dir=episode_dir,
         sandboxes=lease,
         artifacts=sink,
-        budget=Budget(deadline_sec=task.spec.timeouts.total, started_at=started),
+        budget=Budget(
+            deadline_sec=SETUP_TIMEOUT_SEC + task.spec.timeouts.agent + task.spec.timeouts.verify,
+            started_at=started,
+        ),
         session=HarnessSession(
             episode_id=episode_id,
             gateway_url=gateway_url,

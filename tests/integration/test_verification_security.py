@@ -44,7 +44,7 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
     monkeypatch.setenv("ALE_OPENAI_API_KEY", secret)
     task_root = scaffold_task(tmp_path / "scope")
     (task_root / "setup").mkdir()
-    (task_root / "instruction.md").write_text("${greeting}. Do nothing.\n")
+    (task_root / "instruction.md").write_text("Do nothing.\n")
     (task_root / "setup" / "run.sh").write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -110,7 +110,7 @@ async def test_record_containing_a_verify_credential_is_not_collected(
     monkeypatch.setenv("ALE_OPENAI_API_KEY", secret)
     task_root = scaffold_task(tmp_path / "leak")
     (task_root / "setup").mkdir()
-    (task_root / "instruction.md").write_text("${greeting}. Do nothing.\n")
+    (task_root / "instruction.md").write_text("Do nothing.\n")
     (task_root / "setup" / "run.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/output\n"
     )

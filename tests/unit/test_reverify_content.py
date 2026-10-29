@@ -92,7 +92,6 @@ async def test_reverify_refuses_changed_or_unrecorded_inputs_before_attaching(
             "task": lock.task.model_copy(
                 update={
                     "name": task.spec.name,
-                    "variant": task.spec.variant,
                     "non_verifier_digest": None
                     if change == "missing_record"
                     else task.non_verifier_digest,

@@ -392,7 +392,7 @@ async def test_preparation_result_orders_ref_and_artifact_stages(write_task_repo
         with_image_dockerfile=False,
     )
     result = await prepare_task_image_result(task, _Registry())  # type: ignore[arg-type]
-    assert result.task == "demo@base"
+    assert result.task == "demo"
     assert result.role == "solver"
     assert [step.name for step in result.steps] == [
         "lint",

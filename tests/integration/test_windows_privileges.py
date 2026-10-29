@@ -37,7 +37,7 @@ async def test_windows_framework_copies_protected_artifacts_and_verifies_as_admi
         "image": {"kind": "vm", "ref": "local/windows-privileges"},
         "resources": {"cpus": 2, "memory_mb": 8192},
         "artifacts": [r"C:\ale-copy\*.sgf", r"C:\ale-copy\directory.json", r"C:\missing"],
-        "timeouts": {"setup": 120, "agent": 60, "verify": 120},
+        "timeouts": {"agent": 60, "verify": 120},
     }
     if mode == "separate":
         manifest["verify"] = {

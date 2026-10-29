@@ -325,9 +325,8 @@ def _result(
     image: PreparedTaskImage,
     *steps: ImagePreparationStep,
 ) -> ImagePreparationResult:
-    spec = task.spec
     return ImagePreparationResult(
-        task=f"{spec.name}@{spec.variant}",
+        task=str(task.spec.name),
         role=role,
         image=image,
         steps=(ImagePreparationStep("lint", "executed"), *steps),

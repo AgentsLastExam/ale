@@ -27,6 +27,7 @@ from ale.run.episode import run_episode, run_episode_with_retries
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
+from ale.run.protocol import episode_protocol
 from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
@@ -56,12 +57,14 @@ def set_timeout(task_root: Path, phase: str, seconds: int) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_hanging_setup_times_out(tmp_path: Path, write_repo: Callable[..., Path]) -> None:
+async def test_a_hanging_setup_times_out(
+    tmp_path: Path, write_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A task that never finishes preparing is a task defect, reported as a timeout."""
     task_root = write_repo(tmp_path / "repo")
     (task_root / "setup").mkdir()
     (task_root / "setup" / "run.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
-    set_timeout(task_root, "setup", 5)
+    monkeypatch.setattr(episode_protocol, "SETUP_TIMEOUT_SEC", 5)
 
     started = time.monotonic()
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
@@ -180,13 +183,13 @@ async def test_a_hanging_verifier_times_out(
 
 @pytest.mark.asyncio
 async def test_a_timed_out_episode_leaves_no_container_behind(
-    tmp_path: Path, write_repo: Callable[..., Path]
+    tmp_path: Path, write_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Teardown is shielded, so the deadline reclaims the sandbox rather than leaking it."""
     task_root = write_repo(tmp_path / "repo")
     (task_root / "setup").mkdir()
     (task_root / "setup" / "run.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
-    set_timeout(task_root, "setup", 5)
+    monkeypatch.setattr(episode_protocol, "SETUP_TIMEOUT_SEC", 5)
 
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
     assert result.verdict.status is Status.TIMEOUT

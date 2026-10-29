@@ -99,4 +99,4 @@ class Task(ABC):
         return None
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.spec.label})"
+        return f"{type(self).__name__}({self.spec.name})"

@@ -67,7 +67,6 @@ def test_observation_matches_schema_fixture() -> None:
         tasks=(
             TaskValidationObservation(
                 name="demo-task",
-                variant="base",
                 spec_hash=DIGEST,
                 untouched=completed("untouched"),
                 oracle=completed("oracle"),

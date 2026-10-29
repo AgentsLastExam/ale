@@ -194,30 +194,20 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
         image = {"kind": "container", "ref": LINUX_IMAGE}
     home = r"C:\Users\user" if windows else "/home/user"
     memory = 8192 if windows else 1024
-    alternate_memory = 9216 if windows else 1536
     manifest = {
         "spec_type": "core/v1",
         "name": f"standard-assets-{operating_system.value}",
         "os": operating_system.value,
         "image": image,
         "resources": {"cpus": 2, "memory_mb": memory},
-        "timeouts": {"setup": 300, "agent": 300, "verify": 300},
+        "timeouts": {"agent": 300, "verify": 300},
         "artifacts": [f"{home}/output"],
-        "params": {"greeting": "hello"},
-        "variants": [
-            {
-                "name": "alternate",
-                "params": {"greeting": "hola"},
-                "resources": {"memory_mb": alternate_memory},
-                "timeouts": {"agent": 360},
-            }
-        ],
     }
     (task / "task.yaml").write_text(
         yaml.safe_dump(manifest, sort_keys=False),
         encoding="utf-8",
     )
-    (task / "instruction.md").write_text("Write '${greeting} world verified' to the output file.\n")
+    (task / "instruction.md").write_text("Write 'hello world verified' to the output file.\n")
     (task / "setup" / "assets" / "seed.txt").write_text("world\n")
     (task / "oracle" / "assets" / "suffix.txt").write_text("verified\n")
     (task / "verify" / "assets" / "expected-suffix.txt").write_text("verified\n")
@@ -247,11 +237,9 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                 if (([Security.Principal.WindowsPrincipal] `
                     [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
                         [Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 18 }
-                $params = Get-Content $env:ALE_PARAMS_JSON | ConvertFrom-Json
                 $seed = (Get-Content ".\assets\suffix.txt").Trim()
                 $word = (Get-Content "$env:ALE_HOME\input\seed.txt").Trim()
-                Set-Content "$env:ALE_HOME\output\result.txt" `
-                    "$($params.greeting) $word $seed" -NoNewline
+                Set-Content "$env:ALE_HOME\output\result.txt" "hello $word $seed" -NoNewline
                 """
             ).lstrip()
         )
@@ -276,13 +264,9 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                 """\
                 #!/usr/bin/env bash
                 set -euo pipefail
-                greeting=$(
-                    python3 -c 'import json,sys; print(json.load(sys.stdin)["greeting"])' \
-                        < "$ALE_PARAMS_JSON"
-                )
                 word=$(cat "$ALE_HOME/input/seed.txt")
                 suffix=$(cat assets/suffix.txt)
-                printf '%s %s %s' "$greeting" "$word" "$suffix" > "$ALE_HOME/output/result.txt"
+                printf 'hello %s %s' "$word" "$suffix" > "$ALE_HOME/output/result.txt"
                 """
             )
         )
@@ -295,16 +279,14 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
 
     (task / "verify" / "verify.py").write_text(
         textwrap.dedent(
-            "import json\n"
             "import os\n"
             "from pathlib import Path\n"
             "from ale_verify import checks, write\n"
             "home = Path(os.environ['ALE_HOME'])\n"
-            "params = json.loads(Path(os.environ['ALE_TASK_PARAMETERS_PATH']).read_text())\n"
             "suffix = Path('assets/expected-suffix.txt').read_text().strip()\n"
             "verification = {}\n"
             "verification['output'] = checks.text_equals(str(home / 'output/re"
-            "sult.txt'), f\"{params['greeting']} world {suffix}\")['score']\n"
+            "sult.txt'), f'hello world {suffix}')['score']\n"
             "verification['setup_asset'] = checks.text_equals(str(home / 'inpu"
             "t/seed.txt'), 'world\\n')['score']\n"
             "verification['setup_ran'] = checks.text_equals(str(home / 'input/"
@@ -319,8 +301,6 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
 def _write_windows_gui_task(root: Path) -> Path:
     task = _write_task(root, OperatingSystem.WINDOWS)
     manifest = yaml.safe_load((task / "task.yaml").read_text())
-    manifest.pop("params")
-    manifest.pop("variants")
     # Built on the base, so the image gets the framework's Cua Driver.
     manifest["image"] = {"kind": "vm", "base_ref": "local/windows-base"}
     (task / "task.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
@@ -385,7 +365,6 @@ def _write_windows_gui_task(root: Path) -> Path:
     return task
 
 
-@pytest.mark.parametrize("variant", ["base", "alternate"])
 @pytest.mark.parametrize(
     "operating_system",
     [
@@ -393,13 +372,12 @@ def _write_windows_gui_task(root: Path) -> Path:
         pytest.param(OperatingSystem.WINDOWS, marks=pytest.mark.needs_kvm),
     ],
 )
-async def test_standard_task_assets_and_variants_across_operating_systems(
+async def test_standard_task_assets_across_operating_systems(
     tmp_path: Path,
     operating_system: OperatingSystem,
-    variant: str,
 ) -> None:
     task_root = _write_task(tmp_path / "tasks", operating_system)
-    task = load_task_folder(task_root, variant=variant)
+    task = load_task_folder(task_root)
     if operating_system is OperatingSystem.WINDOWS:
         image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
         if not image.is_file():
@@ -417,12 +395,10 @@ async def test_standard_task_assets_and_variants_across_operating_systems(
         collect_artifacts=True,
     )
 
-    greeting = "hello" if variant == "base" else "hola"
-    assert task.spec.params == {"greeting": greeting}
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"overall": 1.0}
     assert (result.run_dir / "artifacts/0000/output/result.txt").read_text() == (
-        f"{greeting} world verified"
+        "hello world verified"
     )
 
 

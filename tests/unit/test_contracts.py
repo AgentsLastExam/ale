@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from ale.core.errors import TaskDefinitionError
 from ale.core.ids import TaskId, canonical_json, content_hash
 from ale.core.taskspec import (
     ImageKind,
@@ -25,7 +24,6 @@ from ale.core.taskspec import (
     VerifierResources,
     VerifySpec,
 )
-from ale.core.template import render_instruction
 from ale.core.verdict import Status, Verdict
 
 pytestmark = pytest.mark.unit
@@ -44,7 +42,6 @@ def test_task_spec_is_strict_core_v1_and_path_independent() -> None:
     spec = make_spec()
     assert spec.spec_type == "core/v1"
     assert spec.name == "demo-hello"
-    assert spec.label == "demo-hello"
     assert spec.network.mode is NetworkMode.BLOCK
     assert spec.image == ImageSpec(kind=ImageKind.CONTAINER)
     assert not hasattr(spec, "domain")
@@ -76,16 +73,14 @@ def test_image_spec_is_explicit_strict_and_nonblank() -> None:
         )
 
 
-def test_task_spec_hash_tracks_rendered_semantics() -> None:
+def test_task_spec_hash_tracks_semantics() -> None:
     assert make_spec().spec_hash == make_spec().spec_hash
     assert make_spec().spec_hash != make_spec(instruction="different").spec_hash
-    hard = make_spec(variant="hard", params={"n": 10})
-    assert hard.label == "demo-hello@hard"
-    assert hard.spec_hash != make_spec(params={"n": 3}).spec_hash
+    assert make_spec().spec_hash != make_spec(resources={"cpus": 2}).spec_hash
 
 
 def test_task_spec_round_trips() -> None:
-    spec = make_spec(params={"rows": 3}, metadata={"category": "cli"})
+    spec = make_spec(metadata={"category": "cli"})
     restored = TaskSpec.model_validate_json(spec.model_dump_json())
     assert restored == spec
 
@@ -137,16 +132,13 @@ def test_manifest_field_set_is_exact() -> None:
         "spec_type",
         "name",
         "os",
-        "environment",
         "image",
         "resources",
         "network",
         "timeouts",
         "artifacts",
         "tools",
-        "params",
         "verify",
-        "variants",
         "metadata",
         "extras",
     }
@@ -196,23 +188,6 @@ def test_mcp_transports_reject_mixed_fields() -> None:
 def test_canonical_json_and_hash_are_stable() -> None:
     assert canonical_json({"b": 1, "a": [1, 2]}) == '{"a":[1,2],"b":1}'
     assert content_hash({"a": 1, "b": 2}) == content_hash({"b": 2, "a": 1})
-
-
-def test_instruction_template_is_strict() -> None:
-    assert render_instruction("Solve ${n} cases", {"n": 3}) == "Solve 3 cases"
-    with pytest.raises(TaskDefinitionError, match="undeclared"):
-        render_instruction("Solve ${n}", {})
-    with pytest.raises(TaskDefinitionError, match="unused"):
-        render_instruction("no placeholders", {"n": 3})
-
-
-def test_instruction_dollar_text_is_not_a_placeholder() -> None:
-    text = "Write $HOME/out.txt for $5, plot $x^2$ over ${n} runs, keep $${HOME} literal"
-    assert render_instruction(text, {"n": 2}) == (
-        "Write $HOME/out.txt for $5, plot $x^2$ over 2 runs, keep ${HOME} literal"
-    )
-    with pytest.raises(TaskDefinitionError, match="malformed"):
-        render_instruction("Solve ${n cases", {})
 
 
 def test_failed_verification_is_not_a_zero_reward() -> None:

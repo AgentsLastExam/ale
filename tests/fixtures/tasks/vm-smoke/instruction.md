@@ -1,1 +1,1 @@
-Write the word ${greeting} into /home/user/output/result.txt
+Write the word hello into /home/user/output/result.txt

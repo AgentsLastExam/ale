@@ -7,7 +7,7 @@ using the same phase ordering for container and VM sandboxes.
 
 Before the protocol starts, the engine has already:
 
-- loaded and rendered one base or selected variant into `TaskSpec`;
+- loaded the Task folder into `TaskSpec`;
 - linted the Task and prepared the solver image and any dedicated verifier image;
 - resolved the Harness and the effective Skill/MCP resources;
 - resolved the Harness authentication path, created its episode capabilities and
@@ -23,8 +23,9 @@ provision -> setup -> agent/oracle -> final evidence capture
           -> shared or separate verify -> teardown/retention -> result
 ```
 
-Every phase is timed and attributed independently. Setup, agent, and verify default to
-`TaskSpec.timeouts`. Run policy may override `timeouts.agent` with positive seconds and
+Every phase is timed and attributed independently. Agent and verify default to
+`TaskSpec.timeouts`. Setup has a fixed framework bound of 1800 s, a guard against a hung setup
+rather than a scored budget. Run policy may override `timeouts.agent` with positive seconds and
 `timeouts.verify` with positive seconds or `"unlimited"`. These overrides are recorded in
 RunLock and the configuration hash without changing the Task identity. The Agent deadline
 starts at Harness launch (or policy rollout), after installation, resource staging, and
@@ -105,9 +106,8 @@ and uploads the same `verify/`. It never reruns setup or copies the solver files
 Verification runs as framework-controlled Task code with open egress and elevated
 privileges (root on Linux, Administrator on Windows), in both shared and separate modes.
 Task code may explicitly drop privileges when executing a submitted program.
-ALE stages `ale_verify`, the rendered
-instruction, parameters, optional solver trajectory, and run-level Judge configuration,
-then executes the OS entry from the verification staging directory. Linux uses
+ALE stages `ale_verify`, the instruction, optional solver trajectory, and run-level Judge
+configuration, then executes the OS entry from the verification staging directory. Linux uses
 `/opt/ale/verify/run.sh`; Windows uses `C:\ProgramData\ALE\verify\run.ps1`.
 ALE selects Python 3.12+ (`python3`, then `python3.12` on Linux; `python.exe` on Windows)
 and provides its command as `ALE_VERIFY_PYTHON`. Both placements produce the same JSON

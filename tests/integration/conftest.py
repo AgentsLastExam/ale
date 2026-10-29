@@ -48,16 +48,15 @@ def _write_repo(
         name: hello
         image: {kind: container}
         resources: {cpus: 1, memory_mb: 512}
-        timeouts: {setup: 120, agent: 120, verify: 120}
+        timeouts: {agent: 120, verify: 120}
         artifacts: [/home/user/output]
-        params: {greeting: hello}
         """).strip()
         + "\n"
         + manifest_suffix.strip()
         + "\n"
     )
     (task / "instruction.md").write_text(
-        "Write ${greeting} followed by the word in /home/user/input/word.txt "
+        "Write hello followed by the word in /home/user/input/word.txt "
         "into /home/user/output/result.txt\n"
     )
     if image is not None:

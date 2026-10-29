@@ -13,9 +13,6 @@ resources: { cpus: 1, memory_mb: 2048 }
 network: { mode: block }
 artifacts: [/home/user/output]
 
-timeouts: { setup: 60, agent: 900, verify: 60 }
-
-params:
-  marker: SUBAGENT_MARKER_7F3A
+timeouts: { agent: 900, verify: 60 }
 
 metadata: { tags: [smoke, subagents] }

@@ -19,18 +19,15 @@ image:
 
 resources: {{cpus: 1, memory_mb: 4096}}
 network: {{mode: block}}
-timeouts: {{setup: 60, agent: 300, verify: 120}}
+timeouts: {{agent: 300, verify: 120}}
 artifacts: [/home/user/output]
-
-params:
-  greeting: hello
 
 metadata:
   tags: []
 """
 
 INSTRUCTION_MD = """\
-Write the word ${greeting} into /home/user/output/result.txt
+Write the word hello into /home/user/output/result.txt
 """
 
 DOCKERFILE = f"""\
@@ -46,15 +43,9 @@ exec "$ALE_VERIFY_PYTHON" verify.py
 """
 
 VERIFY_PY = """\
-import json
-import os
-
 from ale_verify import checks, write
 
-with open(os.environ["ALE_PARAMS_JSON"], encoding="utf-8") as handle:
-    expected = json.load(handle)["greeting"] + "\\n"
-
-check = checks.text_equals("/home/user/output/result.txt", expected)
+check = checks.text_equals("/home/user/output/result.txt", "hello\\n")
 write({"overall": check["score"], "content": check})
 """
 

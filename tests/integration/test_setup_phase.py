@@ -8,6 +8,7 @@ import pytest
 from ale.core.verdict import Status
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol import episode_protocol
 from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
@@ -75,10 +76,9 @@ async def test_nonzero_setup_stops_before_agent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_setup_timeout_is_explicit(tmp_path: Path) -> None:
+async def test_setup_timeout_is_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(episode_protocol, "SETUP_TIMEOUT_SEC", 0.1)
     task = scaffold_task(tmp_path / "timeout")
-    manifest = task / "task.yaml"
-    manifest.write_text(manifest.read_text().replace("setup: 60", "setup: 0.1"))
     setup = task / "setup"
     setup.mkdir()
     entry = setup / "run.sh"

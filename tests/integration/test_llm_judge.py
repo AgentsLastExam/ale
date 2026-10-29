@@ -82,7 +82,7 @@ def judged_task(root: Path) -> Path:
         image: {kind: container}
         resources: {cpus: 1, memory_mb: 512}
         network: {mode: block}
-        timeouts: {setup: 60, agent: 60, verify: 120}
+        timeouts: {agent: 60, verify: 120}
         artifacts: [/home/user/output]
         """).strip()
     )

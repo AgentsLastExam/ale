@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Iterator
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -17,14 +16,10 @@ from ale.core.task import Task, TaskSourceContext
 from ale.core.taskspec import (
     ImageKind,
     OperatingSystem,
-    PhaseTimeouts,
-    Resources,
     TaskManifestV1,
     TaskSpec,
-    VariantOverride,
     VerificationMode,
 )
-from ale.core.template import render_instruction
 from ale.core.verdict import Rewards
 from ale.run.content import tree_digest
 
@@ -238,27 +233,25 @@ def load_tasks(path: Path) -> list[ManifestTask]:
                     f"{previous_root} and {source.repository_root}"
                 )
             repositories[source.repository_name] = source.repository_root
-        for task in _load_folder(folder):
-            previous = seen.get(str(task.spec.name))
-            if previous is not None and previous != folder.root:
-                raise TaskDefinitionError(
-                    f"duplicate Task name {task.spec.name!r}: {previous} and {folder.root}"
-                )
-            seen[str(task.spec.name)] = folder.root
-            tasks.append(task)
+        task = _load_folder(folder)
+        previous = seen.get(str(task.spec.name))
+        if previous is not None:
+            raise TaskDefinitionError(
+                f"duplicate Task name {task.spec.name!r}: {previous} and {folder.root}"
+            )
+        seen[str(task.spec.name)] = folder.root
+        tasks.append(task)
     return tasks
 
 
-def load_task_folder(path: Path, *, variant: str = "base") -> ManifestTask:
-    tasks = [task for task in load_tasks(path) if task.spec.variant == variant]
-    if not tasks:
-        raise TaskDefinitionError(f"{path} has no variant {variant!r}")
+def load_task_folder(path: Path) -> ManifestTask:
+    tasks = load_tasks(path)
     if len(tasks) > 1:
         raise TaskDefinitionError(f"{path} selects more than one Task")
     return tasks[0]
 
 
-def _load_folder(folder: TaskFolder) -> Iterator[ManifestTask]:
+def _load_folder(folder: TaskFolder) -> ManifestTask:
     try:
         manifest = TaskManifestV1.model_validate(_read_yaml(folder.root / TASK_MANIFEST))
     except ValidationError as exc:
@@ -306,10 +299,21 @@ def _load_folder(folder: TaskFolder) -> Iterator[ManifestTask]:
             raise TaskDefinitionError("verify/Dockerfile requires verify.image.kind")
     elif manifest.verify.image is not None and manifest.verify.image.ref is None:
         raise TaskDefinitionError("external verifier requires verify.image.ref")
-    template = (folder.root / INSTRUCTION).read_text(encoding="utf-8")
-    yield ManifestTask(_effective_spec(manifest, template, "base", None), folder)
-    for variant in manifest.variants:
-        yield ManifestTask(_effective_spec(manifest, template, str(variant.name), variant), folder)
+    spec = TaskSpec(
+        name=manifest.name,
+        os=manifest.os,
+        image=manifest.image,
+        instruction=(folder.root / INSTRUCTION).read_text(encoding="utf-8"),
+        resources=manifest.resources,
+        network=manifest.network,
+        timeouts=manifest.timeouts,
+        artifacts=manifest.artifacts,
+        tools=manifest.tools,
+        verify=manifest.verify,
+        metadata=manifest.metadata,
+        extras=manifest.extras,
+    )
+    return ManifestTask(spec, folder)
 
 
 def _stage_entry(operating_system: OperatingSystem) -> str:
@@ -329,47 +333,6 @@ def _require_folder(folder: TaskFolder, operating_system: OperatingSystem) -> No
         raise TaskDefinitionError(
             f"{folder.root} is missing required Task file(s): {', '.join(missing)}"
         )
-
-
-def _effective_spec(
-    manifest: TaskManifestV1,
-    template: str,
-    variant_name: str,
-    variant: VariantOverride | None,
-) -> TaskSpec:
-    params = manifest.params | (variant.params if variant else {})
-    resources = _overlay(manifest.resources, variant.resources if variant else None)
-    timeouts = _overlay(manifest.timeouts, variant.timeouts if variant else None)
-    instruction = render_instruction(
-        template,
-        params,
-        where=f"{manifest.name}/{INSTRUCTION}",
-    )
-    return TaskSpec(
-        name=manifest.name,
-        os=manifest.os,
-        variant=variant_name,
-        environment=manifest.environment,
-        image=manifest.image,
-        instruction=instruction,
-        resources=Resources.model_validate(resources),
-        network=manifest.network,
-        timeouts=PhaseTimeouts.model_validate(timeouts),
-        artifacts=manifest.artifacts,
-        tools=manifest.tools,
-        params=params,
-        verify=manifest.verify,
-        metadata=manifest.metadata,
-        extras=manifest.extras,
-    )
-
-
-def _overlay(base: object, override: object | None) -> dict[str, Any]:
-    values = base.model_dump(mode="python")  # type: ignore[attr-defined]
-    if override is None:
-        return values
-    updates = override.model_dump(mode="python", exclude_none=True)  # type: ignore[attr-defined]
-    return values | updates
 
 
 def _has_files(path: Path) -> bool:

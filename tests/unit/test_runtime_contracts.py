@@ -62,7 +62,6 @@ def make_lock(**overrides: object) -> RunLock:
     base: dict[str, object] = {
         "task": TaskProvenance(
             name="demo-hello",
-            variant="base",
             spec_hash=DIGEST,
             content_digest=DIGEST,
             source=TaskSource(
@@ -134,7 +133,6 @@ class TestRunLock:
         lock = make_lock(
             task=TaskProvenance(
                 name="demo-hello",
-                variant="base",
                 spec_hash=DIGEST,
                 content_digest=DIGEST,
                 source=TaskSource(kind="local", path="/home/dev/tasks/hello"),

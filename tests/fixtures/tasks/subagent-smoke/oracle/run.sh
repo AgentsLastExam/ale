@@ -3,12 +3,4 @@
 # from the trajectory by live acceptance.
 set -euo pipefail
 
-python3 - <<'PY'
-import json
-import os
-
-with open(os.environ["ALE_PARAMS_JSON"], encoding="utf-8") as handle:
-    marker = json.load(handle)["marker"]
-with open("/home/user/output/child.txt", "w", encoding="utf-8") as handle:
-    handle.write(marker)
-PY
+printf 'SUBAGENT_MARKER_7F3A' > /home/user/output/child.txt

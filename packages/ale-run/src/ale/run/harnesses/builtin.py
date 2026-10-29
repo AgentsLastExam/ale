@@ -132,10 +132,7 @@ class OracleHarness(AutonomousHarness):
             # The oracle stands in for an agent, but it is task code and gets the same
             # environment contract a stage does — otherwise a solution that works during
             # authoring fails during validation for reasons that have nothing to do with it.
-            env={
-                "ALE_HOME": session.home,
-                "ALE_PARAMS_JSON": str(root / "params.json"),
-            },
+            env={"ALE_HOME": session.home},
             timeout_sec=timeout_sec,
             # The oracle stands in for the agent, so it meets the agent's limits. An
             # oracle with more privilege would pass exactly the tasks a real agent then

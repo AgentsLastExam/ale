@@ -209,7 +209,7 @@ def test_prepare_uses_selection_and_starts_no_runtime_services(
         )
         return tuple(
             ImagePreparationResult(
-                task=f"{task.spec.name}@{task.spec.variant}",
+                task=str(task.spec.name),
                 role="solver",
                 image=image,
                 steps=(ImagePreparationStep("oci-build", "executed", digest),),
@@ -228,7 +228,7 @@ def test_prepare_uses_selection_and_starts_no_runtime_services(
 
     assert result.exit_code == 0, result.output
     assert observed == ["a", "b"]
-    assert "a@base solver kind=container source=local" in result.output
+    assert "a solver kind=container source=local" in result.output
     assert "oci-build" in result.output
 
 

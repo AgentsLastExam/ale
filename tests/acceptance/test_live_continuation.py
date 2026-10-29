@@ -78,11 +78,7 @@ def _task(root: Path, instruction: str, verify: str) -> Path:
     scaffold_task(root)
     (root / "instruction.md").write_text(instruction)
     manifest = root / "task.yaml"
-    manifest.write_text(
-        manifest.read_text()
-        .replace("agent: 300", "agent: 900")
-        .replace("params:\n  greeting: hello\n", "")
-    )
+    manifest.write_text(manifest.read_text().replace("agent: 300", "agent: 900"))
     (root / "verify/verify.py").write_text(verify)
     return root
 

@@ -73,7 +73,7 @@ def _task(tmp_path: Path, kind: str) -> ManifestTask:
             "spec_type: core/v1\nname: continued\nos: windows\n"
             "image: {kind: vm, base_ref: local/windows-base}\n"
             "resources: {cpus: 2, memory_mb: 8192}\n"
-            "timeouts: {setup: 300, agent: 1200, verify: 300}\n"
+            "timeouts: {agent: 1200, verify: 300}\n"
         )
     else:
         scaffold_task(root)

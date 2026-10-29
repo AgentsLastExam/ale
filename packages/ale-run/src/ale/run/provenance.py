@@ -230,7 +230,6 @@ def build_lock(
     return RunLock(
         task=TaskProvenance(
             name=spec.name,
-            variant=spec.variant,
             spec_hash=spec.spec_hash,
             content_digest=task_digest,
             non_verifier_digest=non_verifier_digest,

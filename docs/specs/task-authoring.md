@@ -61,7 +61,6 @@ its nesting; omit optional sections that the Task does not use.
 ```yaml
 spec_type: core/v1                 # required; current Task schema
 name: my-task                      # required stable ID, unique in its Task collection
-environment: core/standard         # optional; this is the only supported value
 os: linux                           # optional: linux | windows; default: linux
 
 image:                              # required initial sandbox image
@@ -81,7 +80,6 @@ network:                            # optional evaluated-agent/oracle network po
   allowed_hosts: []                 # required and non-empty only for allowlist
 
 timeouts:                           # optional positive seconds; defaults shown
-  setup: 120
   agent: 900
   verify: 300
 
@@ -95,9 +93,6 @@ tools:                              # optional; use only when the Task explicitl
   mcp_servers:
     - path: tools/mcp/search.toml   # Task-relative MCP descriptor
 
-params:                             # optional instruction template values
-  count: 3                          # instruction.md may reference this as ${count}
-
 verify:                             # optional; shared verification is the default
   environment_mode: separate        # shared | separate
   image:                            # optional separate-verifier image
@@ -108,12 +103,6 @@ verify:                             # optional; shared verification is the defau
     memory_mb: 4096
     storage_mb: null
     gpus: 0
-
-variants:                           # optional named instances of this same Task
-  - name: hard                      # unique; "base" is reserved
-    params: {count: 10}             # may override only params...
-    resources: {cpus: 2}            # ...solver resources...
-    timeouts: {agent: 1800}         # ...and timeouts
 
 metadata:                           # optional descriptive values; no runtime behavior
   tags: [document-analysis]
@@ -147,11 +136,6 @@ For shared verification, omit `verify` or set only `environment_mode: shared`. S
 verification runs in an independent sandbox, requires explicit resources, and may reuse the
 solver image, use `verify/Dockerfile`, or use `verify.image.ref`. The Verification APIs and
 records are defined only in [Verification](verification.md).
-
-### Variants
-
-Variants represent parameter, resource, or timeout changes to the same expected outcome. A change
-to image, setup, verification, network, artifacts, or tools is a different Task.
 
 ### Resources and network
 
@@ -265,12 +249,10 @@ explicitly set required ownership, write and execute permissions instead of rely
 
 ## instruction.md
 
-`instruction.md` is the evaluated-agent instruction. Its input and output paths refer to the
-declared initial environment and artifacts. Declared `${name}` placeholders are rendered from `params`.
-Only the braced form is a placeholder: other `$` text such as `$HOME`, `$5` or `$x^2$` is copied
-unchanged, and `$$` renders one `$`, so `$${HOME}` produces a literal `${HOME}`.
-Use literal sandbox paths: `/home/user/...` on Linux and `C:\Users\user\...` on
-Windows. ALE does not add or rewrite a workspace prefix.
+`instruction.md` is the evaluated-agent instruction, used verbatim. Its input and output paths
+refer to the declared initial environment and artifacts. Use literal sandbox paths:
+`/home/user/...` on Linux and `C:\Users\user\...` on Windows. ALE does not add or rewrite a
+workspace prefix.
 
 ## tools/
 

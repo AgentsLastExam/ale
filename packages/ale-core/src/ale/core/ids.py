@@ -24,8 +24,7 @@ class TaskId(str):
 
     Subclasses ``str`` so it serialises transparently and works as a mapping key.
     Deliberately has no accessors: anything the framework needs to *know* about a task
-    — its domain, its variant, where its data lives — is a field somewhere, never a
-    substring here.
+    — its domain, where its data lives — is a field somewhere, never a substring here.
     """
 
     __slots__ = ()

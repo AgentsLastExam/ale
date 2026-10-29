@@ -63,7 +63,7 @@ def context(tmp_path: Path):
         episode_id=tmp_path.name,
         home="/home/user",
         session=SimpleNamespace(token=""),
-        spec=SimpleNamespace(params={}, network=NetworkPolicy(), os=OperatingSystem.LINUX),
+        spec=SimpleNamespace(network=NetworkPolicy(), os=OperatingSystem.LINUX),
         verification_command_env={},
         verification_secrets=(),
         phase_timeout_sec=1.0,

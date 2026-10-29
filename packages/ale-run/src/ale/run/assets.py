@@ -117,8 +117,7 @@ def select_asset_repositories(paths: Sequence[Path]) -> tuple[AssetRepositorySel
     tasks_by_root: dict[Path, AssetLocation] = {}
     for path in paths:
         for task in load_tasks(path.expanduser().resolve()):
-            if task.spec.variant == "base":
-                tasks_by_root[task.folder.root] = AssetLocation(task.folder)
+            tasks_by_root[task.folder.root] = AssetLocation(task.folder)
 
     repositories: dict[Path, list[AssetLocation]] = {}
     names: dict[str, Path] = {}

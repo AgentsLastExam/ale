@@ -94,12 +94,15 @@ from ale.run.recording import (
 from ale.run.verification import installed_ale_verify, verifier_judge_config
 from ale_verify import JudgeInvocation, read_result
 
-__all__ = ["EpisodeProtocol", "Resume", "ReverificationProtocol"]
+__all__ = ["SETUP_TIMEOUT_SEC", "EpisodeProtocol", "Resume", "ReverificationProtocol"]
 
 #: How long past the agent deadline the Host waits. The guest enforces that deadline
 #: itself and stops the agent's process tree before it replies, so evidence capture begins
 #: after the agent stopped; this margin only bounds a guest that no longer replies.
 AGENT_STOP_GRACE_SEC = 60.0
+
+#: Upper bound on the setup phase: a guard against a hung setup, not a scored budget.
+SETUP_TIMEOUT_SEC = 1800.0
 
 
 #: Where the framework's own machinery goes. Under a root-owned, root-only directory,
@@ -196,7 +199,7 @@ class EpisodeProtocol:
         )
         try:
             await self._with_deadline(
-                ctx, Phase.SETUP, spec.timeouts.setup, self._setup(task, ctx, sandbox)
+                ctx, Phase.SETUP, SETUP_TIMEOUT_SEC, self._setup(task, ctx, sandbox)
             )
             if self.agent_enabled:
                 await self._agent(task, ctx, sandbox, logs=logs)
@@ -625,8 +628,6 @@ class EpisodeProtocol:
         await sandbox.write_file(
             str(layout.path("verify", "instruction.md")), ctx.spec.instruction.encode("utf-8")
         )
-        parameters = json.dumps(ctx.spec.params, ensure_ascii=False).encode("utf-8")
-        await sandbox.write_file(str(layout.path("verify", "parameters.json")), parameters)
         await self._stage_verification_config(ctx, sandbox)
         # Scoring is the framework's own work, and a verifier may need to reach something
         # the agent could not. The agent has already finished; nothing it does can follow.
@@ -977,7 +978,6 @@ class EpisodeProtocol:
         env = {
             "ALE_STAGE_DIR": str(directory),
             "ALE_HOME": ctx.home,
-            "ALE_PARAMS_JSON": str(directory / "params.json"),
             "ALE_VERDICT_PATH": str(layout.path("verify", "result.json")),
         }
         if phase is Phase.VERIFY:
@@ -987,7 +987,6 @@ class EpisodeProtocol:
                     "ALE_LLM_JUDGE_LOG_PATH": str(layout.path("verify", "llm-judge.jsonl")),
                     "ALE_VERIFY_CONFIG_PATH": str(layout.path("verify", "config.json")),
                     "ALE_TASK_INSTRUCTION_PATH": str(layout.path("verify", "instruction.md")),
-                    "ALE_TASK_PARAMETERS_PATH": str(layout.path("verify", "parameters.json")),
                     "ALE_AGENT_JUDGE_LOG_PATH": str(layout.path("verify", "agent-judge.jsonl")),
                     **ctx.verification_command_env,
                 }
@@ -1001,9 +1000,6 @@ class EpisodeProtocol:
             if ctx.phase_deadline is not None:
                 remaining = max(0, int(ctx.phase_deadline - time.monotonic()))
                 env["ALE_VERIFY_DEADLINE_SECONDS"] = str(remaining)
-        await sandbox.write_file(
-            str(directory / "params.json"), json.dumps(ctx.spec.params).encode("utf-8")
-        )
         assert ctx.execution is not None
         assert ctx.blobs is not None
         execution_id = f"{phase.value}-{len(ctx.phases) + 1}"
@@ -1117,11 +1113,6 @@ class EpisodeProtocol:
         # As the agent, since the agent is the account that will run it.
         root = oracle_dir(ctx.home, ctx.spec.os)
         await sandbox.upload_dir(str(source), str(root), identity=Identity.AGENT)
-        await sandbox.write_file(
-            str(root / "params.json"),
-            json.dumps(task.spec.params).encode("utf-8"),
-            identity=Identity.AGENT,
-        )
 
     def _verify_timeout(self, ctx: EpisodeContext) -> float | None:
         if self.timeouts.verify == "unlimited":

@@ -65,7 +65,7 @@ async def test_windows_native_harness_completes_a_file_task(
     api_key, upstream = provider_credentials(config.gateway.provider)
     task_root = _write_task(tmp_path / "tasks", OperatingSystem.WINDOWS)
     (task_root / "instruction.md").write_text(
-        "Read C:/Users/user/input/seed.txt, then write '${greeting} <word> verified' to "
+        "Read C:/Users/user/input/seed.txt, then write 'hello <word> verified' to "
         "C:/Users/user/output/result.txt, replacing <word> with the word you read. "
         "Do not include quotes or a trailing newline. Use your file or shell tools.\n"
     )

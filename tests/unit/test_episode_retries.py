@@ -347,7 +347,6 @@ async def test_reverification_retries_only_with_fresh_verifiers(
             "task": lock.task.model_copy(
                 update={
                     "name": task.spec.name,
-                    "variant": task.spec.variant,
                     "non_verifier_digest": task.non_verifier_digest,
                 }
             )

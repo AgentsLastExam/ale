@@ -471,7 +471,6 @@ def _prompt(
         for key in (
             "ALE_HOME",
             "ALE_TASK_INSTRUCTION_PATH",
-            "ALE_TASK_PARAMETERS_PATH",
             "ALE_TRAJECTORY_PATH",
         )
         if os.environ.get(key)

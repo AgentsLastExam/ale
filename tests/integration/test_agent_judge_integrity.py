@@ -106,9 +106,7 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         .replace("memory_mb: 4096", "memory_mb: 512")
         .replace("verify: 120", "verify: 120")
     )
-    (task_root / "instruction.md").write_text(
-        "${greeting}. Write baseline to /home/user/output/result.txt\n"
-    )
+    (task_root / "instruction.md").write_text("Write baseline to /home/user/output/result.txt\n")
     (task_root / "image" / "fake-agent.py").write_text(
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
