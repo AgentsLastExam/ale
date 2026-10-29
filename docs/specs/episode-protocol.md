@@ -122,10 +122,11 @@ Task code may explicitly drop privileges when executing a submitted program.
 ALE stages `ale_verify`, the instruction, optional solver trajectory, and run-level Judge
 configuration, then executes the OS entry from the verification staging directory. Linux uses
 `/opt/ale/tests/test.sh`; Windows uses `C:\ProgramData\ALE\tests\test.ps1`.
-ALE selects Python 3.12+ (`python3`, then `python3.12` on Linux; `python.exe` on Windows)
-and provides its command as `ALE_VERIFY_PYTHON`. Both placements leave the same
-[result](verification.md#result) in `/logs/verifier` (`C:\logs\verifier`), which ALE empties
-and gives to the framework alone before every attempt. The solver interpreter is unchanged.
+ALE selects Python 3.12+ (`python3`, then `python3.12` on Linux; `python.exe` on Windows;
+then the framework's own) and provides its command as `ALE_VERIFY_PYTHON`. Both placements
+leave the same [result](verification.md#result) in `/logs/verifier` (`C:\logs\verifier`),
+which ALE empties and gives to the framework alone before every attempt. The solver
+interpreter is unchanged.
 
 ### Teardown and retention
 

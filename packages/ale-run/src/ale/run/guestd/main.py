@@ -113,6 +113,11 @@ class Handler:
         env.update(params.get("env") or {})
         cwd = params.get("cwd")
         timeout = params.get("timeout_sec")
+        if os.name == "nt" and argv and not os.path.dirname(argv[0]):
+            # Windows looks for a bare program name in the starting program's own directory
+            # first, which is the framework's Python; found on PATH it is the image's, as
+            # on Linux.
+            argv = [shutil.which(argv[0], path=env.get("PATH")) or argv[0], *argv[1:]]
 
         popen_kwargs: dict[str, Any] = {
             "cwd": cwd,

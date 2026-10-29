@@ -365,13 +365,15 @@ that run; the RunLock records what the run used. See
 implementation conventionally lives in `tests/verify.py`. ALE uploads the whole directory to
 its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
 directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal
-absolute paths. The verification image must expose system Python 3.12
-or newer. Before each tests entrypoint starts, ALE selects an existing compatible Python,
-stages `ale_verify` and its schema validator into that interpreter's site-packages, checks
-the import, then sets `ALE_VERIFY_PYTHON` in the entrypoint's process environment.
+absolute paths. Before each tests entrypoint starts, ALE selects a Python 3.12+: the image's
+own when it has one, since that is where the Task installs what `verify.py` imports, and
+otherwise the framework's own. It stages `ale_verify` and its schema validator into that
+interpreter's site-packages, checks the import, then sets `ALE_VERIFY_PYTHON` in the
+entrypoint's process environment.
 It is available to the tests and their child processes, including during `validate` and
 `reverify`; it is not initialized by the image build, setup stage, or SDK import.
-ALE does not install Python or replace the solver's default interpreter.
+ALE does not install Python into the image's environment or replace the solver's default
+interpreter.
 
 The Linux entry is:
 

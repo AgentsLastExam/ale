@@ -31,6 +31,16 @@ from ale.run.guestd import gui
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def pythons(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Stand-ins for the framework's Python builds, so no test downloads one."""
+    root = tmp_path / "pythons"
+    for platform in ("linux", "windows"):
+        (root / platform / "python").mkdir(parents=True)
+    monkeypatch.setattr(framework, "_python", lambda platform: root / platform / "python")
+    return root
+
+
 def test_the_layer_identity_follows_everything_it_is_built_from(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -45,7 +55,7 @@ def test_the_layer_identity_follows_everything_it_is_built_from(
 
 @pytest.mark.asyncio
 async def test_the_layer_is_built_on_the_task_image(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pythons: Path
 ) -> None:
     monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
     driver = tmp_path / "cua-driver-release"
@@ -64,6 +74,7 @@ async def test_the_layer_is_built_on_the_task_image(
     async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
         if argv[:3] == ("docker", "buildx", "build"):
             context = Path(argv[-1])
+            built["context"] = argv[argv.index("--build-context") + 1]
             built["dockerfile"] = (context / "Dockerfile").read_text()
             built["files"] = sorted(path.name for path in context.rglob("*"))
             built["unit"] = (context / "ale-guestd.service").read_text()
@@ -81,7 +92,12 @@ async def test_the_layer_is_built_on_the_task_image(
     assert "COPY guestd/ /opt/ale/guestd/" in dockerfile
     assert "COPY --chmod=0755 cua-driver /usr/local/bin/cua-driver" in dockerfile
     identity = framework_identity(user="app", sudo=True, vm=True)
-    assert json.dumps(["/bin/sh", "/opt/ale/setup.sh", "app", "true", identity]) in dockerfile
+    setup = ["/bin/sh", "/opt/ale/setup.sh", "app", "true", identity, "/tmp/python"]
+    # The Python is mounted for the setup to install, never copied into the layer twice.
+    assert (
+        "RUN --mount=type=bind,from=python,target=/tmp/python " + json.dumps(setup)
+    ) in dockerfile
+    assert built["context"] == f"python={pythons / 'linux' / 'python'}"
     assert dockerfile.rstrip().splitlines()[-2] == "USER app"
     assert set(guestd.FILES) <= set(built["files"])
     assert "Environment=ALE_AGENT_USER=app" in built["unit"]
@@ -93,7 +109,7 @@ async def test_the_layer_is_built_on_the_task_image(
 
 @pytest.mark.asyncio
 async def test_a_vm_disk_gets_the_same_pieces_offline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pythons: Path
 ) -> None:
     driver = tmp_path / "cua-driver-release"
     driver.mkdir()
@@ -121,10 +137,15 @@ async def test_a_vm_disk_gets_the_same_pieces_offline(
     assert f"type=bind,src={tmp_path},dst=/disk" in argv
     assert argv[argv.index("--add") + 1] == "/disk/disk.qcow2"
     identity = framework_identity(user="app", sudo=True, vm=True)
-    assert argv[-1] == f"/bin/sh /opt/ale/setup.sh app true {identity}"
+    setup = argv[argv.index("--run-command") + 1]
+    assert setup == f"/bin/sh /opt/ale/setup.sh app true {identity} /tmp/python"
+    assert f"type=bind,src={pythons / 'linux' / 'python'},dst=/python,readonly" in argv
+    assert "/python:/tmp" in argv
+    assert argv[-2:] == ("--delete", "/tmp/python")  # after the setup installed it
     assert "/framework/ale-guestd.service:/etc/systemd/system/ale-guestd.service" in argv
     assert set(guestd.FILES) <= set(seen["files"])  # type: ignore[arg-type]
     assert "Environment=ALE_AGENT_USER=app" in str(seen["unit"])
+    assert f"ExecStart={guestd.PYTHON['linux']} /opt/ale/guestd/main.py" in str(seen["unit"])
 
 
 @pytest.mark.asyncio
@@ -148,6 +169,12 @@ async def test_a_disk_that_cannot_be_framed_fails_with_the_reason(
             builder="b",
         )
     assert str(failure.value).endswith(reason)
+
+
+def test_a_framing_failure_gives_each_reason_once() -> None:
+    """buildx repeats a failed step's output in its summary."""
+    stderr = "#7 0.21 ALE: no glibc\n#7 ERROR: exit code 1\n > [4/4] RUN:\n0.21 ALE: no glibc\n"
+    assert framework._explained(stderr) == "no glibc"
 
 
 @pytest.mark.asyncio
@@ -435,9 +462,37 @@ def test_cua_driver_is_downloaded_once_and_verified(
         framework._cua_driver(platform)
 
 
+def test_the_framework_python_is_downloaded_once_and_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.undo()  # the real _python, not the stand-ins
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
+    payload = _tar({"python/bin/python3.12": b"elf", "python/lib/python3.12/os.py": b""})
+    downloads: list[str] = []
+
+    class Response(io.BytesIO):
+        def __enter__(self) -> Response:
+            return self
+
+    def urlopen(url: str, timeout: float) -> Response:
+        downloads.append(url)
+        return Response(payload)
+
+    monkeypatch.setattr(framework.urllib.request, "urlopen", urlopen)
+    asset = "cpython-3.12.0+1-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+    monkeypatch.setitem(framework._PYTHON, "linux", (asset, hashlib.sha256(payload).hexdigest()))
+    tree = framework._python("linux")
+    assert tree.name == "python" and (tree / "lib/python3.12/os.py").is_file()
+    assert framework._python("linux") == tree
+    assert len(downloads) == 1 and downloads[0].endswith(asset.replace("+", "%2B"))
+    monkeypatch.setitem(framework._PYTHON, "windows", (asset, "0" * 64))
+    with pytest.raises(Exception, match="pinned checksum"):
+        framework._python("windows")
+
+
 @pytest.mark.asyncio
 async def test_a_windows_disk_is_framed_by_the_installer_inside_the_builder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pythons: Path
 ) -> None:
     release = tmp_path / "release"
     release.mkdir()
@@ -468,7 +523,8 @@ async def test_a_windows_disk_is_framed_by_the_installer_inside_the_builder(
     assert argv[argv.index("--entrypoint") + 1] == "python3"
     assert "--network=none" in argv  # nothing to download: the pieces are staged
     install = argv[argv.index("builder:1") + 1 :]
-    assert install[:3] == ("/framework/install.py", "/disk/disk.qcow2", "/framework")
+    assert install[:4] == ("/framework/install.py", "/disk/disk.qcow2", "/framework", "/python")
+    assert f"type=bind,src={pythons / 'windows' / 'python'},dst=/python,readonly" in argv
     assert install[install.index("--user") + 1] == "user"
     assert install[install.index("--identity") + 1] == windows_framework_identity(user="user")
     assert install[install.index("--runner-address") + 1] == guestd.HOST_ADDRESS
