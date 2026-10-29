@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -546,10 +547,66 @@ def test_a_failed_call_starts_the_driver_once_and_retries(monkeypatch: pytest.Mo
         calls.append(tool)
         if not started:
             raise gui.GuiUnavailable("not serving")
-        return {"width": 10, "height": 20}
+        return {"structuredContent": {"width": 10, "height": 20}}
 
     monkeypatch.setattr(gui, "_invoke", invoke)
     monkeypatch.setattr(gui, "_start_server", lambda: started.append(True) or True)
     assert gui.screen_size() == (10, 20)
     assert calls == ["get_screen_size", "get_screen_size"]
     assert started == [True]
+
+
+def _driver_answers(monkeypatch: pytest.MonkeyPatch, *results: dict | None) -> list[list[str]]:
+    """Answer each Cua Driver MCP run with the next tools/call result (None: no daemon)."""
+    import subprocess
+
+    runs: list[list[str]] = []
+    answers = iter(results)
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        runs.append(command)
+        sent = [json.loads(line) for line in str(kwargs["input"]).splitlines()]
+        assert [message.get("method") for message in sent] == [
+            "initialize",
+            "notifications/initialized",
+            "tools/call",
+        ]
+        result = next(answers)
+        if result is None:
+            return subprocess.CompletedProcess(command, 1, "", "daemon is not running")
+        replies = [
+            {"jsonrpc": "2.0", "id": 0, "result": {}},
+            {"jsonrpc": "2.0", "id": 1, "result": result},
+        ]
+        return subprocess.CompletedProcess(
+            command, 0, "\n".join(json.dumps(reply) for reply in replies) + "\n", "update notice"
+        )
+
+    monkeypatch.setattr(gui, "_binary", lambda: "cua-driver")
+    monkeypatch.setattr(gui.subprocess, "run", run)
+    return runs
+
+
+def test_a_driver_tool_succeeds_unless_it_reports_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A scroll answers with text alone; it still succeeded.
+    _driver_answers(
+        monkeypatch,
+        {"content": [{"type": "text", "text": "Scrolled down"}]},
+        {"content": [], "structuredContent": {"width": 1280, "height": 800}},
+        {"content": [{"type": "image", "data": base64.b64encode(b"png").decode()}]},
+        {"content": [{"type": "text", "text": "No window under screen point"}], "isError": True},
+    )
+    monkeypatch.setattr(gui, "_start_server", lambda: pytest.fail("the driver was running"))
+    assert gui._call("scroll", {"x": 1, "y": 1}) == {}
+    assert gui._call("get_screen_size") == {"width": 1280, "height": 800}
+    assert gui.capture_screen() == b"png"
+    with pytest.raises(gui.ActionFailed, match="click failed: No window under screen point"):
+        gui._call("click", {"x": 99999, "y": 99999})
+
+
+def test_an_unreachable_driver_is_started_and_asked_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    runs = _driver_answers(monkeypatch, None, {"structuredContent": {"x": 5, "y": 6}})
+    started: list[bool] = []
+    monkeypatch.setattr(gui, "_start_server", lambda: started.append(True) or True)
+    assert gui._call("get_cursor_position") == {"x": 5, "y": 6}
+    assert started == [True] and len(runs) == 2 and runs[0][1] == "mcp"

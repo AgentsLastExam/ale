@@ -38,6 +38,10 @@ class GuiUnavailable(RuntimeError):
     """The image has no reachable Cua Driver desktop service."""
 
 
+class ActionFailed(GuiUnavailable):
+    """Cua Driver ran the tool and reported that it failed."""
+
+
 def _binary() -> str:
     configured = os.environ.get("ALE_CUA_DRIVER")
     if not configured and os.name == "nt" and os.path.isfile(_WINDOWS_DRIVER):
@@ -66,8 +70,16 @@ def has_desktop() -> bool:
 
 
 def _call(tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The tool's structured result, or ``{}`` when it answers with text alone."""
+    structured = _result(tool, arguments).get("structuredContent")
+    return structured if isinstance(structured, dict) else {}
+
+
+def _result(tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
         return _invoke(tool, arguments)
+    except ActionFailed:
+        raise
     except GuiUnavailable:
         if not _start_server():
             raise
@@ -75,25 +87,70 @@ def _call(tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def _invoke(tool: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
-    command = [_binary(), "call", tool, json.dumps(arguments or {}, separators=(",", ":"))]
+    """One tool call through the driver's MCP proxy; the MCP result of a tool that succeeded.
+
+    ``cua-driver call`` exits 0 whatever the tool says and prints its text when there is no
+    structured result, which some successes (a scroll) and every failure are; MCP marks a
+    failure with ``isError``.
+    """
+    command = [_binary(), "mcp"]
     if socket := _socket():
         command += ["--socket", socket]
+    messages = [
+        {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "ale-guestd", "version": "1"},
+            },
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments or {}},
+        },
+    ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        result = subprocess.run(
+            command,
+            input="".join(json.dumps(message) + "\n" for message in messages),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GuiUnavailable(f"cua-driver {tool} failed: {exc}") from exc
-    if result.returncode != 0:
-        raise GuiUnavailable(
-            f"cua-driver {tool} failed: {result.stderr.strip() or result.stdout.strip()}"
+    answer = next((reply for reply in _replies(result.stdout) if reply.get("id") == 1), None)
+    if answer is None or not isinstance(answer.get("result"), dict):
+        problem = (answer or {}).get("error") or result.stderr.strip()[-300:] or result.returncode
+        raise GuiUnavailable(f"cua-driver {tool} failed: {problem}")
+    outcome = answer["result"]
+    if outcome.get("isError"):
+        said = " ".join(
+            str(part.get("text", ""))
+            for part in outcome.get("content") or []
+            if isinstance(part, dict) and part.get("type") == "text"
         )
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        detail = (result.stdout.strip() or result.stderr.strip())[:300]
-        raise GuiUnavailable(f"cua-driver {tool} returned invalid JSON: {detail!r}") from exc
-    if not isinstance(payload, dict):
-        raise GuiUnavailable(f"cua-driver {tool} returned a non-object result")
-    return payload
+        raise ActionFailed(f"cua-driver {tool} failed: {said.strip() or 'no reason given'}")
+    return outcome
+
+
+def _replies(output: str) -> list[dict[str, Any]]:
+    replies = []
+    for line in output.splitlines():
+        with contextlib.suppress(json.JSONDecodeError):
+            reply = json.loads(line)
+            if isinstance(reply, dict):
+                replies.append(reply)
+    return replies
 
 
 def _socket() -> str | None:
@@ -282,14 +339,13 @@ def cursor_position() -> tuple[int, int]:
 
 
 def capture_screen() -> bytes:
-    payload = _call("get_desktop_state")
-    encoded = payload.get("screenshot_png_b64")
-    if not isinstance(encoded, str):
-        raise GuiUnavailable("cua-driver get_desktop_state returned no screenshot")
-    try:
-        return base64.b64decode(encoded, validate=True)
-    except ValueError as exc:
-        raise GuiUnavailable("cua-driver returned an invalid screenshot") from exc
+    for part in _result("get_desktop_state").get("content") or []:
+        if isinstance(part, dict) and part.get("type") == "image":
+            try:
+                return base64.b64decode(str(part.get("data")), validate=True)
+            except ValueError as exc:
+                raise GuiUnavailable("cua-driver returned an invalid screenshot") from exc
+    raise GuiUnavailable("cua-driver get_desktop_state returned no screenshot")
 
 
 def _point(action: dict[str, Any], key: str = "coordinate") -> tuple[int, int]:
