@@ -21,7 +21,6 @@ from ale.core.sandbox import Identity, Sandbox, SandboxRequest
 from ale.core.taskspec import NetworkPolicy, Resources
 from ale.core.trace import read_jsonl
 from ale.core.trajectory import AtifTrajectory
-from ale.run.environments.log_mirror import LogMirror
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
@@ -30,6 +29,7 @@ from ale.run.harnesses.forgecode import ForgecodeHarness
 from ale.run.harnesses.hermes import HermesHarness
 from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
+from ale.run.protocol.log_mirror import LogMirror
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import BlobStore, EpisodeRecording
 from tests.integration.scripted_model import FINAL, ScriptedModel

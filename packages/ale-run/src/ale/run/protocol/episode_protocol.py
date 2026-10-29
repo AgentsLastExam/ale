@@ -1,9 +1,6 @@
-"""The standard episode flow.
+"""The episode protocol: how one Task becomes one Episode.
 
-Provision a sandbox, prepare it, let the agent work, score what it left behind. Most
-tasks need exactly this; a domain that needs something else — two isolated containers, a
-staged protocol, a human gate — subclasses :class:`~ale.core.environment.Environment`
-instead of bending this one.
+Provision a sandbox, prepare it, let the agent work, score what it left behind.
 
 Three properties are enforced here rather than trusted to task authors: verification and
 oracle material is absent while the evaluated agent runs, every phase has a deadline,
@@ -26,7 +23,7 @@ from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Literal, cast
 
 from ale.core.config import RunTimeouts
-from ale.core.environment import Environment, EpisodeContext, Phase
+from ale.core.episode import EpisodeContext, Phase
 from ale.core.errors import (
     AgentError,
     BudgetExceededError,
@@ -79,14 +76,14 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.core.verdict import Verdict
-from ale.run.environments.log_mirror import (
+from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
+from ale.run.harnesses.builtin import oracle_dir
+from ale.run.protocol.log_mirror import (
     FINAL_SYNC_TIMEOUT_SEC,
     SYNC_INTERVAL_SEC,
     SYNC_TIMEOUT_SEC,
     LogMirror,
 )
-from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
-from ale.run.harnesses.builtin import oracle_dir
 from ale.run.recording import (
     BlobStore,
     CommandRecorder,
@@ -97,7 +94,7 @@ from ale.run.recording import (
 from ale.run.verification import installed_ale_verify, verifier_judge_config
 from ale_verify import JudgeInvocation, read_result
 
-__all__ = ["Resume", "RetainedVerificationEnvironment", "StandardEnvironment"]
+__all__ = ["EpisodeProtocol", "Resume", "ReverificationProtocol"]
 
 #: How long past the agent deadline the Host waits. The guest enforces that deadline
 #: itself and stops the agent's process tree before it replies, so evidence capture begins
@@ -158,10 +155,10 @@ class Resume:
     gateway_port: int | None = None
 
 
-class StandardEnvironment(Environment):
+class EpisodeProtocol:
     """Linear provision → setup → agent → verify flow."""
 
-    name = "core/standard"
+    component = "episode-protocol"
 
     def __init__(
         self,
@@ -470,7 +467,7 @@ class StandardEnvironment(Environment):
         """Hand the agent a stepwise view of the sandbox and let it drive.
 
         The loop used to live here, which meant an agent that wanted to drive had to be
-        inverted through queues to fit. Now it drives, and the environment is still the
+        inverted through queues to fit. Now it drives, and the protocol is still the
         only thing touching the sandbox — so every observation and action is witnessed,
         and the ceilings hold for an agent that never heard of them.
         """
@@ -1157,7 +1154,7 @@ class StandardEnvironment(Environment):
             PhaseStarted(
                 episode_id=ctx.episode_id,
                 phase=phase.value,
-                component=self.name,
+                component=self.component,
             ),
             durable=True,
         )
@@ -1171,7 +1168,7 @@ class StandardEnvironment(Environment):
                 ctx.execution,
                 episode_id=ctx.episode_id,
                 phase=phase.value,
-                component=self.name,
+                component=self.component,
                 secrets=(ctx.session.token,),
             ):
                 if timeout_sec is None:
@@ -1208,7 +1205,7 @@ class StandardEnvironment(Environment):
                 PhaseFinished(
                     episode_id=ctx.episode_id,
                     phase=phase.value,
-                    component=self.name,
+                    component=self.component,
                     level="info" if outcome == "succeeded" else "error",
                     outcome=outcome,  # type: ignore[arg-type]
                     duration_ms=elapsed,
@@ -1220,7 +1217,7 @@ class StandardEnvironment(Environment):
             ctx.phase_deadline = previous_deadline
 
 
-class RetainedVerificationEnvironment(StandardEnvironment):
+class ReverificationProtocol(EpisodeProtocol):
     """Run current verification against a retained episode without rerunning its agent."""
 
     def __init__(

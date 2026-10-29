@@ -1,18 +1,14 @@
-"""Environments: how one task becomes one episode.
+"""The episode contract: what the episode protocol may touch while it runs one Task.
 
-This is the extension point a domain reaches for when the standard flow is not enough —
-a grading topology with two isolated containers, a staged protocol, a human gate.
-
-Everything an environment needs arrives through :class:`EpisodeContext`. It never builds
+Everything the protocol needs arrives through :class:`EpisodeContext`. It never builds
 its own infrastructure clients, so the guarantees the framework makes (sandboxes are
 leased and reaped, model traffic is metered and recorded, artifacts are collected,
-budgets are enforced) hold for every domain by construction rather than by review.
+budgets are enforced) hold by construction rather than by review.
 """
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -32,15 +28,14 @@ from ale.core.sandbox import (
     Sandbox,
     SandboxRequest,
 )
-from ale.core.task import Task, TaskSourceContext
+from ale.core.task import TaskSourceContext
 from ale.core.taskspec import TaskSpec
 from ale.core.trajectory import AtifTrajectory
-from ale.core.verdict import Rewards, Verdict
+from ale.core.verdict import Rewards
 
 __all__ = [
     "ArtifactSink",
     "Budget",
-    "Environment",
     "EpisodeContext",
     "EventSink",
     "Phase",
@@ -61,9 +56,9 @@ class Phase(StrEnum):
 
 
 class SandboxLease(Protocol):
-    """Leases sandboxes on behalf of an environment.
+    """Leases sandboxes on behalf of the episode protocol.
 
-    An environment may hold several at once (a grader and a solver, say); all of them
+    An episode may lease several (a solver and a separate verifier, say); all of them
     are reaped when the episode ends, whatever the outcome.
     """
 
@@ -113,7 +108,7 @@ class Budget:
     """The wall-clock ceiling for one episode.
 
     The gateway enforces token and model-call limits by refusing calls; this object is
-    the environment's read-only view of the time left.
+    the protocol's read-only view of the time left.
     """
 
     deadline_sec: float
@@ -125,7 +120,7 @@ class Budget:
 
 @dataclass
 class EpisodeContext:
-    """Everything an environment is allowed to touch."""
+    """Everything the episode protocol is allowed to touch."""
 
     episode_id: str
     spec: TaskSpec
@@ -220,24 +215,3 @@ class EpisodeContext:
     harness_execution_counter: int = 0
     sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
     limit_termination: LimitTermination | None = None
-
-    extras: dict[str, object] = field(default_factory=dict)
-    """State owned exclusively by a custom Environment implementation."""
-
-
-class Environment(ABC):
-    """Turns one task into one episode."""
-
-    name: str
-
-    @abstractmethod
-    async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
-        """Administer ``task`` and return its verdict.
-
-        Implementations should let framework errors propagate: the engine maps them to
-        the status taxonomy. Catch only what you can genuinely handle.
-        """
-
-    def required_phases(self) -> Sequence[Phase]:
-        """Phases this environment actually uses; drives timeout accounting."""
-        return (Phase.PROVISION, Phase.SETUP, Phase.AGENT, Phase.VERIFY, Phase.TEARDOWN)

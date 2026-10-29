@@ -19,7 +19,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from ale.core.blob import BlobRef, BlobText, InlineText, InlineTextOrBlob, media_class_for
-from ale.core.environment import EventSink
+from ale.core.episode import EventSink
 from ale.core.lock import RunLock
 from ale.core.result import ResultRecord
 from ale.core.sandbox import ExecResult

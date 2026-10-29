@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from ale.core.environment import EpisodeContext
+from ale.core.episode import EpisodeContext
 from ale.core.errors import TaskDefinitionError
 from ale.core.task import Task, TaskSourceContext
 from ale.core.taskspec import (

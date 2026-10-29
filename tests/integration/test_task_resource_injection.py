@@ -21,9 +21,9 @@ from ale.core.trajectory import (
 )
 from ale.core.verdict import Status
 from ale.run.agent_resources import resolve_agent_resources
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
@@ -319,7 +319,7 @@ async def test_autonomous_agent_uses_task_skill_and_mcp_to_pass(
 
     result = await run_episode(
         task,
-        StandardEnvironment(ResourceProbeHarness()),
+        EpisodeProtocol(ResourceProbeHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         agent_resources=resources,

@@ -12,8 +12,8 @@ import pytest
 
 from ale.core.sandbox import Sandbox, SandboxFile
 from ale.core.taskspec import OperatingSystem
-from ale.run.environments import log_mirror
-from ale.run.environments.log_mirror import LogMirror
+from ale.run.protocol import log_mirror
+from ale.run.protocol.log_mirror import LogMirror
 
 pytestmark = pytest.mark.unit
 

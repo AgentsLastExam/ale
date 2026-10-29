@@ -61,7 +61,7 @@ its nesting; omit optional sections that the Task does not use.
 ```yaml
 spec_type: core/v1                 # required; current Task schema
 name: my-task                      # required stable ID, unique in its Task collection
-environment: core/standard         # optional; this is the only supported Environment
+environment: core/standard         # optional; this is the only supported value
 os: linux                           # optional: linux | windows; default: linux
 
 image:                              # required initial sandbox image
@@ -315,4 +315,4 @@ It may execute a solution normally or use protected reference data from `oracle/
 write or upload that state directly. Oracle assets are absent during evaluated-agent execution.
 
 Validation's untouched and oracle reward requirements are defined in
-[StandardEnvironment](standard-environment.md#validation).
+[the episode protocol](episode-protocol.md#validation).

@@ -18,9 +18,9 @@ import pytest
 from ale.core.config import RunConfig
 from ale.core.lock import TaskSource
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.daytona import DaytonaProvider
 from ale.run.tasksets.manifest import load_tasks
@@ -45,7 +45,7 @@ async def run_one(task_root: Path, run_dir: Path):  # type: ignore[no-untyped-de
     settings = RunConfig()
     return await run_episode(
         task,
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DaytonaProvider()),
         run_dir=run_dir,
         collect_artifacts=True,

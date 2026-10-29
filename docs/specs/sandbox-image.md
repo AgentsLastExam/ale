@@ -355,9 +355,9 @@ A Provider turns a SandboxRequest into a running Sandbox that holds the guarante
 or rejects the request before anything is created; it never degrades one silently. It owns
 isolation (resources, network, identity, enforced where the agent cannot reach), the
 channels (Host to guestd, sandbox to Gateway), the lifecycle (create, destroy, retain,
-attach) and truthful observation. It does not own phase timing (the Environment), command
-and file semantics (guestd), credentials (the Gateway) or image and Task content (the
-engine).
+attach) and truthful observation. It does not own phase timing (the episode protocol),
+command and file semantics (guestd), credentials (the Gateway) or image and Task content
+(the engine).
 
 | Guarantee | Enforced by | Conformance test |
 |---|---|---|

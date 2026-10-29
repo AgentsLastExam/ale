@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from ale.core.config import VerificationConfig
-from ale.core.environment import EventSink
+from ale.core.episode import EventSink
 from ale.core.errors import ConfigError, TaskDefinitionError
 from ale.core.ids import content_hash
 from ale.run.gateway.server import REQUEST_PATHS, Gateway

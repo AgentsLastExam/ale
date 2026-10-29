@@ -7,10 +7,10 @@ import pytest
 
 from ale.core.config import AgentJudgeConfig, VerificationConfig
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.gateway.server import Gateway
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
@@ -165,7 +165,7 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
     try:
         result = await run_episode(
             task,
-            StandardEnvironment(OracleHarness()),
+            EpisodeProtocol(OracleHarness()),
             provider_registry(DockerProvider()),
             run_dir=tmp_path / "runs",
             gateway=gateway,

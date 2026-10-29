@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from ale.core.environment import EpisodeContext
+from ale.core.episode import EpisodeContext
 from ale.core.errors import AgentUnsupportedError
 from ale.core.harness import (
     AgentRun,
@@ -21,7 +21,7 @@ from ale.core.sandbox import Sandbox
 from ale.core.task import Task
 from ale.core.taskspec import OperatingSystem, TaskSpec
 from ale.core.testkit import AutonomousHarnessConformance
-from ale.run.environments.standard import StandardEnvironment
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
@@ -93,16 +93,16 @@ def test_unsupported_resources_fail_explicitly() -> None:
 async def test_unsupported_os_fails_before_sandbox_creation() -> None:
     harness = MinimalHarness()
     harness.validate_os(OperatingSystem.LINUX)
-    environment = StandardEnvironment(harness)
-    environment._provision = AsyncMock()
+    protocol = EpisodeProtocol(harness)
+    protocol._provision = AsyncMock()
     task = Mock(spec=Task)
     task.spec = TaskSpec(
         name="windows", os="windows", image={"kind": "vm", "ref": "base.qcow2"}, instruction="work"
     )
     ctx = Mock(spec=EpisodeContext)
     with pytest.raises(AgentUnsupportedError, match="minimal does not support windows"):
-        await environment.run(task, ctx)
-    environment._provision.assert_not_called()
+        await protocol.run(task, ctx)
+    protocol._provision.assert_not_called()
 
 
 @pytest.mark.asyncio

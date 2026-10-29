@@ -10,13 +10,13 @@ from ale.core.harness import EffectiveAgentResources, HarnessSession, Trajectory
 from ale.core.sandbox import SandboxRequest
 from ale.core.taskspec import NetworkPolicy, Resources
 from ale.core.trace import read_jsonl
-from ale.run.environments.log_mirror import LogMirror
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CONTINUE_PROMPT
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
+from ale.run.protocol.log_mirror import LogMirror
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
 from ale.run.secrets import provider_credentials

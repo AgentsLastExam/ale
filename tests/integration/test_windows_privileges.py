@@ -10,9 +10,9 @@ import yaml
 
 from ale.core.taskspec import ImageKind
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.qemu import QemuProvider
 from ale.run.tasksets.manifest import load_task_folder
 from tests.support import provider_registry
@@ -86,7 +86,7 @@ New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
     )
     result = await run_episode(
         load_task_folder(task),
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(
             QemuProvider(image=image, overlay_dir=tmp_path / "qemu"), kind=ImageKind.VM
         ),

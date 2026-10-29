@@ -12,8 +12,8 @@ Providers turn prepared Task images into Sandboxes. ALE ships three backends:
 
 All three implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
 preflight, image verification, lifecycle, command/file transport, egress changes,
-observed identity, resource allocation and optional retention. Harness and Environment
-code must use those contracts rather than backend-specific methods.
+observed identity, resource allocation and optional retention. Harness and episode
+protocol code must use those contracts rather than backend-specific methods.
 
 The normative contracts are
 [`../../../../../../docs/specs/sandbox-image.md`](../../../../../../docs/specs/sandbox-image.md)

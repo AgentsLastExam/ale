@@ -25,10 +25,10 @@ from ale.core.sandbox import ExecResult, Sandbox, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.verdict import Status
 from ale.run.assets import _repository_lock
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import CONTAINER_BASE, prepare_reference, provider_registry
@@ -53,7 +53,7 @@ async def test_four_episodes_at_once_each_score_and_stay_separate(
     async def one(index: int):  # type: ignore[no-untyped-def]
         return await run_episode(
             task,
-            StandardEnvironment(OracleHarness()),
+            EpisodeProtocol(OracleHarness()),
             providers,
             run_dir=tmp_path / "runs",
         )

@@ -23,10 +23,10 @@ from ale.core.taskspec import ImageKind, OperatingSystem
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status
 from ale.run.cli.tasks import _attach_retained, _continuation
-from ale.run.environments.standard import Resume, StandardEnvironment
 from ale.run.episode import EpisodeResult, run_episode
 from ale.run.gateway.server import Gateway
 from ale.run.harnesses.pi_cli import PiCliHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol, Resume
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.docker import DockerProvider
@@ -174,7 +174,7 @@ async def test_kept_episodes_continue_and_a_superseded_one_is_refused(
     async def episode(name: str, *, resume: Resume | None, keep: bool) -> EpisodeResult:
         result = await run_episode(
             task,
-            StandardEnvironment(harness, resume=resume),
+            EpisodeProtocol(harness, resume=resume),
             registry,
             run_dir=tmp_path / name,
             gateway=gateway,

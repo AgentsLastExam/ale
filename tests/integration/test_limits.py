@@ -23,11 +23,11 @@ from ale.core.sandbox import Identity, Sandbox
 from ale.core.trace import read_jsonl
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode, run_episode_with_retries
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
@@ -42,7 +42,7 @@ async def run_one(task_root: Path, run_dir: Path, harness: object):  # type: ign
     task = load_tasks(task_root)[0]
     return await run_episode(
         task,
-        StandardEnvironment(harness),  # type: ignore[arg-type]
+        EpisodeProtocol(harness),  # type: ignore[arg-type]
         provider_registry(DockerProvider()),
         run_dir=run_dir,
     )
@@ -112,7 +112,7 @@ async def test_runtime_agent_budget_excludes_install_and_verification(
 
     result = await run_episode(
         load_tasks(task_root)[0],
-        StandardEnvironment(SlowInstallOracle(), timeouts=RunTimeouts(agent=2, verify="unlimited")),
+        EpisodeProtocol(SlowInstallOracle(), timeouts=RunTimeouts(agent=2, verify="unlimited")),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
     )
@@ -135,7 +135,7 @@ async def test_runtime_agent_timeout_destroys_descendants_and_does_not_retry(
         calls += 1
         return await run_episode(
             load_tasks(task_root)[0],
-            StandardEnvironment(OracleHarness(), timeouts=RunTimeouts(agent=2, verify="unlimited")),
+            EpisodeProtocol(OracleHarness(), timeouts=RunTimeouts(agent=2, verify="unlimited")),
             provider_registry(DockerProvider()),
             run_dir=tmp_path / "runs",
             sandbox_retention=SandboxRetentionConfig(solver="keep"),
@@ -328,7 +328,7 @@ async def test_gateway_limit_records_gateway_layer(
     try:
         result = await run_episode(
             task,
-            StandardEnvironment(GatewayLimitedHarness()),
+            EpisodeProtocol(GatewayLimitedHarness()),
             provider_registry(DockerProvider()),
             run_dir=tmp_path / "runs",
             gateway=gateway,

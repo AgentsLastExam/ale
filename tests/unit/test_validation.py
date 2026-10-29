@@ -23,8 +23,8 @@ from ale.run.cli.tasks import (
     _validation_notices,
     _validation_outcome,
 )
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.harnesses.builtin import NopHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.task_images import ImagePreparationResult, ImagePreparationStep
 
 pytestmark = pytest.mark.unit
@@ -80,7 +80,7 @@ async def test_verifier_accepts_nested_details(tmp_path: Path) -> None:
         spec=SimpleNamespace(os=OperatingSystem.LINUX), verification_secrets=(), run_dir=tmp_path
     )
     value = {"overall": 1, "details": {"count": 10, "reason": "good"}}
-    observed = await StandardEnvironment(NopHarness())._read_result(ctx, RewardsSandbox(value))
+    observed = await EpisodeProtocol(NopHarness())._read_result(ctx, RewardsSandbox(value))
     assert observed == value
     assert json.loads((tmp_path / "verification.json").read_text()) == value
 
@@ -97,7 +97,7 @@ async def test_validation_uses_the_saved_result_precision(
         spec=SimpleNamespace(os=OperatingSystem.LINUX), verification_secrets=(), run_dir=tmp_path
     )
     value = {"overall": raw_score, "details": {"raw": raw_score}}
-    observed = await StandardEnvironment(NopHarness())._read_result(ctx, RewardsSandbox(value))
+    observed = await EpisodeProtocol(NopHarness())._read_result(ctx, RewardsSandbox(value))
     assert observed == {"overall": expected, "details": {"raw": raw_score}}
     assert json.loads((tmp_path / "verification.json").read_text()) == observed
     rewards = {"overall": observed["overall"]}
@@ -124,7 +124,7 @@ async def test_verifier_rejects_bad_result(tmp_path: Path, payload: object) -> N
         spec=SimpleNamespace(os=OperatingSystem.LINUX), verification_secrets=(), run_dir=tmp_path
     )
     with pytest.raises(VerifierOutputError):
-        await StandardEnvironment(NopHarness())._read_result(ctx, RewardsSandbox(payload))
+        await EpisodeProtocol(NopHarness())._read_result(ctx, RewardsSandbox(payload))
 
 
 def test_validate_accepts_run_level_judge_config(
@@ -221,7 +221,7 @@ def test_prepare_uses_selection_and_starts_no_runtime_services(
         raise AssertionError("prepare started a runtime service")
 
     monkeypatch.setattr(task_cli, "_prepare_images", fake_prepare)
-    for name in ("Gateway", "Ledger", "StandardEnvironment"):
+    for name in ("Gateway", "Ledger", "EpisodeProtocol"):
         monkeypatch.setattr(task_cli, name, forbidden)
 
     result = CliRunner().invoke(app, ["prepare", str(repository)])

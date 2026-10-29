@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
@@ -40,7 +40,7 @@ async def test_relocated_task_local_verifier_does_not_enter_solver_image(
     shutil.copytree(source, relocated)
     result = await run_episode(
         load_tasks(relocated)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
     )
@@ -68,7 +68,7 @@ async def test_external_reference_is_published_only_for_live_verification(
     )
     result = await run_episode(
         load_tasks(task_path)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
     )

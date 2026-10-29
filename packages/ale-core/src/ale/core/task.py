@@ -12,7 +12,7 @@ from ale.core.taskspec import OperatingSystem, TaskSpec
 from ale.core.verdict import Rewards
 
 if TYPE_CHECKING:
-    from ale.core.environment import EpisodeContext
+    from ale.core.episode import EpisodeContext
 
 __all__ = ["Task", "TaskAssetObservation", "TaskFolder", "TaskSourceContext"]
 

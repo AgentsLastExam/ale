@@ -8,7 +8,7 @@ remains `core/v1`.
 | **Sandbox** | An isolated execution instance supplied for one episode. | never called an Environment |
 | **Provider** | A backend adapter that turns a SandboxRequest into a Sandbox holding the guarantees in [the Provider contract](sandbox-image.md#provider-contract), or rejects it before creating anything. | not a model vendor or Task-selected setting |
 | **Model provider** | The vendor whose API the Gateway or a Judge calls, named by `gateway.provider` or a Judge's `provider`. It selects `ALE_<PROVIDER>_API_KEY` and `ALE_<PROVIDER>_BASE_URL`. | never a Sandbox Provider |
-| **Environment** | The administration layer that turns one Task into one Episode: provision, setup, agent, verify, teardown. | never means a Sandbox or shell variables |
+| **Episode protocol** | The administration layer that turns one Task into one Episode: provision, setup, agent, verify, teardown. | not selected or replaced by a Task |
 | **Task folder** | The complete self-contained authored source unit: manifest, instruction, image build context, setup, verification, oracle, and optional agent resources. | not dependent on `domain.yaml`, a repository Kit, sibling Task, or shared domain image |
 | **Task source digest** | A digest of the Task folder's canonical paths, bytes, executable bits, and symlink targets, pruning only the four exact stage asset roots and generated state. | not a hash of `task.yaml` alone or of asset bytes |
 | **TaskSpec** | The frozen, serializable effective specification of one selected Task instance after instruction rendering and variant application. | not the folder on disk |

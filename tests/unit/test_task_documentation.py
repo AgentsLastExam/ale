@@ -16,7 +16,7 @@ NORMATIVE = (
     ROOT / "docs/README.md",
     ROOT / "docs/specs/task-quality-standard.md",
     ROOT / "docs/specs/task-authoring.md",
-    ROOT / "docs/specs/standard-environment.md",
+    ROOT / "docs/specs/episode-protocol.md",
     ROOT / "docs/specs/sandbox-image.md",
     ROOT / "docs/specs/verification.md",
     ROOT / "docs/specs/security.md",

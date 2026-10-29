@@ -16,9 +16,9 @@ import pytest
 from ale.core.trace import DesktopAction
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import ScriptedPolicyHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
@@ -26,7 +26,7 @@ from tests.support import provider_registry
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
 
 
-class PolicyEnvironment(StandardEnvironment):
+class FixedRewardProtocol(EpisodeProtocol):
     async def _verify(self, task, ctx, sandbox):  # type: ignore[no-untyped-def]
         return {"reward": 0.0}
 
@@ -39,7 +39,7 @@ async def run_policy(task_root: Path, run_dir: Path, harness: ScriptedPolicyHarn
     task = load_tasks(task_root)[0]
     return await run_episode(
         task,
-        PolicyEnvironment(harness, **kwargs),
+        FixedRewardProtocol(harness, **kwargs),
         provider_registry(DockerProvider()),
         run_dir=run_dir,
     )

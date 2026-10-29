@@ -20,10 +20,10 @@ from ale.core.sandbox import (
 from ale.core.taskspec import NetworkPolicy, Resources
 from ale.core.verdict import Status
 from ale.run.cli.tasks import _reverify
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import _Lease, run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import (
     DockerProvider,
@@ -146,7 +146,7 @@ def context(root: Path, policy: LoggingPolicy, run: AgentRun | None):
 def test_minimal_deletes_successful_native_logs(tmp_path: Path) -> None:
     root = tmp_path / "minimal"
     ctx = context(root, LoggingPolicy(), AgentRun(exit_code=0, final_message="done"))
-    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
+    EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
     assert (root / "trajectory.json").is_file()
     assert not (root / "logs/claude-code").exists()
 
@@ -158,12 +158,12 @@ def test_debug_and_interruption_keep_native_logs(tmp_path: Path) -> None:
         LoggingPolicy(native_logs="debug"),
         AgentRun(exit_code=0, final_message="done"),
     )
-    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(debug_ctx)  # type: ignore[arg-type]
+    EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(debug_ctx)  # type: ignore[arg-type]
     assert (debug / "logs/claude-code/.ale-harness/stdout.log").is_file()
 
     interrupted = tmp_path / "interrupted"
     interrupted_ctx = context(interrupted, LoggingPolicy(), None)
-    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
+    EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
         interrupted_ctx
     )
     assert (interrupted / "logs/claude-code/.ale-harness/stdout.log").is_file()
@@ -193,7 +193,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
     settings = RunConfig.model_validate({"artifacts": {"collect": "host"}})
     first = await run_episode(
         task,
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         registry,
         run_dir=tmp_path / "first",
         provenance=ProvenanceInputs(
@@ -262,7 +262,7 @@ def test_conversion_failure_keeps_native_logs(tmp_path: Path) -> None:
         + "\n"
     )
 
-    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
+    EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
 
     assert transcript.is_file()
     trajectory = json.loads((root / "trajectory.json").read_text())
@@ -274,10 +274,10 @@ def test_conversion_failure_keeps_native_logs(tmp_path: Path) -> None:
 def test_minimal_retention_is_smaller_than_debug(tmp_path: Path) -> None:
     minimal = tmp_path / "minimal-size"
     debug = tmp_path / "debug-size"
-    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
+    EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
         context(minimal, LoggingPolicy(), AgentRun(exit_code=0, final_message="done"))
     )
-    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
+    EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
         context(
             debug,
             LoggingPolicy(native_logs="debug"),
@@ -303,7 +303,7 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
     )
     result = await run_episode(
         load_tasks(task)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
@@ -356,7 +356,7 @@ async def test_separate_retention_applies_to_solver_and_verifier_independently(
     )
     result = await run_episode(
         load_tasks(task)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
@@ -392,7 +392,7 @@ async def test_shared_failure_still_applies_keep_and_records_the_phase(
 
     result = await run_episode(
         load_tasks(task)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
@@ -425,7 +425,7 @@ async def test_separate_verifier_failure_retains_each_requested_sandbox(tmp_path
     (task / "verify/verify.py").write_text("raise RuntimeError('verifier failed')\n")
     result = await run_episode(
         load_tasks(task)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="keep"),
@@ -463,7 +463,7 @@ async def test_sanitation_failure_destroys_sandbox_without_changing_reward(
     task = scaffold_task(tmp_path / "sanitation-failure")
     result = await run_episode(
         load_tasks(task)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),

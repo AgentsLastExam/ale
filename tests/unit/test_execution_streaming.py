@@ -9,13 +9,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from ale.core.environment import Phase
+from ale.core.episode import Phase
 from ale.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
 from ale.core.sandbox import ExecResult
 from ale.core.taskspec import NetworkPolicy, OperatingSystem
 from ale.core.trace import read_jsonl
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.harnesses.builtin import NopHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
@@ -81,7 +81,7 @@ async def test_setup_nonzero_keeps_received_stdout(tmp_path: Path) -> None:
         chunks=(("stdout", b"before failure\n"),),
     )
     with pytest.raises(TaskError, match="exit code 17"):
-        await StandardEnvironment(NopHarness())._run_stage(
+        await EpisodeProtocol(NopHarness())._run_stage(
             ctx,
             sandbox,
             Path("/opt/ale/setup"),
@@ -101,7 +101,7 @@ async def test_setup_timeout_keeps_received_output(tmp_path: Path) -> None:
         chunks=(("stderr", b"last diagnostic\n"),),
     )
     with pytest.raises(PhaseTimeoutError):
-        await StandardEnvironment(NopHarness())._run_stage(
+        await EpisodeProtocol(NopHarness())._run_stage(
             ctx,
             sandbox,
             Path("/opt/ale/setup"),
@@ -117,16 +117,16 @@ async def test_setup_timeout_keeps_received_output(tmp_path: Path) -> None:
 async def test_malformed_verifier_and_network_failure_are_explicit(
     tmp_path: Path,
 ) -> None:
-    environment = StandardEnvironment(NopHarness())
+    protocol = EpisodeProtocol(NopHarness())
     with pytest.raises(VerifierOutputError):
-        await environment._read_result(
+        await protocol._read_result(
             context(tmp_path),
             StageSandbox(ExecResult(exit_code=0), rewards=b'{"rewards": {}}'),  # type: ignore[arg-type]
         )
 
     ctx = context(tmp_path)
     with pytest.raises(RuntimeError, match="cannot seal"):
-        await environment._seal(
+        await protocol._seal(
             ctx,  # type: ignore[arg-type]
             StageSandbox(
                 ExecResult(exit_code=0),
@@ -142,12 +142,12 @@ async def test_malformed_verifier_and_network_failure_are_explicit(
 async def test_verifier_learns_how_much_of_its_phase_is_left(tmp_path: Path) -> None:
     ctx = context(tmp_path)
     sandbox = StageSandbox(ExecResult(exit_code=0))
-    environment = StandardEnvironment(NopHarness())
-    await environment._run_stage(ctx, sandbox, Path("/opt/ale/verify"), Phase.VERIFY)  # type: ignore[arg-type]
+    protocol = EpisodeProtocol(NopHarness())
+    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/verify"), Phase.VERIFY)  # type: ignore[arg-type]
     assert "ALE_VERIFY_DEADLINE_SECONDS" not in sandbox.env
 
     ctx.phase_deadline = time.monotonic() + 100
-    await environment._run_stage(ctx, sandbox, Path("/opt/ale/verify"), Phase.VERIFY)  # type: ignore[arg-type]
+    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/verify"), Phase.VERIFY)  # type: ignore[arg-type]
     assert 98 <= int(sandbox.env["ALE_VERIFY_DEADLINE_SECONDS"]) <= 100
 
 
@@ -155,15 +155,15 @@ async def test_verifier_learns_how_much_of_its_phase_is_left(tmp_path: Path) -> 
 async def test_selected_verifier_python_is_only_exposed_during_verification(tmp_path: Path) -> None:
     ctx = context(tmp_path)
     sandbox = StageSandbox(ExecResult(exit_code=0))
-    environment = StandardEnvironment(NopHarness())
-    await environment._run_stage(
+    protocol = EpisodeProtocol(NopHarness())
+    await protocol._run_stage(
         ctx,
         sandbox,
         Path("/opt/ale/setup"),
         Phase.SETUP,  # type: ignore[arg-type]
     )
     assert "ALE_VERIFY_PYTHON" not in sandbox.env
-    await environment._run_stage(
+    await protocol._run_stage(
         ctx,
         sandbox,
         Path("/opt/ale/verify"),
@@ -178,7 +178,7 @@ async def test_concurrent_episode_output_never_crosses_files(tmp_path: Path) -> 
     async def run(name: str) -> None:
         root = tmp_path / name
         ctx = context(root)
-        await StandardEnvironment(NopHarness())._run_stage(
+        await EpisodeProtocol(NopHarness())._run_stage(
             ctx,  # type: ignore[arg-type]
             StageSandbox(
                 ExecResult(exit_code=0),

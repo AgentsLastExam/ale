@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.environment import Environment, EpisodeContext
+from ale.core.episode import EpisodeContext
 from ale.core.lock import (
     AgentProvenance,
     FrameworkProvenance,
@@ -78,10 +78,12 @@ class NoSandboxProvider(Provider):
         return image
 
     async def create(self, request: SandboxRequest):  # type: ignore[no-untyped-def]
-        raise AssertionError("this environment does not provision")
+        raise AssertionError("this protocol does not provision")
 
 
-class LoggedEnvironment(Environment):
+class LoggedProtocol:
+    """Stands in for the episode protocol: records evidence through the context only."""
+
     name = "test/logged"
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
@@ -249,7 +251,7 @@ async def test_complete_episode_has_one_authoritative_home_per_fact(
     )
     episode = await run_episode(
         task,
-        LoggedEnvironment(),
+        LoggedProtocol(),  # type: ignore[arg-type]
         provider_registry(NoSandboxProvider()),
         run_dir=tmp_path,
         provenance=provenance(),

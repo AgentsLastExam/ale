@@ -11,9 +11,9 @@ from ale.core.config import RunConfig
 from ale.core.harness import EffectiveAgentResources
 from ale.core.lock import TaskSource
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
@@ -75,7 +75,7 @@ async def test_plain_result_is_accepted_only_after_normal_exit(
     (task_root / "verify/verify.py").write_text(script)
     result = await run_episode(
         load_tasks(task_root)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
     )
@@ -138,7 +138,7 @@ async def test_agent_transcript_and_judge_provenance_are_collected_after_exit(
 
     result = await run_episode(
         task,
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         provenance=provenance(task_root),

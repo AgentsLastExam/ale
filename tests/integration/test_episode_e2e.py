@@ -21,9 +21,9 @@ from ale.core.sandbox import Sandbox
 from ale.core.trace import read_jsonl
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
@@ -35,7 +35,7 @@ async def run_one(task_root: Path, run_dir: Path, harness: object):  # type: ign
     task = load_tasks(task_root)[0]
     return await run_episode(
         task,
-        StandardEnvironment(harness),  # type: ignore[arg-type]
+        EpisodeProtocol(harness),  # type: ignore[arg-type]
         provider_registry(DockerProvider()),
         run_dir=run_dir,
         collect_artifacts=True,
@@ -156,7 +156,7 @@ async def test_failed_episode_retries_in_a_new_sandbox_and_preserves_records(
     async def execute() -> EpisodeResult:
         return await run_episode(
             task,
-            StandardEnvironment(harness),
+            EpisodeProtocol(harness),
             providers,
             run_dir=tmp_path / "runs",
             episode_id="hello-retry",

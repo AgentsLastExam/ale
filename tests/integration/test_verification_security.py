@@ -6,10 +6,10 @@ import pytest
 
 from ale.core.config import LLMJudgeConfig, VerificationConfig
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.gateway.server import Gateway
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import Redactor
 from ale.run.scaffold import scaffold_task
@@ -77,7 +77,7 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
     try:
         result = await run_episode(
             task,
-            StandardEnvironment(OracleHarness()),
+            EpisodeProtocol(OracleHarness()),
             provider_registry(DockerProvider()),
             run_dir=tmp_path / "runs",
             gateway=gateway,
@@ -131,7 +131,7 @@ async def test_record_containing_a_verify_credential_is_not_collected(
 
     result = await run_episode(
         task,
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         verification_config=VerificationConfig(

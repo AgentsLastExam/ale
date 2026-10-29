@@ -31,11 +31,6 @@ from ale.core.validation import (
 from ale.core.verdict import Status, Verdict
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.assets import observe_task_assets
-from ale.run.environments.standard import (
-    Resume,
-    RetainedVerificationEnvironment,
-    StandardEnvironment,
-)
 from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
@@ -57,6 +52,7 @@ from ale.run.harnesses.qwen_code import QwenCodeHarness
 from ale.run.harnesses.zcode import ZCodeHarness
 from ale.run.ledger import Ledger, episode_identity
 from ale.run.lint import lint_repository
+from ale.run.protocol.episode_protocol import EpisodeProtocol, Resume, ReverificationProtocol
 from ale.run.provenance import (
     ProvenanceInputs,
     agent_provenance,
@@ -340,7 +336,7 @@ async def _run_one(
         async def execute() -> EpisodeResult:
             return await run_episode(
                 task,
-                StandardEnvironment(
+                EpisodeProtocol(
                     harness,
                     max_steps=settings.agent.max_steps,
                     timeouts=settings.timeouts,
@@ -611,7 +607,7 @@ async def _reverify(
                 solver = await _attach_retained(handle, request, source_lock)
                 return await run_episode(
                     task,
-                    RetainedVerificationEnvironment(
+                    ReverificationProtocol(
                         solver, source_dir, source_lock.sandbox, timeouts=settings.timeouts
                     ),
                     providers,
@@ -890,7 +886,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                     ) -> EpisodeResult:
                         return await run_episode(
                             task,
-                            StandardEnvironment(
+                            EpisodeProtocol(
                                 harness,
                                 agent_enabled=agent_enabled,
                                 max_steps=settings.agent.max_steps,

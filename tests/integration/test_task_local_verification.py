@@ -9,9 +9,9 @@ import pytest
 from ale.core.sandbox import ImageRef, PreparedTaskImage
 from ale.core.taskspec import ImageKind, ImageSpec, VerifySpec
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import (
@@ -91,7 +91,7 @@ def task_repository(tmp_path: Path, name: str) -> tuple[Path, Path]:
 async def execute(task_path: Path, run_dir: Path):  # type: ignore[no-untyped-def]
     return await run_episode(
         load_tasks(task_path)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=run_dir,
         collect_artifacts=True,

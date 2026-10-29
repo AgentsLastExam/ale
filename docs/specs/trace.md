@@ -213,7 +213,7 @@ are not repeated by another episode's retry or by resuming the same completed ru
 When automatic retries are enabled, failed attempts destroy their owned Sandboxes even
 when retention requested `keep`; successful final attempts use the configured policy.
 The same result layout applies to validation and separate reverification; their execution
-boundaries are specified in [Standard Environment](standard-environment.md).
+boundaries are specified in [Episode protocol](episode-protocol.md).
 
 ## Retention
 

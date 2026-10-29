@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
@@ -20,7 +20,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 async def execute(task_path: Path, run_dir: Path):  # type: ignore[no-untyped-def]
     return await run_episode(
         load_tasks(task_path)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=run_dir,
     )

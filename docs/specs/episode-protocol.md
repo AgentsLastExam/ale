@@ -1,12 +1,11 @@
-# Standard Environment evaluation protocol
+# Episode protocol
 
-`StandardEnvironment` implements ALE's `core/standard` evaluation protocol. It turns one
-prepared Task instance into one Episode using the same phase ordering for container and
-VM sandboxes.
+The episode protocol (`EpisodeProtocol`) turns one prepared Task instance into one Episode
+using the same phase ordering for container and VM sandboxes.
 
 ## Inputs
 
-Before the Environment starts, the engine has already:
+Before the protocol starts, the engine has already:
 
 - loaded and rendered one base or selected variant into `TaskSpec`;
 - linted the Task and prepared the solver image and any dedicated verifier image;
@@ -14,7 +13,7 @@ Before the Environment starts, the engine has already:
 - resolved the Harness authentication path, created its episode capabilities and
   evidence sinks, and prepared the Provider registry, run policy, and RunLock inputs.
 
-Image acquisition and building are preparation, not an Environment phase. `ale prepare`
+Image acquisition and building are preparation, not a protocol phase. `ale prepare`
 stops at that boundary and creates no sandbox.
 
 ## Phase order
@@ -189,6 +188,6 @@ follow the [episode result contract](trace.md#result-and-run-status).
 
 ## Extension boundary
 
-`core/standard` is the only standard Task protocol. A protocol that requires a different
-phase graph, several cooperating solver sandboxes, or a human gate is a new `Environment`
-implemented in the engine; it must not overload fields in this contract.
+This is the only episode protocol. A Task that needs a different phase graph, several
+cooperating solver sandboxes, or a human gate needs an engine change; it must not overload
+fields in this contract.

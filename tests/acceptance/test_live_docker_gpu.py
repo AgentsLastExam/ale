@@ -13,9 +13,9 @@ from ale.core.lock import TaskSource
 from ale.core.sandbox import SandboxRequest
 from ale.core.taskspec import NetworkPolicy, Resources
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
@@ -110,7 +110,7 @@ async def _run_separate_gpu(task: Path, run_dir: Path, indices: tuple[int, ...])
     settings = RunConfig()
     return await run_episode(
         load_tasks(task)[0],
-        StandardEnvironment(harness),
+        EpisodeProtocol(harness),
         provider_registry(DockerProvider(gpus=indices)),
         run_dir=run_dir,
         provenance=ProvenanceInputs(

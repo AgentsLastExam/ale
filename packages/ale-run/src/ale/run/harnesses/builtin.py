@@ -94,7 +94,7 @@ class ScriptedPolicyHarness(StepwisePolicy):
 class OracleHarness(AutonomousHarness):
     """Runs the task's own solution in place of an agent.
 
-    The environment stages it before this runs; see :func:`oracle_dir`.
+    The episode protocol stages it before this runs; see :func:`oracle_dir`.
     """
 
     name = "oracle"

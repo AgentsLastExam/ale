@@ -1,12 +1,12 @@
 """Running one episode.
 
-The smallest thing that can produce a verdict: lease a sandbox, hand the task to an
-environment, map whatever comes back to the shared status taxonomy, and write the
+The smallest thing that can produce a verdict: lease a sandbox, hand the task to the
+episode protocol, map whatever comes back to the shared status taxonomy, and write the
 episode's traces and artifacts.
 
-Error mapping lives here rather than in the environment on purpose. An environment
-should raise what actually went wrong and let one place decide what that means for a
-result, so `task_error` means the same thing across every domain.
+Error mapping lives here rather than in the protocol on purpose. The protocol should
+raise what actually went wrong and let one place decide what that means for a result,
+so `task_error` means the same thing for every Task.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from ale.core.config import LoggingPolicy, SandboxRetentionConfig, VerificationConfig
-from ale.core.environment import ArtifactSink, Budget, Environment, EpisodeContext, Phase
+from ale.core.episode import ArtifactSink, Budget, EpisodeContext, Phase
 from ale.core.errors import (
     AgentError,
     AgentRefusalError,
@@ -47,6 +47,7 @@ from ale.run import artifact_files
 from ale.run.assets import observe_task_assets
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, Limits, SessionRegistry
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, build_lock, judge_provenance
 from ale.run.providers import ProviderRegistry
 from ale.run.recording import EpisodeRecording
@@ -147,7 +148,7 @@ class _LeaseEntry:
 class _Lease:
     """Hands out sandboxes and guarantees they are reaped.
 
-    An environment may hold several at once — a grader and a solver, say — so the lease
+    An episode may lease several — a solver and a separate verifier, say — so the lease
     tracks them rather than assuming one.
     """
 
@@ -467,7 +468,7 @@ class _Artifacts(ArtifactSink):
 
 async def run_episode(
     task: Task,
-    environment: Environment,
+    protocol: EpisodeProtocol,
     providers: ProviderRegistry,
     *,
     run_dir: Path,
@@ -593,7 +594,7 @@ async def run_episode(
     )
     verdict: Verdict | None = None
     try:
-        verdict = await environment.run(task, ctx)
+        verdict = await protocol.run(task, ctx)
     except Exception as exc:  # every failure becomes a typed result, not a traceback
         if isinstance(exc, BudgetExceededError):
             ctx.limit_termination = LimitTermination(

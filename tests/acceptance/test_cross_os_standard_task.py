@@ -14,13 +14,13 @@ from ale.core.config import LoggingPolicy
 from ale.core.sandbox import Identity, SandboxRequest
 from ale.core.taskspec import ImageKind, NetworkPolicy, OperatingSystem, Resources
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
 from ale.run.harnesses._npm import agent_home
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.harnesses.computer_use import ComputerUseHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.qemu import QemuProvider
 from ale.run.secrets import provider_credentials
@@ -411,7 +411,7 @@ async def test_standard_task_assets_and_variants_across_operating_systems(
 
     result = await run_episode(
         task,
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         providers,
         run_dir=tmp_path / "runs",
         collect_artifacts=True,
@@ -443,7 +443,7 @@ async def test_real_llm_reads_and_edits_the_windows_desktop(tmp_path: Path) -> N
     try:
         result = await run_episode(
             task,
-            StandardEnvironment(
+            EpisodeProtocol(
                 ComputerUseHarness(model=model),
                 max_steps=20,
                 stall_limit=6,

@@ -11,7 +11,7 @@ import pytest
 from ale.core.config import LoggingPolicy
 from ale.core.harness import AgentRun, AutonomousHarness, TrajectoryParseContext
 from ale.core.trajectory import AtifTrajectory
-from ale.run.environments.standard import StandardEnvironment
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
@@ -53,7 +53,7 @@ def test_conversion_failure_keeps_a_minimal_trajectory_and_the_native_logs(
         trajectory_written=False,
     )
 
-    StandardEnvironment(BrokenParserHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
+    EpisodeProtocol(BrokenParserHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
 
     assert ctx.trajectory_written
     trajectory = json.loads((tmp_path / "trajectory.json").read_text())

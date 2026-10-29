@@ -28,7 +28,7 @@ from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout, web
 
-from ale.core.environment import EventSink
+from ale.core.episode import EventSink
 from ale.core.errors import ConfigError
 from ale.core.trace import TransportCall, TransportReplay
 from ale.run.gateway import anthropic, gemini, openai_chat_completions, openai_responses

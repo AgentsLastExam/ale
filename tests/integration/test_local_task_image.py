@@ -12,9 +12,9 @@ from ale.core.errors import ProviderStartError
 from ale.core.taskspec import ImageKind
 from ale.core.verdict import Status
 from ale.run import task_images
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers import ProviderRegistry
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import prepare_task_image, prepare_task_image_result
@@ -178,7 +178,7 @@ async def test_episode_starts_exact_prepared_local_image(tmp_path: Path) -> None
     task.prepared_image = await prepare_task_image(task, providers)
     result = await run_episode(
         task,
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         providers,
         run_dir=tmp_path / "runs",
     )
