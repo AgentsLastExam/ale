@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from ale.core.config import RunConfig
 from ale.core.errors import VerificationInfrastructureError, VerifierOutputError
-from ale.core.sandbox import PreparedTaskImage
+from ale.core.sandbox import PreparedTaskImage, SandboxFile
 from ale.core.taskspec import ImageKind, OperatingSystem
 from ale.core.verdict import Status, Verdict
 from ale.run.cli.main import app
@@ -31,24 +31,31 @@ pytestmark = pytest.mark.unit
 
 
 class RewardsSandbox:
-    def __init__(self, payload: object) -> None:
-        self.payload = payload
+    """A verifier directory holding ``reward.json`` and, optionally, ``verification.json``."""
 
-    async def read_file(self, _path) -> bytes:  # type: ignore[no-untyped-def]
-        if isinstance(self.payload, BaseException):
-            raise self.payload
-        if isinstance(self.payload, bytes):
-            return self.payload
-        return json.dumps(self.payload).encode()
+    def __init__(self, reward: object, verification: object = None) -> None:
+        self.files = {
+            name: value if isinstance(value, bytes) else json.dumps(value).encode()
+            for name, value in (("reward.json", reward), ("verification.json", verification))
+            if value is not None
+        }
+
+    async def list_files(self, path: str) -> tuple[SandboxFile, ...]:
+        return tuple(
+            SandboxFile(path=f"{path}/{name}", size=len(data)) for name, data in self.files.items()
+        )
+
+    async def read_file(self, path: str) -> bytes:
+        return self.files[path.rsplit("/", 1)[1]]
 
 
 @pytest.mark.parametrize(
     ("rewards", "expected"),
     [
-        ({"overall": 1.0}, True),
-        ({"overall": 1.0, "format": 1.0}, True),
-        ({"overall": 0.0}, False),
-        ({"overall": 0.5}, False),
+        ({"reward": 1.0}, True),
+        ({"reward": 1.0, "format": 1.0}, True),
+        ({"reward": 0.0}, False),
+        ({"reward": 0.5}, False),
         ({}, False),
         (None, False),
     ],
@@ -60,29 +67,41 @@ def test_full_oracle_detection(rewards: dict[str, float] | None, expected: bool)
 @pytest.mark.parametrize(
     ("rewards", "expected"),
     [
-        ({"overall": 0.0}, True),
-        ({"overall": 0.0, "format": 0.0}, True),
-        ({"overall": 1.0}, False),
-        ({"overall": 0.5}, False),
+        ({"reward": 0.0}, True),
+        ({"reward": 0.0, "format": 0.0}, True),
+        ({"reward": 1.0}, False),
+        ({"reward": 0.5}, False),
         ({}, False),
         (None, False),
     ],
 )
-def test_untouched_admission_checks_only_overall(
+def test_untouched_admission_checks_only_reward(
     rewards: dict[str, float] | None, expected: bool
 ) -> None:
     assert _is_zero_reward_map(rewards) is expected
 
 
-@pytest.mark.asyncio
-async def test_verifier_accepts_nested_details(tmp_path: Path) -> None:
-    ctx = SimpleNamespace(
+def _context(tmp_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(
         spec=SimpleNamespace(os=OperatingSystem.LINUX), verification_secrets=(), run_dir=tmp_path
     )
-    value = {"overall": 1, "details": {"count": 10, "reason": "good"}}
-    observed = await EpisodeProtocol(NopHarness())._read_result(ctx, RewardsSandbox(value))
+
+
+@pytest.mark.asyncio
+async def test_verifier_accepts_nested_details(tmp_path: Path) -> None:
+    value = {"reward": 1, "details": {"count": 10, "reason": "good"}}
+    sandbox = RewardsSandbox({"reward": 1}, value)
+    observed = await EpisodeProtocol(NopHarness())._read_result(_context(tmp_path), sandbox)
     assert observed == value
     assert json.loads((tmp_path / "verification.json").read_text()) == value
+
+
+@pytest.mark.asyncio
+async def test_a_reward_file_alone_is_the_complete_result(tmp_path: Path) -> None:
+    sandbox = RewardsSandbox({"accuracy": 0.25, "reward": 0.5})
+    observed = await EpisodeProtocol(NopHarness())._read_result(_context(tmp_path), sandbox)
+    assert observed == {"accuracy": 0.25, "reward": 0.5}
+    assert json.loads((tmp_path / "verification.json").read_text()) == observed
 
 
 @pytest.mark.asyncio
@@ -93,38 +112,44 @@ async def test_verifier_accepts_nested_details(tmp_path: Path) -> None:
 async def test_validation_uses_the_saved_result_precision(
     tmp_path: Path, raw_score: float, expected: float, full: bool, zero: bool
 ) -> None:
-    ctx = SimpleNamespace(
-        spec=SimpleNamespace(os=OperatingSystem.LINUX), verification_secrets=(), run_dir=tmp_path
-    )
-    value = {"overall": raw_score, "details": {"raw": raw_score}}
-    observed = await EpisodeProtocol(NopHarness())._read_result(ctx, RewardsSandbox(value))
-    assert observed == {"overall": expected, "details": {"raw": raw_score}}
+    value = {"reward": raw_score, "details": {"raw": raw_score}}
+    sandbox = RewardsSandbox({"reward": raw_score}, value)
+    observed = await EpisodeProtocol(NopHarness())._read_result(_context(tmp_path), sandbox)
+    assert observed == {"reward": expected, "details": {"raw": raw_score}}
     assert json.loads((tmp_path / "verification.json").read_text()) == observed
-    rewards = {"overall": observed["overall"]}
+    rewards = {"reward": observed["reward"]}
     assert _is_full_reward_map(rewards) is full
     assert _is_zero_reward_map(rewards) is zero
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "payload",
+    ("reward", "verification"),
     [
-        [],
-        {},
-        {"overall": "1"},
-        {"overall": True},
-        {"overall": float("nan")},
-        {"overall": 1.0001},
-        b"not-json",
-        FileNotFoundError("missing"),
+        ([], None),
+        ({}, None),
+        ({"overall": 1}, None),
+        ({"reward": "1"}, None),
+        ({"reward": True}, None),
+        ({"reward": float("nan")}, None),
+        ({"reward": 1.0001}, None),
+        ({"reward": 1, "details": {"count": 1}}, None),
+        (b"not-json", None),
+        (None, None),
+        (None, {"reward": 1}),
+        ({"reward": 1}, {"reward": 0}),
+        ({"reward": 1}, {"details": "no reward"}),
+        ({"reward": 1}, b"not-json"),
     ],
 )
-async def test_verifier_rejects_bad_result(tmp_path: Path, payload: object) -> None:
-    ctx = SimpleNamespace(
-        spec=SimpleNamespace(os=OperatingSystem.LINUX), verification_secrets=(), run_dir=tmp_path
-    )
+async def test_verifier_rejects_bad_result(
+    tmp_path: Path, reward: object, verification: object
+) -> None:
     with pytest.raises(VerifierOutputError):
-        await EpisodeProtocol(NopHarness())._read_result(ctx, RewardsSandbox(payload))
+        await EpisodeProtocol(NopHarness())._read_result(
+            _context(tmp_path), RewardsSandbox(reward, verification)
+        )
+    assert not (tmp_path / "verification.json").exists()
 
 
 def test_validate_accepts_run_level_judge_config(
@@ -254,18 +279,18 @@ def test_validation_failure_output_is_actionable() -> None:
 
 def test_partial_oracle_is_a_hard_failure() -> None:
     names, warnings, failures = _validation_notices(
-        Verdict.completed({"overall": 0.0}),
-        Verdict.completed({"overall": 0.5}),
+        Verdict.completed({"reward": 0.0}),
+        Verdict.completed({"reward": 0.5}),
     )
-    assert names == ("overall",)
+    assert names == ("reward",)
     assert warnings == ()
     assert [notice.code for notice in failures] == ["oracle_not_full"]
 
 
 def test_nonzero_untouched_is_a_failure_and_other_fields_are_ignored() -> None:
     _, _, failures = _validation_notices(
-        Verdict.completed({"overall": 0.1}),
-        Verdict.completed({"overall": 1.0, "other": 0.2}),
+        Verdict.completed({"reward": 0.1}),
+        Verdict.completed({"reward": 1.0, "other": 0.2}),
     )
     assert {notice.code for notice in failures} == {
         "untouched_nonzero",
@@ -275,7 +300,7 @@ def test_nonzero_untouched_is_a_failure_and_other_fields_are_ignored() -> None:
 def test_infrastructure_failure_remains_a_hard_failure() -> None:
     _, _, failures = _validation_notices(
         Verdict.failed(Status.ENV_ERROR, RuntimeError("no sandbox"), phase="provision"),
-        Verdict.completed({"overall": 1.0}),
+        Verdict.completed({"reward": 1.0}),
     )
     assert [notice.code for notice in failures] == ["untouched_not_completed"]
 

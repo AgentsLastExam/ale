@@ -118,7 +118,7 @@ def judged_task(root: Path) -> Path:
         "ies': {'choice': {'enum': ['no', 'yes']}, 'reasoning': {'typ"
         "e': 'string'}}, 'required': ['choice', 'reasoning']})['choic"
         "e']]\n"
-        'write({"overall": sum(v.values()) / len(v), **v})\n'
+        'write({"reward": sum(v.values()) / len(v), **v})\n'
     )
     for script in task.glob("*/run.sh"):
         script.chmod(0o755)
@@ -208,8 +208,8 @@ async def run_judged_task(  # type: ignore[no-untyped-def]
         assert not (result.run_dir / "verification.json").exists()
     else:
         assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-        assert result.verdict.rewards == {"overall": 1.0}
-        assert json.loads((result.run_dir / "verification.json").read_text())["overall"] == 1
+        assert result.verdict.rewards == {"reward": 1.0}
+        assert json.loads((result.run_dir / "verification.json").read_text())["reward"] == 1
     assert seen and all(secret in header for header in seen)
     invocation = next(
         json.loads(line)["invocation"]

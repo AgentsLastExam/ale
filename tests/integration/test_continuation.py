@@ -92,7 +92,7 @@ def _task(tmp_path: Path, kind: str) -> ManifestTask:
         "from ale_verify import write\n"
         f"path = Path({OUTPUT[kind] + '/turns.txt'!r})\n"
         "turns = len(path.read_text().splitlines()) if path.is_file() else 0\n"
-        "write({'overall': turns / 4})\n"
+        "write({'reward': turns / 4})\n"
     )
     return load_tasks(root)[0]
 
@@ -195,13 +195,13 @@ async def test_kept_episodes_continue_and_a_superseded_one_is_refused(
     try:
         first = await episode("first", resume=None, keep=True)
         assert first.verdict.status is Status.COMPLETED, first.verdict.failure
-        assert first.verdict.rewards == {"overall": 0.25}
+        assert first.verdict.rewards == {"reward": 0.25}
         assert first.record.continuation is not None
         (kept_first,) = [item.handle for item in first.record.sandboxes if item.handle]
         assert await _kept_stages(kept_first, task, first.run_dir) == []
         second = await episode("second", resume=continuing(first), keep=True)
         assert second.verdict.status is Status.COMPLETED, second.verdict.failure
-        assert second.verdict.rewards == {"overall": 0.5}
+        assert second.verdict.rewards == {"reward": 0.5}
 
         # The earlier record still names the Sandbox, which now holds the second agent's
         # state; continuing from it is refused without touching that Sandbox.
@@ -212,7 +212,7 @@ async def test_kept_episodes_continue_and_a_superseded_one_is_refused(
 
         third = await episode("third", resume=continuing(second), keep=False)
         assert third.verdict.status is Status.COMPLETED, third.verdict.failure
-        assert third.verdict.rewards == {"overall": 0.75}
+        assert third.verdict.rewards == {"reward": 0.75}
     finally:
         for handle in dict.fromkeys(kept):
             if handle in {item["handle"] for item in await provider.list_retained()}:

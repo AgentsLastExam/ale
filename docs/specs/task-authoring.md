@@ -262,7 +262,7 @@ in `task.yaml`; never depend on ambient Host configuration.
 
 ## verify/
 
-`verify/run.sh` (or Windows `verify/run.ps1`) evaluates the final outcome and writes a JSON result containing `overall`. Verifier implementation
+`verify/run.sh` (or Windows `verify/run.ps1`) evaluates the final outcome and writes its `reward` to `/logs/verifier/reward.json` (Windows `C:\logs\verifier\reward.json`). Verifier implementation
 conventionally lives in `verify/verify.py`; private references belong in `verify/assets/`.
 ALE runs the stage with `verify/` as cwd. Stage code and assets use ordinary relative paths;
 solver outputs use literal absolute paths. The verification image must expose system Python 3.12

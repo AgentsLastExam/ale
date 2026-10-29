@@ -89,7 +89,7 @@ async def test_live_agent_judge_records_transcript_without_an_extra_trajectory(
     finally:
         await gateway.stop()
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     record = json.loads((result.run_dir / "verification.json").read_text())
     assert "agent_trajectory" not in record
     assert (

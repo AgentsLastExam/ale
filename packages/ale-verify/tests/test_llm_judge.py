@@ -449,7 +449,6 @@ def test_public_judge_sends_media_bytes_and_records_original_evidence(
     monkeypatch.setenv("JUDGE_KEY", "secret")
     monkeypatch.setenv("ALE_VERIFY_CONFIG_PATH", str(settings))
     monkeypatch.setenv("ALE_LLM_JUDGE_LOG_PATH", str(record_path))
-    monkeypatch.setenv("ALE_VERDICT_PATH", str(tmp_path / "rewards.json"))
 
     def open_(request, timeout):  # type: ignore[no-untyped-def]
         parts = json.loads(request.data)["input"][0]["content"]

@@ -183,4 +183,4 @@ async def test_episode_starts_exact_prepared_local_image(tmp_path: Path) -> None
         run_dir=tmp_path / "runs",
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}

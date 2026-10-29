@@ -11,7 +11,7 @@ import pytest
 
 from ale.core.episode import Phase
 from ale.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
-from ale.core.sandbox import ExecResult
+from ale.core.sandbox import ExecResult, SandboxFile
 from ale.core.taskspec import NetworkPolicy, OperatingSystem
 from ale.core.trace import read_jsonl
 from ale.run.harnesses.builtin import NopHarness
@@ -49,9 +49,13 @@ class StageSandbox:
         if self.close_error is not None:
             raise self.close_error
 
-    async def read_file(self, _path) -> bytes:  # type: ignore[no-untyped-def]
+    async def list_files(self, path: str) -> tuple[SandboxFile, ...]:
         if self.rewards is None:
-            raise FileNotFoundError
+            return ()
+        return (SandboxFile(path=f"{path}/reward.json", size=len(self.rewards)),)
+
+    async def read_file(self, _path) -> bytes:  # type: ignore[no-untyped-def]
+        assert self.rewards is not None
         return self.rewards
 
 

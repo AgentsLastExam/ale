@@ -110,15 +110,16 @@ ALE stages `ale_verify`, the instruction, optional solver trajectory, and run-le
 configuration, then executes the OS entry from the verification staging directory. Linux uses
 `/opt/ale/verify/run.sh`; Windows uses `C:\ProgramData\ALE\verify\run.ps1`.
 ALE selects Python 3.12+ (`python3`, then `python3.12` on Linux; `python.exe` on Windows)
-and provides its command as `ALE_VERIFY_PYTHON`. Both placements produce the same JSON
-result containing `overall`. The solver interpreter is unchanged.
+and provides its command as `ALE_VERIFY_PYTHON`. Both placements leave the same
+[result](verification.md#result) in `/logs/verifier` (`C:\logs\verifier`), which ALE empties
+and gives to the framework alone before every attempt. The solver interpreter is unchanged.
 
 ### Teardown and retention
 
 Solver and verifier retention are independent run policies and default to `destroy`.
 Before a requested keep, ALE removes every stage of the Task (`setup/`, `verify/` with
-its Judge state, the oracle) and known credentials, so a kept solver holds only the
-agent's own state.
+its Judge state, the oracle), the verifier directory and known credentials, so a kept
+solver holds only the agent's own state.
 Subscription credentials never enter the Sandbox, so retention does not add a provider
 credential cleanup step. Failure of other required sanitation still forces destruction.
 Result and RunLock record the requested policy, actual Provider outcome, retained handle,
@@ -169,8 +170,8 @@ is still allowed when the retry configuration is nonzero.
 
 `ale validate` uses this same protocol twice with fresh sandboxes:
 
-- untouched must complete with `overall` equal to zero;
-- oracle must complete with `overall` equal to one;
+- untouched must complete with `reward` equal to zero;
+- oracle must complete with `reward` equal to one;
 - both use the [two-decimal result precision](verification.md#result) applied to every run;
   all additional result fields are ignored by validation;
 - setup, image, resource, artifact, verifier, Judge, timeout, and infrastructure failures

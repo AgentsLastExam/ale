@@ -77,7 +77,7 @@ async def test_the_oracle_solves_the_task_on_daytona(
     result = await run_one(task_root, tmp_path / "runs")
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert result.lock is not None and result.lock.resources is not None
     assert result.lock.resources.effective.provider == "daytona"
     observed = result.lock.image.observed_ref
@@ -165,7 +165,7 @@ async def test_a_gpu_task_runs_on_the_gpu_its_lock_records(
     result = await run_one(task_root, tmp_path / "runs")
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert result.lock is not None and result.lock.resources is not None
     gpu = result.lock.resources.effective.gpu
     assert gpu is not None and gpu.requested_count == 1

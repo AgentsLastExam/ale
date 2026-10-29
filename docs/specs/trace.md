@@ -249,7 +249,7 @@ its sanitized native stdout/stderr are retained as response events in
 
 ## Verification result
 
-`verification.json` preserves the complete Task-authored JSON result. Only `overall`
+`verification.json` preserves the complete Task-authored JSON result. Only `reward`
 is projected into episode rewards. `llm-judge.jsonl` and `agent-judge.jsonl` sit alongside
 it and are collected independently, including after failure.
 See [Verification](verification.md) for the result and tool contracts.

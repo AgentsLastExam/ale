@@ -224,12 +224,12 @@ async def test_task_local_helper_and_framework_package_are_importable(tmp_path: 
         "from helper import result\n"
         "v = {}\n"
         "v['local'] = result()['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await execute(task_path, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -245,7 +245,7 @@ async def test_oracle_assets_are_staged_with_the_oracle(tmp_path: Path) -> None:
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -266,12 +266,12 @@ async def test_verify_assets_are_withheld_then_available_by_relative_path(
         "from ale_verify import checks, write\n"
         "v = {}\n"
         "v['reference'] = checks.text_equals('assets/reference.txt', 'withheld')['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -282,11 +282,11 @@ async def test_no_assets_verifier_does_not_receive_a_synthetic_asset_root(tmp_pa
         "from ale_verify import write\n"
         "v = {}\n"
         "v['absent'] = float(not Path('assets').exists())\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -337,14 +337,14 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
         "v = {}\n"
         "v['file'] = checks.json_value('/home/user/output/result.json', 'status', 'ok')['score']\n"
         "v['directory'] = checks.text_equals('/var/lib/ale-report/state.txt', 'ready')['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
 
     result = await execute(task, tmp_path / "runs")
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert [outcome.roles for outcome in result.record.sandboxes] == [
         ("solver",),
         ("verifier",),
@@ -393,14 +393,14 @@ async def test_separate_verifier_image_sources_restore_identically_without_setup
         "v = {}\n"
         "v['content'] = checks.text_equals('/home/user/output/result.txt', 'hello\\n')['score']\n"
         "v['fresh'] = float(not Path('/tmp/solver-setup-ran').exists())\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
 
     result = await execute(task, tmp_path / "runs")
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -447,12 +447,12 @@ async def test_privileged_artifacts_glob_and_never_follow_links(tmp_path, mode):
         )
         + "v['directory'] = float(Path('/root/answers/result.json').is_dir())\n"
         "v['missing'] = float(not Path('/root/missing').exists())\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     entries = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"]
     assert not any(
         entry["source"].endswith(("game.sgf", "broken.sgf", "/loop")) for entry in entries

@@ -104,7 +104,7 @@ def test_task_quality_standard_owns_only_semantic_quality() -> None:
         assert implementation_detail not in text
     verification = (ROOT / "docs/specs/verification.md").read_text(encoding="utf-8")
     assert "finite number from 0 through 1" in verification
-    assert "ALE interprets only `overall`" in verification
+    assert "ALE interprets only `reward`" in verification
 
 
 @pytest.mark.parametrize(

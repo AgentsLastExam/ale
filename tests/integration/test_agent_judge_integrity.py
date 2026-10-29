@@ -23,8 +23,7 @@ pytestmark = pytest.mark.integration
 def test_multiple_agent_judges_allow_later_checks_without_touching_solver_trajectory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    record = tmp_path / "verification.json"
-    verdict = tmp_path / "rewards.json"
+    record = tmp_path / "agent-judge.jsonl"
     config = tmp_path / "config.json"
     trajectory = tmp_path / "trajectory.json"
     trajectory.write_text('{"schema_version":"ATIF-v1.8","steps":[]}')
@@ -36,12 +35,12 @@ def test_multiple_agent_judges_allow_later_checks_without_touching_solver_trajec
     )
     for key, value in {
         "ALE_AGENT_JUDGE_LOG_PATH": record,
-        "ALE_VERDICT_PATH": verdict,
         "ALE_VERIFY_CONFIG_PATH": config,
         "ALE_TRAJECTORY_PATH": trajectory,
         "KEY": "secret",
     }.items():
         monkeypatch.setenv(key, str(value))
+    monkeypatch.setattr("ale_verify._VERIFIER_DIR", tmp_path / "verifier")
 
     def fake(**kwargs):  # type: ignore[no-untyped-def]
         return (
@@ -73,7 +72,7 @@ def test_multiple_agent_judges_allow_later_checks_without_touching_solver_trajec
     monkeypatch.setattr("ale_verify._agents.run", fake)
     first = judge("agent", "functional", prompt="Test.")
     second = judge("agent", "functional", prompt="Test again.")
-    write({"overall": float(first["works"] and second["works"]), "late": 42})
+    write({"reward": float(first["works"] and second["works"]), "late": 42})
     events = [json.loads(line) for line in record.read_text().splitlines()]
     assert len([item for item in events if item["event"] == "completed"]) == 2
     assert trajectory.read_bytes() == before
@@ -153,7 +152,7 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         "t', 'properties': {'choice': {'enum': ['no', 'yes']}, 'reasoning'"
         ": {'type': 'string'}}, 'required': ['choice', 'reasoning']})['cho"
         "ice']]\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     task = load_tasks(task_root)[0]

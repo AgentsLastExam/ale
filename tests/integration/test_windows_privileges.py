@@ -81,7 +81,7 @@ New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
         "v['protected'] = float(content == 'protected')\n"
         "v['directory'] = float(Path('C:\\\\ale-copy\\\\directory.json').is_dir())\n"
         "v['missing'] = float(not Path('C:\\\\missing').exists())\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await run_episode(
@@ -94,5 +94,5 @@ New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
         collect_artifacts=True,
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert (result.run_dir / "artifacts/0000/game.sgf").read_text() == "protected"

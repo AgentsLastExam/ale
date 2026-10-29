@@ -1086,11 +1086,11 @@ def _reused_result(
 
 
 def _is_full_reward_map(rewards: dict[str, float] | None) -> bool:
-    return bool(rewards) and rewards.get("overall") == 1.0
+    return bool(rewards) and rewards.get("reward") == 1.0
 
 
 def _is_zero_reward_map(rewards: dict[str, float] | None) -> bool:
-    return bool(rewards) and rewards.get("overall") == 0.0
+    return bool(rewards) and rewards.get("reward") == 0.0
 
 
 def _validation_notices(
@@ -1113,7 +1113,7 @@ def _validation_notices(
         failures.append(
             ValidationNotice(
                 code="untouched_nonzero",
-                message=f"untouched overall must be zero, got {untouched.rewards}",
+                message=f"untouched reward must be zero, got {untouched.rewards}",
             )
         )
 
@@ -1129,13 +1129,13 @@ def _validation_notices(
             ValidationNotice(
                 code="oracle_not_full",
                 message=(
-                    "oracle overall must be one after rounding to two decimals, "
+                    "oracle reward must be one after rounding to two decimals, "
                     f"got {oracle.rewards}"
                 ),
             )
         )
 
-    return ("overall",), (), tuple(failures)
+    return ("reward",), (), tuple(failures)
 
 
 def _validation_attempt(result: EpisodeResult, run_dir: Path) -> ValidationAttempt:

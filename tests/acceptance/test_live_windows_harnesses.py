@@ -91,7 +91,7 @@ async def test_windows_native_harness_completes_a_file_task(
         await gateway.stop()
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
     assert any(step.get("tool_calls") for step in trajectory["steps"])
     assert (result.run_dir / "logs" / name / STDOUT_PATH).stat().st_size > 0

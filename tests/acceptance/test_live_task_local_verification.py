@@ -32,7 +32,7 @@ async def test_relocated_task_local_verifier_does_not_enter_solver_image(
         "v = {}\n"
         "v['withheld'] = float(EXPECTED == 'verify-only-marker')\n"
         "v['not_baked'] = float(not Path('/verify/helper.py').exists())\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     relocated = tmp_path / "elsewhere" / "task"
@@ -45,7 +45,7 @@ async def test_relocated_task_local_verifier_does_not_enter_solver_image(
         run_dir=tmp_path / "runs",
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -63,7 +63,7 @@ async def test_external_reference_is_published_only_for_live_verification(
         "from ale_verify import checks, write\n"
         "v = {}\n"
         "v['reference'] = checks.text_equals('assets/expected.txt', 'expected')['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await run_episode(
@@ -73,4 +73,4 @@ async def test_external_reference_is_published_only_for_live_verification(
         run_dir=tmp_path / "runs",
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}

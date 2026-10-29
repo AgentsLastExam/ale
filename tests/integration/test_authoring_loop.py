@@ -45,8 +45,8 @@ async def test_scaffold_lints_validates_and_survives_relocation(tmp_path: Path) 
 
     result = await run(moved, tmp_path / "runs", OracleHarness())
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
-    assert json.loads((result.run_dir / "result.json").read_text())["rewards"] == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
+    assert json.loads((result.run_dir / "result.json").read_text())["rewards"] == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -54,7 +54,7 @@ async def test_idle_agent_is_a_real_zero(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "task")
     result = await run(task, tmp_path / "runs", NopHarness())
     assert result.verdict.status is Status.COMPLETED
-    assert result.verdict.rewards == {"overall": 0.0}
+    assert result.verdict.rewards == {"reward": 0.0}
 
 
 @pytest.mark.asyncio
@@ -77,9 +77,9 @@ async def test_dynamic_setup_runs_before_oracle(tmp_path: Path) -> None:
         "v = {}\n"
         "v['setup'] = checks.text_equals('/home/user/output/service-ready', 'ready')['score']\n"
         "v['content'] = checks.text_equals('/home/user/output/result.txt', 'hello\\n')['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await run(task, tmp_path / "runs", OracleHarness())
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}

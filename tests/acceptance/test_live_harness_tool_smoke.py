@@ -114,7 +114,7 @@ def test_real_harness_exercises_its_visible_tool_surface(
     assert passed + failed == tested
     assert result["status"] == "completed"
     denominator = max(report["total"], tested + untested)
-    assert result["rewards"]["overall"] == pytest.approx(passed / denominator, abs=0.005)
+    assert result["rewards"]["reward"] == pytest.approx(passed / denominator, abs=0.005)
     assert lock["agent"]["harness"] == harness
     assert lock["agent"]["model"] == model
     assert lock["agent"]["version"] == version

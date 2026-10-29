@@ -24,7 +24,7 @@ VERIFY_DEFAULT = textwrap.dedent("""
 VERIFY_CHECK = (
     "from ale_verify import checks, write\n"
     "check = checks.text_equals('/home/user/output/result.txt', 'hello world')\n"
-    "write({'overall': check['score'], 'content': check})\n"
+    "write({'reward': check['score'], 'content': check})\n"
 )
 
 

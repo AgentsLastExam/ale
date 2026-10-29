@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from decimal import ROUND_HALF_UP, Decimal
+from pathlib import Path
 from typing import Any
 
 from . import _agents, _llm, checks
@@ -50,6 +51,9 @@ __all__ = [
     "read_result",
     "write",
 ]
+
+#: Where a verifier leaves its result: Harbor's verifier directory.
+_VERIFIER_DIR = Path("C:/logs/verifier" if os.name == "nt" else "/logs/verifier")
 
 
 def judge_route(kind: str, config: Mapping[str, str]) -> tuple[str, str]:
@@ -99,29 +103,50 @@ def probe_judge(kind: str, config: Mapping[str, str]) -> None:
         raise ValueError("Judge kind must be 'llm' or 'agent'")
 
 
-def read_result(raw: str | bytes) -> dict[str, Any]:
-    """Validate a result and round only overall to two decimal places, half up."""
-    value = json_object(raw)
-    overall = value.get("overall")
-    if isinstance(overall, bool) or not isinstance(overall, (int, float)):
-        raise ValueError("overall must be a number")
-    if not 0 <= overall <= 1 or not math.isfinite(overall):
-        raise ValueError("overall must be finite and between 0 and 1")
-    value["overall"] = float(
-        Decimal(str(overall)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    )
-    return value
+def read_result(reward: str | bytes, verification: str | bytes | None = None) -> dict[str, Any]:
+    """Check what a verifier wrote and return the complete result, ``reward`` rounded.
+
+    ``reward`` is the content of ``reward.json``: a flat object of numbers whose ``reward``
+    is from 0 through 1. ``verification`` is the content of ``verification.json`` when one
+    was written: any object whose ``reward`` equals ``reward.json``'s. Only ``reward`` is
+    rounded, to two decimal places, half up.
+    """
+    rewards = json_object(reward)
+    for name, value in rewards.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"reward.json values must be numbers: {name}")
+    if "reward" not in rewards:
+        raise ValueError("reward.json must contain reward")
+    rounded = _rounded(rewards["reward"])
+    result = rewards if verification is None else json_object(verification)
+    claimed = result.get("reward")
+    if isinstance(claimed, bool) or claimed != rewards["reward"]:
+        raise ValueError("verification.json reward must equal reward.json reward")
+    return {**result, "reward": rounded}
 
 
 def write(result: dict[str, Any]) -> None:
-    """Atomically save a result. The engine accepts it only after normal exit."""
+    """Atomically save a result. The engine accepts it only after normal exit.
+
+    ``verification.json`` receives the complete result and ``reward.json`` its ``reward``,
+    both with ``reward`` rounded, in the verifier directory Harbor also uses.
+    """
     # Round-tripping also rejects non-JSON Python objects and non-finite values.
     _json_types(result)
-    normalized = read_result(json.dumps(result, ensure_ascii=False, allow_nan=False))
-    path = os.environ.get("ALE_VERDICT_PATH")
-    if not path:
-        raise RuntimeError("ALE_VERDICT_PATH is not configured")
-    atomic_json(path, normalized)
+    if not isinstance(result, dict) or "reward" not in result:
+        raise ValueError("a result must contain reward")
+    complete = json.dumps(result, ensure_ascii=False, allow_nan=False)
+    normalized = read_result(json.dumps({"reward": result["reward"]}), complete)
+    atomic_json(_VERIFIER_DIR / "verification.json", normalized)
+    atomic_json(_VERIFIER_DIR / "reward.json", {"reward": normalized["reward"]})
+
+
+def _rounded(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("reward must be a number")
+    if not 0 <= value <= 1 or not math.isfinite(value):
+        raise ValueError("reward must be finite and between 0 and 1")
+    return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 def _json_types(value: Any) -> None:

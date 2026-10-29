@@ -5,7 +5,8 @@ Provision a sandbox, prepare it, let the agent work, score what it left behind.
 Three properties are enforced here rather than trusted to task authors: verification and
 oracle material is absent while the evaluated agent runs, every phase has a deadline,
 and teardown happens on every path out. Tasks own literal paths inside the image-declared
-agent home; ALE owns only staging time and its root-only framework directory.
+agent home; ALE owns only staging time, its root-only framework directory and the
+verifier directory a result is written to.
 """
 
 from __future__ import annotations
@@ -129,6 +130,112 @@ def _layout(operating_system: OperatingSystem) -> _StageLayout:
     return _StageLayout(root)
 
 
+def _verifier_dir(operating_system: OperatingSystem) -> PurePath:
+    """Where verification writes ``reward.json``: Harbor's verifier directory."""
+    if operating_system is OperatingSystem.WINDOWS:
+        return PureWindowsPath("C:/logs/verifier")
+    return PurePosixPath("/logs/verifier")
+
+
+#: Gives the verifier directory to the framework alone, empty. The agent may have made the
+#: path, or a link at it, as its own account or with sudo, so a link or file where a
+#: directory belongs is removed rather than followed, the parent becomes root's and only
+#: root may change it, and the directory is made anew, readable by root alone.
+_LINUX_VERIFIER_RESET = """set -eu
+parent="$1" verifier="$2"
+if [ -L "$parent" ] || { [ -e "$parent" ] && [ ! -d "$parent" ]; }; then rm -f -- "$parent"; fi
+mkdir -p -- "$parent"
+chown 0:0 -- "$parent"
+chmod go-w -- "$parent"
+rm -rf -- "$verifier"
+mkdir -m 0700 -- "$verifier"
+"""
+
+#: Removes the verifier directory unless its parent is a link, which is the agent's own.
+_LINUX_VERIFIER_REMOVE = """set -eu
+if [ -d "$1" ] && [ ! -L "$1" ]; then rm -rf -- "$2"; fi
+"""
+
+#: The same on Windows, where any account may create a directory at the root of C:. An
+#: entry's own attributes are read without following a link, a link is deleted as a link,
+#: and a tree is walked without entering one. Both directories are owned by Administrators
+#: and the verifier directory grants only SYSTEM and Administrators, which the agent's
+#: limited token is not; it is created with that descriptor, so it never has another.
+_WINDOWS_VERIFIER_ENTRIES = """$ErrorActionPreference = 'Stop'
+$isDirectory = [int][IO.FileAttributes]::Directory
+$isLink = [int][IO.FileAttributes]::ReparsePoint
+function Get-Entry([string]$Path) {
+    if ([IO.File]::Exists($Path) -or [IO.Directory]::Exists($Path)) {
+        return [int][IO.File]::GetAttributes($Path)
+    }
+    return $null
+}
+function Test-Directory($Attributes) {
+    if ($null -eq $Attributes) { return $false }
+    return (($Attributes -band $isDirectory) -ne 0) -and (($Attributes -band $isLink) -eq 0)
+}
+function Remove-Entry([string]$Path) {
+    $attributes = Get-Entry $Path
+    if ($null -eq $attributes) { return }
+    $directory = ($attributes -band $isDirectory) -ne 0
+    if (($attributes -band $isLink) -ne 0) {
+        if ($directory) { [IO.Directory]::Delete($Path) } else { [IO.File]::Delete($Path) }
+        return
+    }
+    [IO.File]::SetAttributes($Path, [IO.FileAttributes]::Normal)
+    if ($directory) {
+        foreach ($child in [IO.Directory]::GetFileSystemEntries($Path)) { Remove-Entry $child }
+        [IO.Directory]::Delete($Path)
+    } else {
+        [IO.File]::Delete($Path)
+    }
+}
+"""
+
+_WINDOWS_VERIFIER_RESET = """
+$system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$admins = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+$users = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+function Protect-Directory([string]$Path, [bool]$Listed) {
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.SetOwner($admins)
+    $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    foreach ($sid in @($system, $admins)) {
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $sid, 'FullControl', $inherit, 'None', 'Allow'))
+    }
+    if ($Listed) {
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $users, 'ReadAndExecute', 'None', 'None', 'Allow'))
+    }
+    [IO.Directory]::CreateDirectory($Path, $acl) | Out-Null
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+if (-not (Test-Directory (Get-Entry $parent))) { Remove-Entry $parent }
+Protect-Directory $parent $true
+Remove-Entry $verifier
+Protect-Directory $verifier $false
+"""
+
+_WINDOWS_VERIFIER_REMOVE = """
+if (Test-Directory (Get-Entry $parent)) { Remove-Entry $verifier }
+"""
+
+
+def _verifier_dir_command(operating_system: OperatingSystem, *, remove: bool) -> list[str]:
+    directory = _verifier_dir(operating_system)
+    if operating_system is not OperatingSystem.WINDOWS:
+        script = _LINUX_VERIFIER_REMOVE if remove else _LINUX_VERIFIER_RESET
+        return ["sh", "-c", script, "sh", str(directory.parent), str(directory)]
+    return _powershell(
+        f"$parent = {_powershell_literal(str(directory.parent))}; "
+        f"$verifier = {_powershell_literal(str(directory))}\n"
+        + _WINDOWS_VERIFIER_ENTRIES
+        + (_WINDOWS_VERIFIER_REMOVE if remove else _WINDOWS_VERIFIER_RESET)
+    )
+
+
 def _sandbox_path(operating_system: OperatingSystem, root: str, *parts: str) -> str:
     path_type = PureWindowsPath if operating_system is OperatingSystem.WINDOWS else PurePosixPath
     return str(path_type(root).joinpath(*parts))
@@ -138,8 +245,12 @@ def _powershell(command: str) -> list[str]:
     return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]
 
 
+def _powershell_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def _powershell_list(values: Sequence[str]) -> str:
-    return "@(" + ",".join("'" + value.replace("'", "''") + "'" for value in values) + ")"
+    return "@(" + ",".join(_powershell_literal(value) for value in values) + ")"
 
 
 @dataclass(frozen=True)
@@ -619,6 +730,13 @@ class EpisodeProtocol:
                 "could not clear the previous verify stage: "
                 + (removed.stderr.strip() or f"exit {removed.exit_code}")
             )
+        # Whatever the agent or an earlier attempt left there is no result of this one.
+        reset = await sandbox.exec(_verifier_dir_command(ctx.spec.os, remove=False))
+        if not reset.ok:
+            raise TaskError(
+                f"could not prepare {_verifier_dir(ctx.spec.os)}: "
+                + (reset.stderr.strip() or f"exit {reset.exit_code}")
+            )
         await sandbox.upload_dir(str(verify_dir), str(verify_root))
         trajectory = ctx.run_dir / "trajectory.json"
         if trajectory.is_file():
@@ -664,7 +782,7 @@ class EpisodeProtocol:
                 )
             raise TaskError(f"verify failed with exit code {exit_code}")
         result = await self._read_result(ctx, sandbox)
-        return {"overall": float(result["overall"])}
+        return {"reward": float(result["reward"])}
 
     async def _stage_verification_config(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         """Point the verifier's Judges at this episode's Gateway sessions.
@@ -706,15 +824,23 @@ class EpisodeProtocol:
         ctx.judge_invocations = tuple(invocations)
 
     async def _read_result(self, ctx: EpisodeContext, sandbox: Sandbox) -> dict[str, object]:
-        path = str(_layout(ctx.spec.os).path("verify", "result.json"))
+        """The verifier's result: ``reward.json``, completed by ``verification.json`` if any."""
+        directory = _verifier_dir(ctx.spec.os)
+        reward, record = str(directory / "reward.json"), str(directory / "verification.json")
         try:
-            raw = await sandbox.read_file(path)
+            written = {item.path for item in await sandbox.list_files(str(directory))}
+            raw = {
+                path: await sandbox.read_file(path) for path in (reward, record) if path in written
+            }
         except Exception as exc:
-            raise VerifierOutputError(f"verify wrote no result to {path}") from exc
-        if any(secret.encode() in raw for secret in ctx.verification_secrets if secret):
-            raise VerifierOutputError("verify result contains a configured credential")
+            raise VerifierOutputError(f"verify result could not be read: {exc}") from exc
+        if reward not in raw:
+            raise VerifierOutputError(f"verify wrote no result to {reward}")
+        for value in raw.values():
+            if any(secret.encode() in value for secret in ctx.verification_secrets if secret):
+                raise VerifierOutputError("verify result contains a configured credential")
         try:
-            result = read_result(raw)
+            result = read_result(raw[reward], raw.get(record))
         except (ValueError, TypeError, UnicodeError) as exc:
             raise VerifierOutputError(f"verify wrote an invalid result: {exc}") from exc
         atomic_write_json(ctx.run_dir / "verification.json", result, sort_keys=False)
@@ -788,8 +914,8 @@ class EpisodeProtocol:
         if sandbox.request.retention == "destroy":
             ctx.sandboxes.mark_sanitized(sandbox, succeeded=True)
             return True
-        # A retained solver may be handed to another agent, so no stage of this Task
-        # stays behind, only the agent's own state.
+        # A retained solver may be handed to another agent, so no stage or result of this
+        # Task stays behind, only the agent's own state.
         result = await self._clear_stages(ctx, sandbox, ("setup", "verify"))
         if result.ok:
             result = await self._remove_paths(
@@ -801,6 +927,8 @@ class EpisodeProtocol:
                     _sandbox_path(ctx.spec.os, ctx.home, ".claude", ".credentials.json"),
                 ),
             )
+        if result.ok:
+            result = await sandbox.exec(_verifier_dir_command(ctx.spec.os, remove=True))
         reason = None if result.ok else result.stderr.strip() or "retention sanitation failed"
         solver = sandbox.request.role is not SandboxRole.VERIFIER
         if reason is None and self.agent_enabled and solver:
@@ -975,11 +1103,7 @@ class EpisodeProtocol:
     ) -> int:
         layout = _layout(ctx.spec.os)
         entry = directory / ("run.ps1" if ctx.spec.os is OperatingSystem.WINDOWS else "run.sh")
-        env = {
-            "ALE_STAGE_DIR": str(directory),
-            "ALE_HOME": ctx.home,
-            "ALE_VERDICT_PATH": str(layout.path("verify", "result.json")),
-        }
+        env = {"ALE_STAGE_DIR": str(directory), "ALE_HOME": ctx.home}
         if phase is Phase.VERIFY:
             env.update(
                 {

@@ -99,7 +99,7 @@ def _separate_gpu_task(root: Path) -> Path:
         "id', '--format=csv,noheader'], text=True).strip()\n"
         "v = {}\n"
         "v['disjoint'] = float(solver != verifier)\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     return task
@@ -159,7 +159,7 @@ async def test_kept_solver_and_separate_verifier_receive_disjoint_gpus(tmp_path:
     )
     try:
         assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-        assert result.verdict.rewards == {"overall": 1.0}
+        assert result.verdict.rewards == {"reward": 1.0}
         assert result.lock is not None
         solver = result.lock.resources
         verifier = result.lock.verification.resources

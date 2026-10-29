@@ -84,7 +84,7 @@ async def test_live_llm_judge_record_and_transport(
     finally:
         await gateway.stop()
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert (result.run_dir / "result.json").is_file()
     assert (result.run_dir / "verification.json").is_file()
     json.loads((result.run_dir / "verification.json").read_text())

@@ -61,16 +61,19 @@ async def test_plain_result_is_accepted_only_after_normal_exit(
             + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
         )
     script = (
-        "import json, os\nfrom pathlib import Path\n"
-        "Path(os.environ['ALE_VERDICT_PATH']).write_text(json.dumps({"
-        "'overall':0.999,'details':{'count':10,'raw':0.999}}))\n"
+        "import json\nfrom pathlib import Path\n"
+        "verifier = Path('/logs/verifier')\n"
+        "(verifier / 'verification.json').write_text(json.dumps({"
+        "'reward':0.999,'details':{'count':10,'raw':0.999}}))\n"
+        "(verifier / 'reward.json').write_text(json.dumps({'reward':0.999}))\n"
     )
     if mode == "crash":
         script += "raise RuntimeError('after writing result')\n"
     elif mode == "malformed":
-        script += "Path(os.environ['ALE_VERDICT_PATH']).write_text('partial JSON')\n"
+        script += "(verifier / 'reward.json').write_text('partial JSON')\n"
     elif mode == "stale":
-        (task_root / "verify/result.json").write_text('{"overall":1}')
+        # A result shipped with the verify stage is no result of this attempt.
+        (task_root / "verify/reward.json").write_text('{"reward":1}')
         script = "pass\n"
     (task_root / "verify/verify.py").write_text(script)
     result = await run_episode(
@@ -81,9 +84,9 @@ async def test_plain_result_is_accepted_only_after_normal_exit(
     )
     if mode == "direct":
         assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-        assert result.verdict.rewards == {"overall": 1.0}
+        assert result.verdict.rewards == {"reward": 1.0}
         assert json.loads((result.run_dir / "verification.json").read_text()) == {
-            "overall": 1.0,
+            "reward": 1.0,
             "details": {"count": 10, "raw": 0.999},
         }
     else:
@@ -128,9 +131,7 @@ async def test_agent_transcript_and_judge_provenance_are_collected_after_exit(
         Path(os.environ["ALE_AGENT_JUDGE_LOG_PATH"]).write_text(
             json.dumps(transcript)+"\\n"+json.dumps(record)+"\\n"
         )
-        Path(os.environ["ALE_VERDICT_PATH"]).write_text(
-            json.dumps({{"overall":1.0, "details":{{"functional":1.0}}}})
-        )
+        Path("/logs/verifier/reward.json").write_text(json.dumps({{"reward":1.0}}))
         """
     ).strip()
     (task_root / "verify" / "verify.py").write_text(script + "\n")

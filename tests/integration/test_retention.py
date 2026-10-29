@@ -217,7 +217,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         "v['reverified'] = checks.text_equals('/home/user/output/result.tx"
         "t', 'hello\\n')['score']\n"
         "v['stale_removed'] = checks.file_missing('/opt/ale/verify/stale.txt')['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     from ale.run.cli import tasks as task_cli
@@ -230,7 +230,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         assert await _reverify(str(task_path), first.run_dir, settings, tmp_path / "second") == 0
         result_path = next((tmp_path / "second").rglob("result.json"))
         result = json.loads(result_path.read_text())
-        assert result["rewards"] == {"overall": 1.0}
+        assert result["rewards"] == {"reward": 1.0}
         if mode == "separate":
             assert result["sandboxes"][0]["roles"] == ["verifier"]
         assert retained.handle in {
@@ -334,7 +334,8 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
             "sh",
             "-c",
             "test ! -e /home/user/.codex/auth.json && "
-            "test ! -e /home/user/.claude/.credentials.json",
+            "test ! -e /home/user/.claude/.credentials.json && "
+            "test ! -e /logs/verifier",
         )
         assert await credentials.wait() == 0
     finally:
@@ -470,7 +471,7 @@ async def test_sanitation_failure_destroys_sandbox_without_changing_reward(
     )
 
     assert result.verdict.status is Status.COMPLETED
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert result.record.sandboxes[0].outcome == "retention-failed"
     assert "sanitation" in (result.record.sandboxes[0].reason or "")
     assert not any(

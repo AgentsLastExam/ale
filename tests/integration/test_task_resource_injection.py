@@ -277,7 +277,7 @@ def _write_task(root: Path) -> Path:
         fragment = receipt.get("fragment", "")
         ok = answer == f"SKILL-R7::{nonce}::{fragment}"
         ok = ok and receipt.get("nonce") == nonce and len(fragment) == 24
-        write({"overall": float(ok)})
+        write({"reward": float(ok)})
         PY
         """).strip()
     )
@@ -326,7 +326,7 @@ async def test_autonomous_agent_uses_task_skill_and_mcp_to_pass(
     )
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     trajectory = AtifTrajectory.model_validate_json(
         (result.run_dir / "trajectory.json").read_text()
     )

@@ -291,7 +291,7 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
             "t/seed.txt'), 'world\\n')['score']\n"
             "verification['setup_ran'] = checks.text_equals(str(home / 'input/"
             "setup-marker.txt'), 'setup')['score']\n"
-            "verification['overall'] = sum(verification.values()) / len(verification.values())\n"
+            "verification['reward'] = sum(verification.values()) / len(verification.values())\n"
             "write(verification)\n"
         )
     )
@@ -358,7 +358,7 @@ def _write_windows_gui_task(root: Path) -> Path:
             "verification = {}\n"
             "verification['desktop_answer'] = checks.text_equals(str(home / 'o"
             "utput/result.txt'), expected)['score']\n"
-            "verification['overall'] = sum(verification.values()) / len(verification.values())\n"
+            "verification['reward'] = sum(verification.values()) / len(verification.values())\n"
             "write(verification)\n"
         )
     )
@@ -396,7 +396,7 @@ async def test_standard_task_assets_across_operating_systems(
     )
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert (result.run_dir / "artifacts/0000/output/result.txt").read_text() == (
         "hello world verified"
     )
@@ -439,7 +439,7 @@ async def test_real_llm_reads_and_edits_the_windows_desktop(tmp_path: Path) -> N
         await gateway.stop()
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
     transport = [
         json.loads(line)

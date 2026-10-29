@@ -53,7 +53,7 @@ async def test_task_owned_docker_runs_a_nested_offline_container(tmp_path: Path)
         ),
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert (
         result.run_dir / "artifacts/nested-container.txt"
     ).read_text() == "nested-container-ok\n"

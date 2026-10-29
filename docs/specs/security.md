@@ -201,9 +201,17 @@ Daytona's in-sandbox daemon runs commands for anyone who connects, as root. The 
 blocks every non-root user from it and proves that as the agent before handing the
 sandbox out; an agent granted `resources.sudo` can lift the block, as it can any rule.
 
+The verifier writes its result to Harbor's `/logs/verifier` (`C:\logs\verifier`), a path the
+agent can create beforehand: with sudo on Linux, as any account on Windows. Before every
+verification attempt ALE therefore removes a link or file at either level instead of
+following it, makes the parent the framework's and writable by it alone, and recreates the
+verifier directory empty and accessible only to the framework. A result the agent planted
+is gone, and nothing it left running can write or redirect one.
+
 Verified by `tests/integration/test_identity.py`: the agent cannot read the guest service,
-cannot write system paths, and cannot elevate unless its task asked; and by
-`tests/unit/test_guest_authentication.py` for the claimed TCP guest service.
+cannot write system paths, and cannot elevate unless its task asked; by
+`tests/unit/test_guest_authentication.py` for the claimed TCP guest service; and by
+`test_an_agent_cannot_plant_or_redirect_a_result` for the verifier directory.
 
 ## 5. Answers are absent, not hidden
 
@@ -304,7 +312,8 @@ before a Judge changes the live workspace.
 Run configuration, not Task content, decides whether solver and verifier sandboxes are
 destroyed or retained. Default is destroy. Before a kept sandbox receives a durable
 handle, required evidence capture finishes, every stage of its Task (`setup/`, `verify/`
-and the oracle) and known credentials are removed, and episode capabilities are revoked.
+and the oracle), the verifier directory and known credentials are removed, and episode
+capabilities are revoked.
 A later episode may hand the solver to another evaluated agent, which must not find
 verification there. Subscription credentials stay in the
 checkout-local Host profile and therefore require no retained-Sandbox cleanup.
