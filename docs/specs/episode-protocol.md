@@ -89,15 +89,15 @@ each file's guest digest with its Host copy once and copies a rewritten file aga
 Conversion is a pure function of the copied bytes, so it runs once, after the final
 copy. An interrupted run or an incomplete copy produces a trajectory marked incomplete.
 
-When run policy sets `artifacts.collect = "host"`, every Task-declared artifact is
-captured as an immutable file or directory snapshot. Files and directories are selected
-directly by `artifacts`, including globs. Copying never follows links and skips links,
-missing and uncopyable entries, with bounded traversal; see
+With separate verification, or when run policy sets `artifacts.collect = "host"`, every
+Task-declared artifact is captured as an immutable file or directory snapshot. Files and
+directories are selected directly by `artifacts`, including globs. Copying never follows
+links and skips links, missing and uncopyable entries, with bounded traversal; see
 [Artifact copying](task-authoring.md#artifact-copying). The verifier owns scoring.
 
-With the default `artifacts.collect = "none"`, ALE does not inspect artifact paths,
-create a spool, copy bytes, or restore anything. A separate verifier that needs solver
-output therefore requires host artifact collection.
+A separate verifier receives solver output only through the Host. With the default
+`artifacts.collect = "none"`, ALE discards that copy with the episode, and with shared
+verification it inspects no artifact path and copies nothing.
 
 ### Verify
 

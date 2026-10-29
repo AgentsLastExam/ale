@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -41,7 +42,7 @@ from ale.core.result import FailureInfo as ResultFailureInfo
 from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
 from ale.core.sandbox import Identity, RetainedSandbox, Sandbox, SandboxRequest, SandboxRole
 from ale.core.task import Task
-from ale.core.taskspec import NetworkMode, OperatingSystem
+from ale.core.taskspec import NetworkMode, OperatingSystem, VerificationMode
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import Status, Verdict
 from ale.run import artifact_files
@@ -307,10 +308,16 @@ def _retained_outcome(entry: _LeaseEntry, retained: RetainedSandbox) -> SandboxO
 
 @dataclass
 class _Artifacts(ArtifactSink):
-    """Immutable solver evidence, collected only when requested."""
+    """Immutable solver output, captured for the Host or for a separate verifier.
+
+    A separate verifier receives the solver's output only through the Host, so separate
+    verification always captures it, as in Harbor. Unless run policy collects it, that copy
+    is discarded with the episode.
+    """
 
     run_dir: Path
     enabled: bool = True
+    retained: bool = True
     collected: list[str] = field(default_factory=list)
     entries: list[dict[str, object]] = field(default_factory=list)
 
@@ -456,7 +463,8 @@ class _Artifacts(ArtifactSink):
                 )
 
     def cleanup(self) -> None:
-        return None
+        if not self.retained:
+            shutil.rmtree(self.root, ignore_errors=True)
 
     def _write_manifest(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -553,7 +561,10 @@ async def run_episode(
         else {}
     )
 
-    sink = _Artifacts(episode_dir, enabled=collect_artifacts)
+    separate = task.spec.verify.environment_mode is VerificationMode.SEPARATE
+    sink = _Artifacts(
+        episode_dir, enabled=collect_artifacts or separate, retained=collect_artifacts
+    )
     lease = _Lease(providers, sandbox_retention or SandboxRetentionConfig())
     started_at = datetime.now(UTC)
     started = time.monotonic()

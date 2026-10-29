@@ -116,10 +116,12 @@ above it included: one the agent made could point at a file only the framework m
 These are fixed defaults; the verifier decides how to score the resulting output. Copying uses the framework's
 privileged identity on every supported OS; see [Permissions](sandbox-image.md#permissions).
 
-Run-level `artifacts.collect` defaults to `"none"` (no copy or restore). Set it to `"host"`
-to retain outputs or transfer them to a separate verifier. `run`, `validate`, and `reverify`
-use the same policy. Separate-verifier images must not contain prepopulated candidate
-answers; tasks that grade original links or live state should use shared verification.
+Separate verification always transfers the declared artifacts to its verifier through the
+Host, as in Harbor. Run-level `artifacts.collect` decides only whether the episode keeps a
+copy: the default `"none"` keeps none, and `"host"` keeps them in either mode. `run`,
+`validate`, and `reverify` use the same policy. Separate-verifier images must not contain
+prepopulated candidate answers; tasks that grade original links or live state should use
+shared verification.
 
 ### Verification topology
 
