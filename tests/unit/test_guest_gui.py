@@ -61,3 +61,20 @@ def test_only_console_programs_start_with_a_hidden_window(tmp_path: Path) -> Non
     assert windows._console_program(str(tmp_path / "git.exe"), env)
     assert windows._console_program(str(tmp_path / "npm.cmd"), env)
     assert windows._console_program("missing.exe", env)
+
+
+def test_root_calls_the_driver_as_the_account_that_runs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pwd
+
+    socket = tmp_path / "driver.sock"
+    socket.write_text("")
+    agent = pwd.struct_passwd(("user", "x", 1000, 1000, "", "/home/user", "/bin/sh"))
+    monkeypatch.setattr(gui.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(gui.os, "stat", lambda path: type("Stat", (), {"st_uid": 1000})())
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: agent)
+    options = gui._as_daemon_owner(str(socket))
+    assert options["env"]["HOME"] == "/home/user" and callable(options["preexec_fn"])
+    monkeypatch.setattr(gui.os, "geteuid", lambda: 1000)
+    assert gui._as_daemon_owner(str(socket)) == {}  # already that account

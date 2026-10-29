@@ -15,6 +15,8 @@ from typing import Any
 COORDINATE_SPACE = 1000
 #: Where guestd's Cua Driver server listens on Linux.
 _LINUX_SOCKET = "/tmp/ale-cua-driver.sock"
+#: The pipe the Windows boot service (``service.py``) has Cua Driver serve on.
+_WINDOWS_PIPE = r"\\.\pipe\ale-cua-driver"
 #: Where the framework installs Cua Driver on Windows; a Linux image has it on PATH.
 _WINDOWS_DRIVER = os.path.join(
     os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "ALE", "cua-driver", "cua-driver.exe"
@@ -94,7 +96,8 @@ def _invoke(tool: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     failure with ``isError``.
     """
     command = [_binary(), "mcp"]
-    if socket := _socket():
+    socket = _socket()
+    if socket:
         command += ["--socket", socket]
     messages = [
         {
@@ -125,6 +128,7 @@ def _invoke(tool: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
             errors="replace",
             timeout=60,
             check=False,
+            **_as_daemon_owner(socket),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GuiUnavailable(f"cua-driver {tool} failed: {exc}") from exc
@@ -143,6 +147,26 @@ def _invoke(tool: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     return outcome
 
 
+def _as_daemon_owner(socket: str | None) -> dict[str, Any]:
+    """Run the client as the account that owns the daemon's socket, usually the agent's.
+
+    Cua Driver answers only its own account, and guestd runs as root on Linux.
+    """
+    if os.name == "nt" or not socket or os.geteuid() != 0:
+        return {}
+    try:
+        owner = os.stat(socket).st_uid
+    except OSError:
+        return {}  # no daemon yet: the call fails, and guestd starts one
+    if owner == 0:
+        return {}
+    import pwd
+
+    account = pwd.getpwuid(owner)
+    env = dict(os.environ, HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name)
+    return {"env": env, "preexec_fn": _demote(account)}
+
+
 def _replies(output: str) -> list[dict[str, Any]]:
     replies = []
     for line in output.splitlines():
@@ -155,7 +179,7 @@ def _replies(output: str) -> list[dict[str, Any]]:
 
 def _socket() -> str | None:
     configured = os.environ.get("ALE_CUA_DRIVER_SOCKET")
-    return configured or (None if os.name == "nt" else _LINUX_SOCKET)
+    return configured or (_WINDOWS_PIPE if os.name == "nt" else _LINUX_SOCKET)
 
 
 def _start_server() -> bool:

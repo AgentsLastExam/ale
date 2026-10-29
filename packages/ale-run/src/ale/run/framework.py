@@ -77,16 +77,16 @@ WINDOWS_MARKER = "/ProgramData/ALE/framework"
 #: The VM builder: it materializes Linux VM OCI content into a qcow2, and its libguestfs
 #: installs the framework into a Linux or Windows qcow2.
 MATERIALIZER_IMAGE = os.environ.get("ALE_VM_MATERIALIZER", ale_image("ale-vm-materializer"))
-CUA_DRIVER_VERSION = "0.12.6"
+CUA_DRIVER_VERSION = "0.38.0"
 #: Release asset and its published SHA-256, per guest platform.
 _CUA_DRIVER = {
     "linux": (
         f"cua-driver-rs-{CUA_DRIVER_VERSION}-linux-x86_64-binary.tar.gz",
-        "795b8464a25b036fe1a47d9cd1f560d6b4e2ab58e23630c0de3d9feff4757039",
+        "31ab9709dd91ce73677e49b9f3e75c6f0d3e4d9625c286c9e58262bfbea698dd",
     ),
     "windows": (
         f"cua-driver-rs-{CUA_DRIVER_VERSION}-windows-x86_64-binary.zip",
-        "d18a0ca02314c6dc7dfdfbb20aac8f52c7b1547308f182546a9252a991d4d0dd",
+        "5edaa74d0afa1b55a9668dbc4f32736507bd2bd4d75b18ca1dc8881bb12402b5",
     ),
 }
 _CUA_DRIVER_BINARY = {"linux": "cua-driver", "windows": "cua-driver.exe"}

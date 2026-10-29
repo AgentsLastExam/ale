@@ -26,7 +26,12 @@ ROOT = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "ALE"
 PORT = 7411
 #: SMBIOS serial the Host sets when the Task grants the agent Administrator access.
 SUDO_SERIAL = "ale-sudo"
-_CUA_DRIVER_ARGS = "serve --permission-mode unrestricted --dangerously-bypass-approvals"
+#: Where Cua Driver serves guestd's calls; ``gui.py`` connects to the same pipe.
+CUA_DRIVER_PIPE = r"\\.\pipe\ale-cua-driver"
+_CUA_DRIVER_ARGS = (
+    f"serve --socket {CUA_DRIVER_PIPE} --permission-mode unrestricted "
+    "--dangerously-bypass-approvals"
+)
 _SYSTEM, _ADMINISTRATORS = "*S-1-5-18", "*S-1-5-32-544"
 
 _STOP, _SHUTDOWN = 0x1, 0x4
