@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ale.core.errors import AssetError
 from ale.run.assets import (
-    STAGES,
+    ASSET_ROOTS,
     AssetLocation,
     AssetRepositorySelection,
     _asset_inventory,
@@ -115,7 +115,7 @@ def _selection(task: Path) -> AssetRepositorySelection:
 
 
 def _paths(checkpoint: AssetCheckpoint) -> list[str]:
-    return [f"{checkpoint.task_path}/{stage}/assets" for stage in STAGES]
+    return [f"{checkpoint.task_path}/{root}" for root in ASSET_ROOTS]
 
 
 def _metadata(workspace: Path) -> Path:
@@ -201,9 +201,9 @@ def checkpoint_assets(
             return checkpoint.model_copy(update={"commit": head})
         destination = workspace / checkpoint.task_path
         validate_asset_paths(destination)
-        for stage in STAGES:
-            source = task / stage / "assets"
-            target = destination / stage / "assets"
+        for root in ASSET_ROOTS:
+            source = task / root
+            target = destination / root
             shutil.rmtree(target, ignore_errors=True)
             if source.is_dir():
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -312,12 +312,12 @@ def materialize_assets(checkpoint: AssetCheckpoint, output: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     with _materialized(checkpoint) as root:
         validate_asset_paths(root / checkpoint.task_path)
-        for stage in STAGES:
-            source = root / checkpoint.task_path / stage / "assets"
+        for relative in ASSET_ROOTS:
+            source = root / checkpoint.task_path / relative
             if source.exists():
                 list(_regular_files(source))
-                (output / stage).mkdir()
-                shutil.copytree(source, output / stage / "assets")
+                (output / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(source, output / relative)
 
 
 def restore_assets(task: Path, checkpoint: AssetCheckpoint) -> None:

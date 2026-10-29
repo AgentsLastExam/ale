@@ -99,14 +99,11 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
     monkeypatch.setenv(f"ALE_{model_provider.upper()}_API_KEY", secret)
     monkeypatch.setenv(f"ALE_{model_provider.upper()}_BASE_URL", "https://example.test")
     task_root = scaffold_task(tmp_path / "agent-integrity")
-    (task_root / "task.yaml").write_text(
-        (task_root / "task.yaml")
-        .read_text()
-        .replace("memory_mb: 4096", "memory_mb: 512")
-        .replace("verify: 120", "verify: 120")
+    (task_root / "task.toml").write_text(
+        (task_root / "task.toml").read_text().replace("memory_mb = 4096", "memory_mb = 512")
     )
     (task_root / "instruction.md").write_text("Write baseline to /home/user/output/result.txt\n")
-    (task_root / "image" / "fake-agent.py").write_text(
+    (task_root / "environment" / "fake-agent.py").write_text(
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
         "from pathlib import Path\n"
@@ -132,19 +129,19 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         "    print(json.dumps({'type':'result','session_id':session,"
         "'result':json.dumps(verdict)}))\n"
     )
-    (task_root / "image" / "Dockerfile").write_text(
+    (task_root / "environment" / "Dockerfile").write_text(
         f"FROM {CONTAINER_BASE}\n"
         f"COPY fake-agent.py /usr/local/bin/{binary_name}\n"
         f"RUN chmod 755 /usr/local/bin/{binary_name} "
         "&& mkdir -p /home/user/output && chown -R user:user /home/user/output\n"
     )
-    (task_root / "oracle" / "run.sh").write_text(
+    (task_root / "solution" / "solve.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nprintf baseline > /home/user/output/result.txt\n"
     )
-    (task_root / "verify" / "run.sh").write_text(
+    (task_root / "tests" / "test.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 verify.py\n"
     )
-    (task_root / "verify" / "verify.py").write_text(
+    (task_root / "tests" / "verify.py").write_text(
         "from ale_verify import judge, write\n"
         "v = {}\n"
         "v['functional'] = {'no': 0.0, 'yes': 1.0}[judge('agent', 'functio"

@@ -17,7 +17,7 @@ from ale.run.recording import Redactor
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
 from ale_verify._io import EvidenceError, read_text_evidence
-from tests.support import provider_registry
+from tests.support import edit_task_config, provider_registry
 
 pytestmark = pytest.mark.integration
 
@@ -45,20 +45,20 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
     secret = "verify-only-provider-secret"
     monkeypatch.setenv("ALE_OPENAI_API_KEY", secret)
     task_root = scaffold_task(tmp_path / "scope")
-    (task_root / "setup").mkdir()
+    (task_root / "environment" / "setup").mkdir()
     (task_root / "instruction.md").write_text("Do nothing.\n")
-    (task_root / "setup" / "run.sh").write_text(
+    (task_root / "environment" / "setup" / "setup.sh").write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "mkdir -p /home/user/output\n"
         'test -z "${ALE_OPENAI_API_KEY-}${ALE_LLM_JUDGE_TOKEN-}"\n'
         "printf absent > /home/user/output/setup-key\n"
     )
-    (task_root / "oracle" / "run.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
-    (task_root / "verify" / "run.sh").write_text(
+    (task_root / "solution" / "solve.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
+    (task_root / "tests" / "test.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 verify.py\n"
     )
-    (task_root / "verify" / "verify.py").write_text(
+    (task_root / "tests" / "verify.py").write_text(
         "import os, sys\n"
         "from ale_verify import checks, write\n"
         "v = {}\n"
@@ -71,7 +71,7 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
         "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
-    (task_root / "setup" / "run.sh").chmod(0o755)
+    (task_root / "environment" / "setup" / "setup.sh").chmod(0o755)
 
     task = load_tasks(task_root)[0]
     gateway = Gateway()
@@ -111,16 +111,16 @@ async def test_record_containing_a_verify_credential_is_not_collected(
     secret = "record-leak-provider-secret"
     monkeypatch.setenv("ALE_OPENAI_API_KEY", secret)
     task_root = scaffold_task(tmp_path / "leak")
-    (task_root / "setup").mkdir()
+    (task_root / "environment" / "setup").mkdir()
     (task_root / "instruction.md").write_text("Do nothing.\n")
-    (task_root / "setup" / "run.sh").write_text(
+    (task_root / "environment" / "setup" / "setup.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/output\n"
     )
-    (task_root / "oracle" / "run.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
-    (task_root / "verify" / "run.sh").write_text(
+    (task_root / "solution" / "solve.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
+    (task_root / "tests" / "test.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 verify.py\n"
     )
-    (task_root / "verify" / "verify.py").write_text(
+    (task_root / "tests" / "verify.py").write_text(
         "import os\n"
         "from ale_verify import write\n"
         "v = {}\n"
@@ -128,7 +128,7 @@ async def test_record_containing_a_verify_credential_is_not_collected(
         "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
-    (task_root / "setup" / "run.sh").chmod(0o755)
+    (task_root / "environment" / "setup" / "setup.sh").chmod(0o755)
     task = load_tasks(task_root)[0]
 
     result = await run_episode(
@@ -196,17 +196,11 @@ write({
 
 def _planting_task(root: Path, plant: str, verifier: str) -> Path:
     task_root = scaffold_task(root)
-    manifest = task_root / "task.yaml"
-    manifest.write_text(
-        manifest.read_text().replace(
-            "resources: {cpus: 1, memory_mb: 4096}",
-            "resources: {cpus: 1, memory_mb: 4096, sudo: true}",
-        )
-    )
-    (task_root / "oracle" / "run.sh").write_text(
+    edit_task_config(task_root, {"ale": {"sudo": True}})
+    (task_root / "solution" / "solve.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n" + textwrap.dedent(PLANTED[plant])
     )
-    (task_root / "verify" / "verify.py").write_text(verifier)
+    (task_root / "tests" / "verify.py").write_text(verifier)
     return task_root
 
 

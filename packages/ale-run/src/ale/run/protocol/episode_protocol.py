@@ -53,7 +53,7 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxRole,
 )
-from ale.core.task import Task
+from ale.core.task import Stage, Task
 from ale.core.taskspec import (
     NetworkMode,
     NetworkPolicy,
@@ -78,7 +78,7 @@ from ale.core.trajectory import (
 )
 from ale.core.verdict import Verdict
 from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
-from ale.run.harnesses.builtin import oracle_dir
+from ale.run.harnesses.builtin import solution_dir
 from ale.run.protocol.log_mirror import (
     FINAL_SYNC_TIMEOUT_SEC,
     SYNC_INTERVAL_SEC,
@@ -107,9 +107,9 @@ SETUP_TIMEOUT_SEC = 1800.0
 
 
 #: Where the framework's own machinery goes. Under a root-owned, root-only directory,
-#: which is the whole point: the verify stage holds the scorer and the oracle holds the
-#: answer, and until now they were kept from the agent by *timing* alone — uploaded only
-#: when needed. Permissions are a better guarantee than a schedule.
+#: which is the whole point: the tests stage holds the scorer, and timing alone — being
+#: uploaded only when needed — would keep it from the agent only by schedule. Permissions
+#: are a better guarantee than a schedule.
 #:
 #: It also leaves exactly two roots in a sandbox: this one, which belongs to the framework
 #: and which the agent cannot read, and the agent's home, which is entirely its own.
@@ -422,8 +422,8 @@ class EpisodeProtocol:
     async def _setup(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         """Stage what the task declared, then run its own preparation.
 
-        Only agent-visible material is uploaded: the manifest, the verify stage and the
-        oracle stay on the host until they are needed, which is what keeps answers out
+        Only agent-visible material is uploaded: the configuration, the tests and the
+        solution stay on the host until they are needed, which is what keeps answers out
         of reach rather than merely out of sight.
 
         Directories come from the task — its asset destinations and the paths it wants
@@ -437,10 +437,10 @@ class EpisodeProtocol:
         if folder is None:
             return
 
-        if setup_dir := folder.stage_dir("setup"):
-            target = _layout(ctx.spec.os).path("setup")
+        if setup_dir := folder.stage_dir(Stage.SETUP):
+            target = _layout(ctx.spec.os).path(Stage.SETUP)
             await sandbox.upload_dir(str(setup_dir), str(target))
-            if folder.stage_entry("setup", ctx.spec.os):
+            if folder.stage_entry(Stage.SETUP, ctx.spec.os):
                 await self._run_stage(ctx, sandbox, target, Phase.SETUP)
 
     async def _agent(
@@ -712,22 +712,22 @@ class EpisodeProtocol:
                     raise TaskError(f"MCP server {resolved.name!r} cwd is not a directory: {cwd}")
 
     async def _verify(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> dict[str, float]:
-        """Score the episode using the task's own verify stage.
+        """Score the episode using the task's own tests.
 
         A crash or malformed output here is a task defect, reported as ``task_error``:
         deliberately distinguishable from an agent that simply scored zero.
         """
         folder = getattr(task, "folder", None)
-        verify_dir = folder.stage_dir("verify") if folder else None
-        if verify_dir is None:
-            raise TaskError("task has no verify stage")
+        tests_dir = folder.stage_dir(Stage.TESTS) if folder else None
+        if tests_dir is None:
+            raise TaskError("task has no tests stage")
 
         layout = _layout(ctx.spec.os)
-        verify_root = layout.path("verify")
-        removed = await self._clear_stages(ctx, sandbox, ("verify",))
+        tests_root = layout.path(Stage.TESTS)
+        removed = await self._clear_stages(ctx, sandbox, (Stage.TESTS,))
         if not removed.ok:
             raise TaskError(
-                "could not clear the previous verify stage: "
+                "could not clear the previous tests stage: "
                 + (removed.stderr.strip() or f"exit {removed.exit_code}")
             )
         # Whatever the agent or an earlier attempt left there is no result of this one.
@@ -737,14 +737,14 @@ class EpisodeProtocol:
                 f"could not prepare {_verifier_dir(ctx.spec.os)}: "
                 + (reset.stderr.strip() or f"exit {reset.exit_code}")
             )
-        await sandbox.upload_dir(str(verify_dir), str(verify_root))
+        await sandbox.upload_dir(str(tests_dir), str(tests_root))
         trajectory = ctx.run_dir / "trajectory.json"
         if trajectory.is_file():
             await sandbox.write_file(
-                str(layout.path("verify", "trajectory.json")), trajectory.read_bytes()
+                str(layout.path(Stage.TESTS, "trajectory.json")), trajectory.read_bytes()
             )
         await sandbox.write_file(
-            str(layout.path("verify", "instruction.md")), ctx.spec.instruction.encode("utf-8")
+            str(layout.path(Stage.TESTS, "instruction.md")), ctx.spec.instruction.encode("utf-8")
         )
         await self._stage_verification_config(ctx, sandbox)
         # Scoring is the framework's own work, and a verifier may need to reach something
@@ -770,7 +770,7 @@ class EpisodeProtocol:
         )
         try:
             exit_code = await self._run_stage(
-                ctx, sandbox, verify_root, Phase.VERIFY, verify_python=python
+                ctx, sandbox, tests_root, Phase.VERIFY, verify_python=python
             )
         finally:
             # Keep Judge evidence even if the task exits, raises or times out.
@@ -794,7 +794,7 @@ class EpisodeProtocol:
             ctx.verification_config, ctx.judge_tokens, sandbox.gateway_url
         )
         await sandbox.write_file(
-            str(_layout(ctx.spec.os).path("verify", "config.json")),
+            str(_layout(ctx.spec.os).path(Stage.TESTS, "config.json")),
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
         )
         ctx.verification_command_env = command_env
@@ -805,7 +805,7 @@ class EpisodeProtocol:
         invocations = []
         for name in ("llm-judge.jsonl", "agent-judge.jsonl"):
             try:
-                raw = await sandbox.read_file(str(_layout(ctx.spec.os).path("verify", name)))
+                raw = await sandbox.read_file(str(_layout(ctx.spec.os).path(Stage.TESTS, name)))
             except Exception:
                 continue
             text = redactor(raw.decode("utf-8", errors="replace"))
@@ -916,13 +916,13 @@ class EpisodeProtocol:
             return True
         # A retained solver may be handed to another agent, so no stage or result of this
         # Task stays behind, only the agent's own state.
-        result = await self._clear_stages(ctx, sandbox, ("setup", "verify"))
+        result = await self._clear_stages(ctx, sandbox, (Stage.SETUP, Stage.TESTS))
         if result.ok:
             result = await self._remove_paths(
                 ctx,
                 sandbox,
                 (
-                    str(oracle_dir(ctx.home, ctx.spec.os)),
+                    str(solution_dir(ctx.home, ctx.spec.os)),
                     _sandbox_path(ctx.spec.os, ctx.home, ".codex", "auth.json"),
                     _sandbox_path(ctx.spec.os, ctx.home, ".claude", ".credentials.json"),
                 ),
@@ -1102,23 +1102,24 @@ class EpisodeProtocol:
         verify_python: str | None = None,
     ) -> int:
         layout = _layout(ctx.spec.os)
-        entry = directory / ("run.ps1" if ctx.spec.os is OperatingSystem.WINDOWS else "run.sh")
+        stage = Stage.SETUP if phase is Phase.SETUP else Stage.TESTS
+        entry = directory / stage.entry(ctx.spec.os)
         env = {"ALE_STAGE_DIR": str(directory), "ALE_HOME": ctx.home}
         if phase is Phase.VERIFY:
             env.update(
                 {
                     "ALE_EPISODE_ID": ctx.episode_id,
-                    "ALE_LLM_JUDGE_LOG_PATH": str(layout.path("verify", "llm-judge.jsonl")),
-                    "ALE_VERIFY_CONFIG_PATH": str(layout.path("verify", "config.json")),
-                    "ALE_TASK_INSTRUCTION_PATH": str(layout.path("verify", "instruction.md")),
-                    "ALE_AGENT_JUDGE_LOG_PATH": str(layout.path("verify", "agent-judge.jsonl")),
+                    "ALE_LLM_JUDGE_LOG_PATH": str(layout.path(Stage.TESTS, "llm-judge.jsonl")),
+                    "ALE_VERIFY_CONFIG_PATH": str(layout.path(Stage.TESTS, "config.json")),
+                    "ALE_TASK_INSTRUCTION_PATH": str(layout.path(Stage.TESTS, "instruction.md")),
+                    "ALE_AGENT_JUDGE_LOG_PATH": str(layout.path(Stage.TESTS, "agent-judge.jsonl")),
                     **ctx.verification_command_env,
                 }
             )
             if verify_python is not None:
                 env["ALE_VERIFY_PYTHON"] = verify_python
             if (ctx.run_dir / "trajectory.json").is_file():
-                env["ALE_TRAJECTORY_PATH"] = str(layout.path("verify", "trajectory.json"))
+                env["ALE_TRAJECTORY_PATH"] = str(layout.path(Stage.TESTS, "trajectory.json"))
             # Judges retry provider failures until this budget runs out, so a verdict is
             # recorded as failed before the phase deadline kills the verifier.
             if ctx.phase_deadline is not None:
@@ -1231,11 +1232,11 @@ class EpisodeProtocol:
 
     async def _upload_oracle(self, ctx: EpisodeContext, task: Task, sandbox: Sandbox) -> None:
         folder = getattr(task, "folder", None)
-        source = folder.stage_dir("oracle") if folder else None
+        source = folder.stage_dir(Stage.SOLUTION) if folder else None
         if source is None:
-            raise TaskError("validation requires an oracle stage, and this task has none")
+            raise TaskError("validation requires a solution stage, and this task has none")
         # As the agent, since the agent is the account that will run it.
-        root = oracle_dir(ctx.home, ctx.spec.os)
+        root = solution_dir(ctx.home, ctx.spec.os)
         await sandbox.upload_dir(str(source), str(root), identity=Identity.AGENT)
 
     def _verify_timeout(self, ctx: EpisodeContext) -> float | None:

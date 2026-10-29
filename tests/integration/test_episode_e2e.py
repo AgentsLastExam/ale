@@ -71,7 +71,7 @@ async def test_broken_verifier_is_a_task_error_not_a_zero(
     """A verifier that writes nothing is a defect in the task, and must say so."""
     task_root = write_repo(
         tmp_path / "repo",
-        verify_body="#!/usr/bin/env bash\nexit 0\n",  # exits cleanly, writes no rewards
+        test_body="#!/usr/bin/env bash\nexit 0\n",  # exits cleanly, writes no rewards
     )
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
 
@@ -85,14 +85,14 @@ async def test_agent_never_sees_verification_material(
 ) -> None:
     """The reason answers stay on the host until scoring."""
     task_root = write_repo(tmp_path / "repo")
-    (task_root / "verify" / "answer.txt").write_text("hello world")
+    (task_root / "tests" / "answer.txt").write_text("hello world")
 
-    probe = task_root / "setup" / "run.sh"
+    probe = task_root / "environment" / "setup" / "setup.sh"
     probe.parent.mkdir()
     probe.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/input /home/user/output\n"
         "printf 'world' > /home/user/input/word.txt\n"
-        "for p in /opt/ale/verify /home/user/reference; do\n"
+        "for p in /opt/ale/tests /home/user/reference; do\n"
         '  if [ -e "$p" ]; then echo "LEAK: $p" >&2; exit 17; fi\n'
         "done\n"
     )
@@ -145,7 +145,7 @@ async def test_failed_episode_retries_in_a_new_sandbox_and_preserves_records(
             return await super().launch(instruction, sandbox, session, timeout_sec=timeout_sec)
 
     task_root = write_repo(tmp_path / "repo")
-    dockerfile = task_root / "image/Dockerfile"
+    dockerfile = task_root / "environment/Dockerfile"
     # This lifecycle check needs a shell, not the base image's desktop services.
     # An empty DISPLAY is how an image says it shows no desktop.
     dockerfile.write_text(dockerfile.read_text() + '\nENV DISPLAY=\nCMD ["sleep", "infinity"]\n')

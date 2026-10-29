@@ -8,7 +8,6 @@ import textwrap
 from pathlib import Path
 
 import pytest
-import yaml
 
 from ale.core.config import LoggingPolicy
 from ale.core.sandbox import Identity, SandboxRequest
@@ -27,7 +26,13 @@ from ale.run.secrets import provider_credentials
 from ale.run.task_images import prepare_task_image_result
 from ale.run.tasksets.manifest import load_task_folder
 from ale.run.tools import resolved_cua_desktop, stage_cua_desktop
-from tests.support import CONTAINER_BASE, provider_registry
+from tests.support import (
+    CONTAINER_BASE,
+    edit_task_config,
+    merged_config,
+    provider_registry,
+    write_task,
+)
 
 from .trajectory import LIVE, MODELS, llm_audit_evidence
 
@@ -129,13 +134,10 @@ async def test_windows_task_image_installs_software_and_reuses_cache(
         pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows qcow2")
     monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
     folder = _write_task(tmp_path / "tasks", OperatingSystem.WINDOWS)
-    manifest_path = folder / "task.yaml"
-    manifest = yaml.safe_load(manifest_path.read_text())
-    manifest["image"] = {"kind": "vm", "base_ref": str(image)}
-    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
-    (folder / "image/assets").mkdir(parents=True)
-    (folder / "image/assets/proof.txt").write_text("built from image materials")
-    (folder / "image/run.ps1").write_text(
+    edit_task_config(folder, {"ale": {"vm_image": None, "vm_base": str(image)}})
+    (folder / "environment/assets").mkdir(parents=True)
+    (folder / "environment/assets/proof.txt").write_text("built from image materials")
+    (folder / "environment/build.ps1").write_text(
         textwrap.dedent(r"""
         $ErrorActionPreference = 'Stop'
         choco install 7zip --version=24.9.0 -y --no-progress --limit-output
@@ -167,7 +169,7 @@ async def test_windows_task_image_installs_software_and_reuses_cache(
                 "-NoProfile",
                 "-Command",
                 "$ErrorActionPreference = 'Stop'; "
-                "if (Test-Path 'C:\\ProgramData\\ALE\\image') { exit 11 }; "
+                "if (Test-Path 'C:\\ProgramData\\ALE\\environment') { exit 11 }; "
                 "if ((Get-Content ($env:USERPROFILE + '\\image-proof.txt')) "
                 "-ne 'built from image materials') { exit 12 }; "
                 "& 'C:\\Program Files\\7-Zip\\7z.exe' i; exit $LASTEXITCODE",
@@ -180,40 +182,43 @@ async def test_windows_task_image_installs_software_and_reuses_cache(
 
 def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
     windows = operating_system is OperatingSystem.WINDOWS
-    task = root / operating_system.value
-    for stage in ("setup", "oracle", "verify"):
-        (task / stage / "assets").mkdir(parents=True)
-
+    local_linux_image = os.environ.get("ALE_TEST_LINUX_IMAGE")
     if windows:
-        image = {"kind": "vm", "ref": "local/windows-base"}
-    elif local_linux_image := os.environ.get("ALE_TEST_LINUX_IMAGE"):
-        (task / "image").mkdir()
-        (task / "image" / "Dockerfile").write_text(f"FROM {local_linux_image}\n")
-        image = {"kind": "container"}
+        image: dict[str, object] = {"ale": {"sandbox": "vm", "vm_image": "local/windows-base"}}
+    elif local_linux_image:
+        image = {}
     else:
-        image = {"kind": "container", "ref": LINUX_IMAGE}
+        image = {"environment": {"docker_image": LINUX_IMAGE}}
     home = r"C:\Users\user" if windows else "/home/user"
-    memory = 8192 if windows else 1024
-    manifest = {
-        "spec_type": "core/v1",
-        "name": f"standard-assets-{operating_system.value}",
-        "os": operating_system.value,
-        "image": image,
-        "resources": {"cpus": 2, "memory_mb": memory},
-        "timeouts": {"agent": 300, "verify": 300},
-        "artifacts": [f"{home}/output"],
-    }
-    (task / "task.yaml").write_text(
-        yaml.safe_dump(manifest, sort_keys=False),
-        encoding="utf-8",
+    task = write_task(
+        root / operating_system.value,
+        name=f"agentslastexam/standard-assets-{operating_system.value}",
+        config=merged_config(
+            {
+                "artifacts": [f"{home}/output"],
+                "environment": {
+                    "os": operating_system.value,
+                    "cpus": 2,
+                    "memory_mb": 8192 if windows else 1024,
+                },
+                "agent": {"timeout_sec": 300},
+                "verifier": {"timeout_sec": 300},
+            },
+            image,
+        ),
+        dockerfile=f"FROM {local_linux_image}\n" if local_linux_image else None,
+        instruction="Write 'hello world verified' to the output file.\n",
+        test=None,
+        solve=None,
     )
-    (task / "instruction.md").write_text("Write 'hello world verified' to the output file.\n")
-    (task / "setup" / "assets" / "seed.txt").write_text("world\n")
-    (task / "oracle" / "assets" / "suffix.txt").write_text("verified\n")
-    (task / "verify" / "assets" / "expected-suffix.txt").write_text("verified\n")
+    for root_name in ("environment/setup", "solution/assets", "tests/assets"):
+        (task / root_name).mkdir(parents=True)
+    (task / "environment" / "setup" / "seed.txt").write_text("world\n")
+    (task / "solution" / "assets" / "suffix.txt").write_text("verified\n")
+    (task / "tests" / "assets" / "expected-suffix.txt").write_text("verified\n")
 
     if windows:
-        (task / "setup" / "run.ps1").write_text(
+        (task / "environment" / "setup" / "setup.ps1").write_text(
             textwrap.dedent(
                 r"""
                 $ErrorActionPreference = "Stop"
@@ -222,15 +227,15 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                         [Security.Principal.WindowsBuiltInRole]::Administrator
                     )
                 if (-not $admin) { exit 18 }
-                if (Test-Path "C:\ProgramData\ALE\verify\assets") { exit 17 }
+                if (Test-Path "C:\ProgramData\ALE\tests\assets") { exit 17 }
                 New-Item "$env:ALE_HOME\input", "$env:ALE_HOME\output" `
                     -ItemType Directory -Force | Out-Null
-                Copy-Item ".\assets\seed.txt" "$env:ALE_HOME\input\seed.txt" -Force
+                Copy-Item ".\seed.txt" "$env:ALE_HOME\input\seed.txt" -Force
                 Set-Content "$env:ALE_HOME\input\setup-marker.txt" "setup" -NoNewline
                 """
             ).lstrip()
         )
-        (task / "oracle" / "run.ps1").write_text(
+        (task / "solution" / "solve.ps1").write_text(
             textwrap.dedent(
                 r"""
                 $ErrorActionPreference = "Stop"
@@ -243,23 +248,22 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                 """
             ).lstrip()
         )
-        entry = "run.ps1"
-        (task / "verify" / entry).write_text("python.exe .\\verify.py\nexit $LASTEXITCODE\n")
+        (task / "tests" / "test.ps1").write_text("python.exe .\\verify.py\nexit $LASTEXITCODE\n")
     else:
-        (task / "setup" / "run.sh").write_text(
+        (task / "environment" / "setup" / "setup.sh").write_text(
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
                 set -euo pipefail
-                test ! -e /opt/ale/verify/assets
+                test ! -e /opt/ale/tests/assets
                 mkdir -p "$ALE_HOME/input" "$ALE_HOME/output"
-                cp assets/seed.txt "$ALE_HOME/input/seed.txt"
+                cp seed.txt "$ALE_HOME/input/seed.txt"
                 printf setup > "$ALE_HOME/input/setup-marker.txt"
                 chown -R user:user "$ALE_HOME/input" "$ALE_HOME/output"
                 """
             )
         )
-        (task / "oracle" / "run.sh").write_text(
+        (task / "solution" / "solve.sh").write_text(
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
@@ -270,14 +274,11 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                 """
             )
         )
-        entry = "run.sh"
-        (task / "verify" / entry).write_text(
+        (task / "tests" / "test.sh").write_text(
             "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 verify.py\n"
         )
-        for script in task.glob("*/run.sh"):
-            script.chmod(0o755)
 
-    (task / "verify" / "verify.py").write_text(
+    (task / "tests" / "verify.py").write_text(
         textwrap.dedent(
             "import os\n"
             "from pathlib import Path\n"
@@ -300,21 +301,20 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
 
 def _write_windows_gui_task(root: Path) -> Path:
     task = _write_task(root, OperatingSystem.WINDOWS)
-    manifest = yaml.safe_load((task / "task.yaml").read_text())
     # Built on the base, so the image gets the framework's Cua Driver.
-    manifest["image"] = {"kind": "vm", "base_ref": "local/windows-base"}
-    (task / "task.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
-    (task / "image").mkdir()
-    (task / "image" / "run.ps1").write_text("exit 0\n")
+    edit_task_config(task, {"ale": {"vm_image": None, "vm_base": "local/windows-base"}})
+    (task / "environment" / "build.ps1").write_text("exit 0\n")
     (task / "instruction.md").write_text(
         "Use the visible Notepad window. Read the value after SCREEN_CODE=, type the "
         "same value after ANSWER=, and save the file. Do not change the first line.\n"
     )
     expected = "SCREEN_CODE=ALE-5827\r\nANSWER=ALE-5827\r\n"
-    (task / "setup" / "assets" / "screen.txt").write_text("SCREEN_CODE=ALE-5827\r\nANSWER=\r\n")
-    (task / "oracle" / "assets" / "answer.txt").write_text(expected)
-    (task / "verify" / "assets" / "answer.txt").write_text(expected)
-    (task / "setup" / "run.ps1").write_text(
+    (task / "environment" / "setup" / "screen.txt").write_text(
+        "SCREEN_CODE=ALE-5827\r\nANSWER=\r\n"
+    )
+    (task / "solution" / "assets" / "answer.txt").write_text(expected)
+    (task / "tests" / "assets" / "answer.txt").write_text(expected)
+    (task / "environment" / "setup" / "setup.ps1").write_text(
         textwrap.dedent(
             r"""
             $ErrorActionPreference = "Stop"
@@ -339,16 +339,16 @@ def _write_windows_gui_task(root: Path) -> Path:
             }
             New-Item "$env:ALE_HOME\output" -ItemType Directory -Force | Out-Null
             $document = "$env:ALE_HOME\output\result.txt"
-            Copy-Item ".\assets\screen.txt" $document -Force
+            Copy-Item ".\screen.txt" $document -Force
             Start-Process notepad.exe -ArgumentList "`"$document`""
             Start-Sleep -Seconds 3
             """
         ).lstrip()
     )
-    (task / "oracle" / "run.ps1").write_text(
+    (task / "solution" / "solve.ps1").write_text(
         'Copy-Item ".\\assets\\answer.txt" "$env:ALE_HOME\\output\\result.txt" -Force\n'
     )
-    (task / "verify" / "verify.py").write_text(
+    (task / "tests" / "verify.py").write_text(
         textwrap.dedent(
             "import os\n"
             "from pathlib import Path\n"

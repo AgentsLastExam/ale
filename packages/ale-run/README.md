@@ -19,7 +19,7 @@ CLI → Task loading/image preparation → Episode → EpisodeProtocol
 | `src/ale/run/harnesses/` | native agent adapters; see its local README |
 | `src/ale/run/gateway/` | authenticated model routing, limits and Transport Trace; see its local README |
 | `src/ale/run/guestd/` | dependency-free service running inside the Sandbox |
-| `src/ale/run/tasksets/` | Task-folder discovery and manifest loading |
+| `src/ale/run/tasksets/` | Task-folder discovery and `task.toml` loading |
 | `src/ale/run/episode.py` | one episode's resources, recording and terminal result |
 
 ## Common commands

@@ -22,7 +22,7 @@ from ale_verify import (
     JudgeAttempt,
     JudgeInvocation,
 )
-from tests.support import CONTAINER_BASE, provider_registry
+from tests.support import CONTAINER_BASE, edit_task_config, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -54,12 +54,7 @@ async def test_plain_result_is_accepted_only_after_normal_exit(
 ) -> None:
     task_root = repository(tmp_path / "repo", "plain-result")
     if environment_mode == "separate":
-        manifest = task_root / "task.yaml"
-        manifest.write_text(
-            manifest.read_text()
-            + "verify:\n  environment_mode: separate\n"
-            + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
-        )
+        edit_task_config(task_root, {"verifier": {"environment": {"cpus": 1, "memory_mb": 512}}})
     script = (
         "import json\nfrom pathlib import Path\n"
         "verifier = Path('/logs/verifier')\n"
@@ -73,9 +68,9 @@ async def test_plain_result_is_accepted_only_after_normal_exit(
         script += "(verifier / 'reward.json').write_text('partial JSON')\n"
     elif mode == "stale":
         # A result shipped with the verify stage is no result of this attempt.
-        (task_root / "verify/reward.json").write_text('{"reward":1}')
+        (task_root / "tests/reward.json").write_text('{"reward":1}')
         script = "pass\n"
-    (task_root / "verify/verify.py").write_text(script)
+    (task_root / "tests/verify.py").write_text(script)
     result = await run_episode(
         load_tasks(task_root)[0],
         EpisodeProtocol(OracleHarness()),
@@ -134,7 +129,7 @@ async def test_agent_transcript_and_judge_provenance_are_collected_after_exit(
         Path("/logs/verifier/reward.json").write_text(json.dumps({{"reward":1.0}}))
         """
     ).strip()
-    (task_root / "verify" / "verify.py").write_text(script + "\n")
+    (task_root / "tests" / "verify.py").write_text(script + "\n")
     task = load_tasks(task_root)[0]
 
     result = await run_episode(

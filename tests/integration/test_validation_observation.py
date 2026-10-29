@@ -19,7 +19,7 @@ async def test_validation_records_the_task_and_rejects_partial_oracles(
 ) -> None:
     root = tmp_path / "repo"
     task = write_repo(root)
-    (task / "verify" / "verify.py").write_text(
+    (task / "tests" / "verify.py").write_text(
         "import os\n"
         "from ale_verify import write\n"
         "verification = {}\n"
@@ -32,7 +32,7 @@ async def test_validation_records_the_task_and_rejects_partial_oracles(
 
     validation_path = next((tmp_path / "runs").glob("validate-*/validation.json"))
     observation = json.loads(validation_path.read_text())
-    assert [task["name"] for task in observation["tasks"]] == ["hello"]
+    assert [task["name"] for task in observation["tasks"]] == ["agentslastexam/hello"]
     for item in observation["tasks"]:
         assert item["passed"] is False
         assert item["untouched"]["rewards"] == {"reward": 0.0}
@@ -69,7 +69,7 @@ async def test_validation_respects_artifact_policy_for_shared_verification(
             "Path('/logs/verifier/verification.json').write_text(json.dumps(result))\n"
             "Path('/logs/verifier/reward.json').write_text(json.dumps({'reward':score}))\n"
         )
-    (task_root / "verify" / "verify.py").write_text(script)
+    (task_root / "tests" / "verify.py").write_text(script)
     settings = RunConfig.model_validate({"artifacts": {"collect": policy}})
 
     assert await _validate(str(root), settings, tmp_path / "runs") == 0

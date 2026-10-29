@@ -16,7 +16,7 @@ pytestmark = pytest.mark.integration
 
 def task() -> TaskSpec:
     return TaskSpec(
-        name="demo-crash",
+        name="agentslastexam/demo-crash",
         instruction="work",
         image=ImageSpec(kind="container", ref="ghcr.io/example/fixture:1"),
     )
@@ -32,7 +32,7 @@ def test_reopen_marks_stale_attempt_interrupted_and_preserves_retry(tmp_path) ->
         from ale.run.ledger import Ledger
 
         task = TaskSpec(
-            name="demo-crash",
+            name="agentslastexam/demo-crash",
             instruction="work",
             image=ImageSpec(kind="container", ref="ghcr.io/example/fixture:1"),
         )

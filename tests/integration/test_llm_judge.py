@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -18,7 +17,7 @@ from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
 from ale_verify import _llm
-from tests.support import CONTAINER_BASE, provider_registry
+from tests.support import CONTAINER_BASE, provider_registry, write_task
 
 pytestmark = pytest.mark.integration
 
@@ -72,39 +71,31 @@ async def test_direct_llm_call_uses_provider_without_gateway(
 
 
 def judged_task(root: Path) -> Path:
-    task = root / "tasks" / "judged"
-    for stage in ("image", "setup", "verify", "oracle"):
-        (task / stage).mkdir(parents=True)
-    (task / "task.yaml").write_text(
-        textwrap.dedent("""
-        spec_type: core/v1
-        name: judged
-        image: {kind: container}
-        resources: {cpus: 1, memory_mb: 512}
-        network: {mode: block}
-        timeouts: {agent: 60, verify: 120}
-        artifacts: [/home/user/output]
-        """).strip()
+    task = write_task(
+        root / "tasks" / "judged",
+        name="agentslastexam/judged",
+        config={"artifacts": ["/home/user/output"], "agent": {"timeout_sec": 60}},
+        dockerfile=(
+            f"FROM {CONTAINER_BASE}\n"
+            "RUN mkdir -p /home/user/output && chown -R user:user /home/user/output\n"
+        ),
+        instruction="Write blue to /home/user/output/answer.txt\n",
     )
-    (task / "instruction.md").write_text("Write blue to /home/user/output/answer.txt\n")
-    (task / "image" / "Dockerfile").write_text(
-        f"FROM {CONTAINER_BASE}\n"
-        "RUN mkdir -p /home/user/output && chown -R user:user /home/user/output\n"
-    )
-    (task / "setup" / "run.sh").write_text(
+    (task / "environment" / "setup").mkdir()
+    (task / "environment" / "setup" / "setup.sh").write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "mkdir -p /home/user/output\n"
         'test -z "${ALE_OPENAI_API_KEY-}${ALE_ANTHROPIC_API_KEY-}"\n'
         "printf absent > /home/user/output/setup-key\n"
     )
-    (task / "oracle" / "run.sh").write_text(
+    (task / "solution" / "solve.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nprintf blue > /home/user/output/answer.txt\n"
     )
-    (task / "verify" / "run.sh").write_text(
+    (task / "tests" / "test.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 verify.py\n"
     )
-    (task / "verify" / "verify.py").write_text(
+    (task / "tests" / "verify.py").write_text(
         "import os\n"
         "from ale_verify import checks, judge, write\n"
         "v = {}\n"
@@ -120,8 +111,6 @@ def judged_task(root: Path) -> Path:
         "e']]\n"
         'write({"reward": sum(v.values()) / len(v), **v})\n'
     )
-    for script in task.glob("*/run.sh"):
-        script.chmod(0o755)
     return task
 
 
@@ -178,7 +167,7 @@ async def run_judged_task(  # type: ignore[no-untyped-def]
     gateway_url = await gateway.start()
     task_root = judged_task(tmp_path / "repo")
     if crash:
-        script = task_root / "verify/verify.py"
+        script = task_root / "tests/verify.py"
         script.write_text(script.read_text() + "raise RuntimeError('after Judge and write')\n")
     task = load_tasks(task_root)[0]
     try:

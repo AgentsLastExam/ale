@@ -9,21 +9,29 @@ from ale.core.errors import TaskDefinitionError
 from ale.core.ids import TaskId
 from ale.run import ale_image
 
-__all__ = ["scaffold_task"]
+__all__ = ["DEFAULT_ORGANIZATION", "scaffold_task"]
 
-TASK_YAML = """\
-spec_type: core/v1
-name: {name}
-image:
-  kind: container
+#: The organization of a scaffolded Task's ``org/name``; edit ``[task].name`` for another.
+DEFAULT_ORGANIZATION = "agentslastexam"
 
-resources: {{cpus: 1, memory_mb: 4096}}
-network: {{mode: block}}
-timeouts: {{agent: 300, verify: 120}}
-artifacts: [/home/user/output]
+TASK_TOML = """\
+schema_version = "1.4"
+artifacts = ["/home/user/output"]
 
-metadata:
-  tags: []
+[task]
+name = "{name}"
+
+[environment]
+cpus = 1
+memory_mb = 4096
+
+[agent]
+user = "user"
+timeout_sec = 300
+network_mode = "no-network"
+
+[verifier]
+timeout_sec = 120
 """
 
 INSTRUCTION_MD = """\
@@ -36,7 +44,7 @@ FROM {ale_image("container-ubuntu22-base")}
 RUN mkdir -p /home/user/output && chown -R user:user /home/user/output
 """
 
-VERIFY_SH = """\
+TEST_SH = """\
 #!/usr/bin/env bash
 set -euo pipefail
 exec "$ALE_VERIFY_PYTHON" verify.py
@@ -50,7 +58,7 @@ write({"reward": check["score"], "content": check})
 """
 
 
-ORACLE_SH = """\
+SOLVE_SH = """\
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'hello\\n' > /home/user/output/result.txt
@@ -60,11 +68,11 @@ printf 'hello\\n' > /home/user/output/result.txt
 def scaffold_task(path: Path, *, force: bool = False) -> Path:
     target = path.resolve()
     try:
-        name = TaskId(target.name)
+        name = TaskId(f"{DEFAULT_ORGANIZATION}/{target.name}")
     except ValueError as exc:
         raise TaskDefinitionError(
-            "Task folder name must be a lowercase slug or task.yaml must be authored "
-            f"manually: {exc}"
+            "Task folder name must be a lowercase slug, or task.toml must be written by hand: "
+            f"{exc}"
         ) from exc
     if target.exists():
         if not force:
@@ -72,17 +80,17 @@ def scaffold_task(path: Path, *, force: bool = False) -> Path:
         shutil.rmtree(target)
 
     files = {
-        "task.yaml": TASK_YAML.format(name=name),
+        "task.toml": TASK_TOML.format(name=name),
         "instruction.md": INSTRUCTION_MD,
-        "image/Dockerfile": DOCKERFILE,
-        "verify/run.sh": VERIFY_SH,
-        "verify/verify.py": VERIFY_PY,
-        "oracle/run.sh": ORACLE_SH,
+        "environment/Dockerfile": DOCKERFILE,
+        "tests/test.sh": TEST_SH,
+        "tests/verify.py": VERIFY_PY,
+        "solution/solve.sh": SOLVE_SH,
     }
     for relative, content in files.items():
         destination = target / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(content, encoding="utf-8")
-        if destination.name == "run.sh":
+        if destination.suffix == ".sh":
             destination.chmod(0o755)
     return target

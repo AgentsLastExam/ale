@@ -233,7 +233,7 @@ async def test_complete_episode_has_one_authoritative_home_per_fact(
 ) -> None:
     task = DemoTask(
         TaskSpec(
-            name="demo-logging",
+            name="agentslastexam/demo-logging",
             instruction="Use the task tool and inspect the image.",
             image={"kind": "container"},
         ),

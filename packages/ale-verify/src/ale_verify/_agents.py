@@ -72,7 +72,7 @@ def run(
             schema_hash,
             "ALE_HOME must identify the completed solver workspace",
         )
-    stage = Path(os.environ.get("ALE_STAGE_DIR", "/opt/ale/verify"))
+    stage = Path(os.environ.get("ALE_STAGE_DIR", "/opt/ale/tests"))
     home = stage / "agent" / invocation_id
     shutil.rmtree(home, ignore_errors=True)
     home.mkdir(parents=True, mode=0o700)

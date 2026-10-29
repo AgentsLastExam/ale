@@ -634,7 +634,7 @@ class QemuProvider(Provider):
 
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
         if image.kind is not ImageKind.VM:
-            raise ProviderCapabilityError("QemuProvider requires image.kind=vm")
+            raise ProviderCapabilityError("QemuProvider requires a VM image")
         if isinstance(image, ImageRef):
             if self.fixture_image is not None:
                 prepared = await asyncio.to_thread(
@@ -652,7 +652,7 @@ class QemuProvider(Provider):
     async def create(self, request: SandboxRequest) -> QemuSandbox:
         self.accepts(request)
         if request.image_kind is not ImageKind.VM:
-            raise ProviderCapabilityError("QemuProvider requires image.kind=vm")
+            raise ProviderCapabilityError("QemuProvider requires a VM image")
         await self.preflight()
         lease: GpuLease | None = None
         selected: tuple[_VfioGpu, ...] = ()

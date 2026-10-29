@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -14,7 +15,7 @@ from ale.core.verdict import Rewards
 if TYPE_CHECKING:
     from ale.core.episode import EpisodeContext
 
-__all__ = ["Task", "TaskAssetObservation", "TaskFolder", "TaskSourceContext"]
+__all__ = ["Stage", "Task", "TaskAssetObservation", "TaskFolder", "TaskSourceContext"]
 
 
 @dataclass(frozen=True)
@@ -37,27 +38,40 @@ class TaskAssetObservation:
     dirty: bool
 
 
+class Stage(StrEnum):
+    """A Task stage, named as its directory is in the sandbox."""
+
+    SETUP = "setup"
+    TESTS = "tests"
+    SOLUTION = "solution"
+
+    def entry(self, operating_system: OperatingSystem) -> str:
+        """The script a stage runs: ``test.sh``, or ``test.ps1`` on Windows."""
+        name = {Stage.SETUP: "setup", Stage.TESTS: "test", Stage.SOLUTION: "solve"}[self]
+        return f"{name}.ps1" if operating_system is OperatingSystem.WINDOWS else f"{name}.sh"
+
+
 class TaskFolder(Protocol):
     """Filesystem surface used by the standard runtime."""
 
     root: Path
 
     @property
-    def image_dir(self) -> Path: ...
+    def environment_dir(self) -> Path: ...
 
     @property
-    def image_dockerfile(self) -> Path | None: ...
+    def dockerfile(self) -> Path | None: ...
 
     @property
-    def image_script(self) -> Path | None: ...
+    def build_script(self) -> Path | None: ...
 
     @property
     def verifier_dockerfile(self) -> Path | None: ...
 
-    def stage_dir(self, name: str) -> Path | None: ...
+    def stage_dir(self, stage: Stage) -> Path | None: ...
 
     def stage_entry(
-        self, name: str, operating_system: OperatingSystem = OperatingSystem.LINUX
+        self, stage: Stage, operating_system: OperatingSystem = OperatingSystem.LINUX
     ) -> Path | None: ...
 
 

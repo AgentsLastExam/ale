@@ -1,4 +1,4 @@
-"""The egress proxy behind ``network.mode: allowlist``.
+"""The egress proxy behind an ``allowlist`` network policy.
 
 A sandbox in allowlist mode sits on the same routeless bridge as one in ``block`` mode.
 The difference is entirely in what this process will forward on its behalf, which is

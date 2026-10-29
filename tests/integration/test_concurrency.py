@@ -137,7 +137,7 @@ async def test_one_claude_definition_has_no_episode_mutable_paths_or_versions() 
 
 def test_asset_status_shared_lock_blocks_repository_replacement(write_task_repo) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-lock", tasks=("one",))
-    asset = repository / "tasks/one/image/assets/data.txt"
+    asset = repository / "tasks/one/environment/assets/data.txt"
     asset.parent.mkdir(parents=True)
     asset.write_text("stable")
     attempted = threading.Event()

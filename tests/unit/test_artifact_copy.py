@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from ale.core.sandbox import ExecResult, Identity
-from ale.core.taskspec import OperatingSystem, TaskManifestV1
+from ale.core.taskspec import OperatingSystem, TaskSpec
 from ale.run.artifact_files import inspect, read
 from ale.run.episode import _Artifacts
 
@@ -145,13 +145,13 @@ async def test_collection_none_never_inspects_guest(tmp_path):
 
 
 def test_artifacts_accept_file_directory_and_overlapping_glob_paths():
-    manifest = TaskManifestV1(
-        spec_type="core/v1",
-        name="copy",
+    spec = TaskSpec(
+        name="agentslastexam/copy",
         image={"kind": "container"},
+        instruction="Copy.",
         artifacts=("/output", "/output/*.sgf", "/output/exact.sgf"),
     )
-    assert len(manifest.artifacts) == 3
+    assert len(spec.artifacts) == 3
 
 
 @pytest.mark.asyncio

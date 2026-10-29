@@ -31,7 +31,7 @@ from ale.run.protocol import episode_protocol
 from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import provider_registry
+from tests.support import edit_task_config, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -50,10 +50,8 @@ async def run_one(task_root: Path, run_dir: Path, harness: object):  # type: ign
 
 
 def set_timeout(task_root: Path, phase: str, seconds: int) -> None:
-    manifest = task_root / "task.yaml"
-    text = manifest.read_text()
-    line = next(line for line in text.splitlines() if line.startswith("timeouts:"))
-    manifest.write_text(text.replace(line, line.replace(f"{phase}: 120", f"{phase}: {seconds}")))
+    table = "agent" if phase == "agent" else "verifier"
+    edit_task_config(task_root, {table: {"timeout_sec": seconds}})
 
 
 @pytest.mark.asyncio
@@ -62,8 +60,10 @@ async def test_a_hanging_setup_times_out(
 ) -> None:
     """A task that never finishes preparing is a task defect, reported as a timeout."""
     task_root = write_repo(tmp_path / "repo")
-    (task_root / "setup").mkdir()
-    (task_root / "setup" / "run.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
+    (task_root / "environment" / "setup").mkdir()
+    (task_root / "environment" / "setup" / "setup.sh").write_text(
+        "#!/usr/bin/env bash\nsleep 600\n"
+    )
     monkeypatch.setattr(episode_protocol, "SETUP_TIMEOUT_SEC", 5)
 
     started = time.monotonic()
@@ -81,7 +81,7 @@ async def test_a_hanging_agent_times_out_and_keeps_its_trace(
 ) -> None:
     """Partial evidence survives: an episode that ran out of time still explains itself."""
     task_root = write_repo(tmp_path / "repo")
-    (task_root / "oracle" / "run.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
+    (task_root / "solution" / "solve.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
     set_timeout(task_root, "agent", 5)
 
     started = time.monotonic()
@@ -104,7 +104,7 @@ async def test_runtime_agent_budget_excludes_install_and_verification(
     tmp_path: Path, write_repo: Callable[..., Path]
 ) -> None:
     task_root = write_repo(tmp_path / "repo")
-    verifier = task_root / "verify/run.sh"
+    verifier = task_root / "tests/test.sh"
     verifier.write_text("sleep 3\n" + verifier.read_text())
     set_timeout(task_root, "verify", 1)
 
@@ -130,7 +130,7 @@ async def test_runtime_agent_timeout_destroys_descendants_and_does_not_retry(
     tmp_path: Path, write_repo: Callable[..., Path]
 ) -> None:
     task_root = write_repo(tmp_path / "repo")
-    (task_root / "oracle/run.sh").write_text("#!/usr/bin/env bash\nsleep 600 &\nwait\n")
+    (task_root / "solution/solve.sh").write_text("#!/usr/bin/env bash\nsleep 600 &\nwait\n")
     calls = 0
 
     async def execute():
@@ -171,7 +171,7 @@ async def test_a_hanging_verifier_times_out(
     tmp_path: Path, write_repo: Callable[..., Path]
 ) -> None:
     task_root = write_repo(tmp_path / "repo")
-    (task_root / "verify" / "run.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
+    (task_root / "tests" / "test.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
     set_timeout(task_root, "verify", 5)
 
     started = time.monotonic()
@@ -187,8 +187,10 @@ async def test_a_timed_out_episode_leaves_no_container_behind(
 ) -> None:
     """Teardown is shielded, so the deadline reclaims the sandbox rather than leaking it."""
     task_root = write_repo(tmp_path / "repo")
-    (task_root / "setup").mkdir()
-    (task_root / "setup" / "run.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
+    (task_root / "environment" / "setup").mkdir()
+    (task_root / "environment" / "setup" / "setup.sh").write_text(
+        "#!/usr/bin/env bash\nsleep 600\n"
+    )
     monkeypatch.setattr(episode_protocol, "SETUP_TIMEOUT_SEC", 5)
 
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
@@ -213,8 +215,8 @@ async def test_a_crashing_setup_is_a_task_error_not_a_zero(
 ) -> None:
     """Distinguishing a broken task from a hard one is the point of the taxonomy."""
     task_root = write_repo(tmp_path / "repo")
-    (task_root / "setup").mkdir()
-    (task_root / "setup" / "run.sh").write_text(
+    (task_root / "environment" / "setup").mkdir()
+    (task_root / "environment" / "setup" / "setup.sh").write_text(
         textwrap.dedent("""
             #!/usr/bin/env bash
             set -euo pipefail

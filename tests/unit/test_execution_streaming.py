@@ -147,11 +147,11 @@ async def test_verifier_learns_how_much_of_its_phase_is_left(tmp_path: Path) -> 
     ctx = context(tmp_path)
     sandbox = StageSandbox(ExecResult(exit_code=0))
     protocol = EpisodeProtocol(NopHarness())
-    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/verify"), Phase.VERIFY)  # type: ignore[arg-type]
+    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/tests"), Phase.VERIFY)  # type: ignore[arg-type]
     assert "ALE_VERIFY_DEADLINE_SECONDS" not in sandbox.env
 
     ctx.phase_deadline = time.monotonic() + 100
-    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/verify"), Phase.VERIFY)  # type: ignore[arg-type]
+    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/tests"), Phase.VERIFY)  # type: ignore[arg-type]
     assert 98 <= int(sandbox.env["ALE_VERIFY_DEADLINE_SECONDS"]) <= 100
 
 
@@ -170,7 +170,7 @@ async def test_selected_verifier_python_is_only_exposed_during_verification(tmp_
     await protocol._run_stage(
         ctx,
         sandbox,
-        Path("/opt/ale/verify"),
+        Path("/opt/ale/tests"),
         Phase.VERIFY,
         verify_python="python3.12",  # type: ignore[arg-type]
     )

@@ -14,12 +14,12 @@ import typer
 from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config, select_agent_name
 from ale.core.errors import AleError, ConfigError, ProviderCapabilityError, TaskDefinitionError
 from ale.core.harness import EffectiveAgentResources, Harness
-from ale.core.ids import content_hash
+from ale.core.ids import content_hash, task_component
 from ale.core.lock import AssetProvenance, ResumedFrom, RunLock
 from ale.core.result import ResultRecord
 from ale.core.sandbox import ImageKind, PreparedTaskImage, Sandbox, SandboxRequest, SandboxRole
-from ale.core.task import TaskAssetObservation
-from ale.core.taskspec import OperatingSystem, VerificationMode
+from ale.core.task import Stage, TaskAssetObservation
+from ale.core.taskspec import VerificationMode
 from ale.core.trajectory import AtifTrajectory
 from ale.core.validation import (
     TaskValidationObservation,
@@ -70,7 +70,7 @@ from ale.run.task_images import (
     prepare_task_image_result,
     prepare_verifier_image_result,
 )
-from ale.run.tasksets.manifest import VERIFY_DIR, ManifestTask, load_tasks
+from ale.run.tasksets.manifest import ManifestTask, load_tasks
 from ale.run.verification import preflight_judges
 
 EXIT_SOME_FAILED = 2
@@ -444,7 +444,7 @@ async def _run_one(
                 if index < done:
                     typer.echo(f"skip  {task.spec.name}: episode {index + 1} already complete")
                     continue
-                episode_id = f"{task.spec.name}-{uuid.uuid4().hex[:8]}"
+                episode_id = f"{task_component(task.spec.name)}-{uuid.uuid4().hex[:8]}"
                 ledger.queue_episode(
                     episode_id=episode_id,
                     run_id=run_id,
@@ -511,7 +511,7 @@ async def _reverify(
                 or task.non_verifier_digest != source_lock.task.non_verifier_digest
             ):
                 typer.echo(
-                    f"{task.spec.name}: content outside verify/ changed or source evidence is "
+                    f"{task.spec.name}: content outside tests/ changed or source evidence is "
                     "missing; run the solver again",
                     err=True,
                 )
@@ -778,7 +778,7 @@ def _same_assets(recorded: AssetProvenance | None, current: TaskAssetObservation
     """Whether a Task's assets are provably the committed version a source run used.
 
     Asset bytes are identified by their commit rather than hashed, so any asset change,
-    even one only below verify/assets, needs a fresh solver run.
+    even one only below tests/assets, needs a fresh solver run.
     """
     if recorded is None or current is None:
         return recorded is None and current is None
@@ -838,7 +838,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                     ("untouched", NopHarness(), False),
                     ("oracle", OracleHarness(), True),
                 ):
-                    episode_id = f"{spec.name}-{pass_name}-{uuid.uuid4().hex[:8]}"
+                    episode_id = f"{task_component(spec.name)}-{pass_name}-{uuid.uuid4().hex[:8]}"
                     inputs = ProvenanceInputs(
                         source=resolved.source,
                         agent=agent_provenance(
@@ -990,7 +990,7 @@ async def _judge_gateway(settings: RunConfig) -> Gateway | None:
 
 
 def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
-    return [task.folder.root / VERIFY_DIR for task in tasks]
+    return [task.folder.root / Stage.TESTS for task in tasks]
 
 
 async def _prepare_images(
@@ -1013,9 +1013,7 @@ async def _prepare_images(
                 "sudo": task.spec.resources.sudo,
             }
         )
-        windows_build = (
-            task.spec.os is OperatingSystem.WINDOWS and task.folder.image_script is not None
-        )
+        windows_build = spec.base_ref is not None
         image = None if windows_build else by_source.get(key)
         if image is None:
             prepared = await prepare_task_image_result(task, providers)
@@ -1032,14 +1030,12 @@ async def _prepare_images(
         if verify.environment_mode is VerificationMode.SHARED:
             task.prepared_verifier_image = None
             continue
-        if task.folder.verifier_dockerfile is None and verify.image is None:
+        if verify.image is None:
             task.prepared_verifier_image = image
             reused = await prepare_verifier_image_result(task, providers)
             if reused is not None:
                 results.append(reused)
             continue
-        if verify.image is None:
-            raise TaskDefinitionError("verify/Dockerfile requires verify.image.kind")
         verifier_key = content_hash(
             {
                 "role": "verifier",

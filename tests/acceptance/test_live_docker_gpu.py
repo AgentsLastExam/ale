@@ -20,7 +20,7 @@ from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_prove
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import prepare_reference, provider_registry
+from tests.support import edit_task_config, prepare_reference, provider_registry
 
 pytestmark = [
     pytest.mark.needs_docker,
@@ -76,22 +76,21 @@ def _gpu_indices() -> tuple[int, ...]:
 def _separate_gpu_task(root: Path) -> Path:
     task = scaffold_task(root)
     (task / "instruction.md").write_text("Record the assigned GPU.\n")
-    (task / "task.yaml").write_text(
-        "spec_type: core/v1\n"
-        "name: gpu-separate\n"
-        "image: {kind: container}\n"
-        "resources: {cpus: 1, memory_mb: 1024, gpus: 1}\n"
-        "artifacts: [/home/user/output/solver-gpu.txt]\n"
-        "verify:\n"
-        "  environment_mode: separate\n"
-        "  resources: {cpus: 1, memory_mb: 1024, storage_mb: null, gpus: 1}\n"
+    edit_task_config(
+        task,
+        {
+            "artifacts": ["/home/user/output/solver-gpu.txt"],
+            "task": {"name": "agentslastexam/gpu-separate"},
+            "environment": {"memory_mb": 1024, "gpus": 1},
+            "verifier": {"environment": {"cpus": 1, "memory_mb": 1024, "gpus": 1}},
+        },
     )
-    (task / "oracle/run.sh").write_text(
+    (task / "solution/solve.sh").write_text(
         "#!/bin/sh\nset -eu\n"
         "nvidia-smi --query-gpu=uuid --format=csv,noheader > "
         "/home/user/output/solver-gpu.txt\n"
     )
-    (task / "verify/verify.py").write_text(
+    (task / "tests/verify.py").write_text(
         "import subprocess\n"
         "from ale_verify import write\n"
         "solver = open('/home/user/output/solver-gpu.txt').read().strip()\n"

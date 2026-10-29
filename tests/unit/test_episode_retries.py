@@ -330,14 +330,8 @@ async def test_reverification_retries_only_with_fresh_verifiers(
     task_cli = import_module("ale.run.cli.tasks")
     task_path = scaffold_task(tmp_path / "task")
     if mode == "separate":
-        manifest = task_path / "task.yaml"
-        manifest.write_text(
-            manifest.read_text()
-            + (
-                "verify:\n  environment_mode: separate\n"
-                "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
-            )
-        )
+        config = task_path / "task.toml"
+        config.write_text(config.read_text() + 'environment_mode = "separate"\n')
     task = load_tasks(task_path)[0]
     source = write_result(tmp_path / "source", Status.COMPLETED, 1)
     original = (source.run_dir / "result.json").read_bytes()

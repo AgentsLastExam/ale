@@ -17,7 +17,7 @@ pytestmark = pytest.mark.integration
 
 def task() -> TaskSpec:
     return TaskSpec(
-        name="demo-live",
+        name="agentslastexam/demo-live",
         instruction="work",
         image=ImageSpec(kind="container", ref="ghcr.io/example/fixture:1"),
     )

@@ -90,7 +90,7 @@ class RegistryError(AleError):
 
 
 class TaskDefinitionError(AleError):
-    """A task manifest is invalid, or its instruction failed to render."""
+    """A Task folder or its ``task.toml`` is invalid."""
 
 
 class AssetError(AleError):

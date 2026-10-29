@@ -125,7 +125,7 @@ class EpisodeContext:
     episode_id: str
     spec: TaskSpec
     task_dir: Path
-    """Host-side task folder: manifest, verify, oracle, setup scripts, files."""
+    """Host-side task folder: configuration, environment, tests and solution."""
 
     run_dir: Path
     """Host-side output directory for this episode."""

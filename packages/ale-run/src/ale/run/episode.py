@@ -35,6 +35,7 @@ from ale.core.errors import (
     TaskError,
 )
 from ale.core.harness import EffectiveAgentResources, HarnessSession
+from ale.core.ids import task_component
 from ale.core.lock import AssetProvenance, LimitTermination, RunLock
 from ale.core.result import FailureInfo as ResultFailureInfo
 from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
@@ -504,7 +505,7 @@ async def run_episode(
         task.prepared_image = await prepare_task_image(task, providers)
     if task.prepared_verifier_image is None:
         task.prepared_verifier_image = await prepare_verifier_image(task, providers)
-    episode_id = episode_id or f"{task.spec.name}-{uuid.uuid4().hex[:8]}"
+    episode_id = episode_id or f"{task_component(task.spec.name)}-{uuid.uuid4().hex[:8]}"
     trajectory_id = trajectory_id or f"trajectory-{uuid.uuid4().hex}"
     episode_dir = run_dir / episode_id
     recording = EpisodeRecording(episode_dir)

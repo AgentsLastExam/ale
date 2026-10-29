@@ -23,10 +23,11 @@ provision -> setup -> agent/oracle -> final evidence capture
           -> shared or separate verify -> teardown/retention -> result
 ```
 
-Every phase is timed and attributed independently. Agent and verify default to
-`TaskSpec.timeouts`. Setup has a fixed framework bound of 1800 s, a guard against a hung setup
-rather than a scored budget. Run policy may override `timeouts.agent` with positive seconds and
-`timeouts.verify` with positive seconds or `"unlimited"`. These overrides are recorded in
+Every phase is timed and attributed independently. Agent and verify default to the Task's
+`[agent].timeout_sec` and `[verifier].timeout_sec`. Setup has a fixed framework bound of
+1800 s, a guard against a hung setup rather than a scored budget. Run policy may override
+`timeouts.agent` with positive seconds and `timeouts.verify` with positive seconds or
+`"unlimited"`. These overrides are recorded in
 RunLock and the configuration hash without changing the Task identity. The Agent deadline
 starts at Harness launch (or policy rollout), after installation, resource staging, and
 network sealing. Evidence capture, verification, and cleanup do not consume it. An Agent
@@ -50,9 +51,10 @@ pre-create declared artifacts. Framework staging uses `/opt/ale` on Linux and
 
 ### Setup
 
-If `setup/` exists, ALE uploads the complete directory to the OS staging root, opens
-egress, and executes `run.sh` on Linux or `run.ps1` on Windows with that directory as cwd.
-`assets/` is therefore available by an ordinary relative path. Setup is optional and runs once.
+If `environment/setup/` exists, ALE uploads the complete directory to `setup` under the
+staging root, opens egress, and executes `setup.sh` on Linux or `setup.ps1` on Windows with
+that directory as cwd, so its files are available by ordinary relative paths. Setup is
+optional and runs once.
 
 ### Agent or oracle
 
@@ -63,9 +65,10 @@ sandbox; Policy Harnesses drive the framework-owned `TaskEnv`. The evaluated sol
 the validation oracle both run as the image's agent account. Windows autonomous CLI
 Harnesses use the base's native Node.js and Git Bash.
 
-`oracle/` is uploaded only for an oracle episode and is absent for an evaluated solver.
-`verify/` is also absent throughout this phase. Answers are withheld by when they are
-staged, not by a conventional path or a flag a Task must remember.
+`solution/` is uploaded only for an oracle episode and is absent for an evaluated solver.
+`tests/` is also absent throughout this phase. Answers are withheld by when they are
+staged and by the root-only staging directory, not by a conventional path or a flag a Task
+must remember.
 
 ### Evidence capture
 
@@ -98,17 +101,17 @@ output therefore requires host artifact collection.
 
 ### Verify
 
-Shared verification uploads `verify/` into the completed solver sandbox. Separate
+Shared verification uploads `tests/` into the completed solver sandbox. Separate
 verification first releases or retains the solver according to run policy, provisions a
 fresh verifier sandbox, restores captured artifacts to their original absolute paths,
-and uploads the same `verify/`. It never reruns setup or copies the solver filesystem.
+and uploads the same `tests/`. It never reruns setup or copies the solver filesystem.
 
 Verification runs as framework-controlled Task code with open egress and elevated
 privileges (root on Linux, Administrator on Windows), in both shared and separate modes.
 Task code may explicitly drop privileges when executing a submitted program.
 ALE stages `ale_verify`, the instruction, optional solver trajectory, and run-level Judge
 configuration, then executes the OS entry from the verification staging directory. Linux uses
-`/opt/ale/verify/run.sh`; Windows uses `C:\ProgramData\ALE\verify\run.ps1`.
+`/opt/ale/tests/test.sh`; Windows uses `C:\ProgramData\ALE\tests\test.ps1`.
 ALE selects Python 3.12+ (`python3`, then `python3.12` on Linux; `python.exe` on Windows)
 and provides its command as `ALE_VERIFY_PYTHON`. Both placements leave the same
 [result](verification.md#result) in `/logs/verifier` (`C:\logs\verifier`), which ALE empties
@@ -117,8 +120,8 @@ and gives to the framework alone before every attempt. The solver interpreter is
 ### Teardown and retention
 
 Solver and verifier retention are independent run policies and default to `destroy`.
-Before a requested keep, ALE removes every stage of the Task (`setup/`, `verify/` with
-its Judge state, the oracle), the verifier directory and known credentials, so a kept
+Before a requested keep, ALE removes every stage of the Task (setup, tests with their
+Judge state, the solution), the verifier directory and known credentials, so a kept
 solver holds only the agent's own state.
 Subscription credentials never enter the Sandbox, so retention does not add a provider
 credential cleanup step. Failure of other required sanitation still forces destruction.
@@ -132,9 +135,9 @@ have a running retained solver or shared Sandbox, a complete RunLock, and the sa
 solver-image identity as the current Task.
 
 For shared verification, ALE reconnects to the retained shared Sandbox and runs the current
-`verify/` stage there. For separate verification, ALE captures the declared artifacts from the
+`tests/` there. For separate verification, ALE captures the declared artifacts from the
 retained solver, detaches without destroying it, provisions a fresh verifier Sandbox, restores the
-artifacts, and runs the current `verify/` stage there. Before either path uploads `verify/`, ALE
+artifacts, and runs the current `tests/` there. Before either path uploads `tests/`, ALE
 removes the previously staged verifier files so deleted files cannot survive a revision.
 
 The Harness, setup, and agent phases do not run again. The new episode copies the source trajectory

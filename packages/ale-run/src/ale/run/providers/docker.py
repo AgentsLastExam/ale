@@ -410,7 +410,7 @@ class DockerProvider(Provider):
 
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
         if image.kind is not ImageKind.CONTAINER:
-            raise ProviderCapabilityError("DockerProvider requires image.kind=container")
+            raise ProviderCapabilityError("DockerProvider requires a container image")
         prepared = await resolve_container_image(image) if isinstance(image, ImageRef) else image
         resolved = await resolve_prepared_container_image(prepared)
         if problems := await self.check_image(resolved.observed_ref):
@@ -423,7 +423,7 @@ class DockerProvider(Provider):
     async def create(self, request: SandboxRequest) -> Sandbox:
         self.accepts(request)
         if request.image_kind is not ImageKind.CONTAINER:
-            raise ProviderCapabilityError("DockerProvider requires image.kind=container")
+            raise ProviderCapabilityError("DockerProvider requires a container image")
         lease: GpuLease | None = None
         selected: tuple[str, ...] = ()
         candidates: tuple[str, ...] = ()

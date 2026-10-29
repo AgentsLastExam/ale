@@ -60,9 +60,9 @@ async def test_idle_agent_is_a_real_zero(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_dynamic_setup_runs_before_oracle(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "dynamic")
-    setup = task / "setup"
+    setup = task / "environment" / "setup"
     setup.mkdir()
-    entry = setup / "run.sh"
+    entry = setup / "setup.sh"
     entry.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -71,7 +71,7 @@ async def test_dynamic_setup_runs_before_oracle(tmp_path: Path) -> None:
         "chown user:user /home/user/output/service-ready\n"
     )
     entry.chmod(0o755)
-    check = task / "verify" / "verify.py"
+    check = task / "tests" / "verify.py"
     check.write_text(
         "from ale_verify import checks, write\n"
         "v = {}\n"

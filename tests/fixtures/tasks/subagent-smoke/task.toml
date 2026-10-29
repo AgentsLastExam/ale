@@ -4,15 +4,22 @@
 # one and, from the trajectory, that ALE attributes the child's work to the child. The
 # verifier checks the file; live acceptance checks the trajectory. Nothing here needs the
 # parent to receive the child's result, which a one-shot OpenClaw run cannot deliver yet.
-spec_type: core/v1
-name: subagent-smoke
-image:
-  kind: container
-  ref: ghcr.io/agentslastexam/container-ubuntu22-base:latest
-resources: { cpus: 1, memory_mb: 2048 }
-network: { mode: block }
-artifacts: [/home/user/output]
+schema_version = "1.4"
+artifacts = ["/home/user/output"]
 
-timeouts: { agent: 900, verify: 60 }
+[task]
+name = "agentslastexam/subagent-smoke"
+keywords = ["smoke", "subagents"]
 
-metadata: { tags: [smoke, subagents] }
+[environment]
+docker_image = "ghcr.io/agentslastexam/container-ubuntu22-base:latest"
+cpus = 1
+memory_mb = 2048
+
+[agent]
+user = "user"
+timeout_sec = 900
+network_mode = "no-network"
+
+[verifier]
+timeout_sec = 60

@@ -55,8 +55,8 @@ see or control the desktop.
 
 ## Guest contract
 
-- Task manifest: `os: windows`, `image.kind: vm`.
-- Stage entries: `setup/run.ps1`, `oracle/run.ps1`, and `verify/run.ps1`.
+- Task configuration: `[environment].os = "windows"`, `[ale].sandbox = "vm"`.
+- Stage entries: `environment/setup/setup.ps1`, `solution/solve.ps1`, and `tests/test.ps1`.
 - Framework root: `C:\ProgramData\ALE`; agent home: `C:\Users\user`.
 - The base signs the agent account in automatically (Winlogon `AutoAdminLogon` and
   `DefaultUserName`), keeps UAC on, and has Python 3.12 or newer installed for all users.
@@ -65,7 +65,7 @@ see or control the desktop.
   the disk offline, with a boot service that starts guestd and Cua Driver elevated in the
   agent's session; guestd then provides exec, file transfer, health, lifecycle, and the
   shared Sandbox protocol. Agent commands use the limited desktop token unless
-  `resources.sudo` grants Administrator access.
+  `[ale].sudo` grants Administrator access.
 - Cua Driver exclusively provides screenshots and desktop input.
 
 Autonomous CLI Harnesses use native Windows Node.js and Git Bash; their CLI packages are
@@ -73,4 +73,4 @@ installed per run, and model credentials stay on the Host Gateway.
 
 Re-run `prepare.ps1` to update an existing ALE seed. After reboot, run `tools.ps1 -CheckOnly`
 to check package managers, Python, Node.js/npm and Git Bash. Task-specific software belongs
-in the Task's `image/run.ps1`.
+in the Task's `environment/build.ps1`.

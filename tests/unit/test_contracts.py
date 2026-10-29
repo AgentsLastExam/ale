@@ -4,19 +4,19 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
+from tests.support import MINIMAL_TASK_CONFIG, merged_config
 
-from ale.core.ids import TaskId, canonical_json, content_hash
+from ale.core.ids import TaskId, canonical_json, content_hash, task_component
 from ale.core.taskspec import (
     ImageKind,
     ImageSpec,
     McpSource,
     NetworkMode,
     NetworkPolicy,
-    OperatingSystem,
     SkillSource,
     StdioMcpServer,
     StreamableHttpMcpServer,
-    TaskManifestV1,
+    TaskConfig,
     TaskMcpSource,
     TaskSpec,
     ToolProvision,
@@ -31,17 +31,16 @@ pytestmark = pytest.mark.unit
 
 def make_spec(**overrides: object) -> TaskSpec:
     base: dict[str, object] = {
-        "name": TaskId("demo-hello"),
+        "name": TaskId("agentslastexam/demo-hello"),
         "image": {"kind": "container"},
         "instruction": "Write hello into /home/user/output/result.txt",
     }
     return TaskSpec(**(base | overrides))  # type: ignore[arg-type]
 
 
-def test_task_spec_is_strict_core_v1_and_path_independent() -> None:
+def test_task_spec_is_strict_and_path_independent() -> None:
     spec = make_spec()
-    assert spec.spec_type == "core/v1"
-    assert spec.name == "demo-hello"
+    assert spec.name == "agentslastexam/demo-hello"
     assert spec.network.mode is NetworkMode.BLOCK
     assert spec.image == ImageSpec(kind=ImageKind.CONTAINER)
     assert not hasattr(spec, "domain")
@@ -65,7 +64,7 @@ def test_image_spec_is_explicit_strict_and_nonblank() -> None:
         with pytest.raises(ValidationError):
             ImageSpec.model_validate(payload)
 
-    with pytest.raises(ValidationError, match=r"verify\.image\.base_ref"):
+    with pytest.raises(ValidationError, match="base ref"):
         VerifySpec(
             environment_mode="separate",
             resources=VerifierResources(cpus=1, memory_mb=512, storage_mb=None, gpus=0),
@@ -85,76 +84,138 @@ def test_task_spec_round_trips() -> None:
     assert restored == spec
 
 
-def test_manifest_requires_explicit_name_and_rejects_removed_fields() -> None:
-    TaskManifestV1(spec_type="core/v1", name="demo", image={"kind": "container"})
-    with pytest.raises(ValidationError):
-        TaskManifestV1.model_validate({"spec_type": "core/v1", "name": "demo"})
-    for removed in (
-        "domain",
-        "setup",
-        "files",
-        "kits",
-        "gpu_vram_gb",
+def config(*layers: dict[str, object]) -> TaskConfig:
+    return TaskConfig.model_validate(merged_config(MINIMAL_TASK_CONFIG, *layers))
+
+
+def test_task_ids_are_org_and_name_and_one_safe_component() -> None:
+    assert TaskId("agentslastexam/demo_hello") == "agentslastexam/demo_hello"
+    assert task_component(TaskId("agentslastexam/demo-hello")) == "agentslastexam.demo-hello"
+    for invalid in ("demo", "a/b/c", "Org/demo", "org/", "/demo", "org/demo.v1", "-org/demo"):
+        with pytest.raises(ValueError, match="org/name"):
+            TaskId(invalid)
+
+
+def test_task_config_requires_every_field_whose_default_differs_from_harbor() -> None:
+    assert config().ale.sandbox is ImageKind.CONTAINER
+    for table, key in (
+        ("", "schema_version"),
+        ("task", "name"),
+        ("environment", "cpus"),
+        ("environment", "memory_mb"),
+        ("agent", "user"),
+        ("agent", "timeout_sec"),
+        ("agent", "network_mode"),
+        ("verifier", "timeout_sec"),
     ):
-        with pytest.raises(ValidationError):
-            TaskManifestV1.model_validate(
-                {
-                    "spec_type": "core/v1",
-                    "name": "demo",
-                    "image": {"kind": "container"},
-                    removed: {},
-                }
-            )
+        payload = merged_config(MINIMAL_TASK_CONFIG, {table: {key: None}} if table else {key: None})
+        with pytest.raises(ValidationError) as raised:
+            TaskConfig.model_validate(payload)
+        assert raised.value.errors()[0]["type"] == "missing"
+        assert raised.value.errors()[0]["loc"] == ((table, key) if table else (key,))
+    with pytest.raises(ValidationError, match=r"1\.4"):
+        config({"schema_version": "1.3"})
 
 
 @pytest.mark.parametrize(
-    "payload",
+    ("layer", "key"),
     [
-        {"image": {"assets": {}}},
-        {"setup": {"assets": []}},
-        {"verify": {"assets": []}},
+        ({"steps": [{"name": "one"}]}, "steps"),
+        ({"source": "x"}, "source"),
+        ({"solution": {"env": {"A": "b"}}}, "solution"),
+        ({"environment": {"healthcheck": {"command": "true"}}}, "environment.healthcheck"),
+        ({"environment": {"network_mode": "public"}}, "environment.network_mode"),
+        ({"environment": {"workdir": "/app"}}, "environment.workdir"),
+        ({"verifier": {"env": {"A": "b"}}}, "verifier.env"),
+        ({"verifier": {"user": "root"}}, "verifier.user"),
+        (
+            {"verifier": {"environment": {"cpus": 1, "memory_mb": 512, "os": "linux"}}},
+            "verifier.environment.os",
+        ),
+        ({"artifacts": [{"source": "/home/user/output"}]}, "table-form artifacts"),
     ],
 )
-def test_manifest_rejects_authored_asset_fields(payload: dict[str, object]) -> None:
-    with pytest.raises(ValidationError):
-        TaskManifestV1.model_validate(
+def test_harbor_keys_ale_does_not_implement_say_so(layer: dict[str, object], key: str) -> None:
+    with pytest.raises(ValidationError, match=f"{key} (is|are) not supported by ALE"):
+        config(layer)
+
+
+def test_task_config_rejects_unknown_keys() -> None:
+    for layer in ({"domain": "demo"}, {"ale": {"variants": {}}}, {"task": {"org": "x"}}):
+        with pytest.raises(ValidationError, match="Extra inputs"):
+            config(layer)
+
+
+@pytest.mark.parametrize(
+    ("layer", "message"),
+    [
+        ({"environment": {"os": "windows"}}, "requires \\[ale\\].sandbox 'vm'"),
+        (
+            {"environment": {"docker_image": "x"}, "ale": {"sandbox": "vm"}},
+            "docker_image requires",
+        ),
+        ({"ale": {"vm_image": "disk.qcow2"}}, "vm_image requires sandbox 'vm'"),
+        ({"ale": {"sandbox": "vm", "vm_base": "base.qcow2"}}, "vm_base requires os 'windows'"),
+        (
             {
-                "spec_type": "core/v1",
-                "name": "demo",
-                "image": {"kind": "container"},
-                **payload,
-            }
-        )
+                "environment": {"os": "windows"},
+                "ale": {"sandbox": "vm", "vm_base": "b.qcow2", "vm_image": "i.qcow2"},
+            },
+            "mutually exclusive",
+        ),
+        ({"agent": {"network_mode": "allowlist"}}, "non-empty allowed_hosts"),
+        ({"agent": {"allowed_hosts": ["example.org"]}}, "requires network_mode 'allowlist'"),
+        (
+            {
+                "verifier": {
+                    "environment_mode": "shared",
+                    "environment": {"cpus": 1, "memory_mb": 512},
+                }
+            },
+            "shared",
+        ),
+        ({"ale": {"verifier": {"sandbox": "vm", "vm_image": "v.qcow2"}}}, "separate"),
+        (
+            {
+                "environment": {"os": "windows"},
+                "ale": {"sandbox": "vm", "vm_image": "w.qcow2"},
+                "verifier": {"environment": {"docker_image": "x", "cpus": 1, "memory_mb": 512}},
+            },
+            "Windows verifier runs in a VM",
+        ),
+        ({"environment": {"cpus": 1.5}}, "valid integer"),
+        ({"ale": {"sudo": "yes"}}, "valid boolean"),
+    ],
+)
+def test_task_config_cross_field_rules(layer: dict[str, object], message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        config(layer)
 
 
-def test_manifest_field_set_is_exact() -> None:
-    assert set(TaskManifestV1.model_fields) == {
-        "spec_type",
-        "name",
-        "os",
-        "image",
-        "resources",
-        "network",
-        "timeouts",
-        "artifacts",
-        "tools",
-        "verify",
-        "metadata",
-        "extras",
-    }
+def test_verification_mode_follows_harbor() -> None:
+    assert config().verifier.mode is VerificationMode.SHARED
+    separate = {"verifier": {"environment_mode": "separate"}}
+    assert config(separate).verifier.mode is VerificationMode.SEPARATE
+    declared = {"verifier": {"environment": {"cpus": 2, "memory_mb": 1024}}}
+    assert config(declared).verifier.mode is VerificationMode.SEPARATE
+
+
+def test_network_modes_map_onto_the_runtime_policy() -> None:
+    assert config().agent.network == NetworkPolicy(mode=NetworkMode.BLOCK)
+    allowlist = config({"agent": {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]}})
+    assert allowlist.agent.network == NetworkPolicy(
+        mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",)
+    )
+    assert config({"agent": {"network_mode": "public"}}).agent.network.mode is NetworkMode.OPEN
 
 
 def test_windows_artifacts_use_windows_absolute_path_rules() -> None:
-    manifest = TaskManifestV1(
-        spec_type="core/v1",
-        name="windows-demo",
-        os=OperatingSystem.WINDOWS,
-        image={"kind": "vm"},
-        artifacts=(r"C:\Users\user\output",),
+    windows = {"environment": {"os": "windows"}, "ale": {"sandbox": "vm", "vm_image": "w.qcow2"}}
+    assert config(windows, {"artifacts": [r"C:\Users\user\output"]}).artifacts == (
+        r"C:\Users\user\output",
     )
-    assert manifest.artifacts == (r"C:\Users\user\output",)
     with pytest.raises(ValidationError, match="absolute"):
-        TaskManifestV1.model_validate(manifest.model_dump() | {"artifacts": ("output",)})
+        config(windows, {"artifacts": ["output"]})
 
 
 def test_network_and_agent_resource_contracts_remain_strict() -> None:
@@ -245,9 +306,4 @@ def test_shared_and_separate_verification_contracts_are_strict() -> None:
 )
 def test_artifacts_are_absolute_unique_and_safe(artifacts: tuple[str, ...]) -> None:
     with pytest.raises(ValidationError):
-        TaskManifestV1(
-            spec_type="core/v1",
-            name="demo",
-            image={"kind": "container"},
-            artifacts=artifacts,
-        )
+        config({"artifacts": list(artifacts)})

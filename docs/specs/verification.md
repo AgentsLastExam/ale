@@ -180,6 +180,6 @@ for dynamically loaded code and imports the static scan cannot discover.
 
 The framework stages `ale_verify` and its pinned pure-Python JSON Schema dependency in
 the verifier's Python environment. Both are included in runtime provenance. The selected
-interpreter is supplied as `ALE_VERIFY_PYTHON`; see [Task authoring](task-authoring.md#verify).
+interpreter is supplied as `ALE_VERIFY_PYTHON`; see [Task authoring](task-authoring.md#tests).
 Built-in checks return ordinary dictionaries with `score`, `diagnostic`, `raw_value` and
 `evidence`. Authors may use them, ordinary Python, or their existing scoring functions.

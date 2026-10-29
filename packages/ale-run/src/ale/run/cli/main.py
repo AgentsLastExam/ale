@@ -292,9 +292,9 @@ def new_task(
 ) -> None:
     """Scaffold a task that passes `ale lint` immediately.
 
-    The scaffold solves itself: its oracle writes what its verifier expects, so a new
-    task starts from a green `ale validate` and the author changes one thing at a time
-    from a known-good state.
+    The folder name is the Task's name, in the `agentslastexam` organization. The scaffold
+    solves itself: its solution writes what its tests expect, so a new task starts from a
+    green `ale validate` and the author changes one thing at a time from a known-good state.
     """
     try:
         created = scaffold_task(path, force=force)

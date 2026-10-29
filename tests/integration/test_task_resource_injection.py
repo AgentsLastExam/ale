@@ -26,7 +26,7 @@ from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import provider_registry
+from tests.support import MINIMAL_TASK_CONFIG, merged_config, provider_registry, task_toml
 
 from .conftest import IMAGE
 
@@ -168,30 +168,29 @@ def _write_task(root: Path) -> Path:
     root.mkdir()
     task = root / "tasks" / "resource_injection"
     for directory in (
-        task / "image",
+        task / "environment" / "setup",
         task / "tools" / "mcp",
         task / "tools" / "skills" / "resource-proof",
-        task / "setup",
-        task / "verify",
-        task / "oracle",
+        task / "tests",
+        task / "solution",
     ):
         directory.mkdir(parents=True, exist_ok=True)
-    (task / "task.yaml").write_text(
-        textwrap.dedent("""
-        spec_type: core/v1
-        name: resource-injection
-        image: {{ kind: container }}
-        resources: {{ cpus: 1, memory_mb: 512 }}
-        network: {{ mode: block }}
-        timeouts: {{ agent: 60, verify: 60 }}
-        tools:
-          skills: [{{ path: tools/skills/resource-proof }}]
-          mcp_servers: [{{ path: tools/mcp/task-proof.toml }}]
-        artifacts: [/home/user/output]
-        """)
-        .strip()
-        .replace("{{", "{")
-        .replace("}}", "}")
+    (task / "task.toml").write_text(
+        task_toml(
+            merged_config(
+                MINIMAL_TASK_CONFIG,
+                {
+                    "artifacts": ["/home/user/output"],
+                    "task": {"name": "agentslastexam/resource-injection"},
+                    "agent": {"timeout_sec": 60},
+                    "verifier": {"timeout_sec": 60},
+                    "ale": {
+                        "skills": ["tools/skills/resource-proof"],
+                        "mcp_servers": ["tools/mcp/task-proof.toml"],
+                    },
+                },
+            )
+        )
     )
     (task / "instruction.md").write_text("Use the injected Skill and MCP to complete the proof.")
     (task / "tools" / "skills" / "resource-proof" / "SKILL.md").write_text(
@@ -251,17 +250,17 @@ def _write_task(root: Path) -> Path:
                   flush=True)
         """).strip()
     )
-    (task / "image" / "Dockerfile").write_text(
+    (task / "environment" / "Dockerfile").write_text(
         f"FROM {IMAGE}\n"
         "RUN mkdir -p /home/user/input /home/user/output "
         "&& chown -R user:user /home/user/input /home/user/output "
         "\n"
     )
-    (task / "setup" / "run.sh").write_text(
+    (task / "environment" / "setup" / "setup.sh").write_text(
         "#!/bin/bash\nset -e\nmkdir -p /home/user/input /home/user/output\n"
         "printf 'A1B2C3D4' > /home/user/input/nonce.txt\n"
     )
-    (task / "verify" / "run.sh").write_text(
+    (task / "tests" / "test.sh").write_text(
         textwrap.dedent("""
         #!/bin/bash
         set -e
@@ -281,11 +280,11 @@ def _write_task(root: Path) -> Path:
         PY
         """).strip()
     )
-    (task / "oracle" / "run.sh").write_text("#!/bin/bash\nexit 0\n")
+    (task / "solution" / "solve.sh").write_text("#!/bin/bash\nexit 0\n")
     entries = (
-        task / "setup" / "run.sh",
-        task / "verify" / "run.sh",
-        task / "oracle" / "run.sh",
+        task / "environment" / "setup" / "setup.sh",
+        task / "tests" / "test.sh",
+        task / "solution" / "solve.sh",
     )
     for entry in entries:
         entry.chmod(0o755)

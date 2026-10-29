@@ -18,6 +18,7 @@ import pytest
 
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
+from tests.support import edit_task_config
 
 from .trajectory import LIVE, run_task
 
@@ -77,9 +78,8 @@ write({{"reward": sum(scores.values()) / 2, **scores}})
 def _task(root: Path, instruction: str, verify: str) -> Path:
     scaffold_task(root)
     (root / "instruction.md").write_text(instruction)
-    manifest = root / "task.yaml"
-    manifest.write_text(manifest.read_text().replace("agent: 300", "agent: 900"))
-    (root / "verify/verify.py").write_text(verify)
+    edit_task_config(root, {"agent": {"timeout_sec": 900}})
+    (root / "tests/verify.py").write_text(verify)
     return root
 
 

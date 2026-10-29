@@ -1,8 +1,8 @@
 # Task-local software and repository publication
 
 Status: agreed design, not implemented. Current behavior is in the
-[asset contract](../docs/specs/task-assets.md). Authoring and package-format guidance belongs to
-[Task authoring](../docs/specs/task-authoring.md#software-assets).
+[asset contract](../docs/specs/task-assets.md), which also holds the authoring and
+package-format guidance ([offline software](../docs/specs/task-assets.md#offline-software)).
 
 ## Local authoring
 
@@ -13,16 +13,16 @@ remain external inputs. Software assets are installation materials, not the soft
 installation path inside the VM.
 
 ```text
-tasks/a/image/assets/softwares/editor_1/Editor.msix
-tasks/b/image/assets/softwares/editor_1/Editor.msix
+tasks/a/environment/assets/softwares/editor_1/Editor.msix
+tasks/b/environment/assets/softwares/editor_1/Editor.msix
 ```
 
-The planned `image.softwares` list contains software directory IDs, such as `[editor_1]`.
+The planned `[ale].softwares` list contains software directory IDs, such as `[editor_1]`.
 It declares offline materials, not every package installed by the recipe. IDs are single path
 components; there is no nested software/version layout or automatic platform/version selection.
 Every declaration must have complete local materials before building; publication rejects
 undeclared software directories. New packages can be authored and tested before they exist on HF.
-The current strict Task YAML schema does not yet accept this field.
+The current strict `task.toml` schema does not yet accept this field.
 
 ## Publish and restore
 
@@ -30,8 +30,8 @@ Use the existing private dataset `agents-last-exam/<source-repository-name>`:
 
 ```text
 softwares/editor_1/Editor.msix      # one shared package directory
-tasks/a/image/assets/...           # A's other assets
-tasks/b/image/assets/...           # B's other assets
+tasks/a/environment/assets/...     # A's other assets
+tasks/b/environment/assets/...     # B's other assets
 ```
 
 - Publication maps each Task's software directory to the dataset root's `softwares/<id>/`.
@@ -42,7 +42,7 @@ tasks/b/image/assets/...           # B's other assets
   covers both ordinary assets and referenced software. Parallel publication must check conflicts
   against the destination revision. Removing one Task's dependency never deletes shared software.
 - Asset pull/restore fetches only declared software, reuses verified cached content for that
-  revision and restores real files at `image/assets/softwares/<id>/`. Missing or incomplete
+  revision and restores real files at `environment/assets/softwares/<id>/`. Missing or incomplete
   published materials are errors; there is no fallback to supplier websites or interactive login.
   Checkpoint, restore and export must preserve this mapping and Task self-containment.
   All Tasks on one Host share the download cache. Starting with an empty cache, pulling two Tasks

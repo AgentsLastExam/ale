@@ -6,111 +6,102 @@ environment, data visibility, and stage interfaces. Design and acceptance standa
 the [Task quality standard](task-quality-standard.md); scoring and Judge APIs belong to
 [Verification](verification.md).
 
+The format is Harbor's (`task.toml` schema 1.4, `environment/`, `tests/`, `solution/`): a
+field ALE implements as Harbor does keeps Harbor's name and place, and what ALE adds or means
+differently lives in an `[ale]` table or a file Harbor does not read, so no Harbor name carries
+another meaning. ALE runs Tasks in its own runtime; a Task need not run unmodified on Harbor.
+
 ## Task folder
 
 ```text
-tasks/my_task/
-├── task.yaml                    # Task configuration
-├── instruction.md              # instruction shown to the evaluated agent
-├── image/
-│   ├── Dockerfile              # Linux; run.ps1 on Windows
-│   ├── install.sh              # optional image-build helper (install.ps1 on Windows)
-│   └── assets/                 # optional separately managed image data
-├── setup/                       # optional per-episode initialization
-│   ├── run.sh                   # Linux; run.ps1 on Windows
-│   └── assets/
-├── verify/
-│   ├── run.sh                   # Linux; run.ps1 on Windows
+my-task/
+├── task.toml                  # Task configuration
+├── instruction.md             # instruction shown to the evaluated agent
+├── environment/               # the machine the agent starts on
+│   ├── Dockerfile             # container or Linux VM image; context environment/ without setup/
+│   ├── build.ps1              # Windows image, on the same context
+│   └── setup/                 # optional per-episode initialization
+│       └── setup.sh           # setup.ps1 on Windows
+├── tests/                     # verification
+│   ├── test.sh                # test.ps1 on Windows
 │   ├── verify.py
-│   ├── Dockerfile              # optional separate-verifier image
-│   └── assets/
-├── oracle/
-│   ├── run.sh                   # Linux; run.ps1 on Windows
-│   └── assets/
-└── tools/                       # optional Task-requested agent resources
+│   └── Dockerfile             # optional separate-verifier image (context tests/)
+├── solution/                  # known-good solution for validation
+│   └── solve.sh               # solve.ps1 on Windows
+└── tools/                     # optional Task-requested agent resources
     ├── skills/<name>/SKILL.md
     └── mcp/<server>.toml
 ```
 
-Required files are `task.yaml`, `instruction.md`, and the verify/oracle entry for the
-declared OS: `run.sh` for Linux or `run.ps1` for Windows. Linux builds `image/Dockerfile`
-or uses `image.ref`. Windows builds `image/run.ps1` on `image.base_ref`, or directly uses
-`image.ref` without an image script. `ref` and `base_ref` are mutually exclusive.
+Required files are `task.toml`, `instruction.md`, and the tests and solution entries for the
+Task OS: `tests/test.sh` and `solution/solve.sh` on Linux, `test.ps1` and `solve.ps1` on
+Windows. `[ale].sandbox` and the OS decide what `environment/` builds. A container Task builds
+`environment/Dockerfile` or uses `[environment].docker_image`. A Linux VM Task builds
+`environment/Dockerfile` or uses `[ale].vm_image`. A Windows Task builds `environment/build.ps1`
+on `[ale].vm_base`, or uses `[ale].vm_image` alone. Every image build has `environment/` as its
+context, `setup/` excluded. A Linux image named directly wins over a build definition.
 
-Task source, scripts, manifests, and ordinary small fixtures are tracked by Git. `assets/` is for
-data managed separately from source because of its size or lifecycle. Assets live under the stage
-that consumes them:
+## task.toml
 
-- `image/assets/` is available while building the initial environment and becomes agent-visible
-  only when image code places it there;
-- `setup/assets/` is available only to setup;
-- `verify/assets/` is available only to verification;
-- `oracle/assets/` is available only to the oracle.
+`task.toml` is strict. A Harbor field whose default differs from ALE's is required, so its
+value never depends on which runtime reads it. An unknown key fails, and a Harbor key ALE does
+not implement fails with a message saying so. The annotated shape below describes every key;
+omit optional ones the Task does not use.
 
-These four directories are ignored by Git and managed by the platform. Task code references their
-contents through normal stage-relative paths such as `assets/reference.json`.
-PowerShell stages use the same convention, for example
-`python.exe .\helper.py .\assets\seed.json`. `ALE_STAGE_DIR` remains available when a
-subprocess requires an absolute stage path.
+```toml
+schema_version = "1.4"                      # required; exactly "1.4"
+artifacts = ["/home/user/output", "/home/user/games/*.sgf"]  # optional outcome paths
 
-## task.yaml
+[task]                                      # required
+name = "agentslastexam/my-task"             # required org/name, unique in its collection
+description = "Summarize the corpus."       # optional; descriptive
+version = "1.0"                             # optional; descriptive
+authors = [{ name = "Ada", email = "ada@example.org" }]  # optional; descriptive
+keywords = ["document-analysis"]            # optional; descriptive
 
-`task.yaml` is strict: unknown fields fail. The annotated shape below describes every field and
-its nesting; omit optional sections that the Task does not use.
+[metadata]                                  # optional free-form values; no runtime behavior
+network_justification = "the Task reads one publisher's live catalog"
 
-```yaml
-spec_type: core/v1                 # required; current Task schema
-name: my-task                      # required stable ID, unique in its Task collection
-os: linux                           # optional: linux | windows; default: linux
+[environment]                               # required: the solver's machine
+os = "linux"                                # optional: linux | windows; default linux
+# docker_image = "registry.example/image:tag"  # a container image used directly
+cpus = 1                                    # required; integer >= 1
+memory_mb = 4096                            # required; integer >= 128
+storage_mb = 8192                           # optional writable storage; integer >= 256
+gpus = 0                                    # optional GPU count, not indices; default 0
 
-image:                              # required initial sandbox image
-  kind: container                   # required: container | vm
-  # ref: registry.example/image:tag # use an existing image directly
-  user: user                        # optional agent account; must exist in the image
+[agent]                                     # required: the evaluated agent and the oracle
+user = "user"                               # required account; must exist in the image
+timeout_sec = 900                           # required positive seconds
+network_mode = "allowlist"                  # required: no-network | allowlist | public
+allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
 
-resources:                          # optional solver allocation; defaults shown
-  cpus: 1                           # integer >= 1
-  memory_mb: 4096                   # integer >= 128
-  storage_mb: null                  # null or integer >= 256; writable storage request
-  gpus: 0                           # integer >= 0; GPU count, not physical indices
-  sudo: false                       # true gives the agent account working sudo (admin on Windows)
+[verifier]                                  # required
+timeout_sec = 300                           # required positive seconds
+environment_mode = "separate"               # optional: shared | separate
 
-network:                            # optional evaluated-agent/oracle network policy
-  mode: block                       # block | allowlist | open; default: block
-  allowed_hosts: []                 # required and non-empty only for allowlist
+[verifier.environment]                      # optional: a separate verifier's own sandbox
+# docker_image = "registry.example/verifier:tag"  # a container image used directly
+cpus = 1                                    # required in this table
+memory_mb = 4096                            # required in this table
+storage_mb = 8192                           # optional
+gpus = 0                                    # optional; default 0
 
-timeouts:                           # optional positive seconds; defaults shown
-  agent: 900
-  verify: 300
+[ale]                                       # optional
+sandbox = "container"                       # container | vm; default container
+# vm_image = "/path/to/disk.qcow2"            # a VM image used directly
+# vm_base = "/path/to/windows-base.qcow2"     # the base environment/build.ps1 builds on
+sudo = false                                # working sudo (Administrator on Windows) for user
+skills = ["tools/skills/reviewer"]          # Task Skill directories
+mcp_servers = ["tools/mcp/search.toml"]     # Task MCP descriptors
 
-artifacts:                          # optional outcome paths captured from the sandbox
-  - /home/user/output               # absolute file or directory path
-  - /home/user/games/*.sgf          # glob patterns are allowed
-
-tools:                              # optional; use only when the Task explicitly requires them
-  skills:
-    - path: tools/skills/reviewer   # Task-relative Skill directory
-  mcp_servers:
-    - path: tools/mcp/search.toml   # Task-relative MCP descriptor
-
-verify:                             # optional; shared verification is the default
-  environment_mode: separate        # shared | separate
-  image:                            # optional separate-verifier image
-    kind: container                 # container | vm
-    ref: registry.example/verifier:tag # omit ref when verify/Dockerfile exists
-  resources:                        # required for separate verification
-    cpus: 1
-    memory_mb: 4096
-    storage_mb: null
-    gpus: 0
-
-metadata:                           # optional descriptive values; no runtime behavior
-  tags: [document-analysis]
-  # network_justification: explain why open network is necessary
-
-extras:                             # optional namespaced extensions; no standard behavior
-  example.org: {difficulty: hard}
+# [ale.verifier]                            # optional: a separate verifier in a VM
+# sandbox = "vm"
+# vm_image = "/path/to/verifier.qcow2"      # used directly; without it, tests/Dockerfile
 ```
+
+A Windows Task sets `os = "windows"` and `[ale].sandbox = "vm"`. `vm_image` and `vm_base` are
+mutually exclusive; `vm_base` requires Windows and `environment/build.ps1`.
 
 When the instruction requires deliverable files, every instructed destination must equal or be
 contained by a declared `artifacts` path, or matched by a declared glob. Commands and examples in `instruction.md` must write to
@@ -132,26 +123,32 @@ answers; tasks that grade original links or live state should use shared verific
 
 ### Verification topology
 
-For shared verification, omit `verify` or set only `environment_mode: shared`. Separate
-verification runs in an independent sandbox, requires explicit resources, and may reuse the
-solver image, use `verify/Dockerfile`, or use `verify.image.ref`. The Verification APIs and
-records are defined only in [Verification](verification.md).
+Verification is shared unless `environment_mode = "separate"` or `[verifier.environment]`
+says otherwise, as in Harbor. Separate verification runs in an independent sandbox with the
+`[verifier.environment]` resources, or the solver's without sudo when that table is absent.
+Its image is the first of `[verifier.environment].docker_image` or `[ale.verifier].vm_image`,
+`tests/Dockerfile` (a VM when `[ale.verifier].sandbox = "vm"`), and the solver image.
+`[ale.verifier]` and `tests/Dockerfile` require separate verification. A Windows verifier
+reuses the solver image or names a `vm_image`. The Verification APIs and records are defined
+only in [Verification](verification.md).
 
 ### Resources and network
 
-`image.kind` selects container or VM behavior; Tasks never name a Provider. `network` applies to
-the evaluated agent and oracle; its enforcement is specified in [Security](security.md).
-The quality standard owns resource feasibility and network-policy selection. An open-network
-justification uses `metadata.network_justification`.
+`[ale].sandbox` selects container or VM behavior; Tasks never name a Provider.
+`[agent].network_mode` applies to the evaluated agent and the oracle: `no-network` reaches only
+the Gateway, `allowlist` also the declared hosts, `public` everything. Setup and verification
+network is framework-controlled; its enforcement is specified in [Security](security.md).
+The quality standard owns resource feasibility and network-policy selection. A public-network
+justification uses `[metadata].network_justification`.
 
-`resources` is the whole Sandbox's allocation. The image's own processes, such as the GUI base
-images' desktop, share it with the agent and every program the agent starts, so the default
-memory leaves an agent CLI room above the desktop. A Task that needs more declares it.
+`[environment]` resources are the whole Sandbox's allocation. The image's own processes, such
+as the GUI base images' desktop, share it with the agent and every program the agent starts,
+so a GUI Task leaves an agent CLI room above the desktop.
 
-## image/
+## environment/
 
-The image is the reproducible initial computer state supplied to the agent. Start from the ALE GUI
-base matching the Task OS and `image.kind`, then add every stable dependency, service, file,
+The image is the reproducible initial computer state supplied to the agent. Start from the ALE
+GUI base matching the Task OS and sandbox, then add every stable dependency, service, file,
 permission, and piece of initial state required by the Task. The Linux bases are:
 
 - container: `ghcr.io/agentslastexam/container-ubuntu22-base` (Ubuntu 22.04);
@@ -161,87 +158,62 @@ Name an exact version, such as `:0.1.1`, never `latest`; `ale new-task` writes t
 engine's current version. A Task keeps building from the version it names until its
 author moves it ([Sandbox image](sandbox-image.md#versions)).
 
-The submitted initial environment must be reproducible from `image/`; an exploratory sandbox
-snapshot is not Task source. Large build inputs belong in `image/assets/` and are copied by the
-image build. Image-local scripts may implement non-trivial installation and configuration.
-Build-only large inputs can use read-only BuildKit mounts; runtime data belongs in the image.
+The submitted initial environment must be reproducible from `environment/`; an exploratory
+sandbox snapshot is not Task source. A container image builds `environment/Dockerfile` with
+`environment/` as context, `setup/` excluded. Build-local scripts may implement non-trivial
+installation and configuration. Build-only large inputs can use read-only BuildKit mounts;
+runtime data belongs in the image.
 
 ```dockerfile
 FROM ghcr.io/agentslastexam/container-ubuntu22-base:0.1.1
 
 COPY --chmod=0755 install.sh /tmp/install.sh
 RUN /tmp/install.sh && rm /tmp/install.sh
-COPY --chmod=0644 assets/corpus.json /home/user/input/corpus.json
+COPY --chmod=0644 corpus.json /home/user/input/corpus.json
 ```
 
-For a Linux VM Task, use the VM base as the final stage. ALE converts that OCI image into the bootable VM;
-Task code does not implement boot or disk assembly.
+A Linux VM Task builds `environment/Dockerfile` the same way, with the VM base as the final
+stage. ALE converts that OCI image into the bootable VM; Task code does
+not implement boot or disk assembly.
 
-Windows image builds declare a base and provide `image/run.ps1`:
+A Windows Task declares a base and provides `environment/build.ps1`:
 
-```yaml
-os: windows
-image:
-  kind: vm
-  base_ref: /path/to/windows-base.qcow2
+```toml
+[environment]
+os = "windows"
+
+[ale]
+sandbox = "vm"
+vm_base = "/path/to/windows-base.qcow2"
 ```
 
 The base includes WinGet and Chocolatey. Put installation and configuration in
-`image/run.ps1`; Dockerfiles are unsupported on Windows. For example:
+`build.ps1`; Dockerfiles are unsupported on Windows. For example:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 choco install -y 7zip --no-progress
 if ($LASTEXITCODE -ne 0) { throw "7zip installation failed: $LASTEXITCODE" }
-Copy-Item .\assets\input.txt "$env:ALE_HOME\input.txt"
+Copy-Item .\input.txt "$env:ALE_HOME\input.txt"
 ```
 
-`ale prepare TASK` copies `image/` into a temporary Windows VM, runs `run.ps1` with that
-directory as cwd and `ALE_HOME` set to the agent home, installs ALE's current guestd and
-Cua Driver, then saves the configured qcow2.
-Scripts may use WinGet, Chocolatey, or
-local unattended installers; pin package versions where supported and check native command
-exit codes. Scripts must finish within one hour; nonzero exits fail the build. Suppress
+`ale prepare TASK` copies `environment/`, less `setup/`, into a temporary Windows VM, runs
+`build.ps1` with that directory as cwd and `ALE_HOME` set to the agent home, installs ALE's
+current guestd and Cua Driver, then saves the configured qcow2. Scripts may use WinGet,
+Chocolatey, or local unattended installers; pin package versions where supported and check
+native command exit codes. Scripts must finish within one hour; nonzero exits fail the build. Suppress
 installer reboots; builds requiring a mid-script restart are unsupported. ALE owns shutdown.
 Build-only materials are removed before saving; copy required files to their final locations.
-Only `image/` is staged.
-The whole build is cached by base, builder, and all image inputs including assets.
-To use a prepared image directly, declare `image.ref` and omit `image/run.ps1` and
-`image.base_ref`. `base_ref` is supported only for Windows solver builds and requires
-the script. Windows separate verification reuses the solver image or supplies
-`verify.image.ref`.
+Only that context is staged, and the whole build is cached by base, builder, and every file
+in it. A prepared image used directly is named by `[ale].vm_image` without `build.ps1`.
 
-### Software assets
+## environment/setup/
 
-On either OS, install software directly in the image recipe when a clean base can acquire the
-pinned version and deploy it unattended from declared inputs. Machine authentication is allowed;
-interactive login, verification codes, browser sessions and manual installer steps are not a
-repeatable build input. Version pins alone do not guarantee that an upstream keeps old files.
-
-Otherwise, acquire and, if needed, install or compile the software once in a preparation
-environment. Keep the reusable offline materials as real files under
-`image/assets/softwares/<software_id>/`, for example `image/assets/softwares/editor_1/`.
-Use one directory per software/version, with underscores rather than nested version directories.
-Reuse a compatible existing package before preparing another. Slow acquisition or compilation
-can also justify an offline asset. Installed VM state alone is not a rebuildable asset.
-
-Keep deployment scripts and Task-specific configuration in `image/`. Linux uses the Dockerfile;
-Windows uses `run.ps1`. Scripts consume Task-local materials, choose their own extraction or
-installation method, and declare external dependencies. Linux has no required package format.
-For Windows software requiring repackaging, prefer the
-[MSIX workflow](../guides/windows-task-images.md). No Task depends on another Task's files.
-
-Record the source, version, integrity hash, compatible base, and deployment requirements. Keep
-credentials out of assets. Validate from a clean base as the actual agent user, including required
-writes, child tools and save/reopen, without repeating the interactive acquisition process.
-The [asset contract](task-assets.md) owns synchronization and its current implementation limits.
-
-## setup/
-
-`setup/` is optional framework-controlled initialization executed after the sandbox starts. Use it only for
-state that must vary by episode: reset mutable data, generate per-episode values, create writable
-copies, or start services that depend on dynamic state. Stable installation and configuration
-belong in `image/`.
+`environment/setup/` is optional framework-controlled initialization executed after the
+sandbox starts. It is never part of an image build. Use it only for state that must vary by
+episode: reset mutable data, generate per-episode values, create writable copies, or start
+services that depend on dynamic state. Stable installation and configuration belong in the
+image.
 
 Setup and verification use the framework's privileged identity; solver and oracle use
 the agent identity. See [Permissions](sandbox-image.md#permissions). Image/setup code must
@@ -257,19 +229,23 @@ workspace prefix.
 ## tools/
 
 Skills and MCP are optional. Add them only when the Task concept or expert feedback explicitly
-requires a specific Skill or MCP server. Put Task-owned resources below `tools/` and declare them
-in `task.yaml`; never depend on ambient Host configuration.
+requires a specific Skill or MCP server. Put Task-owned resources below `tools/skills/` and
+`tools/mcp/` and declare them in `[ale].skills` and `[ale].mcp_servers`; never depend on
+ambient Host configuration. ALE uploads them from the Task folder, while Harbor's
+`skills_dir` and `mcp_servers` describe resources already in the image.
 
-## verify/
+## tests/
 
-`verify/run.sh` (or Windows `verify/run.ps1`) evaluates the final outcome and writes its `reward` to `/logs/verifier/reward.json` (Windows `C:\logs\verifier\reward.json`). Verifier implementation
-conventionally lives in `verify/verify.py`; private references belong in `verify/assets/`.
-ALE runs the stage with `verify/` as cwd. Stage code and assets use ordinary relative paths;
-solver outputs use literal absolute paths. The verification image must expose system Python 3.12
-or newer. Before each verify entrypoint starts, ALE selects an existing compatible Python,
+`tests/test.sh` (or Windows `tests/test.ps1`) evaluates the final outcome and writes its
+`reward` to `/logs/verifier/reward.json` (Windows `C:\logs\verifier\reward.json`). Verifier
+implementation conventionally lives in `tests/verify.py`. ALE uploads the whole directory to
+its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
+directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal
+absolute paths. The verification image must expose system Python 3.12
+or newer. Before each tests entrypoint starts, ALE selects an existing compatible Python,
 stages `ale_verify` and its schema validator into that interpreter's site-packages, checks
 the import, then sets `ALE_VERIFY_PYTHON` in the entrypoint's process environment.
-It is available to verify and its child processes, including during `validate` and
+It is available to the tests and their child processes, including during `validate` and
 `reverify`; it is not initialized by the image build, setup stage, or SDK import.
 ALE does not install Python or replace the solver's default interpreter.
 
@@ -290,11 +266,11 @@ exit $LASTEXITCODE
 
 APIs, scoring, and record behavior are defined in [Verification](verification.md).
 
-## oracle/
+## solution/
 
-`oracle/run.sh` (or Windows `oracle/run.ps1`) supplies a successful final state for validation.
-It may execute a solution normally or use protected reference data from `oracle/assets/` to
-write or upload that state directly. Oracle assets are absent during evaluated-agent execution.
+`solution/solve.sh` (or Windows `solution/solve.ps1`) supplies a successful final state for
+validation. It may execute a solution normally or write that state directly from reference
+data it carries. The solution is absent during evaluated-agent execution.
 
 Validation's untouched and oracle reward requirements are defined in
 [the episode protocol](episode-protocol.md#validation).

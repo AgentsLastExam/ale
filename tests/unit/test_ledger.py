@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 
 def spec(**overrides: object) -> TaskSpec:
     base: dict[str, object] = {
-        "name": "demo-hello",
+        "name": "agentslastexam/demo-hello",
         "instruction": "write hello",
         "image": {"kind": "container"},
     }

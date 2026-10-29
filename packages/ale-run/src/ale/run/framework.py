@@ -116,7 +116,7 @@ sudo_requested="$2"
 identity="$3"
 if ! id -u "$user" >/dev/null 2>&1; then
     echo "ALE: the agent account '$user' does not exist in this image; create it in the" \
-        "image or name an existing account with image.user in task.yaml" >&2
+        "image or name an existing account with [agent].user in task.toml" >&2
     exit 1
 fi
 chown -R 0:0 /opt/ale

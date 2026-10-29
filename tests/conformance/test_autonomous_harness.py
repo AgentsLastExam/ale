@@ -97,7 +97,10 @@ async def test_unsupported_os_fails_before_sandbox_creation() -> None:
     protocol._provision = AsyncMock()
     task = Mock(spec=Task)
     task.spec = TaskSpec(
-        name="windows", os="windows", image={"kind": "vm", "ref": "base.qcow2"}, instruction="work"
+        name="agentslastexam/windows",
+        os="windows",
+        image={"kind": "vm", "ref": "base.qcow2"},
+        instruction="work",
     )
     ctx = Mock(spec=EpisodeContext)
     with pytest.raises(AgentUnsupportedError, match="minimal does not support windows"):

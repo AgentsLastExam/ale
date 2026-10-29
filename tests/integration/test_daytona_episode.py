@@ -24,7 +24,7 @@ from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.daytona import DaytonaProvider
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import provider_registry
+from tests.support import edit_task_config, provider_registry
 
 pytestmark = [
     pytest.mark.integration,
@@ -60,8 +60,7 @@ async def run_one(task_root: Path, run_dir: Path):  # type: ignore[no-untyped-de
 
 def whole_gib(task_root: Path) -> None:
     """Daytona allocates whole GiB, and refuses a Task that asks for anything else."""
-    manifest = task_root / "task.yaml"
-    manifest.write_text(manifest.read_text().replace("memory_mb: 512", "memory_mb: 1024"))
+    edit_task_config(task_root, {"environment": {"memory_mb": 1024}})
 
 
 def collected(result, name: str) -> str:  # type: ignore[no-untyped-def]
@@ -90,14 +89,14 @@ async def test_the_network_is_open_for_setup_and_closed_for_the_agent(
 ) -> None:
     task_root = write_repo(tmp_path / "repo")
     whole_gib(task_root)
-    (task_root / "setup").mkdir()
-    (task_root / "setup" / "run.sh").write_text(
+    (task_root / "environment" / "setup").mkdir()
+    (task_root / "environment" / "setup" / "setup.sh").write_text(
         "#!/usr/bin/env bash\nset -uo pipefail\nmkdir -p /home/user/output\n"
         f"if {REACH}; then echo reachable > /home/user/output/setup_net\n"
         "else echo blocked > /home/user/output/setup_net; fi\n"
         "chown -R user:user /home/user/output\n"
     )
-    (task_root / "oracle" / "run.sh").write_text(
+    (task_root / "solution" / "solve.sh").write_text(
         textwrap.dedent(f"""\
         #!/usr/bin/env bash
         set -uo pipefail
@@ -120,10 +119,10 @@ async def test_an_allowlisted_task_reaches_its_host_directly_and_nothing_else(
 ) -> None:
     task_root = write_repo(
         tmp_path / "repo",
-        manifest_suffix="network: {mode: allowlist, allowed_hosts: [example.com]}",
+        config={"agent": {"network_mode": "allowlist", "allowed_hosts": ["example.com"]}},
     )
     whole_gib(task_root)
-    oracle = task_root / "oracle" / "run.sh"
+    oracle = task_root / "solution" / "solve.sh"
     oracle.write_text(
         oracle.read_text()
         + textwrap.dedent("""
@@ -151,13 +150,8 @@ async def test_a_gpu_task_runs_on_the_gpu_its_lock_records(
     tmp_path: Path, write_repo: Callable[..., Path]
 ) -> None:
     task_root = write_repo(tmp_path / "repo")
-    manifest = task_root / "task.yaml"
-    manifest.write_text(
-        manifest.read_text().replace(
-            "resources: {cpus: 1, memory_mb: 512}", "resources: {cpus: 2, memory_mb: 8192, gpus: 1}"
-        )
-    )
-    oracle = task_root / "oracle" / "run.sh"
+    edit_task_config(task_root, {"environment": {"cpus": 2, "memory_mb": 8192, "gpus": 1}})
+    oracle = task_root / "solution" / "solve.sh"
     oracle.write_text(
         oracle.read_text()
         + "\nnvidia-smi --query-gpu=uuid --format=csv,noheader > /home/user/output/gpu.txt\n"

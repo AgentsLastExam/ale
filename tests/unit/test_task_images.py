@@ -7,6 +7,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+from tests.support import CONTAINER_BASE
 
 from ale.core.errors import ProviderStartError, TaskDefinitionError
 from ale.core.ids import content_hash
@@ -110,14 +111,17 @@ class _Registry:
 @pytest.fixture
 def windows_task(write_task_repo) -> Task:  # type: ignore[no-untyped-def]
     repository = write_task_repo(
-        image={"kind": "vm", "base_ref": "/images/windows.qcow2"},
-        with_image_dockerfile=False,
-        manifest_suffix="os: windows\n",
+        config={
+            "environment": {"os": "windows"},
+            "ale": {"sandbox": "vm", "vm_base": "/images/windows.qcow2"},
+        },
+        dockerfile=None,
     )
     folder = repository / "tasks/demo"
-    (folder / "image/run.ps1").write_text("Write-Output 'installed'\n")
-    for stage in ("verify", "oracle"):
-        (folder / stage / "run.sh").rename(folder / stage / "run.ps1")
+    (folder / "environment").mkdir()
+    (folder / "environment/build.ps1").write_text("Write-Output 'installed'\n")
+    (folder / "tests/test.sh").rename(folder / "tests/test.ps1")
+    (folder / "solution/solve.sh").rename(folder / "solution/solve.ps1")
     return load_tasks(folder)[0]
 
 
@@ -134,6 +138,7 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
         return runner
 
     async def build(base, context, output, resources, runner_identity, *, user):  # type: ignore[no-untyped-def]
+        assert (context / "build.ps1").is_file() and not (context / "setup").exists()
         assert resources.cpus == 2 and resources.memory_mb == 4096
         assert runner_identity == runner
         assert user == "user"
@@ -166,14 +171,19 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
     assert first.image.builder_identity and first.image.oci_identity is None
 
     assert windows_task.folder is not None
-    asset = windows_task.folder.image_dir / "assets/input.txt"
+    setup = windows_task.folder.environment_dir / "setup/setup.ps1"
+    setup.parent.mkdir()
+    setup.write_text("Write-Output 'per episode'\n")
+    assert await prepare_task_image(windows_task, registry) == first.image  # type: ignore[arg-type]
+    assert len(builds) == 1
+    asset = windows_task.folder.environment_dir / "assets/input.txt"
     asset.parent.mkdir()
     for value in ("first", "changed"):
         asset.write_text(value)
         changed = await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
         assert changed.prepared_identity != first.image.prepared_identity
     assert len(builds) == 3
-    (windows_task.folder.image_dir / "empty").mkdir()
+    (windows_task.folder.environment_dir / "empty").mkdir()
     await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
     assert len(builds) == 4
     runner = "sha256:" + "f" * 64
@@ -235,13 +245,18 @@ async def test_buildx_uses_fixed_context_and_observes_container_identity(
     write_task_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
     task = _task(write_task_repo)
+    (task.folder.environment_dir / ".dockerignore").write_text("!setup\n*.log\n")  # type: ignore[attr-defined]
     commands: list[tuple[str, ...]] = []
+    ignored: list[str] = []
 
     async def fake_run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
         commands.append(argv)
         if argv[:3] == ("docker", "buildx", "version"):
             return 0, "buildx", ""
         if argv[:3] == ("docker", "buildx", "build"):
+            dockerfile = Path(argv[argv.index("--file") + 1])
+            assert dockerfile.read_text() == f"FROM {CONTAINER_BASE}\n"
+            ignored.extend(dockerfile.with_name("Dockerfile.dockerignore").read_text().split())
             Path(argv[argv.index("--metadata-file") + 1]).write_text(
                 json.dumps(
                     {
@@ -257,7 +272,9 @@ async def test_buildx_uses_fixed_context_and_observes_container_identity(
     registry = _Registry()
     prepared = await prepare_task_image(task, registry)  # type: ignore[arg-type]
     build = next(command for command in commands if command[:3] == ("docker", "buildx", "build"))
-    assert build[-1] == str(task.folder.image_dir)  # type: ignore[attr-defined]
+    assert build[-1] == str(task.folder.environment_dir)  # type: ignore[attr-defined]
+    # The Task's own rules come first, so it cannot bring setup/ back into the context.
+    assert ignored == ["!setup", "*.log", "setup", "setup/**"]
     assert prepared.kind is ImageKind.CONTAINER
     assert prepared.source == "solver-local"
     assert prepared.runtime_ref == prepared.prepared_identity
@@ -302,7 +319,7 @@ async def test_unchanged_task_uses_its_prepared_image_without_building(
     write_task_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
     task = _task(write_task_repo)
-    asset = task.folder.image_dir / "assets/data.txt"  # type: ignore[attr-defined]
+    asset = task.folder.environment_dir / "assets/data.txt"  # type: ignore[attr-defined]
     asset.parent.mkdir()
     asset.write_text("one")
     builds: list[tuple[str, ...]] = []
@@ -332,6 +349,12 @@ async def test_unchanged_task_uses_its_prepared_image_without_building(
         ("framework-layer", "reused"),
     ]
 
+    setup = task.folder.environment_dir / "setup/setup.sh"  # type: ignore[attr-defined]
+    setup.parent.mkdir()
+    setup.write_text("echo per-episode\n")
+    await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
+    assert len(builds) == 1  # setup/ is never part of the image
+
     asset.write_text("three")
     await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
     assert len(builds) == 2
@@ -348,13 +371,20 @@ async def test_unchanged_task_uses_its_prepared_image_without_building(
 
 
 @pytest.mark.asyncio
-async def test_dockerfile_wins_over_ref_and_build_failure_never_falls_back(
+async def test_a_named_image_wins_over_the_dockerfile(write_task_repo) -> None:  # type: ignore[no-untyped-def]
+    task = _task(write_task_repo, config={"environment": {"docker_image": "ghcr.io/acme/t:v1"}})
+    registry = _Registry()
+    await prepare_task_image(task, registry)  # type: ignore[arg-type]
+    assert registry.get(ImageKind.CONTAINER).inputs == [
+        ImageRef(kind="container", reference="ghcr.io/acme/t:v1")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_build_failure_never_falls_back(
     write_task_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
-    task = _task(
-        write_task_repo,
-        image={"kind": "container", "ref": "ghcr.io/acme/fallback:v1"},
-    )
+    task = _task(write_task_repo)
 
     async def fake_run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
         if argv[:3] == ("docker", "buildx", "version"):
@@ -372,8 +402,8 @@ async def test_dockerfile_wins_over_ref_and_build_failure_never_falls_back(
 async def test_ref_only_solver_is_prepared_by_matching_provider(write_task_repo) -> None:  # type: ignore[no-untyped-def]
     task = _task(
         write_task_repo,
-        image={"kind": "vm", "ref": "ghcr.io/acme/task-vm:v1"},
-        with_image_dockerfile=False,
+        config={"ale": {"sandbox": "vm", "vm_image": "ghcr.io/acme/task-vm:v1"}},
+        dockerfile=None,
     )
     registry = _Registry()
     prepared = await prepare_task_image(task, registry)  # type: ignore[arg-type]
@@ -388,11 +418,11 @@ async def test_ref_only_solver_is_prepared_by_matching_provider(write_task_repo)
 async def test_preparation_result_orders_ref_and_artifact_stages(write_task_repo) -> None:  # type: ignore[no-untyped-def]
     task = _task(
         write_task_repo,
-        image={"kind": "vm", "ref": "ghcr.io/acme/task-vm:v1"},
-        with_image_dockerfile=False,
+        config={"ale": {"sandbox": "vm", "vm_image": "ghcr.io/acme/task-vm:v1"}},
+        dockerfile=None,
     )
     result = await prepare_task_image_result(task, _Registry())  # type: ignore[arg-type]
-    assert result.task == "demo"
+    assert result.task == "agentslastexam/demo"
     assert result.role == "solver"
     assert [step.name for step in result.steps] == [
         "lint",
@@ -408,8 +438,8 @@ async def test_preparation_result_orders_ref_and_artifact_stages(write_task_repo
 async def test_preparation_failure_names_and_bounds_its_stage(write_task_repo) -> None:  # type: ignore[no-untyped-def]
     task = _task(
         write_task_repo,
-        image={"kind": "vm", "ref": "example.invalid/vm:latest"},
-        with_image_dockerfile=False,
+        config={"ale": {"sandbox": "vm", "vm_image": "example.invalid/vm:latest"}},
+        dockerfile=None,
     )
 
     class _FailingProvider:
@@ -431,7 +461,7 @@ async def test_image_assets_do_not_change_the_local_source_identity(
     write_task_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
     task = _task(write_task_repo)
-    asset = task.folder.image_dir / "assets/data.txt"  # type: ignore[attr-defined]
+    asset = task.folder.environment_dir / "assets/data.txt"  # type: ignore[attr-defined]
     asset.parent.mkdir()
     asset.write_text("one")
 
@@ -470,14 +500,47 @@ async def test_separate_verifier_reuses_complete_solver_image(write_task_repo) -
 
 
 @pytest.mark.asyncio
+async def test_verifier_builds_tests_dockerfile_unless_an_image_is_named(
+    write_task_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    separate = {"verifier": {"environment_mode": "separate"}}
+    task = _task(write_task_repo, config=separate, verifier_dockerfile=True)
+    built: list[dict[str, object]] = []
+
+    async def fake_local(**kwargs: object) -> tuple[PreparedTaskImage, list[object]]:
+        built.append(kwargs)
+        return _prepared(ImageKind.CONTAINER, "verifier-local"), []
+
+    monkeypatch.setattr("ale.run.task_images._prepare_local", fake_local)
+    await prepare_verifier_image(task, _Registry())  # type: ignore[arg-type]
+    assert built[0]["dockerfile"] == task.folder.root / "tests/Dockerfile"  # type: ignore[attr-defined]
+    assert built[0]["exclude"] == ()
+    assert built[0]["source_digest"] == task.verifier_image_source_digest  # type: ignore[attr-defined]
+
+    named = {"docker_image": "ghcr.io/acme/v:1", "cpus": 1, "memory_mb": 512}
+    repository = write_task_repo(
+        "ale-tasks-named", config={"verifier": {"environment": named}}, verifier_dockerfile=True
+    )
+    task = load_tasks(repository / "tasks/demo")[0]
+    registry = _Registry()
+    await prepare_verifier_image(task, registry)  # type: ignore[arg-type]
+    assert len(built) == 1
+    assert registry.get(ImageKind.CONTAINER).inputs == [
+        ImageRef(kind="container", reference="ghcr.io/acme/v:1")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_local_vm_candidate_is_materialized_before_provider_check(
     write_task_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
-    task = _task(write_task_repo, image={"kind": "vm"})
+    task = _task(write_task_repo, config={"ale": {"sandbox": "vm"}})
     vm = _prepared(ImageKind.VM)
 
     async def fake_build(**kwargs: object) -> _OciBuild:
         assert kwargs["source_digest"] == task.image_source_digest
+        assert kwargs["dockerfile"] == task.folder.environment_dir / "Dockerfile"  # type: ignore[attr-defined]
+        assert kwargs["exclude"] == ("setup",)
         return _vm_build()
 
     async def fake_materialize(build: object, *, source: str) -> tuple[PreparedTaskImage, bool]:

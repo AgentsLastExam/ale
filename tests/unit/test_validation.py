@@ -252,8 +252,8 @@ def test_prepare_uses_selection_and_starts_no_runtime_services(
     result = CliRunner().invoke(app, ["prepare", str(repository)])
 
     assert result.exit_code == 0, result.output
-    assert observed == ["a", "b"]
-    assert "a solver kind=container source=local" in result.output
+    assert observed == ["agentslastexam/a", "agentslastexam/b"]
+    assert "agentslastexam/a solver kind=container source=local" in result.output
     assert "oci-build" in result.output
 
 

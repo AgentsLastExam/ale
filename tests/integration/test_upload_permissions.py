@@ -30,7 +30,7 @@ async def test_windows_upload_permissions_ignore_host_modes(tmp_path: Path) -> N
     (source / "assets/empty").mkdir(parents=True)
     (source / "assets/data.txt").write_text("input")
     (source / ".hidden").write_text("hidden")
-    (source / "run.ps1").write_text("Write-Output stage-ok")
+    (source / "setup.ps1").write_text("Write-Output stage-ok")
     request = SandboxRequest(
         episode_id=f"upload-{uuid.uuid4().hex[:8]}",
         os="windows",
@@ -66,7 +66,7 @@ async def test_windows_upload_permissions_ignore_host_modes(tmp_path: Path) -> N
                     "-ExecutionPolicy",
                     "Bypass",
                     "-File",
-                    target + r"\run.ps1",
+                    target + r"\setup.ps1",
                 ],
                 identity=identity,
             )

@@ -232,8 +232,8 @@ async def test_retention_removes_every_task_stage_and_names_the_agents_episode(
     arguments = {argument for argv in removed for argument in argv}
     assert {
         "/opt/ale/setup",
-        "/opt/ale/verify",
-        "/home/user/.ale-oracle",
+        "/opt/ale/tests",
+        "/home/user/.ale-solution",
         "/logs/verifier",
     } <= arguments
     assert written == ({"/opt/ale/agent-episode": b"episode"} if marked else {})
@@ -263,9 +263,9 @@ async def test_windows_retention_empties_the_bases_stage_directories() -> None:
 
     stages, others, result = commands
     # The base made these directories with their own ACL; only what is in them goes.
-    assert r"'C:\ProgramData\ALE\setup','C:\ProgramData\ALE\verify'" in stages
+    assert r"'C:\ProgramData\ALE\setup','C:\ProgramData\ALE\tests'" in stages
     assert "Get-ChildItem -LiteralPath $stage" in stages
-    assert r"'C:\Users\user\.ale-oracle'" in others
+    assert r"'C:\Users\user\.ale-solution'" in others
     # A missing path is skipped like `rm -rf` does, not silenced into a failing exit.
     assert "Test-Path -LiteralPath $path" in others
     assert "SilentlyContinue" not in stages + others

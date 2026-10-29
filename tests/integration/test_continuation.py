@@ -34,7 +34,7 @@ from ale.run.providers.qemu import QemuProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import ManifestTask, load_tasks
 from tests.integration.scripted_model import ScriptedModel
-from tests.support import VM_BASE, provider_registry
+from tests.support import VM_BASE, edit_task_config, provider_registry, write_task
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -61,33 +61,35 @@ def _inputs(task: ManifestTask, harness: Harness, model: str) -> ProvenanceInput
 def _task(tmp_path: Path, kind: str) -> ManifestTask:
     root = tmp_path / "continued"
     if kind == "windows":
-        for stage in ("image", "setup", "oracle", "verify"):
-            (root / stage).mkdir(parents=True)
-        # Built on the base, so the image gets the Windows framework.
-        (root / "image/run.ps1").write_text("exit 0\n")
-        (root / "setup/run.ps1").write_text("exit 0\n")
-        (root / "oracle/run.ps1").write_text("exit 0\n")
-        (root / "verify/run.ps1").write_text("python.exe .\\verify.py\nexit $LASTEXITCODE\n")
-        (root / "instruction.md").write_text("Record one more turn.\n")
-        (root / "task.yaml").write_text(
-            "spec_type: core/v1\nname: continued\nos: windows\n"
-            "image: {kind: vm, base_ref: local/windows-base}\n"
-            "resources: {cpus: 2, memory_mb: 8192}\n"
-            "timeouts: {agent: 1200, verify: 300}\n"
+        write_task(
+            root,
+            name="agentslastexam/continued",
+            config={
+                "environment": {"os": "windows", "cpus": 2, "memory_mb": 8192},
+                "agent": {"timeout_sec": 1200},
+                "verifier": {"timeout_sec": 300},
+                "ale": {"sandbox": "vm", "vm_base": "local/windows-base"},
+            },
+            dockerfile=None,
+            instruction="Record one more turn.\n",
+            test=None,
+            solve=None,
         )
+        for directory in ("environment/setup", "tests", "solution"):
+            (root / directory).mkdir(parents=True, exist_ok=True)
+        # Built on the base, so the image gets the Windows framework.
+        (root / "environment/build.ps1").write_text("exit 0\n")
+        (root / "environment/setup/setup.ps1").write_text("exit 0\n")
+        (root / "solution/solve.ps1").write_text("exit 0\n")
+        (root / "tests/test.ps1").write_text("python.exe .\\verify.py\nexit $LASTEXITCODE\n")
     else:
         scaffold_task(root)
     if kind == "vm":
-        manifest = root / "task.yaml"
-        manifest.write_text(
-            manifest.read_text()
-            .replace("  kind: container", "  kind: vm")
-            .replace("cpus: 1,", "cpus: 2,")
-        )
-        dockerfile = root / "image/Dockerfile"
+        edit_task_config(root, {"environment": {"cpus": 2}, "ale": {"sandbox": "vm"}})
+        dockerfile = root / "environment/Dockerfile"
         _, rest = dockerfile.read_text().split("\n", 1)
         dockerfile.write_text(f"FROM {VM_BASE}\n{rest}")
-    (root / "verify/verify.py").write_text(
+    (root / "tests/verify.py").write_text(
         "from pathlib import Path\n"
         "from ale_verify import write\n"
         f"path = Path({OUTPUT[kind] + '/turns.txt'!r})\n"
@@ -118,13 +120,13 @@ async def _kept_stages(handle: str, task: ManifestTask, run_dir: Path) -> list[s
                 "powershell.exe",
                 "-NoProfile",
                 "-Command",
-                "@('setup', 'verify') | ForEach-Object { $stage = \"C:\\ProgramData\\ALE\\$_\"; "
+                "@('setup', 'tests') | ForEach-Object { $stage = \"C:\\ProgramData\\ALE\\$_\"; "
                 "if (Test-Path -LiteralPath $stage) { "
                 "Get-ChildItem -LiteralPath $stage -Force | ForEach-Object FullName "
                 '} else { "missing $stage" } }',
             ]
         else:
-            argv = ["sh", "-c", "find /opt/ale/setup /opt/ale/verify 2>/dev/null; true"]
+            argv = ["sh", "-c", "find /opt/ale/setup /opt/ale/tests 2>/dev/null; true"]
         listing = await sandbox.exec(argv)
     finally:
         await sandbox.retain(roles=("solver",), reason="inspected")

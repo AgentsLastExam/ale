@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
 import pytest
+from tests.support import edit_task_config as edit
 
 from ale.core.errors import TaskDefinitionError
+from ale.core.task import Stage
+from ale.core.taskspec import ImageKind, NetworkMode, VerificationMode
+from ale.run.assets import ASSET_ROOTS
 from ale.run.lint import lint_repository
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import discover_task_folders, load_tasks
@@ -13,13 +18,13 @@ from ale.run.tasksets.manifest import discover_task_folders, load_tasks
 pytestmark = pytest.mark.unit
 
 
-def test_collection_order_and_names_are_manifest_owned(tmp_path: Path) -> None:
+def test_collection_order_and_names_are_configuration_owned(tmp_path: Path) -> None:
     collection = tmp_path / "collection"
     z = scaffold_task(collection / "z")
     scaffold_task(collection / "a")
-    (z / "task.yaml").write_text((z / "task.yaml").read_text().replace("name: z", "name: zz"))
+    edit(z, {"task": {"name": "acme/zz"}})
     tasks = load_tasks(collection)
-    assert [str(task.spec.name) for task in tasks] == ["a", "zz"]
+    assert [str(task.spec.name) for task in tasks] == ["agentslastexam/a", "acme/zz"]
     assert [folder.root.name for folder in discover_task_folders(collection)] == ["a", "z"]
 
 
@@ -44,53 +49,155 @@ def test_copy_preserves_effective_spec_and_digests(tmp_path: Path) -> None:
     assert one.image_source_digest == two.image_source_digest
 
 
-def test_all_stage_asset_roots_are_excluded_from_task_identity(tmp_path: Path) -> None:
+def test_configuration_maps_onto_the_runtime_spec(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
-    before = load_tasks(task)[0].task_digest
-    for stage in ("image", "setup", "verify", "oracle"):
-        asset = task / stage / "assets" / "large.bin"
+    edit(
+        task,
+        {
+            "environment": {"cpus": 2, "memory_mb": 2048, "storage_mb": 4096, "gpus": 1},
+            "agent": {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]},
+            "metadata": {"network_justification": "installs a package"},
+            "ale": {
+                "sudo": True,
+                "skills": ["tools/skills/reviewer"],
+                "mcp_servers": ["tools/mcp/search.toml"],
+            },
+        },
+    )
+    spec = load_tasks(task)[0].spec
+    assert spec.name == "agentslastexam/demo"
+    assert spec.image.kind is ImageKind.CONTAINER and spec.image.user == "user"
+    assert (spec.resources.cpus, spec.resources.memory_mb) == (2, 2048)
+    assert (spec.resources.storage_mb, spec.resources.gpus, spec.resources.sudo) == (4096, 1, True)
+    assert spec.network.mode is NetworkMode.ALLOWLIST
+    assert spec.network.allowed_hosts == ("pypi.org",)
+    assert (spec.timeouts.agent, spec.timeouts.verify) == (300, 120)
+    assert spec.tools.skills[0].path == "tools/skills/reviewer"
+    assert spec.tools.mcp_servers[0].path == "tools/mcp/search.toml"
+    assert spec.metadata == {"network_justification": "installs a package"}
+    assert spec.verify.environment_mode is VerificationMode.SHARED
+
+
+def test_load_errors_name_the_key(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    edit(task, {"agent": {"user": None}, "environment": {"healthcheck": {"command": "true"}}})
+    with pytest.raises(TaskDefinitionError, match=r"environment\.healthcheck is not supported"):
+        load_tasks(task)
+    edit(task, {"environment": {"healthcheck": None}})
+    with pytest.raises(TaskDefinitionError, match=r"agent\.user is required"):
+        load_tasks(task)
+    edit(task, {"agent": {"user": "user", "shell": "bash"}})
+    with pytest.raises(TaskDefinitionError, match=r"agent\.shell is not a task\.toml key"):
+        load_tasks(task)
+    edit(task, {"agent": {"shell": None}, "environment": {"docker_image": " "}})
+    with pytest.raises(TaskDefinitionError, match="must not be blank"):
+        load_tasks(task)
+    (task / "task.toml").write_text("schema_version = ")
+    with pytest.raises(TaskDefinitionError, match="invalid TOML"):
+        load_tasks(task)
+
+
+def test_asset_roots_and_setup_are_excluded_where_they_must_be(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    loaded = load_tasks(task)[0]
+    for root in ASSET_ROOTS:
+        asset = task / root / "large.bin"
         asset.parent.mkdir(parents=True, exist_ok=True)
-        asset.write_bytes(stage.encode())
-    assert load_tasks(task)[0].task_digest == before
+        asset.write_bytes(root.encode())
+    after = load_tasks(task)[0]
+    assert after.task_digest == loaded.task_digest
+    assert after.non_verifier_digest == loaded.non_verifier_digest
+    assert after.image_source_digest == loaded.image_source_digest
+
+    (task / "environment/setup").mkdir()
+    (task / "environment/setup/setup.sh").write_text("true\n")
+    after = load_tasks(task)[0]
+    assert after.task_digest != loaded.task_digest
+    assert after.image_source_digest == loaded.image_source_digest
+    (task / "environment/install.sh").write_text("true\n")
+    assert load_tasks(task)[0].image_source_digest != loaded.image_source_digest
+    changed = load_tasks(task)[0]
+    (task / "tests/helper.py").write_text("pass\n")
+    assert load_tasks(task)[0].non_verifier_digest == changed.non_verifier_digest
+
+
+def test_vm_assets_are_excluded_from_the_vm_image_source(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    edit(task, {"ale": {"sandbox": "vm"}})
+    loaded = load_tasks(task)[0]
+    (task / "environment/assets").mkdir()
+    (task / "environment/assets/disk.bin").write_bytes(b"large")
+    after = load_tasks(task)[0]
+    assert after.image_source_digest == loaded.image_source_digest
+    assert after.task_digest == loaded.task_digest
 
 
 def test_duplicate_names_fail_before_runtime(tmp_path: Path) -> None:
     collection = tmp_path / "collection"
     scaffold_task(collection / "one")
     two = scaffold_task(collection / "two")
-    manifest = two / "task.yaml"
-    manifest.write_text(manifest.read_text().replace("name: two", "name: one"))
+    edit(two, {"task": {"name": "agentslastexam/one"}})
     with pytest.raises(TaskDefinitionError, match="duplicate Task name"):
         load_tasks(collection)
 
 
-def test_ref_only_solver_has_no_local_source_digest(tmp_path: Path) -> None:
+def test_a_named_image_wins_over_a_build_definition(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
-    (task / "image" / "Dockerfile").unlink()
-    manifest = task / "task.yaml"
-    manifest.write_text(
-        manifest.read_text().replace("kind: container", "kind: vm\n  ref: ghcr.io/acme/task-vm:v1")
-    )
+    edit(task, {"environment": {"docker_image": "ghcr.io/acme/task:v1"}})
     loaded = load_tasks(task)[0]
-    assert loaded.spec.image.kind.value == "vm"
+    assert loaded.spec.image.ref == "ghcr.io/acme/task:v1"
     assert loaded.image_source_digest is None
+    (task / "environment/Dockerfile").unlink()
+    assert load_tasks(task)[0].spec.image.ref == "ghcr.io/acme/task:v1"
+
+
+def test_the_sandbox_decides_what_environment_dockerfile_builds(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    container = load_tasks(task)[0]
+    assert container.spec.image.kind is ImageKind.CONTAINER
+    edit(task, {"ale": {"sandbox": "vm"}})
+    loaded = load_tasks(task)[0]
+    assert loaded.spec.image.kind is ImageKind.VM
+    assert loaded.image_source_digest == container.image_source_digest
+
+    (task / "environment/Dockerfile").unlink()
+    with pytest.raises(TaskDefinitionError, match=r"environment/Dockerfile or \[ale\].vm_image"):
+        load_tasks(task)
+    edit(task, {"ale": {"vm_image": "ghcr.io/acme/task-vm:v1"}})
+    loaded = load_tasks(task)[0]
+    assert loaded.spec.image.ref == "ghcr.io/acme/task-vm:v1"
+    assert loaded.image_source_digest is None
+
+
+@pytest.mark.parametrize("sandbox", ["container", "vm"])
+def test_linux_tasks_reject_a_windows_build(tmp_path: Path, sandbox: str) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    edit(task, {"ale": {"sandbox": sandbox}})
+    (task / "environment/build.ps1").write_text("Write-Output 'build'\n")
+    with pytest.raises(TaskDefinitionError, match="requires os 'windows'"):
+        load_tasks(task)
+    shutil.rmtree(task / "environment")
+    with pytest.raises(TaskDefinitionError, match="environment/Dockerfile or"):
+        load_tasks(task)
 
 
 def _windows_task(tmp_path: Path, *, build: bool = False) -> Path:
     task = scaffold_task(tmp_path / "windows-demo")
-    reference = "base_ref" if build else "ref"
-    manifest = task / "task.yaml"
-    manifest.write_text(
-        manifest.read_text()
-        .replace("name: windows-demo", "name: windows-demo\nos: windows")
-        .replace("kind: container", f"kind: vm\n  {reference}: /images/windows-base.qcow2")
-        .replace("/home/user/output", r"C:\Users\user\output")
+    source = {"vm_base": "/images/windows-base.qcow2"} if build else {"vm_image": "/images/w.qcow2"}
+    edit(
+        task,
+        {
+            "artifacts": [r"C:\Users\user\output"],
+            "environment": {"os": "windows"},
+            "ale": {"sandbox": "vm", **source},
+        },
     )
-    for stage in ("verify", "oracle"):
-        (task / stage / "run.sh").rename(task / stage / "run.ps1")
-    (task / "image" / "Dockerfile").unlink()
+    (task / "tests/test.sh").rename(task / "tests/test.ps1")
+    (task / "solution/solve.sh").rename(task / "solution/solve.ps1")
+    shutil.rmtree(task / "environment")
     if build:
-        (task / "image" / "run.ps1").write_text("Write-Output 'build'\n")
+        (task / "environment").mkdir()
+        (task / "environment/build.ps1").write_text("Write-Output 'build'\n")
     return task
 
 
@@ -99,183 +206,120 @@ def test_windows_task_uses_powershell_stage_entries(tmp_path: Path) -> None:
     loaded = load_tasks(task)[0]
     assert loaded.spec.os.value == "windows"
     assert loaded.image_source_digest is None
-    assert loaded.spec.image.ref == "/images/windows-base.qcow2"
+    assert loaded.spec.image.ref == "/images/w.qcow2"
     assert loaded.spec.image.base_ref is None
-    assert loaded.folder.stage_entry("verify", loaded.spec.os).name == "run.ps1"  # type: ignore[union-attr]
+    assert loaded.folder.stage_entry(Stage.TESTS, loaded.spec.os).name == "test.ps1"  # type: ignore[union-attr]
+    (task / "solution/solve.ps1").unlink()
+    with pytest.raises(TaskDefinitionError, match=r"solution/solve\.ps1"):
+        load_tasks(task)
 
 
-def test_windows_image_script_tracks_source_and_accepts_assets(tmp_path: Path) -> None:
+def test_windows_build_script_tracks_source_and_ignores_assets(tmp_path: Path) -> None:
     task = _windows_task(tmp_path, build=True)
-    entry = task / "image" / "run.ps1"
+    entry = task / "environment/build.ps1"
     entry.write_text("$ErrorActionPreference = 'Stop'\n& .\\install.ps1\n")
-    helper = task / "image" / "install.ps1"
+    helper = task / "environment/install.ps1"
     helper.write_text("choco install -y git\n")
     loaded = load_tasks(task)[0]
-    assert loaded.folder.image_script == entry
+    assert loaded.folder.build_script == entry
     assert loaded.spec.image.base_ref == "/images/windows-base.qcow2"
     assert loaded.spec.image.ref is None
     assert loaded.image_source_digest is not None
     assert lint_repository(task) == []
 
-    assets = task / "image" / "assets"
+    assets = task / "environment/assets"
     assets.mkdir()
     (assets / "data.txt").write_text("input")
     assert load_tasks(task)[0].image_source_digest == loaded.image_source_digest
     assert lint_repository(task) == []
     helper.write_text("choco install -y git 7zip\n")
-    assert load_tasks(task)[0].image_source_digest != loaded.image_source_digest
+    changed = load_tasks(task)[0].image_source_digest
+    assert changed != loaded.image_source_digest
 
-    (task / "setup").mkdir()
-    (task / "setup" / "run.ps1").write_text("winget install Git.Git\n")
-    assert any("belongs in image/run.ps1" in finding.message for finding in lint_repository(task))
+    (task / "environment/setup").mkdir()
+    (task / "environment/setup/setup.ps1").write_text("winget install Git.Git\n")
+    assert load_tasks(task)[0].image_source_digest == changed
+    assert any(
+        "belongs in environment/build.ps1" in finding.message for finding in lint_repository(task)
+    )
 
 
 @pytest.mark.parametrize(
     ("invalid", "message"),
     [
-        ("dockerfile", "image/Dockerfile"),
-        ("missing-base-ref", "image.base_ref"),
-        ("ref-with-script", "image.base_ref"),
-        ("both-refs", "mutually exclusive"),
-        ("missing-script", "image/run.ps1"),
-        ("container", "image.kind: vm"),
-        ("verifier-dockerfile", "reuse the solver image or use a ref"),
+        ("dockerfile", "builds environment/build.ps1, not a Dockerfile"),
+        ("missing-base", r"build\.ps1 requires \[ale\]\.vm_base"),
+        ("missing-script", r"vm_base requires environment/build\.ps1"),
+        ("container", "requires \\[ale\\].sandbox 'vm'"),
+        ("verifier-dockerfile", "Windows verifier"),
     ],
 )
 def test_windows_image_contract_rejects_invalid_sources(
     tmp_path: Path, invalid: str, message: str
 ) -> None:
     task = _windows_task(tmp_path, build=True)
-    manifest = task / "task.yaml"
     if invalid == "dockerfile":
-        (task / "image" / "Dockerfile").write_text("FROM scratch\n")
-    elif invalid == "missing-base-ref":
-        manifest.write_text(
-            manifest.read_text().replace("  base_ref: /images/windows-base.qcow2\n", "")
-        )
-    elif invalid == "ref-with-script":
-        manifest.write_text(manifest.read_text().replace("base_ref:", "ref:"))
-    elif invalid == "both-refs":
-        manifest.write_text(manifest.read_text().replace("kind: vm", "kind: vm\n  ref: task.qcow2"))
+        (task / "environment/Dockerfile").write_text("FROM scratch\n")
+    elif invalid == "missing-base":
+        edit(task, {"ale": {"vm_base": None, "vm_image": "/images/w.qcow2"}})
     elif invalid == "missing-script":
-        (task / "image" / "run.ps1").unlink()
+        (task / "environment/build.ps1").unlink()
     elif invalid == "container":
-        manifest.write_text(manifest.read_text().replace("kind: vm", "kind: container"))
+        edit(task, {"ale": {"sandbox": "container", "vm_base": None}})
     else:
-        (task / "verify" / "Dockerfile").write_text("FROM scratch\n")
+        edit(task, {"verifier": {"environment_mode": "separate"}})
+        (task / "tests/Dockerfile").write_text("FROM scratch\n")
     with pytest.raises(TaskDefinitionError, match=message):
         load_tasks(task)
-    assert any(message in finding.message for finding in lint_repository(task))
+    assert any(re.search(message, finding.message) for finding in lint_repository(task))
 
 
-def test_linux_base_ref_is_rejected_instead_of_ignored(tmp_path: Path) -> None:
+def test_separate_verification_follows_harbor(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
-    manifest = task / "task.yaml"
-    manifest.write_text(
-        manifest.read_text().replace("kind: container", "kind: vm\n  base_ref: base.qcow2")
-    )
-    with pytest.raises(TaskDefinitionError, match=r"image\.base_ref requires os: windows"):
-        load_tasks(task)
+    edit(task, {"environment": {"cpus": 2}, "verifier": {"environment_mode": "separate"}})
+    verify = load_tasks(task)[0].spec.verify
+    assert verify.environment_mode is VerificationMode.SEPARATE
+    assert verify.image is None
+    assert verify.resources is not None and verify.resources.cpus == 2
 
+    edit(task, {"verifier": {"environment": {"cpus": 1, "memory_mb": 1024}}})
+    verify = load_tasks(task)[0].spec.verify
+    assert verify.resources is not None
+    assert (verify.resources.cpus, verify.resources.memory_mb) == (1, 1024)
+    assert verify.image is None
 
-def test_linux_powershell_helper_still_requires_dockerfile(tmp_path: Path) -> None:
-    task = scaffold_task(tmp_path / "demo")
-    (task / "image" / "run.ps1").write_text("Write-Output 'build'\n")
-    assert load_tasks(task)[0].image_source_digest is not None
-    (task / "image" / "Dockerfile").unlink()
-    with pytest.raises(TaskDefinitionError, match="requires os: windows"):
-        load_tasks(task)
-
-
-def test_missing_solver_dockerfile_and_ref_fails_loading(tmp_path: Path) -> None:
-    task = scaffold_task(tmp_path / "demo")
-    (task / "image" / "Dockerfile").unlink()
-    with pytest.raises(TaskDefinitionError, match=r"image\.ref"):
-        load_tasks(task)
-
-
-def test_unknown_environment_is_rejected_at_load_time(tmp_path: Path) -> None:
-    task = scaffold_task(tmp_path / "demo")
-    manifest = task / "task.yaml"
-    manifest.write_text(manifest.read_text() + "environment: custom/unknown\n")
-    with pytest.raises(TaskDefinitionError, match="environment"):
-        load_tasks(task)
-
-
-def test_separate_verifier_dockerfile_requires_explicit_image_kind(
-    tmp_path: Path,
-) -> None:
-    task = scaffold_task(tmp_path / "demo")
-    manifest = task / "task.yaml"
-    manifest.write_text(
-        manifest.read_text()
-        + "verify:\n"
-        + "  environment_mode: separate\n"
-        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
-    )
-    (task / "verify/Dockerfile").write_text("FROM scratch\n")
-    with pytest.raises(TaskDefinitionError, match=r"verify\.image\.kind"):
-        load_tasks(task)
-
-    manifest.write_text(
-        manifest.read_text().replace("  resources:", "  image: {kind: vm}\n  resources:")
-    )
+    (task / "tests/Dockerfile").write_text("FROM scratch\n")
     loaded = load_tasks(task)[0]
     assert loaded.spec.verify.image is not None
-    assert loaded.spec.verify.image.kind.value == "vm"
+    assert loaded.spec.verify.image.kind is ImageKind.CONTAINER
+    assert loaded.spec.verify.image.ref is None
     assert loaded.verifier_image_source_digest is not None
 
-
-def test_verifier_dockerfile_rejects_shared_mode_but_allows_ignored_ref(tmp_path: Path) -> None:
-    task = scaffold_task(tmp_path / "demo")
-    (task / "verify/Dockerfile").write_text("FROM scratch\n")
-    with pytest.raises(TaskDefinitionError, match="requires separate"):
-        load_tasks(task)
-
-    manifest = task / "task.yaml"
-    manifest.write_text(
-        manifest.read_text()
-        + "verify:\n"
-        + "  environment_mode: separate\n"
-        + "  image: {kind: container, ref: example/verifier:latest}\n"
-        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
-    )
+    edit(task, {"verifier": {"environment": {"docker_image": "example/verifier:v1"}}})
     loaded = load_tasks(task)[0]
     assert loaded.spec.verify.image is not None
-    assert loaded.spec.verify.image.ref == "example/verifier:latest"
+    assert loaded.spec.verify.image.ref == "example/verifier:v1"
+    assert loaded.verifier_image_source_digest is None
 
-
-def test_external_verifier_requires_kind_and_ref(tmp_path: Path) -> None:
-    task = scaffold_task(tmp_path / "demo")
-    manifest = task / "task.yaml"
-    resources = "{cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}"
-    manifest.write_text(
-        manifest.read_text()
-        + "verify:\n"
-        + "  environment_mode: separate\n"
-        + "  image: {kind: vm}\n"
-        + f"  resources: {resources}\n"
+    edit(
+        task,
+        {
+            "verifier": {"environment": {"docker_image": None}},
+            "ale": {"verifier": {"sandbox": "vm"}},
+        },
     )
-    with pytest.raises(TaskDefinitionError, match=r"verify\.image\.ref"):
+    image = load_tasks(task)[0].spec.verify.image
+    assert image is not None and image.kind is ImageKind.VM and image.ref is None
+    (task / "tests/Dockerfile").unlink()
+    with pytest.raises(TaskDefinitionError, match="requires vm_image or tests/Dockerfile"):
         load_tasks(task)
-
-    manifest.write_text(
-        manifest.read_text().replace(
-            "image: {kind: vm}", "image: {kind: vm, ref: ghcr.io/acme/verifier:v1}"
-        )
-    )
-    assert load_tasks(task)[0].spec.verify.image is not None
+    edit(task, {"ale": {"verifier": {"vm_image": "ghcr.io/acme/verifier:v1"}}})
+    image = load_tasks(task)[0].spec.verify.image
+    assert image is not None and image.ref == "ghcr.io/acme/verifier:v1"
 
 
-def test_removed_verifier_build_mapping_is_rejected(tmp_path: Path) -> None:
+def test_verifier_dockerfile_requires_separate_verification(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
-    manifest = task / "task.yaml"
-    manifest.write_text(
-        manifest.read_text()
-        + "verify:\n"
-        + "  environment_mode: separate\n"
-        + "  image: {build: verify}\n"
-        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
-    )
-    with pytest.raises(TaskDefinitionError):
+    (task / "tests/Dockerfile").write_text("FROM scratch\n")
+    with pytest.raises(TaskDefinitionError, match="requires separate"):
         load_tasks(task)
