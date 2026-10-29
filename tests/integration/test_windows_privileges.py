@@ -50,12 +50,11 @@ async def test_windows_framework_copies_protected_artifacts_and_verifies_as_admi
         r"""$ErrorActionPreference = 'Stop'
 python.exe -c "import ctypes; assert ctypes.windll.shell32.IsUserAnAdmin()"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-New-Item C:\ale-copy\directory.json, C:\ale-private -ItemType Directory -Force | Out-Null
-Set-Content C:\ale-private\value 'protected' -NoNewline
-& icacls.exe C:\ale-private /inheritance:r /grant:r `
-    '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' | Out-Null
+New-Item C:\ale-copy\directory.json -ItemType Directory -Force | Out-Null
+Set-Content C:\ale-copy\game.sgf 'protected' -NoNewline
+& icacls.exe C:\ale-copy\game.sgf /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' |
+    Out-Null
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-New-Item C:\ale-copy\game.sgf -ItemType SymbolicLink -Target C:\ale-private\value | Out-Null
 New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
     -Target C:\ale-copy\directory.json | Out-Null
 """
@@ -67,7 +66,7 @@ New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
     )
     (task / "oracle/check.py").write_text(
         "from pathlib import Path\n"
-        "try: Path(r'C:\\ale-private\\value').read_text()\n"
+        "try: Path(r'C:\\ale-copy\\game.sgf').read_text()\n"
         "except PermissionError: pass\n"
         "else: raise AssertionError('agent could read Administrator-only output')\n"
     )
