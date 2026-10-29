@@ -4,9 +4,10 @@ Run by ``framework.frame_disk`` inside the VM builder, never on the Host: libgue
 the disk from a small appliance VM and edits the registry hives with hivex, so nothing the
 disk holds executes. Standard library only, since it runs on the builder's system Python.
 
-What it installs is the Windows counterpart of the Linux layer: guestd and Cua Driver under
-``C:\\ProgramData\\ALE``, a boot service that starts them in the agent's session
-(``guestd/service.py``), and the identity of the framework in ``C:\\ProgramData\\ALE\\framework``.
+What it installs is the Windows counterpart of the Linux layer: guestd, Cua Driver and the
+framework's own Python under ``C:\\ProgramData\\ALE``, a boot service on that Python that
+starts guestd and Cua Driver in the agent's session (``guestd/service.py``), and the
+identity of the framework in ``C:\\ProgramData\\ALE\\framework``.
 It checks first that the disk can run them, and says what it lacks in a line starting
 ``ALE: ``.
 """
@@ -23,8 +24,8 @@ from pathlib import Path
 CONFIG = "/Windows/System32/config"
 ROOT = "/ProgramData/ALE"
 SERVICE = "ALEGuestd"
-#: Python the service may run guestd with; older ones lack what guestd uses.
-MINIMUM_PYTHON = (3, 12)
+#: Where the framework's own Python lands, which the service runs on.
+PYTHON = r"C:\ProgramData\ALE\python\python.exe"
 #: What libguestfs says when NTFS was not shut down cleanly and so mounts read-only.
 UNCLEAN = ("hibernat", "unclean", "unsafe state", "read-only file system")
 
@@ -37,6 +38,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("disk", type=Path)
     parser.add_argument("source", type=Path)
+    parser.add_argument("python", type=Path)
     parser.add_argument("--user", required=True)
     parser.add_argument("--identity", required=True)
     parser.add_argument("--runner-address", required=True)
@@ -47,16 +49,18 @@ def main() -> int:
             guestfish(args.disk, f"download {CONFIG}/SYSTEM {hives}/SYSTEM", readonly=True)
             guestfish(args.disk, f"download {CONFIG}/SOFTWARE {hives}/SOFTWARE", readonly=True)
             guestfish(args.disk, f"download {CONFIG}/SAM {hives}/SAM", readonly=True)
-            python = check(hives, args.user)
-            merge(hives / "SYSTEM", service_key(hives, python, args.user, args.runner_address))
+            check(hives, args.user)
+            merge(hives / "SYSTEM", service_key(hives, args.user, args.runner_address))
             guestfish(
                 args.disk,
                 f"""
                 mkdir-p {ROOT}
                 rm-rf {ROOT}/guestd
                 rm-rf {ROOT}/cua-driver
+                rm-rf {ROOT}/python
                 copy-in {args.source}/guestd {ROOT}
                 copy-in {args.source}/cua-driver {ROOT}
+                copy-in {args.python} {ROOT}
                 upload {hives}/SYSTEM {CONFIG}/SYSTEM
                 write {ROOT}/framework "{args.identity}\\n"
                 """,
@@ -93,8 +97,8 @@ def export(hives: Path, hive: str, key: str) -> str:
     return done.stdout
 
 
-def check(hives: Path, user: str) -> str:
-    """Raise unless the disk can run the framework for ``user``; return its Python."""
+def check(hives: Path, user: str) -> None:
+    """Raise unless the disk can run the framework for ``user``."""
     names = export(hives, "SAM", r"\SAM\Domains\Account\Users\Names")
     if user.casefold() not in {name.casefold() for name in key_names(names)}:
         raise Lacks(
@@ -116,13 +120,6 @@ def check(hives: Path, user: str) -> str:
     policies = r"\Microsoft\Windows\CurrentVersion\Policies\System"
     if values(export(hives, "SOFTWARE", policies), policies).get("EnableLUA") == "dword:00000000":
         raise Lacks("User Account Control is off on this Windows disk; the framework needs it on")
-    python = newest_python(export(hives, "SOFTWARE", r"\Python\PythonCore"))
-    if python is None:
-        raise Lacks(
-            "this Windows disk has no Python "
-            f"{MINIMUM_PYTHON[0]}.{MINIMUM_PYTHON[1]} or newer installed for all users"
-        )
-    return python
 
 
 def key_names(text: str) -> list[str]:
@@ -162,20 +159,6 @@ def quote(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def newest_python(text: str) -> str | None:
-    """The ``python.exe`` of the newest all-users Python that guestd can run on."""
-    best: tuple[tuple[int, ...], str] | None = None
-    for key in (line[1:-1] for line in text.splitlines() if line.startswith("[")):
-        match = re.search(r"\\PythonCore\\(\d+)\.(\d+)\\InstallPath$", key)
-        if match is None:
-            continue
-        version = (int(match[1]), int(match[2]))
-        path = values(text, key).get("ExecutablePath", "")
-        if version >= MINIMUM_PYTHON and path and (best is None or version > best[0]):
-            best = (version, path)
-    return best[1] if best else None
-
-
 def control_set(hives: Path) -> str:
     """The control set the disk boots from, which is where services are registered."""
     current = values(export(hives, "SYSTEM", r"\Select"), r"\Select").get("Current", "")
@@ -185,10 +168,10 @@ def control_set(hives: Path) -> str:
     return f"ControlSet{int(match[1], 16):03d}"
 
 
-def service_key(hives: Path, python: str, user: str, runner_address: str) -> str:
+def service_key(hives: Path, user: str, runner_address: str) -> str:
     """The registry text that makes Windows start the framework's service at boot."""
     script = r"C:\ProgramData\ALE\guestd\service.py"
-    image = f'"{python}" -I -S "{script}" "{user}" {runner_address}'
+    image = f'"{PYTHON}" -I -S "{script}" "{user}" {runner_address}'
     return "\r\n".join(
         [
             "Windows Registry Editor Version 5.00",

@@ -14,6 +14,7 @@ import pytest
 from ale.core.errors import TaskError
 from ale.core.sandbox import ExecResult
 from ale.core.taskspec import OperatingSystem
+from ale.run import guestd
 from ale.run.environments.standard import StandardEnvironment
 from ale.run.harnesses.builtin import NopHarness
 
@@ -57,6 +58,26 @@ async def test_linux_selects_newer_python_without_replacing_default(
     if not default_is_modern:
         result = await sandbox.exec(["python3", "-c", "pass"])
         assert result.exit_code != 0 and "3.10" in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_an_image_without_a_compatible_python_verifies_on_the_frameworks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "sh").symlink_to("/bin/sh")
+    executable(bin_dir / "python3", "echo 'Python 3.10 is too old' >&2; exit 1")
+    framework_python = tmp_path / "opt-ale-python" / "python3"
+    framework_python.parent.mkdir()
+    executable(framework_python, f'exec {shlex.quote(sys.executable)} "$@"')
+    monkeypatch.setitem(guestd.PYTHON, "linux", str(framework_python))
+    ctx = SimpleNamespace(spec=SimpleNamespace(os=OperatingSystem.LINUX))
+    python, site = await StandardEnvironment(NopHarness())._site_packages(
+        ctx,
+        LocalSandbox(bin_dir),  # type: ignore[arg-type]
+    )
+    assert python == str(framework_python) and site
 
 
 @pytest.mark.asyncio

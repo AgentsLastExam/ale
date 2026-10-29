@@ -1083,9 +1083,13 @@ class QemuProvider(Provider):
     ) -> None:
         """Check actual tokens, including the default limited agent, before any Task code."""
         command = [
-            "python.exe",
-            "-c",
-            "import ctypes; print(int(bool(ctypes.windll.shell32.IsUserAnAdmin())))",
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[int]([Security.Principal.WindowsPrincipal]"
+            "[Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("
+            "[Security.Principal.WindowsBuiltInRole]::Administrator)",
         ]
         for user, expected in ((None, True), (agent_user, sudo)):
             code, output, stderr, timed_out = await client.exec(

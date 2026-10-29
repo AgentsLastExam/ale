@@ -169,7 +169,7 @@ class ProbingClient:
         self.envs: list[dict[str, str] | None] = []
 
     async def exec(self, argv: list[str], *, env: dict[str, str] | None = None, **_: Any):
-        if argv[:2] == ["python3", "-c"] and "wrap_socket" in argv[2]:
+        if argv[:2] == [guestd.PYTHON["linux"], "-c"] and "wrap_socket" in argv[2]:
             is_open = self.api.sent[-1] == {"networkBlockAll": False}
             return 0, "open" if is_open else "closed", "", False
         self.envs.append(env)
@@ -294,8 +294,9 @@ class ScriptedClient:
         self.calls: list[tuple[list[str], str | None]] = []
 
     async def exec(self, argv: list[str], *, run_as: str | None = None, **_: Any):
+        assert run_as is None and argv[0] == guestd.PYTHON["linux"]  # both start as root
         self.calls.append((argv, run_as))
-        if run_as is None:
+        if len(self.calls) == 1:
             if self.seal_fails:
                 return 1, "", "iptables: Permission denied", False
             return 0, json.dumps([2280, 22220, 22222, 33333, 8080]), "", False
@@ -305,8 +306,9 @@ class ScriptedClient:
 async def test_the_agent_is_probed_on_every_port_the_seal_covers() -> None:
     client = ScriptedClient(reachable=[])
     await _seal_daemon(client, "user")  # type: ignore[arg-type]
-    (_, as_root), (probe, as_agent) = client.calls
-    assert as_root is None and as_agent == "user"
+    _, (probe, _) = client.calls
+    # The probe drops to the agent itself: the framework's Python is root's alone.
+    assert probe[3] == "user" and "os.setuid(account.pw_uid)" in probe[2]
     assert probe[-1] == "2280,22220,22222,33333,8080"  # the daemon's own extra port too
 
 

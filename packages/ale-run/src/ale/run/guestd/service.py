@@ -2,10 +2,11 @@
 
 The framework is installed into a disk offline, and a logon task can only be registered by
 a running Windows, so this service starts the framework instead. Windows starts it at boot
-as LocalSystem, installed as ``python.exe -I -S service.py <agent account>``. It waits for
-the agent to sign in, then starts guestd and Cua Driver on the agent's desktop with the
-account's elevated token, and starts them again when they exit. Agent commands are still
-launched unelevated by guestd itself (``windows.py``).
+as LocalSystem, on the framework's own Python: ``python.exe -I -S service.py <agent account>
+<runner address>``. It waits for the agent to sign in, then starts guestd, on the same
+Python, and Cua Driver on the agent's desktop with the account's elevated token, and starts
+them again when they exit. Agent commands are launched unelevated by guestd itself
+(``windows.py``).
 
 An offline write leaves the files it makes readable and writable by everyone, so the
 service first limits the framework's files to SYSTEM and Administrators.
@@ -237,7 +238,7 @@ class Service:
         self._run("icacls", root, "/setowner", owner)
         self._run("icacls", root, "/reset")
         self._run("icacls", root, "/inheritance:r", "/grant:r", *grant)
-        for name in ("guestd", "cua-driver", "framework"):
+        for name in ("guestd", "cua-driver", "python", "framework"):
             # Files written offline carry no access list; they now inherit the directory's.
             self._run("icacls", str(ROOT / name), "/setowner", owner, "/T")
             self._run("icacls", str(ROOT / name), "/reset", "/T")

@@ -72,10 +72,11 @@ framework is a Windows service instead. It is a registry key under the control s
 disk boots from, written into the SYSTEM hive with hivex, plus files copied into
 `C:\ProgramData\ALE`:
 
-- Checks first, from the hives alone (SAM for the account, SOFTWARE for automatic sign-in,
-  UAC and Python 3.12+ for all users): each failure names the one thing the disk lacks.
-  A disk left hibernated by Fast Startup cannot be written, and says so.
-- The service `ALEGuestd` runs `guestd/service.py` as LocalSystem. At boot it limits
+- Checks first, from the hives alone (SAM for the account, SOFTWARE for automatic sign-in
+  and UAC): each failure names the one thing the disk lacks. A disk left hibernated by
+  Fast Startup cannot be written, and says so.
+- The service `ALEGuestd` runs `guestd/service.py` as LocalSystem on the framework's own
+  Python, copied to `C:\ProgramData\ALE\python`, as is guestd. At boot it limits
   `C:\ProgramData\ALE` to the system and Administrators, because files written offline
   carry no access list and otherwise come out writable by everyone. It opens guestd's port
   to the runner's address only, waits for the agent's sign-in, and starts guestd and Cua

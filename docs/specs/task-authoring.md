@@ -283,13 +283,15 @@ in `task.yaml`; never depend on ambient Host configuration.
 `verify/run.sh` (or Windows `verify/run.ps1`) evaluates the final outcome and writes a JSON result containing `overall`. Verifier implementation
 conventionally lives in `verify/verify.py`; private references belong in `verify/assets/`.
 ALE runs the stage with `verify/` as cwd. Stage code and assets use ordinary relative paths;
-solver outputs use literal absolute paths. The verification image must expose system Python 3.12
-or newer. Before each verify entrypoint starts, ALE selects an existing compatible Python,
-stages `ale_verify` and its schema validator into that interpreter's site-packages, checks
-the import, then sets `ALE_VERIFY_PYTHON` in the entrypoint's process environment.
+solver outputs use literal absolute paths. Before each verify entrypoint starts, ALE selects
+a Python 3.12+: the image's own when it has one, since that is where the Task installs what
+`verify.py` imports, and otherwise the framework's own. It stages `ale_verify` and its
+schema validator into that interpreter's site-packages, checks the import, then sets
+`ALE_VERIFY_PYTHON` in the entrypoint's process environment.
 It is available to verify and its child processes, including during `validate` and
 `reverify`; it is not initialized by the image build, setup stage, or SDK import.
-ALE does not install Python or replace the solver's default interpreter.
+ALE does not install Python into the image's environment or replace the solver's default
+interpreter.
 
 The Linux entry is:
 
