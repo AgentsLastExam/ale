@@ -32,7 +32,6 @@ from ale.run.framework import (
     MATERIALIZER_IMAGE,
     framed_disk,
     framework_identity,
-    install_on_windows,
     windows_framework_identity,
     with_framework,
 )
@@ -174,10 +173,15 @@ async def prepare_task_image_result(
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
             )
-        elif task.spec.os is OperatingSystem.LINUX:
+        else:
             image, reused = await _stage(
                 "framework-layer",
-                framed_disk(image, user=spec.user, sudo=task.spec.resources.sudo),
+                framed_disk(
+                    image,
+                    operating_system=task.spec.os,
+                    user=spec.user,
+                    sudo=task.spec.resources.sudo,
+                ),
             )
             steps.append(
                 ImagePreparationStep(
@@ -270,9 +274,12 @@ async def prepare_verifier_image_result(
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
             )
-        elif task.spec.os is OperatingSystem.LINUX:
+        else:
             image, reused = await _stage(
-                "framework-layer", framed_disk(image, user=verify.image.user, sudo=False)
+                "framework-layer",
+                framed_disk(
+                    image, operating_system=task.spec.os, user=verify.image.user, sudo=False
+                ),
             )
             steps.append(
                 ImagePreparationStep(
@@ -608,8 +615,6 @@ async def _build_windows_image(
         )
         if not result.ok:
             raise ProviderStartError(f"could not remove image build inputs: {result.stderr}")
-        # After the Task's script, so nothing it installs replaces the framework's pieces.
-        await install_on_windows(sandbox, user=user)
         await sandbox.save_image(output)
     finally:
         await asyncio.shield(sandbox.destroy())

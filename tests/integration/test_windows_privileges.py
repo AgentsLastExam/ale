@@ -26,7 +26,7 @@ async def test_windows_framework_copies_protected_artifacts_and_verifies_as_admi
 ) -> None:
     image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to a Windows disk with the current framework")
+        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to an ALE Windows base disk")
     task = tmp_path / "task"
     for stage in ("setup", "oracle", "verify"):
         (task / stage).mkdir(parents=True)

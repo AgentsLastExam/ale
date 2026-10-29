@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from ale.core.config import RunConfig
+from ale.core.taskspec import OperatingSystem
 from ale.core.verdict import Status
 from ale.run import task_images
 from ale.run.environments.standard import StandardEnvironment
@@ -52,7 +53,8 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     bare = tmp_path / "bare.qcow2"
     await task_images._materialize(built, bare)
     builder = MATERIALIZER_IMAGE
-    assert await framework_on_disk(bare, builder=builder) is None
+    linux = OperatingSystem.LINUX
+    assert await framework_on_disk(bare, operating_system=linux, builder=builder) is None
 
     def task_with_ref(name: str, disk: Path) -> Path:
         return write_repo(
@@ -66,7 +68,7 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     framed = Path(first.image.runtime_ref)
     assert framed != bare and first.image.resolved_reference == bare.as_uri()
     identity = framework_identity(user="user", sudo=False, vm=True)
-    assert await framework_on_disk(framed, builder=builder) == identity
+    assert await framework_on_disk(framed, operating_system=linux, builder=builder) == identity
 
     second = await prepare_task_image_result(load_tasks(task_path)[0], registry)
     assert _steps(second)["framework-layer"] == "reused"

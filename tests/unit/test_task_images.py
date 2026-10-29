@@ -12,7 +12,7 @@ from ale.core.errors import ProviderStartError, TaskDefinitionError
 from ale.core.ids import content_hash
 from ale.core.sandbox import ImageRef, PreparedTaskImage
 from ale.core.task import Task
-from ale.core.taskspec import ImageKind, VerifySpec
+from ale.core.taskspec import ImageKind, OperatingSystem, VerifySpec
 from ale.run.cli.tasks import _prepare_images
 from ale.run.task_images import (
     _materialize,
@@ -38,7 +38,9 @@ def framework_layer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         LAYERED.append((image, user, sudo, vm))
         return image
 
-    async def frame(image: PreparedTaskImage, *, user: str, sudo: bool) -> tuple:
+    async def frame(
+        image: PreparedTaskImage, *, operating_system: OperatingSystem, user: str, sudo: bool
+    ) -> tuple:
         LAYERED.append((image.runtime_ref, user, sudo, True))
         return image, False
 

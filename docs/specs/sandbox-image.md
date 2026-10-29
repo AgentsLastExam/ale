@@ -21,21 +21,24 @@ of the Task's own build or `image.ref` (the framework layer):
 - guestd, the guest service every sandbox operation goes through, under root-only
   `/opt/ale`, so it always speaks the protocol of the engine driving it;
 - Cua Driver at a pinned version, the one desktop capture and input implementation;
-- for a VM, the systemd unit that starts guestd at boot;
+- for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
+  Windows that also starts Cua Driver in the agent's session;
 - a check that the agent account exists, failing preparation if it does not;
 - working sudo for that account when the Task sets `resources.sudo: true`, installing sudo
   with the image's package manager when the image lacks it;
-- `/opt/ale/framework`, recording which framework the image carries.
+- a marker file recording which framework the image carries: `/opt/ale/framework` on
+  Linux, `C:\ProgramData\ALE\framework` on Windows.
 
-A Linux VM disk named by a qcow2 `ref` gets the same pieces, installed offline into a copy
-of the disk by the VM builder's libguestfs. Its small appliance VM, not the Host, runs the
-disk's own programs that the setup calls. Each copy is made once per disk and framework
+A VM disk named by a qcow2 `ref` gets the same pieces, installed offline into a copy of
+the disk by the VM builder's libguestfs, so nothing on the disk runs on the Host. On Linux
+its small appliance VM runs the disk's own programs that the setup calls; on Windows the
+install is file and registry edits only. Each copy is made once per disk and framework
 and then used directly, and a disk that already carries this framework, such as one ALE
 prepared, is used as it is.
 
-An image or Linux disk handed straight to a Provider, rather than prepared from a Task,
-gets the same layer from the Provider when it does not carry this framework, so every
-Linux sandbox runs the guestd of the engine driving it however it was made.
+An image or disk handed straight to a Provider, rather than prepared from a Task, gets the
+same layer from the Provider when it does not carry this framework, so every sandbox runs
+the guestd of the engine driving it however it was made.
 
 There are no image labels to declare. Whether a sandbox has a desktop is decided from the
 image's own configuration before anything starts: a VM has one when its systemd enables a
@@ -50,23 +53,25 @@ once its window manager or shell runs.
 ## What a Windows image needs
 
 A Windows Task builds `image/run.ps1` on an ALE Windows base. The base signs its agent
-account in to a desktop and starts the guestd it carries at that logon; this bootstrap
-guestd is how the build reaches the VM. After the Task's script, ALE installs its own
-pieces through it:
+account in to a desktop automatically, with UAC on and Python 3.12 or newer installed for
+all users, and carries none of the framework. ALE installs the framework offline into a
+copy of the base before the build VM boots, so the build talks to the same guestd as every
+later sandbox, and the Task's script cannot replace the framework's pieces:
 
-- the current guestd replaces the base's under `C:\ProgramData\ALE\guestd`;
-- Cua Driver at the pinned version under `C:\ProgramData\ALE\cua-driver`, started
-  elevated at the agent's logon so it can reach elevated windows;
-- a check that `image.user` names the account the base signs in.
+- the current guestd under `C:\ProgramData\ALE\guestd`, and Cua Driver at the pinned
+  version under `C:\ProgramData\ALE\cua-driver`;
+- a boot service, running as the system, that starts both in the agent's session with the
+  account's elevated token, so Cua Driver can reach elevated windows. The service limits
+  those files to the system and Administrators;
+- a check, before anything is written, that the disk has the agent account, signs exactly
+  that account in, keeps UAC on, has the Python and was shut down completely (not left
+  hibernated by Fast Startup), each failing with the one thing it lacks.
 
 Elevation for `resources.sudo` is granted per boot by the Host, not built into the disk.
 A Windows sandbox has a desktop for ALE to drive exactly when its image carries the
-framework's Cua Driver, so the Provider waits for a screenshot in every Task image and
-not in the bare base booted to build one. A disk used directly as `image.ref`, or handed
-straight to a Provider, is not prepared by ALE and must carry a current guestd and Cua
-Driver itself: the Windows framework can only be installed in a running guest, through a
-guestd the disk already carries
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#qemu)).
+framework's Cua Driver, so the Provider waits for a screenshot in every sandbox it boots.
+How the install works, and what it costs, is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#qemu).
 
 ## ALE base images
 
@@ -75,17 +80,17 @@ guestd the disk already carries
 - `vm-ubuntu24-base` provides Ubuntu 24.04, systemd, full GNOME/GDM and the `user`
   account for QEMU. It has no firewall of its own: network policy is enforced by the QEMU
   runner outside the guest ([security.md](security.md#1-a-sandbox-has-only-declared-ways-out)).
-- The private Windows 10 BYOL base provides a logged-in desktop, system Python, a bootstrap
-  guestd, WinGet, Chocolatey, and the runtimes required by autonomous agents.
+- The private Windows 10 BYOL base provides a logged-in desktop, system Python, WinGet,
+  Chocolatey, and the runtimes required by autonomous agents.
   Its licensed disk is not a public ALE artifact.
 
-No base carries Cua Driver, and only the Windows base carries guestd, as the bootstrap
-its Task builds talk to; ALE installs both when it prepares a Task image. The bases do not
-contain domain stacks, benchmark data, databases, robotics suites, or Task-specific tools.
+No base carries guestd or Cua Driver; ALE installs both when it prepares a Task image or
+boots a disk. The bases do not contain domain stacks, benchmark data, databases, robotics
+suites, or Task-specific tools.
 
 Repository sources are separated by responsibility: `images/base/` contains the three
 Task foundations, `images/builders/vm-materializer/` turns Linux VM OCI content into
-qcow2 and installs the framework into a Linux qcow2 named by reference, and
+qcow2 and installs the framework into a Linux or Windows qcow2 named by reference, and
 `images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM.
 
 ## Versions
@@ -190,9 +195,9 @@ recipe installs and pins ALE's cross-platform components, and `compact.sh` valid
 compresses the resulting qcow2. Episodes always cold-boot a fresh overlay. ALE creates no
 ready snapshot, warm pool, or environment server.
 
-Windows Task preparation boots a temporary VM from the resolved base, stages only
-`image/`, and executes `image/run.ps1` with network access for unattended installation.
-The image script has a one-hour budget for installation, integrity checks and extraction;
+Windows Task preparation boots a temporary VM from a framed copy of the resolved base,
+stages only `image/`, and executes `image/run.ps1` with network access for unattended
+installation. The image script has a one-hour budget for installation, integrity checks and extraction;
 Host-to-VM staging happens before that timer starts.
 ALE removes the build materials, shuts down the VM, and saves its configured qcow2.
 Reuse covers the whole build and is keyed by base, builder, scripts, and asset bytes;
@@ -337,8 +342,8 @@ Solver and oracle use the image's agent account. Windows guestd runs elevated in
 account's interactive session and launches agent commands with the desktop's limited
 token, unless the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a limited
 desktop session are required; the Provider checks both framework and agent privileges
-before Task execution. Rebuild older Windows Task images with the current framework;
-direct `image.ref` disks must already satisfy this contract. Linux configures requested
+before Task execution. A Windows Task image is rebuilt when the framework changes, and a
+direct `image.ref` disk is framed like any other. Linux configures requested
 sudo during image preparation. Grants, and their absence, are verified and recorded: a
 Linux sandbox is refused when its guest service is not root, when a requested grant does
 not work, or when an agent that did not request one is root or can use sudo. ALE does not pre-create
@@ -356,7 +361,7 @@ engine).
 
 | Guarantee | Enforced by | Conformance test |
 |---|---|---|
-| Every Linux sandbox runs the framework of the engine driving it, whatever image or disk it was handed; a Windows disk must already carry it | Provider in `create` | `test_a_sandbox_carries_the_engines_framework` |
+| Every sandbox runs the framework of the engine driving it, whatever image or disk it was handed | Provider in `create` | `test_a_sandbox_carries_the_engines_framework` |
 | Agent work runs as `image.user`, framework work as root or Administrator; the agent elevates exactly when `resources.sudo` asks | Provider check in `create`, both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |

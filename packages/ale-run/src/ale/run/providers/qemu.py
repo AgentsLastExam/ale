@@ -105,7 +105,7 @@ RUNNER_BASE = "/images/base.qcow2"
 GUEST_BRIDGE = "docker"
 
 #: Fixed address through which the guest reaches Host services exposed by the runner.
-HOST_IP = "172.30.0.1"
+HOST_IP = guestd.HOST_ADDRESS
 
 #: A guest boots an operating system, so this is minutes rather than the seconds a
 #: container takes.
@@ -890,16 +890,17 @@ class QemuProvider(Provider):
             raise
 
     async def _framed(self, resolved: ResolvedImage, request: SandboxRequest) -> ResolvedImage:
-        """Install the engine's framework into a Linux disk that was not prepared with it.
+        """Install the engine's framework into a disk that was not prepared with it.
 
         Task preparation frames the disk already; this covers a disk handed straight to
-        the Provider, so any Linux disk can serve as a sandbox, as any image can under
-        Docker. A Windows disk boots as it is: its framework is installed only by a
-        running image build, which boots the bare base through this Provider.
+        the Provider, so any VM disk can serve as a sandbox, as any image can under Docker.
         """
-        if request.os is not OperatingSystem.LINUX:
-            return resolved
-        framed, _ = await framed_disk(request.prepared_image, user=request.user, sudo=request.sudo)
+        framed, _ = await framed_disk(
+            request.prepared_image,
+            operating_system=request.os,
+            user=request.user,
+            sudo=request.sudo,
+        )
         if framed == request.prepared_image:
             return resolved
         return resolved.model_copy(
