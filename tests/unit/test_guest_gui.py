@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -37,3 +38,26 @@ def test_cua_driver_is_the_only_gui_backend(monkeypatch: pytest.MonkeyPatch) -> 
         ("get_screen_size", {}),
         ("click", {"x": 100, "y": 50, "scope": "desktop", "button": "left", "count": 1}),
     ]
+
+
+def _program(path: Path, subsystem: int) -> Path:
+    """A file with just the PE header fields the Windows launcher reads."""
+    header = bytearray(0x200)
+    header[0x3C:0x40] = (0x80).to_bytes(4, "little")
+    header[0x80 + 0x5C : 0x80 + 0x5E] = subsystem.to_bytes(2, "little")
+    path.write_bytes(bytes(header))
+    path.chmod(0o755)
+    return path
+
+
+def test_only_console_programs_start_with_a_hidden_window(tmp_path: Path) -> None:
+    from ale.run.guestd import windows
+
+    _program(tmp_path / "notepad.exe", 2)
+    _program(tmp_path / "git.exe", 3)
+    (tmp_path / "npm.cmd").write_text("@echo off\n")
+    env = {"PATH": str(tmp_path)}
+    assert not windows._console_program(str(tmp_path / "notepad.exe"), env)
+    assert windows._console_program(str(tmp_path / "git.exe"), env)
+    assert windows._console_program(str(tmp_path / "npm.cmd"), env)
+    assert windows._console_program("missing.exe", env)
