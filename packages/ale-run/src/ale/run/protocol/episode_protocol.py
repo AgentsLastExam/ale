@@ -258,16 +258,14 @@ def _powershell_list(values: Sequence[str]) -> str:
 class Resume:
     """Continue an earlier episode in its retained solver instead of launching anew.
 
-    ``attach`` reconnects the retained Sandbox for this episode's request; ``trajectory``
-    is the earlier episode's, which tells where this episode's part of the native session
-    begins. ``gateway_port`` is the port the retained Sandbox was given for the Gateway,
-    where the run serves its own, since an agent may keep its endpoint in its session.
+    ``trajectory`` is the earlier episode's, which tells where this episode's part of the
+    native session begins. A kept solver is reconnected for this episode's request by
+    ``attach``; a snapshot, named by ``source.handle``, boots a new solver.
     """
 
     source: ResumedFrom
-    attach: Callable[[SandboxRequest], Awaitable[Sandbox]]
     trajectory: AtifTrajectory | None
-    gateway_port: int | None = None
+    attach: Callable[[SandboxRequest], Awaitable[Sandbox]] | None = None
 
 
 class EpisodeProtocol:
@@ -374,18 +372,31 @@ class EpisodeProtocol:
             sudo=spec.resources.sudo,
             user=spec.image.user,
         )
-        if self.resume is None:
+        resume = self.resume
+        if resume is None:
             sandbox = await ctx.sandboxes.acquire(request)
+        elif resume.attach is None:
+            sandbox = await ctx.sandboxes.acquire(
+                request.model_copy(update={"snapshot": resume.source.handle})
+            )
+            holder = await _agent_episode(sandbox, spec.os)
+            if holder != resume.source.episode_id:
+                raise ProviderCapabilityError(
+                    f"snapshot {resume.source.handle} holds "
+                    + (f"episode {holder}'s" if holder else "no recorded episode's")
+                    + f" agent state, not {resume.source.episode_id}'s"
+                )
         else:
-            resume = self.resume
+            attach_retained = resume.attach
 
             async def attach(request: SandboxRequest) -> Sandbox:
                 # Checked before the lease owns it: a refused Sandbox is not ours to destroy.
-                attached = await resume.attach(request)
+                attached = await attach_retained(request)
                 await _require_agent_episode(attached, spec.os, resume.source.episode_id)
                 return attached
 
             sandbox = await ctx.sandboxes.adopt(request, attach)
+        if resume is not None:
             # Claimed before anything changes it, so the earlier episode's records no
             # longer lead to this Sandbox, whatever happens to this episode.
             await _write_agent_episode(sandbox, spec.os, ctx.episode_id)
@@ -1439,6 +1450,13 @@ async def _write_agent_episode(
     await sandbox.write_file(_agent_episode_path(operating_system), episode_id.encode())
 
 
+async def _agent_episode(sandbox: Sandbox, operating_system: OperatingSystem) -> str | None:
+    try:
+        return (await sandbox.read_file(_agent_episode_path(operating_system))).decode()
+    except Exception:
+        return None
+
+
 async def _require_agent_episode(
     sandbox: Sandbox, operating_system: OperatingSystem, episode_id: str
 ) -> None:
@@ -1447,12 +1465,7 @@ async def _require_agent_episode(
     Once a later episode continued it, the earlier episode's handle no longer describes it.
     A refused Sandbox is left retained as it was, only disconnected.
     """
-    try:
-        holder: str | None = (
-            await sandbox.read_file(_agent_episode_path(operating_system))
-        ).decode()
-    except Exception:
-        holder = None
+    holder = await _agent_episode(sandbox, operating_system)
     if holder == episode_id:
         return
     await sandbox.retain(roles=("solver",), reason="refused: it holds another episode's state")

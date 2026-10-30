@@ -121,13 +121,18 @@ and gives to the framework alone before every attempt. The solver interpreter is
 ### Teardown and retention
 
 Solver and verifier retention are independent run policies and default to `destroy`.
-Before a requested keep, ALE removes every stage of the Task (setup, tests with their
-Judge state, the solution), the verifier directory and known credentials, so a kept
-solver holds only the agent's own state.
+`keep` leaves the Sandbox running. The solver may instead request `snapshot`: once the
+episode is scored its disk is saved and the Sandbox destroyed, and any number of later
+Sandboxes boot from the snapshot. A snapshot holds no processes, memory or desktop session,
+so follow-ups that need them keep the Sandbox. A Provider that cannot save snapshots
+refuses the request before anything is provisioned.
+Before either, ALE removes every stage of the Task (setup, tests with their Judge state,
+the solution), the verifier directory and known credentials, so a kept solver or a
+snapshot holds only the agent's own state.
 Subscription credentials never enter the Sandbox, so retention does not add a provider
 credential cleanup step. Failure of other required sanitation still forces destruction.
 Result and RunLock record the requested policy, actual Provider outcome, retained handle,
-cleanup command, any reason, and the Gateway port a retained Sandbox was given.
+cleanup command and any reason.
 
 ## Reverification
 
@@ -147,21 +152,25 @@ for verifier and review use and records its own verification, result, execution 
 ## Continuation
 
 `ale run TASK --continue-from EPISODE_DIR` gives the Task's instruction to the agent of an
-earlier episode whose solver was kept, in that Sandbox and native session, for follow-up
-turns on one workspace. The earlier episode must have retained its solver and recorded a
-`continuation`. The run uses the same Harness at the same CLI version, and the Task the same
-prepared solver image, resources and verification mode, because a running Sandbox keeps
-its image, allocation and role. It also keeps the Gateway address it was given, which an
-agent may hold in its native session: the run serves its Gateway on that port and fails
-if the port is taken. The model, settings, instruction and verification may differ; the
-RunLock records this episode's own and names the earlier one in `resumed_from`.
+earlier episode whose solver was kept or snapshotted, in that Sandbox or one booted from
+the snapshot, and in that native session, for follow-up turns on one workspace. The
+earlier episode must have retained its solver and recorded a `continuation`. The run uses
+the same Harness at the same CLI version, and the Task the same prepared solver image. A
+kept solver also needs the same resources and verification mode, because a running
+Sandbox keeps its allocation and role; one booted from a snapshot takes the Task's. The
+model, settings, instruction and verification may differ; the RunLock records this
+episode's own and names the earlier one in `resumed_from`. The agent finds this run's
+Gateway at the address it was given, since every Sandbox reaches its Gateway at the same
+one.
 
-The episode adopts the retained solver, so its own retention decides the solver's fate,
-and keeping it again lets a further episode continue. Setup runs again, the Harness finds
-its CLI in place and is given this episode's Gateway session, the Sandbox is sealed, and
-the Harness resumes the native session with the instruction instead of launching. Verification and
-recording are unchanged. A continuation is not retried: its attempt already changed the
-solver. With shared verification the next agent starts from the state verification left;
+A kept solver is adopted, so the episode's own retention decides its fate, and keeping it
+again lets a further episode continue. A snapshot is left as it was, so it can be
+continued any number of times, concurrently. Setup runs again, the Harness finds its CLI
+in place and is given this episode's Gateway session, the Sandbox is sealed, and the
+Harness resumes the native session with the instruction instead of launching.
+Verification and recording are unchanged. A continuation of a kept solver is not retried,
+since its attempt already changed the solver; one from a snapshot is retried like any
+episode. With shared verification the next agent starts from the state verification left;
 separate verification releases the solver first, so it holds only the agent's work.
 
 `ale reverify --episode-retries N` (or `--set episode_retries=N`) retries incomplete

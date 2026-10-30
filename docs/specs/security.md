@@ -296,13 +296,13 @@ not make arbitrary remote MCP authentication implicit; that remains a separate c
 ## 9. Native continuation follows the retained solver
 
 A native continuation names the harness and the exact native session ID. Resume sends
-only the new instruction and selects that exact session, in the episode's own Sandbox or
-in a retained solver a later episode adopted. Continuation fails when the native state is
+only the new instruction and selects that exact session, in the episode's own Sandbox, in
+a retained solver a later episode adopted, or in one booted from its snapshot. Continuation fails when the native state is
 absent or belongs to another harness. There is no "latest session" selector, transcript
 replay fallback, or copying of native state between Sandboxes.
 
-A retained solver records the episode whose agent state it holds. Reverification and
-continuation attach only for that episode, and a continuing episode claims the solver
+A retained solver or snapshot records the episode whose agent state it holds.
+Reverification and continuation use it only for that episode, and a continuing episode claims the solver
 before its agent starts, so an earlier record never leads to a Sandbox a later agent
 changed.
 
@@ -318,10 +318,10 @@ before a Judge changes the live workspace.
 ## 11. Debug retention is explicit and sanitized
 
 Run configuration, not Task content, decides whether solver and verifier sandboxes are
-destroyed or retained. Default is destroy. Before a kept sandbox receives a durable
-handle, required evidence capture finishes, every stage of its Task (setup, tests and
-the solution), the verifier directory and known credentials are removed, and episode
-capabilities are revoked.
+destroyed, kept, or (the solver) saved as a snapshot. Default is destroy. Before a kept
+sandbox or a snapshot receives a durable handle, required evidence capture finishes, every
+stage of its Task (setup, tests and the solution), the verifier directory and known
+credentials are removed, and episode capabilities are revoked.
 A later episode may hand the solver to another evaluated agent, which must not find
 verification there. Subscription credentials stay in the
 checkout-local Host profile and therefore require no retained-Sandbox cleanup.
@@ -329,8 +329,9 @@ checkout-local Host profile and therefore require no retained-Sandbox cleanup.
 Every Docker sandbox, QEMU runner and Daytona sandbox is labeled with ALE ownership,
 episode, role and requested retention (Docker and QEMU also with allocated GPU identity).
 Daytona's organization may be shared, so listing and destroying act only on sandboxes that
-carry ALE's labels. Retained resources remain discoverable
-through `ale sandbox list` and removable only through a validated ALE-managed handle.
+carry ALE's labels, and every snapshot records the same. Retained sandboxes and snapshots
+remain discoverable through `ale sandbox list` and removable only through a validated
+ALE-managed handle.
 Live labels also prevent a retained GPU from being assigned to another ALE sandbox.
 Retention does not change rewards or verification records.
 

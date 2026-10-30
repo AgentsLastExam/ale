@@ -45,15 +45,14 @@ class SandboxOutcome(BaseModel):
     model_config = _STRICT
 
     roles: tuple[Literal["solver", "verifier"], ...]
-    requested: Literal["destroy", "keep"]
-    outcome: Literal["destroyed", "retained", "retention-failed"]
+    requested: Literal["destroy", "keep", "snapshot"]
+    outcome: Literal["destroyed", "retained", "snapshotted", "retention-failed"]
+    """``snapshotted``: the Sandbox was destroyed after its disk was saved as ``handle``."""
     provider: str
     handle: str | None = None
     reason: str | None = None
     cleanup_command: str | None = None
     gpu_devices: tuple[str, ...] = ()
-    #: The Gateway port a retained Sandbox was given; a continuation serves its Gateway there.
-    gateway_port: int | None = None
 
 
 class ResultRecord(BaseModel):

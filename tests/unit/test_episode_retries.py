@@ -233,7 +233,6 @@ async def test_runtime_cleans_sandboxes_for_late_failure_and_cancellation(
     task.prepared_image = task.prepared_verifier_image = image
     sandbox = SimpleNamespace(
         sandbox_id="sandbox",
-        request=SimpleNamespace(gateway_url=None),
         destroy=AsyncMock(),
         retain=AsyncMock(
             return_value=RetainedSandbox(

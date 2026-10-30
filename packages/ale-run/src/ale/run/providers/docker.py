@@ -24,6 +24,7 @@ from urllib.parse import quote, urlsplit
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
+    SANDBOX_GATEWAY_PORT,
     Capabilities,
     ExecOutputSink,
     ExecResult,
@@ -66,7 +67,11 @@ MANAGED_LABEL = "ale.managed"
 ROLE_LABEL = "ale.role"
 RETENTION_LABEL = "ale.retention"
 GPU_LABEL = "ale.gpus"
+PREPARED_LABEL = "ale.prepared"
 HANDLE_PREFIX = "docker:"
+#: A snapshot is a local image in this repository, tagged with its Sandbox's ID.
+SNAPSHOT_REPOSITORY = "ale-snapshot"
+SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
 
 #: The name a sandbox uses for its gateway. It is mapped to the host's address *on the
 #: container's own bridge* rather than to docker's usual host-gateway: an ``--internal``
@@ -74,6 +79,10 @@ HANDLE_PREFIX = "docker:"
 #: sandbox's own subnet. That is the provider's half of the deny-all bargain — no route
 #: off the host, and exactly one destination still reachable.
 HOST_ALIAS = "ale-gateway.internal"
+
+#: The nat chain, in a sandbox's own network namespace, that sends the fixed Gateway port
+#: to the port the Host serves the Gateway on.
+GATEWAY_CHAIN = "ALE_GATEWAY"
 
 _NVIDIA_QUERY = "uuid,name,pci.bus_id,driver_version"
 _HOST_NVIDIA_QUERY = f"index,{_NVIDIA_QUERY}"
@@ -247,7 +256,7 @@ class DockerSandbox(Sandbox):
         URL is rewritten here rather than in the gateway — which is exactly the point of
         the gateway knowing nothing about providers.
         """
-        return _reachable(self.request.gateway_url)
+        return _sandbox_gateway(self.request.gateway_url)
 
     async def exec(
         self,
@@ -375,6 +384,41 @@ class DockerSandbox(Sandbox):
             gpu_devices=gpu_devices,
         )
 
+    async def snapshot(
+        self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
+    ) -> RetainedSandbox:
+        """Stop the container and commit its filesystem as a labelled local image.
+
+        A sandbox mounts no volumes, so the commit holds all of its files. The image keeps
+        the container's labels and command; a snapshot holds no GPU.
+        """
+        await asyncio.gather(
+            self._client.close(), self._file_client.close(), return_exceptions=True
+        )
+        code, _, stderr = await _docker("stop", "--time", "30", self.container, timeout=120)
+        if code != 0:
+            raise ProviderStartError(f"could not stop {self.container}: {stderr.strip()}")
+        code, _, stderr = await _docker(
+            "commit",
+            "--change", f"LABEL {RETENTION_LABEL}=snapshot",
+            "--change", f'LABEL {GPU_LABEL}=""',
+            "--change", f"LABEL {PREPARED_LABEL}={self.request.prepared_image.prepared_identity}",
+            self.container,
+            f"{SNAPSHOT_REPOSITORY}:{self.sandbox_id}",
+            timeout=1800,
+        )  # fmt: skip
+        if code != 0:
+            raise ProviderStartError(f"could not commit {self.container}: {stderr.strip()}")
+        handle = f"{SNAPSHOT_PREFIX}{self.sandbox_id}"
+        return RetainedSandbox(
+            provider="docker",
+            handle=handle,
+            episode_id=self.request.episode_id,
+            roles=roles,
+            reason=reason,
+            cleanup_command=f"ale sandbox destroy {handle}",
+        )
+
 
 class DockerProvider(Provider):
     """Supplies container sandboxes."""
@@ -399,6 +443,7 @@ class DockerProvider(Provider):
             operating_systems=frozenset({OperatingSystem.LINUX}),
             gui=True,  # depends on the image; the GUI base image provides a desktop
             network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.ALLOWLIST, NetworkMode.OPEN}),
+            snapshot=True,
         )
 
     async def preflight(self) -> None:
@@ -437,14 +482,17 @@ class DockerProvider(Provider):
                     + ", ".join(str(index) for index in unknown)
                 )
             candidates = tuple(host_devices[index].id for index in configured)
-        resolved_image = await resolve_prepared_container_image(request.prepared_image)
-        if problems := await self.check_image(resolved_image.observed_ref):
-            raise ProviderCapabilityError(
-                f"{request.prepared_image.runtime_ref} cannot serve as a sandbox: "
-                f"{'; '.join(problems)}. "
-                "See docs/specs/sandbox-image.md"
-            )
-        resolved_image = await self._framed(resolved_image, request)
+        if request.snapshot is not None:
+            resolved_image = await self._snapshot_image(request.snapshot, request)
+        else:
+            resolved_image = await resolve_prepared_container_image(request.prepared_image)
+            if problems := await self.check_image(resolved_image.observed_ref):
+                raise ProviderCapabilityError(
+                    f"{request.prepared_image.runtime_ref} cannot serve as a sandbox: "
+                    f"{'; '.join(problems)}. "
+                    "See docs/specs/sandbox-image.md"
+                )
+            resolved_image = await self._framed(resolved_image, request)
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         container = f"ale-{sandbox_id}"
@@ -467,7 +515,7 @@ class DockerProvider(Provider):
             host_ip = await self._bridge_host_ip(network)
             argv += ["--add-host", f"{HOST_ALIAS}:{host_ip}"]
             if request.gateway_url:
-                argv += ["-e", f"ALE_GATEWAY_URL={_reachable(request.gateway_url)}"]
+                argv += ["-e", f"ALE_GATEWAY_URL={_sandbox_gateway(request.gateway_url)}"]
             if request.proxy_url:
                 request = request.model_copy(
                     update={"proxy_url": _reachable(request.proxy_url, host=host_ip)}
@@ -531,8 +579,7 @@ class DockerProvider(Provider):
                     )
                 runtime_identity = f"docker-engine/{version.strip()}"
 
-            if network:
-                await self._restrict_host(container, network, request)
+            await self._wire_host(container, network, request)
             agent_user = request.user
             client = await self._connect(container, agent_user)
             clients.append(client)
@@ -635,38 +682,62 @@ class DockerProvider(Provider):
             raise ProviderStartError(f"could not create isolated network: {stderr.strip()}")
         return network
 
-    async def _restrict_host(
-        self, container: str, network: str, request: SandboxRequest, *, reattached: bool = False
+    async def _wire_host(
+        self,
+        container: str,
+        network: str | None,
+        request: SandboxRequest,
+        *,
+        reattached: bool = False,
     ) -> None:
-        """Let an isolated sandbox reach only its own Gateway and proxy ports on the host.
+        """Route the fixed Gateway port to the Host, and confine an isolated sandbox to it.
+
+        A short-lived helper with NET_ADMIN joins the sandbox's network namespace. The
+        sandbox itself never holds NET_ADMIN, so neither its agent nor root inside it can
+        lift the rules. Failure stops provisioning.
+
+        The Gateway is dialled at :data:`SANDBOX_GATEWAY_PORT` and forwarded to the port the
+        Host serves it on, in a chain of its own that a later run's Gateway replaces.
 
         An internal bridge has no route off the host, but the host's own address on it
         answers on every port a host service binds to all interfaces: sshd, databases,
-        another run's Gateway. A short-lived helper with NET_ADMIN joins the sandbox's
-        network namespace and rejects every connection to that address except the
-        episode's ports. The sandbox itself never holds NET_ADMIN, so neither its agent
-        nor root inside it can lift the rules. Failure stops provisioning.
-
-        A retained sandbox reattached by a later run keeps its rules and gains that run's
-        ports, inserted ahead of the rejection.
+        another run's Gateway. Every connection to that address is rejected except the
+        episode's ports. A retained sandbox reattached by a later run keeps its rules and
+        gains that run's ports, inserted ahead of the rejection.
         """
-        host_ip = await self._bridge_host_ip(network)
-        ports = sorted(
-            {port for url in (request.gateway_url, request.proxy_url) if (port := _url_port(url))}
-        )
-        if reattached and not ports:
+        port = _url_port(request.gateway_url)
+        routed = bool(port) and _sandbox_gateway(request.gateway_url) != request.gateway_url
+        if not routed and not network:
             return
-        position = "-I OUTPUT 1" if reattached else "-A OUTPUT"
-        rules = (
-            [
-                f"iptables -w {position} -d {host_ip} -p tcp -m multiport "
-                f"--dports {','.join(ports)} -j ACCEPT"
+        host_ip = await self._bridge_host_ip(network)
+        rules: list[str] = []
+        if routed:
+            rules += [
+                f"{{ iptables -w -t nat -N {GATEWAY_CHAIN} || "
+                f"iptables -w -t nat -F {GATEWAY_CHAIN}; }}",
+                f"{{ iptables -w -t nat -C OUTPUT -j {GATEWAY_CHAIN} || "
+                f"iptables -w -t nat -A OUTPUT -j {GATEWAY_CHAIN}; }}",
+                f"iptables -w -t nat -A {GATEWAY_CHAIN} -d {host_ip} -p tcp "
+                f"--dport {SANDBOX_GATEWAY_PORT} -j DNAT --to-destination {host_ip}:{port}",
             ]
-            if ports
-            else []
-        )
-        if not reattached:
-            rules.append(f"iptables -w -A OUTPUT -d {host_ip} -j REJECT")
+        if network:
+            ports = sorted(
+                {
+                    port
+                    for url in (request.gateway_url, request.proxy_url)
+                    if (port := _url_port(url))
+                }
+            )
+            position = "-I OUTPUT 1" if reattached else "-A OUTPUT"
+            if ports:
+                rules.append(
+                    f"iptables -w {position} -d {host_ip} -p tcp -m multiport "
+                    f"--dports {','.join(ports)} -j ACCEPT"
+                )
+            if not reattached:
+                rules.append(f"iptables -w -A OUTPUT -d {host_ip} -j REJECT")
+        if not rules:
+            return
         code, _, stderr = await _docker(
             "run", "--rm", "--network", f"container:{container}", "--cap-add", "NET_ADMIN",
             "--entrypoint", "sh", NETFILTER_IMAGE, "-c", " && ".join(rules),
@@ -674,17 +745,16 @@ class DockerProvider(Provider):
         )  # fmt: skip
         if code != 0:
             raise ProviderStartError(
-                f"could not restrict the sandbox's access to the host: {stderr.strip()}"
+                f"could not route the sandbox's access to the host: {stderr.strip()}"
             )
 
     async def _bridge_host_ip(self, network: str | None) -> str:
-        """The host's address on a container's network.
+        """The host's address on a container's network, the default bridge's for ``None``.
 
         On an isolated bridge this is the only host address a sandbox can dial, which is
         why it is read from the network rather than assumed.
         """
-        if network is None:
-            return "host-gateway"
+        network = network or "bridge"
         code, out, stderr = await _docker(
             "network", "inspect", network, "--format", "{{(index .IPAM.Config 0).Gateway}}"
         )
@@ -833,13 +903,13 @@ class DockerProvider(Provider):
         if code != 0:
             raise ProviderStartError(f"could not list ALE sandboxes: {stderr.strip()}")
         handles = output.split()
+        found = await self._list_snapshots()
         if not handles:
-            return []
+            return found
         code, raw, stderr = await _docker("inspect", *handles, timeout=30)
         if code != 0:
             raise ProviderStartError(f"could not inspect ALE sandboxes: {stderr.strip()}")
         records = json.loads(raw)
-        found: list[dict[str, object]] = []
         for record in records:
             labels = record.get("Config", {}).get("Labels", {}) or {}
             gpu = tuple(filter(None, labels.get(GPU_LABEL, "").split(",")))
@@ -859,7 +929,61 @@ class DockerProvider(Provider):
             )
         return sorted(found, key=lambda item: str(item["handle"]))
 
+    async def _list_snapshots(self) -> list[dict[str, object]]:
+        code, output, stderr = await _docker(
+            "images",
+            "--filter",
+            f"reference={SNAPSHOT_REPOSITORY}:*",
+            "--format",
+            "{{.Tag}}",
+            timeout=30,
+        )
+        if code != 0:
+            raise ProviderStartError(f"could not list ALE snapshots: {stderr.strip()}")
+        found: list[dict[str, object]] = []
+        for tag in output.split():
+            handle = f"{SNAPSHOT_PREFIX}{tag}"
+            try:
+                labels, identity = await _snapshot_record(handle)
+            except ProviderCapabilityError:
+                continue  # tagged by hand, not by ALE
+            found.append(
+                {
+                    "provider": "docker",
+                    "handle": handle,
+                    "episode": labels.get(LABEL, ""),
+                    "role": labels.get(ROLE_LABEL, ""),
+                    "image": identity,
+                    "gpus": (),
+                    "running": False,
+                    "cleanup_command": f"ale sandbox destroy {handle}",
+                }
+            )
+        return found
+
+    async def _snapshot_image(self, handle: str, request: SandboxRequest) -> ResolvedImage:
+        """The snapshot a Sandbox boots from, which must come from the Task's prepared image."""
+        labels, identity = await _snapshot_record(handle)
+        if labels.get(PREPARED_LABEL) != request.prepared_image.prepared_identity:
+            raise ProviderCapabilityError(
+                f"{handle!r} was not taken from the Task's prepared solver image"
+            )
+        return ResolvedImage(
+            kind=ImageKind.CONTAINER,
+            prepared_identity=request.prepared_image.prepared_identity,
+            observed_identity=identity,
+            observed_ref=identity,
+        )
+
     async def destroy_retained(self, handle: str) -> None:
+        if handle.startswith(SNAPSHOT_PREFIX):
+            await _snapshot_record(handle)
+            reference = _snapshot_reference(handle)
+            # Not forced: a sandbox booted from the snapshot still uses its layers.
+            code, _, stderr = await _docker("rmi", reference, timeout=120)
+            if code != 0:
+                raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
+            return
         if not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
         container = handle.removeprefix(HANDLE_PREFIX)
@@ -886,9 +1010,10 @@ class DockerProvider(Provider):
         handle: str,
         request: SandboxRequest,
         allocation: ResourceAllocation,
+        image: ResolvedImage,
     ) -> DockerSandbox:
         """Reconnect to a running retained container without taking ownership of it."""
-        if not handle.startswith(HANDLE_PREFIX):
+        if handle.startswith(SNAPSHOT_PREFIX) or not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
         container = handle.removeprefix(HANDLE_PREFIX)
         code, raw, stderr = await _docker("inspect", container, timeout=30)
@@ -906,8 +1031,7 @@ class DockerProvider(Provider):
         if not record.get("State", {}).get("Running"):
             raise ProviderStartError(f"retained sandbox {handle!r} is not running")
 
-        resolved = await resolve_prepared_container_image(request.prepared_image)
-        if record.get("Image") != resolved.observed_identity:
+        if record.get("Image") != image.observed_identity:
             raise ProviderCapabilityError(f"{handle!r} does not use the expected solver image")
         networks = tuple(
             name
@@ -916,8 +1040,9 @@ class DockerProvider(Provider):
         )
         if len(networks) > 1:
             raise ProviderCapabilityError(f"{handle!r} has more than one ALE network")
-        if networks:
-            await self._restrict_host(container, networks[0], request, reattached=True)
+        await self._wire_host(
+            container, networks[0] if networks else None, request, reattached=True
+        )
         agent_user = request.user
         client = await self._connect(container, agent_user)
         try:
@@ -933,16 +1058,47 @@ class DockerProvider(Provider):
             network=networks[0] if networks else None,
             client=client,
             file_client=file_client,
-            resolved_image=resolved,
+            resolved_image=image,
             allocation=allocation,
             agent_user=agent_user,
             agent_home=agent_home,
         )
 
 
+def _snapshot_reference(handle: str) -> str:
+    if not handle.startswith(SNAPSHOT_PREFIX):
+        raise ProviderCapabilityError(f"{handle!r} is not a Docker snapshot handle")
+    return f"{SNAPSHOT_REPOSITORY}:{handle.removeprefix(SNAPSHOT_PREFIX)}"
+
+
+async def _snapshot_record(handle: str) -> tuple[dict[str, str], str]:
+    """A snapshot's labels and image identity, once it is shown to be ALE's."""
+    code, raw, stderr = await _docker("image", "inspect", _snapshot_reference(handle), timeout=30)
+    if code != 0:
+        raise ProviderStartError(f"snapshot {handle!r} does not exist: {stderr.strip()}")
+    record = json.loads(raw)[0]
+    labels = record.get("Config", {}).get("Labels", {}) or {}
+    if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "snapshot":
+        raise ProviderCapabilityError(f"{handle!r} is not an ALE snapshot")
+    return labels, str(record.get("Id", ""))
+
+
 def _url_port(url: str | None) -> str:
     port = urlsplit(url).port if url else None
     return str(port) if port else ""
+
+
+def _sandbox_gateway(url: str | None) -> str | None:
+    """The Gateway as every container dials it: the Host's alias at the fixed port.
+
+    A Gateway elsewhere than on this Host is left as it is.
+    """
+    if not url:
+        return url
+    parts = urlsplit(url)
+    if parts.hostname not in {"0.0.0.0", "127.0.0.1", "localhost", "::"}:
+        return url
+    return parts._replace(netloc=f"{HOST_ALIAS}:{SANDBOX_GATEWAY_PORT}").geturl()
 
 
 def _reachable(url: str | None, *, host: str = HOST_ALIAS) -> str | None:

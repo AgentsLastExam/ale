@@ -17,7 +17,14 @@ from ale.core.harness import EffectiveAgentResources, Harness
 from ale.core.ids import content_hash, task_component
 from ale.core.lock import AssetProvenance, ResumedFrom, RunLock
 from ale.core.result import ResultRecord
-from ale.core.sandbox import ImageKind, PreparedTaskImage, Sandbox, SandboxRequest, SandboxRole
+from ale.core.sandbox import (
+    ImageKind,
+    PreparedTaskImage,
+    ResolvedImage,
+    Sandbox,
+    SandboxRequest,
+    SandboxRole,
+)
 from ale.core.task import Stage, TaskAssetObservation
 from ale.core.taskspec import VerificationMode
 from ale.core.trajectory import AtifTrajectory
@@ -265,11 +272,9 @@ async def _run_one(
     needs_model = settings.agent.name not in {"oracle", "nop"}
 
     if needs_model:
-        # A kept Sandbox keeps the Gateway address it was given.
-        port = (resume.gateway_port if resume is not None else None) or 0
         if authentication.mode == "subscription":
             assert subscription is not None
-            gateway = Gateway(subscription=subscription, host=_gateway_host(), port=port)
+            gateway = Gateway(subscription=subscription, host=_gateway_host())
         else:
             try:
                 api_key, upstream = provider_credentials(
@@ -285,13 +290,8 @@ async def _run_one(
                 upstream=upstream,
                 dialect=settings.gateway.dialect,
                 host=_gateway_host(),
-                port=port,
             )
-        try:
-            gateway_url = await _start_gateway(gateway)
-        except AleError as error:
-            typer.echo(f"{error}", err=True)
-            return EXIT_BAD_REFERENCE
+        gateway_url = await gateway.start()
         limits = Limits(
             **{
                 key: None if value == "unlimited" else value
@@ -367,9 +367,13 @@ async def _run_one(
             ledger.mark_running(episode_id)
             result = await run_episode_with_retries(
                 execute,
-                # A continuation changes the retained solver it adopts; another attempt
-                # would start from a different state.
-                retries=0 if resume is not None else settings.episode_retries,
+                # A continuation changes the kept solver it adopts; another attempt would
+                # start from a different state. A snapshot stays as it was.
+                retries=(
+                    0
+                    if resume is not None and resume.attach is not None
+                    else settings.episode_retries
+                ),
                 on_retry=_report_retry,
             )
         ledger.finish_episode(result.episode_id, result.record)
@@ -707,7 +711,7 @@ def _continuation(
         (
             sandbox
             for sandbox in result.sandboxes
-            if "solver" in sandbox.roles and sandbox.outcome == "retained"
+            if "solver" in sandbox.roles and sandbox.outcome in {"retained", "snapshotted"}
         ),
         None,
     )
@@ -716,24 +720,29 @@ def _continuation(
         raise TaskDefinitionError(
             f"episode {result.episode_id} left no retained solver and native session"
         )
-    # The native session is read by the same program; the Sandbox is the Task's image as
-    # the earlier agent left it, and a running Sandbox keeps its resources and its role.
-    recorded_and_current = {
+    kept = retained.outcome == "retained"
+    # The native session is read by the same program, and the Sandbox is the Task's image
+    # as the earlier agent left it. A running Sandbox also keeps its resources and its
+    # role; one booted from a snapshot takes this Task's.
+    recorded_and_current: dict[str, tuple[object, object]] = {
         "harness": (result.continuation.harness, harness.name),
         "CLI version": (lock.agent.version, harness.version()),
         "prepared solver image": (
             lock.image.prepared_identity,
             task.prepared_image.prepared_identity if task.prepared_image is not None else None,
         ),
-        "resources": (
-            lock.resources.requested if lock.resources is not None else None,
-            task.spec.resources,
-        ),
-        "verification mode": (
-            "verifier" in retained.roles,
-            task.spec.verify.environment_mode is VerificationMode.SHARED,
-        ),
     }
+    if kept:
+        recorded_and_current |= {
+            "resources": (
+                lock.resources.requested if lock.resources is not None else None,
+                task.spec.resources,
+            ),
+            "verification mode": (
+                "verifier" in retained.roles,
+                task.spec.verify.environment_mode is VerificationMode.SHARED,
+            ),
+        }
     for name, (recorded, current) in recorded_and_current.items():
         if recorded != current:
             raise TaskDefinitionError(
@@ -741,25 +750,14 @@ def _continuation(
             )
     return Resume(
         source=ResumedFrom(
-            episode_id=result.episode_id, handle=handle, continuation=result.continuation
+            episode_id=result.episode_id,
+            retention="keep" if kept else "snapshot",
+            handle=handle,
+            continuation=result.continuation,
         ),
-        attach=lambda request: _attach_retained(handle, request, lock),
         trajectory=trajectory,
-        gateway_port=retained.gateway_port,
+        attach=(lambda request: _attach_retained(handle, request, lock)) if kept else None,
     )
-
-
-async def _start_gateway(gateway: Gateway) -> str:
-    """Serve the Gateway; a fixed port is a continuation's and must be free."""
-    try:
-        return await gateway.start()
-    except OSError as exc:
-        if not gateway.port:
-            raise
-        raise ConfigError(
-            f"the kept solver was given the Gateway at port {gateway.port}, which is in use: "
-            f"{exc.strerror or exc}"
-        ) from exc
 
 
 async def _attach_retained(
@@ -773,7 +771,13 @@ async def _attach_retained(
         provider = provider_named(allocation.provider)
     except ProviderCapabilityError as exc:
         raise TaskDefinitionError(f"unsupported retained sandbox handle: {handle}") from exc
-    return await provider.attach_retained(handle, request, allocation)
+    image = ResolvedImage(
+        kind=lock.image.declaration.kind,
+        prepared_identity=lock.image.prepared_identity,
+        observed_identity=lock.image.observed_identity,
+        observed_ref=lock.image.observed_ref,
+    )
+    return await provider.attach_retained(handle, request, allocation, image)
 
 
 def _same_assets(recorded: AssetProvenance | None, current: TaskAssetObservation | None) -> bool:

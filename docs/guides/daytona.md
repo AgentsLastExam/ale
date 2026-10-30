@@ -85,7 +85,8 @@ ALE_TEST_DAYTONA_GPU=1 uv run pytest -m needs_daytona tests/conformance/test_pro
   the images it pushes; leave it in place. Daytona removes pushed images on its own
   schedule, and ALE pushes again when one is gone.
 
-Nothing else is created: no snapshots, so Daytona's snapshot quota is not used.
+Nothing else is created: no snapshots, so Daytona's snapshot quota is not used, and
+`sandbox_retention.solver = "snapshot"` is refused before a sandbox is made.
 
 ## Limits to know
 

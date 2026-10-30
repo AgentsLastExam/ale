@@ -198,8 +198,9 @@ hashing the whole disk.
 Windows 10 has no public ISO build path in ALE. The current private BYOL base starts from
 the GCP image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
 recipe installs and pins ALE's cross-platform components, and `compact.sh` validates and
-compresses the resulting qcow2. Episodes always cold-boot a fresh overlay. ALE creates no
-ready snapshot, warm pool, or environment server.
+compresses the resulting qcow2. Episodes always cold-boot a fresh overlay, over a retention
+snapshot when they continue one. ALE creates no ready snapshot, warm pool, or environment
+server.
 
 Windows Task preparation boots a temporary VM from a framed copy of the resolved base,
 stages only `environment/` less `setup/`, and executes `build.ps1` there with network access for unattended
@@ -300,12 +301,14 @@ Given a conforming image, the Docker Provider:
 - observes the resulting image and resource allocation;
 - labels every ALE container with episode, physical role, requested retention, and GPU
   identity;
-- destroys by default or returns a retained handle after framework sanitation.
+- destroys by default, or after framework sanitation returns a retained handle or saves a
+  snapshot.
 
 The QEMU Provider applies the same retention contract to its runner container and the
 episode qcow2 overlay mounted into it. `keep` leaves both alive and discoverable;
-`ale sandbox destroy HANDLE` removes both. Provider-qualified QEMU handles prevent the
-runner from being mistaken for a container sandbox.
+`ale sandbox destroy HANDLE` removes both. `snapshot` saves the guest's disk as a
+standalone qcow2. Provider-qualified QEMU handles prevent the runner from being mistaken
+for a container sandbox.
 
 QEMU enforces Task egress in the runner network namespace, outside both Linux and Windows
 guests. The guest does not need an OS-specific firewall implementation for ALE policy.
@@ -362,9 +365,9 @@ A Provider turns a SandboxRequest into a running Sandbox that holds the guarante
 or rejects the request before anything is created; it never degrades one silently. It owns
 isolation (resources, network, identity, enforced where the agent cannot reach), the
 channels (Host to guestd, sandbox to Gateway), the lifecycle (create, destroy, retain,
-attach) and truthful observation. It does not own phase timing (the episode protocol),
-command and file semantics (guestd), credentials (the Gateway) or image and Task content
-(the engine).
+snapshot, attach) and truthful observation. It does not own phase timing (the episode
+protocol), command and file semantics (guestd), credentials (the Gateway) or image and
+Task content (the engine).
 
 | Guarantee | Enforced by | Conformance test |
 |---|---|---|
@@ -372,9 +375,11 @@ command and file semantics (guestd), credentials (the Gateway) or image and Task
 | Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[ale].sudo` asks | Provider check in `create`, both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |
-| Framework phases have the network; after `close_egress` the agent reaches its Gateway (and, for `allowlist`, the declared hosts) and nothing else; `open` Tasks are never sealed; the Gateway address never moves | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |
+| Framework phases have the network; after `close_egress` the agent reaches its Gateway (and, for `allowlist`, the declared hosts) and nothing else; `open` Tasks are never sealed | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |
+| Every Sandbox reaches its Gateway at the same fixed port, whatever port the Host serves it on, and a reattached Sandbox reaches a later run's Gateway there: an agent may keep the address in its native session | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_reattached_sandbox_reaches_a_later_gateway_at_the_same_address` |
 | Resources are applied or rejected; the RunLock records the observed image and allocation | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
 | Destroy is idempotent; retained sandboxes can be listed and destroyed through their Provider | Provider | `test_destroy_is_idempotent`, `test_a_retained_sandbox_can_be_listed_and_destroyed` |
+| A snapshot holds the disk, any number of Sandboxes boot from it, and it is listed and destroyed through its Provider; a Provider without snapshots refuses them before provisioning | Provider | `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | A declared desktop can be captured and driven | Provider and image | `test_a_declared_desktop_can_actually_be_used`, `test_a_declared_desktop_accepts_input` |
 | No platform service inside the sandbox gives the agent more than its account | Provider check in `create` | `test_the_agent_cannot_reach_the_platform_daemon` |
 

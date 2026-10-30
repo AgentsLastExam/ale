@@ -5,9 +5,9 @@ happens inside a sandbox — commands, files, screenshots, input — goes throug
 service, so this interface is identical for containers and virtual machines and there
 is no provider-specific path for callers to special-case.
 
-Two capabilities are declared but unimplemented on purpose: ``reset`` and ``snapshot``.
-Fresh-per-episode is correct for Phase 0, and pretending otherwise would invite callers
-to depend on semantics we have not designed.
+One capability is declared but unimplemented on purpose: ``reset``. Fresh-per-episode is
+correct for Phase 0, and pretending otherwise would invite callers to depend on semantics
+we have not designed.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from ale.core.errors import ProviderCapabilityError
 from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 
 __all__ = [
+    "SANDBOX_GATEWAY_PORT",
     "Capabilities",
     "ExecOutputSink",
     "ExecResult",
@@ -42,6 +43,11 @@ __all__ = [
     "SandboxRole",
     "SandboxState",
 ]
+
+#: The port at which every Sandbox reaches its Gateway, whatever port the Host serves it on.
+#: An agent may keep its endpoint in its native session, and a later episode continues
+#: that session in the kept Sandbox or in one booted from its snapshot, with its own Gateway.
+SANDBOX_GATEWAY_PORT = 7412
 
 
 class ImageRef(BaseModel):
@@ -228,8 +234,10 @@ class SandboxRequest(BaseModel):
     episode_id: str
     os: OperatingSystem = OperatingSystem.LINUX
     role: SandboxRole = SandboxRole.SOLVER
-    retention: Literal["destroy", "keep"] = "destroy"
+    retention: Literal["destroy", "keep", "snapshot"] = "destroy"
     prepared_image: PreparedTaskImage
+    snapshot: str | None = None
+    """A snapshot handle to boot from instead of the prepared image's own disk."""
     resources: Resources
     network: NetworkPolicy
     gateway_url: str | None = Field(
@@ -303,7 +311,7 @@ class ResourceAllocation(BaseModel):
 
 
 class RetainedSandbox(BaseModel):
-    """Durable operator handle returned only after successful sanitation."""
+    """Durable operator handle, to a Sandbox or its snapshot, returned only after sanitation."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -443,6 +451,16 @@ class Sandbox(ABC):
     ) -> RetainedSandbox:
         raise ProviderCapabilityError(f"{type(self).__name__} does not support retention")
 
+    async def snapshot(
+        self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
+    ) -> RetainedSandbox:
+        """Save the disk as a snapshot new Sandboxes boot from, stopping this one.
+
+        Only the disk is kept: processes, the desktop session and memory are not. The
+        Sandbox is left for :meth:`destroy`.
+        """
+        raise ProviderCapabilityError(f"{type(self).__name__} does not save snapshots")
+
     async def screenshot(self) -> bytes:
         """Capture the guest desktop. Only meaningful on GUI-capable sandboxes."""
         raise ProviderCapabilityError(f"{type(self).__name__} has no desktop to capture")
@@ -478,18 +496,28 @@ class Provider(ABC):
 
     def accepts(self, request: SandboxRequest) -> None:
         """Raise unless this provider can serve ``request``."""
-        self.capabilities().check(request.resources, request.network, request.os)
+        capabilities = self.capabilities()
+        capabilities.check(request.resources, request.network, request.os)
+        if (request.retention == "snapshot" or request.snapshot) and not capabilities.snapshot:
+            raise ProviderCapabilityError(f"{self.name} does not save or boot snapshots")
 
     async def list_retained(self) -> list[dict[str, object]]:
-        """The sandboxes this provider kept after their episodes, as operator records."""
+        """The sandboxes and snapshots this provider kept after their episodes."""
         return []
 
     async def destroy_retained(self, handle: str) -> None:
-        """Destroy one retained sandbox and everything it owns."""
+        """Destroy one retained sandbox or snapshot and everything it owns."""
         raise ProviderCapabilityError(f"{self.name} does not retain sandboxes")
 
     async def attach_retained(
-        self, handle: str, request: SandboxRequest, allocation: ResourceAllocation
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+        image: ResolvedImage,
     ) -> Sandbox:
-        """Reconnect to a running retained sandbox without taking ownership of it."""
+        """Reconnect to a running retained sandbox without taking ownership of it.
+
+        ``image`` is what the sandbox was recorded running, which the Provider confirms.
+        """
         raise ProviderCapabilityError(f"{self.name} does not retain sandboxes")
