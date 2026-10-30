@@ -313,7 +313,7 @@ def resources(tmp_path: Path) -> EffectiveAgentResources:
             ResolvedSkill(
                 name="resource-proof",
                 path=skill,
-                source_layers=("task",),
+                source_layers=("run",),
                 declared_sources=("skills/resource-proof",),
                 digest="sha256:" + "b" * 64,
                 reportable=True,
@@ -329,7 +329,7 @@ def resources(tmp_path: Path) -> EffectiveAgentResources:
                     args=("{home}/server.py",),
                     environment={"PROOF_HOME": "{home}"},
                 ),
-                source_layers=("task",),
+                source_layers=("run",),
                 declared_sources=("mcp/task-proof.toml",),
                 digest="sha256:" + "c" * 64,
                 reportable=True,
@@ -1796,6 +1796,29 @@ def test_openclaw_reports_other_transcripts_but_not_what_it_keeps_beside_them(
 )
 def test_openclaw_node_runtime_gate(version: str, supported: bool) -> None:
     assert _supported_node(version) is supported
+
+
+@pytest.mark.parametrize(
+    ("workdir", "expected"), [(None, "/home/agent"), ("/srv/project", "/srv/project")]
+)
+async def test_the_agent_starts_where_the_task_says(workdir, expected) -> None:
+    class Launched(Exception):
+        pass
+
+    started: list[str] = []
+
+    class RecordingSandbox(FakeSandbox):
+        async def exec(self, argv, **kwargs):
+            if "2>> " in " ".join(str(part) for part in argv):
+                started.append(kwargs["cwd"])
+                raise Launched
+            return await super().exec(argv, **kwargs)
+
+    with pytest.raises(Launched):
+        await CodexCliHarness().launch(
+            "Do it.", RecordingSandbox(), session(workdir=workdir), timeout_sec=60
+        )
+    assert started == [expected]
 
 
 @pytest.mark.parametrize(

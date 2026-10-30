@@ -390,7 +390,6 @@ async def _run_one(
                 task=task.spec.tools,
                 agent_skills=settings.agent.skills,
                 agent_mcp_servers=settings.agent.mcp_servers,
-                task_root=task.folder.root,
                 task_source=resolved.source,
                 network=task.spec.network,
                 operating_system=task.spec.os,

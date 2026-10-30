@@ -474,6 +474,7 @@ class EpisodeProtocol:
             update={
                 "gateway_url": sandbox.gateway_url or ctx.session.gateway_url,
                 "home": ctx.home,
+                "workdir": spec.workdir,
                 "sandbox_id": sandbox.sandbox_id,
                 "resources_digest": ctx.agent_resources.digest,
             }
@@ -488,6 +489,8 @@ class EpisodeProtocol:
             ctx.agent_resources,
         )
         await self._validate_stdio_mcp(ctx, sandbox)
+        if spec.workdir is not None and not await self._is_directory(ctx, sandbox, spec.workdir):
+            raise TaskError(f"[agent].workdir is not a directory: {spec.workdir}")
         await self._seal(ctx, sandbox)
 
         variables = ctx.variables.values
@@ -697,23 +700,18 @@ class EpisodeProtocol:
                 )
             if server.cwd:
                 cwd = server.cwd.replace("{home}", ctx.home)
-                if ctx.spec.os is OperatingSystem.WINDOWS:
-                    quoted = cwd.replace("'", "''")
-                    result = await sandbox.exec(
-                        [
-                            "powershell.exe",
-                            "-NoProfile",
-                            "-NonInteractive",
-                            "-Command",
-                            f"if (-not (Test-Path -LiteralPath '{quoted}' -PathType Container)) "
-                            "{ exit 1 }",
-                        ],
-                        identity=Identity.AGENT,
-                    )
-                else:
-                    result = await sandbox.exec(["test", "-d", cwd], identity=Identity.AGENT)
-                if not result.ok:
+                if not await self._is_directory(ctx, sandbox, cwd):
                     raise TaskError(f"MCP server {resolved.name!r} cwd is not a directory: {cwd}")
+
+    async def _is_directory(self, ctx: EpisodeContext, sandbox: Sandbox, path: str) -> bool:
+        if ctx.spec.os is OperatingSystem.WINDOWS:
+            command = _powershell(
+                f"if (-not (Test-Path -LiteralPath {_powershell_literal(path)} "
+                "-PathType Container)) { exit 1 }"
+            )
+        else:
+            command = ["test", "-d", path]
+        return (await sandbox.exec(command, identity=Identity.AGENT)).ok
 
     async def _verify(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> dict[str, float]:
         """Score the episode using the task's own tests.

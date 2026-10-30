@@ -147,7 +147,7 @@ async def test_local_vm_materialization_reuse_and_late_layer_invalidation(
     isolated_ale_cache: Path,
     docker_buildx: None,
 ) -> None:
-    task_path = write_repo(tmp_path / "repo", config={"ale": {"sandbox": "vm"}})
+    task_path = write_repo(tmp_path / "repo", config={"environment": {"vm": True}})
     dockerfile = task_path / "environment" / "Dockerfile"
     dockerfile.write_text(f"FROM {VM_BASE}\nRUN printf first > /etc/task-layer\n")
     registry = ProviderRegistry(RunConfig())
@@ -186,7 +186,7 @@ async def test_failed_local_vm_build_leaves_no_partial_disk(
     isolated_ale_cache: Path,
     docker_buildx: None,
 ) -> None:
-    task_path = write_repo(tmp_path / "repo", config={"ale": {"sandbox": "vm"}})
+    task_path = write_repo(tmp_path / "repo", config={"environment": {"vm": True}})
     # It has the agent account, so the framework layer succeeds and materialization fails.
     (task_path / "environment" / "Dockerfile").write_text(
         "FROM ubuntu:24.04\nRUN useradd -m user\n"

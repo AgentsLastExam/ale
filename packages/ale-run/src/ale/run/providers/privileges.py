@@ -31,13 +31,13 @@ async def verify_identities(client: GuestClient, agent_user: str, *, sudo: bool)
     if sudo and not elevates:
         raise ProviderCapabilityError(
             f"elevated privileges were requested but {agent_user} cannot elevate in this "
-            "sandbox; prepare the image with [ale].sudo = true"
+            "sandbox; prepare the image with [agent].sudo = true"
         )
     if not sudo and (agent_uid == "0" or elevates):
         how = "is root" if agent_uid == "0" else "can use sudo"
         raise ProviderCapabilityError(
             f"{agent_user} {how}, but the Task did not request elevated privileges; use a "
-            "non-root [agent].user without a sudo grant, or declare [ale].sudo = true"
+            "non-root [agent].user without a sudo grant, or declare [agent].sudo = true"
         )
 
 

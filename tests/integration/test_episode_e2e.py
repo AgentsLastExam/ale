@@ -65,6 +65,17 @@ async def test_idle_agent_scores_zero_but_completes(
 
 
 @pytest.mark.asyncio
+async def test_a_workdir_that_is_no_directory_is_a_task_error(
+    tmp_path: Path, write_repo: Callable[..., Path]
+) -> None:
+    task_root = write_repo(tmp_path / "repo", config={"agent": {"workdir": "/no/such/directory"}})
+    result = await run_one(task_root, tmp_path / "runs", OracleHarness())
+
+    assert result.verdict.status is Status.TASK_ERROR
+    assert "[agent].workdir" in result.verdict.failure.message
+
+
+@pytest.mark.asyncio
 async def test_broken_verifier_is_a_task_error_not_a_zero(
     tmp_path: Path, write_repo: Callable[..., Path]
 ) -> None:

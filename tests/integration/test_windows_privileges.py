@@ -31,10 +31,14 @@ async def test_windows_framework_copies_protected_artifacts_and_verifies_as_admi
         name="agentslastexam/windows-privileges",
         config={
             "artifacts": [r"C:\ale-copy\*.sgf", r"C:\ale-copy\directory.json", r"C:\missing"],
-            "environment": {"os": "windows", "cpus": 2, "memory_mb": 8192},
-            "agent": {"timeout_sec": 60},
+            "environment": {
+                "os": "windows",
+                "vm_image": "local/windows-privileges",
+                "cpus": 2,
+                "memory_mb": 8192,
+            },
+            "agent": {"timeout_sec": 60, "workdir": r"C:\Users\user"},
             "verifier": {"environment_mode": mode},
-            "ale": {"sandbox": "vm", "vm_image": "local/windows-privileges"},
         },
         dockerfile=None,
         instruction="Leave the prepared outputs for verification.\n",

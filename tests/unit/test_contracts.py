@@ -17,7 +17,6 @@ from ale.core.taskspec import (
     StdioMcpServer,
     StreamableHttpMcpServer,
     TaskConfig,
-    TaskMcpSource,
     TaskSpec,
     ToolProvision,
     VerificationMode,
@@ -97,7 +96,7 @@ def test_task_ids_are_org_and_name_and_one_safe_component() -> None:
 
 
 def test_task_config_requires_every_field_whose_default_differs_from_harbor() -> None:
-    assert config().ale.sandbox is ImageKind.CONTAINER
+    assert config().environment.kind is ImageKind.CONTAINER
     for table, key in (
         ("", "schema_version"),
         ("task", "name"),
@@ -113,8 +112,9 @@ def test_task_config_requires_every_field_whose_default_differs_from_harbor() ->
             TaskConfig.model_validate(payload)
         assert raised.value.errors()[0]["type"] == "missing"
         assert raised.value.errors()[0]["loc"] == ((table, key) if table else (key,))
-    with pytest.raises(ValidationError, match=r"1\.4"):
-        config({"schema_version": "1.3"})
+    for version in ("1.3", "1.4"):
+        with pytest.raises(ValidationError, match=r"1\.4\+ale\.1"):
+            config({"schema_version": version})
 
 
 @pytest.mark.parametrize(
@@ -139,7 +139,7 @@ def test_harbor_keys_ale_does_not_implement_say_so(layer: dict[str, object], key
 
 
 def test_task_config_rejects_unknown_keys() -> None:
-    for layer in ({"domain": "demo"}, {"ale": {"variants": {}}}, {"task": {"org": "x"}}):
+    for layer in ({"domain": "demo"}, {"ale": {"sudo": True}}, {"task": {"org": "x"}}):
         with pytest.raises(ValidationError, match="Extra inputs"):
             config(layer)
 
@@ -147,18 +147,12 @@ def test_task_config_rejects_unknown_keys() -> None:
 @pytest.mark.parametrize(
     ("layer", "message"),
     [
-        ({"environment": {"os": "windows"}}, "requires \\[ale\\].sandbox 'vm'"),
+        ({"environment": {"docker_image": "x", "vm": True}}, "docker_image is a container"),
+        ({"environment": {"docker_image": "x", "vm_image": "d"}}, "docker_image is a container"),
+        ({"environment": {"docker_image": "x", "os": "windows"}}, "docker_image is a container"),
+        ({"environment": {"vm_base": "base.qcow2"}}, "vm_base requires os 'windows'"),
         (
-            {"environment": {"docker_image": "x"}, "ale": {"sandbox": "vm"}},
-            "docker_image requires",
-        ),
-        ({"ale": {"vm_image": "disk.qcow2"}}, "vm_image requires sandbox 'vm'"),
-        ({"ale": {"sandbox": "vm", "vm_base": "base.qcow2"}}, "vm_base requires os 'windows'"),
-        (
-            {
-                "environment": {"os": "windows"},
-                "ale": {"sandbox": "vm", "vm_base": "b.qcow2", "vm_image": "i.qcow2"},
-            },
+            {"environment": {"os": "windows", "vm_base": "b.qcow2", "vm_image": "i.qcow2"}},
             "mutually exclusive",
         ),
         ({"agent": {"network_mode": "allowlist"}}, "non-empty allowed_hosts"),
@@ -172,17 +166,72 @@ def test_task_config_rejects_unknown_keys() -> None:
             },
             "shared",
         ),
-        ({"ale": {"verifier": {"sandbox": "vm", "vm_image": "v.qcow2"}}}, "separate"),
         (
             {
-                "environment": {"os": "windows"},
-                "ale": {"sandbox": "vm", "vm_image": "w.qcow2"},
+                "verifier": {
+                    "environment": {"docker_image": "x", "vm": True, "cpus": 1, "memory_mb": 512}
+                }
+            },
+            "docker_image is a container",
+        ),
+        (
+            {
+                "environment": {"os": "windows", "vm_image": "w.qcow2"},
                 "verifier": {"environment": {"docker_image": "x", "cpus": 1, "memory_mb": 512}},
             },
             "Windows verifier runs in a VM",
         ),
         ({"environment": {"cpus": 1.5}}, "valid integer"),
-        ({"ale": {"sudo": "yes"}}, "valid boolean"),
+        ({"agent": {"workdir": "project"}}, "workdir must be an absolute path"),
+        ({"environment": {"skills_dir": "skills"}}, "skills_dir must be an absolute path"),
+        ({"environment": {"vm": "yes"}}, "valid boolean"),
+        ({"agent": {"sudo": "yes"}}, "valid boolean"),
+        (
+            {
+                "environment": {
+                    "mcp_servers": [{"name": "s", "transport": "sse", "url": "http://x"}]
+                }
+            },
+            "stdio",
+        ),
+        (
+            {
+                "environment": {
+                    "mcp_servers": [{"name": "s", "transport": "stdio", "url": "http://x"}]
+                }
+            },
+            "takes no url",
+        ),
+        (
+            {"environment": {"mcp_servers": [{"name": "s", "transport": "streamable-http"}]}},
+            "requires url",
+        ),
+        (
+            {
+                "environment": {
+                    "mcp_servers": [
+                        {
+                            "name": "s",
+                            "transport": "streamable-http",
+                            "url": "https://x",
+                            "headers": {"Authorization": "Bearer ${TOKEN}"},
+                        }
+                    ]
+                }
+            },
+            "headers is not supported",
+        ),
+        (
+            {
+                "environment": {
+                    "mcp_servers": [
+                        {"name": "s", "transport": "stdio", "command": "a"},
+                        {"name": "s", "transport": "stdio", "command": "b"},
+                    ]
+                }
+            },
+            "names must be unique",
+        ),
     ],
 )
 def test_task_config_cross_field_rules(layer: dict[str, object], message: str) -> None:
@@ -208,7 +257,7 @@ def test_network_modes_map_onto_the_runtime_policy() -> None:
 
 
 def test_windows_artifacts_use_windows_absolute_path_rules() -> None:
-    windows = {"environment": {"os": "windows"}, "ale": {"sandbox": "vm", "vm_image": "w.qcow2"}}
+    windows = {"environment": {"os": "windows", "vm_image": "w.qcow2"}}
     assert config(windows, {"artifacts": [r"C:\Users\user\output"]}).artifacts == (
         r"C:\Users\user\output",
     )
@@ -221,8 +270,7 @@ def test_network_and_agent_resource_contracts_remain_strict() -> None:
         NetworkPolicy(mode=NetworkMode.ALLOWLIST)
     with pytest.raises(ValidationError):
         NetworkPolicy(mode=NetworkMode.BLOCK, allowed_hosts=("example.com",))
-    assert SkillSource(path="tools/skills/reviewer").path == "tools/skills/reviewer"
-    assert TaskMcpSource(path="tools/mcp/search.toml").path == "tools/mcp/search.toml"
+    assert SkillSource(path="/skills/reviewer").path == "/skills/reviewer"
     assert McpSource(builtin="cua-desktop").builtin == "cua-desktop"
     with pytest.raises(ValidationError):
         ToolProvision.model_validate({"mcp_servers": [{"builtin": "cua-desktop"}]})

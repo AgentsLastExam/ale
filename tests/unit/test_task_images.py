@@ -112,8 +112,7 @@ class _Registry:
 def windows_task(write_task_repo) -> Task:  # type: ignore[no-untyped-def]
     repository = write_task_repo(
         config={
-            "environment": {"os": "windows"},
-            "ale": {"sandbox": "vm", "vm_base": "/images/windows.qcow2"},
+            "environment": {"os": "windows", "vm_base": "/images/windows.qcow2"},
         },
         dockerfile=None,
     )
@@ -402,7 +401,7 @@ async def test_build_failure_never_falls_back(
 async def test_ref_only_solver_is_prepared_by_matching_provider(write_task_repo) -> None:  # type: ignore[no-untyped-def]
     task = _task(
         write_task_repo,
-        config={"ale": {"sandbox": "vm", "vm_image": "ghcr.io/acme/task-vm:v1"}},
+        config={"environment": {"vm_image": "ghcr.io/acme/task-vm:v1"}},
         dockerfile=None,
     )
     registry = _Registry()
@@ -418,7 +417,7 @@ async def test_ref_only_solver_is_prepared_by_matching_provider(write_task_repo)
 async def test_preparation_result_orders_ref_and_artifact_stages(write_task_repo) -> None:  # type: ignore[no-untyped-def]
     task = _task(
         write_task_repo,
-        config={"ale": {"sandbox": "vm", "vm_image": "ghcr.io/acme/task-vm:v1"}},
+        config={"environment": {"vm_image": "ghcr.io/acme/task-vm:v1"}},
         dockerfile=None,
     )
     result = await prepare_task_image_result(task, _Registry())  # type: ignore[arg-type]
@@ -438,7 +437,7 @@ async def test_preparation_result_orders_ref_and_artifact_stages(write_task_repo
 async def test_preparation_failure_names_and_bounds_its_stage(write_task_repo) -> None:  # type: ignore[no-untyped-def]
     task = _task(
         write_task_repo,
-        config={"ale": {"sandbox": "vm", "vm_image": "example.invalid/vm:latest"}},
+        config={"environment": {"vm_image": "example.invalid/vm:latest"}},
         dockerfile=None,
     )
 
@@ -534,7 +533,7 @@ async def test_verifier_builds_tests_dockerfile_unless_an_image_is_named(
 async def test_local_vm_candidate_is_materialized_before_provider_check(
     write_task_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
-    task = _task(write_task_repo, config={"ale": {"sandbox": "vm"}})
+    task = _task(write_task_repo, config={"environment": {"vm": True}})
     vm = _prepared(ImageKind.VM)
 
     async def fake_build(**kwargs: object) -> _OciBuild:

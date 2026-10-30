@@ -27,7 +27,7 @@ def test_new_task_is_standalone_and_lints_clean(tmp_path: Path) -> None:
     assert (task / "environment" / "Dockerfile").is_file()
     assert not (task / "environment" / "setup").exists()
     config = tomllib.loads((task / "task.toml").read_text())
-    assert config["schema_version"] == "1.4"
+    assert config["schema_version"] == "1.4+ale.1"
     assert config["task"]["name"] == "agentslastexam/fresh"
     assert config["agent"]["network_mode"] == "no-network"
 
@@ -108,7 +108,7 @@ def test_any_base_image_is_accepted(tmp_path: Path, base: str) -> None:
 def _vm_task(tmp_path: Path) -> Path:
     task = scaffold_task(tmp_path / "fresh")
     config = task / "task.toml"
-    config.write_text(config.read_text() + '\n[ale]\nsandbox = "vm"\n')
+    config.write_text(config.read_text().replace("[environment]\n", "[environment]\nvm = true\n"))
     return task
 
 

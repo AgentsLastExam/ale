@@ -196,7 +196,7 @@ write({
 
 def _planting_task(root: Path, plant: str, verifier: str) -> Path:
     task_root = scaffold_task(root)
-    edit_task_config(task_root, {"ale": {"sudo": True}})
+    edit_task_config(task_root, {"agent": {"sudo": True}})
     (task_root / "solution" / "solve.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n" + textwrap.dedent(PLANTED[plant])
     )

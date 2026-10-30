@@ -26,7 +26,7 @@ def mcp(name: str, server: StdioMcpServer | StreamableHttpMcpServer) -> Resolved
     return ResolvedMcpServer(
         name=name,
         server=server,
-        source_layers=("task",),
+        source_layers=("run",),
         declared_sources=(name,),
         digest="sha256:" + "c" * 64,
         reportable=True,

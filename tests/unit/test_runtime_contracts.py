@@ -440,7 +440,7 @@ def test_a_task_source_is_read_from_its_git_checkout(tmp_path: Path) -> None:
 
     task = tmp_path / "tasks" / "demo"
     task.mkdir(parents=True)
-    (task / "task.toml").write_text('schema_version = "1.4"\n')
+    (task / "task.toml").write_text('schema_version = "1.4+ale.1"\n')
     assert resolve(str(task)).source.kind == "local"
     git("init", "-q")
     git("remote", "add", "origin", "https://example.invalid/tasks.git")
@@ -474,7 +474,7 @@ def test_a_task_source_records_no_credentials_and_needs_no_git(
 
     task = tmp_path / "tasks" / "demo"
     task.mkdir(parents=True)
-    (task / "task.toml").write_text('schema_version = "1.4"\n')
+    (task / "task.toml").write_text('schema_version = "1.4+ale.1"\n')
     git("init", "-q")
     git("remote", "add", "origin", "https://user:ghp_secret@example.invalid/tasks.git")
     git("add", "-A")

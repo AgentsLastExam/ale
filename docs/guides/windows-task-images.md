@@ -13,9 +13,6 @@ Use an operator-provided ALE Windows base and declare it in `task.toml`:
 ```toml
 [environment]
 os = "windows"
-
-[ale]
-sandbox = "vm"
 vm_base = "/absolute/path/to/windows-base.qcow2"
 ```
 
