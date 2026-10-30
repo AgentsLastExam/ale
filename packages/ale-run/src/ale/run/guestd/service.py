@@ -8,7 +8,8 @@ account's elevated token, and starts them again when they exit. Agent commands a
 launched unelevated by guestd itself (``windows.py``).
 
 An offline write leaves the files it makes readable and writable by everyone, so the
-service first limits the framework's files to SYSTEM and Administrators.
+service first limits the framework's files to SYSTEM and Administrators, leaving Cua Driver
+runnable by every account.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ _CUA_DRIVER_ARGS = (
     f"serve --socket {CUA_DRIVER_PIPE} --permission-mode unrestricted "
     "--dangerously-bypass-approvals"
 )
-_SYSTEM, _ADMINISTRATORS = "*S-1-5-18", "*S-1-5-32-544"
+_SYSTEM, _ADMINISTRATORS, _USERS = "*S-1-5-18", "*S-1-5-32-544", "*S-1-5-32-545"
 
 _STOP, _SHUTDOWN = 0x1, 0x4
 _RUNNING, _STOPPED = 4, 1
@@ -231,7 +232,11 @@ class Service:
         return True
 
     def _lock_down(self) -> None:
-        """Limit the framework's files to SYSTEM and Administrators, as /opt/ale is on Linux."""
+        """Limit the framework's files to SYSTEM and Administrators, as /opt/ale is on Linux.
+
+        Every account may still read and run Cua Driver, as /usr/local/bin/cua-driver on
+        Linux: the agent's ``cua-desktop`` MCP server runs it to reach the driver started here.
+        """
         root, owner = str(ROOT), _ADMINISTRATORS
         grant = f"{_SYSTEM}:(OI)(CI)(F)", f"{owner}:(OI)(CI)(F)"
         self._run("icacls", root, "/setowner", owner)
@@ -241,6 +246,7 @@ class Service:
             # Files written offline carry no access list; they now inherit the directory's.
             self._run("icacls", str(ROOT / name), "/setowner", owner, "/T")
             self._run("icacls", str(ROOT / name), "/reset", "/T")
+        self._run("icacls", str(ROOT / "cua-driver"), "/grant", f"{_USERS}:(OI)(CI)(RX)")
 
     def _open_port(self) -> None:
         """Let the Host's runner, and nothing else, reach guestd."""

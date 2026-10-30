@@ -20,7 +20,8 @@ of the Task's own build or `image.ref` (the framework layer):
 
 - guestd, the guest service every sandbox operation goes through, under root-only
   `/opt/ale`, so it always speaks the protocol of the engine driving it;
-- Cua Driver at a pinned version, the one desktop capture and input implementation;
+- Cua Driver at a pinned version, the one desktop capture and input implementation, which
+  every account may run, because the agent's `cua-desktop` MCP server runs it too;
 - for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
   Windows that also starts Cua Driver in the agent's session;
 - a check that the agent account exists, failing preparation if it does not;
@@ -62,7 +63,8 @@ later sandbox, and the Task's script cannot replace the framework's pieces:
   version under `C:\ProgramData\ALE\cua-driver`;
 - a boot service, running as the system, that starts both in the agent's session with the
   account's elevated token, so Cua Driver can reach elevated windows. The service limits
-  those files to the system and Administrators;
+  those files to the system and Administrators, except that every account may run Cua
+  Driver, as on Linux;
 - a check, before anything is written, that the disk has the agent account, signs exactly
   that account in, keeps UAC on, has the Python and was shut down completely (not left
   hibernated by Fast Startup), each failing with the one thing it lacks.
