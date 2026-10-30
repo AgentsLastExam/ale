@@ -164,6 +164,13 @@ configuration, result, record, and RunLock.
 This deliberately trusts reviewed Task verifier code with the episode's Judge sessions; a
 malicious Task author is outside this threat model.
 
+The one credential a Sandbox can receive beyond episode tokens is one its Task declares in an
+`env` table, such as a token for a service the Task itself uses
+([Task authoring](task-authoring.md#variables)). It comes from the checkout's `.env` only,
+reaches only the commands its table names, is redacted from every record, and can neither
+refer to an `ALE_` variable nor equal a Host credential, so no model or Judge key leaves the
+Gateway this way. `[environment].env` reaches the agent, and the agent can read it.
+
 ## 4. The agent cannot change what it is measured under
 
 The agent runs as the account the image declares, and so does the oracle that stands in
@@ -256,8 +263,9 @@ a Judge failure according to its own scoring policy.
 Task-folder source digest, source and commit when available, exact locally built image
 content, concrete Provider, requested and effective resources, GPU allocation and sandbox
 observations, agent version and integrity, harness family, one optional Task-asset
-repository/path/commit/dirty observation, verification topology and image/resources,
-sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
+repository/path/commit/dirty observation, the name and value source of each Task variable,
+verification topology and image/resources, sandbox lifecycle outcomes, config hash, seed, and
+the engine's own commit.
 
 A reportable result is one that can be published, such as on a leaderboard, because it can
 be reproduced exactly. Its Task must be committed in a git repository with no uncommitted

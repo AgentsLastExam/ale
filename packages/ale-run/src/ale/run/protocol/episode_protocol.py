@@ -91,6 +91,7 @@ from ale.run.recording import (
     Redactor,
     atomic_write_json,
     execution_logging,
+    redact_files,
 )
 from ale.run.verification import installed_ale_verify, verifier_judge_config
 from ale_verify import JudgeInvocation, read_result
@@ -489,12 +490,15 @@ class EpisodeProtocol:
         await self._validate_stdio_mcp(ctx, sandbox)
         await self._seal(ctx, sandbox)
 
+        variables = ctx.variables.values
+
         async def launch() -> None:
             recorded = _RecordedSandbox(
                 ctx,
                 sandbox,
                 component="harness-launch",
                 actor="task" if harness.name == "oracle" else "framework",
+                env=variables.oracle() if harness.name == "oracle" else variables.environment,
             )
             with _limit_terminated(ctx):
                 if self.resume is None:
@@ -801,7 +805,7 @@ class EpisodeProtocol:
         ctx.verification_secrets = tuple(command_env.values())
 
     async def _collect_judge_logs(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
-        redactor = Redactor(ctx.verification_secrets)
+        redactor = Redactor(ctx.secrets)
         invocations = []
         for name in ("llm-judge.jsonl", "agent-judge.jsonl"):
             try:
@@ -843,6 +847,7 @@ class EpisodeProtocol:
             result = read_result(raw[reward], raw.get(record))
         except (ValueError, TypeError, UnicodeError) as exc:
             raise VerifierOutputError(f"verify wrote an invalid result: {exc}") from exc
+        result = Redactor(ctx.secrets, patterns=False).json(result)
         atomic_write_json(ctx.run_dir / "verification.json", result, sort_keys=False)
         return result
 
@@ -872,6 +877,10 @@ class EpisodeProtocol:
                     extra={"ale_data": {"error": type(exc).__name__}},
                 )
             collection_failed = collection_failed or logs.incomplete
+            # Copied while the agent ran, so only now can the copies lose what they held.
+            redact_files(
+                ctx.run_dir / "logs" / self.harness.name, Redactor(ctx.secrets, patterns=False)
+            )
 
         if ctx.agent_started and not ctx.trajectory_written:
             self._parse_harness_trajectory(ctx, collection_failed=collection_failed)
@@ -1026,7 +1035,7 @@ class EpisodeProtocol:
         except Exception as exc:
             # The agent finished; a converter defect must not decide its score. Keep the
             # minimal truthful trajectory, say why, and keep the native evidence.
-            detail = Redactor((ctx.session.token,))(f"{type(exc).__name__}: {exc}")[:500]
+            detail = Redactor(ctx.secrets)(f"{type(exc).__name__}: {exc}")[:500]
             logging.getLogger("ale.execution").warning(
                 "trajectory conversion failed",
                 extra={"ale_data": {"harness": self.harness.name, "error": detail}},
@@ -1076,7 +1085,13 @@ class EpisodeProtocol:
                 step = step.model_copy(update=updates)
                 links.extend((call_id, step.step_id) for call_id in call_ids)
             steps.append(step)
-        trajectory = trajectory.model_copy(update={"steps": steps})
+        trajectory = AtifTrajectory.model_validate(
+            Redactor(ctx.secrets, patterns=False).json(
+                trajectory.model_copy(update={"steps": steps}).model_dump(
+                    mode="json", exclude_none=True
+                )
+            )
+        )
         ctx.trajectory.write_trajectory(trajectory)
         if ctx.transport is not None:
             for call_id, step_id in links:
@@ -1104,7 +1119,16 @@ class EpisodeProtocol:
         layout = _layout(ctx.spec.os)
         stage = Stage.SETUP if phase is Phase.SETUP else Stage.TESTS
         entry = directory / stage.entry(ctx.spec.os)
-        env = {"ALE_STAGE_DIR": str(directory), "ALE_HOME": ctx.home}
+        variables = ctx.variables.values
+        env = {
+            **(
+                variables.environment
+                if phase is Phase.SETUP
+                else variables.verification(ctx.spec.verify.environment_mode)
+            ),
+            "ALE_STAGE_DIR": str(directory),
+            "ALE_HOME": ctx.home,
+        }
         if phase is Phase.VERIFY:
             env.update(
                 {
@@ -1151,14 +1175,7 @@ class EpisodeProtocol:
             actor="task",
             argv=argv,
             cwd=str(directory),
-            secrets=tuple(
-                secret
-                for secret in (
-                    ctx.session.token,
-                    *ctx.verification_secrets,
-                )
-                if secret
-            ),
+            secrets=ctx.secrets,
         )
         started = time.monotonic()
         timeout_sec = ctx.phase_timeout_sec
@@ -1285,7 +1302,7 @@ class EpisodeProtocol:
                 episode_id=ctx.episode_id,
                 phase=phase.value,
                 component=self.component,
-                secrets=(ctx.session.token,),
+                secrets=ctx.secrets,
             ):
                 if timeout_sec is None:
                     return await coro
@@ -1639,11 +1656,14 @@ class _RecordedSandbox:
         *,
         component: str,
         actor: Literal["framework", "task"] = "framework",
+        env: dict[str, str] | None = None,
     ) -> None:
         self._ctx = ctx
         self._sandbox = sandbox
         self._component = component
         self._actor = actor
+        self._env = env or {}
+        """The Task's variables, beneath each command's own."""
 
     def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
         return getattr(self._sandbox, name)
@@ -1672,7 +1692,7 @@ class _RecordedSandbox:
             actor=self._actor,
             argv=[str(part) for part in argv],
             cwd=cwd,
-            secrets=(self._ctx.session.token,),
+            secrets=self._ctx.secrets,
         )
 
         async def emit(stream: Literal["stdout", "stderr"], data: bytes) -> None:
@@ -1685,7 +1705,7 @@ class _RecordedSandbox:
             result = await self._sandbox.exec(
                 argv,
                 cwd=cwd,
-                env=env,
+                env={**self._env, **(env or {})} or None,
                 timeout_sec=timeout_sec,
                 identity=identity,
                 output_sink=emit,

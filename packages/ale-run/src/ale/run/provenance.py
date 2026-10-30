@@ -39,6 +39,7 @@ from ale.core.lock import (
     SandboxProvenance,
     TaskProvenance,
     TaskSource,
+    TaskVariableProvenance,
     VerificationProvenance,
 )
 from ale.core.result import SandboxOutcome
@@ -224,6 +225,7 @@ def build_lock(
     termination: LimitTermination | None = None,
     sandbox_outcomes: tuple[SandboxOutcome, ...] = (),
     resumed_from: ResumedFrom | None = None,
+    variables: tuple[TaskVariableProvenance, ...] = (),
     seed: int = 0,
 ) -> RunLock:
     """Bind one episode's result to everything that produced it."""
@@ -234,6 +236,7 @@ def build_lock(
             content_digest=task_digest,
             non_verifier_digest=non_verifier_digest,
             source=inputs.source,
+            variables=variables,
         ),
         image=_image_provenance(spec.image, resolved_image, allocation, prepared_image),
         resources=ResourceProvenance(requested=spec.resources, effective=allocation),

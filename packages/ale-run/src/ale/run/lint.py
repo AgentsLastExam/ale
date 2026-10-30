@@ -9,7 +9,8 @@ from pathlib import Path
 
 from ale.core.errors import TaskDefinitionError
 from ale.core.task import Stage
-from ale.core.taskspec import OperatingSystem
+from ale.core.taskspec import OperatingSystem, VariableReference
+from ale.run.secrets import is_credential_name
 from ale.run.tasksets.manifest import (
     ENVIRONMENT_DIR,
     INSTRUCTION,
@@ -157,6 +158,46 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
                 "setup is for episode-dynamic initialization",
             )
         )
+    findings.extend(_check_variables(folder.root / TASK_CONFIG, config))
+    return findings
+
+
+def _check_variables(path: Path, config: dict[str, object]) -> list[Finding]:
+    """A Task's ``env`` tables: no credential is written down, and no value misleads."""
+    tables: list[tuple[str, object]] = []
+    for table in ("environment", "verifier", "solution"):
+        body = config.get(table)
+        if isinstance(body, dict):
+            tables.append((table, body.get("env")))
+            nested = body.get("environment") if table == "verifier" else None
+            if isinstance(nested, dict):
+                tables.append(("verifier.environment", nested.get("env")))
+    findings: list[Finding] = []
+    for table, env in tables:
+        for key, value in env.items() if isinstance(env, dict) else ():
+            if not isinstance(value, str):
+                continue
+            reference = VariableReference.parse(value)
+            credential = is_credential_name(key) or (
+                reference is not None and is_credential_name(reference.name)
+            )
+            # A default is written down as much as a literal is.
+            if credential and (reference is None or reference.default):
+                findings.append(
+                    Finding(
+                        path,
+                        f"[{table}].env {key} holds a credential; write ${{NAME}} with no "
+                        "default and set NAME in the checkout's .env",
+                    )
+                )
+            elif reference is None and "${" in value:
+                findings.append(
+                    Finding(
+                        path,
+                        f"[{table}].env {key}: only a whole value ${{NAME}} is resolved; "
+                        "a ${...} inside other text stays as written",
+                    )
+                )
     return findings
 
 

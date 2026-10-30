@@ -614,6 +614,17 @@ class TestRecording:
         assert '"messages"' in request and '"content"' in response
         assert REAL_KEY not in request + response
 
+    async def test_debug_retention_leaves_out_the_tasks_secrets(
+        self, stack, tmp_path: Path
+    ) -> None:
+        gateway, _upstream, session, _trace = stack
+        session.payload_dir = tmp_path / "logs" / "gateway"
+        session.redacted = ("task-secret-value",)
+        await call(gateway, session, messages=[{"role": "user", "content": "task-secret-value"}])
+
+        request = next(session.payload_dir.glob("*.request.json")).read_text()
+        assert "task-secret-value" not in request and "[REDACTED]" in request
+
     async def test_exact_token_retention_requires_explicit_destination(
         self, stack, tmp_path: Path
     ) -> None:

@@ -122,11 +122,9 @@ def test_task_config_requires_every_field_whose_default_differs_from_harbor() ->
     [
         ({"steps": [{"name": "one"}]}, "steps"),
         ({"source": "x"}, "source"),
-        ({"solution": {"env": {"A": "b"}}}, "solution"),
         ({"environment": {"healthcheck": {"command": "true"}}}, "environment.healthcheck"),
         ({"environment": {"network_mode": "public"}}, "environment.network_mode"),
         ({"environment": {"workdir": "/app"}}, "environment.workdir"),
-        ({"verifier": {"env": {"A": "b"}}}, "verifier.env"),
         ({"verifier": {"user": "root"}}, "verifier.user"),
         (
             {"verifier": {"environment": {"cpus": 1, "memory_mb": 512, "os": "linux"}}},

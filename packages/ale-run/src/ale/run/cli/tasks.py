@@ -61,7 +61,7 @@ from ale.run.provenance import (
 )
 from ale.run.providers import ProviderRegistry, provider_named
 from ale.run.recording import atomic_write_json
-from ale.run.secrets import provider_credentials
+from ale.run.secrets import host_credentials, provider_credentials, resolve_task_variables
 from ale.run.sources import resolve
 from ale.run.subscription import SubscriptionCredential, resolve_authentication
 from ale.run.task_images import (
@@ -244,6 +244,7 @@ async def _run_one(
         tasks = load_tasks(resolved.task_dir)
         for task in tasks:
             harness.validate_os(task.spec.os)
+        _resolve_variables(tasks, settings, oracle=settings.agent.name == "oracle")
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
         resume = (
@@ -487,6 +488,7 @@ async def _reverify(
         providers = ProviderRegistry(settings)
         by_name = {str(task.spec.name): task for task in tasks}
         sources = _retained_source_episodes(source_run)
+        _resolve_variables(tasks, settings, oracle=False)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
     except (AleError, OSError, ValueError) as error:
         typer.echo(str(error), err=True)
@@ -814,6 +816,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
     try:
         resolved = resolve(reference)
         tasks = load_tasks(resolved.task_dir)
+        _resolve_variables(tasks, settings, oracle=True)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
     except AleError as error:
@@ -987,6 +990,17 @@ async def _judge_gateway(settings: RunConfig) -> Gateway | None:
     gateway = Gateway(host=_gateway_host())
     await gateway.start()
     return gateway
+
+
+def _resolve_variables(tasks: list[ManifestTask], settings: RunConfig, *, oracle: bool) -> None:
+    """Every Task's variables, before any image, Sandbox or model call; see ``secrets``."""
+    resolve_task_variables(
+        tasks,
+        oracle=oracle,
+        protected=host_credentials(
+            (settings.gateway.api_key_env, settings.container.daytona.api_key_env)
+        ),
+    )
 
 
 def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -24,7 +25,9 @@ from ale.run.recording import (
     CommandRecorder,
     EpisodeRecording,
     JsonlWriter,
+    Redactor,
     execution_logging,
+    redact_files,
 )
 
 pytestmark = pytest.mark.unit
@@ -127,6 +130,21 @@ async def test_command_output_is_redacted_across_chunks_and_finalized_once(
     ]
     assert records[-1]["stdout"]["inline"] == "before [REDACTED] after"
     assert not recording.blobs.partial_path("exec-1", "stdout").exists()
+
+
+def test_records_of_what_the_agent_saw_lose_only_the_known_values(tmp_path: Path) -> None:
+    # What the agent saw or wrote loses the known values only, never text shaped like a key.
+    redactor = Redactor(("tok-service",), patterns=False)
+    assert redactor.json(
+        {"tok-service": ["a tok-service b", "pip install sk-learn-extras", 1]}
+    ) == {"[REDACTED]": ["a [REDACTED] b", "pip install sk-learn-extras", 1]}
+    logs = tmp_path / "logs"
+    (logs / "nested").mkdir(parents=True)
+    (logs / "nested" / "session.jsonl").write_text(json.dumps({"text": "tok-service"}) + "\n")
+    (logs / "image.png").write_bytes(b"\x89PNG\0tok-service")
+    redact_files(logs, redactor)
+    assert json.loads((logs / "nested" / "session.jsonl").read_text()) == {"text": "[REDACTED]"}
+    assert (logs / "image.png").read_bytes() == b"\x89PNG\0tok-service"
 
 
 def test_execution_logger_routes_only_bound_records(tmp_path: Path) -> None:

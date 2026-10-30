@@ -69,6 +69,7 @@ cpus = 1                                    # required; integer >= 1
 memory_mb = 4096                            # required; integer >= 128
 storage_mb = 8192                           # optional writable storage; integer >= 256
 gpus = 0                                    # optional GPU count, not indices; default 0
+env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # optional; see Variables
 
 [agent]                                     # required: the evaluated agent and the oracle
 user = "user"                               # required account; must exist in the image
@@ -79,6 +80,7 @@ allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
 [verifier]                                  # required
 timeout_sec = 300                           # required positive seconds
 environment_mode = "separate"               # optional: shared | separate
+env = { REFERENCE_DB = "${REFERENCE_DB}" }  # optional; the verifier only
 
 [verifier.environment]                      # optional: a separate verifier's own sandbox
 # docker_image = "registry.example/verifier:tag"  # a container image used directly
@@ -86,6 +88,10 @@ cpus = 1                                    # required in this table
 memory_mb = 4096                            # required in this table
 storage_mb = 8192                           # optional
 gpus = 0                                    # optional; default 0
+env = {}                                    # optional; replaces [environment].env
+
+[solution]                                  # optional
+env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # optional; the oracle only
 
 [ale]                                       # optional
 sandbox = "container"                       # container | vm; default container
@@ -146,6 +152,47 @@ justification uses `[metadata].network_justification`.
 `[environment]` resources are the whole Sandbox's allocation. The image's own processes, such
 as the GUI base images' desktop, share it with the agent and every program the agent starts,
 so a GUI Task leaves an agent CLI room above the desktop.
+
+### Variables
+
+Harbor's `env` tables set environment variables for the Task's commands:
+
+| Table | Received by |
+|---|---|
+| `[environment].env` | setup, the agent and the oracle, and a shared verifier |
+| `[verifier].env` | the verifier |
+| `[verifier.environment].env` | a separate verifier, in place of `[environment].env` |
+| `[solution].env` | the oracle |
+
+A separate verifier without `[verifier.environment]` receives `[environment].env`, because
+Harbor copies `[environment]` for it. `[verifier].env` and `[solution].env` win over the table
+beneath them, and a variable the framework or the Harness sets for a command wins over every
+table. Names beginning with `ALE_` are the framework's.
+
+A value is a literal or a whole-value reference, `${NAME}` or `${NAME:-default}`. References
+resolve from the checkout's `.env` (`ALE_ENV_FILE` overrides) and nothing else: a variable
+only exported in the operator's shell, such as their own `GITHUB_TOKEN`, never reaches a
+Sandbox by accident. An empty value counts as unset, as in a shell. `run`, `validate` and
+`reverify` resolve every selected Task before any image is built, Sandbox started or model
+called, and fail naming each Task's missing variables; `[solution].env` is resolved only for
+the oracle. As in Harbor, `${...}` inside other text is not a reference and stays as written.
+Values travel in each command's environment through the guest service, never in an image, a
+Sandbox's configuration or a Host command line, so container and VM, Linux and Windows
+receive them the same way.
+
+A variable is a credential when its name, or the name it refers to, contains `KEY`, `SECRET`,
+`TOKEN` (not `TOKENS`), `PASSWORD`, `CREDENTIAL` or `AUTH`. `ale lint` fails a credential
+written as a literal or with a non-empty default; it is written `${NAME}` and its value lives
+in the `.env`. Credential values from the `.env` are redacted from every record of the
+episode (see [Trace](trace.md)), except values that are only digits or a boolean word, which
+cannot be told apart from ordinary output. Artifacts are the agent's output and are copied
+exactly. The RunLock records each variable's table, name and source (literal, `.env` or
+default), never its value.
+
+These tables never carry the Host's own credentials. A Task cannot refer to an `ALE_`
+variable, and a resolved value equal to a model, Judge or Provider key fails resolution:
+those keys reach a model only through the Gateway
+([Security](security.md#3-provider-credentials-stay-on-the-host)).
 
 ## environment/
 

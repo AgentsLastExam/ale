@@ -12,7 +12,8 @@ import pytest
 from ale.core.episode import Phase
 from ale.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
 from ale.core.sandbox import ExecResult, SandboxFile
-from ale.core.taskspec import NetworkPolicy, OperatingSystem
+from ale.core.task import ResolvedVariables
+from ale.core.taskspec import NetworkPolicy, OperatingSystem, VerifySpec
 from ale.core.trace import read_jsonl
 from ale.run.harnesses.builtin import NopHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
@@ -67,7 +68,11 @@ def context(tmp_path: Path):
         episode_id=tmp_path.name,
         home="/home/user",
         session=SimpleNamespace(token=""),
-        spec=SimpleNamespace(network=NetworkPolicy(), os=OperatingSystem.LINUX),
+        spec=SimpleNamespace(
+            network=NetworkPolicy(), os=OperatingSystem.LINUX, verify=VerifySpec()
+        ),
+        variables=ResolvedVariables(),
+        secrets=(),
         verification_command_env={},
         verification_secrets=(),
         phase_timeout_sec=1.0,

@@ -21,6 +21,7 @@ from ale.core.taskspec import (
     TaskConfig,
     TaskMcpSource,
     TaskSpec,
+    TaskVariables,
     ToolProvision,
     VerificationMode,
     VerifierResources,
@@ -297,6 +298,14 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
             mcp_servers=tuple(TaskMcpSource(path=path) for path in config.ale.mcp_servers),
         ),
         verify=_verification(config, folder),
+        variables=TaskVariables(
+            environment=config.environment.env,
+            verifier=config.verifier.env,
+            verifier_environment=(
+                config.verifier.environment.env if config.verifier.environment else None
+            ),
+            solution=config.solution.env,
+        ),
         metadata=config.metadata,
     )
 

@@ -111,6 +111,8 @@ class GatewaySession:
     """Explicit debug destination for raw provider payloads; absent by default."""
     exact_token_dir: Path | None = None
     """Temporary exact provider token evidence; absent unless explicitly requested."""
+    redacted: tuple[str, ...] = field(default=(), repr=False)
+    """The Task's secret values, kept out of retained payloads and token evidence."""
 
     refusal: LimitReached | None = field(default=None, repr=False)
     """The first limit that refused one of this session's calls, if any."""
