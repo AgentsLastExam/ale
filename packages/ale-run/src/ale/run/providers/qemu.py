@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import secrets
@@ -120,6 +121,10 @@ RETENTION_LABEL = "ale.qemu.retention"
 GPU_LABEL = "ale.qemu.gpus"
 STORAGE_LABEL = "ale.qemu.storage"
 HANDLE_PREFIX = "qemu:"
+SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
+#: A snapshot is a directory holding its standalone disk and this record of where it came from.
+SNAPSHOT_DISK = "disk.qcow2"
+SNAPSHOT_RECORD = "snapshot.json"
 
 #: The runner's nat chain that sends the fixed Gateway port to the port the Host serves the
 #: Gateway on; a later run's Gateway replaces its rule.
@@ -326,6 +331,7 @@ class QemuSandbox(Sandbox):
         agent_user: str,
         agent_home: str,
         host_ip: str = "",
+        snapshot_dir: Path | None = None,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -340,6 +346,7 @@ class QemuSandbox(Sandbox):
         self.storage = storage
         self.host_port = host_port
         self.host_ip = host_ip
+        self.snapshot_dir = snapshot_dir
         self._client = client
         self._file_client = file_client
         self._sealed = False
@@ -502,16 +509,74 @@ class QemuSandbox(Sandbox):
         """Shut down a Windows build VM and export a standalone disk."""
         if self.request.os is not OperatingSystem.WINDOWS:
             raise ProviderCapabilityError("image scripts require a Windows VM")
-        result = await self.exec(["shutdown.exe", "/s", "/t", "1"], timeout_sec=30)
+        await self._power_off()
+        await self._export(destination)
+
+    async def snapshot(
+        self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
+    ) -> RetainedSandbox:
+        """Shut the guest down and export its disk, base and overlay, as one standalone qcow2.
+
+        Standalone, so the snapshot outlives the image cache it was booted from. Compressed
+        with zstd, which made a Windows disk a third smaller and wrote it no slower. Its
+        record holds the disk's content identity, taken once here rather than at every boot.
+        """
+        if self.snapshot_dir is None:
+            raise ProviderCapabilityError(f"{self.container} has nowhere to save a snapshot")
+        target = self.snapshot_dir / self.sandbox_id
+        target.mkdir(parents=True)
+        try:
+            await self._power_off()
+            disk = target / SNAPSHOT_DISK
+            await self._export(disk, compressed=True)
+            identity = await asyncio.to_thread(_disk_identity, disk)
+            record = {
+                "managed": True,
+                "episode": self.request.episode_id,
+                "role": self.request.role.value,
+                "os": self.request.os.value,
+                "prepared_identity": self.request.prepared_image.prepared_identity,
+                "identity": identity,
+            }
+            (target / SNAPSHOT_RECORD).write_text(json.dumps(record, indent=2) + "\n")
+        except BaseException:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
+        handle = f"{SNAPSHOT_PREFIX}{self.sandbox_id}"
+        return RetainedSandbox(
+            provider="qemu",
+            handle=handle,
+            episode_id=self.request.episode_id,
+            roles=roles,
+            reason=reason,
+            cleanup_command=f"ale sandbox destroy {handle}",
+        )
+
+    async def _power_off(self) -> None:
+        """Shut the guest down cleanly and wait for its runner to exit."""
+        if self.request.os is OperatingSystem.WINDOWS:
+            command = ["shutdown.exe", "/s", "/t", "1"]
+        else:
+            # A Linux guest powers off without writing back its dirty pages: files written
+            # seconds earlier came back empty. Its disk is flushed first.
+            result = await self.exec(["sync"], timeout_sec=300)
+            if not result.ok:
+                raise ProviderStartError(f"could not flush {self.container}: {result.stderr}")
+            command = ["systemctl", "poweroff", "--no-block"]
+        result = await self.exec(command, timeout_sec=30)
         if not result.ok:
-            raise ProviderStartError(f"could not shut down build VM: {result.stderr}")
+            raise ProviderStartError(f"could not shut down {self.container}: {result.stderr}")
         await asyncio.gather(
             self._client.close(), self._file_client.close(), return_exceptions=True
         )
         code, output, stderr = await _run("docker", "wait", self.container, timeout=300)
         if code != 0 or output.strip() != "0":
-            raise ProviderStartError(f"build VM did not shut down cleanly: {stderr or output}")
+            raise ProviderStartError(
+                f"{self.container} did not shut down cleanly: {stderr or output}"
+            )
 
+    async def _export(self, destination: Path, *, compressed: bool = False) -> None:
+        """Write the stopped VM's disk as a standalone qcow2."""
         # The stopped overlay names the runner's mount; point it at the same host disk.
         overlay = self.storage / "data.qcow2"
         code, _, stderr = await _run(
@@ -526,18 +591,20 @@ class QemuSandbox(Sandbox):
             timeout=60,
         )
         if code != 0:
-            raise ProviderStartError(f"could not resolve build VM backing disk: {stderr}")
+            raise ProviderStartError(f"could not resolve the VM's backing disk: {stderr}")
+        compression = ("-c", "-o", "compression_type=zstd", "-m", "16", "-W") if compressed else ()
         code, _, stderr = await _run(
             "qemu-img",
             "convert",
             "-O",
             "qcow2",
+            *compression,
             str(overlay),
             str(destination),
             timeout=1800,
         )
         if code != 0:
-            raise ProviderStartError(f"could not export build VM: {stderr}")
+            raise ProviderStartError(f"could not export the VM's disk: {stderr}")
 
     async def destroy(self) -> None:
         """Idempotent: teardown also runs on failure paths, sometimes twice."""
@@ -589,6 +656,7 @@ class QemuProvider(Provider):
         *,
         image: Path | None = None,
         overlay_dir: Path | None = None,
+        snapshot_dir: Path | None = None,
         image_cache_dir: Path | None = None,
         gpu_devices: tuple[str, ...] = (),
         gpu_lock_dir: Path | None = None,
@@ -600,6 +668,7 @@ class QemuProvider(Provider):
         # name: the workspace is the agent's home *inside* a sandbox, and reusing the word
         # for a directory on this machine is the collision the lexicon exists to prevent.
         self.overlay_dir = overlay_dir or Path.home() / ".cache/ale/qemu"
+        self.snapshot_dir = snapshot_dir or self.overlay_dir.parent / "qemu-snapshots"
         self.image_cache_dir = image_cache_dir
         self.gpu_devices = gpu_devices
         self.gpu_lock_dir = gpu_lock_dir or cache_root() / "gpu-locks" / self.name
@@ -612,7 +681,7 @@ class QemuProvider(Provider):
             gui=True,
             network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.ALLOWLIST, NetworkMode.OPEN}),
             reset=False,
-            snapshot=False,
+            snapshot=True,
         )
 
     async def preflight(self) -> None:
@@ -670,8 +739,11 @@ class QemuProvider(Provider):
             by_group = _index_vfio_gpus(candidates)
             used = await _managed_gpu_ids()
             by_group = {group: gpu for group, gpu in by_group.items() if gpu.bdf not in used}
-        resolved_image = await resolve_prepared_vm_image(request.prepared_image)
-        resolved_image = await self._framed(resolved_image, request)
+        if request.snapshot is not None:
+            resolved_image = self._snapshot_image(request.snapshot, request)
+        else:
+            resolved_image = await resolve_prepared_vm_image(request.prepared_image)
+            resolved_image = await self._framed(resolved_image, request)
         base_image = Path(resolved_image.observed_ref)
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
@@ -773,6 +845,7 @@ class QemuProvider(Provider):
             agent_user=agent_user,
             agent_home=agent_home,
             host_ip=host_ip,
+            snapshot_dir=self.snapshot_dir,
         )
         try:
             if request.network.mode is NetworkMode.OPEN:
@@ -1128,12 +1201,12 @@ class QemuProvider(Provider):
         if code != 0:
             raise ProviderStartError(f"could not list retained QEMU sandboxes: {stderr.strip()}")
         containers = output.split()
+        found = self._list_snapshots()
         if not containers:
-            return []
+            return found
         code, raw, stderr = await _run("docker", "inspect", *containers, timeout=30)
         if code != 0:
             raise ProviderStartError(f"could not inspect retained QEMU sandboxes: {stderr.strip()}")
-        found: list[dict[str, object]] = []
         for record in json.loads(raw):
             labels = record.get("Config", {}).get("Labels", {}) or {}
             container = record.get("Name", "").removeprefix("/")
@@ -1151,7 +1224,99 @@ class QemuProvider(Provider):
             )
         return sorted(found, key=lambda item: str(item["handle"]))
 
+    def _list_snapshots(self) -> list[dict[str, object]]:
+        found: list[dict[str, object]] = []
+        if not self.snapshot_dir.is_dir():
+            return found
+        for directory in sorted(self.snapshot_dir.iterdir()):
+            handle = f"{SNAPSHOT_PREFIX}{directory.name}"
+            try:
+                record = self._snapshot_record(handle)
+            except (ProviderCapabilityError, ProviderStartError):
+                continue  # not a snapshot ALE saved, or one still being saved
+            found.append(
+                {
+                    "provider": "qemu",
+                    "handle": handle,
+                    "episode": record.get("episode", ""),
+                    "role": record.get("role", ""),
+                    "image": record.get("identity", ""),
+                    "gpus": (),
+                    "running": False,
+                    "cleanup_command": f"ale sandbox destroy {handle}",
+                }
+            )
+        return found
+
+    def _snapshot_record(self, handle: str) -> dict[str, str]:
+        """A snapshot's record, once its directory is shown to hold one ALE saved."""
+        name = handle.removeprefix(SNAPSHOT_PREFIX)
+        if not handle.startswith(SNAPSHOT_PREFIX) or not name or "/" in name or name[0] == ".":
+            raise ProviderCapabilityError(f"{handle!r} is not a QEMU snapshot handle")
+        directory = self.snapshot_dir / name
+        try:
+            record = json.loads((directory / SNAPSHOT_RECORD).read_text())
+        except FileNotFoundError as exc:
+            raise ProviderStartError(f"snapshot {handle!r} does not exist") from exc
+        except (OSError, ValueError) as exc:
+            raise ProviderCapabilityError(f"{handle!r} has no valid snapshot record") from exc
+        if (
+            not isinstance(record, dict)
+            or record.get("managed") is not True
+            or not (directory / SNAPSHOT_DISK).is_file()
+        ):
+            raise ProviderCapabilityError(f"{handle!r} is not an ALE snapshot")
+        return record
+
+    def _snapshot_image(self, handle: str, request: SandboxRequest) -> ResolvedImage:
+        """The snapshot a VM boots from, which must come from the Task's prepared image."""
+        record = self._snapshot_record(handle)
+        if record.get("prepared_identity") != request.prepared_image.prepared_identity:
+            raise ProviderCapabilityError(
+                f"{handle!r} was not taken from the Task's prepared solver image"
+            )
+        if record.get("os") != request.os.value:
+            raise ProviderCapabilityError(f"{handle!r} holds a {record.get('os')} guest")
+        return ResolvedImage(
+            kind=ImageKind.VM,
+            prepared_identity=request.prepared_image.prepared_identity,
+            observed_identity=str(record.get("identity")),
+            observed_ref=str(
+                self.snapshot_dir / handle.removeprefix(SNAPSHOT_PREFIX) / SNAPSHOT_DISK
+            ),
+        )
+
+    async def _destroy_snapshot(self, handle: str) -> None:
+        self._snapshot_record(handle)
+        directory = self.snapshot_dir / handle.removeprefix(SNAPSHOT_PREFIX)
+        disk = str((directory / SNAPSHOT_DISK).resolve())
+        code, output, stderr = await _run(
+            "docker", "ps", "-a", "-q", "--filter", f"label={MANAGED_LABEL}=true", timeout=30
+        )
+        if code != 0:
+            raise ProviderStartError(f"could not list QEMU sandboxes: {stderr.strip()}")
+        if containers := output.split():
+            code, raw, stderr = await _run("docker", "inspect", *containers, timeout=30)
+            if code != 0:
+                raise ProviderStartError(f"could not inspect QEMU sandboxes: {stderr.strip()}")
+            for record in json.loads(raw):
+                if any(
+                    mount.get("Destination") == RUNNER_BASE and mount.get("Source") == disk
+                    for mount in record.get("Mounts", ())
+                ):
+                    name = record.get("Name", "").removeprefix("/")
+                    raise ProviderStartError(
+                        f"could not destroy {handle}: {HANDLE_PREFIX}{name} runs on it"
+                    )
+        try:
+            shutil.rmtree(directory)
+        except OSError as exc:
+            raise ProviderStartError(f"could not destroy {handle}: {exc}") from exc
+
     async def destroy_retained(self, handle: str) -> None:
+        if handle.startswith(SNAPSHOT_PREFIX):
+            await self._destroy_snapshot(handle)
+            return
         if not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
         container = handle.removeprefix(HANDLE_PREFIX)
@@ -1187,9 +1352,10 @@ class QemuProvider(Provider):
         handle: str,
         request: SandboxRequest,
         allocation: ResourceAllocation,
+        image: ResolvedImage,
     ) -> QemuSandbox:
         """Reconnect to a running retained VM without taking ownership of it."""
-        if not handle.startswith(HANDLE_PREFIX):
+        if handle.startswith(SNAPSHOT_PREFIX) or not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
         container = handle.removeprefix(HANDLE_PREFIX)
         code, raw, stderr = await _run("docker", "inspect", container, timeout=30)
@@ -1214,13 +1380,19 @@ class QemuProvider(Provider):
         }
         if not storage or storage not in mounted_storage:
             raise ProviderCapabilityError(f"{handle!r} has no valid ALE-owned QEMU overlay")
+        base = {
+            mount.get("Source", "")
+            for mount in record.get("Mounts", ())
+            if mount.get("Destination") == RUNNER_BASE
+        }
+        if base != {str(Path(image.observed_ref).resolve())}:
+            raise ProviderCapabilityError(f"{handle!r} does not run the expected solver image")
         ports = record.get("NetworkSettings", {}).get("Ports", {}).get(f"{GUEST_PORT}/tcp") or []
         try:
             host_port = int(ports[0]["HostPort"])
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise ProviderCapabilityError(f"{handle!r} has no guest service port") from exc
 
-        resolved = await resolve_prepared_vm_image(request.prepared_image)
         token = _read_guest_token(Path(storage))
         client = await _connect(host_port, token)
         attached_request = request.model_copy(update={"role": SandboxRole(role)})
@@ -1240,11 +1412,12 @@ class QemuProvider(Provider):
             host_port=host_port,
             client=client,
             file_client=file_client,
-            resolved_image=resolved,
+            resolved_image=image,
             allocation=allocation,
             agent_user=agent_user,
             agent_home=agent_home,
             host_ip=host_ip,
+            snapshot_dir=self.snapshot_dir,
         )
 
 
@@ -1299,6 +1472,11 @@ def _port_of(url: str | None) -> str:
     host_port, _, _ = rest.partition("/")
     _, _, port = host_port.partition(":")
     return port
+
+
+def _disk_identity(disk: Path) -> str:
+    with disk.open("rb") as handle:
+        return "sha256:" + hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def _issue_guest_token(storage: Path) -> str:

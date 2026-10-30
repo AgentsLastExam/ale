@@ -79,6 +79,8 @@ async def test_retained_listing_includes_stale_state_and_cleanup_command(
     async def docker(*args: str, **kwargs: object) -> tuple[int, str, str]:
         if args[:3] == ("ps", "-a", "-q"):
             return 0, "container-id\n", ""
+        if args[0] == "images":
+            return 0, "", ""
         assert args[0] == "inspect"
         return (
             0,

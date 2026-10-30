@@ -8,6 +8,7 @@ anything is provisioned — because a provider that fails late fails expensively
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import sys
@@ -56,9 +57,11 @@ from ale.run.providers.qemu import (
 
 pytestmark = pytest.mark.unit
 
+DIGEST = "sha256:" + "0" * 64
+
 
 def request(**overrides: object) -> SandboxRequest:
-    digest = "sha256:" + "0" * 64
+    digest = DIGEST
     base: dict[str, object] = {
         "episode_id": "e1",
         "prepared_image": PreparedTaskImage(
@@ -218,6 +221,159 @@ async def test_windows_image_export_requires_clean_shutdown_and_preserves_the_ba
     ]
 
 
+def _snapshotting(tmp_path: Path, commands: list[tuple[str, ...]]) -> QemuSandbox:
+    class Client:
+        async def exec(self, argv: list[str], **_kwargs: object) -> tuple[int, str, str, bool]:
+            commands.append(tuple(argv))
+            return 0, "", "", False
+
+        async def close(self) -> None:
+            pass
+
+    sandbox = QemuSandbox.__new__(QemuSandbox)
+    sandbox._client = Client()  # type: ignore[assignment]
+    sandbox._file_client = Client()  # type: ignore[assignment]
+    sandbox.sandbox_id = "e1-abcdef"
+    sandbox.request = request(role="shared")
+    sandbox.container = "ale-qemu-solver"
+    sandbox.storage = tmp_path / "storage"
+    sandbox.snapshot_dir = tmp_path / "snapshots"
+    sandbox.resolved_image = ResolvedImage(
+        kind="vm",
+        prepared_identity=DIGEST,
+        observed_identity=DIGEST,
+        observed_ref=str(tmp_path / "base.qcow2"),
+    )
+    return sandbox
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_is_a_standalone_disk_saved_after_a_clean_shutdown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        commands.append(argv)
+        if argv[:2] == ("docker", "wait"):
+            return 0, "0\n", ""
+        if argv[:2] == ("qemu-img", "convert"):
+            Path(argv[-1]).write_bytes(b"disk")
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    sandbox = _snapshotting(tmp_path, commands)
+    retained = await sandbox.snapshot(roles=("solver", "verifier"), reason="kept")
+
+    disk = tmp_path / "snapshots/e1-abcdef/disk.qcow2"
+    overlay = str(sandbox.storage / "data.qcow2")
+    assert commands == [
+        ("sync",),
+        ("systemctl", "poweroff", "--no-block"),
+        ("docker", "wait", "ale-qemu-solver"),
+        ("qemu-img", "rebase", "-u", "-F", "qcow2", "-b", str(tmp_path / "base.qcow2"), overlay),
+        (
+            "qemu-img",
+            "convert",
+            "-O",
+            "qcow2",
+            *("-c", "-o", "compression_type=zstd", "-m", "16", "-W"),
+            overlay,
+            str(disk),
+        ),
+    ]
+    assert retained.handle == "qemu:snapshot:e1-abcdef"
+    assert retained.cleanup_command == "ale sandbox destroy qemu:snapshot:e1-abcdef"
+    record = json.loads((disk.parent / "snapshot.json").read_text())
+    assert record == {
+        "managed": True,
+        "episode": "e1",
+        "role": "shared",
+        "os": "linux",
+        "prepared_identity": DIGEST,
+        "identity": "sha256:" + hashlib.sha256(b"disk").hexdigest(),
+    }
+
+    provider = QemuProvider(overlay_dir=tmp_path / "overlays", snapshot_dir=tmp_path / "snapshots")
+    booted = provider._snapshot_image(retained.handle, request())
+    assert (booted.observed_identity, booted.observed_ref) == (record["identity"], str(disk))
+    other = request(
+        prepared_image=request().prepared_image.model_copy(
+            update={"prepared_identity": "sha256:" + "1" * 64}
+        )
+    )
+    with pytest.raises(ProviderCapabilityError, match="prepared solver image"):
+        provider._snapshot_image(retained.handle, other)
+    with pytest.raises(ProviderCapabilityError, match="holds a linux guest"):
+        provider._snapshot_image(retained.handle, request(os="windows"))
+    with pytest.raises(ProviderCapabilityError, match="not a QEMU snapshot handle"):
+        provider._snapshot_image("qemu:snapshot:../overlays", request())
+
+
+@pytest.mark.asyncio
+async def test_a_failed_snapshot_leaves_nothing_behind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        if argv[:2] == ("docker", "wait"):
+            return 0, "0\n", ""
+        return (1, "", "no space left") if argv[:2] == ("qemu-img", "convert") else (0, "", "")
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    sandbox = _snapshotting(tmp_path, [])
+    with pytest.raises(ProviderStartError, match="no space left"):
+        await sandbox.snapshot(roles=("solver",), reason="kept")
+    assert not any((tmp_path / "snapshots").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_is_listed_and_not_destroyed_while_a_vm_runs_on_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshots = tmp_path / "snapshots"
+    (snapshots / "e1-abcdef").mkdir(parents=True)
+    (snapshots / "e1-abcdef/disk.qcow2").write_bytes(b"disk")
+    (snapshots / "e1-abcdef/snapshot.json").write_text(
+        json.dumps({"managed": True, "episode": "e1", "role": "solver", "identity": DIGEST})
+    )
+    (snapshots / "unrelated").mkdir()
+    mounts: list[dict[str, str]] = []
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        if argv[:3] == ("docker", "ps", "-a"):
+            return 0, ("runner\n" if "label=ale.qemu.managed=true" in argv[-1] else ""), ""
+        assert argv[:2] == ("docker", "inspect")
+        return 0, json.dumps([{"Name": "/ale-qemu-fork", "Mounts": mounts}]), ""
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    provider = QemuProvider(overlay_dir=tmp_path / "overlays", snapshot_dir=snapshots)
+    assert provider._list_snapshots() == [
+        {
+            "provider": "qemu",
+            "handle": "qemu:snapshot:e1-abcdef",
+            "episode": "e1",
+            "role": "solver",
+            "image": DIGEST,
+            "gpus": (),
+            "running": False,
+            "cleanup_command": "ale sandbox destroy qemu:snapshot:e1-abcdef",
+        }
+    ]
+    mounts.append(
+        {
+            "Source": str((snapshots / "e1-abcdef/disk.qcow2").resolve()),
+            "Destination": "/images/base.qcow2",
+        }
+    )
+    with pytest.raises(ProviderStartError, match="qemu:ale-qemu-fork runs on it"):
+        await provider.destroy_retained("qemu:snapshot:e1-abcdef")
+    mounts.clear()
+    await provider.destroy_retained("qemu:snapshot:e1-abcdef")
+    assert not (snapshots / "e1-abcdef").exists()
+    with pytest.raises(ProviderStartError, match="does not exist"):
+        await provider.destroy_retained("qemu:snapshot:e1-abcdef")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("module_name", ["ale.run.providers.qemu", "ale.run.task_images"])
 async def test_cancelled_image_command_reaps_its_subprocess(
@@ -335,6 +491,8 @@ async def test_qemu_retained_solver_can_be_reattached(
     storage = tmp_path / "episode"
     storage.mkdir()
     (storage / "guestd-token").write_text("retained-token\n")
+    base = tmp_path / "base.qcow2"
+    base.touch()
     record = {
         "Name": "/ale-qemu-test",
         "Config": {
@@ -347,7 +505,10 @@ async def test_qemu_retained_solver_can_be_reattached(
             }
         },
         "State": {"Running": True},
-        "Mounts": [{"Type": "bind", "Source": str(storage), "Destination": "/storage"}],
+        "Mounts": [
+            {"Type": "bind", "Source": str(storage), "Destination": "/storage"},
+            {"Type": "bind", "Source": str(base), "Destination": "/images/base.qcow2"},
+        ],
         "NetworkSettings": {"Ports": {"7411/tcp": [{"HostPort": "17411"}]}},
     }
     rules: list[str] = []
@@ -375,14 +536,6 @@ async def test_qemu_retained_solver_can_be_reattached(
         async def close(self) -> None:
             pass
 
-    async def resolve(image: PreparedTaskImage) -> ResolvedImage:
-        return ResolvedImage(
-            kind="vm",
-            prepared_identity=image.prepared_identity,
-            observed_identity=image.prepared_identity,
-            observed_ref=image.runtime_ref,
-        )
-
     async def contract(
         _provider: QemuProvider, _client: object, _request: SandboxRequest
     ) -> tuple[str, str, bool]:
@@ -391,7 +544,6 @@ async def test_qemu_retained_solver_can_be_reattached(
     monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
     monkeypatch.setattr("ale.run.providers.qemu.TcpTransport", Transport)
     monkeypatch.setattr("ale.run.providers.qemu.GuestClient", Client)
-    monkeypatch.setattr("ale.run.providers.qemu.resolve_prepared_vm_image", resolve)
     monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
     allocation = ResourceAllocation(
         cpus=2,
@@ -400,16 +552,29 @@ async def test_qemu_retained_solver_can_be_reattached(
         network_mode=NetworkMode.BLOCK,
         provider="qemu",
     )
+    image = ResolvedImage(
+        kind="vm",
+        prepared_identity=DIGEST,
+        observed_identity=DIGEST,
+        observed_ref=str(base),
+    )
 
-    sandbox = await QemuProvider().attach_retained("qemu:ale-qemu-test", request(), allocation)
+    sandbox = await QemuProvider().attach_retained(
+        "qemu:ale-qemu-test", request(), allocation, image
+    )
 
     assert sandbox.storage == storage
     assert sandbox.host_port == 17411
     assert sandbox.host_ip == "172.17.0.1"
     assert sandbox.request.role.value == "solver"
+    assert sandbox.resolved_image == image
     # The reattaching run's own Gateway is routed in at the same guest address.
     assert f"iptables -t nat -F {GATEWAY_CHAIN}" in rules[0]
     assert f"--dport {SANDBOX_GATEWAY_PORT} -j DNAT --to-destination 172.17.0.1:8931" in rules[2]
+
+    other = image.model_copy(update={"observed_ref": str(tmp_path / "other.qcow2")})
+    with pytest.raises(ProviderCapabilityError, match="expected solver image"):
+        await QemuProvider().attach_retained("qemu:ale-qemu-test", request(), allocation, other)
 
 
 def test_overlay_uses_the_prepared_disks_virtual_size(

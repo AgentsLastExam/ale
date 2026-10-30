@@ -67,7 +67,11 @@ MANAGED_LABEL = "ale.managed"
 ROLE_LABEL = "ale.role"
 RETENTION_LABEL = "ale.retention"
 GPU_LABEL = "ale.gpus"
+PREPARED_LABEL = "ale.prepared"
 HANDLE_PREFIX = "docker:"
+#: A snapshot is a local image in this repository, tagged with its Sandbox's ID.
+SNAPSHOT_REPOSITORY = "ale-snapshot"
+SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
 
 #: The name a sandbox uses for its gateway. It is mapped to the host's address *on the
 #: container's own bridge* rather than to docker's usual host-gateway: an ``--internal``
@@ -380,6 +384,41 @@ class DockerSandbox(Sandbox):
             gpu_devices=gpu_devices,
         )
 
+    async def snapshot(
+        self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
+    ) -> RetainedSandbox:
+        """Stop the container and commit its filesystem as a labelled local image.
+
+        A sandbox mounts no volumes, so the commit holds all of its files. The image keeps
+        the container's labels and command; a snapshot holds no GPU.
+        """
+        await asyncio.gather(
+            self._client.close(), self._file_client.close(), return_exceptions=True
+        )
+        code, _, stderr = await _docker("stop", "--time", "30", self.container, timeout=120)
+        if code != 0:
+            raise ProviderStartError(f"could not stop {self.container}: {stderr.strip()}")
+        code, _, stderr = await _docker(
+            "commit",
+            "--change", f"LABEL {RETENTION_LABEL}=snapshot",
+            "--change", f'LABEL {GPU_LABEL}=""',
+            "--change", f"LABEL {PREPARED_LABEL}={self.request.prepared_image.prepared_identity}",
+            self.container,
+            f"{SNAPSHOT_REPOSITORY}:{self.sandbox_id}",
+            timeout=1800,
+        )  # fmt: skip
+        if code != 0:
+            raise ProviderStartError(f"could not commit {self.container}: {stderr.strip()}")
+        handle = f"{SNAPSHOT_PREFIX}{self.sandbox_id}"
+        return RetainedSandbox(
+            provider="docker",
+            handle=handle,
+            episode_id=self.request.episode_id,
+            roles=roles,
+            reason=reason,
+            cleanup_command=f"ale sandbox destroy {handle}",
+        )
+
 
 class DockerProvider(Provider):
     """Supplies container sandboxes."""
@@ -404,6 +443,7 @@ class DockerProvider(Provider):
             operating_systems=frozenset({OperatingSystem.LINUX}),
             gui=True,  # depends on the image; the GUI base image provides a desktop
             network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.ALLOWLIST, NetworkMode.OPEN}),
+            snapshot=True,
         )
 
     async def preflight(self) -> None:
@@ -442,14 +482,17 @@ class DockerProvider(Provider):
                     + ", ".join(str(index) for index in unknown)
                 )
             candidates = tuple(host_devices[index].id for index in configured)
-        resolved_image = await resolve_prepared_container_image(request.prepared_image)
-        if problems := await self.check_image(resolved_image.observed_ref):
-            raise ProviderCapabilityError(
-                f"{request.prepared_image.runtime_ref} cannot serve as a sandbox: "
-                f"{'; '.join(problems)}. "
-                "See docs/specs/sandbox-image.md"
-            )
-        resolved_image = await self._framed(resolved_image, request)
+        if request.snapshot is not None:
+            resolved_image = await self._snapshot_image(request.snapshot, request)
+        else:
+            resolved_image = await resolve_prepared_container_image(request.prepared_image)
+            if problems := await self.check_image(resolved_image.observed_ref):
+                raise ProviderCapabilityError(
+                    f"{request.prepared_image.runtime_ref} cannot serve as a sandbox: "
+                    f"{'; '.join(problems)}. "
+                    "See docs/specs/sandbox-image.md"
+                )
+            resolved_image = await self._framed(resolved_image, request)
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         container = f"ale-{sandbox_id}"
@@ -860,13 +903,13 @@ class DockerProvider(Provider):
         if code != 0:
             raise ProviderStartError(f"could not list ALE sandboxes: {stderr.strip()}")
         handles = output.split()
+        found = await self._list_snapshots()
         if not handles:
-            return []
+            return found
         code, raw, stderr = await _docker("inspect", *handles, timeout=30)
         if code != 0:
             raise ProviderStartError(f"could not inspect ALE sandboxes: {stderr.strip()}")
         records = json.loads(raw)
-        found: list[dict[str, object]] = []
         for record in records:
             labels = record.get("Config", {}).get("Labels", {}) or {}
             gpu = tuple(filter(None, labels.get(GPU_LABEL, "").split(",")))
@@ -886,7 +929,61 @@ class DockerProvider(Provider):
             )
         return sorted(found, key=lambda item: str(item["handle"]))
 
+    async def _list_snapshots(self) -> list[dict[str, object]]:
+        code, output, stderr = await _docker(
+            "images",
+            "--filter",
+            f"reference={SNAPSHOT_REPOSITORY}:*",
+            "--format",
+            "{{.Tag}}",
+            timeout=30,
+        )
+        if code != 0:
+            raise ProviderStartError(f"could not list ALE snapshots: {stderr.strip()}")
+        found: list[dict[str, object]] = []
+        for tag in output.split():
+            handle = f"{SNAPSHOT_PREFIX}{tag}"
+            try:
+                labels, identity = await _snapshot_record(handle)
+            except ProviderCapabilityError:
+                continue  # tagged by hand, not by ALE
+            found.append(
+                {
+                    "provider": "docker",
+                    "handle": handle,
+                    "episode": labels.get(LABEL, ""),
+                    "role": labels.get(ROLE_LABEL, ""),
+                    "image": identity,
+                    "gpus": (),
+                    "running": False,
+                    "cleanup_command": f"ale sandbox destroy {handle}",
+                }
+            )
+        return found
+
+    async def _snapshot_image(self, handle: str, request: SandboxRequest) -> ResolvedImage:
+        """The snapshot a Sandbox boots from, which must come from the Task's prepared image."""
+        labels, identity = await _snapshot_record(handle)
+        if labels.get(PREPARED_LABEL) != request.prepared_image.prepared_identity:
+            raise ProviderCapabilityError(
+                f"{handle!r} was not taken from the Task's prepared solver image"
+            )
+        return ResolvedImage(
+            kind=ImageKind.CONTAINER,
+            prepared_identity=request.prepared_image.prepared_identity,
+            observed_identity=identity,
+            observed_ref=identity,
+        )
+
     async def destroy_retained(self, handle: str) -> None:
+        if handle.startswith(SNAPSHOT_PREFIX):
+            await _snapshot_record(handle)
+            reference = _snapshot_reference(handle)
+            # Not forced: a sandbox booted from the snapshot still uses its layers.
+            code, _, stderr = await _docker("rmi", reference, timeout=120)
+            if code != 0:
+                raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
+            return
         if not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
         container = handle.removeprefix(HANDLE_PREFIX)
@@ -913,9 +1010,10 @@ class DockerProvider(Provider):
         handle: str,
         request: SandboxRequest,
         allocation: ResourceAllocation,
+        image: ResolvedImage,
     ) -> DockerSandbox:
         """Reconnect to a running retained container without taking ownership of it."""
-        if not handle.startswith(HANDLE_PREFIX):
+        if handle.startswith(SNAPSHOT_PREFIX) or not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
         container = handle.removeprefix(HANDLE_PREFIX)
         code, raw, stderr = await _docker("inspect", container, timeout=30)
@@ -933,8 +1031,7 @@ class DockerProvider(Provider):
         if not record.get("State", {}).get("Running"):
             raise ProviderStartError(f"retained sandbox {handle!r} is not running")
 
-        resolved = await resolve_prepared_container_image(request.prepared_image)
-        if record.get("Image") != resolved.observed_identity:
+        if record.get("Image") != image.observed_identity:
             raise ProviderCapabilityError(f"{handle!r} does not use the expected solver image")
         networks = tuple(
             name
@@ -961,11 +1058,29 @@ class DockerProvider(Provider):
             network=networks[0] if networks else None,
             client=client,
             file_client=file_client,
-            resolved_image=resolved,
+            resolved_image=image,
             allocation=allocation,
             agent_user=agent_user,
             agent_home=agent_home,
         )
+
+
+def _snapshot_reference(handle: str) -> str:
+    if not handle.startswith(SNAPSHOT_PREFIX):
+        raise ProviderCapabilityError(f"{handle!r} is not a Docker snapshot handle")
+    return f"{SNAPSHOT_REPOSITORY}:{handle.removeprefix(SNAPSHOT_PREFIX)}"
+
+
+async def _snapshot_record(handle: str) -> tuple[dict[str, str], str]:
+    """A snapshot's labels and image identity, once it is shown to be ALE's."""
+    code, raw, stderr = await _docker("image", "inspect", _snapshot_reference(handle), timeout=30)
+    if code != 0:
+        raise ProviderStartError(f"snapshot {handle!r} does not exist: {stderr.strip()}")
+    record = json.loads(raw)[0]
+    labels = record.get("Config", {}).get("Labels", {}) or {}
+    if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "snapshot":
+        raise ProviderCapabilityError(f"{handle!r} is not an ALE snapshot")
+    return labels, str(record.get("Id", ""))
 
 
 def _url_port(url: str | None) -> str:

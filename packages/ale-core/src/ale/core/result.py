@@ -45,8 +45,9 @@ class SandboxOutcome(BaseModel):
     model_config = _STRICT
 
     roles: tuple[Literal["solver", "verifier"], ...]
-    requested: Literal["destroy", "keep"]
-    outcome: Literal["destroyed", "retained", "retention-failed"]
+    requested: Literal["destroy", "keep", "snapshot"]
+    outcome: Literal["destroyed", "retained", "snapshotted", "retention-failed"]
+    """``snapshotted``: the Sandbox was destroyed after its disk was saved as ``handle``."""
     provider: str
     handle: str | None = None
     reason: str | None = None

@@ -47,7 +47,9 @@ app = typer.Typer(
 app.add_typer(assets_app, name="assets")
 vm_image_app = typer.Typer(help="Publish and acquire prebuilt VM disks.", no_args_is_help=True)
 app.add_typer(vm_image_app, name="vm-image")
-sandbox_app = typer.Typer(help="Inspect and remove retained sandboxes.", no_args_is_help=True)
+sandbox_app = typer.Typer(
+    help="Inspect and remove retained sandboxes and snapshots.", no_args_is_help=True
+)
 app.add_typer(sandbox_app, name="sandbox")
 
 EXIT_PROVIDER = 4
@@ -385,7 +387,7 @@ def _print_asset_sync(results: Sequence[AssetSyncResult]) -> None:
 
 @sandbox_app.command("list")
 def sandbox_list() -> None:
-    """List ALE-managed sandboxes requested for retention."""
+    """List ALE-managed sandboxes and snapshots requested for retention."""
     try:
         records = asyncio.run(_list_retained_sandboxes())
     except AleError as error:
@@ -399,8 +401,10 @@ def sandbox_list() -> None:
 
 
 @sandbox_app.command("destroy")
-def sandbox_destroy(handle: Annotated[str, typer.Argument(help="Retained sandbox handle")]) -> None:
-    """Destroy one ALE-retained sandbox and its owned resources."""
+def sandbox_destroy(
+    handle: Annotated[str, typer.Argument(help="Retained sandbox or snapshot handle")],
+) -> None:
+    """Destroy one ALE-retained sandbox or snapshot and its owned resources."""
     try:
         asyncio.run(_destroy_retained_sandbox(handle))
     except AleError as error:

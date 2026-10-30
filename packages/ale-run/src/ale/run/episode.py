@@ -142,7 +142,7 @@ class _LeaseEntry:
     sandbox: Sandbox
     provider_name: str
     roles: tuple[Literal["solver", "verifier"], ...]
-    requested: Literal["destroy", "keep"]
+    requested: Literal["destroy", "keep", "snapshot"]
     sanitation: Literal["not-run", "succeeded", "failed"] = "not-run"
     sanitation_reason: str | None = None
 
@@ -179,10 +179,13 @@ class _Lease:
 
     def _policy(
         self, request: SandboxRequest
-    ) -> tuple[tuple[Literal["solver", "verifier"], ...], Literal["destroy", "keep"]]:
+    ) -> tuple[tuple[Literal["solver", "verifier"], ...], Literal["destroy", "keep", "snapshot"]]:
         if request.role is SandboxRole.SHARED:
-            keep = self.retention.solver == "keep" or self.retention.verifier == "keep"
-            return ("solver", "verifier"), "keep" if keep else "destroy"
+            # The solver's policy wins: the one Sandbox holds the agent's work.
+            policy = self.retention.solver
+            if policy == "destroy":
+                policy = self.retention.verifier
+            return ("solver", "verifier"), policy
         if request.role is SandboxRole.VERIFIER:
             return ("verifier",), self.retention.verifier
         return ("solver",), self.retention.solver
@@ -191,7 +194,7 @@ class _Lease:
         entry = self._find(sandbox)
         if entry is None:
             return
-        if entry.requested == "keep":
+        if entry.requested != "destroy":
             if entry.sanitation == "succeeded":
                 return
             await self._destroy(entry, outcome="retention-failed")
@@ -208,7 +211,11 @@ class _Lease:
 
     async def finalize(self, *, allow_retention: bool = True) -> None:
         for entry in list(self.live):
-            if not allow_retention or entry.requested != "keep" or entry.sanitation != "succeeded":
+            if (
+                not allow_retention
+                or entry.requested == "destroy"
+                or entry.sanitation != "succeeded"
+            ):
                 outcome = (
                     "destroyed"
                     if not allow_retention or entry.requested == "destroy"
@@ -216,20 +223,25 @@ class _Lease:
                 )
                 await self._destroy(entry, outcome=outcome)
                 continue
+            reason = "requested by sandbox_retention run configuration"
             try:
-                retained = await entry.sandbox.retain(
-                    roles=entry.roles,
-                    reason="requested by sandbox_retention run configuration",
-                )
+                if entry.requested == "snapshot":
+                    retained = await entry.sandbox.snapshot(roles=entry.roles, reason=reason)
+                else:
+                    retained = await entry.sandbox.retain(roles=entry.roles, reason=reason)
             except Exception as exc:
                 entry.sanitation_reason = str(exc)
                 await self._destroy(entry, outcome="retention-failed")
+                continue
+            outcome = _retained_outcome(entry, retained)
+            self.outcomes.append(outcome)
+            self.retained.append((entry, outcome))
+            if entry.requested == "snapshot":
+                # The snapshot holds the agent's state now; its Sandbox goes.
+                await self._destroy(entry, outcome=None)
             else:
                 entry.sandbox.release_resources()
                 self.live.remove(entry)
-                outcome = _retained_outcome(entry, retained)
-                self.outcomes.append(outcome)
-                self.retained.append((entry, outcome))
 
     async def destroy_retained(self) -> None:
         """Undo retention if terminal recording fails after Sandbox finalization."""
@@ -237,19 +249,40 @@ class _Lease:
         for entry, outcome in self.retained:
             self.outcomes.remove(outcome)
             try:
-                await self._destroy(entry, outcome="destroyed")
+                if outcome.outcome == "snapshotted" and outcome.handle is not None:
+                    await self._destroy_snapshot(entry, outcome.handle)
+                else:
+                    await self._destroy(entry, outcome="destroyed")
             except RetentionFinalizationError as exc:
                 failure = failure or exc
         self.retained.clear()
         if failure is not None:
             raise failure
 
+    async def _destroy_snapshot(self, entry: _LeaseEntry, handle: str) -> None:
+        try:
+            await self.providers.get(entry.sandbox.request.image_kind).destroy_retained(handle)
+        except Exception as exc:
+            entry.sanitation_reason = str(exc)
+            raise RetentionFinalizationError(f"could not destroy snapshot {handle}: {exc}") from exc
+        finally:
+            self.outcomes.append(
+                SandboxOutcome(
+                    roles=entry.roles,
+                    requested=entry.requested,
+                    outcome="destroyed",
+                    provider=entry.provider_name,
+                    reason=entry.sanitation_reason,
+                )
+            )
+
     async def _destroy(
         self,
         entry: _LeaseEntry,
         *,
-        outcome: Literal["destroyed", "retention-failed"],
+        outcome: Literal["destroyed", "retention-failed"] | None,
     ) -> None:
+        """Destroy an entry's Sandbox, recording ``outcome`` unless one is recorded already."""
         error: Exception | None = None
         try:
             await entry.sandbox.destroy()
@@ -260,15 +293,16 @@ class _Lease:
             entry.sandbox.release_resources()
             if entry in self.live:
                 self.live.remove(entry)
-        self.outcomes.append(
-            SandboxOutcome(
-                roles=entry.roles,
-                requested=entry.requested,
-                outcome=outcome,
-                provider=entry.provider_name,
-                reason=entry.sanitation_reason,
+        if outcome is not None:
+            self.outcomes.append(
+                SandboxOutcome(
+                    roles=entry.roles,
+                    requested=entry.requested,
+                    outcome=outcome,
+                    provider=entry.provider_name,
+                    reason=entry.sanitation_reason,
+                )
             )
-        )
         if error is not None:
             raise RetentionFinalizationError(
                 f"could not destroy sandbox {entry.sandbox.sandbox_id}: {error}"
@@ -292,7 +326,7 @@ def _retained_outcome(entry: _LeaseEntry, retained: RetainedSandbox) -> SandboxO
     return SandboxOutcome(
         roles=entry.roles,
         requested=entry.requested,
-        outcome="retained",
+        outcome="snapshotted" if entry.requested == "snapshot" else "retained",
         provider=retained.provider,
         handle=retained.handle,
         reason=retained.reason,

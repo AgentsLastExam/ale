@@ -814,7 +814,11 @@ class DaytonaProvider(Provider):
         await self._api.delete_sandbox(daytona_id)
 
     async def attach_retained(
-        self, handle: str, request: SandboxRequest, allocation: ResourceAllocation
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+        image: ResolvedImage,
     ) -> Sandbox:
         """Reconnect to a running retained sandbox without taking ownership of it."""
         if not handle.startswith(HANDLE_PREFIX):
@@ -836,15 +840,8 @@ class DaytonaProvider(Provider):
 
         local = await resolve_prepared_container_image(request.prepared_image)
         framed = await with_framework(local.observed_identity, user=request.user, sudo=request.sudo)
-        published = await self._images.lookup(framed)
-        if published is None or _from_reference(data) != published.ref:
+        if _from_reference(data) != image.observed_ref:
             raise ProviderCapabilityError(f"{handle!r} does not use the expected solver image")
-        resolved = ResolvedImage(
-            kind=ImageKind.CONTAINER,
-            prepared_identity=request.prepared_image.prepared_identity,
-            observed_identity=published.digest,
-            observed_ref=published.ref,
-        )
         attached = request.model_copy(update={"role": SandboxRole(role)})
         config = await image_config(framed)
         local_gateway, listeners, targets = _tunnel_plan(attached)
@@ -878,7 +875,7 @@ class DaytonaProvider(Provider):
             file_client=file_client,
             tunnel=tunnel,
             local_gateway=local_gateway,
-            resolved_image=resolved,
+            resolved_image=image,
             allocation=allocation,
             agent_user=request.user,
             agent_home=agent_home,

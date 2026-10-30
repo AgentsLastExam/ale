@@ -234,7 +234,7 @@ class VerificationConfig(BaseModel):
 class SandboxRetentionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    solver: Literal["destroy", "keep"] = "destroy"
+    solver: Literal["destroy", "keep", "snapshot"] = "destroy"
     verifier: Literal["destroy", "keep"] = "destroy"
 
 

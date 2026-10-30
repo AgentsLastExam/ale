@@ -29,6 +29,7 @@ Normative. Every term below has exactly one meaning.
 | **Artifact snapshot** | Immutable regular-file/directory solver evidence captured after the solver stops and before verification, with exact source path, type, mode, and content identity. | not post-verifier bytes or an implicit workspace copy |
 | **Separate verifier** | A fresh verifier sandbox using reused solver content, a Task-local verifier build, or a resolved external image, with its own or the solver's resources and exact artifact restoration. | not a second setup run or a copy of the whole solver filesystem |
 | **Retained sandbox** | An ALE-managed, sanitized Sandbox kept after its episode when run policy requests `keep`, with a durable Provider handle and cleanup command; reverification and continuation attach to it. | not Task-controlled or an unmanaged leaked container |
+| **Sandbox snapshot** | The sanitized disk of a solver saved when run policy requests `snapshot`, with a durable Provider handle; any number of continuations boot new Sandboxes from it. | not an Artifact snapshot, and holds no running process |
 | **Episode** | One complete administration of one selected Task instance by one agent. | not a trial or job |
 | **Run** | One batch invocation of Episodes plus its Run Status Projection. | — |
 | **Harness** | The adapter binding an agent program to ALE. An Autonomous Harness owns its loop; a Policy Harness drives a framework-owned Task environment. | not an agent identity or Task setting |
@@ -38,7 +39,7 @@ Normative. Every term below has exactly one meaning.
 | **MCP Server** | A validated stdio or Streamable HTTP server definition made available to an agent. | not a vendor-native config file |
 | **Effective Agent Resources** | The deduplicated union of Task-, preset-, Run-, and CLI-declared Skills and MCP servers. | never winner-takes-all configuration |
 | **CUA Desktop MCP** (`cua-desktop`) | ALE's built-in screen-control MCP server selected at Run level. | not selected by a Task or automatically injected by an image |
-| **Native Continuation** | One Harness's exact native agent session, by its native ID; it resumes wherever that session's files are, including a later episode's adopted retained solver. | not Run resume, transcript replay, or a copy of the session |
+| **Native Continuation** | One Harness's exact native agent session, by its native ID; it resumes wherever that session's files are, including a later episode's adopted retained solver or one booted from its snapshot. | not Run resume, transcript replay, or a copy of the session |
 | **Limit Termination** | The recorded layer, limit, configured value, and cause that stopped an Episode. | not an untyped process exit |
 | **GuestServer** (`ale-guestd`) | The in-sandbox service through which execution, file transfer, and observation flow. | never Provider-specific |
 | **Gateway** | The host-side service through which solver traffic in API-key and subscription modes is controlled, metered, credentialed, and recorded. | Judge traffic is attributed separately from solver traffic |

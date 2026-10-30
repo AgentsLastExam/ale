@@ -389,6 +389,7 @@ class ProviderConformance:
                     retained.handle,
                     request.model_copy(update={"gateway_url": f"http://127.0.0.1:{later_port}"}),
                     sandbox.allocation,
+                    sandbox.resolved_image,
                 )
                 gateway = attached.gateway_url
                 assert gateway == sandbox.gateway_url
@@ -396,6 +397,42 @@ class ProviderConformance:
                 await attached.retain(roles=("solver",), reason="conformance")
             finally:
                 await self.provider.destroy_retained(retained.handle)
+
+    @pytest.mark.asyncio
+    async def test_a_snapshot_boots_new_sandboxes_with_its_files(self) -> None:
+        """A snapshot keeps the disk, and every Sandbox booted from it starts from that disk."""
+        if not self.provider.capabilities().snapshot:
+            with pytest.raises(ProviderCapabilityError):
+                await self.provider.create(await self.request(retention="snapshot"))
+            return
+        sandbox = await self.provider.create(await self.request(retention="snapshot"))
+        kept = str(PurePosixPath(sandbox.agent_home) / "kept.txt")
+        try:
+            await sandbox.write_file(kept, b"kept", identity=Identity.AGENT)
+            retained = await sandbox.snapshot(roles=("solver",), reason="conformance")
+        finally:
+            await sandbox.destroy()
+        try:
+            assert retained.handle.startswith(f"{self.provider.name}:")
+            listed = {record["handle"] for record in await self.provider.list_retained()}
+            assert retained.handle in listed
+            requests = [await self.request(snapshot=retained.handle) for _ in range(2)]
+            booted = await asyncio.gather(
+                *(self.provider.create(item) for item in requests), return_exceptions=True
+            )
+            forks = [fork for fork in booted if isinstance(fork, Sandbox)]
+            try:
+                for fork in booted:
+                    if isinstance(fork, BaseException):
+                        raise fork
+                    assert await fork.read_file(kept) == b"kept"
+            finally:
+                for fork in forks:
+                    await fork.destroy()
+        finally:
+            await self.provider.destroy_retained(retained.handle)
+        listed = {record["handle"] for record in await self.provider.list_retained()}
+        assert retained.handle not in listed
 
     @pytest.mark.asyncio
     async def test_destroy_is_idempotent(self) -> None:
