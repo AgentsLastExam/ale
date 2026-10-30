@@ -17,7 +17,7 @@ import subprocess
 import pytest
 
 from ale.core.errors import ProviderCapabilityError, TaskDefinitionError
-from ale.core.sandbox import ImageRef
+from ale.core.sandbox import ImageRef, PreparedTaskImage
 from ale.run.framework import with_framework
 from ale.run.images import resolve_container_reference
 from ale.run.providers.docker import DockerProvider
@@ -30,13 +30,15 @@ CONFORMING = CONTAINER_BASE
 #: A build environment, not a sandbox: no unprivileged account, and a command that exits
 #: at once. Referencing one directly is exactly what the contract rules out.
 UPSTREAM = "docker.io/library/python:3.12-slim"
+#: An image whose Python is too old for verification; the framework brings its own.
 OLD_PYTHON = "docker.io/library/python:3.10-slim"
+NO_COMMAND = "ale-test-no-command:latest"
 
 
 async def _pulled(reference: str) -> str:
     """The check inspects a local image, so each test makes sure its image is there.
 
-    A local copy is used as it is: CI builds this engine version's base before publishing.
+    A local copy is used as it is: CI builds a base's new version before publishing it.
     """
     present = subprocess.run(["docker", "image", "inspect", reference], capture_output=True)
     if present.returncode != 0:
@@ -58,17 +60,33 @@ async def test_an_image_without_the_tasks_account_is_refused_by_name() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_old_python_image_is_refused_by_name() -> None:
-    problems = await DockerProvider().check_image(await _pulled(OLD_PYTHON))
-
-    assert any("older than 3.12" in problem for problem in problems)
+async def test_an_image_whatever_its_python_is_accepted() -> None:
+    assert await DockerProvider().check_image(await _pulled(OLD_PYTHON)) == []
 
 
 @pytest.mark.asyncio
 async def test_a_non_conforming_image_never_reaches_provisioning() -> None:
     """Refused before a container exists, not diagnosed from its corpse."""
+    # An image with no command at all: an empty root filesystem, imported.
+    subprocess.run(
+        ["docker", "import", "-", NO_COMMAND], input=bytes(1024), capture_output=True, check=True
+    )
+    image = subprocess.run(
+        ["docker", "image", "inspect", "-f", "{{.Id}}", NO_COMMAND],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    prepared = PreparedTaskImage(
+        kind="container",
+        source="solver-local",
+        input_identity=image,
+        image_source_identity=image,
+        runtime_ref=image,
+        prepared_identity=image,
+    )
     with pytest.raises(ProviderCapabilityError, match=r"sandbox-image\.md"):
-        await DockerProvider().prepare_image(ImageRef(kind="container", reference=OLD_PYTHON))
+        await DockerProvider().prepare_image(prepared)
 
 
 @pytest.mark.asyncio

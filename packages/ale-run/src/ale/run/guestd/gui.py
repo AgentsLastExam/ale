@@ -250,14 +250,21 @@ def _start_server() -> bool:
     raise GuiUnavailable("cua-driver did not start in the desktop session")
 
 
-#: Run as the agent account: reading another account's process environment needs
-#: CAP_SYS_PTRACE, which a container's root does not have, but an account reads its own.
+#: Run as the agent account, to which it drops itself: reading another account's process
+#: environment needs CAP_SYS_PTRACE, which a container's root does not have, but an account
+#: reads its own.
 #: It also reports whether the session has reached its window manager or shell, because an
 #: X server answers screenshots long before the desktop the agent will use is drawn.
 _SESSION_SCAN = """
-import json, os, sys
-shells = set(sys.argv[1].split(","))
-keys = set(sys.argv[2:])
+import json, os, pwd, sys
+if os.geteuid() == 0:
+    # Everything is imported first: the interpreter's own files are root's alone.
+    account = pwd.getpwnam(sys.argv[1])
+    os.initgroups(account.pw_name, account.pw_gid)
+    os.setgid(account.pw_gid)
+    os.setuid(account.pw_uid)
+shells = set(sys.argv[2].split(","))
+keys = set(sys.argv[3:])
 best, shell = None, False
 for name in os.listdir("/proc"):
     if not name.isdigit():
@@ -306,12 +313,18 @@ def _session_environment(account: Any) -> dict[str, str] | None:
     """The environment of the account's desktop session, read from its own processes."""
     try:
         result = subprocess.run(
-            [sys.executable, "-c", _SESSION_SCAN, ",".join(_SHELLS), *_SESSION_KEYS],
+            [
+                sys.executable,
+                "-c",
+                _SESSION_SCAN,
+                account.pw_name,
+                ",".join(_SHELLS),
+                *_SESSION_KEYS,
+            ],
             capture_output=True,
             text=True,
             timeout=30,
             check=False,
-            preexec_fn=_demote(account),
         )
         found = json.loads(result.stdout or "null")
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):

@@ -10,6 +10,7 @@ import pytest
 
 from ale.core.sandbox import Identity, ImageRef, SandboxRequest
 from ale.core.taskspec import NetworkPolicy, OperatingSystem, Resources
+from ale.run import guestd
 from ale.run.framework import WINDOWS_MARKER, windows_framework_identity
 from ale.run.providers.qemu import QemuProvider
 
@@ -65,14 +66,17 @@ async def test_a_bare_windows_disk_boots_with_the_framework_closed_to_the_agent(
         assert report.ok, report.stderr
         lines = report.stdout.splitlines()
         assert lines[0].strip() == "Running"
-        session = {
-            name: line.split()[0]
+        found = {
+            name: line
             for line in lines[1:]
             for name in ("service.py", "main.py", "cua-driver.exe")
             if name in line
         }
-        assert session == {
+        assert {name: line.split()[0] for name, line in found.items()} == {
             "service.py": "session=0",
             "main.py": "session=1",
             "cua-driver.exe": "session=1",
         }
+        # Both on the framework's own Python, not on whatever Python the disk has.
+        assert guestd.PYTHON["windows"] in found["service.py"]
+        assert guestd.PYTHON["windows"] in found["main.py"]

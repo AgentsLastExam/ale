@@ -6,10 +6,8 @@ directly, or builds `image/run.ps1` on `image.base_ref`.
 
 ## What a Linux image needs
 
-A Linux Task may build from any image that has:
+A Linux Task may build from any x86-64 image with glibc that has:
 
-- `python3` for the guest service (3.12+ in containers); Linux VMs may retain
-  Python 3.10+ when `python3.12` is available for verification;
 - the agent account the Task names with `image.user` (default `user`), with a home;
 - for a container, a long-lived command that ALE does not replace;
 - for a VM, a bootable systemd system (the VM base provides one);
@@ -20,6 +18,10 @@ of the Task's own build or `image.ref` (the framework layer):
 
 - guestd, the guest service every sandbox operation goes through, under root-only
   `/opt/ale`, so it always speaks the protocol of the engine driving it;
+- the framework's own Python at a pinned version, which guestd runs on whatever Python
+  the image has (or lacks): `/opt/ale/python` on Linux and `C:\ProgramData\ALE\python` on
+  Windows. Only the framework's identity can run it, and the agent's PATH does not
+  include it;
 - Cua Driver at a pinned version, the one desktop capture and input implementation;
 - for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
   Windows that also starts Cua Driver in the agent's session;
@@ -53,19 +55,19 @@ once its window manager or shell runs.
 ## What a Windows image needs
 
 A Windows Task builds `image/run.ps1` on an ALE Windows base. The base signs its agent
-account in to a desktop automatically, with UAC on and Python 3.12 or newer installed for
-all users, and carries none of the framework. ALE installs the framework offline into a
+account in to a desktop automatically, with UAC on, and carries none of the framework; the
+Python it installs for all users is for Tasks and agents. ALE installs the framework offline into a
 copy of the base before the build VM boots, so the build talks to the same guestd as every
 later sandbox, and the Task's script cannot replace the framework's pieces:
 
-- the current guestd under `C:\ProgramData\ALE\guestd`, and Cua Driver at the pinned
-  version under `C:\ProgramData\ALE\cua-driver`;
-- a boot service, running as the system, that starts both in the agent's session with the
-  account's elevated token, so Cua Driver can reach elevated windows. The service limits
-  those files to the system and Administrators;
+- the current guestd under `C:\ProgramData\ALE\guestd`, Cua Driver at the pinned version
+  under `C:\ProgramData\ALE\cua-driver`, and the framework's own Python;
+- a boot service, running as the system on that Python, that starts guestd and Cua
+  Driver in the agent's session with the account's elevated token, so Cua Driver can reach
+  elevated windows. The service limits those files to the system and Administrators;
 - a check, before anything is written, that the disk has the agent account, signs exactly
-  that account in, keeps UAC on, has the Python and was shut down completely (not left
-  hibernated by Fast Startup), each failing with the one thing it lacks.
+  that account in, keeps UAC on and was shut down completely (not left hibernated by Fast
+  Startup), each failing with the one thing it lacks.
 
 Elevation for `resources.sudo` is granted per boot by the Host, not built into the disk.
 A Windows sandbox has a desktop for ALE to drive exactly when its image carries the
@@ -95,18 +97,20 @@ qcow2 and installs the framework into a Linux or Windows qcow2 named by referenc
 
 ## Versions
 
-Every ALE image is published under the engine's version, such as `0.1.1`, once and never
-overwritten: the publishing workflow skips a version the registry already has, and no
-`latest` tag is published. An engine runs exactly the images of its own version, so a
-checkout that stays on one engine version keeps the same images whatever later versions
-publish. Publishing a changed image therefore means releasing a new engine version.
-A tag that every change overwrote would carry one engine's change into every checkout's
-next build, including checkouts whose engine does not speak the new guest protocol.
+Every ALE image is published once per version and never overwritten: the publishing
+workflow skips a version the registry already has, and no `latest` tag is published, since
+a tag that every change overwrote would change every checkout's next build behind its back.
+
+The VM builder and the QEMU runner run the engine's own logic, so they are published under
+the engine's version, such as `0.1.1`; an engine runs exactly those of its own version, and
+a changed one ships with the next engine version. A base carries no part of the framework,
+so nothing in it depends on the engine: each base has its own version, raised when the base
+itself changes, and any engine runs any version of it.
 
 A Task may build from any image. Task repositories maintained with ALE name an exact
 version of an ALE base, such as `container-ubuntu22-base:0.1.1`, so that a Task keeps
-building from the same base until its author moves it; `ale new-task` writes the
-engine's current version.
+building from the same base until its author moves it; `ale new-task` writes the base's
+current version.
 
 ## Task image
 
@@ -260,9 +264,8 @@ references are pulled and resolved to an immutable repository/content identity b
 solver execution. They are verifier-only; the standard solver image remains locally
 built from `image/`.
 
-Any verifier image must satisfy the same guest contract, expose system Python 3.12 or
-newer, and permit ALE to stage `ale_verify`. Verification runs as framework-controlled
-Task code.
+Any verifier image must satisfy the same guest contract and permit ALE to stage
+`ale_verify`. Verification runs as framework-controlled Task code.
 
 ## Runtime behavior
 

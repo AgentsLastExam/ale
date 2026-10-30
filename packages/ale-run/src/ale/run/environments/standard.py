@@ -79,6 +79,7 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.core.verdict import Verdict
+from ale.run import guestd
 from ale.run.environments.log_mirror import (
     FINAL_SYNC_TIMEOUT_SEC,
     SYNC_INTERVAL_SEC,
@@ -1093,9 +1094,11 @@ class StandardEnvironment(Environment):
             "f'ale_verify requires Python 3.12+, got {sys.version.split()[0]}';"
             f"print({destination})"
         )
+        # The image's own Python first, since that is where the Task's packages are; the
+        # framework's own when the image has none recent enough.
         candidates = (
             ("python.exe",) if ctx.spec.os is OperatingSystem.WINDOWS else ("python3", "python3.12")
-        )
+        ) + (guestd.PYTHON[ctx.spec.os.value],)
         failures = []
         for python in candidates:
             argv = [python, "-c", script]

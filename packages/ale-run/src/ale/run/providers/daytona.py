@@ -62,6 +62,7 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem
+from ale.run import guestd
 from ale.run.framework import MARKER, framework_identity, with_framework
 from ale.run.gpu import parse_nvidia_smi
 from ale.run.guestd.tunnel import Mux
@@ -89,6 +90,8 @@ ROLE_LABEL = "ale.run.role"
 RETENTION_LABEL = "ale.run.retention"
 
 GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
+#: The framework's own Python, which the guest service and these helpers run on.
+PYTHON = guestd.PYTHON["linux"]
 #: Local ports of Daytona's daemon: toolbox API, SSH server, web terminal, and one more.
 DAEMON_PORTS = (2280, 22220, 22222, 33333)
 #: How long a fresh SSH access token lives. Sessions already open outlive it.
@@ -146,10 +149,17 @@ for tool in ("iptables", "ip6tables"):
 print(json.dumps(ordered))
 """
 
-#: Run as the agent. Lists every daemon port it can still connect to, on every local address.
+#: Run as root, dropping to the agent. Lists every daemon port the agent can still connect to,
+#: on every local address.
 _PROBE = r"""
-import json, socket, sys
-ports = [int(port) for port in sys.argv[1].split(",")]
+import json, os, pwd, socket, sys
+# Started as root on the framework's Python, whose files only root reads: everything is
+# imported before dropping to the agent.
+account = pwd.getpwnam(sys.argv[1])
+os.initgroups(account.pw_name, account.pw_gid)
+os.setgid(account.pw_gid)
+os.setuid(account.pw_uid)
+ports = [int(port) for port in sys.argv[2].split(",")]
 hosts = ["127.0.0.1", "::1"]
 try:
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -276,7 +286,8 @@ class _Tunnel:
     ) -> None:
         self._ssh = ssh
         self._targets = targets
-        self._command = "exec python3 {} {}".format(
+        self._command = "exec {} {} {}".format(
+            PYTHON,
             GUESTD_DIR / "tunnel.py",
             " ".join(f"--listen {port}:{target}" for port, target in listeners),
         )
@@ -563,7 +574,7 @@ class DaytonaProvider(Provider):
         self.config = config or DaytonaProviderConfig()
         self._api_client: DaytonaApi | None = None
         self._images_client: ImagePublisher | None = None
-        # Local image inspection (python3, command) is the same check Docker makes.
+        # Local image inspection (the command) is the same check Docker makes.
         self._local = DockerProvider()
 
     @property
@@ -901,7 +912,7 @@ async def _connect(
         shlex.quote(f"{name}={value}")
         for name, value in {**environment, "ALE_AGENT_USER": agent_user}.items()
     )
-    command = f"exec env {assignments} python3 {GUESTD_DIR / 'main.py'} --stdio"
+    command = f"exec env {assignments} {PYTHON} {GUESTD_DIR / 'main.py'} --stdio"
     last: Exception | None = None
     while True:
         transport = StdioTransport(await ssh.argv(command))
@@ -953,7 +964,7 @@ async def _start_image_command(client: GuestClient, config: ImageConfig) -> None
         "log": f"{GUESTD_DIR.parent}/image-command.log",
     }
     code, _, stderr, _ = await client.exec(
-        ["python3", "-c", _LAUNCH, json.dumps(spec)], timeout_sec=60
+        [PYTHON, "-c", _LAUNCH, json.dumps(spec)], timeout_sec=60
     )
     if code != 0:
         raise ProviderStartError(f"could not start the image's command: {stderr.strip()}")
@@ -1047,7 +1058,7 @@ def _same_model(kind: str, model: str) -> bool:
 async def _seal_daemon(client: GuestClient, agent_user: str) -> None:
     """Keep every non-root user away from Daytona's daemon, and prove it from the agent."""
     code, stdout, stderr, _ = await client.exec(
-        ["python3", "-c", _SEAL, ",".join(map(str, DAEMON_PORTS))], timeout_sec=60
+        [PYTHON, "-c", _SEAL, ",".join(map(str, DAEMON_PORTS))], timeout_sec=60
     )
     if code != 0:
         raise ProviderCapabilityError(
@@ -1055,8 +1066,7 @@ async def _seal_daemon(client: GuestClient, agent_user: str) -> None:
         )
     ports = json.loads(stdout)
     code, stdout, stderr, _ = await client.exec(
-        ["python3", "-c", _PROBE, ",".join(map(str, ports))],
-        run_as=agent_user,
+        [PYTHON, "-c", _PROBE, agent_user, ",".join(map(str, ports))],
         timeout_sec=120,
     )
     try:
@@ -1074,7 +1084,7 @@ async def _seal_daemon(client: GuestClient, agent_user: str) -> None:
 
 async def _handshakes(client: GuestClient, address: str, name: str) -> bool:
     _, stdout, _, _ = await client.exec(
-        ["python3", "-c", _HANDSHAKE, address, name, "3"], timeout_sec=30
+        [PYTHON, "-c", _HANDSHAKE, address, name, "3"], timeout_sec=30
     )
     return stdout.strip() == "open"
 

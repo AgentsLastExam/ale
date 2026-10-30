@@ -6,6 +6,8 @@ layer:
 
 - guestd, the guest service every sandbox operation goes through, under root-only
   ``/opt/ale`` so the agent cannot read the protocol driving its sandbox;
+- the framework's own Python at a pinned version under ``/opt/ale/python``, which guestd
+  runs on whatever Python the image has, and verification falls back to;
 - Cua Driver at a pinned version, which guestd starts inside the desktop session when the
   image has one;
 - for a VM, the systemd unit that starts guestd at boot;
@@ -42,10 +44,11 @@ import shlex
 import shutil
 import tarfile
 import tempfile
+import urllib.parse
 import urllib.request
 import uuid
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path, PureWindowsPath
 
 from ale.core.errors import ProviderStartError, TaskDefinitionError
@@ -78,6 +81,19 @@ WINDOWS_MARKER = "/ProgramData/ALE/framework"
 #: installs the framework into a Linux or Windows qcow2.
 MATERIALIZER_IMAGE = os.environ.get("ALE_VM_MATERIALIZER", ale_image("ale-vm-materializer"))
 CUA_DRIVER_VERSION = "0.38.0"
+#: python-build-standalone release of the framework's own Python, and its build per guest
+#: platform with the release's published SHA-256. The Linux build needs glibc.
+PYTHON_RELEASE = "20261013"
+_PYTHON = {
+    "linux": (
+        "cpython-3.12.15+20261013-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+        "178d3d83b6e8e99285a65d3fce9c16b87952cc5efdb4d1a0e3ff3be18ff0fc9c",
+    ),
+    "windows": (
+        "cpython-3.12.15+20261013-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "7a2aef48e5ee569e310b29b32681debbc5d888e92790d85331a47736c6b06aad",
+    ),
+}
 #: Release asset and its published SHA-256, per guest platform.
 _CUA_DRIVER = {
     "linux": (
@@ -101,7 +117,7 @@ After=network.target
 
 [Service]
 Environment=ALE_AGENT_USER={{user}}
-ExecStart=/usr/bin/python3 /opt/ale/guestd/main.py --tcp 0.0.0.0:{guestd.PORT}
+ExecStart={guestd.PYTHON["linux"]} /opt/ale/guestd/main.py --tcp 0.0.0.0:{guestd.PORT}
 Restart=always
 RestartSec=1
 
@@ -114,9 +130,17 @@ _SETUP = r"""set -eu
 user="$1"
 sudo_requested="$2"
 identity="$3"
+python="$4"
 if ! id -u "$user" >/dev/null 2>&1; then
     echo "ALE: the agent account '$user' does not exist in this image; create it in the" \
         "image or name an existing account with image.user in task.yaml" >&2
+    exit 1
+fi
+rm -rf /opt/ale/python
+cp -RP "$python" /opt/ale/python
+if ! /opt/ale/python/bin/python3 -c "" >/dev/null 2>&1; then
+    echo "ALE: the framework's Python does not run in this image; ALE needs an x86-64" \
+        "image with glibc" >&2
     exit 1
 fi
 chown -R 0:0 /opt/ale
@@ -168,6 +192,7 @@ def framework_identity(*, user: str, sudo: bool, vm: bool) -> str:
         {
             "guestd": _guestd_digests(),
             "cua_driver": _CUA_DRIVER["linux"][1],
+            "python": _PYTHON["linux"][1],
             "setup": _SETUP,
             "unit": _GUEST_UNIT if vm else None,
             "user": user,
@@ -182,6 +207,7 @@ def windows_framework_identity(*, user: str) -> str:
         {
             "guestd": _guestd_digests(),
             "cua_driver": _CUA_DRIVER["windows"][1],
+            "python": _PYTHON["windows"][1],
             "installer": hashlib.sha256(_WINDOWS_INSTALLER.read_bytes()).hexdigest(),
             "runner": guestd.HOST_ADDRESS,
             "user": user,
@@ -336,6 +362,7 @@ async def _frame_windows_disk(disk: Path, *, user: str, builder: str) -> None:
     """Check the disk and install the framework, by ``framework_windows.py`` in the builder."""
     identity = windows_framework_identity(user=user)
     driver = await asyncio.to_thread(_cua_driver, "windows")
+    python = await asyncio.to_thread(_python, "windows")
     with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
         context = Path(temporary)
         shutil.copytree(guestd.SOURCE, context / "guestd", ignore=_only(guestd.FILES))
@@ -345,8 +372,9 @@ async def _frame_windows_disk(disk: Path, *, user: str, builder: str) -> None:
             "--device=/dev/kvm", "--network=none",
             "--mount", f"type=bind,src={disk.parent.resolve()},dst=/disk",
             "--mount", f"type=bind,src={context},dst=/framework,readonly",
+            "--mount", f"type=bind,src={python},dst=/python,readonly",
             "--entrypoint", "python3", builder,
-            "/framework/install.py", f"/disk/{disk.name}", "/framework",
+            "/framework/install.py", f"/disk/{disk.name}", "/framework", "/python",
             "--user", user, "--identity", identity, "--runner-address", guestd.HOST_ADDRESS,
             timeout=1800,
         )  # fmt: skip
@@ -360,14 +388,18 @@ async def _frame_linux_disk(disk: Path, *, user: str, sudo: bool, builder: str) 
     """Run the setup script inside the disk's own appliance VM; sudo installs use its network."""
     identity = framework_identity(user=user, sudo=sudo, vm=True)
     driver = await asyncio.to_thread(_cua_driver, "linux")
+    python = await asyncio.to_thread(_python, "linux")
     with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
         context = Path(temporary)
         _stage(context, driver, user=user, vm=True)
-        setup = shlex.join(["/bin/sh", "/opt/ale/setup.sh", user, _flag(sudo), identity])
+        setup = shlex.join(
+            ["/bin/sh", "/opt/ale/setup.sh", user, _flag(sudo), identity, "/tmp/python"]
+        )
         code, output, stderr = await _in_container(
             "--device=/dev/kvm",
             "--mount", f"type=bind,src={disk.parent.resolve()},dst=/disk",
             "--mount", f"type=bind,src={context},dst=/framework,readonly",
+            "--mount", f"type=bind,src={python},dst=/python,readonly",
             "--entrypoint", "virt-customize", builder,
             "--format", "qcow2", "--add", f"/disk/{disk.name}", "--no-logfile",
             "--delete", "/opt/ale/guestd",
@@ -376,7 +408,9 @@ async def _frame_linux_disk(disk: Path, *, user: str, sudo: bool, builder: str) 
             "--upload", "/framework/setup.sh:/opt/ale/setup.sh",
             "--upload", "/framework/cua-driver:/usr/local/bin/cua-driver",
             "--upload", "/framework/ale-guestd.service:/etc/systemd/system/ale-guestd.service",
+            "--copy-in", "/python:/tmp",
             "--run-command", setup,
+            "--delete", "/tmp/python",
             timeout=1800,
         )  # fmt: skip
     if code != 0:
@@ -385,16 +419,20 @@ async def _frame_linux_disk(disk: Path, *, user: str, sudo: bool, builder: str) 
         )
 
 
-def _explained(stderr: str, stdout: str) -> str:
-    """What a framing script said was wrong, else the tail of what it printed."""
-    said = [
+def _explained(stderr: str, stdout: str = "") -> str:
+    """What a framing script said was wrong, else the tail of what it printed.
+
+    Once each: buildx repeats a failed step's output in its summary.
+    """
+    said = dict.fromkeys(
         line.split("ALE: ", 1)[1] for line in f"{stderr}\n{stdout}".splitlines() if "ALE: " in line
-    ]
+    )
     return " ".join(said) if said else stderr.strip()[-2000:]
 
 
 async def _build(base: dict, tag: str, identity: str, *, user: str, sudo: bool, vm: bool) -> None:
     driver = await asyncio.to_thread(_cua_driver, "linux")
+    python = await asyncio.to_thread(_python, "linux")
     base_tag = f"ale-framework-base:{base['Id'].removeprefix('sha256:')}"
     code, _, stderr = await _run("docker", "tag", base["Id"], base_tag)
     if code != 0:
@@ -411,21 +449,27 @@ async def _build(base: dict, tag: str, identity: str, *, user: str, sudo: bool, 
         ]
         if vm:
             lines.append("COPY ale-guestd.service /etc/systemd/system/ale-guestd.service")
-        lines.append(_json_run("/bin/sh", "/opt/ale/setup.sh", user, _flag(sudo), identity))
+        # Mounted, not copied: a copy would land in the layer once more when setup takes it
+        # into /opt/ale/python.
+        lines.append(
+            "RUN --mount=type=bind,from=python,target=/tmp/python "
+            + json.dumps(
+                ["/bin/sh", "/opt/ale/setup.sh", user, _flag(sudo), identity, "/tmp/python"]
+            )
+        )
         if base.get("User"):
             lines.append(f"USER {base['User']}")
         lines.append(f"LABEL {LABEL}={json.dumps(identity)}")
         (context / "Dockerfile").write_text("\n".join(lines) + "\n")
         code, _, stderr = await _run(
             "docker", "buildx", "build", "--load", "--provenance=false", "--sbom=false",
+            "--build-context", f"python={python}",
             "--tag", tag, str(context), timeout=1800,
         )  # fmt: skip
     if code != 0:
         # The setup script explains what the image lacks; buildx's own summary does not.
-        explained = [line.split("ALE: ", 1)[1] for line in stderr.splitlines() if "ALE: " in line]
-        reason = " ".join(explained) if explained else stderr.strip()[-2000:]
         raise TaskDefinitionError(
-            f"could not add the ALE framework layer to the Task image: {reason}"
+            f"could not add the ALE framework layer to the Task image: {_explained(stderr)}"
         )
 
 
@@ -442,10 +486,6 @@ def _flag(value: bool) -> str:
     return "true" if value else "false"
 
 
-def _json_run(*argv: str) -> str:
-    return "RUN " + json.dumps(list(argv))
-
-
 def _only(names: tuple[str, ...]):  # type: ignore[no-untyped-def]
     return lambda directory, entries: [entry for entry in entries if entry not in names]
 
@@ -453,36 +493,79 @@ def _only(names: tuple[str, ...]):  # type: ignore[no-untyped-def]
 def _cua_driver(platform: str) -> Path:
     """The pinned Cua Driver release files, downloaded once and verified against the release."""
     asset, sha256 = _CUA_DRIVER[platform]
-    root = cache_root() / "cua-driver" / CUA_DRIVER_VERSION
-    files = root / platform
-    if files.is_dir():
-        return files
-    root.mkdir(parents=True, exist_ok=True)
-    with (root / "download.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if files.is_dir():
-            return files
-        url = (
-            "https://github.com/trycua/cua/releases/download/"
-            f"cua-driver-rs-v{CUA_DRIVER_VERSION}/{asset}"
+
+    def unpack(payload: bytes, into: Path) -> None:
+        for name, data in _archive_files(asset, payload):
+            (into / name).write_bytes(data)
+        binary = into / _CUA_DRIVER_BINARY[platform]
+        if not binary.is_file():
+            raise ProviderStartError(f"Cua Driver archive has no {binary.name}")
+        binary.chmod(0o755)
+
+    return _fetched(
+        cache_root() / "cua-driver" / CUA_DRIVER_VERSION / platform,
+        "https://github.com/trycua/cua/releases/download/"
+        f"cua-driver-rs-v{CUA_DRIVER_VERSION}/{asset}",
+        sha256,
+        unpack,
+        what="Cua Driver",
+    )
+
+
+def _python(platform: str) -> Path:
+    """The framework's Python for one guest platform: its ``python`` tree."""
+    asset, sha256 = _PYTHON[platform]
+
+    def unpack(payload: bytes, into: Path) -> None:
+        with tarfile.open(fileobj=io.BytesIO(payload)) as bundle:
+            bundle.extractall(into, filter="data")
+        if not (into / "python").is_dir():
+            raise ProviderStartError(f"{asset} has no python directory")
+
+    return (
+        _fetched(
+            cache_root() / "python" / PYTHON_RELEASE / platform,
+            "https://github.com/astral-sh/python-build-standalone/releases/download/"
+            f"{PYTHON_RELEASE}/{urllib.parse.quote(asset)}",
+            sha256,
+            unpack,
+            what="the framework's Python",
         )
+        / "python"
+    )
+
+
+def _fetched(
+    root: Path,
+    url: str,
+    sha256: str,
+    unpack: Callable[[bytes, Path], None],
+    *,
+    what: str,
+) -> Path:
+    """``root``, holding a release asset unpacked once after checking its pinned SHA-256."""
+    if root.is_dir():
+        return root
+    root.parent.mkdir(parents=True, exist_ok=True)
+    with (root.parent / "download.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if root.is_dir():
+            return root
         try:
             with urllib.request.urlopen(url, timeout=300) as response:
                 payload = response.read()
         except OSError as exc:
-            raise ProviderStartError(f"could not download Cua Driver: {exc}") from exc
+            raise ProviderStartError(f"could not download {what}: {exc}") from exc
         if hashlib.sha256(payload).hexdigest() != sha256:
-            raise ProviderStartError("downloaded Cua Driver does not match its pinned checksum")
-        partial = Path(tempfile.mkdtemp(prefix=f".{platform}-", dir=root))
-        for name, data in _archive_files(asset, payload):
-            (partial / name).write_bytes(data)
-        binary = partial / _CUA_DRIVER_BINARY[platform]
-        if not binary.is_file():
-            shutil.rmtree(partial)
-            raise ProviderStartError(f"Cua Driver archive has no {binary.name}")
-        binary.chmod(0o755)
-        partial.rename(files)
-    return files
+            raise ProviderStartError(f"downloaded {what} does not match its pinned checksum")
+        partial = Path(tempfile.mkdtemp(prefix=f".{root.name}-", dir=root.parent))
+        try:
+            unpack(payload, partial)
+        except BaseException:
+            shutil.rmtree(partial, ignore_errors=True)
+            raise
+        partial.rename(root)
+    return root
 
 
 def _archive_files(asset: str, payload: bytes) -> Iterator[tuple[str, bytes]]:

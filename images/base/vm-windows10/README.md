@@ -59,14 +59,16 @@ see or control the desktop.
 - Stage entries: `setup/run.ps1`, `oracle/run.ps1`, and `verify/run.ps1`.
 - Framework root: `C:\ProgramData\ALE`; agent home: `C:\Users\user`.
 - The base signs the agent account in automatically (Winlogon `AutoAdminLogon` and
-  `DefaultUserName`), keeps UAC on, and has Python 3.12 or newer installed for all users.
-  ALE checks all four, and that the agent account exists, before it installs anything.
+  `DefaultUserName`) and keeps UAC on. ALE checks those, and that the agent account
+  exists, before it installs anything.
 - The base carries no guestd, Cua Driver or startup task. ALE installs them into a copy of
-  the disk offline, with a boot service that starts guestd and Cua Driver elevated in the
-  agent's session; guestd then provides exec, file transfer, health, lifecycle, and the
+  the disk offline, with its own Python and a boot service on it that starts guestd and Cua
+  Driver elevated in the agent's session; guestd then provides exec, file transfer, health, lifecycle, and the
   shared Sandbox protocol. Agent commands use the limited desktop token unless
   `resources.sudo` grants Administrator access.
 - Cua Driver exclusively provides screenshots and desktop input.
+- The all-users Python 3.12 the base installs is for Tasks and agents; verification uses it
+  when it can, since Task packages are installed there.
 
 Autonomous CLI Harnesses use native Windows Node.js and Git Bash; their CLI packages are
 installed per run, and model credentials stay on the Host Gateway.

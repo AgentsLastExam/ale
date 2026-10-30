@@ -9,7 +9,7 @@ from ale.run import ale_image
 from ale.run.providers import ProviderRegistry
 
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
-#: The ALE bases of this engine version, for images a test builds or runs.
+#: The current ALE bases, for images a test builds or runs.
 CONTAINER_BASE = ale_image("container-ubuntu22-base")
 VM_BASE = ale_image("vm-ubuntu24-base")
 

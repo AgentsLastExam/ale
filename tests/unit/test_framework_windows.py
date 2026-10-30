@@ -27,24 +27,18 @@ def _key(hive: str, path: str, **entries: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _python(version: str, path: str) -> str:
-    return _key("SOFTWARE", rf"\Python\PythonCore\{version}\InstallPath", ExecutablePath=_sz(path))
-
-
 def _disk(
     *,
     users: tuple[str, ...] = ("Administrator", "User"),
     logon: str = "User",
     auto: str = "1",
     uac: str = "dword:00000001",
-    pythons: tuple[str, ...] = (r"3.12=C:\Python312\python.exe",),
     current: str = "dword:00000001",
 ) -> dict[tuple[str, str], str]:
     names = "\n".join(
         f"[HKEY_LOCAL_MACHINE\\SAM\\SAM\\Domains\\Account\\Users\\Names\\{user}]\n@=hex(3e9):\n"
         for user in users
     )
-    interpreters = "".join(_python(*entry.split("=", 1)) + "\n" for entry in pythons)
     return {
         ("SAM", r"\SAM\Domains\Account\Users\Names"): (
             "[HKEY_LOCAL_MACHINE\\SAM\\SAM\\Domains\\Account\\Users\\Names]\n@=hex(0):\n\n" + names
@@ -53,7 +47,6 @@ def _disk(
             "SOFTWARE", WINLOGON, AutoAdminLogon=_sz(auto), DefaultUserName=_sz(logon)
         ),
         ("SOFTWARE", POLICIES): _key("SOFTWARE", POLICIES, EnableLUA=uac),
-        ("SOFTWARE", r"\Python\PythonCore"): interpreters,
         ("SYSTEM", r"\Select"): _key("SYSTEM", r"\Select", Current=current),
     }
 
@@ -83,22 +76,9 @@ def test_registry_text_is_read_as_hivex_exports_it() -> None:
     }
 
 
-def test_the_newest_all_users_python_that_guestd_can_run_on_is_chosen() -> None:
-    text = "\n".join(
-        [
-            _python("3.11", r"C:\Python311\python.exe"),
-            _python("3.13", r"C:\Python313\python.exe"),
-            _python("3.12", r"C:\Python312\python.exe"),
-        ]
-    )
-    assert installer.newest_python(text) == r"C:\Python313\python.exe"
-    assert installer.newest_python(_python("3.11", r"C:\Python311\python.exe")) is None
-    assert installer.newest_python("") is None
-
-
-def test_a_disk_with_the_account_autologon_and_python_passes(registry) -> None:  # type: ignore[no-untyped-def]
-    registry(_disk(logon="USER"))
-    assert installer.check(Path("/hives"), "user") == r"C:\Python312\python.exe"
+def test_a_disk_with_the_account_and_its_autologon_passes(registry) -> None:  # type: ignore[no-untyped-def]
+    registry(_disk(logon="USER"))  # no Python: the framework brings its own
+    installer.check(Path("/hives"), "user")
 
 
 @pytest.mark.parametrize(
@@ -108,7 +88,6 @@ def test_a_disk_with_the_account_autologon_and_python_passes(registry) -> None: 
         ({"logon": "Administrator"}, "does not sign in 'user' automatically"),
         ({"auto": "0"}, "does not sign in 'user' automatically"),
         ({"uac": "dword:00000000"}, "User Account Control is off"),
-        ({"pythons": ()}, "no Python 3.12 or newer"),
     ],
 )
 def test_a_disk_that_cannot_run_the_framework_says_why(
@@ -123,16 +102,16 @@ def test_a_disk_that_cannot_run_the_framework_says_why(
 
 def test_the_service_is_registered_in_the_control_set_the_disk_boots_from(registry) -> None:  # type: ignore[no-untyped-def]
     registry(_disk(current="dword:00000002"))
-    text = installer.service_key(Path("/hives"), r"C:\Python312\python.exe", "user", "172.30.0.1")
+    text = installer.service_key(Path("/hives"), "user", "172.30.0.1")
     assert "[HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet002\\Services\\ALEGuestd]" in text
     assert '"Start"=dword:00000002' in text and '"ObjectName"="LocalSystem"' in text
     assert (
-        '"ImagePath"="\\"C:\\\\Python312\\\\python.exe\\" -I -S '
+        '"ImagePath"="\\"C:\\\\ProgramData\\\\ALE\\\\python\\\\python.exe\\" -I -S '
         '\\"C:\\\\ProgramData\\\\ALE\\\\guestd\\\\service.py\\" \\"user\\" 172.30.0.1"'
     ) in text
     registry({})
     with pytest.raises(installer.Lacks, match="no control set"):
-        installer.service_key(Path("/hives"), "python.exe", "user", "172.30.0.1")
+        installer.service_key(Path("/hives"), "user", "172.30.0.1")
 
 
 def test_the_framework_is_installed_and_its_marker_written_last(
@@ -153,7 +132,7 @@ def test_the_framework_is_installed_and_its_marker_written_last(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["install.py", str(tmp_path / "d.qcow2"), "/framework", "--user", "user",
+        ["install.py", str(tmp_path / "d.qcow2"), "/framework", "/python", "--user", "user",
          "--identity", identity, "--runner-address", "172.30.0.1"],
     )  # fmt: skip
     assert installer.main() == 0
@@ -169,6 +148,7 @@ def test_the_framework_is_installed_and_its_marker_written_last(
     ]
     assert "copy-in /framework/guestd /ProgramData/ALE" in steps
     assert "copy-in /framework/cua-driver /ProgramData/ALE" in steps
+    assert {"rm-rf /ProgramData/ALE/python", "copy-in /python /ProgramData/ALE"} <= set(steps)
     assert steps[-1] == f'write /ProgramData/ALE/framework "{identity}\\n"'
     assert steps[-2].startswith("upload ") and steps[-2].endswith("/Windows/System32/config/SYSTEM")
 
@@ -187,7 +167,7 @@ def test_a_disk_that_lacks_something_prints_one_line_and_changes_nothing(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["install.py", str(tmp_path / "d.qcow2"), "/framework", "--user", "user",
+        ["install.py", str(tmp_path / "d.qcow2"), "/framework", "/python", "--user", "user",
          "--identity", "sha256:" + "a" * 64, "--runner-address", "172.30.0.1"],
     )  # fmt: skip
     assert installer.main() == 1
