@@ -119,7 +119,7 @@ class ClaudeCodeHarness(CliHarness):
             )
         config_path = agent_path(session.home) / ".claude-config/mcp.json"
         script = (
-            f"{clear_auth}claude --verbose --output-format=stream-json {self._flags()} "
+            f"{clear_auth}claude --verbose --output-format=stream-json {self._flags(session)} "
             f"--strict-mcp-config --mcp-config {shlex.quote(str(config_path))} "
             f"{selector} {shlex.quote(requested)} --print < {shlex.quote(prompt_path)}"
         )
@@ -199,7 +199,7 @@ class ClaudeCodeHarness(CliHarness):
             env[alias] = session.model
         return env
 
-    def _flags(self) -> str:
+    def _flags(self, session: HarnessSession) -> str:
         parts: list[str] = []
         if isinstance(self.settings.max_turns, int):
             parts.extend(("--max-turns", str(self.settings.max_turns)))
@@ -213,9 +213,13 @@ class ClaudeCodeHarness(CliHarness):
         if self.settings.allowed_tools:
             parts.append("--allowedTools")
             parts.extend(shlex.quote(tool) for tool in self.settings.allowed_tools)
-        if self.settings.disallowed_tools:
+        disallowed = list(self.settings.disallowed_tools)
+        if not session.provider_web_tools:
+            # WebSearch runs Anthropic's web search server tool; WebFetch fetches locally.
+            disallowed.append("WebSearch")
+        if disallowed:
             parts.append("--disallowedTools")
-            parts.extend(shlex.quote(tool) for tool in self.settings.disallowed_tools)
+            parts.extend(shlex.quote(tool) for tool in dict.fromkeys(disallowed))
         if self.settings.append_system_prompt != "default":
             parts.extend(
                 ("--append-system-prompt", shlex.quote(self.settings.append_system_prompt))

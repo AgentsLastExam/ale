@@ -2,9 +2,9 @@
 
 The pinned official release is installed and given a Skill and a stdio MCP server, egress
 is sealed, then it launches and resumes twice. The scripted upstream speaks the Gemini
-API behind the Gateway, so agy's own requests, the Gateway's credential swap, model
-rewrite and grounding refusal, the native session files and the parser are exercised
-together without a billed model.
+API behind the Gateway, so agy's own requests, the Gateway's credential swap and model
+rewrite, the hook that denies web search, the native session files and the parser are
+exercised together without a billed model.
 """
 
 from __future__ import annotations
@@ -264,8 +264,8 @@ async def test_agy_runs_through_the_gateway_with_resources_and_resumes(tmp_path:
         await gateway.stop()
         await upstream.stop()
 
-    # agy reached the model only through the Gateway, which swapped in the host key, named
-    # the run's model on every call and refused the grounding search before upstream.
+    # agy reached the model only through the Gateway, which swapped in the host key and
+    # named the run's model on every call; the hook kept agy from asking for a search.
     assert upstream.requests
     assert {request["auth"] for request in upstream.requests} == {HOST_SECRET}
     assert {request["path"].split("/")[-1].split(":")[0] for request in upstream.requests} == {
@@ -282,8 +282,7 @@ async def test_agy_runs_through_the_gateway_with_resources_and_resumes(tmp_path:
     transport = read_jsonl(recording.directory / "trace.transport.jsonl").records
     calls = [record for record in transport if record["kind"] == "call"]
     forwarded = [call for call in calls if call["disposition"] == "forwarded"]
-    assert len(forwarded) == len(upstream.requests)
-    assert [call["disposition"] for call in calls].count("refused") >= 1
+    assert len(forwarded) == len(calls) == len(upstream.requests)
 
     context = TrajectoryParseContext(
         episode_id=session.episode_id,
@@ -315,7 +314,7 @@ async def test_agy_runs_through_the_gateway_with_resources_and_resumes(tmp_path:
     mcp_call, mcp_result = results["mcp__proof__echo"]
     assert (mcp_call.extra or {})["ale"]["mcp"] == {"server": "proof", "tool": "echo"}
     assert "echo:mcp-proof" in json.dumps(mcp_result.content)
-    assert "search_web" in results
+    assert "denied by pre-tool hook" in json.dumps(results["search_web"][1].content)
     assert [step.message for step in trajectory.steps if step.source == "agent"][-3:] == [
         "FIRST-DONE",
         "SECOND-DONE",

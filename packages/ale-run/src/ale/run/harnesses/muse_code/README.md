@@ -23,12 +23,22 @@ names another in `endpoint_transport` and pins `auth = "bearer"`; a `--base-url`
 not enough, so the Gateway URL is set there. Before each run Muse fetches
 `GET /muse-code/models` from the Gateway's origin; the list's content is not used.
 
+Muse's `web_search` runs on Meta's side. In its default client mode the CLI sends each
+query to `/muse-code/search` at the model endpoint's origin, which the Gateway does not
+serve; in hosted mode each model request carries a hosted search tool instead. When
+`web_tools` is on and the Task's network is `open`, ALE sets `MUSE_WEB_SEARCH_MODE=hosted`.
+Otherwise it passes `--disable-web-tools`, which removes Muse's `web_fetch` as well,
+though it fetches locally; no switch keeps it alone.
+
 A launch passes a new UUID to `--session-id`, and a resume passes the same ID again. The
 session is `.local/share/muse/sessions/<year>/<month>/<day>/<session id>/session.jsonl`.
 The parser unwraps retained frames, drops repeated records, and follows the `run` events
 in native order: one agent step per model response, with its usage. A tool's failure is a
-`task` failure linked by `tool:<call id>`. A run Muse starts itself has no prompt; what it
-delivers, such as a subagent's result, is a system step.
+`task` failure linked by `tool:<call id>`. A tool Meta runs inside a response, such as
+hosted web search, is a `provider_tool_call_completed` event: it becomes a call on that
+response's step, with the action as its arguments and its status and results as its
+result. A run Muse starts itself has no prompt; what it delivers, such as a subagent's
+result, is a system step.
 
 A subagent's start is attested with the call that dispatched it and its child session,
 stored in the parent's `subagent/<child id>/`. It becomes an embedded trajectory when

@@ -276,12 +276,23 @@ class ZCodeHarness(CliHarness):
                 "personalModelIds": [session.model],
             },
         }
+        # WebSearch runs the provider's web_search server tool, which ZCode encodes only for
+        # Anthropic Messages and offers only to models whose rule says so.
+        native_search = session.provider_web_tools and api == "anthropic-messages"
+        model_rule = {
+            "providerId": "ale",
+            "modelId": session.model,
+            "config": {"properties": {"supportsNativeWebSearch": native_search}},
+        }
         personal = {
             "schemaVersion": 1,
             "config": {
                 "providerOrder": ["ale"],
                 "providerConfigRules": {"providerRules": [provider]},
-                "modelConfigRules": {"providerModelRules": [], "manualProviderModelRules": []},
+                "modelConfigRules": {
+                    "providerModelRules": [model_rule],
+                    "manualProviderModelRules": [],
+                },
                 "defaultModelSelection": {"providerId": "ale", "modelId": session.model},
             },
         }

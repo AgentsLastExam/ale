@@ -22,6 +22,14 @@ The preset's Gateway provider is `qwen`, Qwen's own compatible-mode API.
 A DashScope key needs `ALE_QWEN_BASE_URL` set to DashScope's compatible-mode host, such
 as `https://dashscope-intl.aliyuncs.com/compatible-mode`.
 
+Qwen's `web_search` is a request of its own that has DashScope run the search on its
+side. Qwen 0.26.1 offers it only when the model's base URL is an https DashScope host, so
+behind the Gateway it is off in every Task, `open` ones included. ALE does not offer it
+yet: that would take Qwen's explicit search backend (`WEB_SEARCH_BASE_URL`,
+`WEB_SEARCH_API_KEY`, `WEB_SEARCH_MODEL`) aimed at the Gateway, a Gateway session that
+serves `/responses`, and DashScope upstream. `web_fetch` fetches from inside the Sandbox
+and stays under its network policy.
+
 A launch passes a new UUID to `--session-id`; a resume passes it to `--resume=`. The
 session is `.qwen-ale/projects/<project>/chats/<session id>.jsonl`. Qwen appends a blank
 line to a prompt read from stdin, so the parser removes it from each prompt. Calls Qwen

@@ -342,6 +342,9 @@ A new adapter is complete only when:
 - unknown settings and unsupported resources fail before provisioning;
 - concurrent episodes have distinct paths, config, logs, and native state;
 - every API-key and subscription model request uses the Gateway session;
+- every tool the provider runs on its own side that can reach the network is off unless
+  `HarnessSession.provider_web_tools` allows it, and works through the Gateway when it
+  does; the adapter's README names each one and says why any it cannot offer stays off;
 - the evidence parser is deterministic;
 - preset, settings, resources, versions, limits, and termination are present in
   provenance;

@@ -40,3 +40,10 @@ code-mode `exec` script that calls `multi_agent_v1__spawn_agent` and prints what
 returned. The thread's turns begin at its `user_message` events, which Codex records for
 each input from the parent but not for injected context. Stdout reports only the root
 thread, so a subagent's MCP calls keep the rollout's sanitized server name.
+
+Codex 0.146.0 enables OpenAI's hosted web search by default. The generated config always
+sets `web_search`: `"live"` when the `web_search` setting is on, as it is by default, and
+the Task's network is `open`, otherwise `"disabled"`. A model Codex drives through
+Responses Lite, such as `gpt-5.6-luna`, gets no hosted search even then: Codex's search for
+it, `web__run` inside `exec`, posts to the provider's `/alpha/search`, which the Gateway
+does not serve, so ALE does not offer it.

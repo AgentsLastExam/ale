@@ -13,4 +13,5 @@ class CodexCliSettings(BaseModel):
     reasoning_effort: Literal[
         "default", "none", "minimal", "low", "medium", "high", "xhigh", "max"
     ] = "default"
-    web_search: bool = False
+    #: OpenAI's hosted web search, used only when the Task's network is open.
+    web_search: bool = True

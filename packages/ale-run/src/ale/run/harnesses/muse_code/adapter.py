@@ -141,7 +141,9 @@ class MuseCodeHarness(CliHarness):
             argv.extend(["--max-model-steps", str(self.settings.max_model_steps)])
         if not self.settings.reminders:
             argv.append("--disable-reminders")
-        if not self.settings.web_tools:
+        # Muse's web_search runs on Meta's side.
+        web_tools = self.settings.web_tools and session.provider_web_tools
+        if not web_tools:
             argv.append("--disable-web-tools")
         env = {
             **await npm_env(sandbox, session.home),
@@ -152,6 +154,10 @@ class MuseCodeHarness(CliHarness):
             "META_API_KEY": session.token,
             "NO_COLOR": "1",
         }
+        if web_tools:
+            # Its default client mode posts searches to /muse-code/search, which the Gateway
+            # does not serve; hosted mode asks for them in the model request instead.
+            env["MUSE_WEB_SEARCH_MODE"] = "hosted"
         script = f"unset {' '.join(_FOREIGN)}; {shlex.join(argv)}"
         return CliCommand(script, env, requested)
 

@@ -25,9 +25,15 @@ selects it by catalog family and effort, so the adapter maps it: `gemini-4-argon
 `high`. Any other model, or an effort the family does not offer, fails before launch.
 `effort` is the only public setting; `default` omits `--effort`, so agy uses the
 family's own default. agy also asks `gemini-3.1-flash-lite-preview` for a conversation
-title, which the Gateway answers with the run's model. Its `search_web` tool is a separate
-Google Search grounding call, which the Gateway allows only when the Task's network is
-open; otherwise the refusal reaches the agent as that tool's error.
+title, which the Gateway answers with the run's model.
+
+`search_web` is a request of its own that has Google Search run on Google's side
+(`googleSearch` grounding), and no agy setting removes the tool. Unless the Task's network
+is `open`, ALE writes a global `PreToolUse` hook to `~/.gemini/config/hooks.json` that
+denies every call to it, the main agent's and its subagents' alike: the model still sees
+the tool, and a call returns the hook's refusal. The hook runs a small Python script, so
+its command does not depend on the shell agy uses. agy's other web tools, such as
+`read_url_content`, fetch from inside the Sandbox and stay under its network policy.
 
 agy reads a headless prompt from stdin only as a stream-json message, so the command
 first has the Sandbox's Python wrap `prompt.md` into `.ale-harness/request.jsonl`, one

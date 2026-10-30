@@ -99,7 +99,7 @@ Only the Gateway writes `trace.transport.jsonl`. Every complete line has
   `input_tokens` counts every input token in every dialect, and `cache_read_tokens` and
   `cache_write_tokens` say how many of them the provider's prompt cache served or stored.
   A refused call's `refusal_limit` names the ceiling, or the request policy
-  (`web_tools`, `unsupported_method`) that refused it;
+  (`unsupported_method`) that refused it;
 - `replay`: the original call ID, request digest, replay reason, and `charged=false`, since
   a replay counts toward neither usage nor limits;
 - `trajectory_link`: call ID, trajectory ID, and ATIF step ID.

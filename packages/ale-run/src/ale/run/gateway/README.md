@@ -61,9 +61,6 @@ Request changes beyond the model:
   - `cachedContents` and files would store state with Google;
   - `embedContent` would run a model other than the run's;
   - the `models` listing would name models the run cannot use.
-- **Grounding.** `googleSearch`, `googleSearchRetrieval`, `urlContext` and `googleMaps`, in
-  either JSON spelling, reach the web from Google's side. A request whose `tools` include
-  one is refused as `web_tools` unless the Task's network is `open`.
 - **Refusal status.** Refusals are 400 `FAILED_PRECONDITION`, with an `ErrorInfo` detail,
   not 429. Antigravity CLI 1.4.7 retried a 429 eight times over about 2.5 minutes but
   fails a 400 at once, and a Gateway refusal does not lift by waiting.

@@ -37,8 +37,8 @@ def test_unknown_setting_is_not_silently_ignored() -> None:
 def test_default_and_unlimited_omit_native_limit_flags() -> None:
     default = ClaudeCodeHarness(settings={"max_turns": "default"})
     unlimited = ClaudeCodeHarness(settings={"max_turns": "unlimited"})
-    assert "--max-turns" not in default._flags()
-    assert "--max-turns" not in unlimited._flags()
+    assert "--max-turns" not in default._flags(native_session())
+    assert "--max-turns" not in unlimited._flags(native_session())
 
 
 def test_concrete_settings_map_to_native_flags() -> None:
@@ -52,13 +52,23 @@ def test_concrete_settings_map_to_native_flags() -> None:
             "effort": "high",
         }
     )
-    flags = harness._flags()
+    flags = harness._flags(native_session(provider_web_tools=True))
     assert "--max-turns 12" in flags
     assert "--permission-mode default" in flags
     assert "--allowedTools 'Bash(git status:*)'" in flags
-    assert "--disallowedTools WebFetch" in flags
+    assert "--disallowedTools WebFetch --append-system-prompt" in flags
     assert "--append-system-prompt 'Use the task files.'" in flags
     assert "--effort high" in flags
+
+
+def test_web_search_is_disallowed_unless_the_task_network_is_open() -> None:
+    """WebSearch runs Anthropic's server tool, outside the Sandbox's network policy."""
+    assert "--disallowedTools WebSearch" in ClaudeCodeHarness()._flags(native_session())
+    assert "--disallowedTools" not in ClaudeCodeHarness()._flags(
+        native_session(provider_web_tools=True)
+    )
+    harness = ClaudeCodeHarness(settings={"disallowed_tools": ["WebSearch", "WebFetch"]})
+    assert harness._flags(native_session()).split().count("WebSearch") == 1
 
 
 @pytest.mark.parametrize("value", [0, -1, False])
