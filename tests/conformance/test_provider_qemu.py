@@ -4,7 +4,7 @@ One suite, two backends, no per-provider assertions: that is what makes "the san
 contract is real" a claim rather than an aspiration, and what turns the future OS
 roadmap into "swap the guest image".
 
-The disk is this engine version's VM base, materialized once per host, without the
+The disk is the current VM base, materialized once per host, without the
 framework: the Provider adds it, as Docker adds it to the container base. Set
 ``ALE_QEMU_IMAGE`` to run the suite on another Linux disk. Needs KVM and Docker.
 """

@@ -1,9 +1,10 @@
 name: images
 
-# Every ALE image is published under the engine's version (packages/ale-run/pyproject.toml)
-# once and never again: a version the registry already has is skipped, so an image never
-# changes under the engines and Tasks that use it. To publish a changed image, release a
-# new engine version.
+# Every ALE image is published once per version and never again: a version the registry
+# already has is skipped, so an image never changes under the engines and Tasks that use it.
+# The builder and runner share the engine's version (packages/ale-run/pyproject.toml); a
+# base has its own (BASES in packages/ale-run/src/ale/run/__init__.py). To publish a changed
+# image, raise its version.
 
 on:
   push:
@@ -11,6 +12,7 @@ on:
     paths:
       - 'images/**'
       - 'packages/ale-run/pyproject.toml'
+      - 'packages/ale-run/src/ale/run/__init__.py'
   pull_request:
     paths:
       - 'images/**'
@@ -72,7 +74,11 @@ jobs:
       - name: Check whether this version is published
         id: release
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' packages/ale-run/pyproject.toml)
+          case "${{ matrix.repository }}" in
+            *-base) version=$(sed -n 's/.*"${{ matrix.repository }}": "\([0-9.]*\)".*/\1/p' packages/ale-run/src/ale/run/__init__.py) ;;
+            *) version=$(sed -n 's/^version = "\(.*\)"$/\1/p' packages/ale-run/pyproject.toml) ;;
+          esac
+          [ -n "$version" ] || { echo "::error::no version for ${{ matrix.repository }}"; exit 1; }
           image="ghcr.io/agentslastexam/${{ matrix.repository }}:$version"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then

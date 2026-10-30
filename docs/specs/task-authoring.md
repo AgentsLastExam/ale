@@ -255,7 +255,7 @@ permission, and piece of initial state required by the Task. The Linux bases are
 - VM: `ghcr.io/agentslastexam/vm-ubuntu24-base` (Ubuntu 24.04).
 
 Name an exact version, such as `:0.1.1`, never `latest`; `ale new-task` writes the
-engine's current version, and `ale lint` reports a `FROM` or `docker_image` with no tag or
+base's current version, and `ale lint` reports a `FROM` or `docker_image` with no tag or
 `latest`. A Task keeps building from the version it names until its author moves it
 ([Sandbox image](sandbox-image.md#versions)).
 
