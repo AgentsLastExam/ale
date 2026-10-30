@@ -113,6 +113,8 @@ async def test_local_container_build_reuse_and_input_boundaries(
     assert image_edit.input_identity != first.input_identity
 
 
+# Building a VM disk takes minutes even with KVM, so these run with the VM suite.
+@pytest.mark.needs_kvm
 @pytest.mark.asyncio
 async def test_local_vm_materialization_reuse_and_late_layer_invalidation(
     tmp_path: Path,
@@ -151,6 +153,7 @@ async def test_local_vm_materialization_reuse_and_late_layer_invalidation(
     assert changed.prepared_identity != first.prepared_identity
 
 
+@pytest.mark.needs_kvm
 @pytest.mark.asyncio
 async def test_failed_local_vm_build_leaves_no_partial_disk(
     tmp_path: Path,

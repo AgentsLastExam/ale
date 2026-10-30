@@ -8,13 +8,18 @@
 | `acceptance/` | live provider, model, GPU or GUI qualification | explicit live markers |
 
 ```bash
-just test       # unit and lightweight conformance
-just test-int   # conformance and integration
-just lint       # formatting, lint and import boundaries
+just test             # unit and lightweight conformance
+just test-int         # conformance and integration, without VMs and agent CLI installs
+just test-harnesses   # every pinned agent CLI, really installed (needs_cli_install)
+just test-vm          # VM Sandboxes on KVM (needs_kvm)
+just lint             # formatting, lint and import boundaries
 ```
 
+Run `just test-harnesses` after changing a Harness, a Gateway dialect or a CLI pin, and
+`just test-vm` after changing VM or Windows behavior. CI's backend jobs run all three.
+
 Tests that require infrastructure must carry the matching marker (`needs_docker`,
-`needs_kvm`, `needs_gui`, `needs_llm`, or a Hugging Face marker) so local and CI runs can
+`needs_kvm`, `needs_gui`, `needs_llm`, `needs_cli_install`, or a Hugging Face marker) so local and CI runs can
 select them deliberately. Prefer testing the public contract; use private helpers only
 when the helper itself is the behavior under test.
 

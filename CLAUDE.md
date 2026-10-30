@@ -70,5 +70,9 @@ just test-int
 just lint
 ```
 
-Mark infrastructure tests with `needs_docker`, `needs_kvm`, `needs_gui`, `needs_llm` or
-the appropriate Hugging Face marker so they can be selected deliberately.
+Also run `just test-harnesses` after changing a Harness, a Gateway dialect or a CLI pin,
+and `just test-vm` after changing VM or Windows behavior.
+
+Mark infrastructure tests with `needs_docker`, `needs_kvm`, `needs_gui`, `needs_llm`,
+`needs_cli_install` or the appropriate Hugging Face marker so they can be selected
+deliberately.

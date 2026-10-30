@@ -52,9 +52,17 @@ wt-rm name:
 test:
     @uv run pytest -m unit
 
-# Everything that needs a real sandbox; add -m 'integration and not needs_kvm' to skip VMs.
+# Everything that needs a real sandbox except the slow parts: VMs and agent CLI installs.
 test-int:
-    @uv run pytest -m "conformance or integration"
+    @uv run pytest -m "(conformance or integration) and not needs_kvm and not needs_cli_install"
+
+# Every pinned agent CLI, really installed and driven through the Gateway.
+test-harnesses:
+    @uv run pytest -m "needs_cli_install"
+
+# VM Sandboxes on KVM; the Windows tests also need ALE_TEST_WINDOWS_IMAGE.
+test-vm:
+    @uv run pytest -m "needs_kvm"
 
 lint:
     @uv run ruff check .
