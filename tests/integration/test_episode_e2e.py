@@ -21,9 +21,9 @@ from ale.core.sandbox import Sandbox
 from ale.core.trace import read_jsonl
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
@@ -35,7 +35,7 @@ async def run_one(task_root: Path, run_dir: Path, harness: object):  # type: ign
     task = load_tasks(task_root)[0]
     return await run_episode(
         task,
-        StandardEnvironment(harness),  # type: ignore[arg-type]
+        EpisodeProtocol(harness),  # type: ignore[arg-type]
         provider_registry(DockerProvider()),
         run_dir=run_dir,
         collect_artifacts=True,
@@ -49,7 +49,7 @@ async def test_oracle_solves_the_task(tmp_path: Path, write_repo: Callable[..., 
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -61,7 +61,7 @@ async def test_idle_agent_scores_zero_but_completes(
     result = await run_one(task_root, tmp_path / "runs", NopHarness())
 
     assert result.verdict.status is Status.COMPLETED
-    assert result.verdict.rewards == {"overall": 0.0}
+    assert result.verdict.rewards == {"reward": 0.0}
 
 
 @pytest.mark.asyncio
@@ -71,7 +71,7 @@ async def test_broken_verifier_is_a_task_error_not_a_zero(
     """A verifier that writes nothing is a defect in the task, and must say so."""
     task_root = write_repo(
         tmp_path / "repo",
-        verify_body="#!/usr/bin/env bash\nexit 0\n",  # exits cleanly, writes no rewards
+        test_body="#!/usr/bin/env bash\nexit 0\n",  # exits cleanly, writes no rewards
     )
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
 
@@ -85,14 +85,14 @@ async def test_agent_never_sees_verification_material(
 ) -> None:
     """The reason answers stay on the host until scoring."""
     task_root = write_repo(tmp_path / "repo")
-    (task_root / "verify" / "answer.txt").write_text("hello world")
+    (task_root / "tests" / "answer.txt").write_text("hello world")
 
-    probe = task_root / "setup" / "run.sh"
+    probe = task_root / "environment" / "setup" / "setup.sh"
     probe.parent.mkdir()
     probe.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/input /home/user/output\n"
         "printf 'world' > /home/user/input/word.txt\n"
-        "for p in /opt/ale/verify /home/user/reference; do\n"
+        "for p in /opt/ale/tests /home/user/reference; do\n"
         '  if [ -e "$p" ]; then echo "LEAK: $p" >&2; exit 17; fi\n'
         "done\n"
     )
@@ -145,7 +145,7 @@ async def test_failed_episode_retries_in_a_new_sandbox_and_preserves_records(
             return await super().launch(instruction, sandbox, session, timeout_sec=timeout_sec)
 
     task_root = write_repo(tmp_path / "repo")
-    dockerfile = task_root / "image/Dockerfile"
+    dockerfile = task_root / "environment/Dockerfile"
     # This lifecycle check needs a shell, not the base image's desktop services.
     # An empty DISPLAY is how an image says it shows no desktop.
     dockerfile.write_text(dockerfile.read_text() + '\nENV DISPLAY=\nCMD ["sleep", "infinity"]\n')
@@ -156,7 +156,7 @@ async def test_failed_episode_retries_in_a_new_sandbox_and_preserves_records(
     async def execute() -> EpisodeResult:
         return await run_episode(
             task,
-            StandardEnvironment(harness),
+            EpisodeProtocol(harness),
             providers,
             run_dir=tmp_path / "runs",
             episode_id="hello-retry",
@@ -169,7 +169,7 @@ async def test_failed_episode_retries_in_a_new_sandbox_and_preserves_records(
     result = await run_episode_with_retries(execute, retries=1)
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert len(harness.sandbox_ids) == len(set(harness.sandbox_ids)) == 2
     failed = ResultRecord.model_validate_json(
         (result.run_dir / "attempts/1/result.json").read_text()

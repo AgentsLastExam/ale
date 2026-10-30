@@ -18,6 +18,7 @@ import pytest
 
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
+from tests.support import edit_task_config
 
 from .trajectory import LIVE, run_task
 
@@ -60,7 +61,7 @@ output = Path("/home/user/output")
 log = output / "log.txt"
 lines = [line.strip() for line in log.read_text().splitlines()] if log.is_file() else []
 names = sorted(path.name for path in output.iterdir())
-write({"overall": float(names == ["log.txt"] and lines == ["first"])})
+write({"reward": float(names == ["log.txt"] and lines == ["first"])})
 """
 VERIFY_SECOND = """\
 from pathlib import Path
@@ -70,20 +71,15 @@ log, word = output / "log.txt", output / "word.txt"
 lines = [line.strip() for line in log.read_text().splitlines()] if log.is_file() else []
 said = word.read_text().strip() if word.is_file() else ""
 scores = {{"log": float(lines == ["first", "second"]), "word": float(said == {word!r})}}
-write({{"overall": sum(scores.values()) / 2, **scores}})
+write({{"reward": sum(scores.values()) / 2, **scores}})
 """
 
 
 def _task(root: Path, instruction: str, verify: str) -> Path:
     scaffold_task(root)
     (root / "instruction.md").write_text(instruction)
-    manifest = root / "task.yaml"
-    manifest.write_text(
-        manifest.read_text()
-        .replace("agent: 300", "agent: 900")
-        .replace("params:\n  greeting: hello\n", "")
-    )
-    (root / "verify/verify.py").write_text(verify)
+    edit_task_config(root, {"agent": {"timeout_sec": 900}})
+    (root / "tests/verify.py").write_text(verify)
     return root
 
 
@@ -119,7 +115,7 @@ def test_a_cli_continues_its_session_in_the_kept_solver(tmp_path: Path, agent: s
         )
         started = _read(first, "result.json")
         assert started["status"] == "completed", started.get("failure")
-        assert started["rewards"] == {"overall": 1.0}, _read(first, "verification.json")
+        assert started["rewards"] == {"reward": 1.0}, _read(first, "verification.json")
         assert started["continuation"]["harness"] == agent
 
         second = run_task(
@@ -134,7 +130,7 @@ def test_a_cli_continues_its_session_in_the_kept_solver(tmp_path: Path, agent: s
         )
         continued = _read(second, "result.json")
         assert continued["status"] == "completed", continued.get("failure")
-        assert continued["rewards"] == {"overall": 1.0}, _read(second, "verification.json")
+        assert continued["rewards"] == {"reward": 1.0}, _read(second, "verification.json")
     finally:
         asyncio.run(_destroy_kept(runs))
 

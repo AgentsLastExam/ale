@@ -14,15 +14,16 @@ from ale.core.env import Observation, StepResult
 from ale.core.errors import PhaseTimeoutError
 from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, StepwisePolicy
 from ale.core.sandbox import Identity, Sandbox
+from ale.core.task import Stage
 from ale.core.taskspec import OperatingSystem
 from ale.core.trace import DesktopAction
 
 from ._diagnostics import failure_detail
 
-__all__ = ["NopHarness", "OracleHarness", "oracle_dir"]
+__all__ = ["NopHarness", "OracleHarness", "solution_dir"]
 
 
-def oracle_dir(home: str, operating_system: OperatingSystem = OperatingSystem.LINUX) -> PurePath:
+def solution_dir(home: str, operating_system: OperatingSystem = OperatingSystem.LINUX) -> PurePath:
     """Where a task's own solution is staged, when one is being run.
 
     In the agent's home, and deliberately not with the rest of the framework's machinery:
@@ -33,7 +34,7 @@ def oracle_dir(home: str, operating_system: OperatingSystem = OperatingSystem.LI
     all — it is staged only by the harness that exists to run it.
     """
     path_type = PureWindowsPath if operating_system is OperatingSystem.WINDOWS else PurePosixPath
-    return path_type(home) / ".ale-oracle"
+    return path_type(home) / ".ale-solution"
 
 
 class NopHarness(AutonomousHarness):
@@ -94,7 +95,7 @@ class ScriptedPolicyHarness(StepwisePolicy):
 class OracleHarness(AutonomousHarness):
     """Runs the task's own solution in place of an agent.
 
-    The environment stages it before this runs; see :func:`oracle_dir`.
+    The episode protocol stages it before this runs; see :func:`solution_dir`.
     """
 
     name = "oracle"
@@ -111,8 +112,8 @@ class OracleHarness(AutonomousHarness):
         *,
         timeout_sec: float,
     ) -> AgentRun:
-        root = oracle_dir(session.home, session.os)
-        entry = root / ("run.ps1" if session.os is OperatingSystem.WINDOWS else "run.sh")
+        root = solution_dir(session.home, session.os)
+        entry = root / Stage.SOLUTION.entry(session.os)
         argv = (
             [
                 "powershell.exe",
@@ -132,10 +133,7 @@ class OracleHarness(AutonomousHarness):
             # The oracle stands in for an agent, but it is task code and gets the same
             # environment contract a stage does — otherwise a solution that works during
             # authoring fails during validation for reasons that have nothing to do with it.
-            env={
-                "ALE_HOME": session.home,
-                "ALE_PARAMS_JSON": str(root / "params.json"),
-            },
+            env={"ALE_HOME": session.home},
             timeout_sec=timeout_sec,
             # The oracle stands in for the agent, so it meets the agent's limits. An
             # oracle with more privilege would pass exactly the tasks a real agent then

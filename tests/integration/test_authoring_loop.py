@@ -9,10 +9,10 @@ from pathlib import Path
 import pytest
 
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.lint import lint_repository
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
@@ -24,7 +24,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 async def run(task_path: Path, run_dir: Path, harness: object):  # type: ignore[no-untyped-def]
     return await run_episode(
         load_tasks(task_path)[0],
-        StandardEnvironment(harness),  # type: ignore[arg-type]
+        EpisodeProtocol(harness),  # type: ignore[arg-type]
         provider_registry(DockerProvider()),
         run_dir=run_dir,
     )
@@ -45,8 +45,8 @@ async def test_scaffold_lints_validates_and_survives_relocation(tmp_path: Path) 
 
     result = await run(moved, tmp_path / "runs", OracleHarness())
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
-    assert json.loads((result.run_dir / "result.json").read_text())["rewards"] == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
+    assert json.loads((result.run_dir / "result.json").read_text())["rewards"] == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -54,15 +54,15 @@ async def test_idle_agent_is_a_real_zero(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "task")
     result = await run(task, tmp_path / "runs", NopHarness())
     assert result.verdict.status is Status.COMPLETED
-    assert result.verdict.rewards == {"overall": 0.0}
+    assert result.verdict.rewards == {"reward": 0.0}
 
 
 @pytest.mark.asyncio
 async def test_dynamic_setup_runs_before_oracle(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "dynamic")
-    setup = task / "setup"
+    setup = task / "environment" / "setup"
     setup.mkdir()
-    entry = setup / "run.sh"
+    entry = setup / "setup.sh"
     entry.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -71,15 +71,15 @@ async def test_dynamic_setup_runs_before_oracle(tmp_path: Path) -> None:
         "chown user:user /home/user/output/service-ready\n"
     )
     entry.chmod(0o755)
-    check = task / "verify" / "verify.py"
+    check = task / "tests" / "verify.py"
     check.write_text(
         "from ale_verify import checks, write\n"
         "v = {}\n"
         "v['setup'] = checks.text_equals('/home/user/output/service-ready', 'ready')['score']\n"
         "v['content'] = checks.text_equals('/home/user/output/result.txt', 'hello\\n')['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await run(task, tmp_path / "runs", OracleHarness())
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}

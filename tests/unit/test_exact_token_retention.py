@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from ale.core.errors import TrajectoryConversionError
-from ale.run.environments.standard import _exact_token_metrics
+from ale.run.protocol.episode_protocol import _exact_token_metrics
 
 pytestmark = pytest.mark.unit
 

@@ -6,16 +6,15 @@ import os
 from pathlib import Path
 
 import pytest
-import yaml
 
 from ale.core.taskspec import ImageKind
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.qemu import QemuProvider
 from ale.run.tasksets.manifest import load_task_folder
-from tests.support import provider_registry
+from tests.support import provider_registry, write_task
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_kvm]
 
@@ -27,26 +26,24 @@ async def test_windows_framework_copies_protected_artifacts_and_verifies_as_admi
     image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
         pytest.skip("set ALE_TEST_WINDOWS_IMAGE to an ALE Windows base disk")
-    task = tmp_path / "task"
-    for stage in ("setup", "oracle", "verify"):
-        (task / stage).mkdir(parents=True)
-    manifest = {
-        "spec_type": "core/v1",
-        "name": "windows-privileges",
-        "os": "windows",
-        "image": {"kind": "vm", "ref": "local/windows-privileges"},
-        "resources": {"cpus": 2, "memory_mb": 8192},
-        "artifacts": [r"C:\ale-copy\*.sgf", r"C:\ale-copy\directory.json", r"C:\missing"],
-        "timeouts": {"setup": 120, "agent": 60, "verify": 120},
-    }
-    if mode == "separate":
-        manifest["verify"] = {
-            "environment_mode": mode,
-            "resources": {"cpus": 2, "memory_mb": 8192, "storage_mb": None, "gpus": 0},
-        }
-    (task / "task.yaml").write_text(yaml.safe_dump(manifest))
-    (task / "instruction.md").write_text("Leave the prepared outputs for verification.\n")
-    (task / "setup/run.ps1").write_text(
+    task = write_task(
+        tmp_path / "task",
+        name="agentslastexam/windows-privileges",
+        config={
+            "artifacts": [r"C:\ale-copy\*.sgf", r"C:\ale-copy\directory.json", r"C:\missing"],
+            "environment": {"os": "windows", "cpus": 2, "memory_mb": 8192},
+            "agent": {"timeout_sec": 60},
+            "verifier": {"environment_mode": mode},
+            "ale": {"sandbox": "vm", "vm_image": "local/windows-privileges"},
+        },
+        dockerfile=None,
+        instruction="Leave the prepared outputs for verification.\n",
+        test=None,
+        solve=None,
+    )
+    for stage in ("environment/setup", "solution", "tests"):
+        (task / stage).mkdir(parents=True, exist_ok=True)
+    (task / "environment/setup/setup.ps1").write_text(
         r"""$ErrorActionPreference = 'Stop'
 python.exe -c "import ctypes; assert ctypes.windll.shell32.IsUserAnAdmin()"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -59,19 +56,19 @@ New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
     -Target C:\ale-copy\directory.json | Out-Null
 """
     )
-    (task / "oracle/run.ps1").write_text(
+    (task / "solution/solve.ps1").write_text(
         'python.exe -c "import ctypes; assert not ctypes.windll.shell32.IsUserAnAdmin()"\n'
         "if ($LASTEXITCODE) { exit $LASTEXITCODE }\n"
         "python.exe .\\check.py\nexit $LASTEXITCODE\n"
     )
-    (task / "oracle/check.py").write_text(
+    (task / "solution/check.py").write_text(
         "from pathlib import Path\n"
         "try: Path(r'C:\\ale-copy\\game.sgf').read_text()\n"
         "except PermissionError: pass\n"
         "else: raise AssertionError('agent could read Administrator-only output')\n"
     )
-    (task / "verify/run.ps1").write_text("python.exe .\\verify.py\nexit $LASTEXITCODE\n")
-    (task / "verify/verify.py").write_text(
+    (task / "tests/test.ps1").write_text("python.exe .\\verify.py\nexit $LASTEXITCODE\n")
+    (task / "tests/verify.py").write_text(
         "import ctypes\n"
         "from pathlib import Path\n"
         "from ale_verify import write\n"
@@ -81,12 +78,12 @@ New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
         "v['protected'] = float(content == 'protected')\n"
         "v['directory'] = float(Path('C:\\\\ale-copy\\\\directory.json').is_dir())\n"
         "v['missing'] = float(not Path('C:\\\\missing').exists())\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await run_episode(
         load_task_folder(task),
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(
             QemuProvider(image=image, overlay_dir=tmp_path / "qemu"), kind=ImageKind.VM
         ),
@@ -94,5 +91,5 @@ New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
         collect_artifacts=True,
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert (result.run_dir / "artifacts/0000/game.sgf").read_text() == "protected"

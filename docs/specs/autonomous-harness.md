@@ -203,7 +203,7 @@ message, so `CliHarness` then sends the fixed `Continue from where you left off.
 recorded like any other prompt. Resume requires the same Harness and a session file the
 adapter recognizes by its exact ID in the Sandbox it is given. The session is the
 agent's files, so it continues in a later episode that adopted the retained solver
-([Standard Environment](standard-environment.md#continuation)); model, settings and
+([Episode protocol](episode-protocol.md#continuation)); model, settings and
 resources may differ there, and that episode's RunLock records its own.
 
 An adapter must never use a "latest session" selector, replay the transcript, copy a
@@ -217,8 +217,8 @@ lookup is invalid.
 
 `Harness.logs` declares, relative to the agent home, the files and directories that
 hold a Harness's own record of a run. A CLI declares `.ale-harness` and its native
-session directories, including child-session locations. The Environment mirrors them
-(see [Standard Environment](standard-environment.md#evidence-capture)) and the parser
+session directories, including child-session locations. The
+[episode protocol](episode-protocol.md#evidence-capture) mirrors them and the parser
 reads the mirror at the same relative paths; it never sees the Sandbox.
 
 `parse_trajectory()` is pure host-side code. For identical collected bytes it returns an
@@ -274,17 +274,17 @@ Keep ownership explicit:
 - Gateway limits own model calls, provider-reported input tokens, output tokens, and
   total tokens in both API-key and subscription modes.
 - Harness settings own native controls such as Claude `max_turns`.
-- Environment timeouts own setup, agent, and verify wall time.
+- Episode protocol timeouts own setup, agent, and verify wall time.
 
 Do not emulate a Gateway limit in an adapter or hide a native limit under a Gateway
 field. Termination records and provenance name the enforcing layer, limit, configured
 value, and observed value.
 
 Adapters do not parse Gateway refusals. The Gateway session records the first limit that
-refused a call, and the Environment attributes an agent phase that then fails, whatever
-error the agent program reported, to that limit: the episode ends `budget_exceeded` with a
-`gateway` termination. Refusals carry `x-should-retry: false` so SDKs stop retrying them.
-Adapters classify only their native limits.
+refused a call, and the episode protocol attributes an agent phase that then fails,
+whatever error the agent program reported, to that limit: the episode ends
+`budget_exceeded` with a `gateway` termination. Refusals carry `x-should-retry: false` so
+SDKs stop retrying them. Adapters classify only their native limits.
 
 The Gateway supports Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, and
 Gemini `generateContent` for API-key mode; each dialect's routes and request handling
@@ -369,5 +369,5 @@ scored from its explicit tool lists, not trusted summary counters, and every cla
 must have an observed call and result in the collected evidence.
 
 For native resume, live acceptance directly calls `launch()` and then `resume()` twice
-inside one sandbox. Production multi-segment Environment or CLI orchestration is not
+inside one sandbox. Multi-segment orchestration by the episode protocol or the CLI is not
 part of this contract.

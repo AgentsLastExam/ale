@@ -136,7 +136,7 @@ class ClaudeCodeHarness(CliHarness):
         return trajectory.parse_trajectory(context)
 
     def classify_failure(self, detail: str) -> Exception:
-        # Gateway refusals are attributed by the Environment from the Gateway session.
+        # Gateway refusals are attributed by the episode protocol from the Gateway session.
         lowered = detail.lower()
         if isinstance(self.settings.max_turns, int) and any(
             marker in lowered for marker in ("max turns", "error_max_turns")

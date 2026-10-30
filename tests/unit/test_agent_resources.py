@@ -95,13 +95,13 @@ def test_task_path_and_symlink_cannot_escape_or_enter_invisible_content(
     outside = skill(tmp_path / "outside")
     (task / "tools/skills").mkdir(parents=True)
     (task / "tools/skills/escape").symlink_to(outside, target_is_directory=True)
-    skill(task / "verify" / "secret")
+    skill(task / "tests" / "secret")
 
     with pytest.raises(AgentResourceError, match="escapes"):
         resolve(task, "escape")
     with pytest.raises(AgentResourceError, match="tools/skills"):
         resolve_agent_resources(
-            task=ToolProvision(skills=(SkillSource(path="verify/secret"),)),
+            task=ToolProvision(skills=(SkillSource(path="tests/secret"),)),
             task_root=task,
             task_source=source(),
         )

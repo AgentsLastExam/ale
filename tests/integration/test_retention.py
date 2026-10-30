@@ -20,10 +20,10 @@ from ale.core.sandbox import (
 from ale.core.taskspec import NetworkPolicy, Resources
 from ale.core.verdict import Status
 from ale.run.cli.tasks import _reverify
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import _Lease, run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import (
     DockerProvider,
@@ -32,7 +32,7 @@ from ale.run.providers.docker import (
 from ale.run.recording import EpisodeRecording
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import provider_registry
+from tests.support import edit_task_config, provider_registry
 
 pytestmark = pytest.mark.integration
 
@@ -146,7 +146,7 @@ def context(root: Path, policy: LoggingPolicy, run: AgentRun | None):
 def test_minimal_deletes_successful_native_logs(tmp_path: Path) -> None:
     root = tmp_path / "minimal"
     ctx = context(root, LoggingPolicy(), AgentRun(exit_code=0, final_message="done"))
-    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
+    EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
     assert (root / "trajectory.json").is_file()
     assert not (root / "logs/claude-code").exists()
 
@@ -158,12 +158,12 @@ def test_debug_and_interruption_keep_native_logs(tmp_path: Path) -> None:
         LoggingPolicy(native_logs="debug"),
         AgentRun(exit_code=0, final_message="done"),
     )
-    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(debug_ctx)  # type: ignore[arg-type]
+    EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(debug_ctx)  # type: ignore[arg-type]
     assert (debug / "logs/claude-code/.ale-harness/stdout.log").is_file()
 
     interrupted = tmp_path / "interrupted"
     interrupted_ctx = context(interrupted, LoggingPolicy(), None)
-    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
+    EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
         interrupted_ctx
     )
     assert (interrupted / "logs/claude-code/.ale-harness/stdout.log").is_file()
@@ -179,21 +179,15 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
 ) -> None:
     task_path = scaffold_task(tmp_path / "reverify")
     if mode == "separate":
-        manifest = task_path / "task.yaml"
-        manifest.write_text(
-            manifest.read_text()
-            + "verify:\n"
-            + "  environment_mode: separate\n"
-            + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
-        )
-    stale = task_path / "verify/stale.txt"
+        edit_task_config(task_path, {"verifier": {"environment": {"cpus": 1, "memory_mb": 512}}})
+    stale = task_path / "tests/stale.txt"
     stale.write_text("must not survive a verifier revision\n")
     registry = provider_registry(DockerProvider())
     task = load_tasks(task_path)[0]
     settings = RunConfig.model_validate({"artifacts": {"collect": "host"}})
     first = await run_episode(
         task,
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         registry,
         run_dir=tmp_path / "first",
         provenance=ProvenanceInputs(
@@ -211,13 +205,13 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
     assert task.prepared_image is not None
 
     stale.unlink()
-    (task_path / "verify/verify.py").write_text(
+    (task_path / "tests/verify.py").write_text(
         "from ale_verify import checks, write\n"
         "v = {}\n"
         "v['reverified'] = checks.text_equals('/home/user/output/result.tx"
         "t', 'hello\\n')['score']\n"
-        "v['stale_removed'] = checks.file_missing('/opt/ale/verify/stale.txt')['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['stale_removed'] = checks.file_missing('/opt/ale/tests/stale.txt')['score']\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     from ale.run.cli import tasks as task_cli
@@ -230,7 +224,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         assert await _reverify(str(task_path), first.run_dir, settings, tmp_path / "second") == 0
         result_path = next((tmp_path / "second").rglob("result.json"))
         result = json.loads(result_path.read_text())
-        assert result["rewards"] == {"overall": 1.0}
+        assert result["rewards"] == {"reward": 1.0}
         if mode == "separate":
             assert result["sandboxes"][0]["roles"] == ["verifier"]
         assert retained.handle in {
@@ -262,7 +256,7 @@ def test_conversion_failure_keeps_native_logs(tmp_path: Path) -> None:
         + "\n"
     )
 
-    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
+    EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(ctx)  # type: ignore[arg-type]
 
     assert transcript.is_file()
     trajectory = json.loads((root / "trajectory.json").read_text())
@@ -274,10 +268,10 @@ def test_conversion_failure_keeps_native_logs(tmp_path: Path) -> None:
 def test_minimal_retention_is_smaller_than_debug(tmp_path: Path) -> None:
     minimal = tmp_path / "minimal-size"
     debug = tmp_path / "debug-size"
-    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
+    EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
         context(minimal, LoggingPolicy(), AgentRun(exit_code=0, final_message="done"))
     )
-    StandardEnvironment(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
+    EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
         context(
             debug,
             LoggingPolicy(native_logs="debug"),
@@ -294,7 +288,7 @@ def test_minimal_retention_is_smaller_than_debug(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "shared-keep")
-    oracle = task / "oracle/run.sh"
+    oracle = task / "solution/solve.sh"
     oracle.write_text(
         oracle.read_text()
         + "mkdir -p /home/user/.codex /home/user/.claude\n"
@@ -303,7 +297,7 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
     )
     result = await run_episode(
         load_tasks(task)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
@@ -324,7 +318,7 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
             "test",
             "!",
             "-e",
-            "/opt/ale/verify/config.json",
+            "/opt/ale/tests/config.json",
         )
         assert await probe.wait() == 0
         credentials = await asyncio.create_subprocess_exec(
@@ -334,7 +328,8 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
             "sh",
             "-c",
             "test ! -e /home/user/.codex/auth.json && "
-            "test ! -e /home/user/.claude/.credentials.json",
+            "test ! -e /home/user/.claude/.credentials.json && "
+            "test ! -e /logs/verifier",
         )
         assert await credentials.wait() == 0
     finally:
@@ -347,16 +342,10 @@ async def test_separate_retention_applies_to_solver_and_verifier_independently(
     tmp_path: Path,
 ) -> None:
     task = scaffold_task(tmp_path / "separate-keep")
-    manifest = task / "task.yaml"
-    manifest.write_text(
-        manifest.read_text()
-        + "verify:\n"
-        + "  environment_mode: separate\n"
-        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
-    )
+    edit_task_config(task, {"verifier": {"environment": {"cpus": 1, "memory_mb": 512}}})
     result = await run_episode(
         load_tasks(task)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
@@ -382,17 +371,17 @@ async def test_shared_failure_still_applies_keep_and_records_the_phase(
 ) -> None:
     task = scaffold_task(tmp_path / f"shared-{failure_phase}-failure")
     if failure_phase == "setup":
-        setup = task / "setup/run.sh"
+        setup = task / "environment/setup/setup.sh"
         setup.parent.mkdir()
         setup.write_text("#!/bin/sh\nexit 7\n")
         setup.chmod(0o755)
     else:
-        oracle = task / "oracle/run.sh"
+        oracle = task / "solution/solve.sh"
         oracle.write_text("#!/bin/sh\nexit 8\n")
 
     result = await run_episode(
         load_tasks(task)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
@@ -415,17 +404,11 @@ async def test_shared_failure_still_applies_keep_and_records_the_phase(
 @pytest.mark.asyncio
 async def test_separate_verifier_failure_retains_each_requested_sandbox(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "separate-verifier-failure")
-    manifest = task / "task.yaml"
-    manifest.write_text(
-        manifest.read_text()
-        + "verify:\n"
-        + "  environment_mode: separate\n"
-        + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
-    )
-    (task / "verify/verify.py").write_text("raise RuntimeError('verifier failed')\n")
+    edit_task_config(task, {"verifier": {"environment": {"cpus": 1, "memory_mb": 512}}})
+    (task / "tests/verify.py").write_text("raise RuntimeError('verifier failed')\n")
     result = await run_episode(
         load_tasks(task)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="keep"),
@@ -463,14 +446,14 @@ async def test_sanitation_failure_destroys_sandbox_without_changing_reward(
     task = scaffold_task(tmp_path / "sanitation-failure")
     result = await run_episode(
         load_tasks(task)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
     )
 
     assert result.verdict.status is Status.COMPLETED
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert result.record.sandboxes[0].outcome == "retention-failed"
     assert "sanitation" in (result.record.sandboxes[0].reason or "")
     assert not any(

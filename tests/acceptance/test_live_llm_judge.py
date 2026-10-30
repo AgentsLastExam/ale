@@ -10,10 +10,10 @@ from ale.core.config import LLMJudgeConfig, RunConfig, VerificationConfig
 from ale.core.harness import EffectiveAgentResources
 from ale.core.lock import TaskSource
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.gateway.server import REQUEST_PATHS, Gateway
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
 from ale.run.secrets import provider_endpoint
@@ -68,7 +68,7 @@ async def test_live_llm_judge_record_and_transport(
     try:
         result = await run_episode(
             task,
-            StandardEnvironment(harness),
+            EpisodeProtocol(harness),
             provider_registry(DockerProvider()),
             gateway=gateway,
             gateway_url=gateway_url,
@@ -84,7 +84,7 @@ async def test_live_llm_judge_record_and_transport(
     finally:
         await gateway.stop()
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert (result.run_dir / "result.json").is_file()
     assert (result.run_dir / "verification.json").is_file()
     json.loads((result.run_dir / "verification.json").read_text())

@@ -11,9 +11,9 @@ from ale.core.config import RunConfig
 from ale.core.harness import EffectiveAgentResources
 from ale.core.lock import TaskSource
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
@@ -22,7 +22,7 @@ from ale_verify import (
     JudgeAttempt,
     JudgeInvocation,
 )
-from tests.support import CONTAINER_BASE, provider_registry
+from tests.support import CONTAINER_BASE, edit_task_config, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -54,36 +54,34 @@ async def test_plain_result_is_accepted_only_after_normal_exit(
 ) -> None:
     task_root = repository(tmp_path / "repo", "plain-result")
     if environment_mode == "separate":
-        manifest = task_root / "task.yaml"
-        manifest.write_text(
-            manifest.read_text()
-            + "verify:\n  environment_mode: separate\n"
-            + "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
-        )
+        edit_task_config(task_root, {"verifier": {"environment": {"cpus": 1, "memory_mb": 512}}})
     script = (
-        "import json, os\nfrom pathlib import Path\n"
-        "Path(os.environ['ALE_VERDICT_PATH']).write_text(json.dumps({"
-        "'overall':0.999,'details':{'count':10,'raw':0.999}}))\n"
+        "import json\nfrom pathlib import Path\n"
+        "verifier = Path('/logs/verifier')\n"
+        "(verifier / 'verification.json').write_text(json.dumps({"
+        "'reward':0.999,'details':{'count':10,'raw':0.999}}))\n"
+        "(verifier / 'reward.json').write_text(json.dumps({'reward':0.999}))\n"
     )
     if mode == "crash":
         script += "raise RuntimeError('after writing result')\n"
     elif mode == "malformed":
-        script += "Path(os.environ['ALE_VERDICT_PATH']).write_text('partial JSON')\n"
+        script += "(verifier / 'reward.json').write_text('partial JSON')\n"
     elif mode == "stale":
-        (task_root / "verify/result.json").write_text('{"overall":1}')
+        # A result shipped with the verify stage is no result of this attempt.
+        (task_root / "tests/reward.json").write_text('{"reward":1}')
         script = "pass\n"
-    (task_root / "verify/verify.py").write_text(script)
+    (task_root / "tests/verify.py").write_text(script)
     result = await run_episode(
         load_tasks(task_root)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
     )
     if mode == "direct":
         assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-        assert result.verdict.rewards == {"overall": 1.0}
+        assert result.verdict.rewards == {"reward": 1.0}
         assert json.loads((result.run_dir / "verification.json").read_text()) == {
-            "overall": 1.0,
+            "reward": 1.0,
             "details": {"count": 10, "raw": 0.999},
         }
     else:
@@ -128,17 +126,15 @@ async def test_agent_transcript_and_judge_provenance_are_collected_after_exit(
         Path(os.environ["ALE_AGENT_JUDGE_LOG_PATH"]).write_text(
             json.dumps(transcript)+"\\n"+json.dumps(record)+"\\n"
         )
-        Path(os.environ["ALE_VERDICT_PATH"]).write_text(
-            json.dumps({{"overall":1.0, "details":{{"functional":1.0}}}})
-        )
+        Path("/logs/verifier/reward.json").write_text(json.dumps({{"reward":1.0}}))
         """
     ).strip()
-    (task_root / "verify" / "verify.py").write_text(script + "\n")
+    (task_root / "tests" / "verify.py").write_text(script + "\n")
     task = load_tasks(task_root)[0]
 
     result = await run_episode(
         task,
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         provenance=provenance(task_root),

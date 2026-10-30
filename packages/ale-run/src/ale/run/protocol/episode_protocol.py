@@ -1,14 +1,12 @@
-"""The standard episode flow.
+"""The episode protocol: how one Task becomes one Episode.
 
-Provision a sandbox, prepare it, let the agent work, score what it left behind. Most
-tasks need exactly this; a domain that needs something else — two isolated containers, a
-staged protocol, a human gate — subclasses :class:`~ale.core.environment.Environment`
-instead of bending this one.
+Provision a sandbox, prepare it, let the agent work, score what it left behind.
 
 Three properties are enforced here rather than trusted to task authors: verification and
 oracle material is absent while the evaluated agent runs, every phase has a deadline,
 and teardown happens on every path out. Tasks own literal paths inside the image-declared
-agent home; ALE owns only staging time and its root-only framework directory.
+agent home; ALE owns only staging time, its root-only framework directory and the
+verifier directory a result is written to.
 """
 
 from __future__ import annotations
@@ -26,7 +24,7 @@ from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Literal, cast
 
 from ale.core.config import RunTimeouts
-from ale.core.environment import Environment, EpisodeContext, Phase
+from ale.core.episode import EpisodeContext, Phase
 from ale.core.errors import (
     AgentError,
     BudgetExceededError,
@@ -55,7 +53,7 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxRole,
 )
-from ale.core.task import Task
+from ale.core.task import Stage, Task
 from ale.core.taskspec import (
     NetworkMode,
     NetworkPolicy,
@@ -79,14 +77,14 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.core.verdict import Verdict
-from ale.run.environments.log_mirror import (
+from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
+from ale.run.harnesses.builtin import solution_dir
+from ale.run.protocol.log_mirror import (
     FINAL_SYNC_TIMEOUT_SEC,
     SYNC_INTERVAL_SEC,
     SYNC_TIMEOUT_SEC,
     LogMirror,
 )
-from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
-from ale.run.harnesses.builtin import oracle_dir
 from ale.run.recording import (
     BlobStore,
     CommandRecorder,
@@ -97,18 +95,21 @@ from ale.run.recording import (
 from ale.run.verification import installed_ale_verify, verifier_judge_config
 from ale_verify import JudgeInvocation, read_result
 
-__all__ = ["Resume", "RetainedVerificationEnvironment", "StandardEnvironment"]
+__all__ = ["SETUP_TIMEOUT_SEC", "EpisodeProtocol", "Resume", "ReverificationProtocol"]
 
 #: How long past the agent deadline the Host waits. The guest enforces that deadline
 #: itself and stops the agent's process tree before it replies, so evidence capture begins
 #: after the agent stopped; this margin only bounds a guest that no longer replies.
 AGENT_STOP_GRACE_SEC = 60.0
 
+#: Upper bound on the setup phase: a guard against a hung setup, not a scored budget.
+SETUP_TIMEOUT_SEC = 1800.0
+
 
 #: Where the framework's own machinery goes. Under a root-owned, root-only directory,
-#: which is the whole point: the verify stage holds the scorer and the oracle holds the
-#: answer, and until now they were kept from the agent by *timing* alone — uploaded only
-#: when needed. Permissions are a better guarantee than a schedule.
+#: which is the whole point: the tests stage holds the scorer, and timing alone — being
+#: uploaded only when needed — would keep it from the agent only by schedule. Permissions
+#: are a better guarantee than a schedule.
 #:
 #: It also leaves exactly two roots in a sandbox: this one, which belongs to the framework
 #: and which the agent cannot read, and the agent's home, which is entirely its own.
@@ -129,6 +130,112 @@ def _layout(operating_system: OperatingSystem) -> _StageLayout:
     return _StageLayout(root)
 
 
+def _verifier_dir(operating_system: OperatingSystem) -> PurePath:
+    """Where verification writes ``reward.json``: Harbor's verifier directory."""
+    if operating_system is OperatingSystem.WINDOWS:
+        return PureWindowsPath("C:/logs/verifier")
+    return PurePosixPath("/logs/verifier")
+
+
+#: Gives the verifier directory to the framework alone, empty. The agent may have made the
+#: path, or a link at it, as its own account or with sudo, so a link or file where a
+#: directory belongs is removed rather than followed, the parent becomes root's and only
+#: root may change it, and the directory is made anew, readable by root alone.
+_LINUX_VERIFIER_RESET = """set -eu
+parent="$1" verifier="$2"
+if [ -L "$parent" ] || { [ -e "$parent" ] && [ ! -d "$parent" ]; }; then rm -f -- "$parent"; fi
+mkdir -p -- "$parent"
+chown 0:0 -- "$parent"
+chmod go-w -- "$parent"
+rm -rf -- "$verifier"
+mkdir -m 0700 -- "$verifier"
+"""
+
+#: Removes the verifier directory unless its parent is a link, which is the agent's own.
+_LINUX_VERIFIER_REMOVE = """set -eu
+if [ -d "$1" ] && [ ! -L "$1" ]; then rm -rf -- "$2"; fi
+"""
+
+#: The same on Windows, where any account may create a directory at the root of C:. An
+#: entry's own attributes are read without following a link, a link is deleted as a link,
+#: and a tree is walked without entering one. Both directories are owned by Administrators
+#: and the verifier directory grants only SYSTEM and Administrators, which the agent's
+#: limited token is not; it is created with that descriptor, so it never has another.
+_WINDOWS_VERIFIER_ENTRIES = """$ErrorActionPreference = 'Stop'
+$isDirectory = [int][IO.FileAttributes]::Directory
+$isLink = [int][IO.FileAttributes]::ReparsePoint
+function Get-Entry([string]$Path) {
+    if ([IO.File]::Exists($Path) -or [IO.Directory]::Exists($Path)) {
+        return [int][IO.File]::GetAttributes($Path)
+    }
+    return $null
+}
+function Test-Directory($Attributes) {
+    if ($null -eq $Attributes) { return $false }
+    return (($Attributes -band $isDirectory) -ne 0) -and (($Attributes -band $isLink) -eq 0)
+}
+function Remove-Entry([string]$Path) {
+    $attributes = Get-Entry $Path
+    if ($null -eq $attributes) { return }
+    $directory = ($attributes -band $isDirectory) -ne 0
+    if (($attributes -band $isLink) -ne 0) {
+        if ($directory) { [IO.Directory]::Delete($Path) } else { [IO.File]::Delete($Path) }
+        return
+    }
+    [IO.File]::SetAttributes($Path, [IO.FileAttributes]::Normal)
+    if ($directory) {
+        foreach ($child in [IO.Directory]::GetFileSystemEntries($Path)) { Remove-Entry $child }
+        [IO.Directory]::Delete($Path)
+    } else {
+        [IO.File]::Delete($Path)
+    }
+}
+"""
+
+_WINDOWS_VERIFIER_RESET = """
+$system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$admins = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+$users = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+function Protect-Directory([string]$Path, [bool]$Listed) {
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.SetOwner($admins)
+    $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    foreach ($sid in @($system, $admins)) {
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $sid, 'FullControl', $inherit, 'None', 'Allow'))
+    }
+    if ($Listed) {
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $users, 'ReadAndExecute', 'None', 'None', 'Allow'))
+    }
+    [IO.Directory]::CreateDirectory($Path, $acl) | Out-Null
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+if (-not (Test-Directory (Get-Entry $parent))) { Remove-Entry $parent }
+Protect-Directory $parent $true
+Remove-Entry $verifier
+Protect-Directory $verifier $false
+"""
+
+_WINDOWS_VERIFIER_REMOVE = """
+if (Test-Directory (Get-Entry $parent)) { Remove-Entry $verifier }
+"""
+
+
+def _verifier_dir_command(operating_system: OperatingSystem, *, remove: bool) -> list[str]:
+    directory = _verifier_dir(operating_system)
+    if operating_system is not OperatingSystem.WINDOWS:
+        script = _LINUX_VERIFIER_REMOVE if remove else _LINUX_VERIFIER_RESET
+        return ["sh", "-c", script, "sh", str(directory.parent), str(directory)]
+    return _powershell(
+        f"$parent = {_powershell_literal(str(directory.parent))}; "
+        f"$verifier = {_powershell_literal(str(directory))}\n"
+        + _WINDOWS_VERIFIER_ENTRIES
+        + (_WINDOWS_VERIFIER_REMOVE if remove else _WINDOWS_VERIFIER_RESET)
+    )
+
+
 def _sandbox_path(operating_system: OperatingSystem, root: str, *parts: str) -> str:
     path_type = PureWindowsPath if operating_system is OperatingSystem.WINDOWS else PurePosixPath
     return str(path_type(root).joinpath(*parts))
@@ -138,8 +245,12 @@ def _powershell(command: str) -> list[str]:
     return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]
 
 
+def _powershell_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def _powershell_list(values: Sequence[str]) -> str:
-    return "@(" + ",".join("'" + value.replace("'", "''") + "'" for value in values) + ")"
+    return "@(" + ",".join(_powershell_literal(value) for value in values) + ")"
 
 
 @dataclass(frozen=True)
@@ -158,10 +269,10 @@ class Resume:
     gateway_port: int | None = None
 
 
-class StandardEnvironment(Environment):
+class EpisodeProtocol:
     """Linear provision → setup → agent → verify flow."""
 
-    name = "core/standard"
+    component = "episode-protocol"
 
     def __init__(
         self,
@@ -199,7 +310,7 @@ class StandardEnvironment(Environment):
         )
         try:
             await self._with_deadline(
-                ctx, Phase.SETUP, spec.timeouts.setup, self._setup(task, ctx, sandbox)
+                ctx, Phase.SETUP, SETUP_TIMEOUT_SEC, self._setup(task, ctx, sandbox)
             )
             if self.agent_enabled:
                 await self._agent(task, ctx, sandbox, logs=logs)
@@ -311,8 +422,8 @@ class StandardEnvironment(Environment):
     async def _setup(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         """Stage what the task declared, then run its own preparation.
 
-        Only agent-visible material is uploaded: the manifest, the verify stage and the
-        oracle stay on the host until they are needed, which is what keeps answers out
+        Only agent-visible material is uploaded: the configuration, the tests and the
+        solution stay on the host until they are needed, which is what keeps answers out
         of reach rather than merely out of sight.
 
         Directories come from the task — its asset destinations and the paths it wants
@@ -326,10 +437,10 @@ class StandardEnvironment(Environment):
         if folder is None:
             return
 
-        if setup_dir := folder.stage_dir("setup"):
-            target = _layout(ctx.spec.os).path("setup")
+        if setup_dir := folder.stage_dir(Stage.SETUP):
+            target = _layout(ctx.spec.os).path(Stage.SETUP)
             await sandbox.upload_dir(str(setup_dir), str(target))
-            if folder.stage_entry("setup", ctx.spec.os):
+            if folder.stage_entry(Stage.SETUP, ctx.spec.os):
                 await self._run_stage(ctx, sandbox, target, Phase.SETUP)
 
     async def _agent(
@@ -470,7 +581,7 @@ class StandardEnvironment(Environment):
         """Hand the agent a stepwise view of the sandbox and let it drive.
 
         The loop used to live here, which meant an agent that wanted to drive had to be
-        inverted through queues to fit. Now it drives, and the environment is still the
+        inverted through queues to fit. Now it drives, and the protocol is still the
         only thing touching the sandbox — so every observation and action is witnessed,
         and the ceilings hold for an agent that never heard of them.
         """
@@ -601,35 +712,40 @@ class StandardEnvironment(Environment):
                     raise TaskError(f"MCP server {resolved.name!r} cwd is not a directory: {cwd}")
 
     async def _verify(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> dict[str, float]:
-        """Score the episode using the task's own verify stage.
+        """Score the episode using the task's own tests.
 
         A crash or malformed output here is a task defect, reported as ``task_error``:
         deliberately distinguishable from an agent that simply scored zero.
         """
         folder = getattr(task, "folder", None)
-        verify_dir = folder.stage_dir("verify") if folder else None
-        if verify_dir is None:
-            raise TaskError("task has no verify stage")
+        tests_dir = folder.stage_dir(Stage.TESTS) if folder else None
+        if tests_dir is None:
+            raise TaskError("task has no tests stage")
 
         layout = _layout(ctx.spec.os)
-        verify_root = layout.path("verify")
-        removed = await self._clear_stages(ctx, sandbox, ("verify",))
+        tests_root = layout.path(Stage.TESTS)
+        removed = await self._clear_stages(ctx, sandbox, (Stage.TESTS,))
         if not removed.ok:
             raise TaskError(
-                "could not clear the previous verify stage: "
+                "could not clear the previous tests stage: "
                 + (removed.stderr.strip() or f"exit {removed.exit_code}")
             )
-        await sandbox.upload_dir(str(verify_dir), str(verify_root))
+        # Whatever the agent or an earlier attempt left there is no result of this one.
+        reset = await sandbox.exec(_verifier_dir_command(ctx.spec.os, remove=False))
+        if not reset.ok:
+            raise TaskError(
+                f"could not prepare {_verifier_dir(ctx.spec.os)}: "
+                + (reset.stderr.strip() or f"exit {reset.exit_code}")
+            )
+        await sandbox.upload_dir(str(tests_dir), str(tests_root))
         trajectory = ctx.run_dir / "trajectory.json"
         if trajectory.is_file():
             await sandbox.write_file(
-                str(layout.path("verify", "trajectory.json")), trajectory.read_bytes()
+                str(layout.path(Stage.TESTS, "trajectory.json")), trajectory.read_bytes()
             )
         await sandbox.write_file(
-            str(layout.path("verify", "instruction.md")), ctx.spec.instruction.encode("utf-8")
+            str(layout.path(Stage.TESTS, "instruction.md")), ctx.spec.instruction.encode("utf-8")
         )
-        parameters = json.dumps(ctx.spec.params, ensure_ascii=False).encode("utf-8")
-        await sandbox.write_file(str(layout.path("verify", "parameters.json")), parameters)
         await self._stage_verification_config(ctx, sandbox)
         # Scoring is the framework's own work, and a verifier may need to reach something
         # the agent could not. The agent has already finished; nothing it does can follow.
@@ -654,7 +770,7 @@ class StandardEnvironment(Environment):
         )
         try:
             exit_code = await self._run_stage(
-                ctx, sandbox, verify_root, Phase.VERIFY, verify_python=python
+                ctx, sandbox, tests_root, Phase.VERIFY, verify_python=python
             )
         finally:
             # Keep Judge evidence even if the task exits, raises or times out.
@@ -666,7 +782,7 @@ class StandardEnvironment(Environment):
                 )
             raise TaskError(f"verify failed with exit code {exit_code}")
         result = await self._read_result(ctx, sandbox)
-        return {"overall": float(result["overall"])}
+        return {"reward": float(result["reward"])}
 
     async def _stage_verification_config(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         """Point the verifier's Judges at this episode's Gateway sessions.
@@ -678,7 +794,7 @@ class StandardEnvironment(Environment):
             ctx.verification_config, ctx.judge_tokens, sandbox.gateway_url
         )
         await sandbox.write_file(
-            str(_layout(ctx.spec.os).path("verify", "config.json")),
+            str(_layout(ctx.spec.os).path(Stage.TESTS, "config.json")),
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
         )
         ctx.verification_command_env = command_env
@@ -689,7 +805,7 @@ class StandardEnvironment(Environment):
         invocations = []
         for name in ("llm-judge.jsonl", "agent-judge.jsonl"):
             try:
-                raw = await sandbox.read_file(str(_layout(ctx.spec.os).path("verify", name)))
+                raw = await sandbox.read_file(str(_layout(ctx.spec.os).path(Stage.TESTS, name)))
             except Exception:
                 continue
             text = redactor(raw.decode("utf-8", errors="replace"))
@@ -708,15 +824,23 @@ class StandardEnvironment(Environment):
         ctx.judge_invocations = tuple(invocations)
 
     async def _read_result(self, ctx: EpisodeContext, sandbox: Sandbox) -> dict[str, object]:
-        path = str(_layout(ctx.spec.os).path("verify", "result.json"))
+        """The verifier's result: ``reward.json``, completed by ``verification.json`` if any."""
+        directory = _verifier_dir(ctx.spec.os)
+        reward, record = str(directory / "reward.json"), str(directory / "verification.json")
         try:
-            raw = await sandbox.read_file(path)
+            written = {item.path for item in await sandbox.list_files(str(directory))}
+            raw = {
+                path: await sandbox.read_file(path) for path in (reward, record) if path in written
+            }
         except Exception as exc:
-            raise VerifierOutputError(f"verify wrote no result to {path}") from exc
-        if any(secret.encode() in raw for secret in ctx.verification_secrets if secret):
-            raise VerifierOutputError("verify result contains a configured credential")
+            raise VerifierOutputError(f"verify result could not be read: {exc}") from exc
+        if reward not in raw:
+            raise VerifierOutputError(f"verify wrote no result to {reward}")
+        for value in raw.values():
+            if any(secret.encode() in value for secret in ctx.verification_secrets if secret):
+                raise VerifierOutputError("verify result contains a configured credential")
         try:
-            result = read_result(raw)
+            result = read_result(raw[reward], raw.get(record))
         except (ValueError, TypeError, UnicodeError) as exc:
             raise VerifierOutputError(f"verify wrote an invalid result: {exc}") from exc
         atomic_write_json(ctx.run_dir / "verification.json", result, sort_keys=False)
@@ -790,19 +914,21 @@ class StandardEnvironment(Environment):
         if sandbox.request.retention == "destroy":
             ctx.sandboxes.mark_sanitized(sandbox, succeeded=True)
             return True
-        # A retained solver may be handed to another agent, so no stage of this Task
-        # stays behind, only the agent's own state.
-        result = await self._clear_stages(ctx, sandbox, ("setup", "verify"))
+        # A retained solver may be handed to another agent, so no stage or result of this
+        # Task stays behind, only the agent's own state.
+        result = await self._clear_stages(ctx, sandbox, (Stage.SETUP, Stage.TESTS))
         if result.ok:
             result = await self._remove_paths(
                 ctx,
                 sandbox,
                 (
-                    str(oracle_dir(ctx.home, ctx.spec.os)),
+                    str(solution_dir(ctx.home, ctx.spec.os)),
                     _sandbox_path(ctx.spec.os, ctx.home, ".codex", "auth.json"),
                     _sandbox_path(ctx.spec.os, ctx.home, ".claude", ".credentials.json"),
                 ),
             )
+        if result.ok:
+            result = await sandbox.exec(_verifier_dir_command(ctx.spec.os, remove=True))
         reason = None if result.ok else result.stderr.strip() or "retention sanitation failed"
         solver = sandbox.request.role is not SandboxRole.VERIFIER
         if reason is None and self.agent_enabled and solver:
@@ -976,37 +1102,29 @@ class StandardEnvironment(Environment):
         verify_python: str | None = None,
     ) -> int:
         layout = _layout(ctx.spec.os)
-        entry = directory / ("run.ps1" if ctx.spec.os is OperatingSystem.WINDOWS else "run.sh")
-        env = {
-            "ALE_STAGE_DIR": str(directory),
-            "ALE_HOME": ctx.home,
-            "ALE_PARAMS_JSON": str(directory / "params.json"),
-            "ALE_VERDICT_PATH": str(layout.path("verify", "result.json")),
-        }
+        stage = Stage.SETUP if phase is Phase.SETUP else Stage.TESTS
+        entry = directory / stage.entry(ctx.spec.os)
+        env = {"ALE_STAGE_DIR": str(directory), "ALE_HOME": ctx.home}
         if phase is Phase.VERIFY:
             env.update(
                 {
                     "ALE_EPISODE_ID": ctx.episode_id,
-                    "ALE_LLM_JUDGE_LOG_PATH": str(layout.path("verify", "llm-judge.jsonl")),
-                    "ALE_VERIFY_CONFIG_PATH": str(layout.path("verify", "config.json")),
-                    "ALE_TASK_INSTRUCTION_PATH": str(layout.path("verify", "instruction.md")),
-                    "ALE_TASK_PARAMETERS_PATH": str(layout.path("verify", "parameters.json")),
-                    "ALE_AGENT_JUDGE_LOG_PATH": str(layout.path("verify", "agent-judge.jsonl")),
+                    "ALE_LLM_JUDGE_LOG_PATH": str(layout.path(Stage.TESTS, "llm-judge.jsonl")),
+                    "ALE_VERIFY_CONFIG_PATH": str(layout.path(Stage.TESTS, "config.json")),
+                    "ALE_TASK_INSTRUCTION_PATH": str(layout.path(Stage.TESTS, "instruction.md")),
+                    "ALE_AGENT_JUDGE_LOG_PATH": str(layout.path(Stage.TESTS, "agent-judge.jsonl")),
                     **ctx.verification_command_env,
                 }
             )
             if verify_python is not None:
                 env["ALE_VERIFY_PYTHON"] = verify_python
             if (ctx.run_dir / "trajectory.json").is_file():
-                env["ALE_TRAJECTORY_PATH"] = str(layout.path("verify", "trajectory.json"))
+                env["ALE_TRAJECTORY_PATH"] = str(layout.path(Stage.TESTS, "trajectory.json"))
             # Judges retry provider failures until this budget runs out, so a verdict is
             # recorded as failed before the phase deadline kills the verifier.
             if ctx.phase_deadline is not None:
                 remaining = max(0, int(ctx.phase_deadline - time.monotonic()))
                 env["ALE_VERIFY_DEADLINE_SECONDS"] = str(remaining)
-        await sandbox.write_file(
-            str(directory / "params.json"), json.dumps(ctx.spec.params).encode("utf-8")
-        )
         assert ctx.execution is not None
         assert ctx.blobs is not None
         execution_id = f"{phase.value}-{len(ctx.phases) + 1}"
@@ -1114,17 +1232,12 @@ class StandardEnvironment(Environment):
 
     async def _upload_oracle(self, ctx: EpisodeContext, task: Task, sandbox: Sandbox) -> None:
         folder = getattr(task, "folder", None)
-        source = folder.stage_dir("oracle") if folder else None
+        source = folder.stage_dir(Stage.SOLUTION) if folder else None
         if source is None:
-            raise TaskError("validation requires an oracle stage, and this task has none")
+            raise TaskError("validation requires a solution stage, and this task has none")
         # As the agent, since the agent is the account that will run it.
-        root = oracle_dir(ctx.home, ctx.spec.os)
+        root = solution_dir(ctx.home, ctx.spec.os)
         await sandbox.upload_dir(str(source), str(root), identity=Identity.AGENT)
-        await sandbox.write_file(
-            str(root / "params.json"),
-            json.dumps(task.spec.params).encode("utf-8"),
-            identity=Identity.AGENT,
-        )
 
     def _verify_timeout(self, ctx: EpisodeContext) -> float | None:
         if self.timeouts.verify == "unlimited":
@@ -1157,7 +1270,7 @@ class StandardEnvironment(Environment):
             PhaseStarted(
                 episode_id=ctx.episode_id,
                 phase=phase.value,
-                component=self.name,
+                component=self.component,
             ),
             durable=True,
         )
@@ -1171,7 +1284,7 @@ class StandardEnvironment(Environment):
                 ctx.execution,
                 episode_id=ctx.episode_id,
                 phase=phase.value,
-                component=self.name,
+                component=self.component,
                 secrets=(ctx.session.token,),
             ):
                 if timeout_sec is None:
@@ -1208,7 +1321,7 @@ class StandardEnvironment(Environment):
                 PhaseFinished(
                     episode_id=ctx.episode_id,
                     phase=phase.value,
-                    component=self.name,
+                    component=self.component,
                     level="info" if outcome == "succeeded" else "error",
                     outcome=outcome,  # type: ignore[arg-type]
                     duration_ms=elapsed,
@@ -1220,7 +1333,7 @@ class StandardEnvironment(Environment):
             ctx.phase_deadline = previous_deadline
 
 
-class RetainedVerificationEnvironment(StandardEnvironment):
+class ReverificationProtocol(EpisodeProtocol):
     """Run current verification against a retained episode without rerunning its agent."""
 
     def __init__(

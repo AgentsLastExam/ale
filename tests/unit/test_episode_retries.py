@@ -249,7 +249,7 @@ async def test_runtime_cleans_sandboxes_for_late_failure_and_cancellation(
     )
     provider = SimpleNamespace(name="docker", create=AsyncMock(return_value=sandbox))
 
-    async def environment_run(_task, ctx):  # type: ignore[no-untyped-def]
+    async def protocol_run(_task, ctx):  # type: ignore[no-untyped-def]
         acquired = await ctx.sandboxes.acquire(
             SandboxRequest(
                 episode_id=ctx.episode_id,
@@ -271,7 +271,7 @@ async def test_runtime_cleans_sandboxes_for_late_failure_and_cancellation(
     monkeypatch.setattr(runtime, "_write_lock", fail_lock)
     episode = run_episode(
         task,
-        SimpleNamespace(run=environment_run),  # type: ignore[arg-type]
+        SimpleNamespace(run=protocol_run),  # type: ignore[arg-type]
         SimpleNamespace(get=lambda _: provider),  # type: ignore[arg-type]
         run_dir=tmp_path / "runs",
         episode_id="episode",
@@ -330,14 +330,8 @@ async def test_reverification_retries_only_with_fresh_verifiers(
     task_cli = import_module("ale.run.cli.tasks")
     task_path = scaffold_task(tmp_path / "task")
     if mode == "separate":
-        manifest = task_path / "task.yaml"
-        manifest.write_text(
-            manifest.read_text()
-            + (
-                "verify:\n  environment_mode: separate\n"
-                "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
-            )
-        )
+        config = task_path / "task.toml"
+        config.write_text(config.read_text() + 'environment_mode = "separate"\n')
     task = load_tasks(task_path)[0]
     source = write_result(tmp_path / "source", Status.COMPLETED, 1)
     original = (source.run_dir / "result.json").read_bytes()
@@ -347,7 +341,6 @@ async def test_reverification_retries_only_with_fresh_verifiers(
             "task": lock.task.model_copy(
                 update={
                     "name": task.spec.name,
-                    "variant": task.spec.variant,
                     "non_verifier_digest": task.non_verifier_digest,
                 }
             )
@@ -366,10 +359,10 @@ async def test_reverification_retries_only_with_fresh_verifiers(
                 image_source_identity=lock.image.image_source_identity,
             )
 
-    async def execute(_task, environment, _providers, **kwargs):  # type: ignore[no-untyped-def]
+    async def execute(_task, protocol, _providers, **kwargs):  # type: ignore[no-untyped-def]
         nonlocal calls
         calls += 1
-        assert environment.source_run_dir == source.run_dir
+        assert protocol.source_run_dir == source.run_dir
         assert kwargs["destroy_failed_sandboxes"]
         return write_result(
             kwargs["run_dir"] / kwargs["episode_id"],
@@ -424,8 +417,8 @@ async def test_validation_projects_only_final_episode_attempts(
                 image_source_identity=lock.image.image_source_identity,
             )
 
-    async def execute(_task, environment, _providers, **kwargs):  # type: ignore[no-untyped-def]
-        name = "oracle" if environment.agent_enabled else "untouched"
+    async def execute(_task, protocol, _providers, **kwargs):  # type: ignore[no-untyped-def]
+        name = "oracle" if protocol.agent_enabled else "untouched"
         counts[name] += 1
         failed = name == "oracle" and counts[name] == 1
         result = write_result(
@@ -434,7 +427,7 @@ async def test_validation_projects_only_final_episode_attempts(
             counts[name],
         )
         if not failed:
-            rewards = {"overall": 1.0 if name == "oracle" else 0.0}
+            rewards = {"reward": 1.0 if name == "oracle" else 0.0}
             result.record = result.record.model_copy(update={"rewards": rewards})
             result.verdict = Verdict.completed(rewards)
             atomic_write_json(result.run_dir / "result.json", result.record)
@@ -476,7 +469,7 @@ async def test_run_retries_each_episode_independently_and_resumes_only_final_suc
                 image_source_identity=digest,
             )
 
-    async def execute(_task, _environment, _providers, **kwargs):  # type: ignore[no-untyped-def]
+    async def execute(_task, _protocol, _providers, **kwargs):  # type: ignore[no-untyped-def]
         episode_id = kwargs["episode_id"]
         assert kwargs["destroy_failed_sandboxes"]
         calls[episode_id] += 1
@@ -521,7 +514,7 @@ async def test_resume_with_new_scheduling_runs_only_missing_episodes(
                 image_source_identity=digest,
             )
 
-    async def execute(_task, _environment, _providers, **kwargs):  # type: ignore[no-untyped-def]
+    async def execute(_task, _protocol, _providers, **kwargs):  # type: ignore[no-untyped-def]
         executed.append(kwargs["episode_id"])
         return write_result(kwargs["run_dir"] / kwargs["episode_id"], Status.COMPLETED, 1)
 

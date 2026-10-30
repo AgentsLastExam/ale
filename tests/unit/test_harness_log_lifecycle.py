@@ -12,13 +12,13 @@ import pytest
 from ale.core.config import LoggingPolicy
 from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, TrajectoryParseContext
 from ale.core.trajectory import AtifAgent, AtifStep, AtifTrajectory
-from ale.run.environments import standard
-from ale.run.environments.standard import RetainedVerificationEnvironment, StandardEnvironment
 from ale.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
+from ale.run.protocol import episode_protocol
+from ale.run.protocol.episode_protocol import EpisodeProtocol, ReverificationProtocol
 from ale.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
@@ -32,7 +32,7 @@ class EvidenceHarness(AutonomousHarness):
         return "1"
 
     async def launch(self, instruction, sandbox, session, *, timeout_sec):  # type: ignore[no-untyped-def]
-        raise AssertionError("the environment phases under test do not launch")
+        raise AssertionError("the protocol phases under test do not launch")
 
     def parse_trajectory(self, context: TrajectoryParseContext) -> AtifTrajectory:
         content = (context.logs_dir / "evidence.log").read_text()
@@ -81,7 +81,7 @@ def test_complete_conversion_drops_native_logs_under_minimal_retention(tmp_path)
     ctx = _context(tmp_path)
     ctx.agent_run = AgentRun(exit_code=0, final_message="done")
     ctx.logging_policy = LoggingPolicy(native_logs="minimal")
-    StandardEnvironment(EvidenceHarness())._parse_harness_trajectory(ctx)
+    EpisodeProtocol(EvidenceHarness())._parse_harness_trajectory(ctx)
     assert ctx.trajectory_written
     assert "incomplete" not in _read(ctx).get("extra", {}).get("ale", {})
     assert not (tmp_path / "logs/evidence-test").exists()
@@ -90,7 +90,7 @@ def test_complete_conversion_drops_native_logs_under_minimal_retention(tmp_path)
 def test_parser_failure_after_an_interrupted_agent_is_still_conversion_failed(tmp_path):
     ctx = _context(tmp_path)
     (tmp_path / "logs/evidence-test/evidence.log").write_text("broken")
-    trajectory = StandardEnvironment(EvidenceHarness())._convert_harness_trajectory(ctx)
+    trajectory = EpisodeProtocol(EvidenceHarness())._convert_harness_trajectory(ctx)
     assert trajectory.extra["ale"]["incomplete_reason"] == "conversion_failed"
 
 
@@ -107,7 +107,7 @@ async def test_final_collection_precedes_conversion(tmp_path):
             assert not (tmp_path / "trajectory.json").exists()
 
     sandbox = SimpleNamespace(gateway_url=None, sandbox_id="sandbox")
-    await StandardEnvironment(EvidenceHarness())._capture_solver_evidence(
+    await EpisodeProtocol(EvidenceHarness())._capture_solver_evidence(
         ctx, sandbox, logs=Collector()
     )
     assert ctx.solver_evidence_captured
@@ -118,8 +118,8 @@ async def test_final_collection_precedes_conversion(tmp_path):
 async def test_polling_only_copies_logs_and_retries_after_a_timeout(tmp_path, monkeypatch):
     calls = 0
     retried = asyncio.Event()
-    monkeypatch.setattr(standard, "SYNC_INTERVAL_SEC", 0.001)
-    monkeypatch.setattr(standard, "SYNC_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(episode_protocol, "SYNC_INTERVAL_SEC", 0.001)
+    monkeypatch.setattr(episode_protocol, "SYNC_TIMEOUT_SEC", 0.01)
 
     class NeverConverted(EvidenceHarness):
         def parse_trajectory(self, context):
@@ -133,7 +133,7 @@ async def test_polling_only_copies_logs_and_retries_after_a_timeout(tmp_path, mo
                 retried.set()
             await asyncio.Event().wait()
 
-    worker = asyncio.create_task(StandardEnvironment(NeverConverted())._poll_logs(Collector()))
+    worker = asyncio.create_task(EpisodeProtocol(NeverConverted())._poll_logs(Collector()))
     try:
         await asyncio.wait_for(retried.wait(), timeout=1)
     finally:
@@ -199,7 +199,7 @@ def test_minimal_retention_keeps_native_sessions_outside_parser_coverage(
     ctx.agent_run = AgentRun(exit_code=0, final_message="done")
     ctx.logging_policy = LoggingPolicy(native_logs="minimal")
 
-    StandardEnvironment(harness)._parse_harness_trajectory(ctx)
+    EpisodeProtocol(harness)._parse_harness_trajectory(ctx)
 
     trajectory = _read(ctx)
     assert ctx.trajectory_written
@@ -218,8 +218,6 @@ def test_minimal_retention_keeps_native_sessions_outside_parser_coverage(
 async def test_retained_reverification_captures_evidence_without_a_harness(tmp_path):
     ctx = _context(tmp_path)
     ctx.agent_started = False
-    environment = RetainedVerificationEnvironment(
-        SimpleNamespace(), tmp_path, sandbox_identity=None
-    )
-    await environment._capture_solver_evidence(ctx, SimpleNamespace())
+    protocol = ReverificationProtocol(SimpleNamespace(), tmp_path, sandbox_identity=None)
+    await protocol._capture_solver_evidence(ctx, SimpleNamespace())
     assert ctx.solver_evidence_captured

@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
@@ -24,15 +24,15 @@ async def test_relocated_task_local_verifier_does_not_enter_solver_image(
 ) -> None:
     source = scaffold_task(tmp_path / "source")
     secret = "verify-only-marker"
-    (source / "verify" / "helper.py").write_text(f"EXPECTED = {secret!r}\n")
-    (source / "verify" / "verify.py").write_text(
+    (source / "tests" / "helper.py").write_text(f"EXPECTED = {secret!r}\n")
+    (source / "tests" / "verify.py").write_text(
         "from pathlib import Path\n"
         "from ale_verify import write\n"
         "from helper import EXPECTED\n"
         "v = {}\n"
         "v['withheld'] = float(EXPECTED == 'verify-only-marker')\n"
-        "v['not_baked'] = float(not Path('/verify/helper.py').exists())\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['not_baked'] = float(not Path('/tests/helper.py').exists())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     relocated = tmp_path / "elsewhere" / "task"
@@ -40,12 +40,12 @@ async def test_relocated_task_local_verifier_does_not_enter_solver_image(
     shutil.copytree(source, relocated)
     result = await run_episode(
         load_tasks(relocated)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -56,21 +56,21 @@ async def test_external_reference_is_published_only_for_live_verification(
     repository.mkdir()
     subprocess.run(["git", "init", "-q", str(repository)], check=True)
     task_path = scaffold_task(repository / "tasks/reference")
-    reference = task_path / "verify/assets/expected.txt"
+    reference = task_path / "tests/assets/expected.txt"
     reference.parent.mkdir(parents=True)
     reference.write_text("expected")
-    (task_path / "verify" / "verify.py").write_text(
+    (task_path / "tests" / "verify.py").write_text(
         "from ale_verify import checks, write\n"
         "v = {}\n"
         "v['reference'] = checks.text_equals('assets/expected.txt', 'expected')['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await run_episode(
         load_tasks(task_path)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}

@@ -12,11 +12,11 @@ from ale.core.sandbox import Sandbox
 from ale.core.taskspec import ImageKind, OperatingSystem
 from ale.core.verdict import Status
 from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
 from ale.run.harnesses.base import STDOUT_PATH
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.qemu import QemuProvider
 from ale.run.secrets import provider_credentials
 from ale.run.tasksets.manifest import load_task_folder
@@ -65,7 +65,7 @@ async def test_windows_native_harness_completes_a_file_task(
     api_key, upstream = provider_credentials(config.gateway.provider)
     task_root = _write_task(tmp_path / "tasks", OperatingSystem.WINDOWS)
     (task_root / "instruction.md").write_text(
-        "Read C:/Users/user/input/seed.txt, then write '${greeting} <word> verified' to "
+        "Read C:/Users/user/input/seed.txt, then write 'hello <word> verified' to "
         "C:/Users/user/output/result.txt, replacing <word> with the word you read. "
         "Do not include quotes or a trailing newline. Use your file or shell tools.\n"
     )
@@ -76,7 +76,7 @@ async def test_windows_native_harness_completes_a_file_task(
     try:
         result = await run_episode(
             load_task_folder(task_root),
-            StandardEnvironment(harness),
+            EpisodeProtocol(harness),
             provider_registry(
                 QemuProvider(image=image, overlay_dir=tmp_path / "qemu"), kind=ImageKind.VM
             ),
@@ -91,7 +91,7 @@ async def test_windows_native_harness_completes_a_file_task(
         await gateway.stop()
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
     assert any(step.get("tool_calls") for step in trajectory["steps"])
     assert (result.run_dir / "logs" / name / STDOUT_PATH).stat().st_size > 0

@@ -198,7 +198,7 @@ async def test_log_mirror_follows_appends_and_rewrites_through_a_real_guest(
     tmp_path: Path,
 ) -> None:
     from ale.core.taskspec import OperatingSystem
-    from ale.run.environments.log_mirror import LogMirror
+    from ale.run.protocol.log_mirror import LogMirror
 
     transport = StdioTransport([sys.executable, guestd.__file__, "--stdio"])
     await transport.start()

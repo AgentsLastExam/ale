@@ -3,38 +3,36 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Iterator
+import tomllib
 from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import ValidationError
 
-from ale.core.environment import EpisodeContext
+from ale.core.episode import EpisodeContext
 from ale.core.errors import TaskDefinitionError
-from ale.core.task import Task, TaskSourceContext
+from ale.core.task import Stage, Task, TaskSourceContext
 from ale.core.taskspec import (
     ImageKind,
+    ImageSpec,
     OperatingSystem,
-    PhaseTimeouts,
-    Resources,
-    TaskManifestV1,
+    SkillSource,
+    TaskConfig,
+    TaskMcpSource,
     TaskSpec,
-    VariantOverride,
+    ToolProvision,
     VerificationMode,
+    VerifierResources,
+    VerifySpec,
 )
-from ale.core.template import render_instruction
 from ale.core.verdict import Rewards
+from ale.run.assets import ASSET_ROOTS
 from ale.run.content import tree_digest
 
 __all__ = [
     "INSTRUCTION",
-    "ORACLE_DIR",
-    "SETUP_DIR",
-    "STAGE_ENTRY",
-    "TASK_MANIFEST",
-    "VERIFY_DIR",
+    "TASK_CONFIG",
     "ManifestTask",
     "TaskFolder",
     "discover_task_folders",
@@ -42,32 +40,38 @@ __all__ = [
     "load_tasks",
 ]
 
-TASK_MANIFEST = "task.yaml"
+TASK_CONFIG = "task.toml"
 INSTRUCTION = "instruction.md"
-STAGE_ENTRY = "run.sh"
-VERIFY_DIR = "verify"
-ORACLE_DIR = "oracle"
+ENVIRONMENT_DIR = "environment"
+#: Below ``environment/``: never part of an image build context.
 SETUP_DIR = "setup"
-IMAGE_DIR = "image"
-_SOURCE_EXCLUDES = (
-    "image/assets",
-    "setup/assets",
-    "verify/assets",
-    "oracle/assets",
-    ".ale-cache",
-)
+WINDOWS_BUILD = "build.ps1"
+_SOURCE_EXCLUDES = (*ASSET_ROOTS, ".ale-cache")
 
 
-def _read_yaml(path: Path) -> dict[str, Any]:
+def _read_toml(path: Path) -> dict[str, Any]:
     try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        with path.open("rb") as handle:
+            return tomllib.load(handle)
     except FileNotFoundError as exc:
         raise TaskDefinitionError(f"missing {path.name}: {path}") from exc
-    except yaml.YAMLError as exc:
-        raise TaskDefinitionError(f"invalid YAML in {path}: {exc}") from exc
-    if not isinstance(loaded, dict):
-        raise TaskDefinitionError(f"{path} must contain a mapping")
-    return loaded
+    except tomllib.TOMLDecodeError as exc:
+        raise TaskDefinitionError(f"invalid TOML in {path}: {exc}") from exc
+
+
+def _describe(error: ValidationError) -> str:
+    """One readable line per problem, each naming the ``task.toml`` key it is about."""
+    problems = []
+    for item in error.errors():
+        key = ".".join(str(part) for part in item["loc"])
+        message = str(item["msg"]).removeprefix("Value error, ")
+        if item["type"] == "extra_forbidden":
+            problems.append(f"{key} is not a task.toml key")
+        elif item["type"] == "missing":
+            problems.append(f"{key} is required")
+        else:
+            problems.append(f"{key}: {message}" if key else message)
+    return "; ".join(problems)
 
 
 class TaskFolder:
@@ -75,36 +79,43 @@ class TaskFolder:
         self.root = root.resolve()
 
     @property
-    def image_dir(self) -> Path:
-        return self.root / IMAGE_DIR
+    def environment_dir(self) -> Path:
+        return self.root / ENVIRONMENT_DIR
 
     @property
-    def image_dockerfile(self) -> Path | None:
-        path = self.image_dir / "Dockerfile"
-        return path if path.is_file() else None
+    def dockerfile(self) -> Path | None:
+        return _file(self.environment_dir / "Dockerfile")
 
     @property
-    def image_script(self) -> Path | None:
-        path = self.image_dir / "run.ps1"
-        return path if path.is_file() else None
+    def build_script(self) -> Path | None:
+        return _file(self.environment_dir / WINDOWS_BUILD)
 
     @property
     def verifier_dockerfile(self) -> Path | None:
-        path = self.root / VERIFY_DIR / "Dockerfile"
-        return path if path.is_file() else None
+        return _file(self.root / Stage.TESTS / "Dockerfile")
 
-    def stage_dir(self, name: str) -> Path | None:
-        path = self.root / name
+    def stage_dir(self, stage: Stage) -> Path | None:
+        path = self.environment_dir / SETUP_DIR if stage is Stage.SETUP else self.root / stage
         return path if path.is_dir() else None
 
     def stage_entry(
         self,
-        name: str,
+        stage: Stage,
         operating_system: OperatingSystem = OperatingSystem.LINUX,
     ) -> Path | None:
-        directory = self.stage_dir(name)
-        entry = directory / _stage_entry(operating_system) if directory else None
-        return entry if entry and entry.is_file() else None
+        directory = self.stage_dir(stage)
+        return _file(directory / stage.entry(operating_system)) if directory else None
+
+    def image_source_digest(self, image: ImageSpec) -> str | None:
+        """What a solver image is built from: its build context, without assets."""
+        if image.ref is not None:
+            return None
+        return tree_digest(self.environment_dir, exclude=("assets", SETUP_DIR))
+
+    def verifier_image_source_digest(self, image: ImageSpec | None) -> str | None:
+        if image is None or image.ref is not None:
+            return None
+        return tree_digest(self.root / Stage.TESTS, exclude=("assets",))
 
     @cached_property
     def content_digest(self) -> str:
@@ -117,19 +128,7 @@ class TaskFolder:
         Asset bytes are left to their own commit identity rather than hashed on every load;
         reverification compares that commit separately.
         """
-        return tree_digest(self.root, exclude=(VERIFY_DIR, *_SOURCE_EXCLUDES))
-
-    @cached_property
-    def image_source_digest(self) -> str | None:
-        if self.image_dockerfile is None and self.image_script is None:
-            return None
-        return tree_digest(self.image_dir, exclude=("assets",))
-
-    @cached_property
-    def verifier_image_source_digest(self) -> str | None:
-        if self.verifier_dockerfile is None:
-            return None
-        return tree_digest(self.root / VERIFY_DIR, exclude=("assets",))
+        return tree_digest(self.root, exclude=(Stage.TESTS, *_SOURCE_EXCLUDES))
 
     @cached_property
     def source(self) -> TaskSourceContext:
@@ -158,6 +157,10 @@ class TaskFolder:
             repository_name=_repository_name(repository_root),
             task_relative_path=relative,
         )
+
+
+def _file(path: Path) -> Path | None:
+    return path if path.is_file() else None
 
 
 def _repository_name(root: Path) -> str:
@@ -197,14 +200,14 @@ class ManifestTask(Task):
             source=folder.source,
             task_digest=folder.content_digest,
             non_verifier_digest=folder.non_verifier_digest,
-            image_source_digest=folder.image_source_digest,
-            verifier_image_source_digest=folder.verifier_image_source_digest,
+            image_source_digest=folder.image_source_digest(spec.image),
+            verifier_image_source_digest=folder.verifier_image_source_digest(spec.verify.image),
         )
 
     async def score(self, ctx: EpisodeContext) -> Rewards:
         if ctx.verified_rewards is None:
             raise TaskDefinitionError(
-                "verification produced no rewards; verify/run.sh must write them"
+                "verification produced no rewards; tests must write /logs/verifier/reward.json"
             )
         return {str(key): float(value) for key, value in ctx.verified_rewards.items()}
 
@@ -213,15 +216,15 @@ def discover_task_folders(path: Path) -> tuple[TaskFolder, ...]:
     source = path.expanduser().resolve()
     if not source.exists():
         raise TaskDefinitionError(f"Task path does not exist: {source}")
-    if (source / TASK_MANIFEST).is_file():
+    if (source / TASK_CONFIG).is_file():
         return (TaskFolder(source),)
-    manifests = sorted(
-        source.rglob(TASK_MANIFEST),
+    configs = sorted(
+        source.rglob(TASK_CONFIG),
         key=lambda item: item.relative_to(source).as_posix(),
     )
-    if not manifests:
-        raise TaskDefinitionError(f"no {TASK_MANIFEST} found below {source}")
-    return tuple(TaskFolder(manifest.parent) for manifest in manifests)
+    if not configs:
+        raise TaskDefinitionError(f"no {TASK_CONFIG} found below {source}")
+    return tuple(TaskFolder(config.parent) for config in configs)
 
 
 def load_tasks(path: Path) -> list[ManifestTask]:
@@ -238,139 +241,147 @@ def load_tasks(path: Path) -> list[ManifestTask]:
                     f"{previous_root} and {source.repository_root}"
                 )
             repositories[source.repository_name] = source.repository_root
-        for task in _load_folder(folder):
-            previous = seen.get(str(task.spec.name))
-            if previous is not None and previous != folder.root:
-                raise TaskDefinitionError(
-                    f"duplicate Task name {task.spec.name!r}: {previous} and {folder.root}"
-                )
-            seen[str(task.spec.name)] = folder.root
-            tasks.append(task)
+        task = _load_folder(folder)
+        previous = seen.get(str(task.spec.name))
+        if previous is not None:
+            raise TaskDefinitionError(
+                f"duplicate Task name {task.spec.name!r}: {previous} and {folder.root}"
+            )
+        seen[str(task.spec.name)] = folder.root
+        tasks.append(task)
     return tasks
 
 
-def load_task_folder(path: Path, *, variant: str = "base") -> ManifestTask:
-    tasks = [task for task in load_tasks(path) if task.spec.variant == variant]
-    if not tasks:
-        raise TaskDefinitionError(f"{path} has no variant {variant!r}")
+def load_task_folder(path: Path) -> ManifestTask:
+    tasks = load_tasks(path)
     if len(tasks) > 1:
         raise TaskDefinitionError(f"{path} selects more than one Task")
     return tasks[0]
 
 
-def _load_folder(folder: TaskFolder) -> Iterator[ManifestTask]:
+def _load_folder(folder: TaskFolder) -> ManifestTask:
+    path = folder.root / TASK_CONFIG
     try:
-        manifest = TaskManifestV1.model_validate(_read_yaml(folder.root / TASK_MANIFEST))
+        config = TaskConfig.model_validate(_read_toml(path))
     except ValidationError as exc:
+        raise TaskDefinitionError(f"invalid {path}: {_describe(exc)}") from exc
+    _require_files(folder, config.environment.os)
+    try:
+        spec = _spec(config, folder)
+    except ValidationError as exc:
+        raise TaskDefinitionError(f"invalid Task {folder.root}: {_describe(exc)}") from exc
+    except TaskDefinitionError as exc:
+        raise TaskDefinitionError(f"invalid Task {folder.root}: {exc}") from exc
+    return ManifestTask(spec, folder)
+
+
+def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
+    """The runtime specification: ``task.toml`` with the folder's build definitions."""
+    return TaskSpec(
+        name=config.task.name,
+        os=config.environment.os,
+        image=_solver_image(config, folder),
+        instruction=(folder.root / INSTRUCTION).read_text(encoding="utf-8"),
+        resources={
+            "cpus": config.environment.cpus,
+            "memory_mb": config.environment.memory_mb,
+            "storage_mb": config.environment.storage_mb,
+            "gpus": config.environment.gpus,
+            "sudo": config.ale.sudo,
+        },
+        network=config.agent.network,
+        timeouts={"agent": config.agent.timeout_sec, "verify": config.verifier.timeout_sec},
+        artifacts=config.artifacts,
+        tools=ToolProvision(
+            skills=tuple(SkillSource(path=path) for path in config.ale.skills),
+            mcp_servers=tuple(TaskMcpSource(path=path) for path in config.ale.mcp_servers),
+        ),
+        verify=_verification(config, folder),
+        metadata=config.metadata,
+    )
+
+
+def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
+    """The solver image: one named directly wins over a build definition, as in Harbor.
+
+    ``[ale].sandbox`` and the OS decide what ``environment/`` builds: a Dockerfile for a
+    container or a Linux VM, ``build.ps1`` for Windows.
+    """
+    ale, user = config.ale, config.agent.user
+    windows = config.environment.os is OperatingSystem.WINDOWS
+    if not windows and folder.build_script is not None:
+        raise TaskDefinitionError("environment/build.ps1 requires os 'windows'")
+    if ale.sandbox is ImageKind.CONTAINER:
+        ref = config.environment.docker_image
+        if ref is None and folder.dockerfile is None:
+            raise TaskDefinitionError(
+                "a container Task requires environment/Dockerfile or [environment].docker_image"
+            )
+        return ImageSpec(kind=ImageKind.CONTAINER, ref=ref, user=user)
+
+    if windows:
+        if folder.dockerfile is not None:
+            raise TaskDefinitionError(
+                "a Windows Task builds environment/build.ps1, not a Dockerfile"
+            )
+        if folder.build_script is not None and ale.vm_base is None:
+            raise TaskDefinitionError("environment/build.ps1 requires [ale].vm_base")
+        if ale.vm_base is not None and folder.build_script is None:
+            raise TaskDefinitionError("[ale].vm_base requires environment/build.ps1")
+        if ale.vm_base is None and ale.vm_image is None:
+            raise TaskDefinitionError(
+                "a Windows Task requires environment/build.ps1 or [ale].vm_image"
+            )
+        return ImageSpec(kind=ImageKind.VM, ref=ale.vm_image, base_ref=ale.vm_base, user=user)
+
+    if ale.vm_image is None and folder.dockerfile is None:
         raise TaskDefinitionError(
-            f"invalid task manifest {folder.root / TASK_MANIFEST}: {exc}"
-        ) from exc
-    _require_folder(folder, manifest.os)
-    if manifest.os is OperatingSystem.WINDOWS:
-        if manifest.image.kind is not ImageKind.VM:
-            raise TaskDefinitionError("Windows Tasks require image.kind: vm")
-        if folder.image_dockerfile is not None:
-            raise TaskDefinitionError("Windows Tasks use image/run.ps1, not image/Dockerfile")
-        if folder.image_script is not None and manifest.image.base_ref is None:
-            raise TaskDefinitionError(
-                "image/run.ps1 requires image.base_ref; image.ref is for direct use"
-            )
-        if folder.verifier_dockerfile is not None:
-            raise TaskDefinitionError(
-                "Windows verification must reuse the solver image or use a ref"
-            )
-    elif folder.image_script is not None and folder.image_dockerfile is None:
-        raise TaskDefinitionError("image/run.ps1 requires os: windows")
-    if manifest.image.base_ref is not None and (
-        manifest.os is not OperatingSystem.WINDOWS or folder.image_script is None
-    ):
-        raise TaskDefinitionError("image.base_ref requires os: windows and image/run.ps1")
-    if (
-        folder.image_dockerfile is None
-        and folder.image_script is None
-        and manifest.image.ref is None
-    ):
-        raise TaskDefinitionError("solver requires image/Dockerfile or image.ref")
-    if (
-        folder.image_dockerfile is None
-        and folder.image_script is None
-        and _has_files(folder.image_dir / "assets")
-    ):
-        raise TaskDefinitionError("image/assets is unused when solver uses image.ref")
-
-    verifier_dockerfile = folder.verifier_dockerfile
-    if verifier_dockerfile is not None:
-        if manifest.verify.environment_mode is VerificationMode.SHARED:
-            raise TaskDefinitionError("verify/Dockerfile requires separate verification")
-        if manifest.verify.image is None:
-            raise TaskDefinitionError("verify/Dockerfile requires verify.image.kind")
-    elif manifest.verify.image is not None and manifest.verify.image.ref is None:
-        raise TaskDefinitionError("external verifier requires verify.image.ref")
-    template = (folder.root / INSTRUCTION).read_text(encoding="utf-8")
-    yield ManifestTask(_effective_spec(manifest, template, "base", None), folder)
-    for variant in manifest.variants:
-        yield ManifestTask(_effective_spec(manifest, template, str(variant.name), variant), folder)
+            "a Linux VM Task requires environment/Dockerfile or [ale].vm_image"
+        )
+    return ImageSpec(kind=ImageKind.VM, ref=ale.vm_image, user=user)
 
 
-def _stage_entry(operating_system: OperatingSystem) -> str:
-    return "run.ps1" if operating_system is OperatingSystem.WINDOWS else STAGE_ENTRY
+def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
+    """Harbor's verifier semantics; ``[ale.verifier]`` adds a VM verifier image."""
+    verifier, ale_verifier = config.verifier, config.ale.verifier
+    dockerfile = folder.verifier_dockerfile
+    if verifier.mode is VerificationMode.SHARED:
+        if dockerfile is not None:
+            raise TaskDefinitionError("tests/Dockerfile requires separate verification")
+        return VerifySpec()
+    if dockerfile is not None and config.environment.os is OperatingSystem.WINDOWS:
+        raise TaskDefinitionError("a Windows verifier reuses the solver image or names a vm_image")
+
+    environment = verifier.environment
+    user = config.agent.user
+    image: ImageSpec | None = None
+    if environment is not None and environment.docker_image is not None:
+        image = ImageSpec(kind=ImageKind.CONTAINER, ref=environment.docker_image, user=user)
+    elif ale_verifier is not None and ale_verifier.vm_image is not None:
+        image = ImageSpec(kind=ImageKind.VM, ref=ale_verifier.vm_image, user=user)
+    elif dockerfile is not None:
+        kind = ale_verifier.sandbox if ale_verifier is not None else ImageKind.CONTAINER
+        image = ImageSpec(kind=kind, user=user)
+    elif ale_verifier is not None:
+        raise TaskDefinitionError("[ale.verifier] requires vm_image or tests/Dockerfile")
+
+    # Without a verifier environment, a separate verifier gets the solver's resources.
+    sized = environment or config.environment
+    resources = VerifierResources(
+        cpus=sized.cpus, memory_mb=sized.memory_mb, storage_mb=sized.storage_mb, gpus=sized.gpus
+    )
+    return VerifySpec(environment_mode=VerificationMode.SEPARATE, image=image, resources=resources)
 
 
-def _require_folder(folder: TaskFolder, operating_system: OperatingSystem) -> None:
-    entry = _stage_entry(operating_system)
+def _require_files(folder: TaskFolder, operating_system: OperatingSystem) -> None:
     required = (
-        folder.root / TASK_MANIFEST,
+        folder.root / TASK_CONFIG,
         folder.root / INSTRUCTION,
-        folder.root / VERIFY_DIR / entry,
-        folder.root / ORACLE_DIR / entry,
+        folder.root / Stage.TESTS / Stage.TESTS.entry(operating_system),
+        folder.root / Stage.SOLUTION / Stage.SOLUTION.entry(operating_system),
     )
     missing = [path.relative_to(folder.root).as_posix() for path in required if not path.is_file()]
     if missing:
         raise TaskDefinitionError(
             f"{folder.root} is missing required Task file(s): {', '.join(missing)}"
         )
-
-
-def _effective_spec(
-    manifest: TaskManifestV1,
-    template: str,
-    variant_name: str,
-    variant: VariantOverride | None,
-) -> TaskSpec:
-    params = manifest.params | (variant.params if variant else {})
-    resources = _overlay(manifest.resources, variant.resources if variant else None)
-    timeouts = _overlay(manifest.timeouts, variant.timeouts if variant else None)
-    instruction = render_instruction(
-        template,
-        params,
-        where=f"{manifest.name}/{INSTRUCTION}",
-    )
-    return TaskSpec(
-        name=manifest.name,
-        os=manifest.os,
-        variant=variant_name,
-        environment=manifest.environment,
-        image=manifest.image,
-        instruction=instruction,
-        resources=Resources.model_validate(resources),
-        network=manifest.network,
-        timeouts=PhaseTimeouts.model_validate(timeouts),
-        artifacts=manifest.artifacts,
-        tools=manifest.tools,
-        params=params,
-        verify=manifest.verify,
-        metadata=manifest.metadata,
-        extras=manifest.extras,
-    )
-
-
-def _overlay(base: object, override: object | None) -> dict[str, Any]:
-    values = base.model_dump(mode="python")  # type: ignore[attr-defined]
-    if override is None:
-        return values
-    updates = override.model_dump(mode="python", exclude_none=True)  # type: ignore[attr-defined]
-    return values | updates
-
-
-def _has_files(path: Path) -> bool:
-    return path.is_dir() and any(item.is_file() for item in path.rglob("*"))

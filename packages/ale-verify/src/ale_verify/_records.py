@@ -58,7 +58,6 @@ class EvidenceReference:
         "file",
         "reference",
         "task_instruction",
-        "task_parameters",
         "solver_trajectory",
     ]
     location: str | None
@@ -70,7 +69,6 @@ class EvidenceReference:
             "file",
             "reference",
             "task_instruction",
-            "task_parameters",
             "solver_trajectory",
         }:
             raise ValueError("unknown evidence kind")

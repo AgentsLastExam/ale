@@ -24,11 +24,11 @@ from ale.core.lock import TaskSource
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.ledger import Ledger, episode_identity
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import (
     ProvenanceInputs,
     agent_provenance,
@@ -62,7 +62,7 @@ async def run_with_provenance(task_root: Path, run_dir: Path, inputs: Provenance
     task = load_tasks(task_root)[0]
     return await run_episode(
         task,
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=run_dir,
         provenance=inputs,
@@ -89,7 +89,7 @@ async def test_every_provenance_field_is_populated(
     assert lock.image.observed_identity == lock.image.prepared_identity
     assert lock.image.runtime_ref == lock.image.prepared_identity
     assert lock.image.observed_ref
-    assert lock.task.name == task_root.name
+    assert lock.task.name == f"agentslastexam/{task_root.name}"
     assert lock.task.spec_hash.startswith("sha256:")
     assert lock.task.content_digest.startswith("sha256:")
     assert lock.config_hash.startswith("sha256:")
@@ -225,7 +225,7 @@ async def test_evidence_is_parsed_when_artifacts_are_disabled(
     task = load_tasks(task_root)[0]
     result = await run_episode(
         task,
-        StandardEnvironment(EvidenceHarness()),
+        EpisodeProtocol(EvidenceHarness()),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         collect_artifacts=False,

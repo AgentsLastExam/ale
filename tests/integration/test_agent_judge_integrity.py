@@ -7,10 +7,10 @@ import pytest
 
 from ale.core.config import AgentJudgeConfig, VerificationConfig
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.gateway.server import Gateway
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
@@ -23,8 +23,7 @@ pytestmark = pytest.mark.integration
 def test_multiple_agent_judges_allow_later_checks_without_touching_solver_trajectory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    record = tmp_path / "verification.json"
-    verdict = tmp_path / "rewards.json"
+    record = tmp_path / "agent-judge.jsonl"
     config = tmp_path / "config.json"
     trajectory = tmp_path / "trajectory.json"
     trajectory.write_text('{"schema_version":"ATIF-v1.8","steps":[]}')
@@ -36,12 +35,12 @@ def test_multiple_agent_judges_allow_later_checks_without_touching_solver_trajec
     )
     for key, value in {
         "ALE_AGENT_JUDGE_LOG_PATH": record,
-        "ALE_VERDICT_PATH": verdict,
         "ALE_VERIFY_CONFIG_PATH": config,
         "ALE_TRAJECTORY_PATH": trajectory,
         "KEY": "secret",
     }.items():
         monkeypatch.setenv(key, str(value))
+    monkeypatch.setattr("ale_verify._VERIFIER_DIR", tmp_path / "verifier")
 
     def fake(**kwargs):  # type: ignore[no-untyped-def]
         return (
@@ -73,7 +72,7 @@ def test_multiple_agent_judges_allow_later_checks_without_touching_solver_trajec
     monkeypatch.setattr("ale_verify._agents.run", fake)
     first = judge("agent", "functional", prompt="Test.")
     second = judge("agent", "functional", prompt="Test again.")
-    write({"overall": float(first["works"] and second["works"]), "late": 42})
+    write({"reward": float(first["works"] and second["works"]), "late": 42})
     events = [json.loads(line) for line in record.read_text().splitlines()]
     assert len([item for item in events if item["event"] == "completed"]) == 2
     assert trajectory.read_bytes() == before
@@ -100,16 +99,11 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
     monkeypatch.setenv(f"ALE_{model_provider.upper()}_API_KEY", secret)
     monkeypatch.setenv(f"ALE_{model_provider.upper()}_BASE_URL", "https://example.test")
     task_root = scaffold_task(tmp_path / "agent-integrity")
-    (task_root / "task.yaml").write_text(
-        (task_root / "task.yaml")
-        .read_text()
-        .replace("memory_mb: 4096", "memory_mb: 512")
-        .replace("verify: 120", "verify: 120")
+    (task_root / "task.toml").write_text(
+        (task_root / "task.toml").read_text().replace("memory_mb = 4096", "memory_mb = 512")
     )
-    (task_root / "instruction.md").write_text(
-        "${greeting}. Write baseline to /home/user/output/result.txt\n"
-    )
-    (task_root / "image" / "fake-agent.py").write_text(
+    (task_root / "instruction.md").write_text("Write baseline to /home/user/output/result.txt\n")
+    (task_root / "environment" / "fake-agent.py").write_text(
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
         "from pathlib import Path\n"
@@ -135,19 +129,19 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         "    print(json.dumps({'type':'result','session_id':session,"
         "'result':json.dumps(verdict)}))\n"
     )
-    (task_root / "image" / "Dockerfile").write_text(
+    (task_root / "environment" / "Dockerfile").write_text(
         f"FROM {CONTAINER_BASE}\n"
         f"COPY fake-agent.py /usr/local/bin/{binary_name}\n"
         f"RUN chmod 755 /usr/local/bin/{binary_name} "
         "&& mkdir -p /home/user/output && chown -R user:user /home/user/output\n"
     )
-    (task_root / "oracle" / "run.sh").write_text(
+    (task_root / "solution" / "solve.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nprintf baseline > /home/user/output/result.txt\n"
     )
-    (task_root / "verify" / "run.sh").write_text(
+    (task_root / "tests" / "test.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 verify.py\n"
     )
-    (task_root / "verify" / "verify.py").write_text(
+    (task_root / "tests" / "verify.py").write_text(
         "from ale_verify import judge, write\n"
         "v = {}\n"
         "v['functional'] = {'no': 0.0, 'yes': 1.0}[judge('agent', 'functio"
@@ -155,7 +149,7 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         "t', 'properties': {'choice': {'enum': ['no', 'yes']}, 'reasoning'"
         ": {'type': 'string'}}, 'required': ['choice', 'reasoning']})['cho"
         "ice']]\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     task = load_tasks(task_root)[0]
@@ -165,7 +159,7 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
     try:
         result = await run_episode(
             task,
-            StandardEnvironment(OracleHarness()),
+            EpisodeProtocol(OracleHarness()),
             provider_registry(DockerProvider()),
             run_dir=tmp_path / "runs",
             gateway=gateway,

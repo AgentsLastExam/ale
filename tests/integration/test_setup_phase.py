@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
 
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol import episode_protocol
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
@@ -20,7 +20,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 async def execute(task_path: Path, run_dir: Path):  # type: ignore[no-untyped-def]
     return await run_episode(
         load_tasks(task_path)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=run_dir,
     )
@@ -29,7 +29,7 @@ async def execute(task_path: Path, run_dir: Path):  # type: ignore[no-untyped-de
 @pytest.mark.asyncio
 async def test_setup_is_optional_and_artifact_paths_are_prepared(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "plain")
-    assert not (task / "setup").exists()
+    assert not (task / "environment" / "setup").exists()
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
 
@@ -37,9 +37,9 @@ async def test_setup_is_optional_and_artifact_paths_are_prepared(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_setup_runs_relative_entry_as_root(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "root-setup")
-    setup = task / "setup"
+    setup = task / "environment" / "setup"
     setup.mkdir()
-    entry = setup / "run.sh"
+    entry = setup / "setup.sh"
     entry.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -48,24 +48,24 @@ async def test_setup_runs_relative_entry_as_root(tmp_path: Path) -> None:
         "chown user:user /home/user/output/setup-uid\n"
     )
     entry.chmod(0o755)
-    check = task / "verify" / "verify.py"
+    check = task / "tests" / "verify.py"
     check.write_text(
         "from ale_verify import checks, write\n"
         "v = {}\n"
         "v['root'] = checks.text_equals('/home/user/output/setup-uid', '0\\n')['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
 async def test_nonzero_setup_stops_before_agent(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "broken")
-    setup = task / "setup"
+    setup = task / "environment" / "setup"
     setup.mkdir()
-    entry = setup / "run.sh"
+    entry = setup / "setup.sh"
     entry.write_text("#!/usr/bin/env bash\nset -euo pipefail\nexit 23\n")
     entry.chmod(0o755)
     result = await execute(task, tmp_path / "runs")
@@ -75,13 +75,12 @@ async def test_nonzero_setup_stops_before_agent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_setup_timeout_is_explicit(tmp_path: Path) -> None:
+async def test_setup_timeout_is_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(episode_protocol, "SETUP_TIMEOUT_SEC", 0.1)
     task = scaffold_task(tmp_path / "timeout")
-    manifest = task / "task.yaml"
-    manifest.write_text(manifest.read_text().replace("setup: 60", "setup: 0.1"))
-    setup = task / "setup"
+    setup = task / "environment" / "setup"
     setup.mkdir()
-    entry = setup / "run.sh"
+    entry = setup / "setup.sh"
     entry.write_text("#!/usr/bin/env bash\nsleep 10\n")
     entry.chmod(0o755)
     result = await execute(task, tmp_path / "runs")
@@ -91,33 +90,30 @@ async def test_setup_timeout_is_explicit(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_setup_assets_are_uploaded_with_the_complete_stage(
+async def test_setup_files_are_uploaded_with_the_complete_stage(
     tmp_path: Path,
 ) -> None:
-    repository = tmp_path / "ale-tasks-demo"
-    repository.mkdir()
-    subprocess.run(["git", "init", "-q", str(repository)], check=True)
-    task = scaffold_task(repository / "tasks/setup-assets")
-    setup = task / "setup"
+    task = scaffold_task(tmp_path / "setup-files")
+    setup = task / "environment" / "setup"
     setup.mkdir()
-    (setup / "run.sh").write_text(
+    (setup / "setup.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n"
         'test "$(id -u)" = 0\n'
-        'test "$(cat assets/value.txt)" = dynamic\n'
+        'test "$(cat data/value.txt)" = dynamic\n'
         "printf ready > /home/user/output/setup-ready\n"
         "chown user:user /home/user/output/setup-ready\n"
     )
-    (setup / "run.sh").chmod(0o755)
-    source = task / "setup/assets/value.txt"
-    source.parent.mkdir(parents=True)
+    (setup / "setup.sh").chmod(0o755)
+    source = setup / "data/value.txt"
+    source.parent.mkdir()
     source.write_text("dynamic")
-    (task / "verify" / "verify.py").write_text(
+    (task / "tests" / "verify.py").write_text(
         "from ale_verify import checks, write\n"
         "v = {}\n"
         "v['setup'] = checks.text_equals('/home/user/output/setup-ready', 'ready')['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}

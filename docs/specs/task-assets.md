@@ -1,16 +1,55 @@
 # Task assets
 
-Task assets are the four separately managed `image/assets`, `setup/assets`,
-`verify/assets`, and `oracle/assets` roots described by the
-[Task authoring contract](task-authoring.md). Runtime stages consume their materialized
-files normally; running a Task never implicitly downloads assets.
+Task source, scripts, configuration, and ordinary small fixtures are tracked by Git. Task
+assets are files managed separately because of their size or lifecycle: ignored by Git and
+synchronized with Hugging Face by the commands below. They live in an `assets/` directory
+beside the files of the stage that reads them, at these fixed roots of a
+[Task folder](task-authoring.md):
 
-Offline software materials belong in each Task's `image/assets/softwares/<software_id>/`;
-see the [software authoring rules](task-authoring.md#software-assets). Current asset commands
-treat these as ordinary Task-local files and mirror their paths to HF. They do not yet consolidate
-software into a repository-level directory or support `image.softwares` declarations. The agreed
-[repository software publication design](../../specs/task-software-publication.md) describes that
-pending change; it is not the current CLI contract.
+| Root | Read by |
+|---|---|
+| `environment/assets/` | the image build, container or VM, through its ordinary context |
+| `tests/assets/` | verification |
+| `solution/assets/` | the oracle |
+
+To the runtime they are ordinary files of their stage, uploaded with it and read through
+relative paths such as `assets/reference.json` or `.\assets\seed.json`; `ALE_STAGE_DIR`
+gives a subprocess the stage's absolute path. A stage's assets are therefore as visible as
+the stage: the image build places what the agent sees, and tests and solution assets are
+absent while the evaluated agent works. Setup has no asset root: large data it needs is built
+into the image, at a root-only location when the agent must not read it directly. Running a
+Task never implicitly downloads assets.
+Source digests leave the asset roots out; assets have their own commit identity.
+
+## Offline software
+
+On either OS, install software directly in the image recipe when a clean base can acquire the
+pinned version and deploy it unattended from declared inputs. Machine authentication is allowed;
+interactive login, verification codes, browser sessions and manual installer steps are not a
+repeatable build input. Version pins alone do not guarantee that an upstream keeps old files.
+
+Otherwise, acquire and, if needed, install or compile the software once in a preparation
+environment. Keep the reusable offline materials as real files under
+`environment/assets/softwares/<software_id>/`, for example
+`environment/assets/softwares/editor_1/`. Use one directory per
+software/version, with underscores rather than nested version directories. Reuse a compatible
+existing package before preparing another. Slow acquisition or compilation can also justify an
+offline asset. Installed VM state alone is not a rebuildable asset.
+
+Keep deployment scripts and Task-specific configuration beside the build definition: the
+Dockerfile on Linux, `build.ps1` on Windows. Scripts consume Task-local materials, choose their
+own extraction or installation method, and declare external dependencies. Linux has no required
+package format. For Windows software requiring repackaging, prefer the
+[MSIX workflow](../guides/windows-task-images.md). No Task depends on another Task's files.
+
+Record the source, version, integrity hash, compatible base, and deployment requirements. Keep
+credentials out of assets. Validate from a clean base as the actual agent user, including required
+writes, child tools and save/reopen, without repeating the interactive acquisition process.
+
+Asset commands treat these as ordinary Task-local files and mirror their paths to HF. They do
+not consolidate software into a repository-level directory; the agreed
+[repository software publication design](../../specs/task-software-publication.md) describes
+that pending change, not the current CLI contract.
 
 ## Repository and access
 
@@ -20,7 +59,7 @@ namespace is `agents-last-exam` unless `ALE_ASSETS_NAMESPACE` names another orga
 or user, so a Task repository maintained elsewhere keeps its assets in its own namespace.
 The source repository name comes from its `origin` URL, falling back to the main Git
 directory. A linked worktree's directory name is never the dataset name. Dataset paths
-mirror source paths, for example `tasks/example/verify/assets/expected.json`.
+mirror source paths, for example `tasks/example/tests/assets/expected.json`.
 
 The first asset checkpoint may create the missing private dataset and empty collection.
 It does not upload Task files. An existing public dataset is rejected. Commands pass
@@ -40,7 +79,7 @@ its commit; no per-attempt asset archives or separate content-hash manifests are
 Git/LFS owns object storage and history. A small checkpoint JSON records the dataset,
 Task path, local worktree, base commit, and accepted commit. With no assets or previous
 asset state, the commit is null and no HF access is needed.
-Checkpoints also accept incomplete Task folders before a valid manifest exists. As with
+Checkpoints also accept incomplete Task folders before a valid `task.toml` exists. As with
 ordinary Git, empty directories are not versioned.
 
 The materialized Task's dirty inventory records file and directory paths, sizes, and
@@ -61,8 +100,8 @@ ale assets publish --checkpoint REF.json --title 'Build example' --description B
 ale assets comment-pr --checkpoint REF.json --publication PUBLICATION.json --message-file SOURCE_PR_LINK.md
 ```
 
-`diff` emits a JSON array of Task-relative paths, such as `verify/assets/expected.json`.
-`materialize` writes only the four asset roots relative to its empty output directory.
+`diff` emits a JSON array of Task-relative paths, such as `tests/assets/expected.json`.
+`materialize` writes only the asset roots relative to its empty output directory.
 It reads the recorded commit, not the latest asset worktree contents. Source commit and
 asset commit are paired in the orchestrator's existing records; no extra source commit
 or reference file in the Task repository is required.

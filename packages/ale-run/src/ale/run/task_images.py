@@ -39,6 +39,7 @@ from ale.run.images import resolve_loaded_image
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.qemu import RUNNER_IMAGE, QemuProvider
 from ale.run.sources import cache_root
+from ale.run.tasksets.manifest import SETUP_DIR
 
 __all__ = [
     "ImagePreparationResult",
@@ -127,9 +128,7 @@ async def prepare_task_image_result(
     spec = task.spec.image
     provider = providers.get(spec.kind)
     folder = _task_folder(task)
-    if task.spec.os is OperatingSystem.WINDOWS and folder.image_script is not None:
-        if spec.kind is not ImageKind.VM or spec.base_ref is None:
-            raise TaskDefinitionError("image/run.ps1 requires image.kind=vm and image.base_ref")
+    if spec.base_ref is not None:
         base = await _stage(
             "base-resolution",
             provider.prepare_image(ImageRef(kind=spec.kind, reference=spec.base_ref)),
@@ -149,10 +148,7 @@ async def prepare_task_image_result(
             ),
             ImagePreparationStep("artifact-check", "executed", image.prepared_identity),
         )
-    dockerfile = folder.image_dockerfile
-    if dockerfile is None:
-        if spec.ref is None:
-            raise TaskDefinitionError("solver requires image/Dockerfile or image.ref")
+    if spec.ref is not None:
         image = await _stage(
             "reference-resolution",
             provider.prepare_image(ImageRef(kind=spec.kind, reference=spec.ref)),
@@ -204,8 +200,13 @@ async def prepare_task_image_result(
     source_identity = task.image_source_digest
     if source_identity is None:
         raise TaskDefinitionError("local solver image has no source identity")
+    dockerfile = folder.dockerfile
+    if dockerfile is None:
+        raise TaskDefinitionError("the solver image has no Dockerfile to build")
     candidate, steps = await _prepare_local(
-        context=dockerfile.parent,
+        dockerfile=dockerfile,
+        # Setup is uploaded at setup time; it never enters an image.
+        exclude=(SETUP_DIR,),
         source_digest=source_identity,
         source="solver-local",
         kind=spec.kind,
@@ -235,8 +236,7 @@ async def prepare_verifier_image_result(
     if verify.environment_mode is VerificationMode.SHARED:
         return None
 
-    dockerfile = _task_folder(task).verifier_dockerfile
-    if dockerfile is None and verify.image is None:
+    if verify.image is None:
         image = task.prepared_image
         if image is None:
             raise TaskDefinitionError("solver image must be prepared before verifier image")
@@ -248,13 +248,9 @@ async def prepare_verifier_image_result(
                 "artifact-check", "reused", image.prepared_identity, image.runtime_ref
             ),
         )
-    if verify.image is None:
-        raise TaskDefinitionError("verify/Dockerfile requires verify.image.kind")
 
     provider = providers.get(verify.image.kind)
-    if dockerfile is None:
-        if verify.image.ref is None:
-            raise TaskDefinitionError("external verifier requires verify.image.ref")
+    if verify.image.ref is not None:
         image = await _stage(
             "reference-resolution",
             provider.prepare_image(ImageRef(kind=verify.image.kind, reference=verify.image.ref)),
@@ -300,10 +296,12 @@ async def prepare_verifier_image_result(
         )
 
     source_identity = task.verifier_image_source_digest
-    if source_identity is None:
-        raise TaskDefinitionError("local verifier image has no source identity")
+    dockerfile = _task_folder(task).verifier_dockerfile
+    if source_identity is None or dockerfile is None:
+        raise TaskDefinitionError("the verifier image has no tests/Dockerfile to build")
     candidate, steps = await _prepare_local(
-        context=dockerfile.parent,
+        dockerfile=dockerfile,
+        exclude=(),
         source_digest=source_identity,
         source="verifier-local",
         kind=verify.image.kind,
@@ -325,9 +323,8 @@ def _result(
     image: PreparedTaskImage,
     *steps: ImagePreparationStep,
 ) -> ImagePreparationResult:
-    spec = task.spec
     return ImagePreparationResult(
-        task=f"{spec.name}@{spec.variant}",
+        task=str(task.spec.name),
         role=role,
         image=image,
         steps=(ImagePreparationStep("lint", "executed"), *steps),
@@ -336,7 +333,8 @@ def _result(
 
 async def _prepare_local(
     *,
-    context: Path,
+    dockerfile: Path,
+    exclude: tuple[str, ...],
     source_digest: str,
     source: str,
     kind: ImageKind,
@@ -350,10 +348,11 @@ async def _prepare_local(
     directly, without asking Docker to build or check anything.
     """
     vm = kind is ImageKind.VM
+    context = dockerfile.parent
     key = content_hash(
         {
             "source": source,
-            "context": _context_identity(context),
+            "context": _context_identity(context, exclude=exclude),
             "framework": framework_identity(user=user, sudo=sudo, vm=vm),
         }
     )
@@ -368,7 +367,12 @@ async def _prepare_local(
             if found is None:
                 build = await _stage(
                     "oci-build",
-                    _build_oci(context=context, source_digest=source_digest, source=source),
+                    _build_oci(
+                        dockerfile=dockerfile,
+                        exclude=exclude,
+                        source_digest=source_digest,
+                        source=source,
+                    ),
                 )
                 layered = await _stage(
                     "framework-layer",
@@ -403,18 +407,22 @@ async def _prepare_local(
     return candidate, steps
 
 
-def _context_identity(context: Path) -> str:
-    """What a build reads from its context.
+def _context_identity(context: Path, *, exclude: tuple[str, ...] = ()) -> str:
+    """What a build reads from its context, apart from the excluded directories.
 
     File contents are hashed. Assets are observed by path, size, modification time and
     mode, as asset dirtiness is, so finding an unchanged Task's image never re-reads them.
     """
     assets = context / "assets"
+    excluded = tuple(context / name for name in exclude)
     return content_hash(
         {
-            "files": tree_digest(context, exclude=("assets",)),
+            "files": tree_digest(context, exclude=("assets", *exclude)),
             "directories": sorted(
-                str(entry.relative_to(context)) for entry in context.rglob("*") if entry.is_dir()
+                str(entry.relative_to(context))
+                for entry in context.rglob("*")
+                if entry.is_dir()
+                and not any(entry == item or item in entry.parents for item in excluded)
             ),
             "assets": [
                 [
@@ -490,11 +498,10 @@ async def _prepare_windows_image(
     task: Task, base: PreparedTaskImage
 ) -> tuple[PreparedTaskImage, bool]:
     folder = _task_folder(task)
-    script = folder.image_script
-    if script is None or task.image_source_digest is None:
-        raise TaskDefinitionError("Windows image requires image/run.ps1")
-    context = script.parent
-    for entry in context.rglob("*"):
+    if folder.build_script is None or task.image_source_digest is None:
+        raise TaskDefinitionError("a Windows image build requires environment/build.ps1")
+    context = folder.environment_dir
+    for entry in _windows_context_entries(context):
         if entry.is_symlink():
             raise TaskDefinitionError(f"Windows image inputs cannot be symlinks: {entry}")
     context_identity = _windows_context_identity(context)
@@ -526,8 +533,10 @@ async def _prepare_windows_image(
             if not reused:
                 with tempfile.TemporaryDirectory(prefix=f".{disk.stem}-", dir=root) as temporary:
                     output = Path(temporary) / "disk.qcow2"
+                    staged = Path(temporary) / "context"
+                    _stage_windows_context(context, staged)
                     await _build_windows_image(
-                        base, context, output, resources, runner_identity, user=user
+                        base, staged, output, resources, runner_identity, user=user
                     )
                     if _windows_context_identity(context) != context_identity:
                         raise TaskDefinitionError("Windows image inputs changed during build")
@@ -548,14 +557,40 @@ async def _prepare_windows_image(
     ), reused
 
 
+def _windows_context_entries(context: Path) -> list[Path]:
+    """The Windows build context: ``environment/`` less ``setup/``, as on Linux."""
+    return [
+        entry for entry in context.rglob("*") if entry.relative_to(context).parts[0] != SETUP_DIR
+    ]
+
+
 def _windows_context_identity(context: Path) -> str:
     return content_hash(
         {
-            "files": tree_digest(context),
+            "files": tree_digest(context, exclude=(SETUP_DIR,)),
             "directories": sorted(
-                str(entry.relative_to(context)) for entry in context.rglob("*") if entry.is_dir()
+                str(entry.relative_to(context))
+                for entry in _windows_context_entries(context)
+                if entry.is_dir()
             ),
         }
+    )
+
+
+def _stage_windows_context(context: Path, staged: Path) -> None:
+    """Link the build context into ``staged``, copying where a link cannot be made."""
+
+    def link(source: str, target: str) -> None:
+        try:
+            os.link(source, target)
+        except OSError:
+            shutil.copy2(source, target)
+
+    shutil.copytree(
+        context,
+        staged,
+        ignore=lambda directory, _: [SETUP_DIR] if Path(directory) == context else [],
+        copy_function=link,
     )
 
 
@@ -580,7 +615,7 @@ async def _build_windows_image(
             user=user,
         )
     )
-    target = r"C:\ProgramData\ALE\image"
+    target = r"C:\ProgramData\ALE\environment"
     try:
         await sandbox.upload_dir(str(context), target)
         result = await sandbox.exec(
@@ -591,7 +626,7 @@ async def _build_windows_image(
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
-                "$ErrorActionPreference = 'Stop'; & .\\run.ps1; "
+                "$ErrorActionPreference = 'Stop'; & .\\build.ps1; "
                 "if (-not $?) { exit 1 }; if ($LASTEXITCODE) { exit $LASTEXITCODE }",
             ],
             cwd=target,
@@ -600,7 +635,8 @@ async def _build_windows_image(
         )
         if not result.ok:
             raise TaskDefinitionError(
-                f"image/run.ps1 failed (exit={result.exit_code}, timeout={result.timed_out}): "
+                f"environment/build.ps1 failed (exit={result.exit_code}, "
+                f"timeout={result.timed_out}): "
                 f"{result.stderr or result.stdout}"
             )
         result = await sandbox.exec(
@@ -620,15 +656,35 @@ async def _build_windows_image(
         await asyncio.shield(sandbox.destroy())
 
 
-async def _build_oci(*, context: Path, source_digest: str, source: str) -> _OciBuild:
+async def _build_oci(
+    *, dockerfile: Path, exclude: tuple[str, ...], source_digest: str, source: str
+) -> _OciBuild:
+    """Build ``dockerfile`` with its directory as context, less the excluded directories.
+
+    Exclusion uses a Dockerfile-specific ignore file beside a copy of the Dockerfile, which
+    BuildKit reads instead of the context's own ``.dockerignore``; that one's rules come
+    first, so the Task cannot bring an excluded directory back.
+    """
     code, _, stderr = await _run("docker", "buildx", "version", timeout=30)
     if code != 0:
         raise ProviderStartError(f"Docker Buildx is unavailable: {stderr.strip()}")
 
+    context = dockerfile.parent
     input_identity = _input_identity(source, source_digest)
     tag = f"ale-{source}:{input_identity.removeprefix('sha256:')}"
     with tempfile.TemporaryDirectory(prefix="ale-image-") as temporary:
         metadata_file = Path(temporary) / "metadata.json"
+        file_arguments: tuple[str, ...] = ()
+        if exclude:
+            copied = Path(temporary) / "Dockerfile"
+            shutil.copyfile(dockerfile, copied)
+            own = context / ".dockerignore"
+            rules = own.read_text(encoding="utf-8").splitlines() if own.is_file() else []
+            rules += [pattern for name in exclude for pattern in (name, f"{name}/**")]
+            copied.with_name("Dockerfile.dockerignore").write_text(
+                "\n".join(rules) + "\n", encoding="utf-8"
+            )
+            file_arguments = ("--file", str(copied))
         code, _, stderr = await _run(
             "docker",
             "buildx",
@@ -640,6 +696,7 @@ async def _build_oci(*, context: Path, source_digest: str, source: str) -> _OciB
             tag,
             "--metadata-file",
             str(metadata_file),
+            *file_arguments,
             str(context),
         )
         if code != 0:

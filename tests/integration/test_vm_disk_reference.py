@@ -10,10 +10,10 @@ from ale.core.config import RunConfig
 from ale.core.taskspec import OperatingSystem
 from ale.core.verdict import Status
 from ale.run import task_images
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.framework import MATERIALIZER_IMAGE, framework_identity, framework_on_disk
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers import ProviderRegistry
 from ale.run.task_images import prepare_task_image_result
 from ale.run.tasksets.manifest import load_tasks
@@ -58,7 +58,9 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
 
     def task_with_ref(name: str, disk: Path) -> Path:
         return write_repo(
-            tmp_path / name, image={"kind": "vm", "ref": str(disk)}, with_image_dockerfile=False
+            tmp_path / name,
+            config={"ale": {"sandbox": "vm", "vm_image": str(disk)}},
+            dockerfile=None,
         )
 
     registry = ProviderRegistry(RunConfig())
@@ -84,6 +86,6 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     task = load_tasks(task_path)[0]
     task.prepared_image = first.image
     result = await run_episode(
-        task, StandardEnvironment(OracleHarness()), registry, run_dir=tmp_path / "runs"
+        task, EpisodeProtocol(OracleHarness()), registry, run_dir=tmp_path / "runs"
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure

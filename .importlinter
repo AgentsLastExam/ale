@@ -33,7 +33,7 @@ source_modules =
     ale.run.gateway
 forbidden_modules =
     ale.run.providers
-    ale.run.environments
+    ale.run.protocol
 
 [importlinter:contract:guestd-stdlib-only]
 name = the guest service imports neither engine code nor third-party packages

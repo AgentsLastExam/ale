@@ -1,20 +1,19 @@
-# Standard Environment evaluation protocol
+# Episode protocol
 
-`StandardEnvironment` implements ALE's `core/standard` evaluation protocol. It turns one
-prepared Task instance into one Episode using the same phase ordering for container and
-VM sandboxes.
+The episode protocol (`EpisodeProtocol`) turns one prepared Task instance into one Episode
+using the same phase ordering for container and VM sandboxes.
 
 ## Inputs
 
-Before the Environment starts, the engine has already:
+Before the protocol starts, the engine has already:
 
-- loaded and rendered one base or selected variant into `TaskSpec`;
+- loaded the Task folder into `TaskSpec`;
 - linted the Task and prepared the solver image and any dedicated verifier image;
 - resolved the Harness and the effective Skill/MCP resources;
 - resolved the Harness authentication path, created its episode capabilities and
   evidence sinks, and prepared the Provider registry, run policy, and RunLock inputs.
 
-Image acquisition and building are preparation, not an Environment phase. `ale prepare`
+Image acquisition and building are preparation, not a protocol phase. `ale prepare`
 stops at that boundary and creates no sandbox.
 
 ## Phase order
@@ -24,9 +23,11 @@ provision -> setup -> agent/oracle -> final evidence capture
           -> shared or separate verify -> teardown/retention -> result
 ```
 
-Every phase is timed and attributed independently. Setup, agent, and verify default to
-`TaskSpec.timeouts`. Run policy may override `timeouts.agent` with positive seconds and
-`timeouts.verify` with positive seconds or `"unlimited"`. These overrides are recorded in
+Every phase is timed and attributed independently. Agent and verify default to the Task's
+`[agent].timeout_sec` and `[verifier].timeout_sec`. Setup has a fixed framework bound of
+1800 s, a guard against a hung setup rather than a scored budget. Run policy may override
+`timeouts.agent` with positive seconds and `timeouts.verify` with positive seconds or
+`"unlimited"`. These overrides are recorded in
 RunLock and the configuration hash without changing the Task identity. The Agent deadline
 starts at Harness launch (or policy rollout), after installation, resource staging, and
 network sealing. Evidence capture, verification, and cleanup do not consume it. An Agent
@@ -50,9 +51,10 @@ pre-create declared artifacts. Framework staging uses `/opt/ale` on Linux and
 
 ### Setup
 
-If `setup/` exists, ALE uploads the complete directory to the OS staging root, opens
-egress, and executes `run.sh` on Linux or `run.ps1` on Windows with that directory as cwd.
-`assets/` is therefore available by an ordinary relative path. Setup is optional and runs once.
+If `environment/setup/` exists, ALE uploads the complete directory to `setup` under the
+staging root, opens egress, and executes `setup.sh` on Linux or `setup.ps1` on Windows with
+that directory as cwd, so its files are available by ordinary relative paths. Setup is
+optional and runs once.
 
 ### Agent or oracle
 
@@ -63,9 +65,10 @@ sandbox; Policy Harnesses drive the framework-owned `TaskEnv`. The evaluated sol
 the validation oracle both run as the image's agent account. Windows autonomous CLI
 Harnesses use the base's native Node.js and Git Bash.
 
-`oracle/` is uploaded only for an oracle episode and is absent for an evaluated solver.
-`verify/` is also absent throughout this phase. Answers are withheld by when they are
-staged, not by a conventional path or a flag a Task must remember.
+`solution/` is uploaded only for an oracle episode and is absent for an evaluated solver.
+`tests/` is also absent throughout this phase. Answers are withheld by when they are
+staged and by the root-only staging directory, not by a conventional path or a flag a Task
+must remember.
 
 ### Evidence capture
 
@@ -98,28 +101,28 @@ output therefore requires host artifact collection.
 
 ### Verify
 
-Shared verification uploads `verify/` into the completed solver sandbox. Separate
+Shared verification uploads `tests/` into the completed solver sandbox. Separate
 verification first releases or retains the solver according to run policy, provisions a
 fresh verifier sandbox, restores captured artifacts to their original absolute paths,
-and uploads the same `verify/`. It never reruns setup or copies the solver filesystem.
+and uploads the same `tests/`. It never reruns setup or copies the solver filesystem.
 
 Verification runs as framework-controlled Task code with open egress and elevated
 privileges (root on Linux, Administrator on Windows), in both shared and separate modes.
 Task code may explicitly drop privileges when executing a submitted program.
-ALE stages `ale_verify`, the rendered
-instruction, parameters, optional solver trajectory, and run-level Judge configuration,
-then executes the OS entry from the verification staging directory. Linux uses
-`/opt/ale/verify/run.sh`; Windows uses `C:\ProgramData\ALE\verify\run.ps1`.
+ALE stages `ale_verify`, the instruction, optional solver trajectory, and run-level Judge
+configuration, then executes the OS entry from the verification staging directory. Linux uses
+`/opt/ale/tests/test.sh`; Windows uses `C:\ProgramData\ALE\tests\test.ps1`.
 ALE selects Python 3.12+ (`python3`, then `python3.12` on Linux; `python.exe` on Windows)
-and provides its command as `ALE_VERIFY_PYTHON`. Both placements produce the same JSON
-result containing `overall`. The solver interpreter is unchanged.
+and provides its command as `ALE_VERIFY_PYTHON`. Both placements leave the same
+[result](verification.md#result) in `/logs/verifier` (`C:\logs\verifier`), which ALE empties
+and gives to the framework alone before every attempt. The solver interpreter is unchanged.
 
 ### Teardown and retention
 
 Solver and verifier retention are independent run policies and default to `destroy`.
-Before a requested keep, ALE removes every stage of the Task (`setup/`, `verify/` with
-its Judge state, the oracle) and known credentials, so a kept solver holds only the
-agent's own state.
+Before a requested keep, ALE removes every stage of the Task (setup, tests with their
+Judge state, the solution), the verifier directory and known credentials, so a kept
+solver holds only the agent's own state.
 Subscription credentials never enter the Sandbox, so retention does not add a provider
 credential cleanup step. Failure of other required sanitation still forces destruction.
 Result and RunLock record the requested policy, actual Provider outcome, retained handle,
@@ -132,9 +135,9 @@ have a running retained solver or shared Sandbox, a complete RunLock, and the sa
 solver-image identity as the current Task.
 
 For shared verification, ALE reconnects to the retained shared Sandbox and runs the current
-`verify/` stage there. For separate verification, ALE captures the declared artifacts from the
+`tests/` there. For separate verification, ALE captures the declared artifacts from the
 retained solver, detaches without destroying it, provisions a fresh verifier Sandbox, restores the
-artifacts, and runs the current `verify/` stage there. Before either path uploads `verify/`, ALE
+artifacts, and runs the current `tests/` there. Before either path uploads `tests/`, ALE
 removes the previously staged verifier files so deleted files cannot survive a revision.
 
 The Harness, setup, and agent phases do not run again. The new episode copies the source trajectory
@@ -170,8 +173,8 @@ is still allowed when the retry configuration is nonzero.
 
 `ale validate` uses this same protocol twice with fresh sandboxes:
 
-- untouched must complete with `overall` equal to zero;
-- oracle must complete with `overall` equal to one;
+- untouched must complete with `reward` equal to zero;
+- oracle must complete with `reward` equal to one;
 - both use the [two-decimal result precision](verification.md#result) applied to every run;
   all additional result fields are ignored by validation;
 - setup, image, resource, artifact, verifier, Judge, timeout, and infrastructure failures
@@ -189,6 +192,6 @@ follow the [episode result contract](trace.md#result-and-run-status).
 
 ## Extension boundary
 
-`core/standard` is the only standard Task protocol. A protocol that requires a different
-phase graph, several cooperating solver sandboxes, or a human gate is a new `Environment`
-implemented in the engine; it must not overload fields in this contract.
+This is the only episode protocol. A Task that needs a different phase graph, several
+cooperating solver sandboxes, or a human gate needs an engine change; it must not overload
+fields in this contract.

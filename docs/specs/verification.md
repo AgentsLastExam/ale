@@ -6,13 +6,15 @@ scoring registry, automatic aggregation, callback, or required order of tool cal
 
 ## Result
 
-The Task writes a JSON object to `ALE_VERDICT_PATH`. Its top-level `overall` must be a
-finite number from 0 through 1; booleans and numeric strings are not scores. Other fields
-may contain arbitrary nested JSON values. ALE interprets only `overall`, preserves the
-complete result, and never averages or treats additional numeric values as rewards.
-NaN, infinity and duplicate object keys are invalid JSON results.
+The verifier writes Harbor's reward file, `/logs/verifier/reward.json`
+(`C:\logs\verifier\reward.json` on Windows): a flat JSON object whose values are numbers.
+Its `reward` must be a finite number from 0 through 1; booleans and numeric strings are not
+numbers. ALE interprets only `reward` and never averages or treats other values as rewards.
+Beside it, `verification.json` may hold the complete result: any JSON object, nested values
+included, whose `reward` equals `reward.json`'s. NaN, infinity and duplicate object keys
+make either file invalid.
 
-After checking the range, ALE rounds `overall` to two decimal places using decimal
+After checking the range, ALE rounds `reward` to two decimal places using decimal
 round-half-up: `0.994` becomes `0.99`, `0.995` and `0.999` become `1.0`, and `0.004`
 becomes `0.0`. This same value is saved and used by `run`, `reverify`, and `validate`.
 Other fields and Judge responses keep their original precision; rounding never makes an
@@ -22,19 +24,23 @@ out-of-range score valid.
 from ale_verify import checks, write
 
 check = checks.text_equals("/home/user/output/answer.txt", "42")
-write({"overall": check["score"], "answer": check})
+write({"reward": check["score"], "answer": check})
 ```
 
-`write(result)` validates and rounds `overall`, then atomically replaces the result file
-without modifying the caller's object. It does not end the program or mark the episode
-successful. Repeated calls replace the previous result. Other languages or
-Python programs may write the same JSON directly; the engine applies the same checks.
+`write(result)` validates and rounds `reward`, then atomically replaces `verification.json`
+with the complete result and `reward.json` with `{"reward": ...}`, without modifying the
+caller's object. It does not end the program or mark the episode successful. Repeated
+calls replace the previous result. Other languages or Python programs may write the same
+files directly, `verification.json` being optional; the engine applies the same checks.
 An exception, timeout or nonzero exit still fails verification after a result was written.
-The engine clears the verification staging directory before every attempt.
 
-On the host, `verification.json` contains this complete object. Episode rewards contain
-only `overall`; the episode status and failure remain in `result.json`. There is no second
-reward envelope or requirement to match a separate scoring record.
+Before every attempt the engine clears the verification staging directory and empties the
+verifier directory, which only the framework can then write
+([Security](security.md#4-the-agent-cannot-change-what-it-is-measured-under)).
+
+On the host, `verification.json` contains the complete result, which is `reward.json`'s
+object when the verifier wrote no `verification.json`. Episode rewards contain only
+`reward`; the episode status and failure remain in `result.json`.
 
 ## Judge tools
 
@@ -47,7 +53,7 @@ from ale_verify import judge, write
 def verify():
     report = Path("/home/user/output/report.pdf")
     if not report.is_file():
-        return {"overall": 0, "reasoning": "Required report is missing."}
+        return {"reward": 0, "reasoning": "Required report is missing."}
 
     assessment = judge(
         "llm",
@@ -63,7 +69,7 @@ def verify():
             "required": ["correctness", "reasoning"],
         },
     )
-    return {"overall": assessment["correctness"], "review": assessment}
+    return {"reward": assessment["correctness"], "review": assessment}
 
 
 write(verify())
@@ -174,6 +180,6 @@ for dynamically loaded code and imports the static scan cannot discover.
 
 The framework stages `ale_verify` and its pinned pure-Python JSON Schema dependency in
 the verifier's Python environment. Both are included in runtime provenance. The selected
-interpreter is supplied as `ALE_VERIFY_PYTHON`; see [Task authoring](task-authoring.md#verify).
+interpreter is supplied as `ALE_VERIFY_PYTHON`; see [Task authoring](task-authoring.md#tests).
 Built-in checks return ordinary dictionaries with `score`, `diagnostic`, `raw_value` and
 `evidence`. Authors may use them, ordinary Python, or their existing scoring functions.

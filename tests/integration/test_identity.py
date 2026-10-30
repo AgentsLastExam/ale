@@ -21,13 +21,13 @@ from ale.core.config import RunConfig
 from ale.core.lock import TaskSource
 from ale.core.sandbox import Identity
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import provider_registry
+from tests.support import edit_task_config, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -41,7 +41,7 @@ async def run_one(task_root: Path, run_dir: Path, **kwargs):  # type: ignore[no-
     task = load_tasks(task_root)[0]
     return await run_episode(
         task,
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=run_dir,
         collect_artifacts=True,
@@ -50,20 +50,14 @@ async def run_one(task_root: Path, run_dir: Path, **kwargs):  # type: ignore[no-
 
 
 def with_oracle(task_root: Path, body: str) -> None:
-    (task_root / "oracle" / "run.sh").write_text(
+    (task_root / "solution" / "solve.sh").write_text(
         "#!/usr/bin/env bash\nset -uo pipefail\nmkdir -p /home/user/output\n"
         + textwrap.dedent(body)
     )
 
 
 def declare_sudo(task_root: Path) -> None:
-    manifest = task_root / "task.yaml"
-    manifest.write_text(
-        manifest.read_text().replace(
-            "resources: {cpus: 1, memory_mb: 512}",
-            "resources: {cpus: 1, memory_mb: 512, sudo: true}",
-        )
-    )
+    edit_task_config(task_root, {"ale": {"sudo": True}})
 
 
 def collected(result, name: str) -> str:  # type: ignore[no-untyped-def]
@@ -94,8 +88,8 @@ class TestWhoRunsWhat:
     ) -> None:
         """A task's stages are engine machinery, run on the task's behalf."""
         task_root = write_repo(tmp_path / "repo")
-        (task_root / "setup").mkdir()
-        (task_root / "setup" / "run.sh").write_text(
+        (task_root / "environment" / "setup").mkdir()
+        (task_root / "environment" / "setup" / "setup.sh").write_text(
             "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/input /home/user/output\n"
             "printf 'world' > /home/user/input/word.txt\nid -un > /home/user/output/setup_who\n"
         )

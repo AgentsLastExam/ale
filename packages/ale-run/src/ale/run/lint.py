@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
 from ale.core.errors import TaskDefinitionError
+from ale.core.task import Stage
 from ale.core.taskspec import OperatingSystem
 from ale.run.tasksets.manifest import (
+    ENVIRONMENT_DIR,
     INSTRUCTION,
-    STAGE_ENTRY,
-    TASK_MANIFEST,
+    SETUP_DIR,
+    TASK_CONFIG,
     TaskFolder,
     discover_task_folders,
     load_tasks,
@@ -32,6 +33,15 @@ _VM_RESERVED_NAMES = {
     "loader.conf",
     "mkosi.conf",
 }
+_TOP_LEVEL = {
+    TASK_CONFIG,
+    INSTRUCTION,
+    ENVIRONMENT_DIR,
+    Stage.TESTS,
+    Stage.SOLUTION,
+    "tools",
+    ".ale-cache",
+}
 
 
 @dataclass(frozen=True)
@@ -46,11 +56,11 @@ class Finding:
 def lint_repository(path: Path) -> list[Finding]:
     findings: list[Finding] = []
     source = path.expanduser().resolve()
-    if not (source / TASK_MANIFEST).is_file():
+    if not (source / TASK_CONFIG).is_file():
         for removed, replacement in (
-            ("domain.yaml", "put the stable name in each Task's task.yaml"),
+            ("domain.yaml", "put the stable name in each Task's task.toml"),
             ("kits", "move Task-specific helpers below the owning Task"),
-            ("images", "put image build materials below each Task image/ directory"),
+            ("images", "put image build materials below each Task's environment/ directory"),
             ("files", "put content below the Task stage that owns it"),
             ("skills", "move Task Skills below tools/skills/"),
             ("mcp", "move Task MCP below tools/mcp/"),
@@ -69,7 +79,7 @@ def lint_repository(path: Path) -> list[Finding]:
     try:
         load_tasks(source)
     except TaskDefinitionError as error:
-        findings.append(Finding(source / TASK_MANIFEST, str(error)))
+        findings.append(Finding(source / TASK_CONFIG, str(error)))
     return findings
 
 
@@ -85,104 +95,78 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
                 )
             )
 
-    allowed = {
-        "task.yaml",
-        "instruction.md",
-        "image",
-        "setup",
-        "verify",
-        "oracle",
-        "tools",
-        ".ale-cache",
-    }
     for entry in folder.root.iterdir():
-        if entry.name not in allowed:
+        if entry.name not in _TOP_LEVEL:
             findings.append(
                 Finding(entry, "unsupported top-level Task entry; move it into its owning stage")
             )
 
-    manifest: dict[str, object] = {}
-    manifest_path = folder.root / TASK_MANIFEST
-    if manifest_path.is_file():
-        try:
-            loaded = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError:
-            loaded = {}
-        manifest = loaded if isinstance(loaded, dict) else {}
-        if isinstance(manifest, dict):
-            for field in ("image", "setup", "verify"):
-                section = manifest.get(field)
-                if isinstance(section, dict) and "assets" in section:
-                    findings.append(
-                        Finding(
-                            manifest_path,
-                            f"{field}.assets asset declarations are removed; "
-                            "place canonical bytes below "
-                            f"{field}/assets/",
-                        )
-                    )
-
+    config = _read_config(folder.root / TASK_CONFIG)
+    environment = config.get("environment")
     try:
-        operating_system = OperatingSystem(str(manifest.get("os", "linux")))
+        operating_system = OperatingSystem(
+            environment.get("os", "linux") if isinstance(environment, dict) else "linux"
+        )
     except ValueError:
         operating_system = OperatingSystem.LINUX
-    stage_entry = "run.ps1" if operating_system is OperatingSystem.WINDOWS else STAGE_ENTRY
-    required = {
-        INSTRUCTION: folder.root / INSTRUCTION,
-        f"verify/{stage_entry}": folder.root / "verify" / stage_entry,
-        f"oracle/{stage_entry}": folder.root / "oracle" / stage_entry,
-    }
-    for label, file in required.items():
-        if not file.is_file():
-            findings.append(Finding(folder.root, f"no {label}"))
+    for stage in (Stage.TESTS, Stage.SOLUTION):
+        entry = f"{stage}/{stage.entry(operating_system)}"
+        if not (folder.root / entry).is_file():
+            findings.append(Finding(folder.root, f"no {entry}"))
+    if not (folder.root / INSTRUCTION).is_file():
+        findings.append(Finding(folder.root, f"no {INSTRUCTION}"))
 
-    dockerfile = folder.image_dir / "Dockerfile"
-    image = manifest.get("image")
-    kind = image.get("kind") if isinstance(image, dict) else None
-    ref = image.get("ref") if isinstance(image, dict) else None
-    if operating_system is OperatingSystem.WINDOWS:
-        if folder.image_script is None and _has_files(folder.image_dir / "assets"):
-            findings.append(
-                Finding(folder.image_dir / "assets", "image/assets requires image/run.ps1")
-            )
-    elif dockerfile.is_file():
-        # Any base image is accepted; the engine adds what it needs when it prepares one.
-        if kind == "vm" and _vm_boot_override(dockerfile):
-            findings.append(
-                Finding(dockerfile, "VM final stage must not declare CMD or ENTRYPOINT")
-            )
-        if kind == "vm":
-            for entry in folder.image_dir.rglob("*"):
-                if entry.is_file() and (
-                    entry.name in _VM_RESERVED_NAMES or entry.suffix in {".qcow2", ".raw"}
-                ):
-                    findings.append(
-                        Finding(entry, "VM boot and disk materialization files are ALE-owned")
-                    )
-    elif ref is None:
-        findings.append(Finding(folder.root, "no image/Dockerfile and no image.ref"))
-    elif _has_files(folder.image_dir / "assets"):
+    builds_image = folder.dockerfile is not None or folder.build_script is not None
+    if not builds_image and _has_files(folder.environment_dir / "assets"):
         findings.append(
-            Finding(folder.image_dir / "assets", "image/assets is unused for ref-only images")
+            Finding(
+                folder.environment_dir / "assets",
+                "environment/assets is unused without an image build",
+            )
         )
+    ale = config.get("ale")
+    vm = isinstance(ale, dict) and ale.get("sandbox") == "vm"
+    if vm and folder.dockerfile is not None:
+        # Any base image is accepted; the engine adds what it needs when it prepares one.
+        if _vm_boot_override(folder.dockerfile):
+            findings.append(
+                Finding(folder.dockerfile, "VM final stage must not declare CMD or ENTRYPOINT")
+            )
+        for entry in folder.environment_dir.rglob("*"):
+            in_context = entry.relative_to(folder.environment_dir).parts[0] != SETUP_DIR
+            if (
+                in_context
+                and entry.is_file()
+                and (entry.name in _VM_RESERVED_NAMES or entry.suffix in {".qcow2", ".raw"})
+            ):
+                findings.append(
+                    Finding(entry, "VM boot and disk materialization files are ALE-owned")
+                )
 
-    verify = folder.root / "verify"
-    if (verify / "check.py").exists() and not (verify / "verify.py").exists():
-        findings.append(Finding(verify / "check.py", "rename the default verifier to verify.py"))
-
-    setup = folder.stage_entry("setup", operating_system)
+    setup = folder.stage_entry(Stage.SETUP, operating_system)
     if setup and _FIXED_SETUP.search(setup.read_text(encoding="utf-8", errors="replace")):
-        image_entry = (
-            "image/run.ps1" if operating_system is OperatingSystem.WINDOWS else "image/Dockerfile"
+        image_build = (
+            "environment/build.ps1"
+            if operating_system is OperatingSystem.WINDOWS
+            else "the image's Dockerfile"
         )
         findings.append(
             Finding(
                 setup,
-                f"fixed installation or download belongs in {image_entry}; "
+                f"fixed installation or download belongs in {image_build}; "
                 "setup is for episode-dynamic initialization",
             )
         )
     return findings
+
+
+def _read_config(path: Path) -> dict[str, object]:
+    """The configuration as far as it parses; loading reports what is wrong with it."""
+    try:
+        with path.open("rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
 
 
 def _vm_boot_override(path: Path) -> bool:

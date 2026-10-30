@@ -5,12 +5,12 @@ from pathlib import Path
 import pytest
 
 from ale.core.config import RunConfig
-from ale.core.environment import Phase
+from ale.core.episode import Phase
 from ale.core.lock import TaskSource
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import (
     ProvenanceInputs,
     agent_provenance,
@@ -36,7 +36,7 @@ async def test_task_owned_docker_runs_a_nested_offline_container(tmp_path: Path)
     phases: list[Phase] = []
     result = await run_episode(
         load_tasks(TASK)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         ProviderRegistry(settings),
         run_dir=tmp_path,
         phase_callback=phases.append,
@@ -53,7 +53,7 @@ async def test_task_owned_docker_runs_a_nested_offline_container(tmp_path: Path)
         ),
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert (
         result.run_dir / "artifacts/nested-container.txt"
     ).read_text() == "nested-container-ok\n"

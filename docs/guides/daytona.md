@@ -47,7 +47,7 @@ uv run ale run TASK --agent claude-code --set container.provider=daytona
 
 ## GPU Tasks
 
-A Task that sets `resources.gpus` gets that many GPUs of the first model in `gpu_types`
+A Task that sets `[environment].gpus` gets that many GPUs of the first model in `gpu_types`
 with capacity, in Daytona's GPU region, which Daytona chooses itself. The organization
 needs GPU quota there; Daytona's usage report lists it per region, with the CPU, memory
 and disk each GPU may come with. A sandbox takes up to 8 GPUs, and only NVIDIA models can
@@ -59,9 +59,9 @@ it into the GPU region, about a minute and a half for the desktop base.
 
 ## Allowlisted Tasks
 
-A Task with `network.mode: allowlist` downloads straight from Daytona to its declared
-hosts, never through your machine. Daytona takes domain names only, at most 100, so a Task
-whose allowlist names an address, a port or a pattern is refused on Daytona.
+A Task with `[agent].network_mode = "allowlist"` downloads straight from Daytona to its
+declared hosts, never through your machine. Daytona takes domain names only, at most 100, so
+a Task whose allowlist names an address, a port or a pattern is refused on Daytona.
 
 ## Checking an organization
 

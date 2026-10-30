@@ -675,7 +675,7 @@ async def test_vm_reference_uses_provider_acquisition_and_wrong_kind_is_refused(
         await QemuProvider().prepare_image(ImageRef(kind="vm", reference="ghcr.io/acme/vm:v1"))
         == prepared
     )
-    with pytest.raises(ProviderCapabilityError, match="kind=vm"):
+    with pytest.raises(ProviderCapabilityError, match="requires a VM image"):
         await QemuProvider().prepare_image(
             ImageRef(kind=ImageKind.CONTAINER, reference="ghcr.io/acme/container:v1")
         )

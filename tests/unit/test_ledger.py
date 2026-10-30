@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 
 def spec(**overrides: object) -> TaskSpec:
     base: dict[str, object] = {
-        "name": "demo-hello",
+        "name": "agentslastexam/demo-hello",
         "instruction": "write hello",
         "image": {"kind": "container"},
     }
@@ -80,11 +80,6 @@ class TestEpisodeIdentity:
 
     def test_a_different_prepared_image_is_different_work(self) -> None:
         assert identity(spec()) != identity(spec(), image_digest="sha256:" + "3" * 64)
-
-    def test_a_different_variant_is_different_work(self) -> None:
-        base = spec(variant="base", params={"n": 3})
-        hard = spec(variant="hard", params={"n": 10})
-        assert identity(base) != identity(hard)
 
     def test_a_different_agent_is_different_work(self) -> None:
         assert identity(spec()) != identity(spec(), agent="cua-gui@1")

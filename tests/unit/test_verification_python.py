@@ -14,8 +14,8 @@ import pytest
 from ale.core.errors import TaskError
 from ale.core.sandbox import ExecResult
 from ale.core.taskspec import OperatingSystem
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.harnesses.builtin import NopHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 
 pytestmark = pytest.mark.unit
 
@@ -48,12 +48,12 @@ async def test_linux_selects_newer_python_without_replacing_default(
     executable(bin_dir / "python3.12", modern)
     sandbox = LocalSandbox(bin_dir)
     ctx = SimpleNamespace(spec=SimpleNamespace(os=OperatingSystem.LINUX))
-    environment = StandardEnvironment(NopHarness())
+    protocol = EpisodeProtocol(NopHarness())
 
-    python, site = await environment._site_packages(ctx, sandbox)  # type: ignore[arg-type]
+    python, site = await protocol._site_packages(ctx, sandbox)  # type: ignore[arg-type]
     assert python == ("python3" if default_is_modern else "python3.12")
     assert site
-    await environment._probe_package(sandbox, python, "ale-verify", "import ale_verify")  # type: ignore[arg-type]
+    await protocol._probe_package(sandbox, python, "ale-verify", "import ale_verify")  # type: ignore[arg-type]
     if not default_is_modern:
         result = await sandbox.exec(["python3", "-c", "pass"])
         assert result.exit_code != 0 and "3.10" in result.stderr
@@ -65,14 +65,14 @@ async def test_missing_compatible_linux_interpreter_is_a_task_error(tmp_path: Pa
     executable(tmp_path / "python3", "echo 'Python 3.10 is too old' >&2; exit 1")
     ctx = SimpleNamespace(spec=SimpleNamespace(os=OperatingSystem.LINUX))
     with pytest.raises(TaskError, match=r"python3:.*3.10.*python3.12: not available"):
-        await StandardEnvironment(NopHarness())._site_packages(ctx, LocalSandbox(tmp_path))  # type: ignore[arg-type]
+        await EpisodeProtocol(NopHarness())._site_packages(ctx, LocalSandbox(tmp_path))  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
 async def test_windows_keeps_its_system_python(tmp_path: Path) -> None:
     executable(tmp_path / "python.exe", f'exec {shlex.quote(sys.executable)} "$@"')
     ctx = SimpleNamespace(spec=SimpleNamespace(os=OperatingSystem.WINDOWS))
-    python, site = await StandardEnvironment(NopHarness())._site_packages(
+    python, site = await EpisodeProtocol(NopHarness())._site_packages(
         ctx,
         LocalSandbox(tmp_path),  # type: ignore[arg-type]
     )

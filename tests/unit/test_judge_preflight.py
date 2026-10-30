@@ -24,7 +24,7 @@ LLM = {
 
 
 def verifier(root: Path, source: str) -> Path:
-    directory = root / "verify"
+    directory = root / "tests"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "verify.py").write_text(source)
     return directory
@@ -101,7 +101,7 @@ async def test_run_stops_before_any_image_or_agent_when_its_judge_is_unconfigure
 ) -> None:
     task_cli = import_module("ale.run.cli.tasks")
     task_path = scaffold_task(tmp_path / "task")
-    (task_path / "verify" / "judged.py").write_text(
+    (task_path / "tests" / "judged.py").write_text(
         'from ale_verify import judge\njudge("llm", "quality")\n'
     )
     prepare = AsyncMock(side_effect=AssertionError("must not prepare images"))

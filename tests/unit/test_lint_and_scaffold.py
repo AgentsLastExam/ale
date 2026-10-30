@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,24 +24,29 @@ def messages(path: Path) -> str:
 def test_new_task_is_standalone_and_lints_clean(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "fresh")
     assert lint_repository(task) == []
-    assert (task / "image" / "Dockerfile").is_file()
-    assert not (task / "setup").exists()
-    assert "spec_type: core/v1" in (task / "task.yaml").read_text()
-    assert "name: fresh" in (task / "task.yaml").read_text()
-    assert "image:" in (task / "task.yaml").read_text()
-    assert "kind: container" in (task / "task.yaml").read_text()
+    assert (task / "environment" / "Dockerfile").is_file()
+    assert not (task / "environment" / "setup").exists()
+    config = tomllib.loads((task / "task.toml").read_text())
+    assert config["schema_version"] == "1.4"
+    assert config["task"]["name"] == "agentslastexam/fresh"
+    assert config["agent"]["network_mode"] == "no-network"
+
+
+def test_new_task_folder_name_must_be_a_slug(tmp_path: Path) -> None:
+    with pytest.raises(TaskDefinitionError, match="lowercase slug"):
+        scaffold_task(tmp_path / "Fresh")
 
 
 def test_stage_entries_are_executable(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "fresh")
-    for stage in ("verify", "oracle"):
-        assert (task / stage / "run.sh").stat().st_mode & 0o111
+    for entry in ("tests/test.sh", "solution/solve.sh"):
+        assert (task / entry).stat().st_mode & 0o111
 
 
 def test_stage_entries_do_not_require_host_executable_bits(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "fresh")
-    for stage in ("verify", "oracle"):
-        (task / stage / "run.sh").chmod(0o644)
+    for entry in ("tests/test.sh", "solution/solve.sh"):
+        (task / entry).chmod(0o644)
     assert lint_repository(task) == []
 
 
@@ -56,9 +62,9 @@ def test_refuses_to_clobber_without_force(tmp_path: Path) -> None:
     ("relative", "message"),
     [
         ("instruction.md", "instruction.md"),
-        ("image/Dockerfile", "image/Dockerfile"),
-        ("verify/run.sh", "verify/run.sh"),
-        ("oracle/run.sh", "oracle/run.sh"),
+        ("environment/Dockerfile", "environment/Dockerfile"),
+        ("tests/test.sh", "tests/test.sh"),
+        ("solution/solve.sh", "solution/solve.sh"),
     ],
 )
 def test_missing_required_file_is_reported(tmp_path: Path, relative: str, message: str) -> None:
@@ -73,29 +79,21 @@ def test_removed_repository_concepts_are_reported(tmp_path: Path) -> None:
     (collection / "domain.yaml").write_text("name: old\n")
     (collection / "kits").mkdir()
     (task / "files").mkdir()
+    (task / "verify").mkdir()
     report = messages(collection)
     assert "stable name" in report
     assert "helpers below the owning Task" in report
     assert "top-level files/" in report
-
-
-@pytest.mark.parametrize("field", ["image", "setup", "verify"])
-def test_removed_manifest_asset_fields_have_migration_guidance(tmp_path: Path, field: str) -> None:
-    task = scaffold_task(tmp_path / "fresh")
-    manifest = task / "task.yaml"
-    manifest.write_text(manifest.read_text() + f"\n{field}:\n  assets: []\n")
-    report = messages(task)
-    assert "asset declarations are removed" in report
-    assert f"{field}/assets" in report
+    assert "unsupported top-level Task entry" in report
 
 
 def test_fixed_installation_in_setup_is_reported(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "fresh")
-    (task / "setup").mkdir()
-    entry = task / "setup" / "run.sh"
+    (task / "environment" / "setup").mkdir()
+    entry = task / "environment" / "setup" / "setup.sh"
     entry.write_text("#!/bin/sh\napt-get install -y jq\n")
     entry.chmod(0o755)
-    assert "belongs in image/Dockerfile" in messages(task)
+    assert "belongs in the image's Dockerfile" in messages(task)
 
 
 @pytest.mark.parametrize(
@@ -103,30 +101,49 @@ def test_fixed_installation_in_setup_is_reported(tmp_path: Path) -> None:
 )
 def test_any_base_image_is_accepted(tmp_path: Path, base: str) -> None:
     task = scaffold_task(tmp_path / "fresh")
-    (task / "image" / "Dockerfile").write_text(f"FROM {base}\n")
+    (task / "environment" / "Dockerfile").write_text(f"FROM {base}\n")
     assert messages(task) == ""
 
 
+def _vm_task(tmp_path: Path) -> Path:
+    task = scaffold_task(tmp_path / "fresh")
+    config = task / "task.toml"
+    config.write_text(config.read_text() + '\n[ale]\nsandbox = "vm"\n')
+    return task
+
+
 def test_vm_final_stage_owns_no_boot_contract(tmp_path: Path) -> None:
-    task = scaffold_task(tmp_path / "fresh")
-    manifest = task / "task.yaml"
-    manifest.write_text(manifest.read_text().replace("kind: container", "kind: vm"))
-    dockerfile = task / "image" / "Dockerfile"
-    dockerfile.write_text(f'FROM {VM_BASE}\nCMD ["bash"]\n')
+    task = _vm_task(tmp_path)
+    (task / "environment" / "Dockerfile").write_text(f'FROM {VM_BASE}\nCMD ["bash"]\n')
     assert "CMD" in messages(task)
+    (task / "environment" / "Dockerfile").write_text(f"FROM {VM_BASE}\n")
+    (task / "environment" / "mkosi.conf").write_text("")
+    assert "ALE-owned" in messages(task)
+    # Setup is not part of the image build, so its file names are its own.
+    (task / "environment" / "mkosi.conf").unlink()
+    (task / "environment" / "setup").mkdir()
+    (task / "environment" / "setup" / "mkosi.conf").write_text("")
+    assert "ALE-owned" not in messages(task)
 
 
-def test_ref_only_assets_are_rejected(tmp_path: Path) -> None:
+def test_assets_without_a_build_are_reported(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "fresh")
-    (task / "image" / "Dockerfile").unlink()
-    manifest = task / "task.yaml"
-    manifest.write_text(
-        manifest.read_text().replace("kind: container", "kind: vm\n  ref: ghcr.io/acme/task-vm:v1")
+    config = task / "task.toml"
+    config.write_text(
+        config.read_text().replace("memory_mb = 4096", 'memory_mb = 4096\ndocker_image = "x:1"')
     )
-    assets = task / "image" / "assets"
-    assets.mkdir()
-    (assets / "unused.bin").write_bytes(b"unused")
-    assert "image/assets" in messages(task)
+    (task / "environment" / "Dockerfile").unlink()
+    (task / "environment" / "assets").mkdir()
+    (task / "environment" / "assets" / "unused.bin").write_bytes(b"unused")
+    assert "environment/assets is unused" in messages(task)
+
+    task = _vm_task(tmp_path / "vm")
+    (task / "environment" / "Dockerfile").unlink()
+    config = task / "task.toml"
+    config.write_text(config.read_text() + 'vm_image = "ghcr.io/acme/task-vm:v1"\n')
+    (task / "environment" / "assets").mkdir()
+    (task / "environment" / "assets" / "unused.bin").write_bytes(b"unused")
+    assert "environment/assets is unused" in messages(task)
 
 
 def test_assets_cli_accepts_multiple_paths_collection_and_force(

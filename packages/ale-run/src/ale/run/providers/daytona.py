@@ -620,7 +620,7 @@ class DaytonaProvider(Provider):
 
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
         if image.kind is not ImageKind.CONTAINER:
-            raise ProviderCapabilityError("DaytonaProvider requires image.kind=container")
+            raise ProviderCapabilityError("DaytonaProvider requires a container image")
         prepared = await resolve_container_image(image) if isinstance(image, ImageRef) else image
         resolved = await resolve_prepared_container_image(prepared)
         await self._require_usable(prepared.runtime_ref, resolved.observed_ref)
@@ -638,7 +638,7 @@ class DaytonaProvider(Provider):
     async def create(self, request: SandboxRequest) -> Sandbox:
         self.accepts(request)
         if request.image_kind is not ImageKind.CONTAINER:
-            raise ProviderCapabilityError("DaytonaProvider requires image.kind=container")
+            raise ProviderCapabilityError("DaytonaProvider requires a container image")
         local = await resolve_prepared_container_image(request.prepared_image)
         framed = await with_framework(local.observed_identity, user=request.user, sudo=request.sudo)
         await self._require_usable(request.prepared_image.runtime_ref, framed)

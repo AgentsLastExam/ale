@@ -54,7 +54,7 @@ def test_real_subagent_work_lands_in_its_own_trajectory(tmp_path: Path, harness:
     refs = _refs(trajectory)
 
     assert result["status"] == "completed", result
-    assert result["rewards"] == {"overall": 1.0}, result
+    assert result["rewards"] == {"reward": 1.0}, result
     # Every native child session was linked to its spawn and converted.
     assert not [
         issue

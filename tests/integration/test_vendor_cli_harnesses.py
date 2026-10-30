@@ -29,7 +29,6 @@ from ale.core.harness import (
 from ale.core.sandbox import Identity, Sandbox, SandboxRequest
 from ale.core.taskspec import NetworkPolicy, Resources, StdioMcpServer
 from ale.core.trace import read_jsonl
-from ale.run.environments.log_mirror import LogMirror
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
@@ -37,6 +36,7 @@ from ale.run.harnesses.kimi_code import KimiCodeHarness
 from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
 from ale.run.harnesses.zcode import ZCodeHarness
+from ale.run.protocol.log_mirror import LogMirror
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
 from tests.support import CONTAINER_BASE, prepare_reference

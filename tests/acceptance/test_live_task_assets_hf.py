@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from ale.run.assets import (
+    ASSET_ROOTS,
     asset_status,
     pull_assets,
     push_assets,
@@ -34,8 +35,8 @@ def _clean_copy(task: Path, tmp_path: Path) -> Path:
     )
     subprocess.run(["git", "init", "-q", str(clone)], check=True)
     copied = clone / relative
-    for stage in ("image", "setup", "verify", "oracle"):
-        shutil.rmtree(copied / stage / "assets", ignore_errors=True)
+    for root in ASSET_ROOTS:
+        shutil.rmtree(copied / root, ignore_errors=True)
     return copied
 
 
@@ -50,10 +51,10 @@ def test_authenticated_push_and_pinned_private_pull_round_trip(tmp_path: Path) -
     pulled = pull_assets([clean_task], collection=collection, revision=pushed[0].commit)
     assert pulled[0].commit == pushed[0].commit
     assert all(not item.dirty for item in asset_status([clean_task]))
-    assert (clean_task / "image/assets/public.txt").is_file()
-    assert (clean_task / "setup/assets/service-response.txt").is_file()
-    assert (clean_task / "verify/assets/expected.json").is_file()
-    assert (clean_task / "oracle/assets/result.json").is_file()
+    assert (clean_task / "environment/assets/public.txt").is_file()
+    assert (clean_task / "environment/assets/service-response.txt").is_file()
+    assert (clean_task / "tests/assets/expected.json").is_file()
+    assert (clean_task / "solution/assets/result.json").is_file()
 
 
 @pytest.mark.needs_hf_write

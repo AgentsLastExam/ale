@@ -14,12 +14,12 @@ import typer
 from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config, select_agent_name
 from ale.core.errors import AleError, ConfigError, ProviderCapabilityError, TaskDefinitionError
 from ale.core.harness import EffectiveAgentResources, Harness
-from ale.core.ids import content_hash
+from ale.core.ids import content_hash, task_component
 from ale.core.lock import AssetProvenance, ResumedFrom, RunLock
 from ale.core.result import ResultRecord
 from ale.core.sandbox import ImageKind, PreparedTaskImage, Sandbox, SandboxRequest, SandboxRole
-from ale.core.task import TaskAssetObservation
-from ale.core.taskspec import OperatingSystem, VerificationMode
+from ale.core.task import Stage, TaskAssetObservation
+from ale.core.taskspec import VerificationMode
 from ale.core.trajectory import AtifTrajectory
 from ale.core.validation import (
     TaskValidationObservation,
@@ -31,11 +31,6 @@ from ale.core.validation import (
 from ale.core.verdict import Status, Verdict
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.assets import observe_task_assets
-from ale.run.environments.standard import (
-    Resume,
-    RetainedVerificationEnvironment,
-    StandardEnvironment,
-)
 from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
@@ -57,6 +52,7 @@ from ale.run.harnesses.qwen_code import QwenCodeHarness
 from ale.run.harnesses.zcode import ZCodeHarness
 from ale.run.ledger import Ledger, episode_identity
 from ale.run.lint import lint_repository
+from ale.run.protocol.episode_protocol import EpisodeProtocol, Resume, ReverificationProtocol
 from ale.run.provenance import (
     ProvenanceInputs,
     agent_provenance,
@@ -66,7 +62,7 @@ from ale.run.provenance import (
 from ale.run.providers import ProviderRegistry, provider_named
 from ale.run.recording import atomic_write_json
 from ale.run.secrets import provider_credentials
-from ale.run.sources import parse_task_reference, resolve, select_tasks
+from ale.run.sources import resolve
 from ale.run.subscription import SubscriptionCredential, resolve_authentication
 from ale.run.task_images import (
     ImagePreparationResult,
@@ -74,7 +70,7 @@ from ale.run.task_images import (
     prepare_task_image_result,
     prepare_verifier_image_result,
 )
-from ale.run.tasksets.manifest import VERIFY_DIR, ManifestTask, load_tasks
+from ale.run.tasksets.manifest import ManifestTask, load_tasks
 from ale.run.verification import preflight_judges
 
 EXIT_SOME_FAILED = 2
@@ -244,12 +240,8 @@ async def _run_one(
         return EXIT_BAD_REFERENCE
     providers = ProviderRegistry(settings)
     try:
-        task_reference = parse_task_reference(reference)
-        resolved = resolve(task_reference.source)
-        tasks = select_tasks(
-            list(load_tasks(resolved.task_dir)),
-            task_reference.variants,
-        )
+        resolved = resolve(reference)
+        tasks = load_tasks(resolved.task_dir)
         for task in tasks:
             harness.validate_os(task.spec.os)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
@@ -340,7 +332,7 @@ async def _run_one(
         async def execute() -> EpisodeResult:
             return await run_episode(
                 task,
-                StandardEnvironment(
+                EpisodeProtocol(
                     harness,
                     max_steps=settings.agent.max_steps,
                     timeouts=settings.timeouts,
@@ -420,7 +412,7 @@ async def _run_one(
                 timeouts=settings.timeouts,
             )
             if task.prepared_image is None:
-                raise TaskDefinitionError(f"solver image was not prepared for {task.spec.label}")
+                raise TaskDefinitionError(f"solver image was not prepared for {task.spec.name}")
             identity = episode_identity(
                 task.spec,
                 task_digest=task.task_digest,
@@ -450,9 +442,9 @@ async def _run_one(
             )
             for index in range(settings.episodes):
                 if index < done:
-                    typer.echo(f"skip  {task.spec.label}: episode {index + 1} already complete")
+                    typer.echo(f"skip  {task.spec.name}: episode {index + 1} already complete")
                     continue
-                episode_id = f"{task.spec.name}-{uuid.uuid4().hex[:8]}"
+                episode_id = f"{task_component(task.spec.name)}-{uuid.uuid4().hex[:8]}"
                 ledger.queue_episode(
                     episode_id=episode_id,
                     run_id=run_id,
@@ -490,11 +482,10 @@ async def _reverify(
 ) -> int:
     """Reverify retained solver episodes without launching their Harness again."""
     try:
-        task_reference = parse_task_reference(reference)
-        resolved = resolve(task_reference.source)
-        tasks = select_tasks(list(load_tasks(resolved.task_dir)), task_reference.variants)
+        resolved = resolve(reference)
+        tasks = load_tasks(resolved.task_dir)
         providers = ProviderRegistry(settings)
-        by_id = {(str(task.spec.name), task.spec.variant): task for task in tasks}
+        by_name = {str(task.spec.name): task for task in tasks}
         sources = _retained_source_episodes(source_run)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
     except (AleError, OSError, ValueError) as error:
@@ -507,7 +498,7 @@ async def _reverify(
         run_dir = runs_dir / f"reverify-{uuid.uuid4().hex[:8]}"
         failures = 0
         for source_dir, source_result, source_lock, handle in sources:
-            task = by_id.get((str(source_lock.task.name), source_lock.task.variant))
+            task = by_name.get(str(source_lock.task.name))
             if task is None:
                 typer.echo(
                     f"source episode {source_result.episode_id} does not match the selected Task",
@@ -520,7 +511,7 @@ async def _reverify(
                 or task.non_verifier_digest != source_lock.task.non_verifier_digest
             ):
                 typer.echo(
-                    f"{task.spec.name}: content outside verify/ changed or source evidence is "
+                    f"{task.spec.name}: content outside tests/ changed or source evidence is "
                     "missing; run the solver again",
                     err=True,
                 )
@@ -611,7 +602,7 @@ async def _reverify(
                 solver = await _attach_retained(handle, request, source_lock)
                 return await run_episode(
                     task,
-                    RetainedVerificationEnvironment(
+                    ReverificationProtocol(
                         solver, source_dir, source_lock.sandbox, timeouts=settings.timeouts
                     ),
                     providers,
@@ -787,7 +778,7 @@ def _same_assets(recorded: AssetProvenance | None, current: TaskAssetObservation
     """Whether a Task's assets are provably the committed version a source run used.
 
     Asset bytes are identified by their commit rather than hashed, so any asset change,
-    even one only below verify/assets, needs a fresh solver run.
+    even one only below tests/assets, needs a fresh solver run.
     """
     if recorded is None or current is None:
         return recorded is None and current is None
@@ -821,12 +812,8 @@ def _check_reportable(result: EpisodeResult) -> bool:
 async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
     providers = ProviderRegistry(settings)
     try:
-        task_reference = parse_task_reference(reference)
-        resolved = resolve(task_reference.source)
-        tasks = select_tasks(
-            list(load_tasks(resolved.task_dir)),
-            task_reference.variants,
-        )
+        resolved = resolve(reference)
+        tasks = load_tasks(resolved.task_dir)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
     except AleError as error:
@@ -851,7 +838,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                     ("untouched", NopHarness(), False),
                     ("oracle", OracleHarness(), True),
                 ):
-                    episode_id = f"{spec.name}-{pass_name}-{uuid.uuid4().hex[:8]}"
+                    episode_id = f"{task_component(spec.name)}-{pass_name}-{uuid.uuid4().hex[:8]}"
                     inputs = ProvenanceInputs(
                         source=resolved.source,
                         agent=agent_provenance(
@@ -890,7 +877,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                     ) -> EpisodeResult:
                         return await run_episode(
                             task,
-                            StandardEnvironment(
+                            EpisodeProtocol(
                                 harness,
                                 agent_enabled=agent_enabled,
                                 max_steps=settings.agent.max_steps,
@@ -930,7 +917,6 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                 observations.append(
                     TaskValidationObservation(
                         name=str(spec.name),
-                        variant=spec.variant,
                         spec_hash=spec.spec_hash,
                         untouched=_validation_attempt(zero_result, run_dir),
                         oracle=_validation_attempt(one_result, run_dir),
@@ -943,7 +929,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                 failures += 0 if passed else 1
                 mark = "WARN" if warnings else ("ok  " if passed else "FAIL")
                 typer.echo(
-                    f"{mark}  {spec.label}: untouched={_validation_outcome(zero_result.verdict)}, "
+                    f"{mark}  {spec.name}: untouched={_validation_outcome(zero_result.verdict)}, "
                     f"oracle={_validation_outcome(one_result.verdict)}"
                 )
         finally:
@@ -965,12 +951,8 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
 
 async def _prepare_only(reference: str, settings: RunConfig) -> int:
     try:
-        task_reference = parse_task_reference(reference)
-        resolved = resolve(task_reference.source)
-        tasks = select_tasks(
-            list(load_tasks(resolved.task_dir)),
-            task_reference.variants,
-        )
+        resolved = resolve(reference)
+        tasks = load_tasks(resolved.task_dir)
         for root in {task.folder.root for task in tasks}:
             if findings := lint_repository(root):
                 raise TaskDefinitionError(
@@ -1008,7 +990,7 @@ async def _judge_gateway(settings: RunConfig) -> Gateway | None:
 
 
 def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
-    return [task.folder.root / VERIFY_DIR for task in tasks]
+    return [task.folder.root / Stage.TESTS for task in tasks]
 
 
 async def _prepare_images(
@@ -1031,9 +1013,7 @@ async def _prepare_images(
                 "sudo": task.spec.resources.sudo,
             }
         )
-        windows_build = (
-            task.spec.os is OperatingSystem.WINDOWS and task.folder.image_script is not None
-        )
+        windows_build = spec.base_ref is not None
         image = None if windows_build else by_source.get(key)
         if image is None:
             prepared = await prepare_task_image_result(task, providers)
@@ -1050,14 +1030,12 @@ async def _prepare_images(
         if verify.environment_mode is VerificationMode.SHARED:
             task.prepared_verifier_image = None
             continue
-        if task.folder.verifier_dockerfile is None and verify.image is None:
+        if verify.image is None:
             task.prepared_verifier_image = image
             reused = await prepare_verifier_image_result(task, providers)
             if reused is not None:
                 results.append(reused)
             continue
-        if verify.image is None:
-            raise TaskDefinitionError("verify/Dockerfile requires verify.image.kind")
         verifier_key = content_hash(
             {
                 "role": "verifier",
@@ -1087,9 +1065,8 @@ async def _prepare_images(
 def _reused_result(
     task: ManifestTask, role: str, image: PreparedTaskImage
 ) -> ImagePreparationResult:
-    spec = task.spec
     return ImagePreparationResult(
-        task=f"{spec.name}@{spec.variant}",
+        task=str(task.spec.name),
         role=role,
         image=image,
         steps=(
@@ -1105,11 +1082,11 @@ def _reused_result(
 
 
 def _is_full_reward_map(rewards: dict[str, float] | None) -> bool:
-    return bool(rewards) and rewards.get("overall") == 1.0
+    return bool(rewards) and rewards.get("reward") == 1.0
 
 
 def _is_zero_reward_map(rewards: dict[str, float] | None) -> bool:
-    return bool(rewards) and rewards.get("overall") == 0.0
+    return bool(rewards) and rewards.get("reward") == 0.0
 
 
 def _validation_notices(
@@ -1132,7 +1109,7 @@ def _validation_notices(
         failures.append(
             ValidationNotice(
                 code="untouched_nonzero",
-                message=f"untouched overall must be zero, got {untouched.rewards}",
+                message=f"untouched reward must be zero, got {untouched.rewards}",
             )
         )
 
@@ -1148,13 +1125,13 @@ def _validation_notices(
             ValidationNotice(
                 code="oracle_not_full",
                 message=(
-                    "oracle overall must be one after rounding to two decimals, "
+                    "oracle reward must be one after rounding to two decimals, "
                     f"got {oracle.rewards}"
                 ),
             )
         )
 
-    return ("overall",), (), tuple(failures)
+    return ("reward",), (), tuple(failures)
 
 
 def _validation_attempt(result: EpisodeResult, run_dir: Path) -> ValidationAttempt:

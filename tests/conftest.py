@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import os
 import subprocess
-import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
-import yaml
 
-from tests.support import CONTAINER_BASE
+from tests.support import CONTAINER_BASE, write_task
 
 # Typer forces Rich terminal styling whenever GITHUB_ACTIONS is set, which splits option
 # names in help text with escape codes. Tests read the same plain output everywhere.
@@ -39,67 +38,27 @@ def write_task_repo(tmp_path: Path) -> Callable[..., Path]:
         name: str = "tasks-example",
         *,
         tasks: tuple[str, ...] = ("demo",),
-        stage_assets: tuple[str, ...] = (),
-        manifest_suffix: str = "",
-        image: dict[str, str] | None = None,
-        with_image_dockerfile: bool = True,
-        verifier_image: dict[str, str] | None = None,
-        with_verifier_dockerfile: bool = False,
+        asset_roots: tuple[str, ...] = (),
+        config: Mapping[str, Any] | None = None,
+        dockerfile: str | None = f"FROM {CONTAINER_BASE}\n",
+        verifier_dockerfile: bool = False,
     ) -> Path:
         root = tmp_path / name
         root.mkdir()
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         for task_name in tasks:
-            task = root / "tasks" / task_name
-            for directory in ("image", "verify", "oracle"):
-                (task / directory).mkdir(parents=True, exist_ok=True)
-            manifest: dict[str, object] = {
-                "spec_type": "core/v1",
-                "name": task_name,
-                "image": image or {"kind": "container"},
-            }
-            if verifier_image is not None:
-                manifest["verify"] = {
-                    "environment_mode": "separate",
-                    "image": verifier_image,
-                    "resources": {
-                        "cpus": 1,
-                        "memory_mb": 512,
-                        "storage_mb": None,
-                        "gpus": 0,
-                    },
-                }
-            (task / "task.yaml").write_text(
-                yaml.safe_dump(manifest, sort_keys=False) + manifest_suffix,
-                encoding="utf-8",
+            task = write_task(
+                root / "tasks" / task_name,
+                name=f"agentslastexam/{task_name}",
+                config=config,
+                dockerfile=dockerfile,
             )
-            (task / "instruction.md").write_text("Do the task.\n", encoding="utf-8")
-            if with_image_dockerfile:
-                (task / "image" / "Dockerfile").write_text(
-                    f"FROM {CONTAINER_BASE}\n",
-                    encoding="utf-8",
-                )
-            if with_verifier_dockerfile:
-                (task / "verify" / "Dockerfile").write_text(
-                    f"FROM {CONTAINER_BASE}\n",
-                    encoding="utf-8",
-                )
-            for stage in ("verify", "oracle"):
-                entry = task / stage / "run.sh"
-                entry.write_text(
-                    textwrap.dedent(
-                        """\
-                        #!/usr/bin/env bash
-                        set -euo pipefail
-                        """
-                    ),
-                    encoding="utf-8",
-                )
-                entry.chmod(0o755)
-            for stage in stage_assets:
-                assets = task / stage / "assets"
+            if verifier_dockerfile:
+                (task / "tests" / "Dockerfile").write_text(f"FROM {CONTAINER_BASE}\n")
+            for relative in asset_roots:
+                assets = task / relative
                 assets.mkdir(parents=True, exist_ok=True)
-                (assets / "fixture.txt").write_text(stage, encoding="utf-8")
+                (assets / "fixture.txt").write_text(relative, encoding="utf-8")
         return root
 
     return write

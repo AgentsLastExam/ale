@@ -32,7 +32,7 @@ def test_recursive_selection_deduplicates_overlapping_roots(write_task_repo) -> 
 def test_task_local_assets_have_one_commit_and_dirty_observation(write_task_repo) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
     task_path = repository / "tasks/one"
-    asset = task_path / "image/assets/data.txt"
+    asset = task_path / "environment/assets/data.txt"
     asset.parent.mkdir()
     asset.write_text("one")
     task = load_tasks(task_path)[0]
@@ -54,7 +54,7 @@ def test_task_local_assets_have_one_commit_and_dirty_observation(write_task_repo
 def test_removing_a_clean_asset_root_is_dirty_until_synchronized(write_task_repo) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
     task_path = repository / "tasks/one"
-    asset_root = task_path / "verify/assets"
+    asset_root = task_path / "tests/assets"
     asset_root.mkdir()
     (asset_root / "expected.json").write_text("{}")
     selection = select_asset_repositories([task_path])[0]
@@ -71,7 +71,7 @@ def test_removing_a_clean_asset_root_is_dirty_until_synchronized(write_task_repo
 def test_old_marker_without_inventory_is_dirty(write_task_repo) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
     task_path = repository / "tasks/one"
-    asset = task_path / "image/assets/data.txt"
+    asset = task_path / "environment/assets/data.txt"
     asset.parent.mkdir()
     asset.write_text("one")
     state = repository / ".ale-cache/assets.json"
@@ -98,7 +98,7 @@ def test_old_marker_without_inventory_is_dirty(write_task_repo) -> None:  # type
 
 def test_status_does_not_read_asset_bytes(write_task_repo, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
-    asset = repository / "tasks/one/oracle/assets/reference.bin"
+    asset = repository / "tasks/one/solution/assets/reference.bin"
     asset.parent.mkdir()
     asset.write_bytes(b"large")
 

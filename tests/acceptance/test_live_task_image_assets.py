@@ -9,34 +9,31 @@ from ale.core.sandbox import SandboxRequest
 from ale.run.providers.docker import DockerProvider
 from ale.run.task_images import prepare_task_image
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import CONTAINER_BASE, provider_registry
+from tests.support import CONTAINER_BASE, provider_registry, write_task
 
 pytestmark = [pytest.mark.needs_docker]
 
 
-def write_task(repository: Path) -> Path:
+def write_asset_task(repository: Path) -> Path:
     subprocess.run(["git", "init", "-q", str(repository)], check=True)
-    path = repository / "tasks/live-image-asset"
-    for directory in ("image", "verify", "oracle"):
-        (path / directory).mkdir(parents=True, exist_ok=True)
-    (path / "task.yaml").write_text(
-        "spec_type: core/v1\nname: live-image-asset\nimage: {kind: container}\n",
-        encoding="utf-8",
+    path = write_task(
+        repository / "tasks/live-image-asset",
+        name="agentslastexam/live-image-asset",
+        dockerfile=(
+            f"FROM {CONTAINER_BASE}\n"
+            "COPY assets/public.txt /home/user/input/public.txt\n"
+            "RUN chown -R user:user /home/user/input\n"
+        ),
+        instruction="Inspect /home/user/input/public.txt.\n",
+        test="#!/usr/bin/env bash\nexit 0\n",
+        solve="#!/usr/bin/env bash\nexit 0\n",
     )
-    (path / "instruction.md").write_text("Inspect /home/user/input/public.txt.\n")
-    (path / "image" / "Dockerfile").write_text(
-        f"FROM {CONTAINER_BASE}\n"
-        "COPY assets/public.txt /home/user/input/public.txt\n"
-        "RUN chown -R user:user /home/user/input\n"
-    )
-    (path / "image" / "assets").mkdir()
-    (path / "image" / "assets" / "public.txt").write_text("public")
-    (path / "verify" / "private-marker").write_text("must-not-enter-image")
-    (path / "verify" / "run.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
-    (path / "oracle" / "private-marker").write_text("must-not-enter-image")
-    (path / "oracle" / "run.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
-    for entry in (path / "verify" / "run.sh", path / "oracle" / "run.sh"):
-        entry.chmod(0o755)
+    (path / "environment" / "assets").mkdir()
+    (path / "environment" / "assets" / "public.txt").write_text("public")
+    (path / "environment" / "setup").mkdir()
+    (path / "environment" / "setup" / "private-marker").write_text("must-not-enter-image")
+    (path / "tests" / "private-marker").write_text("must-not-enter-image")
+    (path / "solution" / "private-marker").write_text("must-not-enter-image")
     return path
 
 
@@ -44,7 +41,7 @@ def write_task(repository: Path) -> Path:
 async def test_fixed_image_context_is_loaded_and_withholds_other_stages(
     tmp_path: Path,
 ) -> None:
-    task_path = write_task(tmp_path / "ale-tasks-live")
+    task_path = write_asset_task(tmp_path / "ale-tasks-live")
     task = load_tasks(task_path)[0]
     provider = DockerProvider()
     prepared = await prepare_task_image(task, provider_registry(provider))

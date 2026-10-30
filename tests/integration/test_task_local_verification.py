@@ -9,9 +9,9 @@ import pytest
 from ale.core.sandbox import ImageRef, PreparedTaskImage
 from ale.core.taskspec import ImageKind, ImageSpec, VerifySpec
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import (
@@ -19,7 +19,7 @@ from ale.run.task_images import (
     prepare_verifier_image_result,
 )
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import CONTAINER_BASE, provider_registry
+from tests.support import CONTAINER_BASE, edit_task_config, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -91,7 +91,7 @@ def task_repository(tmp_path: Path, name: str) -> tuple[Path, Path]:
 async def execute(task_path: Path, run_dir: Path):  # type: ignore[no-untyped-def]
     return await run_episode(
         load_tasks(task_path)[0],
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=run_dir,
         collect_artifacts=True,
@@ -170,7 +170,7 @@ async def test_local_separate_verifier_builds_declared_kind(
     tmp_path: Path, kind: ImageKind, monkeypatch: pytest.MonkeyPatch, framework_layer: None
 ) -> None:
     task = load_tasks(scaffold_task(tmp_path / f"local-{kind}"))[0]
-    (task.folder.root / "verify/Dockerfile").write_text("FROM fixture\n")
+    (task.folder.root / "tests/Dockerfile").write_text("FROM fixture\n")
     task.spec = task.spec.model_copy(
         update={
             "verify": VerifySpec.model_validate(
@@ -213,80 +213,80 @@ async def test_local_separate_verifier_builds_declared_kind(
 @pytest.mark.asyncio
 async def test_task_local_helper_and_framework_package_are_importable(tmp_path: Path) -> None:
     task_path = scaffold_task(tmp_path / "local-helper")
-    (task_path / "verify" / "helper.py").write_text(
+    (task_path / "tests" / "helper.py").write_text(
         "from ale_verify import checks\n"
         "\n"
         "def result():\n"
         "    return checks.text_equals('/home/user/output/result.txt', 'hello\\n')\n"
     )
-    (task_path / "verify" / "verify.py").write_text(
+    (task_path / "tests" / "verify.py").write_text(
         "from ale_verify import write\n"
         "from helper import result\n"
         "v = {}\n"
         "v['local'] = result()['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await execute(task_path, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
-async def test_oracle_assets_are_staged_with_the_oracle(tmp_path: Path) -> None:
-    task = scaffold_task(tmp_path / "oracle-assets")
-    asset = task / "oracle/assets/result.txt"
+async def test_solution_assets_are_staged_with_the_solution(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "solution-assets")
+    asset = task / "solution/assets/result.txt"
     asset.parent.mkdir(parents=True)
     asset.write_text("hello\n")
-    (task / "oracle/run.sh").write_text(
+    (task / "solution/solve.sh").write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "cp assets/result.txt /home/user/output/result.txt\n"
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
-async def test_verify_assets_are_withheld_then_available_by_relative_path(
+async def test_tests_assets_are_withheld_then_available_by_relative_path(
     tmp_path: Path,
 ) -> None:
     _, task = task_repository(tmp_path, "external-reference")
-    setup = task / "setup"
+    setup = task / "environment/setup"
     setup.mkdir()
-    (setup / "run.sh").write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\ntest ! -e /opt/ale/verify/assets/reference.txt\n"
+    (setup / "setup.sh").write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\ntest ! -e /opt/ale/tests/assets/reference.txt\n"
     )
-    (setup / "run.sh").chmod(0o755)
-    reference = task / "verify/assets/reference.txt"
+    (setup / "setup.sh").chmod(0o755)
+    reference = task / "tests/assets/reference.txt"
     reference.parent.mkdir(parents=True)
     reference.write_text("withheld")
-    (task / "verify" / "verify.py").write_text(
+    (task / "tests" / "verify.py").write_text(
         "from ale_verify import checks, write\n"
         "v = {}\n"
         "v['reference'] = checks.text_equals('assets/reference.txt', 'withheld')['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
 async def test_no_assets_verifier_does_not_receive_a_synthetic_asset_root(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "no-assets")
-    (task / "verify" / "verify.py").write_text(
+    (task / "tests" / "verify.py").write_text(
         "from pathlib import Path\n"
         "from ale_verify import write\n"
         "v = {}\n"
         "v['absent'] = float(not Path('assets').exists())\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -294,7 +294,7 @@ async def test_missing_requested_verify_asset_is_a_task_error_not_zero(
     tmp_path: Path,
 ) -> None:
     task = scaffold_task(tmp_path / "missing-asset")
-    (task / "verify" / "verify.py").write_text(
+    (task / "tests" / "verify.py").write_text(
         "from pathlib import Path\nPath('assets/missing.json').read_text()\n"
     )
     result = await execute(task, tmp_path / "runs")
@@ -308,43 +308,40 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
     tmp_path: Path,
 ) -> None:
     task = scaffold_task(tmp_path / "separate")
-    (task / "task.yaml").write_text(
-        "spec_type: core/v1\n"
-        "name: separate\n"
-        "image: {kind: container}\n"
-        "resources: {cpus: 1, memory_mb: 512}\n"
-        "artifacts: [/home/user/output/result.json, /var/lib/ale-report]\n"
-        "verify:\n"
-        "  environment_mode: separate\n"
-        "  image: {kind: container}\n"
-        "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    edit_task_config(
+        task,
+        {
+            "artifacts": ["/home/user/output/result.json", "/var/lib/ale-report"],
+            "environment": {"memory_mb": 512},
+            "verifier": {"environment": {"cpus": 1, "memory_mb": 512}},
+        },
     )
     (task / "instruction.md").write_text("Produce both declared outputs.\n")
-    (task / "image/Dockerfile").write_text(
+    (task / "environment/Dockerfile").write_text(
         f"FROM {CONTAINER_BASE}\n"
         "RUN mkdir -p /home/user/output /var/lib/ale-report "
         "&& printf '{}\\n' > /home/user/output/result.json "
         "&& chown -R user:user /home/user/output /var/lib/ale-report\n"
     )
-    (task / "verify/Dockerfile").write_text(f"FROM {CONTAINER_BASE}\n")
-    (task / "oracle/run.sh").write_text(
+    (task / "tests/Dockerfile").write_text(f"FROM {CONTAINER_BASE}\n")
+    (task / "solution/solve.sh").write_text(
         "#!/bin/sh\nset -eu\n"
         'printf \'{"status":"ok"}\\n\' > /home/user/output/result.json\n'
         "printf ready > /var/lib/ale-report/state.txt\n"
     )
-    (task / "verify/verify.py").write_text(
+    (task / "tests/verify.py").write_text(
         "from ale_verify import checks, write\n"
         "v = {}\n"
         "v['file'] = checks.json_value('/home/user/output/result.json', 'status', 'ok')['score']\n"
         "v['directory'] = checks.text_equals('/var/lib/ale-report/state.txt', 'ready')['score']\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
 
     result = await execute(task, tmp_path / "runs")
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert [outcome.roles for outcome in result.record.sandboxes] == [
         ("solver",),
         ("verifier",),
@@ -355,52 +352,43 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "image_line",
-    [
-        "",
-        f"  image:\n    kind: container\n    ref: {CONTAINER_BASE}\n",
-    ],
-    ids=["solver-image", "external-ref"],
-)
+@pytest.mark.parametrize("named", [False, True], ids=["solver-image", "external-ref"])
 async def test_separate_verifier_image_sources_restore_identically_without_setup(
     tmp_path: Path,
-    image_line: str,
+    named: bool,
 ) -> None:
-    task = scaffold_task(tmp_path / ("separate-ref" if image_line else "separate-reuse"))
-    (task / "task.yaml").write_text(
-        "spec_type: core/v1\n"
-        "name: separate-source\n"
-        "image: {kind: container}\n"
-        "resources: {cpus: 1, memory_mb: 512}\n"
-        "artifacts: [/home/user/output/result.txt]\n"
-        "verify:\n"
-        "  environment_mode: separate\n"
-        f"{image_line}"
-        "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
+    task = scaffold_task(tmp_path / ("separate-ref" if named else "separate-reuse"))
+    verifier = {"cpus": 1, "memory_mb": 512} | ({"docker_image": CONTAINER_BASE} if named else {})
+    edit_task_config(
+        task,
+        {
+            "artifacts": ["/home/user/output/result.txt"],
+            "environment": {"memory_mb": 512},
+            "verifier": {"environment": verifier},
+        },
     )
     (task / "instruction.md").write_text("Write the requested output.\n")
-    setup = task / "setup/run.sh"
+    setup = task / "environment/setup/setup.sh"
     setup.parent.mkdir()
     setup.write_text("#!/bin/sh\nset -eu\ntouch /tmp/solver-setup-ran\n")
     setup.chmod(0o755)
-    (task / "oracle/run.sh").write_text(
+    (task / "solution/solve.sh").write_text(
         "#!/bin/sh\nset -eu\nprintf 'hello\\n' > /home/user/output/result.txt\n"
     )
-    (task / "verify/verify.py").write_text(
+    (task / "tests/verify.py").write_text(
         "from pathlib import Path\n"
         "from ale_verify import checks, write\n"
         "v = {}\n"
         "v['content'] = checks.text_equals('/home/user/output/result.txt', 'hello\\n')['score']\n"
         "v['fresh'] = float(not Path('/tmp/solver-setup-ran').exists())\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
 
     result = await execute(task, tmp_path / "runs")
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 @pytest.mark.asyncio
@@ -408,18 +396,15 @@ async def test_separate_verifier_image_sources_restore_identically_without_setup
 async def test_privileged_artifacts_glob_and_never_follow_links(tmp_path, mode):
     task = scaffold_task(tmp_path / f"copy-{mode}")
     (task / "instruction.md").write_text("Leave the prepared outputs for verification.\n")
-    (task / "task.yaml").write_text(
-        f"spec_type: core/v1\nname: copy-{mode}\nimage: {{kind: container}}\n"
-        "resources: {cpus: 1, memory_mb: 512}\n"
-        "artifacts: [/root/answers/*.sgf, /root/missing, /root/answers/result.json]\n"
-        + (
-            "verify:\n  environment_mode: separate\n"
-            "  resources: {cpus: 1, memory_mb: 512, storage_mb: null, gpus: 0}\n"
-            if mode == "separate"
-            else ""
-        )
+    edit_task_config(
+        task,
+        {
+            "artifacts": ["/root/answers/*.sgf", "/root/missing", "/root/answers/result.json"],
+            "environment": {"memory_mb": 512},
+            "verifier": {"environment_mode": mode},
+        },
     )
-    setup = task / "setup/run.sh"
+    setup = task / "environment/setup/setup.sh"
     setup.parent.mkdir()
     setup.write_text(
         "#!/bin/sh\nset -eu\n"
@@ -431,8 +416,8 @@ async def test_privileged_artifacts_glob_and_never_follow_links(tmp_path, mode):
         "ln -s /root/answers/result.json /root/answers/result.json/loop\n"
     )
     setup.chmod(0o755)
-    (task / "oracle/run.sh").write_text("#!/bin/sh\nset -eu\n[ $(id -u) -ne 0 ]\n")
-    (task / "verify/verify.py").write_text(
+    (task / "solution/solve.sh").write_text("#!/bin/sh\nset -eu\n[ $(id -u) -ne 0 ]\n")
+    (task / "tests/verify.py").write_text(
         "import os\n"
         "from pathlib import Path\n"
         "from ale_verify import write\n"
@@ -447,12 +432,12 @@ async def test_privileged_artifacts_glob_and_never_follow_links(tmp_path, mode):
         )
         + "v['directory'] = float(Path('/root/answers/result.json').is_dir())\n"
         "v['missing'] = float(not Path('/root/missing').exists())\n"
-        "v['overall'] = sum(v.values()) / len(v.values())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     entries = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"]
     assert not any(
         entry["source"].endswith(("game.sgf", "broken.sgf", "/loop")) for entry in entries

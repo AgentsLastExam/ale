@@ -4,7 +4,7 @@
 Sandbox, runs the selected Harness, verifies the result and writes the episode record.
 
 ```text
-CLI → Task loading/image preparation → Episode → StandardEnvironment
+CLI → Task loading/image preparation → Episode → EpisodeProtocol
     → Provider/Sandbox → Harness/Gateway → Verification → Result/RunLock
 ```
 
@@ -14,12 +14,12 @@ CLI → Task loading/image preparation → Episode → StandardEnvironment
 |---|---|
 | `src/ale/run/cli/main.py` | Typer command definitions and presentation |
 | `src/ale/run/cli/tasks.py` | Task run, validation and image-preparation composition |
-| `src/ale/run/environments/` | phase ordering for one Task episode |
+| `src/ale/run/protocol/` | the episode protocol: phase ordering for one Task episode |
 | `src/ale/run/providers/` | Docker and QEMU Sandbox implementations; see its local README |
 | `src/ale/run/harnesses/` | native agent adapters; see its local README |
 | `src/ale/run/gateway/` | authenticated model routing, limits and Transport Trace; see its local README |
 | `src/ale/run/guestd/` | dependency-free service running inside the Sandbox |
-| `src/ale/run/tasksets/` | Task-folder discovery and manifest loading |
+| `src/ale/run/tasksets/` | Task-folder discovery and `task.toml` loading |
 | `src/ale/run/episode.py` | one episode's resources, recording and terminal result |
 
 ## Common commands

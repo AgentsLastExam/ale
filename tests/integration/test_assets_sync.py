@@ -34,7 +34,7 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one", "two"))
-    preserved = repository / "tasks/two/image/assets/local.txt"
+    preserved = repository / "tasks/two/environment/assets/local.txt"
     preserved.parent.mkdir(parents=True)
     preserved.write_text("keep")
 
@@ -46,7 +46,7 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
     def snapshot_download(**kwargs: object) -> str:
         assert kwargs["revision"] == "a" * 40
         assert kwargs["token"] == "hf-checkout-token"
-        target = Path(str(kwargs["local_dir"])) / "tasks/one/image/assets"
+        target = Path(str(kwargs["local_dir"])) / "tasks/one/environment/assets"
         target.mkdir(parents=True)
         (target / "remote.txt").write_text("remote")
         return str(target)
@@ -60,12 +60,12 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
     assert result.commit == "a" * 40
     assert tokens == ["hf-checkout-token"]
     assert api.revision == "a" * 40
-    assert (repository / "tasks/one/image/assets/remote.txt").read_text() == "remote"
+    assert (repository / "tasks/one/environment/assets/remote.txt").read_text() == "remote"
     assert preserved.read_text() == "keep"
     assert all(not item.dirty for item in asset_status([repository / "tasks/one"]))
 
     task = repository / "tasks/one"
-    remote = task / "image/assets/remote.txt"
+    remote = task / "environment/assets/remote.txt"
     with pytest.raises(AssetError, match=r"already exist.*--force"):
         pull_assets([task], collection="agents-last-exam/assets-123")
     remote.write_text("local edit")
@@ -82,7 +82,7 @@ def test_pull_rejects_empty_existing_assets_before_contacting_hf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
-    (repository / "tasks/one/image/assets").mkdir()
+    (repository / "tasks/one/environment/assets").mkdir()
 
     def forbidden(**kwargs: object) -> None:
         pytest.fail("existing assets must be rejected before contacting HF")
@@ -97,7 +97,7 @@ def test_pull_preserves_assets_created_during_download(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
-    local = repository / "tasks/one/image/assets/local.txt"
+    local = repository / "tasks/one/environment/assets/local.txt"
     monkeypatch.setattr("huggingface_hub.HfApi", FakeApi)
 
     def download(**kwargs: object) -> str:
@@ -118,19 +118,20 @@ def test_pull_rolls_back_every_selected_root_when_replacement_fails(
 ) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
     task = repository / "tasks/one"
-    for stage in ("image", "setup", "oracle"):
-        root = task / stage / "assets"
+    roots = ("environment/assets", "tests/assets", "solution/assets")
+    for relative in roots:
+        root = task / relative
         root.mkdir(parents=True)
-        (root / "original.txt").write_text(stage)
+        (root / "original.txt").write_text(relative)
 
     monkeypatch.setattr("huggingface_hub.HfApi", FakeApi)
 
     def snapshot_download(**kwargs: object) -> str:
         downloaded = Path(str(kwargs["local_dir"]))
-        for stage in ("image", "setup", "oracle"):
-            root = downloaded / f"tasks/one/{stage}/assets"
+        for relative in roots:
+            root = downloaded / f"tasks/one/{relative}"
             root.mkdir(parents=True)
-            (root / "remote.txt").write_text(stage)
+            (root / "remote.txt").write_text(relative)
         return str(downloaded)
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
@@ -149,10 +150,9 @@ def test_pull_rolls_back_every_selected_root_when_replacement_fails(
     with pytest.raises(AssetError, match="simulated replacement failure"):
         pull_assets([task], collection="agents-last-exam/assets-123", force=True)
 
-    assert (task / "image/assets/original.txt").read_text() == "image"
-    assert (task / "setup/assets/original.txt").read_text() == "setup"
-    assert (task / "oracle/assets/original.txt").read_text() == "oracle"
-    assert not (task / "image/assets/remote.txt").exists()
+    for relative in roots:
+        assert (task / relative / "original.txt").read_text() == relative
+    assert not (task / "environment/assets/remote.txt").exists()
 
 
 def test_pull_rejects_public_dataset(

@@ -23,7 +23,6 @@ _EPISODE_COLUMNS = (
     "run_id",
     "identity",
     "task_id",
-    "variant",
     "episode_path",
     "status",
     "current_phase",
@@ -49,7 +48,6 @@ CREATE TABLE episodes (
     run_id          TEXT NOT NULL,
     identity        TEXT NOT NULL,
     task_id         TEXT NOT NULL,
-    variant         TEXT,
     episode_path    TEXT NOT NULL,
     status          TEXT NOT NULL,
     current_phase   TEXT,
@@ -160,13 +158,12 @@ class Ledger:
                 started = row["started_at"] if "started_at" in names else None
                 finished = row["finished_at"] if "finished_at" in names else None
                 self._db.execute(
-                    "INSERT INTO episodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO episodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         row["episode_id"],
                         row["run_id"],
                         row["identity"],
                         row["task_id"],
-                        row["variant"] if "variant" in names else None,
                         row["episode_id"],
                         row["status"],
                         None,
@@ -210,14 +207,13 @@ class Ledger:
         with self._lock:
             self._db.execute(
                 "INSERT INTO episodes "
-                "(episode_id, run_id, identity, task_id, variant, episode_path, "
-                "status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(episode_id, run_id, identity, task_id, episode_path, "
+                "status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     episode_id,
                     run_id,
                     identity,
                     str(spec.name),
-                    spec.variant,
                     episode_path or episode_id,
                     "queued",
                     now,

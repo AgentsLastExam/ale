@@ -2,7 +2,7 @@
 
 This package defines every shape that crosses a boundary in ALE: task
 specifications, evaluation results, traces, provenance records, and the abstract
-interfaces that providers, harnesses and environments implement.
+interfaces that providers and harnesses implement.
 
 Nothing here may import ``ale.run`` (Constitution II: structural decoupling) and
 nothing here may depend on a third-party evaluation framework (Constitution I:

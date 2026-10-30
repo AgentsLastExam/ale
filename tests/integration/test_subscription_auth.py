@@ -13,9 +13,9 @@ from ale.core.harness import AgentRun, AutonomousHarness, EffectiveAgentResource
 from ale.core.lock import TaskSource
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.gateway.session import SessionRegistry
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
 from ale.run.subscription import resolve_authentication
@@ -117,7 +117,7 @@ async def test_subscription_profile_stays_host_side(
 
     result = await run_episode(
         task,
-        StandardEnvironment(harness),
+        EpisodeProtocol(harness),
         provider_registry(DockerProvider()),
         run_dir=tmp_path / "runs",
         model=settings.agent.model,

@@ -213,7 +213,7 @@ are not repeated by another episode's retry or by resuming the same completed ru
 When automatic retries are enabled, failed attempts destroy their owned Sandboxes even
 when retention requested `keep`; successful final attempts use the configured policy.
 The same result layout applies to validation and separate reverification; their execution
-boundaries are specified in [Standard Environment](standard-environment.md).
+boundaries are specified in [Episode protocol](episode-protocol.md).
 
 ## Retention
 
@@ -249,7 +249,7 @@ its sanitized native stdout/stderr are retained as response events in
 
 ## Verification result
 
-`verification.json` preserves the complete Task-authored JSON result. Only `overall`
+`verification.json` preserves the complete Task-authored JSON result. Only `reward`
 is projected into episode rewards. `llm-judge.jsonl` and `agent-judge.jsonl` sit alongside
 it and are collected independently, including after failure.
 See [Verification](verification.md) for the result and tool contracts.

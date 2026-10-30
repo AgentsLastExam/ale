@@ -63,7 +63,6 @@ class TaskValidationObservation(BaseModel):
     model_config = _FROZEN
 
     name: str = Field(min_length=1)
-    variant: str = Field(min_length=1)
     spec_hash: str = Field(pattern=_DIGEST)
     untouched: ValidationAttempt
     oracle: ValidationAttempt

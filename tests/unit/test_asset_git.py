@@ -71,7 +71,7 @@ def test_checkpoint_restore_and_isolated_task_worktrees(
     write_task_repo, asset_remote: Path, tmp_path: Path
 ) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo(
-        "tasks-example", tasks=("one", "two"), stage_assets=("image", "verify")
+        "tasks-example", tasks=("one", "two"), asset_roots=("environment/assets", "tests/assets")
     )
     one, two = (repository / f"tasks/{name}" for name in ("one", "two"))
     first = checkpoint_assets(one, workspace=tmp_path / "assets-one", branch="brew/one")
@@ -87,24 +87,27 @@ def test_checkpoint_restore_and_isolated_task_worktrees(
     assert git(first.workspace, "rev-parse", "--git-common-dir") == git(
         second.workspace, "rev-parse", "--git-common-dir"
     )
-    (one / "verify/assets/fixture.txt").write_text("changed verifier")
+    (one / "tests/assets/fixture.txt").write_text("changed verifier")
     with pytest.raises(AssetError, match="differ"):
         check_assets(one, first)
     changed = checkpoint_assets(one, workspace=first.workspace, branch="brew/one")
-    assert diff_assets(first, changed) == ["verify/assets/fixture.txt"]
-    assert (second.workspace / "tasks/two/verify/assets/fixture.txt").read_text() == "verify"
+    assert diff_assets(first, changed) == ["tests/assets/fixture.txt"]
+    assert (second.workspace / "tasks/two/tests/assets/fixture.txt").read_text() == "tests/assets"
     assert "tasks/two" not in git(
         first.workspace, "ls-tree", "-r", "--name-only", changed.commit or "HEAD"
     )
 
     restore_assets(one, first)
-    assert (one / "verify/assets/fixture.txt").read_text() == "verify"
+    assert (one / "tests/assets/fixture.txt").read_text() == "tests/assets"
     check_assets(one, first)
     destination = tmp_path / "materialized"
     materialize_assets(changed, destination)
-    assert (destination / "verify/assets/fixture.txt").read_text() == "changed verifier"
-    assert (destination / "image/assets/fixture.txt").read_text() == "image"
-    pointer = git(first.workspace, "show", f"{first.commit}:tasks/one/image/assets/fixture.txt")
+    assert (destination / "tests/assets/fixture.txt").read_text() == "changed verifier"
+    image_asset = destination / "environment/assets/fixture.txt"
+    assert image_asset.read_text() == "environment/assets"
+    pointer = git(
+        first.workspace, "show", f"{first.commit}:tasks/one/environment/assets/fixture.txt"
+    )
     assert pointer.startswith("version https://git-lfs.github.com/spec/v1")
 
 
@@ -116,7 +119,7 @@ def test_publish_keeps_exact_commit_and_resumes_same_draft(
     monkeypatch: pytest.MonkeyPatch,
     advance_main: bool,
 ) -> None:  # type: ignore[no-untyped-def]
-    task = write_task_repo("tasks-example", stage_assets=("verify",)) / "tasks/demo"
+    task = write_task_repo("tasks-example", asset_roots=("tests/assets",)) / "tasks/demo"
     checkpoint = checkpoint_assets(task, workspace=tmp_path / "assets", branch="brew/demo")
     created: list[str] = []
     if advance_main:
@@ -169,7 +172,7 @@ def test_empty_assets_cli_stays_offline_and_writes_null_commit(
     write_task_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
     task = write_task_repo() / "tasks/demo"
-    (task / "verify/assets").mkdir()
+    (task / "tests/assets").mkdir()
     monkeypatch.setattr(
         "ale.run.asset_git.ensure_asset_repository",
         lambda *_: pytest.fail("empty task contacted HF"),
@@ -268,15 +271,15 @@ def test_private_org_repository_and_collection_are_enforced(
 def test_removed_assets_have_a_deletion_commit(
     write_task_repo, asset_remote: Path, tmp_path: Path
 ) -> None:  # type: ignore[no-untyped-def]
-    task = write_task_repo(stage_assets=("verify",)) / "tasks/demo"
+    task = write_task_repo(asset_roots=("tests/assets",)) / "tasks/demo"
     first = checkpoint_assets(task, workspace=tmp_path / "assets", branch="brew/demo")
-    shutil.rmtree(task / "verify/assets")
+    shutil.rmtree(task / "tests/assets")
     removed = checkpoint_assets(task, workspace=first.workspace, branch="brew/demo")
     assert removed.commit != first.commit
-    assert diff_assets(first, removed) == ["verify/assets/fixture.txt"]
+    assert diff_assets(first, removed) == ["tests/assets/fixture.txt"]
     check_assets(task, removed)
     restore_assets(task, first)
-    assert (task / "verify/assets/fixture.txt").read_text() == "verify"
+    assert (task / "tests/assets/fixture.txt").read_text() == "tests/assets"
 
 
 def test_checkpoint_rejects_unsafe_task_path(tmp_path: Path) -> None:
@@ -289,12 +292,12 @@ def test_partial_task_checkpoint_does_not_require_a_valid_manifest(
     asset_remote: Path,
     tmp_path: Path,
 ) -> None:  # type: ignore[no-untyped-def]
-    repository = write_task_repo(stage_assets=("verify",))
+    repository = write_task_repo(asset_roots=("tests/assets",))
     task = repository / "tasks/demo"
-    (task / "task.yaml").write_text("invalid: [")
+    (task / "task.toml").write_text("invalid = [")
     checkpoint = checkpoint_assets(task, workspace=tmp_path / "assets", branch="brew/demo")
     check_assets(task, checkpoint)
-    executable = task / "verify/assets/fixture.txt"
+    executable = task / "tests/assets/fixture.txt"
     executable.chmod(0o755)
     with pytest.raises(AssetError, match="differ"):
         check_assets(task, checkpoint)
@@ -302,7 +305,7 @@ def test_partial_task_checkpoint_does_not_require_a_valid_manifest(
         task, workspace=checkpoint.workspace, branch="brew/demo"
     )
     assert executable_checkpoint.commit != checkpoint.commit
-    assert diff_assets(checkpoint, executable_checkpoint) == ["verify/assets/fixture.txt"]
+    assert diff_assets(checkpoint, executable_checkpoint) == ["tests/assets/fixture.txt"]
     restore_assets(task, checkpoint)
     assert not executable.stat().st_mode & 0o111
     missing = checkpoint_assets(
@@ -323,8 +326,8 @@ def test_checkpoint_rejects_symlinked_stages_before_any_upload(
     outside = tmp_path / "private-data"
     (outside / "assets").mkdir(parents=True)
     (outside / "assets/secret.txt").write_text("must remain outside")
-    shutil.rmtree(task / "image")
-    (task / "image").symlink_to(outside, target_is_directory=True)
+    shutil.rmtree(task / "environment")
+    (task / "environment").symlink_to(outside, target_is_directory=True)
     monkeypatch.setattr(
         "ale.run.asset_git.ensure_asset_repository",
         lambda *_: pytest.fail("unsafe Task contacted HF"),
@@ -342,7 +345,7 @@ def test_publication_retry_does_not_overwrite_an_updated_pr(
 ) -> None:  # type: ignore[no-untyped-def]
     from ale.run import asset_git
 
-    task = write_task_repo(stage_assets=("verify",)) / "tasks/demo"
+    task = write_task_repo(asset_roots=("tests/assets",)) / "tasks/demo"
     checkpoint = checkpoint_assets(task, workspace=tmp_path / "assets", branch="brew/demo")
     original = asset_git._git
 

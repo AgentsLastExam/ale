@@ -20,8 +20,8 @@ if ($currentUser -ne $AgentUser) {
 
 $work = "$env:ProgramData\ALE\install"
 $setup = "$env:ProgramData\ALE\setup"
-$verify = "$env:ProgramData\ALE\verify"
-New-Item -ItemType Directory -Path $work, $setup, $verify -Force | Out-Null
+$tests = "$env:ProgramData\ALE\tests"
+New-Item -ItemType Directory -Path $work, $setup, $tests -Force | Out-Null
 
 $python = "C:\Python312\python.exe"
 if (-not (Test-Path $python)) {
@@ -64,7 +64,7 @@ if (-not (Test-Path $python)) {
 # directory down at every boot. These are the directories ALE stages Task files in.
 icacls "$env:ProgramData\ALE" /inheritance:r /grant:r `
     "SYSTEM:(OI)(CI)(F)" "Administrators:(OI)(CI)(F)" | Out-Null
-foreach ($stage in $setup, $verify) {
+foreach ($stage in $setup, $tests) {
     icacls $stage /inheritance:r /grant:r `
         "SYSTEM:(OI)(CI)(F)" "Administrators:(OI)(CI)(F)" "${AgentUser}:(OI)(CI)(M)" | Out-Null
 }

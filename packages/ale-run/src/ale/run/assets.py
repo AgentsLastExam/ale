@@ -1,4 +1,4 @@
-"""Synchronize Task-local stage assets with same-named Hugging Face datasets."""
+"""Synchronize Task-local assets with same-named Hugging Face datasets."""
 
 from __future__ import annotations
 
@@ -11,22 +11,29 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from ale.core.config import resolve_asset_collection
 from ale.core.errors import AssetError
 from ale.core.task import Task, TaskAssetObservation, TaskSourceContext
 from ale.run.secrets import hf_token
-from ale.run.tasksets.manifest import TaskFolder, load_tasks
 
 if TYPE_CHECKING:
     from huggingface_hub import HfApi
 
-Stage = Literal["image", "setup", "verify", "oracle"]
-STAGES: tuple[Stage, ...] = ("image", "setup", "verify", "oracle")
+    from ale.run.tasksets.manifest import TaskFolder
+
+#: Where a Task keeps assets, relative to its folder: beside the files that read them.
+#: The Task loader leaves them out of source digests, so it imports this list from here.
+ASSET_ROOTS: tuple[str, ...] = (
+    "environment/assets",
+    "tests/assets",
+    "solution/assets",
+)
 DEFAULT_NAMESPACE = "agents-last-exam"
 
 __all__ = [
+    "ASSET_ROOTS",
     "AssetRepositorySelection",
     "AssetSyncResult",
     "asset_status",
@@ -66,7 +73,7 @@ def _asset_roots(task: Task | AssetLocation) -> tuple[Path, ...]:
     if task.folder is None:
         return ()
     validate_asset_paths(task.folder.root)
-    return tuple(path for stage in STAGES if (path := task.folder.root / stage / "assets").is_dir())
+    return tuple(path for root in ASSET_ROOTS if (path := task.folder.root / root).is_dir())
 
 
 def _task_path(task: AssetLocation) -> str:
@@ -114,11 +121,12 @@ def asset_status(paths: Sequence[Path]) -> tuple[TaskAssetObservation, ...]:
 
 
 def select_asset_repositories(paths: Sequence[Path]) -> tuple[AssetRepositorySelection, ...]:
+    from ale.run.tasksets.manifest import load_tasks
+
     tasks_by_root: dict[Path, AssetLocation] = {}
     for path in paths:
         for task in load_tasks(path.expanduser().resolve()):
-            if task.spec.variant == "base":
-                tasks_by_root[task.folder.root] = AssetLocation(task.folder)
+            tasks_by_root[task.folder.root] = AssetLocation(task.folder)
 
     repositories: dict[Path, list[AssetLocation]] = {}
     names: dict[str, Path] = {}
@@ -173,7 +181,11 @@ def pull_assets(
                     token=hf_token(),
                     repo_type="dataset",
                     revision=commit,
-                    allow_patterns=[f"{_task_path(task)}/*/assets/**" for task in selection.tasks],
+                    allow_patterns=[
+                        f"{_task_path(task)}/{root}/**"
+                        for task in selection.tasks
+                        for root in ASSET_ROOTS
+                    ],
                     local_dir=downloaded,
                 )
                 with _repository_lock(selection.repository_root, exclusive=True):
@@ -201,8 +213,8 @@ def pull_assets(
 
 def _require_absent_assets(tasks: Sequence[AssetLocation]) -> None:
     for task in tasks:
-        for stage in STAGES:
-            root = task.folder.root / stage / "assets"
+        for relative in ASSET_ROOTS:
+            root = task.folder.root / relative
             if root.exists() or root.is_symlink():
                 raise AssetError(
                     f"local assets already exist at {root}; pass --force to replace them"
@@ -294,9 +306,9 @@ def _replace_selected_assets(tasks: Sequence[AssetLocation], downloaded: Path) -
         task_path = _task_path(task)
         validate_asset_paths(task.folder.root)
         validate_asset_paths(downloaded / task_path)
-        for stage in STAGES:
-            source = downloaded / task_path / stage / "assets"
-            destination = task.folder.root / stage / "assets"
+        for root in ASSET_ROOTS:
+            source = downloaded / task_path / root
+            destination = task.folder.root / root
             backup = destination.with_name(f".{destination.name}.ale-backup")
             if source.is_dir():
                 list(_regular_files(source))
@@ -369,11 +381,9 @@ def _asset_inventory(task: Task | AssetLocation) -> list[dict[str, int | str]]:
 
 
 def validate_asset_paths(task_root: Path) -> None:
-    for path in (
-        task_root,
-        *(task_root / stage for stage in STAGES),
-        *(task_root / stage / "assets" for stage in STAGES),
-    ):
+    """Each asset root and every directory above it must be a real directory."""
+    paths = {task_root / path for root in ASSET_ROOTS for path in (root, *Path(root).parents)}
+    for path in sorted(paths):
         if path.is_symlink() or (path.exists() and not path.is_dir()):
             raise AssetError(f"asset directory must be a real directory: {path}")
 

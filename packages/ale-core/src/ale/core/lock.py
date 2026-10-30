@@ -84,7 +84,6 @@ class TaskProvenance(BaseModel):
     model_config = _FROZEN
 
     name: TaskId
-    variant: str
     spec_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     content_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     source: TaskSource

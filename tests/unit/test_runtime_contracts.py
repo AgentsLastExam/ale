@@ -61,8 +61,7 @@ GUESTD = Path(__file__).resolve().parents[2] / "packages/ale-run/src/ale/run/gue
 def make_lock(**overrides: object) -> RunLock:
     base: dict[str, object] = {
         "task": TaskProvenance(
-            name="demo-hello",
-            variant="base",
+            name="agentslastexam/demo-hello",
             spec_hash=DIGEST,
             content_digest=DIGEST,
             source=TaskSource(
@@ -133,8 +132,7 @@ class TestRunLock:
     def test_local_source_is_not_reportable(self) -> None:
         lock = make_lock(
             task=TaskProvenance(
-                name="demo-hello",
-                variant="base",
+                name="agentslastexam/demo-hello",
                 spec_hash=DIGEST,
                 content_digest=DIGEST,
                 source=TaskSource(kind="local", path="/home/dev/tasks/hello"),
@@ -172,7 +170,7 @@ class TestRunLock:
                 framework=existing.framework,
             ),
             TaskSpec(
-                name="windows",
+                name="agentslastexam/windows",
                 os="windows",
                 image={"kind": "vm", "base_ref": "/images/base.qcow2"},
                 instruction="Complete the task.",
@@ -396,7 +394,7 @@ class TestArtifactPolicy:
 
     def test_a_task_declares_paths_not_dispositions(self) -> None:
         spec = TaskSpec(
-            name="demo-hello",
+            name="agentslastexam/demo-hello",
             instruction="write",
             image={"kind": "container"},
             artifacts=("/home/user/output",),
@@ -442,7 +440,7 @@ def test_a_task_source_is_read_from_its_git_checkout(tmp_path: Path) -> None:
 
     task = tmp_path / "tasks" / "demo"
     task.mkdir(parents=True)
-    (task / "task.yaml").write_text("name: demo\n")
+    (task / "task.toml").write_text('schema_version = "1.4"\n')
     assert resolve(str(task)).source.kind == "local"
     git("init", "-q")
     git("remote", "add", "origin", "https://example.invalid/tasks.git")
@@ -476,7 +474,7 @@ def test_a_task_source_records_no_credentials_and_needs_no_git(
 
     task = tmp_path / "tasks" / "demo"
     task.mkdir(parents=True)
-    (task / "task.yaml").write_text("name: demo\n")
+    (task / "task.toml").write_text('schema_version = "1.4"\n')
     git("init", "-q")
     git("remote", "add", "origin", "https://user:ghp_secret@example.invalid/tasks.git")
     git("add", "-A")

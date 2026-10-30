@@ -3,10 +3,10 @@
   "title": "ALE verification result v1",
   "type": "object",
   "required": [
-    "overall"
+    "reward"
   ],
   "properties": {
-    "overall": {
+    "reward": {
       "type": "number",
       "minimum": 0,
       "maximum": 1

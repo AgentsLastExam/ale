@@ -281,7 +281,7 @@ class ProviderConformance:
             (source / "assets/empty").mkdir(parents=True)
             (source / "assets/data.txt").write_text("input")
             (source / ".hidden").write_text("hidden")
-            (source / "run.sh").write_text("printf stage-ok")
+            (source / "test.sh").write_text("printf stage-ok")
             (source / "link").symlink_to("assets/data.txt")
             async with await self.provider.create(await self.request()) as sandbox:
                 target = "/tmp/ale-conformance-upload"
@@ -293,7 +293,7 @@ class ProviderConformance:
                     owner = sandbox.agent_user if identity is Identity.AGENT else "root"
                     modes = await sandbox.exec(["python3", "-c", _UPLOAD_MODES, target, owner])
                     assert modes.ok, modes.stderr
-                    stage = await sandbox.exec(["sh", f"{target}/run.sh"], identity=identity)
+                    stage = await sandbox.exec(["sh", f"{target}/test.sh"], identity=identity)
                     assert stage.stdout == "stage-ok", stage.stderr
                     edit = await sandbox.exec(
                         ["sh", "-c", f"echo edit > {target}/assets/data.txt"],

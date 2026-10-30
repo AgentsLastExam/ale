@@ -33,5 +33,5 @@ def test_result_matches_schema_fixture():
             / "tests/fixtures/verification-result-v1.schema.json"
         ).read_text()
     )
-    result = read_result('{"overall":0.5,"why":{"anything":[1,true,null]}}')
+    result = read_result('{"reward":0.5}', '{"reward":0.5,"why":{"anything":[1,true,null]}}')
     jsonschema.validate(result, schema)

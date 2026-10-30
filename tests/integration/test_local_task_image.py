@@ -12,9 +12,9 @@ from ale.core.errors import ProviderStartError
 from ale.core.taskspec import ImageKind
 from ale.core.verdict import Status
 from ale.run import task_images
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers import ProviderRegistry
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import prepare_task_image, prepare_task_image_result
@@ -102,12 +102,12 @@ async def test_local_container_build_reuse_and_input_boundaries(
     ]
     assert not any(command[:2] == ("docker", "buildx") for command in commands)
 
-    verifier = task_path / "verify" / "verify.py"
+    verifier = task_path / "tests" / "verify.py"
     verifier.write_text(verifier.read_text() + "\n# verifier-only edit\n")
     verifier_edit = await prepare_task_image(load_tasks(task_path)[0], registry)
     assert verifier_edit.input_identity == first.input_identity
 
-    dockerfile = task_path / "image" / "Dockerfile"
+    dockerfile = task_path / "environment" / "Dockerfile"
     dockerfile.write_text(dockerfile.read_text() + "\nRUN true\n")
     image_edit = await prepare_task_image(load_tasks(task_path)[0], registry)
     assert image_edit.input_identity != first.input_identity
@@ -116,14 +116,39 @@ async def test_local_container_build_reuse_and_input_boundaries(
 # Building a VM disk takes minutes even with KVM, so these run with the VM suite.
 @pytest.mark.needs_kvm
 @pytest.mark.asyncio
+async def test_setup_never_enters_the_container_build_context(
+    tmp_path: Path, isolated_ale_cache: Path, docker_buildx: None
+) -> None:
+    task_path = scaffold_task(tmp_path / "task")
+    environment = task_path / "environment"
+    (environment / "keep.txt").write_text("kept\n")
+    (environment / "ignored.txt").write_text("ignored\n")
+    # The Task's own rules still apply, and cannot bring setup/ back.
+    (environment / ".dockerignore").write_text("ignored.txt\n!setup\n!setup/**\n")
+    (environment / "setup").mkdir()
+    (environment / "setup" / "setup.sh").write_text("true\n")
+    (environment / "Dockerfile").write_text(
+        (environment / "Dockerfile").read_text()
+        + "COPY . /opt/context/\n"
+        + "RUN test -f /opt/context/keep.txt && test ! -e /opt/context/ignored.txt "
+        + "&& test ! -e /opt/context/setup\n"
+    )
+    registry = ProviderRegistry(RunConfig())
+    first = await prepare_task_image(load_tasks(task_path)[0], registry)
+
+    (environment / "setup" / "setup.sh").write_text("echo changed\n")
+    assert await prepare_task_image(load_tasks(task_path)[0], registry) == first
+
+
+@pytest.mark.asyncio
 async def test_local_vm_materialization_reuse_and_late_layer_invalidation(
     tmp_path: Path,
     write_repo: Callable[..., Path],
     isolated_ale_cache: Path,
     docker_buildx: None,
 ) -> None:
-    task_path = write_repo(tmp_path / "repo", image={"kind": "vm"})
-    dockerfile = task_path / "image" / "Dockerfile"
+    task_path = write_repo(tmp_path / "repo", config={"ale": {"sandbox": "vm"}})
+    dockerfile = task_path / "environment" / "Dockerfile"
     dockerfile.write_text(f"FROM {VM_BASE}\nRUN printf first > /etc/task-layer\n")
     registry = ProviderRegistry(RunConfig())
 
@@ -143,7 +168,7 @@ async def test_local_vm_materialization_reuse_and_late_layer_invalidation(
         step.name == "vm-materialization" and step.outcome == "reused" for step in reused.steps
     )
 
-    verifier = task_path / "verify" / "verify.py"
+    verifier = task_path / "tests" / "verify.py"
     verifier.write_text(verifier.read_text() + "\n# unrelated edit\n")
     assert await prepare_task_image(load_tasks(task_path)[0], registry) == first
 
@@ -161,9 +186,11 @@ async def test_failed_local_vm_build_leaves_no_partial_disk(
     isolated_ale_cache: Path,
     docker_buildx: None,
 ) -> None:
-    task_path = write_repo(tmp_path / "repo", image={"kind": "vm"})
+    task_path = write_repo(tmp_path / "repo", config={"ale": {"sandbox": "vm"}})
     # It has the agent account, so the framework layer succeeds and materialization fails.
-    (task_path / "image" / "Dockerfile").write_text("FROM ubuntu:24.04\nRUN useradd -m user\n")
+    (task_path / "environment" / "Dockerfile").write_text(
+        "FROM ubuntu:24.04\nRUN useradd -m user\n"
+    )
     with pytest.raises(ProviderStartError, match="no initramfs"):
         await prepare_task_image(
             load_tasks(task_path)[0],
@@ -181,9 +208,9 @@ async def test_episode_starts_exact_prepared_local_image(tmp_path: Path) -> None
     task.prepared_image = await prepare_task_image(task, providers)
     result = await run_episode(
         task,
-        StandardEnvironment(OracleHarness()),
+        EpisodeProtocol(OracleHarness()),
         providers,
         run_dir=tmp_path / "runs",
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}

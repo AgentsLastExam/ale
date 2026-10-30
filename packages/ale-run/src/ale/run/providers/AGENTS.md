@@ -3,7 +3,7 @@
 Read [`README.md`](README.md) and `docs/specs/sandbox-image.md` before changing a backend.
 
 - Implement the public Provider/Sandbox contracts; do not expose Docker or QEMU details
-  to Harnesses or Environments.
+  to Harnesses or the episode protocol.
 - Record what actually ran: resolved image, allocation, account, network and retention.
 - Lifecycle operations must be idempotent enough for cancellation and failure cleanup.
 - Never infer capability success; preflight and image checks return actionable failures.

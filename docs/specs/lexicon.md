@@ -1,36 +1,33 @@
 # Lexicon
 
-Normative. Every term below has exactly one meaning. The public Task manifest version
-remains `core/v1`.
+Normative. Every term below has exactly one meaning.
 
 | Term | Definition | Never |
 |---|---|---|
 | **Sandbox** | An isolated execution instance supplied for one episode. | never called an Environment |
 | **Provider** | A backend adapter that turns a SandboxRequest into a Sandbox holding the guarantees in [the Provider contract](sandbox-image.md#provider-contract), or rejects it before creating anything. | not a model vendor or Task-selected setting |
 | **Model provider** | The vendor whose API the Gateway or a Judge calls, named by `gateway.provider` or a Judge's `provider`. It selects `ALE_<PROVIDER>_API_KEY` and `ALE_<PROVIDER>_BASE_URL`. | never a Sandbox Provider |
-| **Environment** | The administration layer that turns one Task into one Episode: provision, setup, agent, verify, teardown. | never means a Sandbox or shell variables |
-| **Task folder** | The complete self-contained authored source unit: manifest, instruction, image build context, setup, verification, oracle, and optional agent resources. | not dependent on `domain.yaml`, a repository Kit, sibling Task, or shared domain image |
-| **Task source digest** | A digest of the Task folder's canonical paths, bytes, executable bits, and symlink targets, pruning only the four exact stage asset roots and generated state. | not a hash of `task.yaml` alone or of asset bytes |
-| **TaskSpec** | The frozen, serializable effective specification of one selected Task instance after instruction rendering and variant application. | not the folder on disk |
+| **Episode protocol** | The administration layer that turns one Task into one Episode: provision, setup, agent, verify, teardown. | not selected or replaced by a Task |
+| **Task folder** | The complete self-contained authored source unit: `task.toml`, instruction, environment, tests, solution, and optional agent resources. | not dependent on `domain.yaml`, a repository Kit, sibling Task, or shared domain image |
+| **Task id** | `[task].name`, Harbor's `org/name` with each part a lowercase slug, unique in its collection. Where it names a file, directory, container or image it is the one component `org.name`. | not derived from the folder path |
+| **Environment** | The Task's definition of the machine the agent starts on: `[environment]` and `environment/`. | never a Sandbox or the episode protocol |
+| **Task source digest** | A digest of the Task folder's canonical paths, bytes, executable bits, and symlink targets, pruning only the [asset roots](task-assets.md) and generated state. | not a hash of `task.toml` alone or of asset bytes |
+| **TaskSpec** | The frozen, serializable specification of one Task: its validated `task.toml` and its instruction. | not the folder on disk |
 | **Task operating system** | `linux` (default) or explicit `windows`; it selects path and stage-entry semantics and must match the prepared image. | not a Provider name inferred from an image tag |
-| **Task** | One self-contained Task folder bound to its effective TaskSpec and standard behavior. | not a collection or loader |
+| **Task** | One self-contained Task folder bound to its TaskSpec and standard behavior. | not a collection or loader |
 | **Task collection** | A directory or source that contains several independent Task folders for selection. | not a Task and not an execution contract |
-| **Variant** | An additional named parameter/resource/timeout instance of one Task. The top-level Task is always `base`. | not allowed to change image, setup, verification, network, artifacts, Skills, or MCP |
-| **Image declaration** | Required `image.kind: container|vm` plus optional `image.ref` for a solver or dedicated verifier. | not a Provider selection or build flag |
-| **Task image** | The final container or VM image prepared from one fixed local Dockerfile or matching-kind ref. | not a shared Image Tree node |
+| **Image declaration** | A solver's or dedicated verifier's sandbox kind (`[ale].sandbox`: container or vm) and either an image used directly (`docker_image`, `vm_image`) or a build definition in its fixed directory. | not a Provider selection or build flag |
+| **Task image** | The final container or VM image prepared from one fixed local build definition or matching-kind image reference. | not a shared Image Tree node |
 | **Prepared Task image** | Immutable kind-aware output consumed by a sandbox request. | not mutable sandbox state |
 | **ALE base image** | A foundational Linux desktop container, Ubuntu VM, or private Windows BYOL image providing the sandbox contract and guest service. | not a domain image or Task-specific dependency bundle |
 | **VM materializer** | ALE-owned versioned conversion from final Linux VM OCI rootfs to bootable qcow2. | never Task-authored boot or partition code |
-| **Task assets** | Optional ignored files directly below a Task's `image/assets`, `setup/assets`, `verify/assets`, or `oracle/assets`, synchronized explicitly with a same-named HF dataset. | not a manifest declaration, central cache tree, content hash, or implicit runtime download |
-| **Image assets** | Task-local `image/assets` bytes consumed through the ordinary `image/` Docker context. | not a named BuildKit context or runtime mount |
-| **Verify assets** | Task-local `verify/assets` bytes uploaded only with the verify stage and read by verifier code through ordinary relative paths. | never baked into the solver image or published during agent execution |
-| **Oracle assets** | Task-local `oracle/assets` bytes uploaded only when the oracle harness runs and read through ordinary relative paths. | never uploaded for an evaluated solver |
+| **Task assets** | Optional ignored files in a Task's [asset roots](task-assets.md), synchronized explicitly with a same-named HF dataset; to the runtime they are ordinary stage files. | not a configuration declaration, central cache tree, content hash, or implicit runtime download |
 | **Setup** | Trusted framework-controlled Task work that creates irreducibly per-episode state after the Task image starts. | not package installation, fixed compilation, or fixed input download |
 | **Framework Verification Library** (`ale_verify`) | The engine-owned Python package staged for verify; it provides optional checks, Judges returning data, and atomic JSON result writing. | not a repository Kit, Host verification service, Gateway client, or plugin |
-| **Judge Invocation** | One attributable LLM or agent Judge execution with its resolved configuration, attempts, usage, verdict, and evidence links. | not a Task manifest declaration or reusable profile |
-| **Verification Result** | The Task-authored JSON object saved as `verification.json`; only `overall` has scoring semantics. | not the Episode Result or solver trajectory |
+| **Judge Invocation** | One attributable LLM or agent Judge execution with its resolved configuration, attempts, usage, verdict, and evidence links. | not a Task configuration declaration or reusable profile |
+| **Verification Result** | The Task-authored result in the verifier directory, `reward.json` with an optional complete `verification.json`, saved on the host as `verification.json`; only `reward` has scoring semantics. | not the Episode Result or solver trajectory |
 | **Artifact snapshot** | Immutable regular-file/directory solver evidence captured after the solver stops and before verification, with exact source path, type, mode, and content identity. | not post-verifier bytes or an implicit workspace copy |
-| **Separate verifier** | A fresh verifier sandbox using reused solver content, a Task-local verifier build, or a resolved external image, with independently requested resources and exact artifact restoration. | not a second setup run or a copy of the whole solver filesystem |
+| **Separate verifier** | A fresh verifier sandbox using reused solver content, a Task-local verifier build, or a resolved external image, with its own or the solver's resources and exact artifact restoration. | not a second setup run or a copy of the whole solver filesystem |
 | **Retained sandbox** | An ALE-managed, sanitized Sandbox kept after its episode when run policy requests `keep`, with a durable Provider handle and cleanup command; reverification and continuation attach to it. | not Task-controlled or an unmanaged leaked container |
 | **Episode** | One complete administration of one selected Task instance by one agent. | not a trial or job |
 | **Run** | One batch invocation of Episodes plus its Run Status Projection. | — |

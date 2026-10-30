@@ -4,14 +4,14 @@ Read [`README.md`](README.md) before changing the runtime. The normal ownership 
 
 ```text
 CLI composition → Task/image preparation → Episode administration
-→ StandardEnvironment phases → Provider/Sandbox + Harness/Gateway → records
+→ EpisodeProtocol phases → Provider/Sandbox + Harness/Gateway → records
 ```
 
 - `cli/` parses and composes; it does not implement Provider, Harness or phase behavior.
 - `episode.py` owns one episode's session, leases, recording, failure mapping and result.
-- `environments/` owns phase ordering and phase-local state.
+- `protocol/` owns phase ordering and phase-local state.
 - `providers/` implements infrastructure; `harnesses/` uses only the Sandbox contract.
-- `gateway/` never imports Providers or Environments.
+- `gateway/` never imports Providers or the episode protocol.
 - `guestd/` is standard-library only and must remain deployable as copied source.
 - Prefer explicit typed runtime state over `dict[str, object]`, `Any`, `getattr` or string
   keys shared between modules.

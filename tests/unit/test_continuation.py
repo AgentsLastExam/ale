@@ -35,15 +35,15 @@ from ale.core.trajectory import (
 )
 from ale.core.verdict import Status
 from ale.run.cli.tasks import _continuation, _start_gateway
-from ale.run.environments.standard import (
-    Resume,
-    StandardEnvironment,
-    _continued_segment,
-    _require_agent_episode,
-)
 from ale.run.episode import _Lease
 from ale.run.gateway.server import Gateway
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
+from ale.run.protocol.episode_protocol import (
+    EpisodeProtocol,
+    Resume,
+    _continued_segment,
+    _require_agent_episode,
+)
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
 
@@ -226,11 +226,16 @@ async def test_retention_removes_every_task_stage_and_names_the_agents_episode(
     )
     sanitized: list[tuple[bool, str | None]] = []
     ctx = _retention_context(OperatingSystem.LINUX, "/home/user", sanitized)
-    environment = StandardEnvironment(ClaudeCodeHarness(), agent_enabled=agent)
-    assert await environment._sanitize_for_retention(ctx, sandbox)  # type: ignore[arg-type]
+    protocol = EpisodeProtocol(ClaudeCodeHarness(), agent_enabled=agent)
+    assert await protocol._sanitize_for_retention(ctx, sandbox)  # type: ignore[arg-type]
 
     arguments = {argument for argv in removed for argument in argv}
-    assert {"/opt/ale/setup", "/opt/ale/verify", "/home/user/.ale-oracle"} <= arguments
+    assert {
+        "/opt/ale/setup",
+        "/opt/ale/tests",
+        "/home/user/.ale-solution",
+        "/logs/verifier",
+    } <= arguments
     assert written == ({"/opt/ale/agent-episode": b"episode"} if marked else {})
     assert sanitized == [(True, None)]
 
@@ -253,17 +258,18 @@ async def test_windows_retention_empties_the_bases_stage_directories() -> None:
     )
     sanitized: list[tuple[bool, str | None]] = []
     ctx = _retention_context(OperatingSystem.WINDOWS, r"C:\Users\user", sanitized)
-    environment = StandardEnvironment(ClaudeCodeHarness())
-    assert await environment._sanitize_for_retention(ctx, sandbox)  # type: ignore[arg-type]
+    protocol = EpisodeProtocol(ClaudeCodeHarness())
+    assert await protocol._sanitize_for_retention(ctx, sandbox)  # type: ignore[arg-type]
 
-    stages, others = commands
+    stages, others, result = commands
     # The base made these directories with their own ACL; only what is in them goes.
-    assert r"'C:\ProgramData\ALE\setup','C:\ProgramData\ALE\verify'" in stages
+    assert r"'C:\ProgramData\ALE\setup','C:\ProgramData\ALE\tests'" in stages
     assert "Get-ChildItem -LiteralPath $stage" in stages
-    assert r"'C:\Users\user\.ale-oracle'" in others
+    assert r"'C:\Users\user\.ale-solution'" in others
     # A missing path is skipped like `rm -rf` does, not silenced into a failing exit.
     assert "Test-Path -LiteralPath $path" in others
     assert "SilentlyContinue" not in stages + others
+    assert r"$verifier = 'C:\logs\verifier'" in result
     assert sanitized == [(True, None)]
 
 
@@ -281,8 +287,8 @@ async def test_a_failed_stage_clearing_stops_retention_with_its_reason() -> None
     )
     sanitized: list[tuple[bool, str | None]] = []
     ctx = _retention_context(OperatingSystem.LINUX, "/home/user", sanitized)
-    environment = StandardEnvironment(ClaudeCodeHarness())
-    assert not await environment._sanitize_for_retention(ctx, sandbox)  # type: ignore[arg-type]
+    protocol = EpisodeProtocol(ClaudeCodeHarness())
+    assert not await protocol._sanitize_for_retention(ctx, sandbox)  # type: ignore[arg-type]
     assert len(calls) == 1
     assert sanitized == [(False, "permission denied")]
 
@@ -400,7 +406,7 @@ def _source(tmp_path: Path, **changes: Any) -> tuple[Path, Any]:
     record = ResultRecord(
         episode_id="earlier",
         status=Status.COMPLETED,
-        rewards={"overall": 1.0},
+        rewards={"reward": 1.0},
         started_at="2026-10-27T00:00:00Z",
         finished_at="2026-10-27T00:01:00Z",
         sandboxes=(

@@ -6,12 +6,13 @@ import os
 import shutil
 import subprocess
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from tests.support import CONTAINER_BASE
+from tests.support import CONTAINER_BASE, merged_config, write_task
 
 IMAGE = CONTAINER_BASE
 
@@ -24,74 +25,51 @@ VERIFY_DEFAULT = textwrap.dedent("""
 VERIFY_CHECK = (
     "from ale_verify import checks, write\n"
     "check = checks.text_equals('/home/user/output/result.txt', 'hello world')\n"
-    "write({'overall': check['score'], 'content': check})\n"
+    "write({'reward': check['score'], 'content': check})\n"
+)
+
+
+HELLO_DOCKERFILE = (
+    f"FROM {IMAGE}\n"
+    "RUN mkdir -p /home/user/input /home/user/output \\\n"
+    " && printf 'world' > /home/user/input/word.txt \\\n"
+    " && chown -R user:user /home/user/input /home/user/output\n"
+)
+
+HELLO_SOLVE = (
+    "#!/usr/bin/env bash\nset -euo pipefail\n"
+    "word=$(cat /home/user/input/word.txt)\n"
+    "printf 'hello %s' \"$word\" > /home/user/output/result.txt\n"
 )
 
 
 def _write_repo(
     root: Path,
     *,
-    with_oracle: bool = True,
-    verify_body: str | None = None,
-    manifest_suffix: str = "",
-    stage_assets: tuple[str, ...] = (),
-    image: dict[str, str] | None = None,
-    with_image_dockerfile: bool = True,
+    with_solution: bool = True,
+    test_body: str | None = None,
+    config: Mapping[str, Any] | None = None,
+    asset_roots: tuple[str, ...] = (),
+    dockerfile: str | None = HELLO_DOCKERFILE,
 ) -> Path:
-    """Create one complete Task; the historical function name is kept fixture-local."""
-    task = root / "tasks" / "hello"
-    (task / "image").mkdir(parents=True)
-    (task / "verify").mkdir()
-    (task / "task.yaml").write_text(
-        textwrap.dedent("""
-        spec_type: core/v1
-        name: hello
-        image: {kind: container}
-        resources: {cpus: 1, memory_mb: 512}
-        timeouts: {setup: 120, agent: 120, verify: 120}
-        artifacts: [/home/user/output]
-        params: {greeting: hello}
-        """).strip()
-        + "\n"
-        + manifest_suffix.strip()
-        + "\n"
+    """Create one complete Task, ``agentslastexam/hello``, below ``root/tasks/hello``."""
+    task = write_task(
+        root / "tasks" / "hello",
+        name="agentslastexam/hello",
+        config=merged_config({"artifacts": ["/home/user/output"]}, config),
+        dockerfile=dockerfile,
+        instruction=(
+            "Write hello followed by the word in /home/user/input/word.txt "
+            "into /home/user/output/result.txt\n"
+        ),
+        test=test_body or VERIFY_DEFAULT,
+        solve=HELLO_SOLVE if with_solution else None,
     )
-    (task / "instruction.md").write_text(
-        "Write ${greeting} followed by the word in /home/user/input/word.txt "
-        "into /home/user/output/result.txt\n"
-    )
-    if image is not None:
-        manifest = task / "task.yaml"
-        kind = image["kind"]
-        ref = f"\n  ref: {image['ref']}" if "ref" in image else ""
-        manifest.write_text(
-            manifest.read_text().replace(
-                "image: {kind: container}",
-                f"image:\n  kind: {kind}{ref}",
-            )
-        )
-    if with_image_dockerfile:
-        (task / "image" / "Dockerfile").write_text(
-            f"FROM {IMAGE}\n"
-            "RUN mkdir -p /home/user/input /home/user/output \\\n"
-            " && printf 'world' > /home/user/input/word.txt \\\n"
-            " && chown -R user:user /home/user/input /home/user/output\n"
-        )
-    (task / "verify" / "run.sh").write_text(verify_body or VERIFY_DEFAULT)
-    (task / "verify" / "run.sh").chmod(0o755)
-    (task / "verify" / "verify.py").write_text(VERIFY_CHECK + "\n")
-    for stage in stage_assets:
-        assets = task / stage / "assets"
+    (task / "tests" / "verify.py").write_text(VERIFY_CHECK + "\n")
+    for relative in asset_roots:
+        assets = task / relative
         assets.mkdir(parents=True, exist_ok=True)
-        (assets / "fixture.txt").write_text(stage)
-    if with_oracle:
-        (task / "oracle").mkdir()
-        (task / "oracle" / "run.sh").write_text(
-            "#!/usr/bin/env bash\nset -euo pipefail\n"
-            "word=$(cat /home/user/input/word.txt)\n"
-            "printf 'hello %s' \"$word\" > /home/user/output/result.txt\n"
-        )
-        (task / "oracle" / "run.sh").chmod(0o755)
+        (assets / "fixture.txt").write_text(relative)
     return task
 
 

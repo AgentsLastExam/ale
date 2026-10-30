@@ -11,10 +11,10 @@ from ale.core.config import AgentJudgeConfig, RunConfig, VerificationConfig
 from ale.core.harness import EffectiveAgentResources
 from ale.core.lock import TaskSource
 from ale.core.verdict import Status
-from ale.run.environments.standard import StandardEnvironment
 from ale.run.episode import run_episode
 from ale.run.gateway.server import Gateway
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers.docker import DockerProvider
 from ale.run.secrets import provider_endpoint
@@ -73,7 +73,7 @@ async def test_live_agent_judge_records_transcript_without_an_extra_trajectory(
     try:
         result = await run_episode(
             task,
-            StandardEnvironment(harness),
+            EpisodeProtocol(harness),
             provider_registry(DockerProvider()),
             gateway=gateway,
             gateway_url=gateway_url,
@@ -89,7 +89,7 @@ async def test_live_agent_judge_records_transcript_without_an_extra_trajectory(
     finally:
         await gateway.stop()
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     record = json.loads((result.run_dir / "verification.json").read_text())
     assert "agent_trajectory" not in record
     assert (

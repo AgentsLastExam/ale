@@ -53,7 +53,7 @@ async def test_our_base_image_conforms() -> None:
 async def test_an_image_without_the_tasks_account_is_refused_by_name() -> None:
     """Any image serves once it has Python and the account; what is missing is named."""
     prepared = await DockerProvider().prepare_image(ImageRef(kind="container", reference=UPSTREAM))
-    with pytest.raises(TaskDefinitionError, match=r"image\.user"):
+    with pytest.raises(TaskDefinitionError, match=r"\[agent\]\.user"):
         await with_framework(prepared.runtime_ref, user="user", sudo=False)
 
 

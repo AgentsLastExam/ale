@@ -99,7 +99,7 @@ def check(hives: Path, user: str) -> str:
     if user.casefold() not in {name.casefold() for name in key_names(names)}:
         raise Lacks(
             f"the agent account '{user}' does not exist on this Windows disk; create it "
-            f"or name an existing account with image.user in task.yaml"
+            f"or name an existing account with [agent].user in task.toml"
         )
     winlogon = values(
         export(hives, "SOFTWARE", r"\Microsoft\Windows NT\CurrentVersion\Winlogon"),

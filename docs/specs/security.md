@@ -14,9 +14,10 @@ stops measuring what it says it measures.
 
 ## 1. A sandbox has only declared ways out
 
-Default is `network.mode: block`. Docker uses a per-episode `--internal` bridge with no
-route off the host. QEMU enforces deny-all in the runner network namespace, outside the
-guest OS, and forwards only the episode's framework-owned service ports.
+Under `[agent].network_mode = "no-network"` (`block` in the RunLock), Docker uses a
+per-episode `--internal` bridge with no route off the host. QEMU enforces deny-all in the
+runner network namespace, outside the guest OS, and forwards only the episode's
+framework-owned service ports.
 
 No route off the host is not the same as no way out: the host's own address on the
 bridge answers on every port a host service binds to all interfaces, such as sshd, a
@@ -182,7 +183,7 @@ The oracle sharing the agent's limits is the load-bearing half. `ale validate` i
 check a task gets before publication, and an oracle with more privilege would pass exactly
 the tasks a real agent then fails on access alone.
 
-A task may declare `resources.sudo` when it genuinely needs to install software or change
+A task may declare `[ale].sudo` when it genuinely needs to install software or change
 system configuration. The grant is verified rather than assumed — writing a sudoers rule
 succeeds in an image with no `sudo` binary — and recorded in provenance, because an
 episode run that way was less isolated and the two should not be compared without that
@@ -199,20 +200,27 @@ memory. Container guest services are `docker exec` sessions with no listener.
 
 Daytona's in-sandbox daemon runs commands for anyone who connects, as root. The Provider
 blocks every non-root user from it and proves that as the agent before handing the
-sandbox out; an agent granted `resources.sudo` can lift the block, as it can any rule.
+sandbox out; an agent granted `[ale].sudo` can lift the block, as it can any rule.
+
+The verifier writes its result to Harbor's `/logs/verifier` (`C:\logs\verifier`), a path the
+agent can create beforehand: with sudo on Linux, as any account on Windows. Before every
+verification attempt ALE therefore removes a link or file at either level instead of
+following it, makes the parent the framework's and writable by it alone, and recreates the
+verifier directory empty and accessible only to the framework. A result the agent planted
+is gone, and nothing it left running can write or redirect one.
 
 Verified by `tests/integration/test_identity.py`: the agent cannot read the guest service,
-cannot write system paths, and cannot elevate unless its task asked; and by
-`tests/unit/test_guest_authentication.py` for the claimed TCP guest service.
+cannot write system paths, and cannot elevate unless its task asked; by
+`tests/unit/test_guest_authentication.py` for the claimed TCP guest service; and by
+`test_an_agent_cannot_plant_or_redirect_a_result` for the verifier directory.
 
 ## 5. Answers are absent, not hidden
 
-`verify/` and `oracle/`, including their optional `assets/` directories, are copied into a sandbox
-only for their own phases. While the evaluated agent works they are not access-controlled
+`tests/` and `solution/` are copied into a sandbox only for their own phases. While the evaluated agent works they are not access-controlled
 — they are not there. In separate mode only the immutable declared artifact snapshot is
 restored; the solver filesystem is not transferred wholesale.
 
-This is why there is no "secret" flag on an asset. A flag is a promise about behaviour
+This is why there is no "secret" flag on a Task file. A flag is a promise about behaviour
 that some future code path could forget to check; a file that was never uploaded cannot
 be read by anything.
 
@@ -303,8 +311,9 @@ before a Judge changes the live workspace.
 
 Run configuration, not Task content, decides whether solver and verifier sandboxes are
 destroyed or retained. Default is destroy. Before a kept sandbox receives a durable
-handle, required evidence capture finishes, every stage of its Task (`setup/`, `verify/`
-and the oracle) and known credentials are removed, and episode capabilities are revoked.
+handle, required evidence capture finishes, every stage of its Task (setup, tests and
+the solution), the verifier directory and known credentials are removed, and episode
+capabilities are revoked.
 A later episode may hand the solver to another evaluated agent, which must not find
 verification there. Subscription credentials stay in the
 checkout-local Host profile and therefore require no retained-Sandbox cleanup.
@@ -325,7 +334,7 @@ Stating these plainly is part of the model. Treating an unlisted gap as covered 
 security claims rot.
 
 **A malicious task author.** A Task folder's setup and verification entries run as trusted
-framework-controlled code, and a Task may declare `resources.sudo` for its agent. Tasks
+framework-controlled code, and a Task may declare `[ale].sudo` for its agent. Tasks
 are reviewed content, not untrusted input; the identity model protects a result from its
 *agent*, not a host from its Task. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are
 aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host Gateway; a

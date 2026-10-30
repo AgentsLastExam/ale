@@ -13,9 +13,10 @@ pytestmark = pytest.mark.unit
     "relative",
     [
         "instruction.md",
-        "task.yaml",
-        "image/Dockerfile",
-        "oracle/run.sh",
+        "task.toml",
+        "environment/Dockerfile",
+        "environment/setup/setup.sh",
+        "solution/solve.sh",
         "other.txt",
     ],
 )
@@ -31,11 +32,10 @@ def test_non_verifier_change_requires_new_solver(tmp_path: Path, relative: str):
 @pytest.mark.parametrize(
     "relative",
     [
-        "verify/run.sh",
-        "verify/assets/input",
-        "image/assets/input",
-        "setup/assets/input",
-        "oracle/assets/input",
+        "tests/test.sh",
+        "tests/assets/input",
+        "environment/assets/input",
+        "solution/assets/input",
     ],
 )
 def test_verifier_and_asset_changes_preserve_source_identity(tmp_path: Path, relative: str):
@@ -50,7 +50,7 @@ def test_verifier_and_asset_changes_preserve_source_identity(tmp_path: Path, rel
 
 def test_loading_a_task_never_reads_asset_bytes(tmp_path: Path):
     root = scaffold_task(tmp_path / "task")
-    unreadable = root / "image" / "assets" / "large.bin"
+    unreadable = root / "environment" / "assets" / "large.bin"
     unreadable.parent.mkdir(parents=True)
     unreadable.write_bytes(b"x")
     unreadable.chmod(0)
@@ -65,7 +65,7 @@ def test_loading_a_task_never_reads_asset_bytes(tmp_path: Path):
 def test_timestamps_do_not_change_content_identity(tmp_path: Path):
     root = scaffold_task(tmp_path / "task")
     before = load_tasks(root)[0].non_verifier_digest
-    os.utime(root / "image/Dockerfile", (1, 1))
+    os.utime(root / "environment/Dockerfile", (1, 1))
     assert load_tasks(root)[0].non_verifier_digest == before
     (root / "instruction.md").chmod(0o755)
     assert load_tasks(root)[0].non_verifier_digest != before
@@ -92,7 +92,6 @@ async def test_reverify_refuses_changed_or_unrecorded_inputs_before_attaching(
             "task": lock.task.model_copy(
                 update={
                     "name": task.spec.name,
-                    "variant": task.spec.variant,
                     "non_verifier_digest": None
                     if change == "missing_record"
                     else task.non_verifier_digest,
