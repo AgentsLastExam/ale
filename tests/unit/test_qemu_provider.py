@@ -19,6 +19,7 @@ import pytest
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
+    SANDBOX_GATEWAY_PORT,
     Identity,
     ImageRef,
     PreparedTaskImage,
@@ -35,6 +36,7 @@ from ale.core.taskspec import (
 )
 from ale.run.providers.qemu import (
     EPISODE_LABEL,
+    GATEWAY_CHAIN,
     GPU_LABEL,
     HANDLE_PREFIX,
     HOST_IP,
@@ -348,15 +350,13 @@ async def test_qemu_retained_solver_can_be_reattached(
         "Mounts": [{"Type": "bind", "Source": str(storage), "Destination": "/storage"}],
         "NetworkSettings": {"Ports": {"7411/tcp": [{"HostPort": "17411"}]}},
     }
+    rules: list[str] = []
 
     async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
         if argv[:2] == ("docker", "exec"):
             if "ip route" in argv[-1]:
                 return 0, "172.17.0.1\n", ""
-            # The reattaching run's own Gateway port is routed in.
-            assert "--dport 8931 -j DNAT --to-destination 172.17.0.1:8931" in argv[-1] or (
-                "MASQUERADE" in argv[-1]
-            )
+            rules.append(argv[-1])
             return 0, "", ""
         assert argv[:2] == ("docker", "inspect")
         return 0, json.dumps([record]), ""
@@ -407,6 +407,9 @@ async def test_qemu_retained_solver_can_be_reattached(
     assert sandbox.host_port == 17411
     assert sandbox.host_ip == "172.17.0.1"
     assert sandbox.request.role.value == "solver"
+    # The reattaching run's own Gateway is routed in at the same guest address.
+    assert f"iptables -t nat -F {GATEWAY_CHAIN}" in rules[0]
+    assert f"--dport {SANDBOX_GATEWAY_PORT} -j DNAT --to-destination 172.17.0.1:8931" in rules[2]
 
 
 def test_overlay_uses_the_prepared_disks_virtual_size(
@@ -708,12 +711,12 @@ class TestGatewayAddressing:
     def test_the_host_is_rewritten_to_the_runner_address(self) -> None:
         """A host bind address is meaningless inside the guest.
 
-        What the guest can reach is the runner holding it, which forwards this one port
-        onward — so that is the address the agent's SDK must be handed.
+        What the guest can reach is the runner holding it, which forwards the fixed port to
+        the one the Gateway is on — so that is the address the agent's SDK must be handed.
         """
         sandbox = QemuSandbox.__new__(QemuSandbox)
         sandbox.request = request(gateway_url="http://0.0.0.0:8931")  # type: ignore[attr-defined]
-        assert sandbox.gateway_url == f"http://{HOST_IP}:8931"
+        assert sandbox.gateway_url == f"http://{HOST_IP}:{SANDBOX_GATEWAY_PORT}"
 
     def test_no_gateway_stays_absent(self) -> None:
         sandbox = QemuSandbox.__new__(QemuSandbox)

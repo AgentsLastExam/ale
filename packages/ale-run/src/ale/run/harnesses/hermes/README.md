@@ -23,7 +23,7 @@ Each turn runs in a background `hermes gateway run` that the first chat starts a
 outlives it with that chat's environment, Gateway token included, so every invocation first
 runs `hermes gateway stop` and the chat starts one of its own. A session freezes its route,
 the Gateway URL among it, and `--resume` refuses a different `--model` or `--base-url`; a
-continuing episode reaches it because its Gateway keeps the kept Sandbox's port.
+continuing episode reaches it because every Sandbox sees its Gateway at the same address.
 
 Hermes keeps sessions in SQLite and chooses a new session's ID itself, which the
 invocation's `result` event reports; `--resume` continues that exact session. After every

@@ -265,11 +265,9 @@ async def _run_one(
     needs_model = settings.agent.name not in {"oracle", "nop"}
 
     if needs_model:
-        # A kept Sandbox keeps the Gateway address it was given.
-        port = (resume.gateway_port if resume is not None else None) or 0
         if authentication.mode == "subscription":
             assert subscription is not None
-            gateway = Gateway(subscription=subscription, host=_gateway_host(), port=port)
+            gateway = Gateway(subscription=subscription, host=_gateway_host())
         else:
             try:
                 api_key, upstream = provider_credentials(
@@ -285,13 +283,8 @@ async def _run_one(
                 upstream=upstream,
                 dialect=settings.gateway.dialect,
                 host=_gateway_host(),
-                port=port,
             )
-        try:
-            gateway_url = await _start_gateway(gateway)
-        except AleError as error:
-            typer.echo(f"{error}", err=True)
-            return EXIT_BAD_REFERENCE
+        gateway_url = await gateway.start()
         limits = Limits(
             **{
                 key: None if value == "unlimited" else value
@@ -745,21 +738,7 @@ def _continuation(
         ),
         attach=lambda request: _attach_retained(handle, request, lock),
         trajectory=trajectory,
-        gateway_port=retained.gateway_port,
     )
-
-
-async def _start_gateway(gateway: Gateway) -> str:
-    """Serve the Gateway; a fixed port is a continuation's and must be free."""
-    try:
-        return await gateway.start()
-    except OSError as exc:
-        if not gateway.port:
-            raise
-        raise ConfigError(
-            f"the kept solver was given the Gateway at port {gateway.port}, which is in use: "
-            f"{exc.strerror or exc}"
-        ) from exc
 
 
 async def _attach_retained(

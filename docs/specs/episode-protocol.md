@@ -127,7 +127,7 @@ solver holds only the agent's own state.
 Subscription credentials never enter the Sandbox, so retention does not add a provider
 credential cleanup step. Failure of other required sanitation still forces destruction.
 Result and RunLock record the requested policy, actual Provider outcome, retained handle,
-cleanup command, any reason, and the Gateway port a retained Sandbox was given.
+cleanup command and any reason.
 
 ## Reverification
 
@@ -151,10 +151,10 @@ earlier episode whose solver was kept, in that Sandbox and native session, for f
 turns on one workspace. The earlier episode must have retained its solver and recorded a
 `continuation`. The run uses the same Harness at the same CLI version, and the Task the same
 prepared solver image, resources and verification mode, because a running Sandbox keeps
-its image, allocation and role. It also keeps the Gateway address it was given, which an
-agent may hold in its native session: the run serves its Gateway on that port and fails
-if the port is taken. The model, settings, instruction and verification may differ; the
-RunLock records this episode's own and names the earlier one in `resumed_from`.
+its image, allocation and role. The model, settings, instruction and verification may
+differ; the RunLock records this episode's own and names the earlier one in
+`resumed_from`. The agent finds this run's Gateway at the address it was given, since
+every Sandbox reaches its Gateway at the same one.
 
 The episode adopts the retained solver, so its own retention decides the solver's fate,
 and keeping it again lets a further episode continue. Setup runs again, the Harness finds

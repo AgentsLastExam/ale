@@ -52,8 +52,6 @@ class SandboxOutcome(BaseModel):
     reason: str | None = None
     cleanup_command: str | None = None
     gpu_devices: tuple[str, ...] = ()
-    #: The Gateway port a retained Sandbox was given; a continuation serves its Gateway there.
-    gateway_port: int | None = None
 
 
 class ResultRecord(BaseModel):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import socket
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,7 +18,6 @@ from ale.core.result import ResultRecord, SandboxOutcome
 from ale.core.sandbox import (
     ExecResult,
     PreparedTaskImage,
-    RetainedSandbox,
     SandboxRequest,
     SandboxRole,
 )
@@ -34,9 +32,8 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.core.verdict import Status
-from ale.run.cli.tasks import _continuation, _start_gateway
+from ale.run.cli.tasks import _continuation
 from ale.run.episode import _Lease
-from ale.run.gateway.server import Gateway
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.protocol.episode_protocol import (
     EpisodeProtocol,
@@ -110,43 +107,6 @@ async def test_a_refused_attachment_leaves_nothing_to_reap() -> None:
         await lease.adopt(_request(), attach)
     await lease.finalize()
     assert not lease.live and not lease.outcomes
-
-
-@pytest.mark.asyncio
-async def test_a_kept_solver_records_the_gateway_port_it_was_given() -> None:
-    sandbox = _kept()
-    sandbox.request = _request().model_copy(update={"gateway_url": "http://0.0.0.0:40559"})
-    sandbox.retain = AsyncMock(
-        return_value=RetainedSandbox(
-            provider="docker",
-            handle="docker:kept",
-            episode_id="later",
-            roles=("solver",),
-            reason="kept",
-            cleanup_command="ale sandbox destroy docker:kept",
-        )
-    )
-
-    async def attach(request: SandboxRequest) -> Any:
-        return sandbox
-
-    lease = _Lease(SimpleNamespace(), SandboxRetentionConfig(solver="keep"))  # type: ignore[arg-type]
-    await lease.adopt(sandbox.request, attach)
-    lease.mark_sanitized(sandbox, succeeded=True)  # type: ignore[arg-type]
-    await lease.finalize()
-    assert [(item.outcome, item.gateway_port) for item in lease.outcomes] == [("retained", 40559)]
-
-
-@pytest.mark.asyncio
-async def test_a_continuation_gateway_needs_the_port_its_solver_was_given() -> None:
-    with socket.socket() as taken:
-        taken.bind(("127.0.0.1", 0))
-        taken.listen()
-        port = taken.getsockname()[1]
-        gateway = Gateway(api_key="key", host="127.0.0.1", port=port)
-        with pytest.raises(ConfigError, match=f"given the Gateway at port {port}, which is in use"):
-            await _start_gateway(gateway)
-        await gateway.stop()
 
 
 # --- the solver's owner ---
@@ -416,7 +376,6 @@ def _source(tmp_path: Path, **changes: Any) -> tuple[Path, Any]:
                 outcome="retained",
                 provider="docker",
                 handle="docker:kept",
-                gateway_port=40559,
             ),
         ),
         continuation=CONTINUATION,
@@ -438,7 +397,6 @@ def test_the_earlier_episode_names_its_solver_session_and_trajectory(tmp_path: P
         episode_id="earlier", handle="docker:kept", continuation=CONTINUATION
     )
     assert resume.trajectory is None
-    assert resume.gateway_port == 40559
 
 
 @pytest.mark.parametrize(

@@ -43,6 +43,7 @@ from urllib.parse import urlsplit
 from ale.core.config import DaytonaProviderConfig
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
+    SANDBOX_GATEWAY_PORT,
     Capabilities,
     ExecOutputSink,
     ExecResult,
@@ -1141,8 +1142,8 @@ async def _discard(
 def _tunnel_plan(
     request: SandboxRequest,
 ) -> tuple[str | None, list[tuple[int, int]], list[tuple[str, int]]]:
-    """What the tunnel carries: the Gateway's URL on the sandbox's loopback, at the port the
-    Host chose, the port to listen on, and the Host address behind it.
+    """What the tunnel carries: the Gateway's URL on the sandbox's loopback at the fixed
+    port, the port to listen on, and the Host address behind it.
 
     Only the Gateway. The Host's egress proxy is not used: allowlisted hosts are reached
     directly, under Daytona's own allowlist.
@@ -1156,8 +1157,8 @@ def _tunnel_plan(
     host = parts.hostname or "127.0.0.1"
     if host in {"0.0.0.0", "::"}:
         host = "127.0.0.1"
-    local = parts._replace(netloc=f"127.0.0.1:{parts.port}").geturl()
-    return local, [(parts.port, 0)], [(host, parts.port)]
+    local = parts._replace(netloc=f"127.0.0.1:{SANDBOX_GATEWAY_PORT}").geturl()
+    return local, [(SANDBOX_GATEWAY_PORT, 0)], [(host, parts.port)]
 
 
 def _domain_allowlist(hosts: Sequence[str]) -> str:

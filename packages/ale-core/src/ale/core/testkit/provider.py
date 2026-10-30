@@ -21,7 +21,14 @@ from urllib.parse import urlsplit
 import pytest
 
 from ale.core.errors import ProviderCapabilityError
-from ale.core.sandbox import Identity, ImageRef, Provider, Sandbox, SandboxRequest
+from ale.core.sandbox import (
+    SANDBOX_GATEWAY_PORT,
+    Identity,
+    ImageRef,
+    Provider,
+    Sandbox,
+    SandboxRequest,
+)
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 
 __all__ = ["ProviderConformance"]
@@ -307,13 +314,15 @@ class ProviderConformance:
 
         Framework phases have the network; the agent phase reaches only the episode's
         Gateway, not the Internet and not any other service on the Host; verification
-        gets the network back. The Gateway's address never moves in between.
+        gets the network back. The Gateway's address never moves in between, and is at the
+        same port whatever port the Host serves it on.
         """
         async with _host_services() as (gateway_port, other_port):
             request = await self.request(gateway_url=f"http://127.0.0.1:{gateway_port}")
             async with await self.provider.create(request) as sandbox:
                 gateway = sandbox.gateway_url
                 assert gateway is not None
+                assert urlsplit(gateway).port == SANDBOX_GATEWAY_PORT
                 host = urlsplit(gateway).hostname
                 await sandbox.open_egress()
                 opened = await _reach(sandbox, f"tcp={INTERNET}", identity=Identity.FRAMEWORK)
@@ -359,6 +368,34 @@ class ProviderConformance:
             await self.provider.destroy_retained(retained.handle)
         listed = {record["handle"] for record in await self.provider.list_retained()}
         assert retained.handle not in listed
+
+    @pytest.mark.asyncio
+    async def test_a_reattached_sandbox_reaches_a_later_gateway_at_the_same_address(
+        self,
+    ) -> None:
+        """A later run serves its own Gateway; a kept agent finds it where it found the first."""
+        async with _host_services() as (first_port, _), _host_services() as (later_port, _):
+            request = await self.request(
+                retention="keep", gateway_url=f"http://127.0.0.1:{first_port}"
+            )
+            sandbox = await self.provider.create(request)
+            try:
+                retained = await sandbox.retain(roles=("solver",), reason="conformance")
+            except ProviderCapabilityError:
+                await sandbox.destroy()
+                pytest.skip(f"{self.provider.name} does not retain sandboxes")
+            try:
+                attached = await self.provider.attach_retained(
+                    retained.handle,
+                    request.model_copy(update={"gateway_url": f"http://127.0.0.1:{later_port}"}),
+                    sandbox.allocation,
+                )
+                gateway = attached.gateway_url
+                assert gateway == sandbox.gateway_url
+                assert (await _reach(attached, f"http={gateway}"))[f"http={gateway}"]
+                await attached.retain(roles=("solver",), reason="conformance")
+            finally:
+                await self.provider.destroy_retained(retained.handle)
 
     @pytest.mark.asyncio
     async def test_destroy_is_idempotent(self) -> None:

@@ -22,7 +22,6 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
-from urllib.parse import urlsplit
 
 from ale.core.config import LoggingPolicy, SandboxRetentionConfig, VerificationConfig
 from ale.core.episode import ArtifactSink, Budget, EpisodeContext, Phase
@@ -299,11 +298,6 @@ def _retained_outcome(entry: _LeaseEntry, retained: RetainedSandbox) -> SandboxO
         reason=retained.reason,
         cleanup_command=retained.cleanup_command,
         gpu_devices=retained.gpu_devices,
-        gateway_port=(
-            urlsplit(entry.sandbox.request.gateway_url).port
-            if entry.sandbox.request.gateway_url
-            else None
-        ),
     )
 
 

@@ -19,6 +19,17 @@ The normative contracts are
 [`../../../../../../docs/specs/sandbox-image.md`](../../../../../../docs/specs/sandbox-image.md)
 and [`../../../../../../docs/specs/security.md`](../../../../../../docs/specs/security.md).
 
+## Gateway address
+
+Every Sandbox dials its Gateway at `SANDBOX_GATEWAY_PORT` (7412), whatever port the Host
+serves it on.
+
+| Provider | Where the fixed port leads |
+|---|---|
+| Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone |
+| QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
+| Daytona | `guestd/tunnel.py` listens at 7412 on the sandbox's loopback |
+
 ## Daytona
 
 Daytona's sandboxes are built for a different trust model than ALE's, so `daytona.py`

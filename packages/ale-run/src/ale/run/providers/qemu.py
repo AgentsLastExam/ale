@@ -33,10 +33,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
+    SANDBOX_GATEWAY_PORT,
     Capabilities,
     ExecOutputSink,
     ExecResult,
@@ -119,6 +120,10 @@ RETENTION_LABEL = "ale.qemu.retention"
 GPU_LABEL = "ale.qemu.gpus"
 STORAGE_LABEL = "ale.qemu.storage"
 HANDLE_PREFIX = "qemu:"
+
+#: The runner's nat chain that sends the fixed Gateway port to the port the Host serves the
+#: Gateway on; a later run's Gateway replaces its rule.
+GATEWAY_CHAIN = "ALE_GATEWAY"
 
 
 @dataclass(frozen=True)
@@ -360,9 +365,10 @@ class QemuSandbox(Sandbox):
         url = self.request.gateway_url
         if not url:
             return None
-        scheme, _, rest = url.partition("://")
-        _, _, port = rest.partition(":")
-        return f"{scheme}://{HOST_IP}:{port}" if port else url
+        parts = urlsplit(url)
+        if parts.port is None:
+            return url
+        return parts._replace(netloc=f"{HOST_IP}:{SANDBOX_GATEWAY_PORT}").geturl()
 
     async def exec(
         self,
@@ -988,18 +994,26 @@ class QemuProvider(Provider):
         prepare — a task's setup may fetch what it needs, and the agent's own CLI may have
         to be installed, neither of which is the thing being measured.
 
-        The forwarding is set up once and never moved: the guest's single permitted
-        address is the runner, and the runner sends that one port on to the host. Doing it
-        here rather than in the guest means the host's address is discovered at run time
-        instead of baked into a disk.
+        The guest's single permitted address is the runner, and the runner sends the fixed
+        Gateway port on to the port the Host serves the Gateway on. Doing it here rather than
+        in the guest means the host's address is discovered at run time instead of baked
+        into a disk, and a later run that reattaches routes the same address to its own
+        Gateway.
         """
         host_ip = await _runner_host_ip(container)
         rules: list[str] = []
-        ports = {
-            _port_of(request.gateway_url),
-            _port_of(request.proxy_url) if request.network.mode is NetworkMode.ALLOWLIST else "",
-        }
-        for port in sorted(ports - {""}):
+        if gateway_port := _port_of(request.gateway_url):
+            # The guest dials the fixed port; a later run's Gateway replaces the target.
+            rules += [
+                f"iptables -t nat -N {GATEWAY_CHAIN} || iptables -t nat -F {GATEWAY_CHAIN}",
+                f"iptables -t nat -C PREROUTING -j {GATEWAY_CHAIN} || "
+                f"iptables -t nat -A PREROUTING -j {GATEWAY_CHAIN}",
+                f"iptables -t nat -A {GATEWAY_CHAIN} -i {GUEST_BRIDGE} -p tcp -d {HOST_IP} "
+                f"--dport {SANDBOX_GATEWAY_PORT} -j DNAT --to-destination {host_ip}:{gateway_port}",
+                f"iptables -t nat -A POSTROUTING -p tcp -d {host_ip} --dport {gateway_port} "
+                "-j MASQUERADE",
+            ]
+        if request.network.mode is NetworkMode.ALLOWLIST and (port := _port_of(request.proxy_url)):
             rules += [
                 f"iptables -t nat -A PREROUTING -i {GUEST_BRIDGE} -p tcp -d {HOST_IP} "
                 f"--dport {port} -j DNAT --to-destination {host_ip}:{port}",

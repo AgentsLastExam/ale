@@ -260,14 +260,12 @@ class Resume:
 
     ``attach`` reconnects the retained Sandbox for this episode's request; ``trajectory``
     is the earlier episode's, which tells where this episode's part of the native session
-    begins. ``gateway_port`` is the port the retained Sandbox was given for the Gateway,
-    where the run serves its own, since an agent may keep its endpoint in its session.
+    begins.
     """
 
     source: ResumedFrom
     attach: Callable[[SandboxRequest], Awaitable[Sandbox]]
     trajectory: AtifTrajectory | None
-    gateway_port: int | None = None
 
 
 class EpisodeProtocol:

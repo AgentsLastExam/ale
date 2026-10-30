@@ -23,6 +23,7 @@ from ale.core.errors import ProviderCapabilityError
 from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 
 __all__ = [
+    "SANDBOX_GATEWAY_PORT",
     "Capabilities",
     "ExecOutputSink",
     "ExecResult",
@@ -42,6 +43,11 @@ __all__ = [
     "SandboxRole",
     "SandboxState",
 ]
+
+#: The port at which every Sandbox reaches its Gateway, whatever port the Host serves it on.
+#: An agent may keep its endpoint in its native session, and a later episode continues
+#: that session in the kept Sandbox with its own Gateway.
+SANDBOX_GATEWAY_PORT = 7412
 
 
 class ImageRef(BaseModel):

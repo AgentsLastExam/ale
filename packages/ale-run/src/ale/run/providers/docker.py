@@ -24,6 +24,7 @@ from urllib.parse import quote, urlsplit
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
+    SANDBOX_GATEWAY_PORT,
     Capabilities,
     ExecOutputSink,
     ExecResult,
@@ -74,6 +75,10 @@ HANDLE_PREFIX = "docker:"
 #: sandbox's own subnet. That is the provider's half of the deny-all bargain — no route
 #: off the host, and exactly one destination still reachable.
 HOST_ALIAS = "ale-gateway.internal"
+
+#: The nat chain, in a sandbox's own network namespace, that sends the fixed Gateway port
+#: to the port the Host serves the Gateway on.
+GATEWAY_CHAIN = "ALE_GATEWAY"
 
 _NVIDIA_QUERY = "uuid,name,pci.bus_id,driver_version"
 _HOST_NVIDIA_QUERY = f"index,{_NVIDIA_QUERY}"
@@ -247,7 +252,7 @@ class DockerSandbox(Sandbox):
         URL is rewritten here rather than in the gateway — which is exactly the point of
         the gateway knowing nothing about providers.
         """
-        return _reachable(self.request.gateway_url)
+        return _sandbox_gateway(self.request.gateway_url)
 
     async def exec(
         self,
@@ -467,7 +472,7 @@ class DockerProvider(Provider):
             host_ip = await self._bridge_host_ip(network)
             argv += ["--add-host", f"{HOST_ALIAS}:{host_ip}"]
             if request.gateway_url:
-                argv += ["-e", f"ALE_GATEWAY_URL={_reachable(request.gateway_url)}"]
+                argv += ["-e", f"ALE_GATEWAY_URL={_sandbox_gateway(request.gateway_url)}"]
             if request.proxy_url:
                 request = request.model_copy(
                     update={"proxy_url": _reachable(request.proxy_url, host=host_ip)}
@@ -531,8 +536,7 @@ class DockerProvider(Provider):
                     )
                 runtime_identity = f"docker-engine/{version.strip()}"
 
-            if network:
-                await self._restrict_host(container, network, request)
+            await self._wire_host(container, network, request)
             agent_user = request.user
             client = await self._connect(container, agent_user)
             clients.append(client)
@@ -635,38 +639,62 @@ class DockerProvider(Provider):
             raise ProviderStartError(f"could not create isolated network: {stderr.strip()}")
         return network
 
-    async def _restrict_host(
-        self, container: str, network: str, request: SandboxRequest, *, reattached: bool = False
+    async def _wire_host(
+        self,
+        container: str,
+        network: str | None,
+        request: SandboxRequest,
+        *,
+        reattached: bool = False,
     ) -> None:
-        """Let an isolated sandbox reach only its own Gateway and proxy ports on the host.
+        """Route the fixed Gateway port to the Host, and confine an isolated sandbox to it.
+
+        A short-lived helper with NET_ADMIN joins the sandbox's network namespace. The
+        sandbox itself never holds NET_ADMIN, so neither its agent nor root inside it can
+        lift the rules. Failure stops provisioning.
+
+        The Gateway is dialled at :data:`SANDBOX_GATEWAY_PORT` and forwarded to the port the
+        Host serves it on, in a chain of its own that a later run's Gateway replaces.
 
         An internal bridge has no route off the host, but the host's own address on it
         answers on every port a host service binds to all interfaces: sshd, databases,
-        another run's Gateway. A short-lived helper with NET_ADMIN joins the sandbox's
-        network namespace and rejects every connection to that address except the
-        episode's ports. The sandbox itself never holds NET_ADMIN, so neither its agent
-        nor root inside it can lift the rules. Failure stops provisioning.
-
-        A retained sandbox reattached by a later run keeps its rules and gains that run's
-        ports, inserted ahead of the rejection.
+        another run's Gateway. Every connection to that address is rejected except the
+        episode's ports. A retained sandbox reattached by a later run keeps its rules and
+        gains that run's ports, inserted ahead of the rejection.
         """
-        host_ip = await self._bridge_host_ip(network)
-        ports = sorted(
-            {port for url in (request.gateway_url, request.proxy_url) if (port := _url_port(url))}
-        )
-        if reattached and not ports:
+        port = _url_port(request.gateway_url)
+        routed = bool(port) and _sandbox_gateway(request.gateway_url) != request.gateway_url
+        if not routed and not network:
             return
-        position = "-I OUTPUT 1" if reattached else "-A OUTPUT"
-        rules = (
-            [
-                f"iptables -w {position} -d {host_ip} -p tcp -m multiport "
-                f"--dports {','.join(ports)} -j ACCEPT"
+        host_ip = await self._bridge_host_ip(network)
+        rules: list[str] = []
+        if routed:
+            rules += [
+                f"{{ iptables -w -t nat -N {GATEWAY_CHAIN} || "
+                f"iptables -w -t nat -F {GATEWAY_CHAIN}; }}",
+                f"{{ iptables -w -t nat -C OUTPUT -j {GATEWAY_CHAIN} || "
+                f"iptables -w -t nat -A OUTPUT -j {GATEWAY_CHAIN}; }}",
+                f"iptables -w -t nat -A {GATEWAY_CHAIN} -d {host_ip} -p tcp "
+                f"--dport {SANDBOX_GATEWAY_PORT} -j DNAT --to-destination {host_ip}:{port}",
             ]
-            if ports
-            else []
-        )
-        if not reattached:
-            rules.append(f"iptables -w -A OUTPUT -d {host_ip} -j REJECT")
+        if network:
+            ports = sorted(
+                {
+                    port
+                    for url in (request.gateway_url, request.proxy_url)
+                    if (port := _url_port(url))
+                }
+            )
+            position = "-I OUTPUT 1" if reattached else "-A OUTPUT"
+            if ports:
+                rules.append(
+                    f"iptables -w {position} -d {host_ip} -p tcp -m multiport "
+                    f"--dports {','.join(ports)} -j ACCEPT"
+                )
+            if not reattached:
+                rules.append(f"iptables -w -A OUTPUT -d {host_ip} -j REJECT")
+        if not rules:
+            return
         code, _, stderr = await _docker(
             "run", "--rm", "--network", f"container:{container}", "--cap-add", "NET_ADMIN",
             "--entrypoint", "sh", NETFILTER_IMAGE, "-c", " && ".join(rules),
@@ -674,17 +702,16 @@ class DockerProvider(Provider):
         )  # fmt: skip
         if code != 0:
             raise ProviderStartError(
-                f"could not restrict the sandbox's access to the host: {stderr.strip()}"
+                f"could not route the sandbox's access to the host: {stderr.strip()}"
             )
 
     async def _bridge_host_ip(self, network: str | None) -> str:
-        """The host's address on a container's network.
+        """The host's address on a container's network, the default bridge's for ``None``.
 
         On an isolated bridge this is the only host address a sandbox can dial, which is
         why it is read from the network rather than assumed.
         """
-        if network is None:
-            return "host-gateway"
+        network = network or "bridge"
         code, out, stderr = await _docker(
             "network", "inspect", network, "--format", "{{(index .IPAM.Config 0).Gateway}}"
         )
@@ -916,8 +943,9 @@ class DockerProvider(Provider):
         )
         if len(networks) > 1:
             raise ProviderCapabilityError(f"{handle!r} has more than one ALE network")
-        if networks:
-            await self._restrict_host(container, networks[0], request, reattached=True)
+        await self._wire_host(
+            container, networks[0] if networks else None, request, reattached=True
+        )
         agent_user = request.user
         client = await self._connect(container, agent_user)
         try:
@@ -943,6 +971,19 @@ class DockerProvider(Provider):
 def _url_port(url: str | None) -> str:
     port = urlsplit(url).port if url else None
     return str(port) if port else ""
+
+
+def _sandbox_gateway(url: str | None) -> str | None:
+    """The Gateway as every container dials it: the Host's alias at the fixed port.
+
+    A Gateway elsewhere than on this Host is left as it is.
+    """
+    if not url:
+        return url
+    parts = urlsplit(url)
+    if parts.hostname not in {"0.0.0.0", "127.0.0.1", "localhost", "::"}:
+        return url
+    return parts._replace(netloc=f"{HOST_ALIAS}:{SANDBOX_GATEWAY_PORT}").geturl()
 
 
 def _reachable(url: str | None, *, host: str = HOST_ALIAS) -> str | None:
