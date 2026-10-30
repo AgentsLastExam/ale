@@ -41,7 +41,7 @@ from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
 from tests.support import CONTAINER_BASE, prepare_reference
 
-pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
+pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_cli_install]
 
 HOST_SECRET = "host-only-secret"
 MODEL = "scripted-model"

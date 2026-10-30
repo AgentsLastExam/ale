@@ -49,6 +49,7 @@ markers = [
     "conformance: contract suites run against a concrete implementation",
     "integration: end-to-end tests that provision real sandboxes",
     "needs_docker: requires a working container runtime",
+    "needs_cli_install: installs pinned agent CLIs from their package registries; slow",
     "needs_daytona: requires a Daytona API key and creates billable cloud sandboxes",
     "needs_gui: requires the desktop base image, which is large",
     "needs_llm: requires provider credentials and makes real model calls",

@@ -35,7 +35,7 @@ from ale.run.recording import BlobStore, EpisodeRecording
 from tests.integration.scripted_model import FINAL, ScriptedModel
 from tests.support import CONTAINER_BASE, prepare_reference
 
-pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
+pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_cli_install]
 
 
 @dataclass(frozen=True)
