@@ -97,18 +97,20 @@ qcow2 and installs the framework into a Linux or Windows qcow2 named by referenc
 
 ## Versions
 
-Every ALE image is published under the engine's version, such as `0.1.1`, once and never
-overwritten: the publishing workflow skips a version the registry already has, and no
-`latest` tag is published. An engine runs exactly the images of its own version, so a
-checkout that stays on one engine version keeps the same images whatever later versions
-publish. Publishing a changed image therefore means releasing a new engine version.
-A tag that every change overwrote would carry one engine's change into every checkout's
-next build, including checkouts whose engine does not speak the new guest protocol.
+Every ALE image is published once per version and never overwritten: the publishing
+workflow skips a version the registry already has, and no `latest` tag is published, since
+a tag that every change overwrote would change every checkout's next build behind its back.
+
+The VM builder and the QEMU runner run the engine's own logic, so they are published under
+the engine's version, such as `0.1.1`; an engine runs exactly those of its own version, and
+a changed one ships with the next engine version. A base carries no part of the framework,
+so nothing in it depends on the engine: each base has its own version, raised when the base
+itself changes, and any engine runs any version of it.
 
 A Task may build from any image. Task repositories maintained with ALE name an exact
 version of an ALE base, such as `container-ubuntu22-base:0.1.1`, so that a Task keeps
-building from the same base until its author moves it; `ale new-task` writes the
-engine's current version.
+building from the same base until its author moves it; `ale new-task` writes the base's
+current version.
 
 ## Task image
 

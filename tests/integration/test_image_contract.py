@@ -38,7 +38,7 @@ NO_COMMAND = "ale-test-no-command:latest"
 async def _pulled(reference: str) -> str:
     """The check inspects a local image, so each test makes sure its image is there.
 
-    A local copy is used as it is: CI builds this engine version's base before publishing.
+    A local copy is used as it is: CI builds a base's new version before publishing it.
     """
     present = subprocess.run(["docker", "image", "inspect", reference], capture_output=True)
     if present.returncode != 0:

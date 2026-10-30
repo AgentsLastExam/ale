@@ -174,7 +174,7 @@ permission, and piece of initial state required by the Task. The Linux bases are
 - VM: `ghcr.io/agentslastexam/vm-ubuntu24-base` (Ubuntu 24.04).
 
 Name an exact version, such as `:0.1.1`, never `latest`; `ale new-task` writes the
-engine's current version. A Task keeps building from the version it names until its
+base's current version. A Task keeps building from the version it names until its
 author moves it ([Sandbox image](sandbox-image.md#versions)).
 
 The submitted initial environment must be reproducible from `image/`; an exploratory sandbox

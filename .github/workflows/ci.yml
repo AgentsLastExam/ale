@@ -113,7 +113,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen --all-groups
-      # This engine version's images: pulled once published, built here while a new
+      # The images this engine uses: pulled once published, built here while a new
       # version is still under review.
       - run: images/build.sh container-ubuntu22-base ale-qemu-runner
       # One -m, not two: a second `-m` replaces the first rather than intersecting, so
