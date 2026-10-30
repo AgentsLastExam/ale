@@ -9,6 +9,7 @@ from ale.core.config import RunConfig
 from ale.core.sandbox import ImageRef, SandboxRequest
 from ale.core.taskspec import NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
+from ale.run.framework import framework_identity
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
@@ -34,6 +35,8 @@ class TestDockerProvider(ProviderConformance):
         kind="container",
         reference=CONTAINER_BASE,
     )
+    #: The base carries no framework; the Provider adds it.
+    framework = framework_identity(user="user", sudo=False, vm=False)
 
 
 @pytest.mark.asyncio

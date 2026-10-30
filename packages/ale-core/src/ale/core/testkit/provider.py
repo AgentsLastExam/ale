@@ -110,6 +110,13 @@ class ProviderConformance:
     what it was built from. So the GUI assertions need an image that claims a desktop,
     and skip rather than fail where none is configured."""
 
+    framework: str | None = None
+    """The framework identity the engine adds for this suite's requests, if it records one.
+
+    Every sandbox carries it in ``/opt/ale/framework`` whatever image it was handed. The
+    suite depends on no engine package, so a backend's suite supplies the value; ``None``
+    skips the check."""
+
     async def request(self, **overrides: object) -> SandboxRequest:
         image = overrides.pop("image", self.image)
         assert isinstance(image, ImageRef)
@@ -247,6 +254,19 @@ class ProviderConformance:
             )
             escaped = await sandbox.exec(["sh", "-c", probe], identity=Identity.AGENT)
             assert escaped.ok and escaped.stdout.split() == [], escaped.stdout
+
+    @pytest.mark.asyncio
+    async def test_a_sandbox_carries_the_engines_framework(self) -> None:
+        """Any image a Provider accepts runs the guest service of the engine driving it.
+
+        An image handed straight to a Provider may carry an older guest service or none;
+        booted unchanged, it would speak another protocol or could not be driven at all.
+        """
+        if self.framework is None:
+            pytest.skip("this backend's suite names no framework identity")
+        async with await self.provider.create(await self.request()) as sandbox:
+            recorded = await sandbox.read_file("/opt/ale/framework")
+            assert recorded.decode().strip() == self.framework
 
     @pytest.mark.asyncio
     async def test_uploads_ignore_host_modes_and_belong_to_their_identity(self) -> None:

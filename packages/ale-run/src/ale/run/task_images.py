@@ -27,13 +27,11 @@ from ale.core.taskspec import (
     Resources,
     VerificationMode,
 )
-from ale.run import ale_image
 from ale.run.content import tree_digest
 from ale.run.framework import (
-    frame_disk,
+    MATERIALIZER_IMAGE,
+    framed_disk,
     framework_identity,
-    framework_on_disk,
-    install_on_windows,
     windows_framework_identity,
     with_framework,
 )
@@ -52,7 +50,6 @@ __all__ = [
     "vm_materialization_identity",
 ]
 
-MATERIALIZER_IMAGE = os.environ.get("ALE_VM_MATERIALIZER", ale_image("ale-vm-materializer"))
 VM_OUTPUT_CONTRACT = "ale-vm-qcow2/v1"
 WINDOWS_BUILD_CONTRACT = "ale-windows-powershell/v1"
 
@@ -176,14 +173,22 @@ async def prepare_task_image_result(
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
             )
-        elif task.spec.os is OperatingSystem.LINUX:
-            image, outcome = await _stage(
+        else:
+            image, reused = await _stage(
                 "framework-layer",
-                _framed_disk(image, user=spec.user, sudo=task.spec.resources.sudo),
+                framed_disk(
+                    image,
+                    operating_system=task.spec.os,
+                    user=spec.user,
+                    sudo=task.spec.resources.sudo,
+                ),
             )
             steps.append(
                 ImagePreparationStep(
-                    "framework-layer", outcome, image.prepared_identity, image.runtime_ref
+                    "framework-layer",
+                    "reused" if reused else "executed",
+                    image.prepared_identity,
+                    image.runtime_ref,
                 )
             )
         return _result(
@@ -269,13 +274,19 @@ async def prepare_verifier_image_result(
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
             )
-        elif task.spec.os is OperatingSystem.LINUX:
-            image, outcome = await _stage(
-                "framework-layer", _framed_disk(image, user=verify.image.user, sudo=False)
+        else:
+            image, reused = await _stage(
+                "framework-layer",
+                framed_disk(
+                    image, operating_system=task.spec.os, user=verify.image.user, sudo=False
+                ),
             )
             steps.append(
                 ImagePreparationStep(
-                    "framework-layer", outcome, image.prepared_identity, image.runtime_ref
+                    "framework-layer",
+                    "reused" if reused else "executed",
+                    image.prepared_identity,
+                    image.runtime_ref,
                 )
             )
         return _result(
@@ -463,68 +474,6 @@ async def _framed_reference(
     return image.model_copy(update={"runtime_ref": layered, "prepared_identity": layered})
 
 
-async def _framed_disk(
-    image: PreparedTaskImage, *, user: str, sudo: bool
-) -> tuple[PreparedTaskImage, str]:
-    """A Linux VM disk named by reference, with the framework installed.
-
-    A copy of the disk is framed once per disk, framework and builder, and then used
-    directly. A disk that already carries this exact framework, such as one ALE prepared,
-    is used as it is.
-    """
-    identity = framework_identity(user=user, sudo=sudo, vm=True)
-    key = content_hash(
-        {
-            "disk": image.prepared_identity,
-            "framework": identity,
-            "builder": await _materializer_identity(),
-        }
-    )
-    root = cache_root() / "vm-builds"
-    root.mkdir(parents=True, exist_ok=True)
-    disk = root / f"{key.removeprefix('sha256:')}.qcow2"
-    # Names the input disk when it already carried this framework, so it is checked once.
-    carried = disk.with_suffix(".json")
-    source = Path(image.runtime_ref)
-    with disk.with_suffix(".lock").open("a") as lock:
-        await _acquire_lock(lock)
-        try:
-            if await _valid_qcow2(disk):
-                return _with_disk(image, disk, key), "reused"
-            if _carried(carried) == str(source):
-                return image, "reused"
-            if await framework_on_disk(source, builder=MATERIALIZER_IMAGE) == identity:
-                carried.write_text(json.dumps({"disk": str(source)}), encoding="utf-8")
-                return image, "reused"
-            with tempfile.TemporaryDirectory(prefix=f".{disk.stem}-", dir=root) as temporary:
-                output = Path(temporary) / "disk.qcow2"
-                code, _, stderr = await _run(
-                    "qemu-img", "convert", "-O", "qcow2", str(source), str(output)
-                )
-                if code != 0:
-                    raise ProviderStartError(f"could not copy the VM disk: {stderr.strip()}")
-                await frame_disk(output, user=user, sudo=sudo, builder=MATERIALIZER_IMAGE)
-                if not await _valid_qcow2(output):
-                    raise ProviderStartError("framing produced no valid qcow2")
-                os.replace(output, disk)
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
-    return _with_disk(image, disk, key), "executed"
-
-
-def _carried(record: Path) -> str | None:
-    try:
-        return str(json.loads(record.read_text(encoding="utf-8"))["disk"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-
-
-def _with_disk(image: PreparedTaskImage, disk: Path, identity: str) -> PreparedTaskImage:
-    return image.model_copy(
-        update={"runtime_ref": str(disk.resolve()), "prepared_identity": identity}
-    )
-
-
 def _local_container(build: _OciBuild, *, source: str) -> PreparedTaskImage:
     return PreparedTaskImage(
         kind=ImageKind.CONTAINER,
@@ -666,8 +615,6 @@ async def _build_windows_image(
         )
         if not result.ok:
             raise ProviderStartError(f"could not remove image build inputs: {result.stderr}")
-        # After the Task's script, so nothing it installs replaces the framework's pieces.
-        await install_on_windows(sandbox, user=user)
         await sandbox.save_image(output)
     finally:
         await asyncio.shield(sandbox.destroy())

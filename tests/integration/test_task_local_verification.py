@@ -34,9 +34,9 @@ def framework_layer(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("ale.run.task_images.with_framework", layer)
 
     async def disk(image, **kwargs):
-        return image, "reused"
+        return image, True
 
-    monkeypatch.setattr("ale.run.task_images._framed_disk", disk)
+    monkeypatch.setattr("ale.run.task_images.framed_disk", disk)
 
 
 DIGEST = "sha256:" + "d" * 64

@@ -10,6 +10,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import shutil
 import subprocess
 import sys
 from ctypes import wintypes as w
@@ -131,6 +132,12 @@ def main() -> int:
         startup.cb = ctypes.sizeof(startup)
         startup.desktop = "winsta0\\default"
         startup.flags = 0x00000100  # STARTF_USESTDHANDLES
+        if request.get("shell") or _console_program(request["argv"][0], env):
+            # It gets a console of its own, since this call cannot share guestd's; hidden, as
+            # guestd's is, so nothing appears on the agent's desktop. A window program is
+            # not hidden: the setting would apply to its first window.
+            startup.flags |= 0x00000001  # STARTF_USESHOWWINDOW
+            startup.show = 0  # SW_HIDE
         startup.stdout = msvcrt.get_osfhandle(sys.stdout.fileno())
         startup.stderr = msvcrt.get_osfhandle(sys.stderr.fileno())
         with open(os.devnull, "rb") as null:
@@ -159,6 +166,21 @@ def main() -> int:
         for handle in (process.thread, process.process, primary, token, shell_process):
             if handle:
                 kernel.CloseHandle(handle)
+
+
+def _console_program(name: str, env: dict[str, str]) -> bool:
+    """Whether ``name`` runs in a console; a script or an unknown program is taken to."""
+    found = shutil.which(name, path=env.get("PATH") or env.get("Path"))
+    if not found or not found.lower().endswith(".exe"):
+        return True
+    try:
+        with open(found, "rb") as program:
+            program.seek(0x3C)
+            header = int.from_bytes(program.read(4), "little")
+            program.seek(header + 0x5C)  # PE optional header's Subsystem
+            return int.from_bytes(program.read(2), "little") != 2  # 2: a window program
+    except (OSError, ValueError):
+        return True
 
 
 if __name__ == "__main__":

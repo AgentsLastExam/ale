@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -10,15 +11,18 @@ from pathlib import Path
 import pytest
 
 from ale.core.errors import ProviderStartError, TaskDefinitionError
-from ale.core.sandbox import ExecResult
+from ale.core.sandbox import PreparedTaskImage
+from ale.core.taskspec import OperatingSystem
 from ale.run import framework, guestd
 from ale.run.framework import (
     LABEL,
     MARKER,
+    MATERIALIZER_IMAGE,
+    WINDOWS_MARKER,
     frame_disk,
+    framed_disk,
     framework_identity,
     framework_on_disk,
-    install_on_windows,
     windows_framework_identity,
     with_framework,
 )
@@ -108,7 +112,9 @@ async def test_a_vm_disk_gets_the_same_pieces_offline(
 
     monkeypatch.setattr(framework, "_run", run)
     disk = tmp_path / "disk.qcow2"
-    await frame_disk(disk, user="app", sudo=True, builder="builder:1")
+    await frame_disk(
+        disk, operating_system=OperatingSystem.LINUX, user="app", sudo=True, builder="builder:1"
+    )
     argv = seen["argv"]
     assert isinstance(argv, tuple)
     assert argv[argv.index("--entrypoint") + 1] == "virt-customize"
@@ -134,24 +140,136 @@ async def test_a_disk_that_cannot_be_framed_fails_with_the_reason(
 
     monkeypatch.setattr(framework, "_run", run)
     with pytest.raises(TaskDefinitionError) as failure:
-        await frame_disk(tmp_path / "disk.qcow2", user="app", sudo=False, builder="b")
+        await frame_disk(
+            tmp_path / "disk.qcow2",
+            operating_system=OperatingSystem.LINUX,
+            user="app",
+            sudo=False,
+            builder="b",
+        )
     assert str(failure.value).endswith(reason)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operating_system", "marker"),
+    [(OperatingSystem.LINUX, MARKER), (OperatingSystem.WINDOWS, WINDOWS_MARKER)],
+)
 async def test_the_framework_a_disk_carries_is_read_from_its_marker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operating_system: OperatingSystem,
+    marker: str,
 ) -> None:
     identity = "sha256:" + "a" * 64
     answers = iter([(1, f"{identity}\n", "path must start with /"), (1, "", "No such file")])
 
     async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
-        assert argv[-1] == MARKER and "--network=none" in argv
+        assert argv[-1] == marker and "--network=none" in argv
         return next(answers)
 
     monkeypatch.setattr(framework, "_run", run)
-    assert await framework_on_disk(tmp_path / "d.qcow2", builder="b") == identity
-    assert await framework_on_disk(tmp_path / "d.qcow2", builder="b") is None
+    disk = tmp_path / "d.qcow2"
+    found = await framework_on_disk(disk, operating_system=operating_system, builder="b")
+    assert found == identity
+    assert await framework_on_disk(disk, operating_system=operating_system, builder="b") is None
+
+
+def _external_disk(path: str, digest: str) -> PreparedTaskImage:
+    return PreparedTaskImage(
+        kind="vm",
+        source="external-ref",
+        input_identity=digest,
+        runtime_ref=path,
+        prepared_identity=digest,
+        resolved_reference=f"file://{path}",
+    )
+
+
+@pytest.fixture
+def framing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """``framed_disk`` with the copy, the builder and the disks' markers stubbed out."""
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "cache"))
+    seen: dict[str, object] = {"framed": [], "carried": {}}
+
+    async def builder_identity() -> str:
+        return "sha256:" + "9" * 64
+
+    async def valid(path: Path) -> bool:
+        return path.is_file()
+
+    async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
+        assert argv[:2] == ("qemu-img", "convert")
+        Path(argv[-1]).write_bytes(Path(argv[-2]).read_bytes())
+        return 0, "", ""
+
+    async def frame(
+        disk: Path, *, operating_system: OperatingSystem, user: str, sudo: bool, builder: str
+    ) -> None:
+        assert builder == MATERIALIZER_IMAGE
+        seen["framed"].append((disk, operating_system))  # type: ignore[attr-defined]
+
+    async def on_disk(disk: Path, *, operating_system: OperatingSystem, builder: str) -> str | None:
+        return seen["carried"].get(disk)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(framework, "_builder_identity", builder_identity)
+    monkeypatch.setattr(framework, "_valid_qcow2", valid)
+    monkeypatch.setattr(framework, "_run", run)
+    monkeypatch.setattr(framework, "frame_disk", frame)
+    monkeypatch.setattr(framework, "framework_on_disk", on_disk)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_vm_disk_is_framed_once_and_a_framed_disk_is_used_as_it_is(
+    tmp_path: Path, framing: dict[str, object]
+) -> None:
+    source = tmp_path / "input.qcow2"
+    source.write_bytes(b"disk")
+    framed: list[tuple[Path, OperatingSystem]] = framing["framed"]  # type: ignore[assignment]
+    carried: dict[Path, str | None] = framing["carried"]  # type: ignore[assignment]
+    image = _external_disk(str(source), "sha256:" + "d" * 64)
+    linux = {"operating_system": OperatingSystem.LINUX, "user": "user"}
+
+    first, reused = await framed_disk(image, sudo=False, **linux)  # type: ignore[arg-type]
+    assert not reused and len(framed) == 1
+    assert first.runtime_ref != image.runtime_ref
+    assert first.resolved_reference == image.resolved_reference
+    assert first.prepared_identity != image.prepared_identity
+    assert await framed_disk(image, sudo=False, **linux) == (first, True)  # type: ignore[arg-type]
+    assert len(framed) == 1
+    await framed_disk(image, sudo=True, **linux)  # type: ignore[arg-type]
+    assert len(framed) == 2  # another framework is another copy
+
+    ready = image.model_copy(update={"prepared_identity": "sha256:" + "e" * 64})
+    carried[source] = framework_identity(user="user", sudo=False, vm=True)
+    assert await framed_disk(ready, sudo=False, **linux) == (ready, True)  # type: ignore[arg-type]
+    carried.clear()  # recorded once, not looked at again
+    assert await framed_disk(ready, sudo=False, **linux) == (ready, True)  # type: ignore[arg-type]
+    assert len(framed) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_windows_disk_is_framed_for_its_account_whatever_sudo_says(
+    tmp_path: Path, framing: dict[str, object]
+) -> None:
+    source = tmp_path / "windows.qcow2"
+    source.write_bytes(b"disk")
+    framed: list[tuple[Path, OperatingSystem]] = framing["framed"]  # type: ignore[assignment]
+    carried: dict[Path, str | None] = framing["carried"]  # type: ignore[assignment]
+    image = _external_disk(str(source), "sha256:" + "d" * 64)
+    windows = {"operating_system": OperatingSystem.WINDOWS}
+
+    first, reused = await framed_disk(image, user="user", sudo=True, **windows)  # type: ignore[arg-type]
+    assert not reused and framed[0][1] is OperatingSystem.WINDOWS
+    # The Host grants Administrator access per boot, so it is not in the disk.
+    assert await framed_disk(image, user="user", sudo=False, **windows) == (first, True)  # type: ignore[arg-type]
+    await framed_disk(image, user="other", sudo=True, **windows)  # type: ignore[arg-type]
+    assert len(framed) == 2  # but the account is
+    carried[source] = windows_framework_identity(user="user")
+    ready = image.model_copy(update={"prepared_identity": "sha256:" + "e" * 64})
+    assert await framed_disk(ready, user="user", sudo=True, **windows) == (ready, True)  # type: ignore[arg-type]
+    assert len(framed) == 2
 
 
 @pytest.mark.asyncio
@@ -202,6 +320,55 @@ async def test_docker_frames_an_image_unless_it_carries_exactly_this_framework(
     assert await provider._framed(resolved, request) == resolved  # type: ignore[arg-type]
     reframed = await provider._framed(resolved, request)  # type: ignore[arg-type]
     assert (reframed.observed_identity, reframed.observed_ref) == (framed, framed)
+
+
+@pytest.mark.asyncio
+async def test_qemu_frames_a_disk_unless_it_carries_exactly_this_framework(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ale.core.sandbox import ResolvedImage, SandboxRequest
+    from ale.core.taskspec import NetworkPolicy, Resources
+    from ale.run.providers import qemu
+
+    original = "sha256:" + "1" * 64
+    framed = "sha256:" + "2" * 64
+    prepared = _external_disk("/disks/task.qcow2", original)
+    copy = prepared.model_copy(
+        update={"runtime_ref": "/cache/framed.qcow2", "prepared_identity": framed}
+    )
+    answers = iter([prepared, copy, copy])
+    asked: list[tuple[PreparedTaskImage, OperatingSystem, str, bool]] = []
+
+    async def frame(
+        image: PreparedTaskImage, *, operating_system: OperatingSystem, user: str, sudo: bool
+    ) -> tuple:
+        asked.append((image, operating_system, user, sudo))
+        return next(answers), False
+
+    monkeypatch.setattr(qemu, "framed_disk", frame)
+    resolved = ResolvedImage(
+        kind="vm",
+        prepared_identity=original,
+        observed_identity=original,
+        observed_ref=prepared.runtime_ref,
+    )
+    request = SandboxRequest(
+        episode_id="e1",
+        prepared_image=prepared,
+        resources=Resources(sudo=True),
+        network=NetworkPolicy(),
+        user="app",
+        sudo=True,
+    )
+    provider = qemu.QemuProvider()
+    assert await provider._framed(resolved, request) == resolved
+    reframed = await provider._framed(resolved, request)
+    assert reframed.prepared_identity == original  # what the request named, still
+    assert (reframed.observed_identity, reframed.observed_ref) == (framed, copy.runtime_ref)
+    assert asked == [(prepared, OperatingSystem.LINUX, "app", True)] * 2
+    windows = request.model_copy(update={"os": OperatingSystem.WINDOWS})
+    assert (await provider._framed(resolved, windows)).observed_ref == copy.runtime_ref
+    assert asked[-1] == (prepared, OperatingSystem.WINDOWS, "app", True)
 
 
 def _zip(files: dict[str, bytes]) -> bytes:
@@ -268,54 +435,82 @@ def test_cua_driver_is_downloaded_once_and_verified(
         framework._cua_driver(platform)
 
 
-class _WindowsBuildVm:
-    def __init__(self, setup: ExecResult) -> None:
-        self.setup = setup
-        self.uploaded: list[str] = []
-        self.commands: list[list[str]] = []
-
-    async def upload_dir(self, source: str, target: str) -> None:
-        self.uploaded = sorted(str(path.relative_to(source)) for path in Path(source).rglob("*"))
-        self.target = target
-
-    async def exec(self, argv: list[str], *, timeout_sec: float) -> ExecResult:
-        self.commands.append(argv)
-        if "-File" in argv:
-            return self.setup
-        return ExecResult(exit_code=0, stdout="", stderr="")
-
-
 @pytest.mark.asyncio
-async def test_windows_builds_get_the_current_guestd_and_cua_driver(
+async def test_a_windows_disk_is_framed_by_the_installer_inside_the_builder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     release = tmp_path / "release"
     release.mkdir()
     (release / "cua-driver.exe").write_bytes(b"pe")
     monkeypatch.setattr(framework, "_cua_driver", lambda platform: release)
-    vm = _WindowsBuildVm(ExecResult(exit_code=0, stdout="", stderr=""))
-    await install_on_windows(vm, user="user")  # type: ignore[arg-type]
+    seen: dict[str, object] = {}
+
+    async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
+        seen["argv"] = argv
+        context = Path(
+            next(a for a in argv if a.endswith(",dst=/framework,readonly")).split(",")[1][4:]
+        )
+        seen["files"] = sorted(
+            str(path.relative_to(context)) for path in context.rglob("*") if path.is_file()
+        )
+        return 0, "", ""
+
+    monkeypatch.setattr(framework, "_run", run)
+    await frame_disk(
+        tmp_path / "disk.qcow2",
+        operating_system=OperatingSystem.WINDOWS,
+        user="user",
+        sudo=True,
+        builder="builder:1",
+    )
+    argv = seen["argv"]
+    assert isinstance(argv, tuple)
+    assert argv[argv.index("--entrypoint") + 1] == "python3"
+    assert "--network=none" in argv  # nothing to download: the pieces are staged
+    install = argv[argv.index("builder:1") + 1 :]
+    assert install[:3] == ("/framework/install.py", "/disk/disk.qcow2", "/framework")
+    assert install[install.index("--user") + 1] == "user"
+    assert install[install.index("--identity") + 1] == windows_framework_identity(user="user")
+    assert install[install.index("--runner-address") + 1] == guestd.HOST_ADDRESS
     assert {f"guestd/{name}" for name in guestd.FILES} | {
         "cua-driver/cua-driver.exe",
-        "setup.ps1",
-    } <= set(vm.uploaded)
-    setup, cleanup = vm.commands
-    assert setup[setup.index("-User") + 1] == "user"
-    assert "Remove-Item" in cleanup[-1] and vm.target in cleanup[-1]
-    assert windows_framework_identity(user="user") != windows_framework_identity(user="admin")
+        "install.py",
+    } == set(seen["files"])  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
-async def test_a_windows_base_with_another_account_fails_with_the_reason(
+async def test_a_windows_disk_that_cannot_be_framed_fails_with_the_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(framework, "_cua_driver", lambda platform: tmp_path)
-    reason = "this Windows base signs in 'user' as its agent account, but image.user names 'app'"
-    vm = _WindowsBuildVm(ExecResult(exit_code=1, stdout="", stderr=f"ALE: {reason}\r\n"))
+    reason = "the agent account 'app' does not exist on this Windows disk"
+
+    async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
+        return 1, "", f"Traceback...\nALE: {reason}\n"
+
+    monkeypatch.setattr(framework, "_run", run)
     with pytest.raises(TaskDefinitionError) as failure:
-        await install_on_windows(vm, user="app")  # type: ignore[arg-type]
+        await frame_disk(
+            tmp_path / "disk.qcow2",
+            operating_system=OperatingSystem.WINDOWS,
+            user="app",
+            sudo=False,
+            builder="b",
+        )
     assert str(failure.value).endswith(reason)
-    assert len(vm.commands) == 2  # the staging files are removed even so
+
+
+def test_the_windows_identity_follows_everything_it_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = windows_framework_identity(user="user")
+    assert windows_framework_identity(user="user") == base
+    assert windows_framework_identity(user="admin") != base
+    installer = tmp_path / "install.py"
+    installer.write_text("changed\n")
+    monkeypatch.setattr(framework, "_WINDOWS_INSTALLER", installer)
+    assert windows_framework_identity(user="user") != base
+    assert "service.py" in guestd.FILES  # the boot service is part of guestd's files
 
 
 def test_a_desktop_is_decided_by_the_images_own_configuration(
@@ -352,10 +547,66 @@ def test_a_failed_call_starts_the_driver_once_and_retries(monkeypatch: pytest.Mo
         calls.append(tool)
         if not started:
             raise gui.GuiUnavailable("not serving")
-        return {"width": 10, "height": 20}
+        return {"structuredContent": {"width": 10, "height": 20}}
 
     monkeypatch.setattr(gui, "_invoke", invoke)
     monkeypatch.setattr(gui, "_start_server", lambda: started.append(True) or True)
     assert gui.screen_size() == (10, 20)
     assert calls == ["get_screen_size", "get_screen_size"]
     assert started == [True]
+
+
+def _driver_answers(monkeypatch: pytest.MonkeyPatch, *results: dict | None) -> list[list[str]]:
+    """Answer each Cua Driver MCP run with the next tools/call result (None: no daemon)."""
+    import subprocess
+
+    runs: list[list[str]] = []
+    answers = iter(results)
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        runs.append(command)
+        sent = [json.loads(line) for line in str(kwargs["input"]).splitlines()]
+        assert [message.get("method") for message in sent] == [
+            "initialize",
+            "notifications/initialized",
+            "tools/call",
+        ]
+        result = next(answers)
+        if result is None:
+            return subprocess.CompletedProcess(command, 1, "", "daemon is not running")
+        replies = [
+            {"jsonrpc": "2.0", "id": 0, "result": {}},
+            {"jsonrpc": "2.0", "id": 1, "result": result},
+        ]
+        return subprocess.CompletedProcess(
+            command, 0, "\n".join(json.dumps(reply) for reply in replies) + "\n", "update notice"
+        )
+
+    monkeypatch.setattr(gui, "_binary", lambda: "cua-driver")
+    monkeypatch.setattr(gui.subprocess, "run", run)
+    return runs
+
+
+def test_a_driver_tool_succeeds_unless_it_reports_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A scroll answers with text alone; it still succeeded.
+    _driver_answers(
+        monkeypatch,
+        {"content": [{"type": "text", "text": "Scrolled down"}]},
+        {"content": [], "structuredContent": {"width": 1280, "height": 800}},
+        {"content": [{"type": "image", "data": base64.b64encode(b"png").decode()}]},
+        {"content": [{"type": "text", "text": "No window under screen point"}], "isError": True},
+    )
+    monkeypatch.setattr(gui, "_start_server", lambda: pytest.fail("the driver was running"))
+    assert gui._call("scroll", {"x": 1, "y": 1}) == {}
+    assert gui._call("get_screen_size") == {"width": 1280, "height": 800}
+    assert gui.capture_screen() == b"png"
+    with pytest.raises(gui.ActionFailed, match="click failed: No window under screen point"):
+        gui._call("click", {"x": 99999, "y": 99999})
+
+
+def test_an_unreachable_driver_is_started_and_asked_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    runs = _driver_answers(monkeypatch, None, {"structuredContent": {"x": 5, "y": 6}})
+    started: list[bool] = []
+    monkeypatch.setattr(gui, "_start_server", lambda: started.append(True) or True)
+    assert gui._call("get_cursor_position") == {"x": 5, "y": 6}
+    assert started == [True] and len(runs) == 2 and runs[0][1] == "mcp"

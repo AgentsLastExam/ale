@@ -177,6 +177,10 @@ $removeTrees = @(
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\Vault",
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\Microsoft\Word",
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\Package Cache\{b6ce88eb-2ce3-4d91-8efc-425ae1f48caf}",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\Programs\Python",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\pip",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\conda",
+    "$env:SystemDrive\Users\$AgentUser\AppData\Local\cua-driver",
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\Programs\Microsoft VS Code",
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\RealVNC",
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\Thunderbird",
@@ -210,6 +214,24 @@ foreach ($directory in @(
     Get-ChildItem -LiteralPath $directory -Force -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
+# The seed's own per-user Python, whose files are removed above. Its registration would
+# still make py.exe pick it over the all-users Python.
+foreach ($root in @(
+    "HKCU:\SOFTWARE\Python\PythonCore",
+    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+)) {
+    Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | Where-Object {
+        $entry = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
+        $place = (Get-ItemProperty -LiteralPath "$($_.PSPath)\InstallPath" `
+            -ErrorAction SilentlyContinue).'(default)'
+        "$place $($entry.BundleCachePath)" -like "*\Users\$AgentUser\*" -and
+            ($root -like "*PythonCore" -or $entry.DisplayName -match "^Python ")
+    } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+# Directories the removed applications added to the system PATH.
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine").Split(";") |
+    Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+[Environment]::SetEnvironmentVariable("Path", ($machinePath -join ";"), "Machine")
 foreach ($key in @(
     "HKCU:\SOFTWARE\Microsoft\Notepad",
     "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32",

@@ -16,14 +16,15 @@ The result is an ordinary image built on the Task image, so Docker runs it and V
 preparation materializes it. A label records what it was built with, which makes adding
 the same layer twice a no-op.
 
-A Linux VM disk named by reference gets the same pieces installed into it offline, inside
-the VM builder's own small appliance VM, so the disk's programs never run on the Host.
-Both record what they installed in ``/opt/ale/framework``; a disk that already carries
-this framework is used as it is.
+A VM disk named by reference or handed straight to the QEMU Provider gets the same pieces
+installed into a copy of it offline, inside the VM builder's own small appliance VM, so the
+disk's programs never run on the Host. Both record what they installed in a marker file; a
+disk that already carries this framework is used as it is.
 
-A Windows image is built inside a running VM, so the same pieces arrive there through the
-guest service the base already runs, after the Task's own image script: the current
-guestd replaces the base's, and Cua Driver is installed and started at the agent's logon.
+On Windows the pieces are guestd, Cua Driver and a boot service that starts both in the
+agent's session, which replaces the logon tasks only a running Windows could register
+(``framework_windows.py`` installs them). A Windows Task image is built from a framed copy
+of its base, so the framework is already there when the Task's own image script runs.
 Elevation is not part of the image; the Host grants it per boot.
 """
 
@@ -35,6 +36,7 @@ import fcntl
 import hashlib
 import io
 import json
+import os
 import re
 import shlex
 import shutil
@@ -48,18 +50,21 @@ from pathlib import Path, PureWindowsPath
 
 from ale.core.errors import ProviderStartError, TaskDefinitionError
 from ale.core.ids import content_hash
-from ale.core.sandbox import Sandbox
-from ale.run import guestd
+from ale.core.sandbox import PreparedTaskImage
+from ale.core.taskspec import OperatingSystem
+from ale.run import ale_image, guestd
 from ale.run.sources import cache_root
 
 __all__ = [
     "CUA_DRIVER_VERSION",
     "LABEL",
     "MARKER",
+    "MATERIALIZER_IMAGE",
+    "WINDOWS_MARKER",
     "frame_disk",
+    "framed_disk",
     "framework_identity",
     "framework_on_disk",
-    "install_on_windows",
     "windows_framework_identity",
     "with_framework",
 ]
@@ -67,19 +72,26 @@ __all__ = [
 LABEL = "ale.framework"
 #: Where a prepared Linux image records the framework identity it carries.
 MARKER = "/opt/ale/framework"
-CUA_DRIVER_VERSION = "0.12.6"
+#: The same for a Windows disk, as libguestfs names ``C:\ProgramData\ALE\framework``.
+WINDOWS_MARKER = "/ProgramData/ALE/framework"
+#: The VM builder: it materializes Linux VM OCI content into a qcow2, and its libguestfs
+#: installs the framework into a Linux or Windows qcow2.
+MATERIALIZER_IMAGE = os.environ.get("ALE_VM_MATERIALIZER", ale_image("ale-vm-materializer"))
+CUA_DRIVER_VERSION = "0.38.0"
 #: Release asset and its published SHA-256, per guest platform.
 _CUA_DRIVER = {
     "linux": (
         f"cua-driver-rs-{CUA_DRIVER_VERSION}-linux-x86_64-binary.tar.gz",
-        "795b8464a25b036fe1a47d9cd1f560d6b4e2ab58e23630c0de3d9feff4757039",
+        "31ab9709dd91ce73677e49b9f3e75c6f0d3e4d9625c286c9e58262bfbea698dd",
     ),
     "windows": (
         f"cua-driver-rs-{CUA_DRIVER_VERSION}-windows-x86_64-binary.zip",
-        "d18a0ca02314c6dc7dfdfbb20aac8f52c7b1547308f182546a9252a991d4d0dd",
+        "5edaa74d0afa1b55a9668dbc4f32736507bd2bd4d75b18ca1dc8881bb12402b5",
     ),
 }
 _CUA_DRIVER_BINARY = {"linux": "cua-driver", "windows": "cua-driver.exe"}
+#: Run inside the VM builder to install the Windows framework into a disk.
+_WINDOWS_INSTALLER = Path(__file__).with_name("framework_windows.py")
 
 #: How a prepared VM disk starts the guest service at boot.
 _GUEST_UNIT = f"""\
@@ -150,64 +162,6 @@ printf '%s\n' "$identity" > /opt/ale/framework
 """
 
 
-#: Run elevated, as the agent account, in a Windows image build VM. The base's own logon
-#: tasks start guestd from ``ProgramData\ALE\guestd``; this replaces what they start.
-_WINDOWS_SETUP = r"""param([string]$User, [string]$Source)
-$ErrorActionPreference = "Stop"
-# One unwrapped line the engine can quote; a thrown error is wrapped to the console width.
-function Fail([string]$Reason) { [Console]::Error.WriteLine("ALE: $Reason"); exit 1 }
-if (-not (Get-LocalUser -Name $User -ErrorAction SilentlyContinue)) {
-    Fail ("the agent account '$User' does not exist in this image; create it in the base " +
-        "or name the base's account with image.user in task.yaml")
-}
-if ($env:USERNAME -ne $User) {
-    Fail ("this Windows base signs in '$env:USERNAME' as its agent account, but " +
-        "image.user names '$User'")
-}
-$root = "$env:ProgramData\ALE"
-Get-Process -Name "cua-driver", "cua-driver-uia" -ErrorAction SilentlyContinue |
-    Stop-Process -Force
-Start-Sleep -Seconds 1
-foreach ($part in "guestd", "cua-driver") {
-    if (Test-Path "$root\$part") { Remove-Item "$root\$part" -Recurse -Force }
-    Copy-Item "$Source\$part" "$root\$part" -Recurse -Force
-}
-$account = "$env:COMPUTERNAME\$User"
-$driver = "$root\cua-driver\cua-driver.exe"
-$serve = "serve --permission-mode unrestricted --dangerously-bypass-approvals"
-# Started hidden through PowerShell so no console window appears on the agent's desktop,
-# and elevated so it can reach elevated windows the agent opens.
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
-    "-NoProfile -WindowStyle Hidden -NonInteractive -Command `"Start-Process " +
-    "-FilePath '$driver' -ArgumentList '$serve' -WindowStyle Hidden`""
-)
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $account
-$principal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive `
-    -RunLevel Highest
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Days 3650)
-Register-ScheduledTask -TaskName "ALE Cua Driver" -Action $action -Trigger $trigger `
-    -Principal $principal -Settings $settings -Force | Out-Null
-# Framework operations always need Administrator access. The Host's existing SMBIOS
-# grant controls only agent commands; guestd launches other agent commands unelevated.
-$start = "$root\start-guestd.ps1"
-$python = (& python.exe -c "import sys; print(sys.executable)").Trim()
-@"
-`$env:ALE_AGENT_USER = "$User"
-`$env:ALE_AGENT_HOME = "$env:USERPROFILE"
-`$serial = (Get-CimInstance Win32_ComputerSystemProduct).IdentifyingNumber
-`$env:ALE_AGENT_SUDO = if (`$serial -eq "ale-sudo") { "1" } else { "0" }
-& "$python" -I -S "$root\guestd\main.py" --tcp 0.0.0.0:7411
-"@ | Set-Content -LiteralPath $start -Encoding UTF8
-$guestAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
-    "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$start`""
-)
-Register-ScheduledTask -TaskName "ALE Guestd Session" -Action $guestAction -Trigger $trigger `
-    -Principal $principal -Settings $settings -Force | Out-Null
-Unregister-ScheduledTask -TaskName "ALE Guestd" -Confirm:$false -ErrorAction SilentlyContinue
-"""
-
-
 def framework_identity(*, user: str, sudo: bool, vm: bool) -> str:
     """Everything the Linux layer is built from, so a change to any of it rebuilds it."""
     return content_hash(
@@ -223,12 +177,13 @@ def framework_identity(*, user: str, sudo: bool, vm: bool) -> str:
 
 
 def windows_framework_identity(*, user: str) -> str:
-    """Everything the Windows framework step installs, so a change to any of it rebuilds."""
+    """Everything the Windows framework is built from, so a change to any of it reframes."""
     return content_hash(
         {
             "guestd": _guestd_digests(),
             "cua_driver": _CUA_DRIVER["windows"][1],
-            "setup": _WINDOWS_SETUP,
+            "installer": hashlib.sha256(_WINDOWS_INSTALLER.read_bytes()).hexdigest(),
+            "runner": guestd.HOST_ADDRESS,
             "user": user,
         }
     )
@@ -239,38 +194,6 @@ def _guestd_digests() -> dict[str, str]:
         name: hashlib.sha256((guestd.SOURCE / name).read_bytes()).hexdigest()
         for name in guestd.FILES
     }
-
-
-async def install_on_windows(sandbox: Sandbox, *, user: str) -> None:
-    """Install the framework into a running Windows image build VM.
-
-    The VM must run guestd elevated as the agent account, which is how image builds boot.
-    The new guestd takes over at the next boot of the saved disk.
-    """
-    driver = await asyncio.to_thread(_cua_driver, "windows")
-    staging = PureWindowsPath(r"C:\ProgramData\ALE\framework-install")
-    with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
-        context = Path(temporary)
-        shutil.copytree(guestd.SOURCE, context / "guestd", ignore=_only(guestd.FILES))
-        shutil.copytree(driver, context / "cua-driver")
-        (context / "setup.ps1").write_text(_WINDOWS_SETUP)
-        await sandbox.upload_dir(str(context), str(staging))
-    powershell = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"]
-    result = await sandbox.exec(
-        [*powershell, "-File", str(staging / "setup.ps1"), "-User", user, "-Source", str(staging)],
-        timeout_sec=600,
-    )
-    cleanup = await sandbox.exec(
-        [*powershell, "-Command", f"Remove-Item -LiteralPath '{staging}' -Recurse -Force"],
-        timeout_sec=120,
-    )
-    if not result.ok:
-        output = f"{result.stderr}\n{result.stdout}"
-        explained = [line.split("ALE: ", 1)[1] for line in output.splitlines() if "ALE: " in line]
-        reason = " ".join(explained) if explained else output.strip()[-2000:]
-        raise TaskDefinitionError(f"could not add the ALE framework to the Windows image: {reason}")
-    if not cleanup.ok:
-        raise ProviderStartError(f"could not remove the framework staging files: {cleanup.stderr}")
 
 
 async def with_framework(image: str, *, user: str, sudo: bool, vm: bool = False) -> str:
@@ -299,8 +222,86 @@ async def with_framework(image: str, *, user: str, sudo: bool, vm: bool = False)
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-async def framework_on_disk(disk: Path, *, builder: str) -> str | None:
-    """The framework identity a Linux VM disk records, or None when it carries none.
+async def framed_disk(
+    image: PreparedTaskImage, *, operating_system: OperatingSystem, user: str, sudo: bool
+) -> tuple[PreparedTaskImage, bool]:
+    """A VM disk with the framework installed, and whether it was already there.
+
+    A copy of the disk is framed once per disk, framework and builder, and then used
+    directly. A disk that already carries this exact framework, such as one ALE prepared,
+    is used as it is; that is read from the disk once and then recorded. Windows does not
+    take ``sudo``: the Host grants Administrator access per boot, not in the disk.
+    """
+    identity = (
+        windows_framework_identity(user=user)
+        if operating_system is OperatingSystem.WINDOWS
+        else framework_identity(user=user, sudo=sudo, vm=True)
+    )
+    key = content_hash(
+        {
+            "disk": image.prepared_identity,
+            "framework": identity,
+            "builder": await _builder_identity(),
+        }
+    )
+    root = cache_root() / "vm-builds"
+    root.mkdir(parents=True, exist_ok=True)
+    disk = root / f"{key.removeprefix('sha256:')}.qcow2"
+    # Names the input disk when it already carried this framework, so it is checked once.
+    carried = disk.with_suffix(".json")
+    source = Path(image.runtime_ref)
+    with disk.with_suffix(".lock").open("a") as lock:
+        await _acquire(lock)
+        try:
+            if await _valid_qcow2(disk):
+                return _with_disk(image, disk, key), True
+            if _carried(carried) == str(source):
+                return image, True
+            found = await framework_on_disk(
+                source, operating_system=operating_system, builder=MATERIALIZER_IMAGE
+            )
+            if found == identity:
+                carried.write_text(json.dumps({"disk": str(source)}), encoding="utf-8")
+                return image, True
+            with tempfile.TemporaryDirectory(prefix=f".{disk.stem}-", dir=root) as temporary:
+                output = Path(temporary) / "disk.qcow2"
+                code, _, stderr = await _run(
+                    "qemu-img", "convert", "-O", "qcow2", str(source), str(output), timeout=1800
+                )
+                if code != 0:
+                    raise ProviderStartError(f"could not copy the VM disk: {stderr.strip()}")
+                await frame_disk(
+                    output,
+                    operating_system=operating_system,
+                    user=user,
+                    sudo=sudo,
+                    builder=MATERIALIZER_IMAGE,
+                )
+                if not await _valid_qcow2(output):
+                    raise ProviderStartError("framing produced no valid qcow2")
+                os.replace(output, disk)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+    return _with_disk(image, disk, key), False
+
+
+def _carried(record: Path) -> str | None:
+    try:
+        return str(json.loads(record.read_text(encoding="utf-8"))["disk"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _with_disk(image: PreparedTaskImage, disk: Path, identity: str) -> PreparedTaskImage:
+    return image.model_copy(
+        update={"runtime_ref": str(disk.resolve()), "prepared_identity": identity}
+    )
+
+
+async def framework_on_disk(
+    disk: Path, *, operating_system: OperatingSystem, builder: str
+) -> str | None:
+    """The framework identity a VM disk records, or None when it carries none.
 
     Judged by what is printed: virt-cat can print the file and still exit non-zero over
     an unrelated mount it could not follow.
@@ -309,20 +310,54 @@ async def framework_on_disk(disk: Path, *, builder: str) -> str | None:
         "--device=/dev/kvm", "--network=none",
         "--mount", f"type=bind,src={disk.parent.resolve()},dst=/disk,readonly",
         "--entrypoint", "virt-cat", builder,
-        "--format", "qcow2", "--add", f"/disk/{disk.name}", MARKER,
+        "--format", "qcow2", "--add", f"/disk/{disk.name}",
+        WINDOWS_MARKER if operating_system is OperatingSystem.WINDOWS else MARKER,
         timeout=300,
     )  # fmt: skip
     found = output.strip()
     return found if re.fullmatch(r"sha256:[0-9a-f]{64}", found) else None
 
 
-async def frame_disk(disk: Path, *, user: str, sudo: bool, builder: str) -> None:
-    """Install the framework into a standalone Linux VM disk, in place, without booting it.
+async def frame_disk(
+    disk: Path, *, operating_system: OperatingSystem, user: str, sudo: bool, builder: str
+) -> None:
+    """Install the framework into a standalone VM disk, in place, without booting it.
 
     ``builder`` is the VM builder image. Its libguestfs edits the disk from a small
-    appliance VM of its own, which is also where the setup script and the image's programs
-    it calls run, never on the Host. Package installation for sudo uses its network.
+    appliance VM of its own, never on the Host.
     """
+    if operating_system is OperatingSystem.WINDOWS:
+        await _frame_windows_disk(disk, user=user, builder=builder)
+    else:
+        await _frame_linux_disk(disk, user=user, sudo=sudo, builder=builder)
+
+
+async def _frame_windows_disk(disk: Path, *, user: str, builder: str) -> None:
+    """Check the disk and install the framework, by ``framework_windows.py`` in the builder."""
+    identity = windows_framework_identity(user=user)
+    driver = await asyncio.to_thread(_cua_driver, "windows")
+    with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
+        context = Path(temporary)
+        shutil.copytree(guestd.SOURCE, context / "guestd", ignore=_only(guestd.FILES))
+        shutil.copytree(driver, context / "cua-driver")
+        shutil.copy2(_WINDOWS_INSTALLER, context / "install.py")
+        code, output, stderr = await _in_container(
+            "--device=/dev/kvm", "--network=none",
+            "--mount", f"type=bind,src={disk.parent.resolve()},dst=/disk",
+            "--mount", f"type=bind,src={context},dst=/framework,readonly",
+            "--entrypoint", "python3", builder,
+            "/framework/install.py", f"/disk/{disk.name}", "/framework",
+            "--user", user, "--identity", identity, "--runner-address", guestd.HOST_ADDRESS,
+            timeout=1800,
+        )  # fmt: skip
+    if code != 0:
+        raise TaskDefinitionError(
+            f"could not add the ALE framework to the Windows disk: {_explained(stderr, output)}"
+        )
+
+
+async def _frame_linux_disk(disk: Path, *, user: str, sudo: bool, builder: str) -> None:
+    """Run the setup script inside the disk's own appliance VM; sudo installs use its network."""
     identity = framework_identity(user=user, sudo=sudo, vm=True)
     driver = await asyncio.to_thread(_cua_driver, "linux")
     with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
@@ -345,13 +380,17 @@ async def frame_disk(disk: Path, *, user: str, sudo: bool, builder: str) -> None
             timeout=1800,
         )  # fmt: skip
     if code != 0:
-        explained = [
-            line.split("ALE: ", 1)[1]
-            for line in f"{stderr}\n{output}".splitlines()
-            if "ALE: " in line
-        ]
-        reason = " ".join(explained) if explained else stderr.strip()[-2000:]
-        raise TaskDefinitionError(f"could not add the ALE framework to the VM disk: {reason}")
+        raise TaskDefinitionError(
+            f"could not add the ALE framework to the VM disk: {_explained(stderr, output)}"
+        )
+
+
+def _explained(stderr: str, stdout: str) -> str:
+    """What a framing script said was wrong, else the tail of what it printed."""
+    said = [
+        line.split("ALE: ", 1)[1] for line in f"{stderr}\n{stdout}".splitlines() if "ALE: " in line
+    ]
+    return " ".join(said) if said else stderr.strip()[-2000:]
 
 
 async def _build(base: dict, tag: str, identity: str, *, user: str, sudo: bool, vm: bool) -> None:
@@ -474,6 +513,23 @@ async def _inspect(reference: str, *, missing_ok: bool = False) -> dict:
     loaded = json.loads(config or "null") or {}
     loaded["Id"] = image_id.strip()
     return loaded
+
+
+async def _builder_identity() -> str:
+    """The VM builder's local image ID, pulling it first when this host lacks it."""
+    if found := await _inspect(MATERIALIZER_IMAGE, missing_ok=True):
+        return found["Id"]
+    code, _, stderr = await _run("docker", "pull", MATERIALIZER_IMAGE, timeout=900)
+    if code != 0:
+        raise ProviderStartError(f"could not acquire image {MATERIALIZER_IMAGE}: {stderr.strip()}")
+    return (await _inspect(MATERIALIZER_IMAGE))["Id"]
+
+
+async def _valid_qcow2(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    code, _, _ = await _run("qemu-img", "check", "-q", str(path), timeout=300)
+    return code == 0
 
 
 async def _acquire(handle) -> None:  # type: ignore[no-untyped-def]

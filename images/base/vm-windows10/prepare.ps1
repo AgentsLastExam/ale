@@ -1,8 +1,6 @@
 param(
     [string]$AgentUser = "user",
-    [string]$GuestdSource = "$PSScriptRoot\guestd",
-    [string]$PythonVersion = "3.12.10",
-    [switch]$Compact
+    [string]$PythonVersion = "3.12.10"
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,22 +10,18 @@ $principal = New-Object Security.Principal.WindowsPrincipal(
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Run prepare.ps1 from an elevated PowerShell session."
 }
-if (-not (Test-Path "$GuestdSource\main.py")) {
-    throw "guestd source is missing: $GuestdSource"
-}
 if (-not (Get-LocalUser -Name $AgentUser -ErrorAction SilentlyContinue)) {
     throw "Windows account '$AgentUser' does not exist."
 }
 $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name.Split("\\")[-1]
 if ($currentUser -ne $AgentUser) {
-    throw "Run prepare.ps1 as '$AgentUser' so its logon tasks run in that desktop session."
+    throw "Run prepare.ps1 as '$AgentUser' so its per-user settings apply to that account."
 }
 
 $work = "$env:ProgramData\ALE\install"
-$guestd = "$env:ProgramData\ALE\guestd"
 $setup = "$env:ProgramData\ALE\setup"
 $verify = "$env:ProgramData\ALE\verify"
-New-Item -ItemType Directory -Path $work, $guestd, $setup, $verify -Force | Out-Null
+New-Item -ItemType Directory -Path $work, $setup, $verify -Force | Out-Null
 
 $python = "C:\Python312\python.exe"
 if (-not (Test-Path $python)) {
@@ -65,38 +59,25 @@ if (-not (Test-Path $python)) {
 }
 & $python -c "import sys; assert sys.version_info >= (3, 12), sys.version"
 
-# Replace, not merge: a re-run must not keep modules an older guestd shipped.
-Get-ChildItem $guestd -Force | Remove-Item -Recurse -Force
-Copy-Item "$GuestdSource\*.py" $guestd -Force
+# The framework (guestd, Cua Driver, the service that starts them) is not part of the base:
+# ALE installs it into a copy of the disk before it boots, and its service locks this
+# directory down at every boot. These are the directories ALE stages Task files in.
 icacls "$env:ProgramData\ALE" /inheritance:r /grant:r `
-    "SYSTEM:(OI)(CI)(F)" "Administrators:(OI)(CI)(F)" "${AgentUser}:(OI)(CI)(RX)" | Out-Null
+    "SYSTEM:(OI)(CI)(F)" "Administrators:(OI)(CI)(F)" | Out-Null
 foreach ($stage in $setup, $verify) {
     icacls $stage /inheritance:r /grant:r `
         "SYSTEM:(OI)(CI)(F)" "Administrators:(OI)(CI)(F)" "${AgentUser}:(OI)(CI)(M)" | Out-Null
 }
-
-# ALE installs Cua Driver and refreshes guestd whenever it builds a Task image from this
-# base; the guestd staged above is what that build talks to.
-$start = "$env:ProgramData\ALE\start-guestd.ps1"
-@"
-`$env:ALE_AGENT_USER = "$AgentUser"
-`$env:ALE_AGENT_HOME = "C:\Users\$AgentUser"
-`$serial = (Get-CimInstance Win32_ComputerSystemProduct).IdentifyingNumber
-`$env:ALE_AGENT_SUDO = if (`$serial -eq "ale-sudo") { "1" } else { "0" }
-& "$python" -I -S "$guestd\main.py" --tcp 0.0.0.0:7411
-"@ | Set-Content -Path $start -Encoding UTF8
-
-$account = "$env:COMPUTERNAME\$AgentUser"
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument `
-    "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$start`""
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $account
-$taskPrincipal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive `
-    -RunLevel Highest
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Days 3650) `
-    -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName "ALE Guestd Session" -Action $action -Trigger $trigger `
-    -Principal $taskPrincipal -Settings $settings -Force | Out-Null
-Unregister-ScheduledTask -TaskName "ALE Guestd" -Confirm:$false -ErrorAction SilentlyContinue
+# A seed an earlier recipe prepared also carries a guestd of its own, the logon tasks that
+# started it and its firewall rule.
+foreach ($task in "ALE Guestd Session", "ALE Guestd") {
+    Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
+}
+Get-NetFirewallRule -DisplayName "ALE guestd" -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule
+foreach ($leftover in "guestd", "start-guestd.ps1", "start-session.ps1", "debloat.ps1") {
+    Remove-Item "$env:ProgramData\ALE\$leftover" -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # The seed came from GCP, but the prepared disk runs behind ALE's QEMU runner.  Leaving
 # cloud agents enabled adds minute-long metadata timeouts to every cold boot.
@@ -120,6 +101,7 @@ Get-Process -Name "vmtoolsd", "vmwaretray" -ErrorAction SilentlyContinue | `
 if (-not (Test-Path "$env:ProgramData\ALE\debloat.done")) {
     throw "Windows base cleanup did not complete; inspect C:\ProgramData\ALE\debloat.log."
 }
+Remove-Item "$env:ProgramData\ALE\debloat.done", "$env:ProgramData\ALE\debloat.log" -Force
 & "$PSScriptRoot\tools.ps1"
 
 # The screen, filesystem and timestamps must begin every episode in one predictable locale.
@@ -217,11 +199,6 @@ New-ItemProperty $edgePolicy -Name HideFirstRunExperience -Value 1 `
 New-ItemProperty $edgePolicy -Name DefaultBrowserSettingEnabled -Value 0 `
     -PropertyType DWord -Force | Out-Null
 
-Get-NetFirewallRule -DisplayName "ALE guestd" -ErrorAction SilentlyContinue | `
-    Remove-NetFirewallRule
-New-NetFirewallRule -DisplayName "ALE guestd" -Direction Inbound -Action Allow `
-    -Protocol TCP -LocalPort 7411 -RemoteAddress 172.30.0.1 | Out-Null
-
 powercfg.exe /setactive SCHEME_BALANCED
 powercfg.exe /hibernate off
 powercfg.exe /change monitor-timeout-ac 0
@@ -234,22 +211,15 @@ powercfg.exe /change hibernate-timeout-ac 0
 powercfg.exe /change hibernate-timeout-dc 0
 Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" `
     -Name HiberbootEnabled -Value 0 -Force
+# Zeroed at shutdown, so a saved disk carries no page file contents to store.
+Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" `
+    -Name ClearPageFileAtShutdown -Value 1 -Type DWord -Force
 Set-ItemProperty "HKCU:\Control Panel\Desktop" -Name ScreenSaveActive -Value "0" -Force
 Set-ItemProperty "HKCU:\Control Panel\Desktop" -Name ScreenSaveTimeOut -Value "0" -Force
 Remove-Item "$env:TEMP\*", "$env:SystemRoot\Temp\*" -Recurse -Force `
     -ErrorAction SilentlyContinue
 Optimize-Volume -DriveLetter C -ReTrim -ErrorAction SilentlyContinue
 
-if ($Compact) {
-    $archive = "$work\SDelete.zip"
-    Invoke-WebRequest "https://download.sysinternals.com/files/SDelete.zip" -OutFile $archive
-    Expand-Archive $archive "$work\sdelete" -Force
-    $sdelete = "$work\sdelete\sdelete64.exe"
-    if ((Get-AuthenticodeSignature $sdelete).Status -ne "Valid") {
-        throw "SDelete signature is not valid."
-    }
-    & $sdelete -accepteula -z C:
-}
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Host "ALE Windows base preparation completed. Reboot once, test guestd, then shut down."
+Write-Host "ALE Windows base preparation completed. Shut down completely (Fast Startup is off)."

@@ -45,3 +45,43 @@ request to that name's own host, so sending an allowed name to another address r
 the allowed host; other ports of unlisted addresses are unreachable. The proxy accepts every
 TCP connection to port 443 before it decides, which is why egress is checked with a TLS
 handshake rather than a connect.
+
+## QEMU
+
+`QemuProvider.create` frames the disk it is handed with `framework.framed_disk`, the
+function Task preparation uses for a qcow2 `ref`, so both share one cache in `vm-builds`.
+Measured on a KVM host:
+
+- A disk that already carries this framework, such as one ALE prepared, boots as it is.
+  Reading its marker (`/opt/ale/framework`, or `C:\ProgramData\ALE\framework` on Windows)
+  with the VM builder's `virt-cat` takes about 3 s, and the answer is recorded next to the
+  cache, so each disk pays it once per Host.
+- Any other disk is copied with `qemu-img convert` and framed offline, once per disk,
+  framework identity and builder image. The copy is an uncompressed qcow2: about 4.5 GB for
+  the 2.3 GB Linux VM base, 23 GB for the 14 GB Windows base.
+- The resolved image keeps the request's prepared identity and observes the copy that
+  boots, which the RunLock records.
+
+Linux is framed by `virt-customize` in about 30–40 s. Its setup script runs inside
+libguestfs's appliance VM, because it calls the disk's own programs.
+
+Windows is framed by `framework_windows.py`, run by the builder's Python, with nothing on
+the disk executed; copy and install take about a minute, and the framed disk boots to a
+ready sandbox in about 25 s. Windows cannot register a logon task offline, so the
+framework is a Windows service instead. It is a registry key under the control set the
+disk boots from, written into the SYSTEM hive with hivex, plus files copied into
+`C:\ProgramData\ALE`:
+
+- Checks first, from the hives alone (SAM for the account, SOFTWARE for automatic sign-in,
+  UAC and Python 3.12+ for all users): each failure names the one thing the disk lacks.
+  A disk left hibernated by Fast Startup cannot be written, and says so.
+- The service `ALEGuestd` runs `guestd/service.py` as LocalSystem. At boot it limits
+  `C:\ProgramData\ALE` to the system and Administrators, because files written offline
+  carry no access list and otherwise come out writable by everyone. It opens guestd's port
+  to the runner's address only, waits for the agent's sign-in, and starts guestd and Cua
+  Driver on the agent's desktop with the account's elevated token (the one UAC keeps beside
+  the limited one), each in its own hidden console, restarting either that exits.
+- The service reads the Host's `ale-sudo` SMBIOS serial and passes it to guestd, which
+  runs agent commands with the desktop's limited token unless it is set.
+- A Task image build boots a framed copy of its base, so its `run.ps1` runs beside the
+  same guestd as every sandbox, and the saved image already carries the framework.
