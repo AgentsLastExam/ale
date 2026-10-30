@@ -73,8 +73,11 @@ _STATUS_BY_ERROR: tuple[tuple[type[BaseException], Status], ...] = (
 
 
 #: Outcomes another attempt must not replace. A completed zero is a score, and a limit
-#: termination is the measured agent's own result: retrying it would grant a fresh budget.
-_FINAL_STATUSES = frozenset({Status.COMPLETED, Status.TIMEOUT, Status.BUDGET_EXCEEDED})
+#: termination or a refusal is the measured agent's own result: retrying a limit would grant
+#: a fresh budget.
+_FINAL_STATUSES = frozenset(
+    {Status.COMPLETED, Status.TIMEOUT, Status.BUDGET_EXCEEDED, Status.REFUSED}
+)
 
 
 def status_for(error: BaseException) -> Status:
@@ -631,7 +634,13 @@ async def run_episode(
                 reason=type(exc).__name__,
             )
         phase = _phase_of(exc, ctx.failure_phase)
-        verdict = Verdict.failed(status_for(exc), exc, phase=phase, message=redact(str(exc)))
+        verdict = Verdict.failed(
+            status_for(exc),
+            exc,
+            phase=phase,
+            message=redact(str(exc)),
+            rewards=ctx.stopped_rewards,
+        )
         recording.execution.append(
             ExecutionFailure(
                 episode_id=episode_id,

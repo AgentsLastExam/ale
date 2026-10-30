@@ -160,8 +160,10 @@ Canonical JSON never embeds base64. No blob manifest exists.
 ## Result and run status
 
 `result.json` is the episode's atomic terminal truth. A completed result has a non-empty,
-finite named reward map and no failure. A failed result has failure information and no
-rewards. ALE supplies no primary reward or aggregation policy.
+finite named reward map and no failure. A failed result has failure information, and has
+rewards exactly when verification still completed after the agent
+[stopped early](episode-protocol.md#agent-or-oracle). ALE supplies no primary reward or
+aggregation policy.
 
 `runs/<run>/ledger.db` is a rebuildable run-level projection for queued/running/current
 phase/terminal/interrupted state. It uses WAL and stores bounded failures and final reward
@@ -185,7 +187,8 @@ with a new Gateway session and trajectory, preserving the logical episode ID and
 Only `status=completed` stops retries successfully; a completed zero score is still a
 completed episode. `status=timeout` and `status=budget_exceeded` are limit terminations
 and terminal without retry: the timed-out phase and its deadline, or the exhausted limit,
-remain in the failure details, and another attempt would grant a fresh limit. Judge infrastructure failures stop without another episode attempt;
+remain in the failure details, and another attempt would grant a fresh limit.
+`status=refused` is also terminal, as the agent's own decision. Judge infrastructure failures stop without another episode attempt;
 their internal retry budget is defined in [Verification](verification.md). Host cancellation
 interrupts the loop immediately. Missing results
 caused by a host interruption are not treated as an unlimited retry request.

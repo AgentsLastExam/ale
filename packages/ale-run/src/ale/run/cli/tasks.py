@@ -1153,7 +1153,7 @@ def _validation_attempt(result: EpisodeResult, run_dir: Path) -> ValidationAttem
     return ValidationAttempt(
         episode_id=result.episode_id,
         status=result.verdict.status,
-        rewards=result.verdict.rewards,
+        rewards=result.verdict.rewards if result.verdict.status is Status.COMPLETED else None,
         lock_path=lock_path.relative_to(run_dir).as_posix() if lock_path else None,
         lock_digest=(
             f"sha256:{hashlib.sha256(lock_path.read_bytes()).hexdigest()}" if lock_path else None
@@ -1163,11 +1163,9 @@ def _validation_attempt(result: EpisodeResult, run_dir: Path) -> ValidationAttem
 
 
 def _validation_outcome(verdict: Verdict) -> object:
-    if verdict.rewards is not None:
-        return verdict.rewards
     if verdict.failure is not None:
         return f"{verdict.status.value} ({verdict.failure.error_class}: {verdict.failure.message})"
-    return verdict.status.value
+    return verdict.rewards if verdict.rewards is not None else verdict.status.value
 
 
 def _gateway_host() -> str:

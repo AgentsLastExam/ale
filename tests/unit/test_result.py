@@ -46,19 +46,20 @@ def test_rewards_are_nonempty_named_and_finite(rewards: dict[str, float]) -> Non
         completed(rewards=rewards)
 
 
-def test_failure_and_rewards_are_mutually_exclusive() -> None:
-    failure = FailureInfo(error_type="TaskError", message="broken", phase="verify")
+def test_only_a_failed_result_carries_a_failure_and_it_may_still_be_scored() -> None:
+    failure = FailureInfo(error_type="PhaseTimeoutError", message="late", phase="agent")
     with pytest.raises(ValidationError):
         completed(failure=failure)
+    fields = {
+        "episode_id": "episode-1",
+        "status": Status.TIMEOUT,
+        "rewards": {"score": 0.5},
+        "started_at": "2026-07-29T12:00:00Z",
+        "finished_at": "2026-07-29T12:01:00Z",
+    }
+    assert ResultRecord(**fields, failure=failure).rewards == {"score": 0.5}
     with pytest.raises(ValidationError):
-        ResultRecord(
-            episode_id="episode-1",
-            status=Status.TASK_ERROR,
-            rewards={"score": 0.0},
-            failure=failure,
-            started_at="2026-07-29T12:00:00Z",
-            finished_at="2026-07-29T12:01:00Z",
-        )
+        ResultRecord(**fields)
 
 
 def test_phase_timing_is_consistent_with_terminal_time() -> None:

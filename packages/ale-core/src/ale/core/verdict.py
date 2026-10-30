@@ -43,11 +43,6 @@ class Status(StrEnum):
     REFUSED = "refused"
     """The agent declined the task."""
 
-    @property
-    def is_scored(self) -> bool:
-        """Whether this status may contribute to score aggregates."""
-        return self is Status.COMPLETED
-
 
 Rewards = dict[str, float]
 """Named scores. ALE preserves the map and does not select an aggregate."""
@@ -70,7 +65,11 @@ class Verdict(BaseModel):
 
     status: Status
     rewards: Rewards | None = Field(
-        default=None, description="Present exactly when verification ran to completion"
+        default=None,
+        description=(
+            "Present exactly when verification ran to completion, which it also does after "
+            "an agent that timed out, hit a limit, failed or refused"
+        ),
     )
     metrics: dict[str, float] = Field(
         default_factory=dict,
@@ -96,12 +95,14 @@ class Verdict(BaseModel):
         phase: str | None = None,
         metrics: dict[str, float] | None = None,
         message: str | None = None,
+        rewards: Rewards | None = None,
     ) -> Verdict:
         """Build a verdict from a raised error; ``message`` replaces its text, redacted."""
         if status is Status.COMPLETED:
             raise ValueError("use Verdict.completed for successful episodes")
         return cls(
             status=status,
+            rewards=rewards,
             metrics=metrics or {},
             failure=FailureInfo(
                 error_class=type(error).__name__,

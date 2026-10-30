@@ -103,6 +103,9 @@ __all__ = ["SETUP_TIMEOUT_SEC", "EpisodeProtocol", "Resume", "ReverificationProt
 #: after the agent stopped; this margin only bounds a guest that no longer replies.
 AGENT_STOP_GRACE_SEC = 60.0
 
+#: How an agent's run can end early. Its work is still verified, as in Harbor.
+_AGENT_STOPS = (PhaseTimeoutError, BudgetExceededError, AgentError)
+
 #: Upper bound on the setup phase: a guard against a hung setup, not a scored budget.
 SETUP_TIMEOUT_SEC = 1800.0
 
@@ -317,8 +320,10 @@ class EpisodeProtocol:
                 await self._agent(task, ctx, sandbox, logs=logs)
             try:
                 await self._capture_solver_evidence(ctx, sandbox, logs=logs)
-            except BaseException:
+            except BaseException as error:
                 ctx.failure_phase = Phase.AGENT
+                if ctx.agent_stop is not None and isinstance(error, Exception):
+                    raise ctx.agent_stop from error
                 raise
 
             async def verify() -> dict[str, float]:
@@ -334,9 +339,20 @@ class EpisodeProtocol:
                     await self._sanitize_for_retention(ctx, verifier)
                     await ctx.sandboxes.release(verifier)
 
-            rewards = await self._with_deadline(
-                ctx, Phase.VERIFY, self._verify_timeout(ctx), verify()
-            )
+            try:
+                rewards = await self._with_deadline(
+                    ctx, Phase.VERIFY, self._verify_timeout(ctx), verify()
+                )
+            except Exception as error:
+                if ctx.agent_stop is None:
+                    raise
+                # What stopped the agent stays the reason this Episode has no score.
+                logging.getLogger("ale.execution").warning(
+                    "verification after the agent stopped failed",
+                    extra={"ale_data": {"error": type(error).__name__}},
+                )
+                ctx.failure_phase = Phase.AGENT
+                raise ctx.agent_stop from error
         finally:
             # Teardown runs on every path, including cancellation.
             await asyncio.shield(
@@ -344,7 +360,11 @@ class EpisodeProtocol:
             )
 
         ctx.verified_rewards = rewards
-        return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
+        scored = await task.score(ctx)
+        if ctx.agent_stop is not None:
+            ctx.stopped_rewards = scored
+            raise ctx.agent_stop
+        return Verdict.completed(scored, metrics=ctx.metrics)
 
     # --- phases ---
 
@@ -458,9 +478,12 @@ class EpisodeProtocol:
 
         harness = self.harness
         if isinstance(harness, PolicyHarness):
-            await self._with_deadline(
-                ctx, Phase.AGENT, timeout, self._rollout(harness, ctx, sandbox)
-            )
+            try:
+                await self._with_deadline(
+                    ctx, Phase.AGENT, timeout, self._rollout(harness, ctx, sandbox)
+                )
+            except _AGENT_STOPS as error:
+                ctx.agent_stop = error
             return
 
         if harness.name == "oracle":
@@ -525,6 +548,11 @@ class EpisodeProtocol:
         try:
             backstop = None if timeout is None else timeout + AGENT_STOP_GRACE_SEC
             await self._with_deadline(ctx, Phase.AGENT, backstop, launch())
+        except _AGENT_STOPS as error:
+            # Past the backstop the guest no longer replies, so nothing there can be verified.
+            if isinstance(error, PhaseTimeoutError) and isinstance(error.__cause__, TimeoutError):
+                raise
+            ctx.agent_stop = error
         finally:
             if polling is not None:
                 polling.cancel()
