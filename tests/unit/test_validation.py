@@ -83,7 +83,10 @@ def test_untouched_admission_checks_only_reward(
 
 def _context(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
-        spec=SimpleNamespace(os=OperatingSystem.LINUX), verification_secrets=(), run_dir=tmp_path
+        spec=SimpleNamespace(os=OperatingSystem.LINUX),
+        verification_secrets=(),
+        secrets=(),
+        run_dir=tmp_path,
     )
 
 

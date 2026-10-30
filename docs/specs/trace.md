@@ -137,8 +137,9 @@ Setup, oracle, verifier, harness preparation/launch, artifact collection, and cl
 framework/task execution. Agent-owned Bash/MCP/CUA calls belong only in ATIF.
 
 Command output at or below 16 KiB stays inline. Larger output becomes a text BlobRef.
-Credentials, bearer tokens, provider keys, and configured secrets are redacted before
-text reaches disk. Timeouts kill the process group, drain both pipes, preserve received
+Credentials, bearer tokens, provider keys, and configured secrets are redacted before text
+reaches disk; mirrored native logs, copied while the agent runs, are redacted when the agent
+stops, before conversion. Timeouts kill the process group, drain both pipes, preserve received
 output with `complete=false`, and record a terminal command outcome. A host restart
 recovers deterministic `.partial` files as incomplete blobs. A torn JSONL suffix is
 reported and never silently repaired.

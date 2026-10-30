@@ -60,6 +60,7 @@ def _context(path: Path) -> SimpleNamespace:
         session=HarnessSession(
             episode_id="episode", model="model", token="token", gateway_url="http://gateway"
         ),
+        secrets=("token",),
         agent_version="1",
         spec=SimpleNamespace(instruction="instruction", artifacts=()),
         agent_run=None,

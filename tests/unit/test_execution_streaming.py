@@ -68,6 +68,7 @@ def context(tmp_path: Path):
         home="/home/user",
         session=SimpleNamespace(token=""),
         spec=SimpleNamespace(network=NetworkPolicy(), os=OperatingSystem.LINUX),
+        secrets=(),
         verification_command_env={},
         verification_secrets=(),
         phase_timeout_sec=1.0,

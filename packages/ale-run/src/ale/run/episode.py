@@ -52,7 +52,7 @@ from ale.run.gateway.session import GatewaySession, Limits, SessionRegistry
 from ale.run.protocol.episode_protocol import SETUP_TIMEOUT_SEC, EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, build_lock, judge_provenance
 from ale.run.providers import ProviderRegistry
-from ale.run.recording import EpisodeRecording
+from ale.run.recording import EpisodeRecording, Redactor
 from ale.run.task_images import prepare_task_image, prepare_verifier_image
 from ale.run.verification import judge_endpoints, open_judge_sessions
 from ale_verify import JudgeInvocation
@@ -607,6 +607,7 @@ async def run_episode(
         verification_config=verification_config or VerificationConfig(),
         judge_tokens={kind: opened.token for kind, opened in judge_sessions.items()},
     )
+    redact = Redactor(ctx.secrets)
     verdict: Verdict | None = None
     try:
         verdict = await protocol.run(task, ctx)
@@ -620,7 +621,7 @@ async def run_episode(
                 reason=type(exc).__name__,
             )
         phase = _phase_of(exc, ctx.failure_phase)
-        verdict = Verdict.failed(status_for(exc), exc, phase=phase)
+        verdict = Verdict.failed(status_for(exc), exc, phase=phase, message=redact(str(exc)))
         recording.execution.append(
             ExecutionFailure(
                 episode_id=episode_id,
@@ -628,7 +629,7 @@ async def run_episode(
                 component="episode",
                 level="error",
                 error_type=type(exc).__name__,
-                message=str(exc),
+                message=redact(str(exc)),
             ),
             durable=True,
         )
@@ -660,7 +661,12 @@ async def run_episode(
             and verdict is not None
             and verdict.status is Status.COMPLETED
         ):
-            verdict = Verdict.failed(Status.ENV_ERROR, finalization_error, phase="teardown")
+            verdict = Verdict.failed(
+                Status.ENV_ERROR,
+                finalization_error,
+                phase="teardown",
+                message=redact(str(finalization_error)),
+            )
 
     assert verdict is not None
     finalize_started_at = datetime.now(UTC)
@@ -682,7 +688,7 @@ async def run_episode(
             recording.write_lock(lock)
     except Exception as exc:
         finalize_outcome = "failed"
-        verdict = Verdict.failed(Status.ENV_ERROR, exc, phase="finalize")
+        verdict = Verdict.failed(Status.ENV_ERROR, exc, phase="finalize", message=redact(str(exc)))
         recording.execution.append(
             ExecutionFailure(
                 episode_id=episode_id,
@@ -690,7 +696,7 @@ async def run_episode(
                 component="recording",
                 level="error",
                 error_type=type(exc).__name__,
-                message=str(exc),
+                message=redact(str(exc)),
             ),
             durable=True,
         )
@@ -698,7 +704,9 @@ async def run_episode(
         try:
             await lease.destroy_retained()
         except RetentionFinalizationError as exc:
-            verdict = Verdict.failed(Status.ENV_ERROR, exc, phase="teardown")
+            verdict = Verdict.failed(
+                Status.ENV_ERROR, exc, phase="teardown", message=redact(str(exc))
+            )
         ctx.sandbox_outcomes = tuple(lease.outcomes)
         if lock is not None:
             lock = lock.model_copy(update={"sandbox_outcomes": ctx.sandbox_outcomes})

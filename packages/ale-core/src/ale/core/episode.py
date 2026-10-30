@@ -215,3 +215,8 @@ class EpisodeContext:
     harness_execution_counter: int = 0
     sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
     limit_termination: LimitTermination | None = None
+
+    @property
+    def secrets(self) -> tuple[str, ...]:
+        """Every value this episode keeps out of what it records."""
+        return (self.session.token, *self.verification_secrets)

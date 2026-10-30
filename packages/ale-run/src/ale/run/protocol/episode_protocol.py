@@ -91,6 +91,7 @@ from ale.run.recording import (
     Redactor,
     atomic_write_json,
     execution_logging,
+    redact_files,
 )
 from ale.run.verification import installed_ale_verify, verifier_judge_config
 from ale_verify import JudgeInvocation, read_result
@@ -801,7 +802,7 @@ class EpisodeProtocol:
         ctx.verification_secrets = tuple(command_env.values())
 
     async def _collect_judge_logs(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
-        redactor = Redactor(ctx.verification_secrets)
+        redactor = Redactor(ctx.secrets)
         invocations = []
         for name in ("llm-judge.jsonl", "agent-judge.jsonl"):
             try:
@@ -843,6 +844,7 @@ class EpisodeProtocol:
             result = read_result(raw[reward], raw.get(record))
         except (ValueError, TypeError, UnicodeError) as exc:
             raise VerifierOutputError(f"verify wrote an invalid result: {exc}") from exc
+        result = Redactor(ctx.secrets, patterns=False).json(result)
         atomic_write_json(ctx.run_dir / "verification.json", result, sort_keys=False)
         return result
 
@@ -872,6 +874,10 @@ class EpisodeProtocol:
                     extra={"ale_data": {"error": type(exc).__name__}},
                 )
             collection_failed = collection_failed or logs.incomplete
+            # Copied while the agent ran, so only now can the copies lose what they held.
+            redact_files(
+                ctx.run_dir / "logs" / self.harness.name, Redactor(ctx.secrets, patterns=False)
+            )
 
         if ctx.agent_started and not ctx.trajectory_written:
             self._parse_harness_trajectory(ctx, collection_failed=collection_failed)
@@ -1026,7 +1032,7 @@ class EpisodeProtocol:
         except Exception as exc:
             # The agent finished; a converter defect must not decide its score. Keep the
             # minimal truthful trajectory, say why, and keep the native evidence.
-            detail = Redactor((ctx.session.token,))(f"{type(exc).__name__}: {exc}")[:500]
+            detail = Redactor(ctx.secrets)(f"{type(exc).__name__}: {exc}")[:500]
             logging.getLogger("ale.execution").warning(
                 "trajectory conversion failed",
                 extra={"ale_data": {"harness": self.harness.name, "error": detail}},
@@ -1076,7 +1082,13 @@ class EpisodeProtocol:
                 step = step.model_copy(update=updates)
                 links.extend((call_id, step.step_id) for call_id in call_ids)
             steps.append(step)
-        trajectory = trajectory.model_copy(update={"steps": steps})
+        trajectory = AtifTrajectory.model_validate(
+            Redactor(ctx.secrets, patterns=False).json(
+                trajectory.model_copy(update={"steps": steps}).model_dump(
+                    mode="json", exclude_none=True
+                )
+            )
+        )
         ctx.trajectory.write_trajectory(trajectory)
         if ctx.transport is not None:
             for call_id, step_id in links:
@@ -1151,14 +1163,7 @@ class EpisodeProtocol:
             actor="task",
             argv=argv,
             cwd=str(directory),
-            secrets=tuple(
-                secret
-                for secret in (
-                    ctx.session.token,
-                    *ctx.verification_secrets,
-                )
-                if secret
-            ),
+            secrets=ctx.secrets,
         )
         started = time.monotonic()
         timeout_sec = ctx.phase_timeout_sec
@@ -1285,7 +1290,7 @@ class EpisodeProtocol:
                 episode_id=ctx.episode_id,
                 phase=phase.value,
                 component=self.component,
-                secrets=(ctx.session.token,),
+                secrets=ctx.secrets,
             ):
                 if timeout_sec is None:
                     return await coro
@@ -1672,7 +1677,7 @@ class _RecordedSandbox:
             actor=self._actor,
             argv=[str(part) for part in argv],
             cwd=cwd,
-            secrets=(self._ctx.session.token,),
+            secrets=self._ctx.secrets,
         )
 
         async def emit(stream: Literal["stdout", "stderr"], data: bytes) -> None:

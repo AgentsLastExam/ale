@@ -95,14 +95,19 @@ class Verdict(BaseModel):
         *,
         phase: str | None = None,
         metrics: dict[str, float] | None = None,
+        message: str | None = None,
     ) -> Verdict:
-        """Build a verdict from a raised error."""
+        """Build a verdict from a raised error; ``message`` replaces its text, redacted."""
         if status is Status.COMPLETED:
             raise ValueError("use Verdict.completed for successful episodes")
         return cls(
             status=status,
             metrics=metrics or {},
-            failure=FailureInfo(error_class=type(error).__name__, message=str(error), phase=phase),
+            failure=FailureInfo(
+                error_class=type(error).__name__,
+                message=str(error) if message is None else message,
+                phase=phase,
+            ),
         )
 
     # --- validation ---

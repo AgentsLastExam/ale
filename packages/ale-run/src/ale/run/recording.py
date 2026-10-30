@@ -39,9 +39,11 @@ __all__ = [
     "CommandRecorder",
     "EpisodeRecording",
     "JsonlWriter",
+    "Redactor",
     "atomic_write_json",
     "execution_logging",
     "install_execution_handler",
+    "redact_files",
 ]
 
 INLINE_TEXT_LIMIT = 16 * 1024
@@ -206,20 +208,58 @@ class BlobStore:
 
 
 class Redactor:
-    """Remove framework-managed credentials before execution text reaches disk."""
+    """Remove framework-managed credentials before execution text reaches disk.
 
-    def __init__(self, secrets: tuple[str, ...] = ()) -> None:
+    ``patterns`` also removes anything shaped like a bearer token or provider key, which suits
+    diagnostics; a record of what the agent saw or wrote loses only the known values.
+    """
+
+    def __init__(self, secrets: tuple[str, ...] = (), *, patterns: bool = True) -> None:
         self.secrets = tuple(sorted((value for value in secrets if value), key=len, reverse=True))
+        self.patterns = patterns
 
     def __call__(self, text: str) -> str:
         for secret in self.secrets:
             text = text.replace(secret, "[REDACTED]")
+        if not self.patterns:
+            return text
         text = re.sub(
             r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}",
             "Bearer [REDACTED]",
             text,
         )
         return re.sub(r"\bsk-[A-Za-z0-9_-]{8,}", "sk-[REDACTED]", text)
+
+    def json(self, value: Any) -> Any:
+        """A JSON value with every string in it redacted, keys included."""
+        if isinstance(value, str):
+            return self(value)
+        if isinstance(value, dict):
+            return {self(key): self.json(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self.json(item) for item in value]
+        return value
+
+
+def redact_files(root: Path, redactor: Redactor) -> None:
+    """Redact every text file below ``root`` in place; binary files are left alone."""
+    if not root.is_dir():
+        return
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        data = path.read_bytes()
+        if b"\0" in data:
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        redacted = redactor(text)
+        if redacted != text:
+            temporary = path.with_name(f".{path.name}.redacted")
+            temporary.write_text(redacted, encoding="utf-8")
+            os.replace(temporary, path)
 
 
 class _RedactedStream:
