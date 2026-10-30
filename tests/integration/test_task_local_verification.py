@@ -88,13 +88,13 @@ def task_repository(tmp_path: Path, name: str) -> tuple[Path, Path]:
     return repository, task
 
 
-async def execute(task_path: Path, run_dir: Path):  # type: ignore[no-untyped-def]
+async def execute(task_path: Path, run_dir: Path, *, collect: bool = True):  # type: ignore[no-untyped-def]
     return await run_episode(
         load_tasks(task_path)[0],
         EpisodeProtocol(OracleHarness()),
         provider_registry(DockerProvider()),
         run_dir=run_dir,
-        collect_artifacts=True,
+        collect_artifacts=collect,
     )
 
 
@@ -304,8 +304,9 @@ async def test_missing_requested_verify_asset_is_a_task_error_not_zero(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("collect", [True, False], ids=["host", "none"])
 async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
-    tmp_path: Path,
+    tmp_path: Path, collect: bool
 ) -> None:
     task = scaffold_task(tmp_path / "separate")
     edit_task_config(
@@ -338,7 +339,7 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
         "write(v)\n"
     )
 
-    result = await execute(task, tmp_path / "runs")
+    result = await execute(task, tmp_path / "runs", collect=collect)
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"reward": 1.0}
@@ -347,8 +348,10 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
         ("verifier",),
     ]
     snapshot = result.run_dir / "artifacts/snapshot.json"
-    assert snapshot.is_file()
-    assert '"source": "/var/lib/ale-report"' in snapshot.read_text()
+    if collect:
+        assert '"source": "/var/lib/ale-report"' in snapshot.read_text()
+    else:
+        assert not snapshot.parent.exists()
 
 
 @pytest.mark.asyncio
