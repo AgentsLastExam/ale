@@ -159,8 +159,10 @@ or names a `vm_image`. The Verification APIs and records are defined only in
 
 `[environment]` selects container or VM behavior; Tasks never name a Provider.
 `[agent].network_mode` applies to the evaluated agent and the oracle: `no-network` reaches only
-the Gateway, `allowlist` also the declared hosts, `public` everything. Setup and verification
-network is framework-controlled; its enforcement is specified in [Security](security.md).
+the Gateway, `allowlist` also the declared hosts, `public` everything. As in Harbor, an
+`allowed_hosts` entry `pypi.org` is that host and `*.pypi.org` every name below it, not
+`pypi.org` itself; addresses and CIDR ranges are not supported. Setup and verification network
+is framework-controlled; its enforcement is specified in [Security](security.md).
 The quality standard owns resource feasibility and network-policy selection. A public-network
 justification uses `[metadata].network_justification`.
 

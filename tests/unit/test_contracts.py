@@ -158,6 +158,18 @@ def test_task_config_rejects_unknown_keys() -> None:
         ({"agent": {"network_mode": "allowlist"}}, "non-empty allowed_hosts"),
         ({"agent": {"allowed_hosts": ["example.org"]}}, "requires network_mode 'allowlist'"),
         (
+            {"agent": {"network_mode": "allowlist", "allowed_hosts": ["10.0.0.1"]}},
+            "addresses and CIDR ranges are not supported",
+        ),
+        (
+            {"agent": {"network_mode": "allowlist", "allowed_hosts": ["10.0.0.0/8"]}},
+            "addresses and CIDR ranges are not supported",
+        ),
+        (
+            {"agent": {"network_mode": "allowlist", "allowed_hosts": ["foo.*.org"]}},
+            "neither a hostname",
+        ),
+        (
             {
                 "verifier": {
                     "environment_mode": "shared",

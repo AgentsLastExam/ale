@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
+from collections.abc import Iterable
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal, NamedTuple, Self
@@ -42,6 +44,7 @@ __all__ = [
     "VerifierResources",
     "VerifierTable",
     "VerifySpec",
+    "host_allowed",
 ]
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
@@ -77,6 +80,8 @@ def _validate_artifact_paths(paths: tuple[str, ...], operating_system: Operating
 
 
 _ACCOUNT = r"^[a-z_][a-z0-9_-]{0,31}$"
+_DNS_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_ALLOWED_HOST = re.compile(rf"(?:\*\.)?{_DNS_LABEL}(?:\.{_DNS_LABEL})*")
 
 
 class ImageSpec(BaseModel):
@@ -126,6 +131,19 @@ class NetworkMode(StrEnum):
     BLOCK = "block"
     ALLOWLIST = "allowlist"
     OPEN = "open"
+
+
+def host_allowed(host: str, allowed_hosts: Iterable[str]) -> bool:
+    """Whether ``allowed_hosts`` admits ``host``, with Harbor's matching.
+
+    A name matches itself; ``*.example.org`` matches every name below ``example.org``, at any
+    depth, and not ``example.org`` itself.
+    """
+    name = host.lower().rstrip(".")
+    for allowed in (entry.lower() for entry in allowed_hosts):
+        if name == allowed or (allowed.startswith("*.") and name.endswith(allowed[1:])):
+            return True
+    return False
 
 
 class NetworkPolicy(BaseModel):
@@ -514,6 +532,20 @@ class AgentTable(BaseModel):
         )
 
     # --- validation ---
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _hostnames_only(cls, hosts: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        for host in hosts or ():
+            try:
+                ipaddress.ip_network(host, strict=False)
+            except ValueError:
+                pass
+            else:
+                raise ValueError(f"{host}: addresses and CIDR ranges are not supported by ALE")
+            if not _ALLOWED_HOST.fullmatch(host):
+                raise ValueError(f"{host!r} is neither a hostname nor *.hostname")
+        return hosts
 
     @model_validator(mode="after")
     def _hosts_only_for_allowlist(self) -> Self:

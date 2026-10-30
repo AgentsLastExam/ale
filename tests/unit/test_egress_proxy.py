@@ -24,11 +24,15 @@ class TestAllowlistMatching:
     def test_declared_host_is_allowed(self) -> None:
         assert self.session("example.com").may_reach("example.com")
 
-    def test_subdomains_of_a_declared_host_are_allowed(self) -> None:
-        """Declaring a service means its service, not one exact label."""
-        session = self.session("example.com")
+    def test_a_declared_host_is_that_host_only(self) -> None:
+        """As in Harbor: a Task reaches below a name by writing ``*.name``."""
+        assert not self.session("example.com").may_reach("files.example.com")
+
+    def test_a_pattern_matches_below_its_name_and_not_the_name(self) -> None:
+        session = self.session("*.example.com")
         assert session.may_reach("files.example.com")
         assert session.may_reach("a.b.example.com")
+        assert not session.may_reach("example.com")
 
     def test_a_lookalike_suffix_is_not_allowed(self) -> None:
         """`notexample.com` ends with the declared string and is a different site."""

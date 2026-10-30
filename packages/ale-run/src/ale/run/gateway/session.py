@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from ale.core.taskspec import host_allowed
+
 __all__ = [
     "CallUsage",
     "GatewayReservation",
@@ -136,17 +138,13 @@ class GatewaySession:
     """
 
     def may_reach(self, host: str) -> bool:
-        """Whether ``host`` is allowlisted, matching subdomains of a declared name.
+        """Whether ``host`` is allowlisted.
 
         Matching is on the name the client asked for, not on a resolved address: a task
         declares ``pypi.org`` because that is what it means, and pinning to whatever IP
         that resolved to once would break the task rather than tighten it.
         """
-        name = host.partition(":")[0].lower().rstrip(".")
-        return any(
-            name == allowed or name.endswith(f".{allowed}")
-            for allowed in (a.lower() for a in self.allowed_hosts)
-        )
+        return host_allowed(host.partition(":")[0], self.allowed_hosts)
 
     _replay: dict[str, Any] = field(default_factory=dict, repr=False)
     _inflight: dict[str, asyncio.Future[Any]] = field(default_factory=dict, repr=False)

@@ -23,6 +23,7 @@ from ale.core.taskspec import (
     StdioMcpServer,
     StreamableHttpMcpServer,
     ToolProvision,
+    host_allowed,
 )
 
 __all__ = ["resolve_agent_resources"]
@@ -263,10 +264,7 @@ def _check_network(server: McpServer, network: NetworkPolicy) -> None:
     host = (urlparse(server.url).hostname or "").lower()
     if network.mode is NetworkMode.BLOCK:
         raise AgentResourceError(f"remote MCP {server.name!r} is blocked by task network policy")
-    if network.mode is NetworkMode.ALLOWLIST and not any(
-        host == allowed.lower() or host.endswith(f".{allowed.lower()}")
-        for allowed in network.allowed_hosts
-    ):
+    if network.mode is NetworkMode.ALLOWLIST and not host_allowed(host, network.allowed_hosts):
         raise AgentResourceError(
             f"remote MCP {server.name!r} host {host!r} is not in task allowed_hosts"
         )
