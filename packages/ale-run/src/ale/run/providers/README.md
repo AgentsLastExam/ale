@@ -77,10 +77,11 @@ disk boots from, written into the SYSTEM hive with hivex, plus files copied into
   A disk left hibernated by Fast Startup cannot be written, and says so.
 - The service `ALEGuestd` runs `guestd/service.py` as LocalSystem. At boot it limits
   `C:\ProgramData\ALE` to the system and Administrators, because files written offline
-  carry no access list and otherwise come out writable by everyone. It opens guestd's port
-  to the runner's address only, waits for the agent's sign-in, and starts guestd and Cua
-  Driver on the agent's desktop with the account's elevated token (the one UAC keeps beside
-  the limited one), each in its own hidden console, restarting either that exits.
+  carry no access list and otherwise come out writable by everyone, then gives Users read
+  and execute access to `cua-driver`. It opens guestd's port to the runner's address only,
+  waits for the agent's sign-in, and starts guestd and Cua Driver on the agent's desktop
+  with the account's elevated token (the one UAC keeps beside the limited one), each in its
+  own hidden console, restarting either that exits.
 - The service reads the Host's `ale-sudo` SMBIOS serial and passes it to guestd, which
   runs agent commands with the desktop's limited token unless it is set.
 - A Task image build boots a framed copy of its base, so its `run.ps1` runs beside the

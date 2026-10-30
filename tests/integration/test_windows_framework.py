@@ -51,6 +51,16 @@ async def test_a_bare_windows_disk_boots_with_the_framework_closed_to_the_agent(
             identity=Identity.AGENT,
         )
         assert not write.ok
+        # Cua Driver alone stays runnable, as on Linux: the agent's cua-desktop runs it.
+        driver = r"C:\ProgramData\ALE\cua-driver"
+        run = await sandbox.exec(
+            [driver + r"\cua-driver.exe", "--version"], identity=Identity.AGENT
+        )
+        assert run.ok and run.stdout.startswith("cua-driver "), run.stderr or run.stdout
+        plant = await sandbox.exec(
+            [*POWERSHELL, rf"Set-Content {driver}\planted.dll 'x'"], identity=Identity.AGENT
+        )
+        assert not plant.ok
         # The service runs as the system; guestd and Cua Driver run in the agent's session.
         report = await sandbox.exec(
             [
