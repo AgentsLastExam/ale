@@ -55,13 +55,34 @@ def test_configuration_maps_onto_the_runtime_spec(tmp_path: Path) -> None:
         task,
         {
             "environment": {"cpus": 2, "memory_mb": 2048, "storage_mb": 4096, "gpus": 1},
-            "agent": {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]},
-            "metadata": {"network_justification": "installs a package"},
-            "ale": {
+            "agent": {
+                "network_mode": "allowlist",
+                "allowed_hosts": ["pypi.org", "*.pypi.org"],
                 "sudo": True,
-                "skills": ["tools/skills/reviewer"],
-                "mcp_servers": ["tools/mcp/search.toml"],
+                "workdir": "/home/user/project",
             },
+            "metadata": {"network_justification": "installs a package"},
+        },
+    )
+    edit(
+        task,
+        {
+            "environment": {
+                "skills_dir": "/skills",
+                "mcp_servers": [
+                    {
+                        "name": "search",
+                        "transport": "stdio",
+                        "command": "/opt/search",
+                        "args": ["--index", "/srv/index"],
+                    },
+                    {
+                        "name": "remote",
+                        "transport": "streamable-http",
+                        "url": "https://pypi.org/mcp",
+                    },
+                ],
+            }
         },
     )
     spec = load_tasks(task)[0].spec
@@ -70,10 +91,12 @@ def test_configuration_maps_onto_the_runtime_spec(tmp_path: Path) -> None:
     assert (spec.resources.cpus, spec.resources.memory_mb) == (2, 2048)
     assert (spec.resources.storage_mb, spec.resources.gpus, spec.resources.sudo) == (4096, 1, True)
     assert spec.network.mode is NetworkMode.ALLOWLIST
-    assert spec.network.allowed_hosts == ("pypi.org",)
+    assert spec.network.allowed_hosts == ("pypi.org", "*.pypi.org")
+    assert spec.workdir == "/home/user/project"
     assert (spec.timeouts.agent, spec.timeouts.verify) == (300, 120)
-    assert spec.tools.skills[0].path == "tools/skills/reviewer"
-    assert spec.tools.mcp_servers[0].path == "tools/mcp/search.toml"
+    assert spec.tools.skills_dir == "/skills"
+    assert [server.name for server in spec.tools.mcp_servers] == ["search", "remote"]
+    assert spec.tools.mcp_servers[0].args == ("--index", "/srv/index")
     assert spec.metadata == {"network_justification": "installs a package"}
     assert spec.verify.environment_mode is VerificationMode.SHARED
 
@@ -123,7 +146,7 @@ def test_asset_roots_and_setup_are_excluded_where_they_must_be(tmp_path: Path) -
 
 def test_vm_assets_are_excluded_from_the_vm_image_source(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
-    edit(task, {"ale": {"sandbox": "vm"}})
+    edit(task, {"environment": {"vm": True}})
     loaded = load_tasks(task)[0]
     (task / "environment/assets").mkdir()
     (task / "environment/assets/disk.bin").write_bytes(b"large")
@@ -151,28 +174,30 @@ def test_a_named_image_wins_over_a_build_definition(tmp_path: Path) -> None:
     assert load_tasks(task)[0].spec.image.ref == "ghcr.io/acme/task:v1"
 
 
-def test_the_sandbox_decides_what_environment_dockerfile_builds(tmp_path: Path) -> None:
+def test_vm_decides_what_environment_dockerfile_builds(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     container = load_tasks(task)[0]
     assert container.spec.image.kind is ImageKind.CONTAINER
-    edit(task, {"ale": {"sandbox": "vm"}})
+    edit(task, {"environment": {"vm": True}})
     loaded = load_tasks(task)[0]
     assert loaded.spec.image.kind is ImageKind.VM
     assert loaded.image_source_digest == container.image_source_digest
 
     (task / "environment/Dockerfile").unlink()
-    with pytest.raises(TaskDefinitionError, match=r"environment/Dockerfile or \[ale\].vm_image"):
+    with pytest.raises(
+        TaskDefinitionError, match=r"environment/Dockerfile or \[environment\].vm_image"
+    ):
         load_tasks(task)
-    edit(task, {"ale": {"vm_image": "ghcr.io/acme/task-vm:v1"}})
+    edit(task, {"environment": {"vm": None, "vm_image": "ghcr.io/acme/task-vm:v1"}})
     loaded = load_tasks(task)[0]
     assert loaded.spec.image.ref == "ghcr.io/acme/task-vm:v1"
     assert loaded.image_source_digest is None
 
 
-@pytest.mark.parametrize("sandbox", ["container", "vm"])
-def test_linux_tasks_reject_a_windows_build(tmp_path: Path, sandbox: str) -> None:
+@pytest.mark.parametrize("vm", [False, True])
+def test_linux_tasks_reject_a_windows_build(tmp_path: Path, vm: bool) -> None:
     task = scaffold_task(tmp_path / "demo")
-    edit(task, {"ale": {"sandbox": sandbox}})
+    edit(task, {"environment": {"vm": vm}})
     (task / "environment/build.ps1").write_text("Write-Output 'build'\n")
     with pytest.raises(TaskDefinitionError, match="requires os 'windows'"):
         load_tasks(task)
@@ -188,8 +213,7 @@ def _windows_task(tmp_path: Path, *, build: bool = False) -> Path:
         task,
         {
             "artifacts": [r"C:\Users\user\output"],
-            "environment": {"os": "windows"},
-            "ale": {"sandbox": "vm", **source},
+            "environment": {"os": "windows", **source},
         },
     )
     (task / "tests/test.sh").rename(task / "tests/test.ps1")
@@ -248,9 +272,9 @@ def test_windows_build_script_tracks_source_and_ignores_assets(tmp_path: Path) -
     ("invalid", "message"),
     [
         ("dockerfile", "builds environment/build.ps1, not a Dockerfile"),
-        ("missing-base", r"build\.ps1 requires \[ale\]\.vm_base"),
+        ("missing-base", r"build\.ps1 requires \[environment\]\.vm_base"),
         ("missing-script", r"vm_base requires environment/build\.ps1"),
-        ("container", "requires \\[ale\\].sandbox 'vm'"),
+        ("container", "docker_image is a container image"),
         ("verifier-dockerfile", "Windows verifier"),
     ],
 )
@@ -261,11 +285,11 @@ def test_windows_image_contract_rejects_invalid_sources(
     if invalid == "dockerfile":
         (task / "environment/Dockerfile").write_text("FROM scratch\n")
     elif invalid == "missing-base":
-        edit(task, {"ale": {"vm_base": None, "vm_image": "/images/w.qcow2"}})
+        edit(task, {"environment": {"vm_base": None, "vm_image": "/images/w.qcow2"}})
     elif invalid == "missing-script":
         (task / "environment/build.ps1").unlink()
     elif invalid == "container":
-        edit(task, {"ale": {"sandbox": "container", "vm_base": None}})
+        edit(task, {"environment": {"docker_image": "ghcr.io/acme/w:v1", "vm_base": None}})
     else:
         edit(task, {"verifier": {"environment_mode": "separate"}})
         (task / "tests/Dockerfile").write_text("FROM scratch\n")
@@ -304,8 +328,7 @@ def test_separate_verification_follows_harbor(tmp_path: Path) -> None:
     edit(
         task,
         {
-            "verifier": {"environment": {"docker_image": None}},
-            "ale": {"verifier": {"sandbox": "vm"}},
+            "verifier": {"environment": {"docker_image": None, "vm": True}},
         },
     )
     image = load_tasks(task)[0].spec.verify.image
@@ -313,7 +336,7 @@ def test_separate_verification_follows_harbor(tmp_path: Path) -> None:
     (task / "tests/Dockerfile").unlink()
     with pytest.raises(TaskDefinitionError, match="requires vm_image or tests/Dockerfile"):
         load_tasks(task)
-    edit(task, {"ale": {"verifier": {"vm_image": "ghcr.io/acme/verifier:v1"}}})
+    edit(task, {"verifier": {"environment": {"vm_image": "ghcr.io/acme/verifier:v1"}}})
     image = load_tasks(task)[0].spec.verify.image
     assert image is not None and image.ref == "ghcr.io/acme/verifier:v1"
 

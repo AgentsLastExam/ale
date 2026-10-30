@@ -16,7 +16,7 @@ Normative. Every term below has exactly one meaning.
 | **Task operating system** | `linux` (default) or explicit `windows`; it selects path and stage-entry semantics and must match the prepared image. | not a Provider name inferred from an image tag |
 | **Task** | One self-contained Task folder bound to its TaskSpec and standard behavior. | not a collection or loader |
 | **Task collection** | A directory or source that contains several independent Task folders for selection. | not a Task and not an execution contract |
-| **Image declaration** | A solver's or dedicated verifier's sandbox kind (`[ale].sandbox`: container or vm) and either an image used directly (`docker_image`, `vm_image`) or a build definition in its fixed directory. | not a Provider selection or build flag |
+| **Image declaration** | A solver's or dedicated verifier's sandbox kind (container or vm, from `vm`, `vm_image`, `vm_base` and the OS) and either an image used directly (`docker_image`, `vm_image`) or a build definition in its fixed directory. | not a Provider selection or build flag |
 | **Task image** | The final container or VM image prepared from one fixed local build definition or matching-kind image reference. | not a shared Image Tree node |
 | **Prepared Task image** | Immutable kind-aware output consumed by a sandbox request. | not mutable sandbox state |
 | **ALE base image** | A foundational Linux desktop container, Ubuntu VM, or private Windows BYOL image providing the sandbox contract and guest service. | not a domain image or Task-specific dependency bundle |
@@ -34,9 +34,9 @@ Normative. Every term below has exactly one meaning.
 | **Harness** | The adapter binding an agent program to ALE. An Autonomous Harness owns its loop; a Policy Harness drives a framework-owned Task environment. | not an agent identity or Task setting |
 | **CLI Harness** | An Autonomous Harness that runs one pinned native command-line agent through `CliHarness`, sharing its prompt delivery, evidence layout, and continuation rules. | not a wrapper for arbitrary commands |
 | **Harness Preset** | Complete version-controlled configuration automatically selected for one Harness. | not an implicit constructor default |
-| **Skill Source** | An explicitly declared local directory containing one Skill or immediate Skill collection. | never ambient host agent state |
+| **Skill Source** | An operator's explicitly declared local directory containing one Skill or immediate Skill collection. | never ambient host agent state |
 | **MCP Server** | A validated stdio or Streamable HTTP server definition made available to an agent. | not a vendor-native config file |
-| **Effective Agent Resources** | The deduplicated union of Task-, preset-, Run-, and CLI-declared Skills and MCP servers. | never winner-takes-all configuration |
+| **Effective Agent Resources** | The Task's Skill directory and MCP servers with the deduplicated preset-, Run-, and CLI-declared ones, which replace a Task's of the same name. | never ambient configuration |
 | **CUA Desktop MCP** (`cua-desktop`) | ALE's built-in screen-control MCP server selected at Run level. | not selected by a Task or automatically injected by an image |
 | **Native Continuation** | One Harness's exact native agent session, by its native ID; it resumes wherever that session's files are, including a later episode's adopted retained solver. | not Run resume, transcript replay, or a copy of the session |
 | **Limit Termination** | The recorded layer, limit, configured value, and cause that stopped an Episode. | not an untyped process exit |

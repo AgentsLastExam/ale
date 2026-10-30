@@ -134,7 +134,7 @@ async def test_windows_task_image_installs_software_and_reuses_cache(
         pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows qcow2")
     monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
     folder = _write_task(tmp_path / "tasks", OperatingSystem.WINDOWS)
-    edit_task_config(folder, {"ale": {"vm_image": None, "vm_base": str(image)}})
+    edit_task_config(folder, {"environment": {"vm_image": None, "vm_base": str(image)}})
     (folder / "environment/assets").mkdir(parents=True)
     (folder / "environment/assets/proof.txt").write_text("built from image materials")
     (folder / "environment/build.ps1").write_text(
@@ -184,7 +184,7 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
     windows = operating_system is OperatingSystem.WINDOWS
     local_linux_image = os.environ.get("ALE_TEST_LINUX_IMAGE")
     if windows:
-        image: dict[str, object] = {"ale": {"sandbox": "vm", "vm_image": "local/windows-base"}}
+        image: dict[str, object] = {"environment": {"vm_image": "local/windows-base"}}
     elif local_linux_image:
         image = {}
     else:
@@ -302,7 +302,7 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
 def _write_windows_gui_task(root: Path) -> Path:
     task = _write_task(root, OperatingSystem.WINDOWS)
     # Built on the base, so the image gets the framework's Cua Driver.
-    edit_task_config(task, {"ale": {"vm_image": None, "vm_base": "local/windows-base"}})
+    edit_task_config(task, {"environment": {"vm_image": None, "vm_base": "local/windows-base"}})
     (task / "environment" / "build.ps1").write_text("exit 0\n")
     (task / "instruction.md").write_text(
         "Use the visible Notepad window. Read the value after SCREEN_CODE=, type the "

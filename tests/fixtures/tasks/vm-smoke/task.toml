@@ -1,10 +1,11 @@
-schema_version = "1.4"
+schema_version = "1.4+ale.1"
 artifacts = ["/home/user/output"]
 
 [task]
 name = "agentslastexam/vm-smoke"
 
 [environment]
+vm = true
 cpus = 2
 memory_mb = 4096
 
@@ -15,6 +16,3 @@ network_mode = "no-network"
 
 [verifier]
 timeout_sec = 300
-
-[ale]
-sandbox = "vm"

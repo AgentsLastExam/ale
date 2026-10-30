@@ -49,7 +49,7 @@ async def prepare_reference(
 
 #: The smallest valid ``task.toml``: a container Task with no network.
 MINIMAL_TASK_CONFIG: dict[str, Any] = {
-    "schema_version": "1.4",
+    "schema_version": "1.4+ale.1",
     "task": {"name": "agentslastexam/demo"},
     "environment": {"cpus": 1, "memory_mb": 512},
     "agent": {"user": "user", "timeout_sec": 120, "network_mode": "no-network"},

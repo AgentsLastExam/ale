@@ -13,7 +13,13 @@ from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import StdioMcpServer, StreamableHttpMcpServer
 from ale.core.trajectory import AtifTrajectory
 from ale.run.harnesses._npm import agent_path, npm_env
-from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
+from ale.run.harnesses.base import (
+    LOG_ROOT,
+    CliCommand,
+    CliHarness,
+    NativeResult,
+    install_skills,
+)
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
@@ -62,14 +68,7 @@ class ClaudeCodeHarness(CliHarness):
             ],
             identity=Identity.AGENT,
         )
-        for skill in resources.skills:
-            target = config_dir / "skills" / skill.name
-            await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
-            if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+        await install_skills(sandbox, session, resources, config_dir / "skills")
         mcp_servers: dict[str, dict[str, object]] = {}
         for resolved in resources.mcp_servers:
             server = resolved.server

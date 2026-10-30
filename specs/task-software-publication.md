@@ -17,12 +17,13 @@ tasks/a/environment/assets/softwares/editor_1/Editor.msix
 tasks/b/environment/assets/softwares/editor_1/Editor.msix
 ```
 
-The planned `[ale].softwares` list contains software directory IDs, such as `[editor_1]`.
+A planned per-Task list contains software directory IDs, such as `[editor_1]`.
 It declares offline materials, not every package installed by the recipe. IDs are single path
 components; there is no nested software/version layout or automatic platform/version selection.
 Every declaration must have complete local materials before building; publication rejects
 undeclared software directories. New packages can be authored and tested before they exist on HF.
-The current strict `task.toml` schema does not yet accept this field.
+The runtime does not read this list, so `task.toml` has no such field; where it lives is
+decided with this design's implementation.
 
 ## Publish and restore
 

@@ -30,6 +30,7 @@ from ale.run.harnesses.base import (
     CliCommand,
     CliHarness,
     NativeResult,
+    install_skills,
     prompt_argument,
 )
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -225,14 +226,7 @@ class ZCodeHarness(CliHarness):
             ["mkdir", "-p", str(skills_root), str(home / ".zcode/cli"), str(private)],
             identity=Identity.AGENT,
         )
-        for skill in resources.skills:
-            target = skills_root / skill.name
-            await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
-            if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+        await install_skills(sandbox, session, resources, skills_root)
         servers: dict[str, dict[str, Any]] = {}
         for resolved in resources.mcp_servers:
             server = resolved.server
@@ -311,7 +305,7 @@ class ZCodeHarness(CliHarness):
             "--output-format",
             "stream-json",
             "--cwd",
-            str(home),
+            session.start_dir,
         ]
         if native_session_id is not None:
             argv.extend(["--resume", native_session_id])

@@ -16,7 +16,7 @@ from ale.core.taskspec import (
     OperatingSystem,
     SkillSource,
     StdioMcpServer,
-    TaskMcpSource,
+    StreamableHttpMcpServer,
     ToolProvision,
 )
 from ale.run.agent_resources import resolve_agent_resources
@@ -41,38 +41,42 @@ def skill(path: Path, text: str = "name") -> Path:
     return path
 
 
-def resolve(task_root: Path, *paths: str, kind: str = "git"):
+def resolve(*paths: Path):
     return resolve_agent_resources(
-        task=ToolProvision(
-            skills=tuple(SkillSource(path=f"tools/skills/{path}") for path in paths)
-        ),
-        task_root=task_root,
-        task_source=source(kind),
+        task=ToolProvision(),
+        agent_skills=tuple(SkillSource(path=str(path), origin="run") for path in paths),
+        task_source=source(),
+    )
+
+
+def stdio(name: str = "search", command: str = "/opt/search") -> StdioMcpServer:
+    return StdioMcpServer(name=name, transport="stdio", command=command)
+
+
+def remote(name: str = "remote") -> StreamableHttpMcpServer:
+    return StreamableHttpMcpServer(
+        name=name, transport="streamable-http", url="https://mcp.example.com/api"
     )
 
 
 def test_single_skill_and_immediate_collection_resolve(tmp_path: Path) -> None:
-    task = tmp_path / "task"
-    skill(task / "tools/skills/one")
-    collection = task / "tools/skills/collection"
+    one = skill(tmp_path / "one")
+    collection = tmp_path / "collection"
     skill(collection / "two")
     skill(collection / "three")
     skill(collection / ".hidden")
 
-    resources = resolve(task, "one", "collection")
+    resources = resolve(one, collection)
 
     assert [item.name for item in resources.skills] == ["one", "three", "two"]
-    assert all(item.source_layers == ("task",) for item in resources.skills)
-    assert all(item.source_version == "a" * 40 for item in resources.skills)
+    assert all(item.source_layers == ("run",) for item in resources.skills)
+    assert all(not item.reportable for item in resources.skills)
     assert resources.digest.startswith("sha256:")
 
 
 @pytest.mark.parametrize("layout", ["missing", "file", "empty", "partial", "recursive"])
 def test_invalid_skill_layouts_fail(tmp_path: Path, layout: str) -> None:
-    task = tmp_path / "task"
-    task.mkdir()
-    path = task / "tools/skills" / layout
-    path.parent.mkdir(parents=True)
+    path = tmp_path / layout
     if layout == "file":
         path.write_text("no")
     elif layout == "empty":
@@ -84,88 +88,87 @@ def test_invalid_skill_layouts_fail(tmp_path: Path, layout: str) -> None:
         skill(path / "outer" / "inner")
 
     with pytest.raises(AgentResourceError):
-        resolve(task, layout)
+        resolve(path)
 
 
-def test_task_path_and_symlink_cannot_escape_or_enter_invisible_content(
-    tmp_path: Path,
-) -> None:
-    task = tmp_path / "task"
-    task.mkdir()
-    outside = skill(tmp_path / "outside")
-    (task / "tools/skills").mkdir(parents=True)
-    (task / "tools/skills/escape").symlink_to(outside, target_is_directory=True)
-    skill(task / "tests" / "secret")
+def test_a_symlink_cannot_leave_the_skill(tmp_path: Path) -> None:
+    directory = skill(tmp_path / "tool")
+    outside = tmp_path / "outside"
+    outside.write_text("secret")
+    (directory / "link").symlink_to(outside)
 
     with pytest.raises(AgentResourceError, match="escapes"):
-        resolve(task, "escape")
-    with pytest.raises(AgentResourceError, match="tools/skills"):
-        resolve_agent_resources(
-            task=ToolProvision(skills=(SkillSource(path="tests/secret"),)),
-            task_root=task,
-            task_source=source(),
-        )
-    with pytest.raises(AgentResourceError, match="relative"):
-        resolve_agent_resources(
-            task=ToolProvision(skills=(SkillSource(path=str(outside)),)),
-            task_root=task,
-            task_source=source(),
-        )
+        resolve(directory)
 
 
 def test_digest_and_executable_metadata_track_file_mode(tmp_path: Path) -> None:
-    task = tmp_path / "task"
-    directory = skill(task / "tools/skills/tool")
+    directory = skill(tmp_path / "tool")
     script = directory / "run.sh"
     script.write_text("#!/bin/sh\n")
-    before = resolve(task, "tool").skills[0]
+    before = resolve(directory).skills[0]
 
     script.chmod(script.stat().st_mode | 0o111)
-    after = resolve(task, "tool").skills[0]
+    after = resolve(directory).skills[0]
 
     assert before.digest != after.digest
     assert after.executable_files == ("run.sh",)
 
 
-def test_identical_names_deduplicate_and_different_content_conflicts(tmp_path: Path) -> None:
-    task = tmp_path / "task"
-    task_skill = skill(task / "tools/skills/same", "same")
-    run = tmp_path / "run" / "same"
-    skill(run, "same")
-    os.chmod(run / "SKILL.md", (task_skill / "SKILL.md").stat().st_mode)
+def test_operator_layers_deduplicate_and_different_content_conflicts(tmp_path: Path) -> None:
+    preset = skill(tmp_path / "preset" / "same", "same")
+    run = skill(tmp_path / "run" / "same", "same")
+    os.chmod(run / "SKILL.md", (preset / "SKILL.md").stat().st_mode)
 
     resources = resolve_agent_resources(
-        task=ToolProvision(skills=(SkillSource(path="tools/skills/same"),)),
+        task=ToolProvision(),
         agent_skills=(
-            SkillSource(
-                path=str(run),
-                origin="run",
-                declared=str(run),
-            ),
+            SkillSource(path=str(preset), origin="preset"),
+            SkillSource(path=str(run), origin="run"),
         ),
-        task_root=task,
         task_source=source(),
     )
     assert len(resources.skills) == 1
-    assert resources.skills[0].source_layers == ("run", "task")
-    assert not resources.skills[0].reportable
+    assert resources.skills[0].source_layers == ("preset", "run")
 
     (run / "SKILL.md").write_text("different")
     with pytest.raises(AgentResourceConflictError):
-        resolve_agent_resources(
-            task=ToolProvision(skills=(SkillSource(path="tools/skills/same"),)),
-            agent_skills=(SkillSource(path=str(run), origin="run"),),
-            task_root=task,
-            task_source=source(),
-        )
+        resolve(preset, run)
 
 
-def test_local_task_skill_is_visible_but_not_reportable(tmp_path: Path) -> None:
-    task = tmp_path / "task"
-    skill(task / "tools/skills/local")
-    resolved = resolve(task, "local", kind="local").skills[0]
-    assert not resolved.reportable
-    assert "not committed in a git repository" in (resolved.reportability_reason or "")
+def test_a_task_skills_directory_is_passed_to_the_harness_and_counts_in_the_digest() -> None:
+    plain = resolve_agent_resources(task=ToolProvision(), task_source=source())
+    declared = resolve_agent_resources(
+        task=ToolProvision(skills_dir="/skills"), task_source=source()
+    )
+    assert declared.skills_dir == "/skills"
+    assert not declared.skills
+    assert declared.digest != plain.digest
+
+
+def test_task_servers_resolve_from_their_entries_without_any_upload() -> None:
+    resources = resolve_agent_resources(
+        task=ToolProvision(mcp_servers=(stdio(), remote())),
+        task_source=source(),
+        network=NetworkPolicy(mode=NetworkMode.OPEN),
+    )
+
+    assert [server.name for server in resources.mcp_servers] == ["remote", "search"]
+    external, local = resources.mcp_servers
+    assert local.source_layers == ("task",)
+    assert local.staged_files is None
+    assert local.reportable and local.source_version == "a" * 40
+    assert not external.reportable
+    assert "no immutable identity" in (external.reportability_reason or "")
+
+
+def test_a_local_task_server_is_visible_but_not_reportable() -> None:
+    resources = resolve_agent_resources(
+        task=ToolProvision(mcp_servers=(stdio(),)), task_source=source("local")
+    )
+    assert not resources.mcp_servers[0].reportable
+    assert "not committed in a git repository" in (
+        resources.mcp_servers[0].reportability_reason or ""
+    )
 
 
 def mcp(path: Path, body: str) -> Path:
@@ -174,24 +177,18 @@ def mcp(path: Path, body: str) -> Path:
     return path
 
 
-def resolve_mcp(
-    task_root: Path,
-    *sources: TaskMcpSource,
-    network: NetworkPolicy | None = None,
-):
+def resolve_descriptors(*paths: Path, network: NetworkPolicy | None = None):
     return resolve_agent_resources(
-        task=ToolProvision(mcp_servers=sources),
-        task_root=task_root,
+        task=ToolProvision(),
+        agent_mcp_servers=tuple(McpSource(path=str(path), origin="run") for path in paths),
         task_source=source(),
         network=network,
     )
 
 
 def test_strict_stdio_and_streamable_http_descriptors(tmp_path: Path) -> None:
-    task = tmp_path / "task"
-    task.mkdir()
-    mcp(
-        task / "tools/mcp/stdio.toml",
+    stdio_descriptor = mcp(
+        tmp_path / "stdio/stdio.toml",
         """
 schema_version = 1
 name = "files"
@@ -203,8 +200,8 @@ cwd = "{mcp}"
 MODE = "read-only"
 """,
     )
-    mcp(
-        task / "tools/mcp/http.toml",
+    http_descriptor = mcp(
+        tmp_path / "http/http.toml",
         """
 schema_version = 1
 name = "remote"
@@ -213,18 +210,15 @@ url = "https://mcp.example.com/api"
 """,
     )
 
-    resources = resolve_mcp(
-        task,
-        TaskMcpSource(path="tools/mcp/stdio.toml"),
-        TaskMcpSource(path="tools/mcp/http.toml"),
-        network=NetworkPolicy(mode=NetworkMode.OPEN),
+    resources = resolve_descriptors(
+        stdio_descriptor, http_descriptor, network=NetworkPolicy(mode=NetworkMode.OPEN)
     )
 
     assert [server.name for server in resources.mcp_servers] == ["files", "remote"]
     assert resources.mcp_servers[0].server.transport == "stdio"
     assert resources.mcp_servers[0].server.args == ("{mcp}/server.py",)
     assert resources.mcp_servers[0].server.cwd == "{mcp}"
-    assert resources.mcp_servers[0].staged_files == task / "tools/mcp"
+    assert resources.mcp_servers[0].staged_files == stdio_descriptor.parent
     assert resources.mcp_servers[1].server.transport == "streamable-http"
 
 
@@ -260,61 +254,36 @@ command = "python3"
     ],
 )
 def test_invalid_transport_auth_and_unknown_fields_fail(tmp_path: Path, body: str) -> None:
-    task = tmp_path / "task"
-    task.mkdir()
-    (task / "tools/mcp").mkdir(parents=True)
-    mcp(task / "tools/mcp/bad.toml", body)
-
     with pytest.raises(AgentResourceError, match="invalid MCP descriptor"):
-        resolve_mcp(
-            task,
-            TaskMcpSource(path="tools/mcp/bad.toml"),
-            network=NetworkPolicy(mode=NetworkMode.OPEN),
+        resolve_descriptors(
+            mcp(tmp_path / "bad.toml", body), network=NetworkPolicy(mode=NetworkMode.OPEN)
         )
 
 
-def test_remote_mcp_obeys_network_policy(tmp_path: Path) -> None:
-    task = tmp_path / "task"
-    task.mkdir()
-    mcp(
-        task / "tools/mcp/remote.toml",
-        """
-schema_version = 1
-name = "remote"
-transport = "streamable-http"
-url = "https://mcp.example.com/api"
-""",
-    )
-    declaration = TaskMcpSource(path="tools/mcp/remote.toml")
+def test_remote_mcp_obeys_network_policy() -> None:
+    def resolved(network: NetworkPolicy | None = None):
+        return resolve_agent_resources(
+            task=ToolProvision(mcp_servers=(remote(),)),
+            task_source=source(),
+            network=network,
+        )
+
+    def allowlist(*hosts: str) -> NetworkPolicy:
+        return NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=hosts)
 
     with pytest.raises(AgentResourceError, match="blocked"):
-        resolve_mcp(task, declaration)
-    with pytest.raises(AgentResourceError, match="allowed_hosts"):
-        resolve_mcp(
-            task,
-            declaration,
-            network=NetworkPolicy(
-                mode=NetworkMode.ALLOWLIST,
-                allowed_hosts=("other.example.com",),
-            ),
-        )
-    assert resolve_mcp(
-        task,
-        declaration,
-        network=NetworkPolicy(
-            mode=NetworkMode.ALLOWLIST,
-            allowed_hosts=("example.com",),
-        ),
-    ).mcp_servers
+        resolved()
+    # A name matches itself; only a pattern reaches below it, as in Harbor.
+    for hosts in (("other.example.com",), ("example.com",)):
+        with pytest.raises(AgentResourceError, match="allowed_hosts"):
+            resolved(allowlist(*hosts))
+    assert resolved(allowlist("mcp.example.com")).mcp_servers
+    assert resolved(allowlist("*.example.com")).mcp_servers
 
 
 @pytest.mark.parametrize("operating_system", list(OperatingSystem))
-def test_builtin_cua_desktop_is_opt_in_and_deduplicates(
-    tmp_path: Path, operating_system: OperatingSystem
-) -> None:
-    task = tmp_path / "task"
-    task.mkdir()
-    assert not resolve_mcp(task).mcp_servers
+def test_builtin_cua_desktop_is_opt_in_and_deduplicates(operating_system: OperatingSystem) -> None:
+    assert not resolve_descriptors().mcp_servers
 
     resources = resolve_agent_resources(
         task=ToolProvision(),
@@ -330,7 +299,6 @@ def test_builtin_cua_desktop_is_opt_in_and_deduplicates(
                 declared="cua-desktop",
             ),
         ),
-        task_root=task,
         task_source=source(),
         operating_system=operating_system,
     )
@@ -346,37 +314,45 @@ def test_builtin_cua_desktop_is_opt_in_and_deduplicates(
         resolve_agent_resources(
             task=ToolProvision(),
             agent_mcp_servers=(McpSource(builtin="missing"),),
-            task_root=task,
             task_source=source(),
         )
 
 
-def test_same_name_different_mcp_definitions_conflict(tmp_path: Path) -> None:
-    task = tmp_path / "task"
-    task.mkdir()
-    mcp(
-        task / "tools/mcp/first.toml",
+def test_an_operator_server_replaces_a_task_server_of_the_same_name(tmp_path: Path) -> None:
+    descriptor = mcp(
+        tmp_path / "search.toml",
         """
 schema_version = 1
-name = "duplicate"
-transport = "stdio"
-command = "one"
-""",
-    )
-    second = mcp(
-        tmp_path / "second.toml",
-        """
-schema_version = 1
-name = "duplicate"
+name = "search"
 transport = "stdio"
 command = "two"
 """,
     )
 
-    with pytest.raises(AgentResourceConflictError, match="duplicate"):
-        resolve_agent_resources(
-            task=ToolProvision(mcp_servers=(TaskMcpSource(path="tools/mcp/first.toml"),)),
-            agent_mcp_servers=(McpSource(path=str(second), origin="run"),),
-            task_root=task,
-            task_source=source(),
+    resources = resolve_agent_resources(
+        task=ToolProvision(mcp_servers=(stdio(command="one"),)),
+        agent_mcp_servers=(McpSource(path=str(descriptor), origin="run"),),
+        task_source=source(),
+    )
+
+    (server,) = resources.mcp_servers
+    assert server.source_layers == ("run",)
+    assert isinstance(server.server, StdioMcpServer) and server.server.command == "two"
+
+
+def test_operators_cannot_disagree_about_one_server(tmp_path: Path) -> None:
+    first, second = (
+        mcp(
+            tmp_path / f"{command}.toml",
+            f"""
+schema_version = 1
+name = "duplicate"
+transport = "stdio"
+command = "{command}"
+""",
         )
+        for command in ("one", "two")
+    )
+
+    with pytest.raises(AgentResourceConflictError, match="duplicate"):
+        resolve_descriptors(first, second)

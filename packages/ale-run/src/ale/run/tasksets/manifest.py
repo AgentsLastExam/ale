@@ -17,9 +17,7 @@ from ale.core.taskspec import (
     ImageKind,
     ImageSpec,
     OperatingSystem,
-    SkillSource,
     TaskConfig,
-    TaskMcpSource,
     TaskSpec,
     TaskVariables,
     ToolProvision,
@@ -288,14 +286,15 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
             "memory_mb": config.environment.memory_mb,
             "storage_mb": config.environment.storage_mb,
             "gpus": config.environment.gpus,
-            "sudo": config.ale.sudo,
+            "sudo": config.agent.sudo,
         },
         network=config.agent.network,
+        workdir=config.agent.workdir,
         timeouts={"agent": config.agent.timeout_sec, "verify": config.verifier.timeout_sec},
         artifacts=config.artifacts,
         tools=ToolProvision(
-            skills=tuple(SkillSource(path=path) for path in config.ale.skills),
-            mcp_servers=tuple(TaskMcpSource(path=path) for path in config.ale.mcp_servers),
+            skills_dir=config.environment.skills_dir,
+            mcp_servers=tuple(entry.server for entry in config.environment.mcp_servers),
         ),
         verify=_verification(config, folder),
         variables=TaskVariables(
@@ -313,15 +312,15 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
 def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
     """The solver image: one named directly wins over a build definition, as in Harbor.
 
-    ``[ale].sandbox`` and the OS decide what ``environment/`` builds: a Dockerfile for a
-    container or a Linux VM, ``build.ps1`` for Windows.
+    ``[environment]`` decides what ``environment/`` builds: a Dockerfile for a container or
+    a Linux VM, ``build.ps1`` for Windows.
     """
-    ale, user = config.ale, config.agent.user
-    windows = config.environment.os is OperatingSystem.WINDOWS
+    environment, user = config.environment, config.agent.user
+    windows = environment.os is OperatingSystem.WINDOWS
     if not windows and folder.build_script is not None:
         raise TaskDefinitionError("environment/build.ps1 requires os 'windows'")
-    if ale.sandbox is ImageKind.CONTAINER:
-        ref = config.environment.docker_image
+    if environment.kind is ImageKind.CONTAINER:
+        ref = environment.docker_image
         if ref is None and folder.dockerfile is None:
             raise TaskDefinitionError(
                 "a container Task requires environment/Dockerfile or [environment].docker_image"
@@ -333,26 +332,28 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
             raise TaskDefinitionError(
                 "a Windows Task builds environment/build.ps1, not a Dockerfile"
             )
-        if folder.build_script is not None and ale.vm_base is None:
-            raise TaskDefinitionError("environment/build.ps1 requires [ale].vm_base")
-        if ale.vm_base is not None and folder.build_script is None:
-            raise TaskDefinitionError("[ale].vm_base requires environment/build.ps1")
-        if ale.vm_base is None and ale.vm_image is None:
+        if folder.build_script is not None and environment.vm_base is None:
+            raise TaskDefinitionError("environment/build.ps1 requires [environment].vm_base")
+        if environment.vm_base is not None and folder.build_script is None:
+            raise TaskDefinitionError("[environment].vm_base requires environment/build.ps1")
+        if environment.vm_base is None and environment.vm_image is None:
             raise TaskDefinitionError(
-                "a Windows Task requires environment/build.ps1 or [ale].vm_image"
+                "a Windows Task requires environment/build.ps1 or [environment].vm_image"
             )
-        return ImageSpec(kind=ImageKind.VM, ref=ale.vm_image, base_ref=ale.vm_base, user=user)
-
-    if ale.vm_image is None and folder.dockerfile is None:
-        raise TaskDefinitionError(
-            "a Linux VM Task requires environment/Dockerfile or [ale].vm_image"
+        return ImageSpec(
+            kind=ImageKind.VM, ref=environment.vm_image, base_ref=environment.vm_base, user=user
         )
-    return ImageSpec(kind=ImageKind.VM, ref=ale.vm_image, user=user)
+
+    if environment.vm_image is None and folder.dockerfile is None:
+        raise TaskDefinitionError(
+            "a Linux VM Task requires environment/Dockerfile or [environment].vm_image"
+        )
+    return ImageSpec(kind=ImageKind.VM, ref=environment.vm_image, user=user)
 
 
 def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
-    """Harbor's verifier semantics; ``[ale.verifier]`` adds a VM verifier image."""
-    verifier, ale_verifier = config.verifier, config.ale.verifier
+    """Harbor's verifier semantics, with a VM as another kind of verifier image."""
+    verifier = config.verifier
     dockerfile = folder.verifier_dockerfile
     if verifier.mode is VerificationMode.SHARED:
         if dockerfile is not None:
@@ -366,13 +367,13 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
     image: ImageSpec | None = None
     if environment is not None and environment.docker_image is not None:
         image = ImageSpec(kind=ImageKind.CONTAINER, ref=environment.docker_image, user=user)
-    elif ale_verifier is not None and ale_verifier.vm_image is not None:
-        image = ImageSpec(kind=ImageKind.VM, ref=ale_verifier.vm_image, user=user)
+    elif environment is not None and environment.vm_image is not None:
+        image = ImageSpec(kind=ImageKind.VM, ref=environment.vm_image, user=user)
     elif dockerfile is not None:
-        kind = ale_verifier.sandbox if ale_verifier is not None else ImageKind.CONTAINER
+        kind = environment.kind if environment is not None else ImageKind.CONTAINER
         image = ImageSpec(kind=kind, user=user)
-    elif ale_verifier is not None:
-        raise TaskDefinitionError("[ale.verifier] requires vm_image or tests/Dockerfile")
+    elif environment is not None and environment.vm:
+        raise TaskDefinitionError("[verifier.environment].vm requires vm_image or tests/Dockerfile")
 
     # Without a verifier environment, a separate verifier gets the solver's resources.
     sized = environment or config.environment

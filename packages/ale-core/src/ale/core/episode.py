@@ -152,6 +152,11 @@ class EpisodeContext:
     """Validated solver image selected before provisioning."""
     prepared_verifier_image: PreparedTaskImage | None = None
     """Prepared dedicated verifier image; None for shared verification."""
+    agent_stop: Exception | None = None
+    """What ended the agent's run early. Its work is verified first, as in Harbor; this then
+    decides the Episode's status."""
+    stopped_rewards: Rewards | None = None
+    """The score of an agent that ended early, carried past ``agent_stop``."""
 
     home: str = ""
     """The agent's home directory, which is also where a run does its work.

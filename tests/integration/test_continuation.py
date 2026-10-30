@@ -65,10 +65,14 @@ def _task(tmp_path: Path, kind: str) -> ManifestTask:
             root,
             name="agentslastexam/continued",
             config={
-                "environment": {"os": "windows", "cpus": 2, "memory_mb": 8192},
+                "environment": {
+                    "os": "windows",
+                    "vm_base": "local/windows-base",
+                    "cpus": 2,
+                    "memory_mb": 8192,
+                },
                 "agent": {"timeout_sec": 1200},
                 "verifier": {"timeout_sec": 300},
-                "ale": {"sandbox": "vm", "vm_base": "local/windows-base"},
             },
             dockerfile=None,
             instruction="Record one more turn.\n",
@@ -85,7 +89,7 @@ def _task(tmp_path: Path, kind: str) -> ManifestTask:
     else:
         scaffold_task(root)
     if kind == "vm":
-        edit_task_config(root, {"environment": {"cpus": 2}, "ale": {"sandbox": "vm"}})
+        edit_task_config(root, {"environment": {"cpus": 2, "vm": True}})
         dockerfile = root / "environment/Dockerfile"
         _, rest = dockerfile.read_text().split("\n", 1)
         dockerfile.write_text(f"FROM {VM_BASE}\n{rest}")

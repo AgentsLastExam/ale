@@ -129,13 +129,13 @@ def allowlist(*hosts: str) -> NetworkPolicy:
     return NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=hosts)
 
 
-def test_the_allowlist_becomes_daytonas_with_subdomains_as_ale_matches_them() -> None:
-    assert _domain_allowlist(("PyPI.org.", "files.pythonhosted.org", "pypi.org")) == (
-        "*.files.pythonhosted.org,*.pypi.org"
+def test_the_allowlist_becomes_daytonas_with_names_and_patterns_as_written() -> None:
+    assert _domain_allowlist(("PyPI.org.", "*.pythonhosted.org", "pypi.org")) == (
+        "*.pythonhosted.org,pypi.org"
     )
     provider = DaytonaProvider()
     provider.accepts(request(network=allowlist("example.com")))
-    for unusable in ("10.0.0.1", "example.com:8443", "*.example.com", "https://example.com"):
+    for unusable in ("10.0.0.1", "example.com:8443", "https://example.com"):
         with pytest.raises(ProviderCapabilityError, match="takes domain names"):
             provider.accepts(request(network=allowlist(unusable)))
     with pytest.raises(ProviderCapabilityError, match="at most 100"):
@@ -144,7 +144,7 @@ def test_the_allowlist_becomes_daytonas_with_subdomains_as_ale_matches_them() ->
 
 def test_egress_is_probed_with_an_endpoint_the_allowlist_leaves_out() -> None:
     assert _egress_probe(()) == ("1.1.1.1:443", "one.one.one.one")
-    assert _egress_probe(("one.one.one",)) == ("8.8.8.8:443", "dns.google")
+    assert _egress_probe(("*.one.one.one",)) == ("8.8.8.8:443", "dns.google")
     with pytest.raises(ProviderCapabilityError, match="covers every endpoint"):
         DaytonaProvider().accepts(request(network=allowlist("one.one.one.one", "dns.google")))
 
@@ -210,7 +210,7 @@ async def test_the_agent_gets_daytonas_allowlist_and_no_proxy_variables() -> Non
     await sandbox.close_egress()
     assert api.sent == [
         {"networkBlockAll": False},
-        {"networkBlockAll": False, "domainAllowList": "*.example.com"},
+        {"networkBlockAll": False, "domainAllowList": "example.com"},
     ]
     await sandbox.exec(["true"], identity=Identity.AGENT)
     assert client.envs == [None]

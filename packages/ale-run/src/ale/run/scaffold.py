@@ -15,7 +15,7 @@ __all__ = ["DEFAULT_ORGANIZATION", "scaffold_task"]
 DEFAULT_ORGANIZATION = "agentslastexam"
 
 TASK_TOML = """\
-schema_version = "1.4"
+schema_version = "1.4+ale.1"
 artifacts = ["/home/user/output"]
 
 [task]

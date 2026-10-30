@@ -32,8 +32,8 @@ Every phase is timed and attributed independently. Agent and verify default to t
 RunLock and the configuration hash without changing the Task identity. The Agent deadline
 starts at Harness launch (or policy rollout), after installation, resource staging, and
 network sealing. Evidence capture, verification, and cleanup do not consume it. An Agent
-timeout terminates execution, destroys its Sandbox even if retention was requested, and
-returns `timeout` without retry. Teardown is cancellation-shielded on every exit path.
+timeout terminates execution, is not retried, and destroys its Sandbox even if retention was
+requested, after verification. Teardown is cancellation-shielded on every exit path.
 
 ### Provision
 
@@ -62,7 +62,8 @@ optional and runs once.
 ALE rejects unsupported Harness/OS combinations before provisioning. It installs the
 selected Harness and its declared resources, validates staged stdio MCP
 commands, then applies the Task network policy. Autonomous Harnesses launch inside the
-sandbox; Policy Harnesses drive the framework-owned `TaskEnv`. The evaluated solver and
+sandbox, in `[agent].workdir` or else the agent's home; Policy Harnesses drive the
+framework-owned `TaskEnv`. The evaluated solver and
 the validation oracle both run as the image's agent account. Windows autonomous CLI
 Harnesses use the base's native Node.js and Git Bash.
 
@@ -70,6 +71,12 @@ Harnesses use the base's native Node.js and Git Bash.
 `tests/` is also absent throughout this phase. Answers are withheld by when they are
 staged and by the root-only staging directory, not by a conventional path or a flag a Task
 must remember.
+
+An agent run that ends early, by a timeout, a limit, a failure or a refusal, moves on to
+evidence capture and verification, as in Harbor, because what it left is still its work. The
+Episode's status stays what stopped the agent, and `rewards` holds the score. If capture or
+verification then fails, that status stands without a score. An agent phase that never reached
+its run, or a guest that stopped replying, ends the Episode without verification.
 
 ### Evidence capture
 

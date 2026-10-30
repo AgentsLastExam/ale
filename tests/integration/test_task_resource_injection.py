@@ -26,7 +26,13 @@ from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import MINIMAL_TASK_CONFIG, merged_config, provider_registry, task_toml
+from tests.support import (
+    MINIMAL_TASK_CONFIG,
+    edit_task_config,
+    merged_config,
+    provider_registry,
+    task_toml,
+)
 
 from .conftest import IMAGE
 
@@ -169,8 +175,8 @@ def _write_task(root: Path) -> Path:
     task = root / "tasks" / "resource_injection"
     for directory in (
         task / "environment" / "setup",
-        task / "tools" / "mcp",
-        task / "tools" / "skills" / "resource-proof",
+        task / "environment" / "mcp",
+        task / "environment" / "skills" / "resource-proof",
         task / "tests",
         task / "solution",
     ):
@@ -182,18 +188,25 @@ def _write_task(root: Path) -> Path:
                 {
                     "artifacts": ["/home/user/output"],
                     "task": {"name": "agentslastexam/resource-injection"},
+                    "environment": {
+                        "skills_dir": "/skills",
+                        "mcp_servers": [
+                            {
+                                "name": "task-proof",
+                                "transport": "stdio",
+                                "command": "python3",
+                                "args": ["/opt/task-proof/task_proof_mcp.py"],
+                            }
+                        ],
+                    },
                     "agent": {"timeout_sec": 60},
                     "verifier": {"timeout_sec": 60},
-                    "ale": {
-                        "skills": ["tools/skills/resource-proof"],
-                        "mcp_servers": ["tools/mcp/task-proof.toml"],
-                    },
                 },
             )
         )
     )
-    (task / "instruction.md").write_text("Use the injected Skill and MCP to complete the proof.")
-    (task / "tools" / "skills" / "resource-proof" / "SKILL.md").write_text(
+    (task / "instruction.md").write_text("Use the image's Skill and MCP to complete the proof.")
+    (task / "environment" / "skills" / "resource-proof" / "SKILL.md").write_text(
         textwrap.dedent("""
         ---
         name: resource-proof
@@ -203,16 +216,7 @@ def _write_task(root: Path) -> Path:
         Write exactly `SKILL-R7::<nonce>::<fragment>` to the requested output.
         """).strip()
     )
-    (task / "tools" / "mcp" / "task-proof.toml").write_text(
-        textwrap.dedent("""
-        schema_version = 1
-        name = "task-proof"
-        transport = "stdio"
-        command = "python3"
-        args = ["{mcp}/task_proof_mcp.py"]
-        """).strip()
-    )
-    (task / "tools" / "mcp" / "task_proof_mcp.py").write_text(
+    (task / "environment" / "mcp" / "task_proof_mcp.py").write_text(
         textwrap.dedent("""
         import json, secrets, sys
         from pathlib import Path
@@ -252,7 +256,10 @@ def _write_task(root: Path) -> Path:
     )
     (task / "environment" / "Dockerfile").write_text(
         f"FROM {IMAGE}\n"
-        "RUN mkdir -p /home/user/input /home/user/output "
+        "COPY skills/ /skills/\n"
+        "COPY mcp/ /opt/task-proof/\n"
+        "RUN chmod +x /opt/task-proof/task_proof_mcp.py "
+        "&& mkdir -p /home/user/input /home/user/output "
         "&& chown -R user:user /home/user/input /home/user/output "
         "\n"
     )
@@ -298,20 +305,25 @@ async def test_autonomous_agent_uses_task_skill_and_mcp_to_pass(
 ) -> None:
     task_root = _write_task(tmp_path / "repo")
     if direct_command:
-        config = task_root / "tools/mcp/task-proof.toml"
-        config.write_text(
-            config.read_text().replace(
-                'command = "python3"\nargs = ["{mcp}/task_proof_mcp.py"]',
-                'command = "{mcp}/task_proof_mcp.py"',
-            )
+        edit_task_config(
+            task_root,
+            {
+                "environment": {
+                    "mcp_servers": [
+                        {
+                            "name": "task-proof",
+                            "transport": "stdio",
+                            "command": "/opt/task-proof/task_proof_mcp.py",
+                        }
+                    ]
+                }
+            },
         )
-        command = task_root / "tools/mcp/task_proof_mcp.py"
+        command = task_root / "environment/mcp/task_proof_mcp.py"
         command.write_text("#!/usr/bin/env python3\n" + command.read_text())
-        command.chmod(0o600)
     task = load_tasks(task_root)[0]
     resources = resolve_agent_resources(
         task=task.spec.tools,
-        task_root=task_root,
         task_source=TaskSource(kind="local", path=str(task_root)),
         network=task.spec.network,
     )
