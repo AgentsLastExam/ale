@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, NamedTuple, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ale.core.ids import TaskId, content_hash
 
@@ -27,13 +28,17 @@ __all__ = [
     "PhaseTimeouts",
     "Resources",
     "SkillSource",
+    "SolutionTable",
     "StdioMcpServer",
     "StreamableHttpMcpServer",
     "TaskConfig",
+    "TaskEnv",
     "TaskMcpSource",
     "TaskSpec",
     "TaskTable",
+    "TaskVariables",
     "ToolProvision",
+    "VariableReference",
     "VerificationMode",
     "VerifierEnvironmentTable",
     "VerifierResources",
@@ -265,6 +270,83 @@ class VerifySpec(BaseModel):
         return self
 
 
+_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*))?\}", re.DOTALL)
+#: The prefix of the framework's own variables: those it sets in the commands it runs, and
+#: the Host configuration it reads, model and Judge keys included.
+_RESERVED_PREFIX = "ALE_"
+
+
+class VariableReference(NamedTuple):
+    """A whole value ``${NAME}`` or ``${NAME:-default}``, resolved on the Host."""
+
+    name: str
+    default: str | None
+
+    @classmethod
+    def parse(cls, value: str) -> VariableReference | None:
+        """The reference ``value`` is, or ``None`` for a literal.
+
+        Only a whole value refers to a variable, as in Harbor: ``Bearer ${TOKEN}`` is text.
+        """
+        match = _REFERENCE.fullmatch(value)
+        return cls(match[1], match[2]) if match else None
+
+
+def _valid_env(env: dict[str, str]) -> dict[str, str]:
+    for key, value in env.items():
+        if not _VARIABLE_NAME.fullmatch(key):
+            raise ValueError(f"{key!r} is not an environment variable name")
+        if key.upper().startswith(_RESERVED_PREFIX):
+            raise ValueError(f"{key}: the {_RESERVED_PREFIX} prefix is reserved for the framework")
+        reference = VariableReference.parse(value)
+        if reference is not None and reference.name.upper().startswith(_RESERVED_PREFIX):
+            # The Host's own configuration, model and Judge keys included, never enters a
+            # Sandbox through a Task.
+            raise ValueError(f"{key}: a Task cannot refer to the Host's {reference.name}")
+    return env
+
+
+#: A Harbor ``env`` table: names to literals or whole-value ``${NAME}`` references.
+TaskEnv = Annotated[dict[str, str], AfterValidator(_valid_env)]
+
+
+class TaskVariables(BaseModel):
+    """Environment variables a Task declares, by the ``task.toml`` table declaring them.
+
+    A TaskSpec holds them as written; resolved, they hold what each command receives.
+    Variables the framework or a Harness sets for a command win over them.
+    """
+
+    model_config = _FROZEN
+
+    environment: dict[str, str] = Field(default_factory=dict)
+    """``[environment].env``: setup, the agent and the oracle, and a shared verifier."""
+    verifier: dict[str, str] = Field(default_factory=dict)
+    """``[verifier].env``: the verifier only."""
+    verifier_environment: dict[str, str] | None = None
+    """``[verifier.environment].env``. ``None`` without that table: a separate verifier then
+    receives ``environment``, as Harbor copies ``[environment]`` for it."""
+    solution: dict[str, str] = Field(default_factory=dict)
+    """``[solution].env``: the oracle only."""
+
+    @property
+    def tables(self) -> tuple[tuple[str, dict[str, str]], ...]:
+        """Each declared table by its ``task.toml`` name."""
+        tables = [("environment", self.environment), ("verifier", self.verifier)]
+        if self.verifier_environment is not None:
+            tables.append(("verifier.environment", self.verifier_environment))
+        tables.append(("solution", self.solution))
+        return tuple(tables)
+
+    def oracle(self) -> dict[str, str]:
+        return {**self.environment, **self.solution}
+
+    def verification(self, mode: VerificationMode) -> dict[str, str]:
+        separate = mode is VerificationMode.SEPARATE and self.verifier_environment is not None
+        return {**(self.verifier_environment if separate else self.environment), **self.verifier}
+
+
 class TaskSpec(BaseModel):
     """The Task's configuration and instruction as the runtime uses them."""
 
@@ -280,6 +362,7 @@ class TaskSpec(BaseModel):
     artifacts: tuple[str, ...] = ()
     tools: ToolProvision = ToolProvision()
     verify: VerifySpec = VerifySpec()
+    variables: TaskVariables = TaskVariables()
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property
@@ -309,7 +392,6 @@ _HARBOR_ENVIRONMENT_ONLY = frozenset(
         "allow_internet",
         "allowed_hosts",
         "build_timeout_sec",
-        "env",
         "gpu_types",
         "healthcheck",
         "mcp_servers",
@@ -325,9 +407,9 @@ _HARBOR_ENVIRONMENT_ONLY = frozenset(
 #: Harbor ``task.toml`` keys that ALE does not implement, by table. They fail with a
 #: message saying so rather than as unknown keys, because a Harbor author expects them.
 _UNSUPPORTED_HARBOR_KEYS: dict[tuple[str, ...], frozenset[str]] = {
-    (): frozenset({"multi_step_reward_strategy", "solution", "source", "steps"}),
+    (): frozenset({"multi_step_reward_strategy", "source", "steps"}),
     ("environment",): _HARBOR_ENVIRONMENT_ONLY,
-    ("verifier",): frozenset({"allowed_hosts", "collect", "env", "network_mode", "user"}),
+    ("verifier",): frozenset({"allowed_hosts", "collect", "network_mode", "user"}),
     ("verifier", "environment"): _HARBOR_ENVIRONMENT_ONLY | {"os"},
 }
 
@@ -362,6 +444,7 @@ class EnvironmentTable(BaseModel):
     memory_mb: int = Field(ge=128, strict=True)
     storage_mb: int | None = Field(default=None, ge=256, strict=True)
     gpus: int = Field(default=0, ge=0, strict=True)
+    env: TaskEnv = Field(default_factory=dict)
 
 
 class AgentTable(BaseModel):
@@ -401,6 +484,7 @@ class VerifierEnvironmentTable(BaseModel):
     memory_mb: int = Field(ge=128, strict=True)
     storage_mb: int | None = Field(default=None, ge=256, strict=True)
     gpus: int = Field(default=0, ge=0, strict=True)
+    env: TaskEnv = Field(default_factory=dict)
 
 
 class VerifierTable(BaseModel):
@@ -409,6 +493,7 @@ class VerifierTable(BaseModel):
     model_config = _FROZEN
 
     timeout_sec: float = Field(gt=0, allow_inf_nan=False, strict=True)
+    env: TaskEnv = Field(default_factory=dict)
     environment_mode: VerificationMode | None = None
     environment: VerifierEnvironmentTable | None = None
 
@@ -428,6 +513,14 @@ class VerifierTable(BaseModel):
         if self.environment_mode is VerificationMode.SHARED and self.environment is not None:
             raise ValueError("environment_mode 'shared' cannot declare [verifier.environment]")
         return self
+
+
+class SolutionTable(BaseModel):
+    """``[solution]``: what the oracle receives besides ``[environment].env``."""
+
+    model_config = _FROZEN
+
+    env: TaskEnv = Field(default_factory=dict)
 
 
 class AleVerifierTable(BaseModel):
@@ -489,6 +582,7 @@ class TaskConfig(BaseModel):
     environment: EnvironmentTable
     agent: AgentTable
     verifier: VerifierTable
+    solution: SolutionTable = SolutionTable()
     ale: AleTable = AleTable()
 
     # --- validation ---

@@ -43,7 +43,7 @@ is the one condition under which installs silently degrade to copies.
 | Task checkouts and guest disks | `~/.cache/ale` (`ALE_CACHE_DIR`) | a new worktree can reuse operator-managed runtime artifacts |
 | Task asset sync state | each Task repository's `.ale-cache/` | generated commit/dirty marker; ignored by Git |
 | Task assets | each Task's [asset roots](../specs/task-assets.md) | direct development paths; explicit HF pull/push/status |
-| Secrets | checkout `.env` (`ALE_ENV_FILE` overrides) | `ALE_`-prefixed names from [`.env.example`](../../.env.example); provider and Judge keys stay on the Host Gateway |
+| Secrets | checkout `.env` (`ALE_ENV_FILE` overrides) | `ALE_`-prefixed names from [`.env.example`](../../.env.example), and the [Task variables](../specs/task-authoring.md#variables) the selected Tasks refer to; provider and Judge keys stay on the Host Gateway |
 | Default run configuration | `ALE_RUN_CONFIG` points to a run TOML | used when `--config` is absent; see [`ale-run`](../../packages/ale-run/README.md) for precedence |
 
 Set `ALE_REPO_PATH` to the absolute active engine checkout for engine discovery. Configure

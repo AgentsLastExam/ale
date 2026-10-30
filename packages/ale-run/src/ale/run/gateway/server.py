@@ -40,6 +40,7 @@ from ale.run.gateway.session import (
     SessionRegistry,
     Upstream,
 )
+from ale.run.recording import Redactor
 from ale.run.subscription import SubscriptionCredential
 
 __all__ = ["REQUEST_PATHS", "Gateway"]
@@ -743,11 +744,15 @@ class Gateway:
         if request is not None:
             _atomic_write(
                 root / f"{call_id}.request.json",
-                json.dumps(request, ensure_ascii=False, sort_keys=True, indent=2).encode() + b"\n",
+                _redacted(
+                    session,
+                    json.dumps(request, ensure_ascii=False, sort_keys=True, indent=2).encode()
+                    + b"\n",
+                ),
             )
         if response is not None:
             suffix = "sse" if streaming else "json"
-            _atomic_write(root / f"{call_id}.response.{suffix}", response)
+            _atomic_write(root / f"{call_id}.response.{suffix}", _redacted(session, response))
 
     def _retain_exact_tokens(
         self,
@@ -766,9 +771,23 @@ class Gateway:
         root.mkdir(parents=True, exist_ok=True)
         _atomic_write(
             root / f"{call_id}.json",
-            json.dumps(retained, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-            + b"\n",
+            _redacted(
+                session,
+                json.dumps(
+                    retained, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode()
+                + b"\n",
+            ),
         )
+
+
+def _redacted(session: GatewaySession, data: bytes) -> bytes:
+    """``data`` without the Task's secrets; undecodable bytes pass through unchanged."""
+    if not session.redacted:
+        return data
+    text = data.decode("utf-8", errors="surrogateescape")
+    redactor = Redactor(session.redacted, patterns=False)
+    return redactor(text).encode("utf-8", errors="surrogateescape")
 
 
 async def _iter_chunks(

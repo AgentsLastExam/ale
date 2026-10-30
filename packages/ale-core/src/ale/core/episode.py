@@ -28,7 +28,7 @@ from ale.core.sandbox import (
     Sandbox,
     SandboxRequest,
 )
-from ale.core.task import TaskSourceContext
+from ale.core.task import ResolvedVariables, TaskSourceContext
 from ale.core.taskspec import TaskSpec
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Rewards
@@ -137,6 +137,8 @@ class EpisodeContext:
     """Gateway address plus this episode's bearer token — never a provider credential."""
     agent_resources: EffectiveAgentResources = field(default_factory=EffectiveAgentResources)
     task_source: TaskSourceContext = field(default_factory=TaskSourceContext)
+    variables: ResolvedVariables = field(default_factory=ResolvedVariables)
+    """The Task's variables as its commands receive them."""
     trajectory_id: str = ""
     transport: EventSink | None = None
     execution: EventSink | None = None
@@ -219,4 +221,4 @@ class EpisodeContext:
     @property
     def secrets(self) -> tuple[str, ...]:
         """Every value this episode keeps out of what it records."""
-        return (self.session.token, *self.verification_secrets)
+        return (self.session.token, *self.verification_secrets, *self.variables.secrets)

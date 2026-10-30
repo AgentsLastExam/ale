@@ -33,6 +33,7 @@ from ale.core.errors import (
     EnvironmentError_,
     PhaseTimeoutError,
     RetentionFinalizationError,
+    TaskDefinitionError,
     TaskError,
 )
 from ale.core.harness import EffectiveAgentResources, HarnessSession
@@ -41,7 +42,7 @@ from ale.core.lock import AssetProvenance, LimitTermination, RunLock
 from ale.core.result import FailureInfo as ResultFailureInfo
 from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
 from ale.core.sandbox import Identity, RetainedSandbox, Sandbox, SandboxRequest, SandboxRole
-from ale.core.task import Task
+from ale.core.task import ResolvedVariables, Task
 from ale.core.taskspec import NetworkMode, OperatingSystem, VerificationMode
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import Status, Verdict
@@ -508,6 +509,13 @@ async def run_episode(
     Never raises for an episode that merely failed: a failure is a result with a status,
     and the caller decides what to do with it.
     """
+    if task.variables is None:
+        # Resolved by the caller for every Task at once, so a missing one fails the whole
+        # selection before anything is built, started or spent.
+        if any(env for _, env in task.spec.variables.tables):
+            raise TaskDefinitionError(f"{task.spec.name}: its variables were not resolved")
+        task.variables = ResolvedVariables()
+    variables = task.variables
     task.asset_observation = observe_task_assets(task)
     if task.prepared_image is None:
         task.prepared_image = await prepare_task_image(task, providers)
@@ -530,6 +538,7 @@ async def run_episode(
             limits=limits or Limits(),
             allowed_hosts=allowed_hosts,
             provider_web_tools=task.spec.network.mode is NetworkMode.OPEN,
+            redacted=variables.secrets,
             payload_dir=(
                 episode_dir / "logs" / "gateway"
                 if (logging_policy or LoggingPolicy()).transport_payloads == "debug"
@@ -590,6 +599,7 @@ async def run_episode(
         ),
         agent_resources=agent_resources or EffectiveAgentResources(),
         task_source=task.source,
+        variables=variables,
         trajectory_id=trajectory_id,
         transport=recording.transport,
         execution=recording.execution,
@@ -815,6 +825,7 @@ def _write_lock(
         termination=ctx.limit_termination,
         sandbox_outcomes=ctx.sandbox_outcomes,
         resumed_from=ctx.resumed_from,
+        variables=ctx.variables.provenance,
         seed=seed,
     )
     return lock

@@ -43,6 +43,7 @@ __all__ = [
     "SandboxProvenance",
     "TaskProvenance",
     "TaskSource",
+    "TaskVariableProvenance",
     "VerificationProvenance",
 ]
 
@@ -80,6 +81,16 @@ class TaskSource(BaseModel):
         return self
 
 
+class TaskVariableProvenance(BaseModel):
+    """Where one Task variable's value came from. The value itself is never recorded."""
+
+    model_config = _FROZEN
+
+    table: Literal["environment", "verifier", "verifier.environment", "solution"]
+    name: str = Field(min_length=1)
+    source: Literal["literal", "env_file", "default"]
+
+
 class TaskProvenance(BaseModel):
     model_config = _FROZEN
 
@@ -88,6 +99,8 @@ class TaskProvenance(BaseModel):
     content_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     source: TaskSource
     non_verifier_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    variables: tuple[TaskVariableProvenance, ...] = ()
+    """The variables this episode resolved, ``[solution].env`` only for the oracle."""
 
 
 class ImageProvenance(BaseModel):

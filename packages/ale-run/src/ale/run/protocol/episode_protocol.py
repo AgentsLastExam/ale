@@ -490,12 +490,15 @@ class EpisodeProtocol:
         await self._validate_stdio_mcp(ctx, sandbox)
         await self._seal(ctx, sandbox)
 
+        variables = ctx.variables.values
+
         async def launch() -> None:
             recorded = _RecordedSandbox(
                 ctx,
                 sandbox,
                 component="harness-launch",
                 actor="task" if harness.name == "oracle" else "framework",
+                env=variables.oracle() if harness.name == "oracle" else variables.environment,
             )
             with _limit_terminated(ctx):
                 if self.resume is None:
@@ -1116,7 +1119,16 @@ class EpisodeProtocol:
         layout = _layout(ctx.spec.os)
         stage = Stage.SETUP if phase is Phase.SETUP else Stage.TESTS
         entry = directory / stage.entry(ctx.spec.os)
-        env = {"ALE_STAGE_DIR": str(directory), "ALE_HOME": ctx.home}
+        variables = ctx.variables.values
+        env = {
+            **(
+                variables.environment
+                if phase is Phase.SETUP
+                else variables.verification(ctx.spec.verify.environment_mode)
+            ),
+            "ALE_STAGE_DIR": str(directory),
+            "ALE_HOME": ctx.home,
+        }
         if phase is Phase.VERIFY:
             env.update(
                 {
@@ -1644,11 +1656,14 @@ class _RecordedSandbox:
         *,
         component: str,
         actor: Literal["framework", "task"] = "framework",
+        env: dict[str, str] | None = None,
     ) -> None:
         self._ctx = ctx
         self._sandbox = sandbox
         self._component = component
         self._actor = actor
+        self._env = env or {}
+        """The Task's variables, beneath each command's own."""
 
     def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
         return getattr(self._sandbox, name)
@@ -1690,7 +1705,7 @@ class _RecordedSandbox:
             result = await self._sandbox.exec(
                 argv,
                 cwd=cwd,
-                env=env,
+                env={**self._env, **(env or {})} or None,
                 timeout_sec=timeout_sec,
                 identity=identity,
                 output_sink=emit,

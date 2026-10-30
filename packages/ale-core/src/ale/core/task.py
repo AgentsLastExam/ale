@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from ale.core.lock import TaskVariableProvenance
 from ale.core.sandbox import PreparedTaskImage
-from ale.core.taskspec import OperatingSystem, TaskSpec
+from ale.core.taskspec import OperatingSystem, TaskSpec, TaskVariables
 from ale.core.verdict import Rewards
 
 if TYPE_CHECKING:
     from ale.core.episode import EpisodeContext
 
-__all__ = ["Stage", "Task", "TaskAssetObservation", "TaskFolder", "TaskSourceContext"]
+__all__ = [
+    "ResolvedVariables",
+    "Stage",
+    "Task",
+    "TaskAssetObservation",
+    "TaskFolder",
+    "TaskSourceContext",
+]
 
 
 @dataclass(frozen=True)
@@ -28,6 +36,16 @@ class TaskSourceContext:
         values = self.repository_root, self.repository_name, self.task_relative_path
         if any(value is None for value in values) and any(value is not None for value in values):
             raise ValueError("Task source context fields must be present or absent together")
+
+
+@dataclass(frozen=True)
+class ResolvedVariables:
+    """A Task's variables with their values, resolved on the Host before anything runs."""
+
+    values: TaskVariables = field(default_factory=TaskVariables)
+    secrets: tuple[str, ...] = ()
+    """Values every record leaves out: the credentials among them."""
+    provenance: tuple[TaskVariableProvenance, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -97,6 +115,7 @@ class Task(ABC):
         self.prepared_image: PreparedTaskImage | None = None
         self.prepared_verifier_image: PreparedTaskImage | None = None
         self.asset_observation: TaskAssetObservation | None = None
+        self.variables: ResolvedVariables | None = None
 
     @property
     def id(self) -> str:
