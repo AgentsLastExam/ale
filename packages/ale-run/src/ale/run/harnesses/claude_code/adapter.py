@@ -12,7 +12,7 @@ from ale.core.harness import EffectiveAgentResources, HarnessSession, Trajectory
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import StdioMcpServer, StreamableHttpMcpServer
 from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, npm_env
+from ale.run.harnesses._npm import agent_path, npm_env, run_posix
 from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
@@ -50,26 +50,22 @@ class ClaudeCodeHarness(CliHarness):
         config_dir = agent_path(session.home) / ".claude-config"
         # The CLI expects its configuration directory to exist, with these subdirectories
         # in place. It creates neither, and the failures are opaque when they are missing.
-        await sandbox.exec(
-            [
-                "mkdir",
-                "-p",
-                *(
-                    str(config_dir / name)
-                    for name in ("debug", "projects", "shell-snapshots", "statsig", "todos")
-                ),
-                str(config_dir / "skills"),
-            ],
-            identity=Identity.AGENT,
+        await run_posix(
+            sandbox,
+            session.home,
+            "mkdir",
+            "-p",
+            *(
+                config_dir / name
+                for name in ("debug", "projects", "shell-snapshots", "statsig", "todos", "skills")
+            ),
         )
         for skill in resources.skills:
             target = config_dir / "skills" / skill.name
             await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
             if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+                executables = (target / path for path in skill.executable_files)
+                await run_posix(sandbox, session.home, "chmod", "+x", *executables)
         mcp_servers: dict[str, dict[str, object]] = {}
         for resolved in resources.mcp_servers:
             server = resolved.server

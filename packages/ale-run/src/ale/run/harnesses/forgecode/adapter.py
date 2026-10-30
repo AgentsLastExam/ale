@@ -16,7 +16,7 @@ from ale.core.harness import EffectiveAgentResources, HarnessSession, Trajectory
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, npm_env
+from ale.run.harnesses._npm import agent_path, npm_env, run_posix
 from ale.run.harnesses._release import ReleaseAsset, ReleaseAssets
 from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -100,18 +100,13 @@ class ForgecodeHarness(CliHarness):
         home = agent_path(session.home)
         state = home / STATE
         skills_root = state / "skills"
-        await sandbox.exec(
-            ["mkdir", "-p", str(skills_root), str(home / trajectory.DUMPS)],
-            identity=Identity.AGENT,
-        )
+        await run_posix(sandbox, session.home, "mkdir", "-p", skills_root, home / trajectory.DUMPS)
         for skill in resources.skills:
             target = skills_root / skill.name
             await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
             if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+                executables = (target / path for path in skill.executable_files)
+                await run_posix(sandbox, session.home, "chmod", "+x", *executables)
 
         servers: dict[str, dict[str, Any]] = {}
         for resolved in resources.mcp_servers:
@@ -195,7 +190,7 @@ class ForgecodeHarness(CliHarness):
                 ]
             ),
         )
-        await sandbox.exec(["chmod", "600", str(credentials)], identity=Identity.AGENT)
+        await run_posix(sandbox, session.home, "chmod", "600", credentials)
 
     async def prepare_command(
         self,

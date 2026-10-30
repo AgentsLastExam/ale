@@ -22,6 +22,7 @@ from ale.run.harnesses._npm import (
     is_windows,
     npm_env,
     reported_version,
+    run_posix,
 )
 from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -138,18 +139,15 @@ class HermesHarness(CliHarness):
     ) -> None:
         home = agent_path(session.home)
         skills_root = home / STATE / "skills"
-        await sandbox.exec(
-            ["mkdir", "-p", str(skills_root), str(home / trajectory.EXPORTS)],
-            identity=Identity.AGENT,
+        await run_posix(
+            sandbox, session.home, "mkdir", "-p", skills_root, home / trajectory.EXPORTS
         )
         for skill in resources.skills:
             target = skills_root / skill.name
             await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
             if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+                executables = (target / path for path in skill.executable_files)
+                await run_posix(sandbox, session.home, "chmod", "+x", *executables)
 
         servers: dict[str, dict[str, Any]] = {}
         for resolved in resources.mcp_servers:

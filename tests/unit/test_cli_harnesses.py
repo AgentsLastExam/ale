@@ -38,7 +38,7 @@ from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
 from ale.run.cli.tasks import PRESET_DIR, _harness
 from ale.run.harnesses import _release
-from ale.run.harnesses._npm import reported_version
+from ale.run.harnesses._npm import agent_path, is_windows, reported_version, run_posix
 from ale.run.harnesses._release import (
     ReleaseAsset,
     ReleaseAssets,
@@ -432,6 +432,63 @@ async def test_resource_translation_uses_episode_local_native_config(tmp_path: P
         assert "resource-proof" in sandbox.uploads[0][1]
         assert "http://gateway/v1" in rendered
         assert "token" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("home", "expected"),
+    [
+        ("/home/agent", ["chmod", "+x", "/home/agent/skill/run tool.sh"]),
+        (
+            r"C:\Users\Agent User",
+            [
+                "C:/Program Files/Git/bin/bash.exe",
+                "-c",
+                "export PATH=\"/usr/bin:$PATH\"; chmod +x 'C:/Users/Agent User/skill/run tool.sh'",
+            ],
+        ),
+    ],
+)
+async def test_posix_utilities_run_directly_on_linux_and_through_git_bash_on_windows(
+    home: str, expected: list[str]
+) -> None:
+    sandbox = FakeSandbox()
+    await run_posix(sandbox, home, "chmod", "+x", agent_path(home) / "skill/run tool.sh")  # type: ignore[arg-type]
+    assert sandbox.commands == [expected]
+
+
+async def test_a_failed_posix_utility_raises_with_its_command_and_error() -> None:
+    sandbox = FakeSandbox(exit_code=1, stderr="chmod: cannot access '/x': No such file\n")
+    with pytest.raises(AgentError, match=r"^chmod \+x /x failed: chmod: cannot access"):
+        await run_posix(sandbox, "/home/agent", "chmod", "+x", "/x")  # type: ignore[arg-type]
+    with pytest.raises(AgentError, match=r"failed: exit 1$"):
+        await run_posix(FakeSandbox(exit_code=1), "/home/agent", "chmod", "600", "/x")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("home", ["/home/agent", r"C:\Users\Agent User"], ids=["linux", "windows"])
+@pytest.mark.parametrize("name", sorted(path.stem for path in PRESET_DIR.glob("*.toml")))
+async def test_every_cli_harness_stages_skill_executables_on_both_systems(
+    tmp_path: Path, name: str, home: str
+) -> None:
+    config = load_run_config(preset_path=PRESET_DIR / f"{name}.toml")
+    harness = _harness(config)
+    if is_windows(home) and OperatingSystem.WINDOWS not in harness.supported_os:
+        pytest.skip(f"{name} supports Linux only")
+    effective = resources(tmp_path)
+    skill = effective.skills[0].model_copy(update={"executable_files": ("run tool.sh",)})
+    effective = effective.model_copy(update={"skills": (skill,), "mcp_servers": ()})
+    sandbox = FakeSandbox()
+    current = session(home=home, model=config.agent.model)
+    await harness.install_resources(sandbox, current, effective)  # type: ignore[arg-type]
+    chmod = ["chmod", "+x", f"{sandbox.uploads[0][1]}/run tool.sh"]
+    if is_windows(home):
+        assert not [argv for argv in sandbox.commands if argv[0] in ("mkdir", "chmod")]
+        assert [
+            "C:/Program Files/Git/bin/bash.exe",
+            "-c",
+            'export PATH="/usr/bin:$PATH"; ' + shlex.join(chmod),
+        ] in sandbox.commands
+    else:
+        assert chmod in sandbox.commands
 
 
 async def test_grok_chat_gateway_selects_native_chat_backend(tmp_path: Path) -> None:

@@ -22,6 +22,7 @@ from ale.run.harnesses._npm import (
     is_windows,
     npm_env,
     reported_version,
+    run_posix,
     version_mismatch,
 )
 from ale.run.harnesses.base import (
@@ -221,18 +222,15 @@ class ZCodeHarness(CliHarness):
         home = agent_path(session.home)
         skills_root = home / ".zcode/skills"
         private = home / trajectory.PRIVATE
-        await sandbox.exec(
-            ["mkdir", "-p", str(skills_root), str(home / ".zcode/cli"), str(private)],
-            identity=Identity.AGENT,
+        await run_posix(
+            sandbox, session.home, "mkdir", "-p", skills_root, home / ".zcode/cli", private
         )
         for skill in resources.skills:
             target = skills_root / skill.name
             await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
             if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+                executables = (target / path for path in skill.executable_files)
+                await run_posix(sandbox, session.home, "chmod", "+x", *executables)
         servers: dict[str, dict[str, Any]] = {}
         for resolved in resources.mcp_servers:
             server = resolved.server
@@ -290,9 +288,7 @@ class ZCodeHarness(CliHarness):
             (json.dumps(personal, ensure_ascii=False, indent=2) + "\n").encode(),
             identity=Identity.AGENT,
         )
-        await sandbox.exec(
-            ["chmod", "600", str(private / "provider.json")], identity=Identity.AGENT
-        )
+        await run_posix(sandbox, session.home, "chmod", "600", private / "provider.json")
 
     async def prepare_command(
         self,

@@ -74,7 +74,8 @@ pinned asset raises it during installation.
 
 On Windows, the base also supplies Git for Windows at `C:/Program Files/Git` and
 puts its `bin` and `usr/bin` directories on `PATH`. Harnesses use Git Bash to launch
-the native Windows CLI packages; WSL is not required. npm installs and release
+the native Windows CLI packages and to run the POSIX file utilities that stage their
+resources; WSL is not required. npm installs and release
 binaries stay under the agent's `.local` directory, and the inherited Windows tool
 search path is preserved.
 The built-in `cua-desktop` uses the OS's system Python. Task-provided Skills and MCP
@@ -142,7 +143,8 @@ preflight error.
 Preparation runs after task setup and before agent egress is sealed:
 
 1. `install()` verifies or installs the pinned program and returns the observed version.
-2. `install_resources()` stages only `EffectiveAgentResources`.
+2. `install_resources()` stages only `EffectiveAgentResources` and raises when any
+   staging step fails.
 3. ALE validates stdio MCP commands and working directories inside the sandbox.
 
 Use only the provider-independent `Sandbox` API. Run measured and staged agent-owned
