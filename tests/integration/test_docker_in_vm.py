@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -51,12 +52,14 @@ async def test_task_owned_docker_runs_a_nested_offline_container(tmp_path: Path)
             gateway=gateway_provenance(settings),
             config_hash=settings.config_hash,
         ),
+        collect_artifacts=True,
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"reward": 1.0}
-    assert (
-        result.run_dir / "artifacts/nested-container.txt"
-    ).read_text() == "nested-container-ok\n"
+    (entry,) = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"]
+    assert entry["source"] == "/home/user/output/nested-container.txt"
+    stored = result.run_dir / "artifacts" / entry["stored_path"]
+    assert stored.read_text() == "nested-container-ok\n"
     assert phases == [
         Phase.PROVISION,
         Phase.SETUP,
