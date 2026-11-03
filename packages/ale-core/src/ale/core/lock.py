@@ -162,6 +162,8 @@ class ResumedFrom(BaseModel):
     model_config = _FROZEN
 
     episode_id: str
+    retention: Literal["keep", "snapshot"]
+    """Whether the episode adopted the kept solver or booted one from its snapshot."""
     handle: str
     continuation: NativeContinuation
 

@@ -1,9 +1,11 @@
-"""Each shipped CLI continues its own native session in the solver an earlier episode kept.
+"""Each shipped CLI continues its own native session in the solver an earlier episode kept,
+or in two Sandboxes booted at once from its snapshot.
 
-Two Tasks share one image. The first gives the agent a code word to remember and has it
+The Tasks share one image. The first gives the agent a code word to remember and has it
 start a log; the second, run with ``--continue-from``, asks for the word and another log
-line. Only the agent's session holds the word and only the kept Sandbox holds the log, so
-the second score shows that both carried over. Real models through the real Gateway.
+line. Only the agent's session holds the word and only the retained solver holds the log,
+so the second score shows that both carried over. Real models through the real Gateway,
+each run serving its own, as an operator's runs would.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -96,13 +99,34 @@ async def _destroy_kept(runs: Path) -> None:
                 await provider.destroy_retained(item["handle"])
 
 
+@pytest.mark.parametrize("retention", ["keep", "snapshot"])
 @pytest.mark.parametrize("agent", sorted(AGENTS))
-def test_a_cli_continues_its_session_in_the_kept_solver(tmp_path: Path, agent: str) -> None:
+def test_a_cli_continues_its_session_from_its_retained_solver(
+    tmp_path: Path, agent: str, retention: str
+) -> None:
     model, gateway = AGENTS[agent]
     word = f"heron-{secrets.token_hex(3)}"
     first_task = _task(tmp_path / "codeword-first", FIRST.format(word=word), VERIFY_FIRST)
-    second_task = _task(tmp_path / "codeword-second", SECOND, VERIFY_SECOND.format(word=word))
+    # A kept solver is continued once; a snapshot by two forks at once.
+    forks = range(1 if retention == "keep" else 2)
+    second_tasks = [
+        _task(tmp_path / f"codeword-second-{fork}", SECOND, VERIFY_SECOND.format(word=word))
+        for fork in forks
+    ]
     runs = tmp_path / "runs"
+
+    def second(fork: int) -> Path:
+        return run_task(
+            second_tasks[fork],
+            runs,
+            run_id=f"second-{fork}",
+            agent=agent,
+            model=model,
+            settings=gateway,
+            options=("--continue-from", str(first)),
+            timeout=1800,
+        )
+
     try:
         first = run_task(
             first_task,
@@ -110,7 +134,7 @@ def test_a_cli_continues_its_session_in_the_kept_solver(tmp_path: Path, agent: s
             run_id="first",
             agent=agent,
             model=model,
-            settings=(*gateway, 'sandbox_retention.solver="keep"'),
+            settings=(*gateway, f'sandbox_retention.solver="{retention}"'),
             timeout=1800,
         )
         started = _read(first, "result.json")
@@ -118,39 +142,37 @@ def test_a_cli_continues_its_session_in_the_kept_solver(tmp_path: Path, agent: s
         assert started["rewards"] == {"reward": 1.0}, _read(first, "verification.json")
         assert started["continuation"]["harness"] == agent
 
-        second = run_task(
-            second_task,
-            runs,
-            run_id="second",
-            agent=agent,
-            model=model,
-            settings=gateway,
-            options=("--continue-from", str(first)),
-            timeout=1800,
-        )
-        continued = _read(second, "result.json")
-        assert continued["status"] == "completed", continued.get("failure")
-        assert continued["rewards"] == {"reward": 1.0}, _read(second, "verification.json")
+        with ThreadPoolExecutor(len(forks)) as pool:
+            seconds = list(pool.map(second, forks))
+        continued = [_read(episode, "result.json") for episode in seconds]
+        for episode, result in zip(seconds, continued, strict=True):
+            assert result["status"] == "completed", result.get("failure")
+            assert result["rewards"] == {"reward": 1.0}, _read(episode, "verification.json")
     finally:
         asyncio.run(_destroy_kept(runs))
 
-    # One native session across both episodes; the second records where it came from.
-    assert continued["continuation"] == started["continuation"]
-    assert _read(second, "lock.json")["resumed_from"]["episode_id"] == started["episode_id"]
-    assert [item["outcome"] for item in continued["sandboxes"]] == ["destroyed"]
+    before = _read(first, "trajectory.json")
+    for episode, result in zip(seconds, continued, strict=True):
+        # One native session across the episodes; each continuation records its source.
+        assert result["continuation"] == started["continuation"]
+        resumed = _read(episode, "lock.json")["resumed_from"]
+        assert (resumed["episode_id"], resumed["retention"]) == (started["episode_id"], retention)
+        assert [item["outcome"] for item in result["sandboxes"]] == ["destroyed"]
 
-    # The second trajectory is only its own part of the session, linked to the first.
-    before, after = _read(first, "trajectory.json"), _read(second, "trajectory.json")
-    assert after["schema_version"] == "ATIF-v1.8"
-    assert after["session_id"] == before["session_id"]
-    ale = after["extra"]["ale"]
-    issues = [issue["reason"] for issue in ale.get("parse_issues", ())]
-    assert "continuation_boundary_not_found" not in issues, ale["parse_issues"]
-    assert ale["resumed_from"] == {
-        "episode_id": started["episode_id"],
-        "trajectory_id": before["trajectory_id"],
-        "native_steps": len(before["steps"]),
-    }
-    users = [step["message"] for step in after["steps"] if step["source"] == "user"]
-    assert any("code word I gave you earlier" in str(message) for message in users), users
-    assert not any(word in json.dumps(step) for step in after["steps"] if step["source"] == "user")
+        # Each continuation's trajectory is only its own part of the session.
+        after = _read(episode, "trajectory.json")
+        assert after["schema_version"] == "ATIF-v1.8"
+        assert after["session_id"] == before["session_id"]
+        ale = after["extra"]["ale"]
+        issues = [issue["reason"] for issue in ale.get("parse_issues", ())]
+        assert "continuation_boundary_not_found" not in issues, ale["parse_issues"]
+        assert ale["resumed_from"] == {
+            "episode_id": started["episode_id"],
+            "trajectory_id": before["trajectory_id"],
+            "native_steps": len(before["steps"]),
+        }
+        users = [step["message"] for step in after["steps"] if step["source"] == "user"]
+        assert any("code word I gave you earlier" in str(message) for message in users), users
+        assert not any(
+            word in json.dumps(step) for step in after["steps"] if step["source"] == "user"
+        )

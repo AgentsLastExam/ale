@@ -19,6 +19,25 @@ The normative contracts are
 [`../../../../../../docs/specs/sandbox-image.md`](../../../../../../docs/specs/sandbox-image.md)
 and [`../../../../../../docs/specs/security.md`](../../../../../../docs/specs/security.md).
 
+## Gateway address
+
+Every Sandbox dials its Gateway at `SANDBOX_GATEWAY_PORT` (7412), whatever port the Host
+serves it on.
+
+| Provider | Where the fixed port leads |
+|---|---|
+| Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone |
+| QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
+| Daytona | `guestd/tunnel.py` listens at 7412 on the sandbox's loopback |
+
+## Snapshots
+
+| Provider | How a snapshot is saved, booted and destroyed |
+|---|---|
+| Docker | `docker stop`, then `docker commit` to `ale-snapshot:<sandbox id>`. The image keeps the container's command and labels, with `ale.retention=snapshot`, `ale.prepared` naming the prepared image, and no GPU label. A container boots from its image ID; `docker rmi` destroys it and fails while a container still uses it |
+| QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay is then rebased on its own base and converted into a standalone zstd-compressed qcow2 in `~/.cache/ale/qemu-snapshots/<sandbox id>/`, beside `snapshot.json` with its episode, role, OS, prepared image and disk digest. Standalone, it outlives the image cache. Compression made a 23 GB Windows disk 15 GB and exported it in 71 s rather than 82 s. A VM boots from it through a fresh overlay. Destroying it fails while a runner mounts it |
+| Daytona | None: snapshots count against an organization quota shared with other tools, so `accepts` refuses them |
+
 ## Daytona
 
 Daytona's sandboxes are built for a different trust model than ALE's, so `daytona.py`

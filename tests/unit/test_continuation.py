@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import socket
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -34,9 +33,8 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.core.verdict import Status
-from ale.run.cli.tasks import _continuation, _start_gateway
+from ale.run.cli.tasks import _continuation
 from ale.run.episode import _Lease
-from ale.run.gateway.server import Gateway
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.protocol.episode_protocol import (
     EpisodeProtocol,
@@ -112,41 +110,88 @@ async def test_a_refused_attachment_leaves_nothing_to_reap() -> None:
     assert not lease.live and not lease.outcomes
 
 
-@pytest.mark.asyncio
-async def test_a_kept_solver_records_the_gateway_port_it_was_given() -> None:
-    sandbox = _kept()
-    sandbox.request = _request().model_copy(update={"gateway_url": "http://0.0.0.0:40559"})
-    sandbox.retain = AsyncMock(
-        return_value=RetainedSandbox(
-            provider="docker",
-            handle="docker:kept",
-            episode_id="later",
-            roles=("solver",),
-            reason="kept",
-            cleanup_command="ale sandbox destroy docker:kept",
-        )
+def _retained(handle: str) -> RetainedSandbox:
+    return RetainedSandbox(
+        provider="docker",
+        handle=handle,
+        episode_id="later",
+        roles=("solver",),
+        reason="kept",
+        cleanup_command=f"ale sandbox destroy {handle}",
     )
 
+
+async def _snapshotting_lease(sandbox: SimpleNamespace, providers: object = None) -> _Lease:
     async def attach(request: SandboxRequest) -> Any:
+        sandbox.request = request
         return sandbox
 
-    lease = _Lease(SimpleNamespace(), SandboxRetentionConfig(solver="keep"))  # type: ignore[arg-type]
-    await lease.adopt(sandbox.request, attach)
+    lease = _Lease(providers or SimpleNamespace(), SandboxRetentionConfig(solver="snapshot"))  # type: ignore[arg-type]
+    await lease.adopt(_request(), attach)
     lease.mark_sanitized(sandbox, succeeded=True)  # type: ignore[arg-type]
-    await lease.finalize()
-    assert [(item.outcome, item.gateway_port) for item in lease.outcomes] == [("retained", 40559)]
+    return lease
 
 
 @pytest.mark.asyncio
-async def test_a_continuation_gateway_needs_the_port_its_solver_was_given() -> None:
-    with socket.socket() as taken:
-        taken.bind(("127.0.0.1", 0))
-        taken.listen()
-        port = taken.getsockname()[1]
-        gateway = Gateway(api_key="key", host="127.0.0.1", port=port)
-        with pytest.raises(ConfigError, match=f"given the Gateway at port {port}, which is in use"):
-            await _start_gateway(gateway)
-        await gateway.stop()
+async def test_a_snapshotted_solver_is_saved_then_destroyed() -> None:
+    sandbox = _kept()
+    sandbox.snapshot = AsyncMock(return_value=_retained("docker:snapshot:kept"))
+    lease = await _snapshotting_lease(sandbox)
+    assert sandbox.request.retention == "snapshot"
+    await lease.release(sandbox)  # type: ignore[arg-type]
+    sandbox.destroy.assert_not_awaited()  # kept for verification, then saved
+
+    await lease.finalize()
+    sandbox.snapshot.assert_awaited_once()
+    sandbox.retain.assert_not_awaited()
+    sandbox.destroy.assert_awaited_once()
+    assert [(item.outcome, item.handle) for item in lease.outcomes] == [
+        ("snapshotted", "docker:snapshot:kept")
+    ]
+    assert not lease.live
+
+
+@pytest.mark.asyncio
+async def test_a_failed_snapshot_destroys_the_solver_and_says_why() -> None:
+    sandbox = _kept()
+    sandbox.snapshot = AsyncMock(side_effect=RuntimeError("disk full"))
+    lease = await _snapshotting_lease(sandbox)
+    await lease.finalize()
+    sandbox.destroy.assert_awaited_once()
+    assert [(item.outcome, item.reason) for item in lease.outcomes] == [
+        ("retention-failed", "disk full")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_undoing_a_snapshot_removes_it() -> None:
+    sandbox = _kept()
+    sandbox.snapshot = AsyncMock(return_value=_retained("docker:snapshot:kept"))
+    provider = SimpleNamespace(destroy_retained=AsyncMock())
+    lease = await _snapshotting_lease(sandbox, SimpleNamespace(get=lambda kind: provider))
+    await lease.finalize()
+    await lease.destroy_retained()
+    provider.destroy_retained.assert_awaited_once_with("docker:snapshot:kept")
+    assert [item.outcome for item in lease.outcomes] == ["destroyed"]
+
+
+@pytest.mark.parametrize(
+    ("solver", "verifier", "policy"),
+    [
+        ("snapshot", "keep", "snapshot"),
+        ("keep", "destroy", "keep"),
+        ("destroy", "keep", "keep"),
+        ("destroy", "destroy", "destroy"),
+    ],
+)
+def test_a_shared_sandbox_follows_the_solvers_retention_first(
+    solver: str, verifier: str, policy: str
+) -> None:
+    lease = _Lease(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        SandboxRetentionConfig(solver=solver, verifier=verifier),  # type: ignore[arg-type]
+    )
+    assert lease._policy(_request(SandboxRole.SHARED)) == (("solver", "verifier"), policy)
 
 
 # --- the solver's owner ---
@@ -181,6 +226,56 @@ async def test_a_retained_solver_serves_only_the_episode_whose_agent_it_holds(
     del held[path]
     with pytest.raises(ProviderCapabilityError, match="no recorded episode's"):
         await _require_agent_episode(sandbox, os, "earlier")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_continuation_boots_a_new_solver_and_claims_it(tmp_path: Path) -> None:
+    held = {"/opt/ale/agent-episode": b"earlier"}
+
+    async def read_file(path: str, **_: object) -> bytes:
+        return held[path]
+
+    async def write_file(path: str, data: bytes, **_: object) -> None:
+        held[path] = data
+
+    sandbox = SimpleNamespace(
+        read_file=read_file,
+        write_file=write_file,
+        resolved_image=None,
+        allocation=None,
+        agent_user="user",
+        agent_home="/home/user",
+    )
+    acquired: list[SandboxRequest] = []
+
+    async def acquire(request: SandboxRequest) -> Any:
+        acquired.append(request)
+        return sandbox
+
+    ctx = SimpleNamespace(
+        spec=load_tasks(scaffold_task(tmp_path / "continued"))[0].spec,
+        proxy_url="",
+        allowed_hosts=frozenset(),
+        episode_id="later",
+        prepared_image=_request().prepared_image,
+        session=SimpleNamespace(gateway_url="", token=""),
+        sandboxes=SimpleNamespace(acquire=acquire),
+    )
+    source = ResumedFrom(
+        episode_id="earlier",
+        retention="snapshot",
+        handle="docker:snapshot:kept",
+        continuation=CONTINUATION,
+    )
+    protocol = EpisodeProtocol(ClaudeCodeHarness(), resume=Resume(source=source, trajectory=None))
+    assert await protocol._provision(ctx) is sandbox  # type: ignore[arg-type]
+    assert acquired[0].snapshot == "docker:snapshot:kept"
+    assert held == {"/opt/ale/agent-episode": b"later"}
+    assert ctx.resumed_from == source
+
+    # Another episode's state is refused; the lease reaps the new solver.
+    with pytest.raises(ProviderCapabilityError, match="holds episode later's agent state"):
+        await protocol._provision(ctx)  # type: ignore[arg-type]
 
 
 def _retention_context(
@@ -345,7 +440,9 @@ def _segment_of(
 
 def _resume(trajectory: AtifTrajectory | None) -> Resume:
     return Resume(
-        source=ResumedFrom(episode_id="earlier", handle="docker:kept", continuation=CONTINUATION),
+        source=ResumedFrom(
+            episode_id="earlier", retention="keep", handle="docker:kept", continuation=CONTINUATION
+        ),
         attach=AsyncMock(),
         trajectory=trajectory,
     )
@@ -416,7 +513,6 @@ def _source(tmp_path: Path, **changes: Any) -> tuple[Path, Any]:
                 outcome="retained",
                 provider="docker",
                 handle="docker:kept",
-                gateway_port=40559,
             ),
         ),
         continuation=CONTINUATION,
@@ -435,10 +531,29 @@ def test_the_earlier_episode_names_its_solver_session_and_trajectory(tmp_path: P
     harness = SimpleNamespace(name="claude-code", version=lambda: "2.1.170")
     resume = _continuation(episode, [task], RunConfig(), harness)  # type: ignore[arg-type]
     assert resume.source == ResumedFrom(
-        episode_id="earlier", handle="docker:kept", continuation=CONTINUATION
+        episode_id="earlier", retention="keep", handle="docker:kept", continuation=CONTINUATION
     )
     assert resume.trajectory is None
-    assert resume.gateway_port == 40559
+    assert resume.attach is not None
+
+
+def test_a_snapshot_continues_in_a_new_solver_with_this_tasks_resources(tmp_path: Path) -> None:
+    snapshot = SandboxOutcome(
+        roles=("solver",),
+        requested="snapshot",
+        outcome="snapshotted",
+        provider="docker",
+        handle="docker:snapshot:kept",
+    )
+    resources = make_lock().resources.model_copy(update={"requested": Resources(cpus=2)})
+    episode, task = _source(
+        tmp_path, record={"sandboxes": (snapshot,)}, lock={"resources": resources}
+    )
+    harness = SimpleNamespace(name="claude-code", version=lambda: "2.1.170")
+    resume = _continuation(episode, [task], RunConfig(), harness)  # type: ignore[arg-type]
+    assert resume.source.retention == "snapshot"
+    assert resume.source.handle == "docker:snapshot:kept"
+    assert resume.attach is None
 
 
 @pytest.mark.parametrize(

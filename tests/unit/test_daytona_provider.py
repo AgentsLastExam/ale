@@ -16,6 +16,7 @@ import pytest
 from ale.core.config import DaytonaProviderConfig, RunConfig
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
+    SANDBOX_GATEWAY_PORT,
     Identity,
     PreparedTaskImage,
     ResolvedImage,
@@ -113,12 +114,15 @@ def test_ssh_command_is_read_for_user_host_and_port() -> None:
 
 
 def test_the_tunnel_carries_the_gateway_alone_and_never_a_wildcard_address() -> None:
-    """The egress proxy is not tunneled: allowlisted hosts are reached directly."""
+    """The egress proxy is not tunneled: allowlisted hosts are reached directly.
+
+    The sandbox dials the fixed Gateway port whatever port the Host serves the Gateway on.
+    """
     local_gateway, listeners, targets = _tunnel_plan(
         request(gateway_url="http://0.0.0.0:41000/v1", proxy_url="http://192.0.2.9:42000")
     )
-    assert local_gateway == "http://127.0.0.1:41000/v1"
-    assert listeners == [(41000, 0)]
+    assert local_gateway == f"http://127.0.0.1:{SANDBOX_GATEWAY_PORT}/v1"
+    assert listeners == [(SANDBOX_GATEWAY_PORT, 0)]
     assert targets == [("127.0.0.1", 41000)]
     assert _tunnel_plan(request()) == (None, [], [])
     with pytest.raises(ProviderCapabilityError, match="explicit port"):
