@@ -2,8 +2,8 @@
 
 Every failure in ALE maps to exactly one class here, and every class maps to exactly
 one terminal :class:`~ale.core.verdict.Status`. That mapping is what lets the run layer
-decide retries, what keeps failed episodes out of score aggregates, and what makes
-"why did this run stop?" answerable from a record rather than from a log.
+decide retries, and what makes "why did this run stop?" answerable from a record rather
+than from a log.
 
 Add a new class only when it implies a *different* decision by the caller.
 """

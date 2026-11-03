@@ -2,7 +2,8 @@
 
 The failure this guards against is not "the limit was ignored" — it is an episode that
 burns its whole budget and then stalls, holding a container and telling nobody why. So
-each case asserts a *typed status*, promptly, with the partial evidence preserved.
+each case asserts a *typed status*, promptly, with the partial evidence preserved. An agent
+stopped early still has what it left verified, as in Harbor.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import pytest
 from aiohttp import web
 
 from ale.core.config import RunTimeouts, SandboxRetentionConfig
-from ale.core.errors import AgentError, HarnessLimitError
+from ale.core.errors import AgentError, AgentRefusalError, HarnessLimitError, PhaseTimeoutError
 from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.trace import read_jsonl
@@ -89,6 +90,7 @@ async def test_a_hanging_agent_times_out_and_keeps_its_trace(
     elapsed = time.monotonic() - started
 
     assert result.verdict.status is Status.TIMEOUT
+    assert result.verdict.rewards == {"reward": 0.0}  # verified: it left nothing behind
     assert elapsed < GRACE_SEC
 
     trajectory = AtifTrajectory.model_validate_json(
@@ -97,6 +99,42 @@ async def test_a_hanging_agent_times_out_and_keeps_its_trace(
     assert trajectory.steps[0].source == "user"
     assert trajectory.extra["ale"]["incomplete"] is True
     assert any(phase.phase == "agent" for phase in result.record.phases)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("environment_mode", ["shared", "separate"])
+async def test_work_left_by_a_timed_out_agent_is_scored(
+    tmp_path: Path, write_repo: Callable[..., Path], environment_mode: str
+) -> None:
+    task_root = write_repo(
+        tmp_path / "repo", config={"verifier": {"environment_mode": environment_mode}}
+    )
+    solve = task_root / "solution" / "solve.sh"
+    solve.write_text(solve.read_text() + "sleep 600\n")
+    set_timeout(task_root, "agent", 5)
+
+    result = await run_one(task_root, tmp_path / "runs", OracleHarness())
+
+    assert result.verdict.status is Status.TIMEOUT
+    assert result.verdict.failure.phase == "agent"
+    assert result.verdict.rewards == {"reward": 1.0}
+    assert result.record.status is Status.TIMEOUT
+    assert result.record.rewards == {"reward": 1.0}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_verification_leaves_the_agents_stop_as_the_outcome(
+    tmp_path: Path, write_repo: Callable[..., Path]
+) -> None:
+    task_root = write_repo(tmp_path / "repo", test_body="#!/usr/bin/env bash\nexit 1\n")
+    (task_root / "solution" / "solve.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
+    set_timeout(task_root, "agent", 5)
+
+    result = await run_one(task_root, tmp_path / "runs", OracleHarness())
+
+    assert result.verdict.status is Status.TIMEOUT
+    assert result.verdict.failure.phase == "agent"
+    assert result.verdict.rewards is None
 
 
 @pytest.mark.asyncio
@@ -229,6 +267,52 @@ async def test_a_crashing_setup_is_a_task_error_not_a_zero(
 
     assert result.verdict.status is Status.TASK_ERROR
     assert result.verdict.rewards is None
+
+
+class StoppedHarness(AutonomousHarness):
+    """Leaves the right answer, then ends the way ``stop`` says."""
+
+    name = "stopped"
+
+    def __init__(self, stop: Exception) -> None:
+        self.stop = stop
+
+    def version(self) -> str:
+        return "1"
+
+    async def launch(
+        self,
+        instruction: str,
+        sandbox: Sandbox,
+        session: HarnessSession,
+        *,
+        timeout_sec: float,
+    ) -> AgentRun:
+        await sandbox.exec(
+            ["sh", "-c", "printf 'hello world' > /home/user/output/result.txt"],
+            identity=Identity.AGENT,
+        )
+        raise self.stop
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop", "status"),
+    [
+        (PhaseTimeoutError("agent", 1), Status.TIMEOUT),
+        (HarnessLimitError("max_turns", 1, 1), Status.BUDGET_EXCEEDED),
+        (AgentError("crashed"), Status.AGENT_ERROR),
+        (AgentRefusalError("declined"), Status.REFUSED),
+    ],
+)
+async def test_every_early_stop_keeps_its_status_and_gets_a_score(
+    tmp_path: Path, write_repo: Callable[..., Path], stop: Exception, status: Status
+) -> None:
+    result = await run_one(write_repo(tmp_path / "repo"), tmp_path / "runs", StoppedHarness(stop))
+
+    assert result.verdict.status is status
+    assert result.verdict.failure.phase == "agent"
+    assert result.verdict.rewards == {"reward": 1.0}
 
 
 class NativeLimitedHarness(AutonomousHarness):

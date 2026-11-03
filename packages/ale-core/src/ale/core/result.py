@@ -100,6 +100,6 @@ class ResultRecord(BaseModel):
         if self.status is Status.COMPLETED:
             if self.rewards is None or self.failure is not None:
                 raise ValueError("completed result requires rewards and no failure")
-        elif self.failure is None or self.rewards is not None:
-            raise ValueError("failed result requires failure and no rewards")
+        elif self.failure is None:
+            raise ValueError("failed result requires failure")
         return self
