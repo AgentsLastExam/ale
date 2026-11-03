@@ -402,10 +402,12 @@ def publish_assets(
         result["status"] = "unchanged"
         write_record(output, result)
         return result
+    api = HfApi(token=hf_token())
+    if not api.repo_info(checkpoint.repo_id, repo_type="dataset").private:
+        raise AssetError(f"asset dataset must be private: {checkpoint.repo_id}")
     if target_main:
         reference = "refs/heads/main"
     else:
-        api = HfApi(token=hf_token())
         marker = f"<!-- ale-assets:{checkpoint.task_path}:{checkpoint.commit} -->"
         if output.exists():
             saved = json.loads(output.read_text())
