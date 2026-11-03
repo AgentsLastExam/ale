@@ -59,11 +59,14 @@ The source repository name comes from its `origin` URL, falling back to the main
 directory. A linked worktree's directory name is never the dataset name. Dataset paths
 mirror source paths, for example `tasks/example/tests/assets/expected.json`.
 
-The first asset checkpoint may create the missing dataset and empty collection. Both start
-private, because tests, solutions and licensed software must not become public by accident.
-It does not upload Task files. An existing dataset keeps the visibility its owner chose, and
-ALE treats a public or gated one like a private one, so a Task repository can offer its assets
-openly. Commands pass `ALE_HF_TOKEN` from the checkout's `.env` explicitly to every Hugging Face
+The first asset checkpoint may create the missing dataset and empty collection. The dataset is
+public with manual gated access: anyone sees its name and file list, but only users an
+administrator approves can download a file, so contributors request access on the dataset's
+page rather than joining the namespace, which would open its other private datasets to them.
+It is gated before it becomes public, so tests, solutions and licensed software are never
+downloadable by anyone not approved. The collection starts private. The checkpoint does not
+upload Task files. An existing dataset keeps the settings its owner chose, and ALE treats a
+public, gated or private one alike. Commands pass `ALE_HF_TOKEN` from the checkout's `.env` explicitly to every Hugging Face
 call and Git request; without it they are anonymous, which is enough to pull a public dataset.
 The operator's own `HF_TOKEN` or cached Hugging Face login is never used, so the checkout alone
 decides which account ALE acts as. Credentials never enter a remote Git URL or the Task

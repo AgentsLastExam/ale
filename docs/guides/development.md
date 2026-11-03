@@ -47,7 +47,8 @@ is the one condition under which installs silently degrade to copies.
 | Default run configuration | `ALE_RUN_CONFIG` points to a run TOML | used when `--config` is absent; see [`ale-run`](../../packages/ale-run/README.md) for precedence |
 
 Set `ALE_REPO_PATH` to the absolute active engine checkout for engine discovery. Configure
-`ALE_HF_TOKEN` to push Task assets or pull them from a private dataset. The `assets`
+`ALE_HF_TOKEN` to push Task assets or pull them from a gated or private dataset, with an account
+that dataset has approved. The `assets`
 collection of `agents-last-exam`, or of `ALE_ASSETS_NAMESPACE` when set, is discovered
 automatically; see [Task assets](../specs/task-assets.md). Runtime never downloads assets,
 and Tasks without stage-local assets require no collection or token.

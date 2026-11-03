@@ -285,11 +285,19 @@ def asset_collection(api: HfApi, collection: str | None = None) -> str:
 
 
 def ensure_asset_repository(repository_name: str, collection: str | None = None) -> tuple[str, str]:
+    """The Task repository's asset dataset, in the namespace's assets collection.
+
+    A missing one is created public with manual gated access, and gated before it is public, so
+    it is never open. An existing one keeps the settings its owner chose.
+    """
     from huggingface_hub import HfApi
 
     api = HfApi(token=hf_token())
     repo_id = asset_repo_id(repository_name)
-    api.create_repo(repo_id, repo_type="dataset", private=True, exist_ok=True)
+    if not api.repo_exists(repo_id, repo_type="dataset"):
+        api.create_repo(repo_id, repo_type="dataset", private=True, exist_ok=True)
+        api.update_repo_settings(repo_id, repo_type="dataset", gated="manual")
+        api.update_repo_settings(repo_id, repo_type="dataset", private=False)
     slug = asset_collection(api, collection)
     api.add_collection_item(slug, repo_id, "dataset", exists_ok=True)
     return repo_id, slug
