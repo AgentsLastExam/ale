@@ -9,6 +9,8 @@ from pydantic import ValidationError
 from ale.core.config import OrchardProviderConfig
 from ale.run.providers.orchard_client import OrchardClient
 
+pytestmark = pytest.mark.unit
+
 
 def config(**kw):
     return OrchardProviderConfig(endpoint="https://localhost:8443", **kw)
@@ -326,9 +328,160 @@ def test_worker_does_not_report_success_after_consent_timeout(monkeypatch, tmp_p
     monkeypatch.setattr(worker, "Bootstrap", Mock(return_value=runner))
     monkeypatch.setattr(worker, "OrchardVNC", Mock())
     monkeypatch.setattr(worker, "guest", Mock(return_value="ready"))
+    monkeypatch.setattr(worker, "grant", Mock(return_value=False))
     monkeypatch.setattr(worker.api, "shutdown", Mock())
     worker.main()
     result = json.loads(capsys.readouterr().out)["result"]
     assert result["status"] == "failed"
     assert len(result["attempts"]) == 1
     runner.confirm_capture_ready.assert_called_once()
+
+
+def test_worker_connects_vnc_before_grant_and_restores_endpoint_after_grant(
+    monkeypatch, tmp_path, capsys
+):
+    import io
+    import json
+    from unittest.mock import Mock
+
+    from ale.run.providers import macos_permission_worker as worker
+
+    events = []
+    settings = {
+        "temporary": str(tmp_path),
+        "port": 15900,
+        "user": "fake",
+        "password": "fake",
+        "ocr": "/fake/ocr",
+        "socket": "/fake/socket",
+        "capture_argv": ["fake-probe"],
+        "retries": 0,
+    }
+    monkeypatch.setattr(worker.sys, "stdin", io.StringIO(json.dumps(settings)))
+    monkeypatch.setattr(worker.tempfile, "tempdir", str(tmp_path))
+    vnc = Mock()
+    vnc.capture.side_effect = lambda path: events.append("vnc_ready")
+    runner = Mock()
+    runner.ensure.side_effect = lambda app, label, permission: events.append(permission)
+
+    def confirm(label, probe):
+        assert probe()
+        events.append("confirmed")
+
+    runner.confirm_capture_ready.side_effect = confirm
+    monkeypatch.setattr(worker, "OrchardVNC", Mock(return_value=vnc))
+    monkeypatch.setattr(worker, "Bootstrap", Mock(return_value=runner))
+    monkeypatch.setattr(worker.api, "shutdown", Mock())
+
+    def grant(action):
+        events.append("grant_" + action)
+        return action == "poll"
+
+    monkeypatch.setattr(worker, "grant", grant, raising=False)
+
+    def guest(*argv):
+        events.append("probe" if argv == ("fake-probe",) else "service")
+        return "ready"
+
+    monkeypatch.setattr(worker, "guest", guest)
+    worker.main()
+    assert json.loads(capsys.readouterr().out)["result"]["status"] == "ui_enabled"
+    assert events[:5] == [
+        "vnc_ready",
+        "grant_start",
+        "accessibility",
+        "screen_recording",
+        "grant_poll",
+    ]
+    assert events.index("grant_poll") < events.index("service") < events.index("probe")
+
+
+@pytest.mark.parametrize("app, expected", [("CuaDriver", True), ("OtherApp", False)])
+def test_tcc_prompt_matches_driver_before_opening_settings(app, expected):
+    from ale.run.providers.macos_permission_policy import Row, permission_prompt
+
+    rows = [
+        Row(f'"{app}" would like to record this computer\u2019s', 540, 240, 320, 16),
+        Row("screen and audio.", 580, 265, 200, 16),
+        Row("Open System Settings", 570, 340, 160, 14),
+        Row("Deny", 635, 375, 40, 14),
+    ]
+    assert bool(permission_prompt(rows, "CuaDriver")) is expected
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_grant_waits_concurrently_with_ui_and_closes_on_cancellation(monkeypatch, cancel):
+    import json
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from ale.run.providers import orchard_permissions as permissions
+    from ale.run.providers.orchard_client import OrchardExecResult
+
+    started, approved, closed, tunnel_closed = (asyncio.Event() for _ in range(4))
+    grants = []
+    monkeypatch.setattr(permissions, "preflight", lambda config: None)
+    monkeypatch.setenv("ALE_MACOS_ADMIN_PASSWORD", "fake-password")
+    child = SimpleNamespace(
+        returncode=None if cancel else 0,
+        stdin=SimpleNamespace(write=lambda value: None, drain=AsyncMock()),
+        stdout=asyncio.StreamReader(),
+        wait=AsyncMock(return_value=0),
+    )
+
+    def kill():
+        child.returncode = -9
+
+    child.kill = kill
+    child.stdout.feed_data(b'{"grant":"start"}\n{"grant":"start"}\n')
+    if not cancel:
+        for message in [
+            {"guest": ["/bin/test", "-d", "/Applications/CuaDriver.app"]},
+            {"grant": "poll"},
+            {"result": {"status": "ui_enabled"}},
+        ]:
+            child.stdout.feed_data(json.dumps(message).encode() + b"\n")
+        child.stdout.feed_eof()
+    compiler = SimpleNamespace(returncode=0, wait=AsyncMock(return_value=0))
+    monkeypatch.setattr(
+        permissions.asyncio, "create_subprocess_exec", AsyncMock(side_effect=[compiler, child])
+    )
+
+    @asynccontextmanager
+    async def forward(name, uid):
+        try:
+            yield 15900
+        finally:
+            tunnel_closed.set()
+
+    async def execute(name, argv, **kwargs):
+        assert argv[:4] == ["sudo", "-n", "-u", "admin"]
+        if argv[-2:] == ["permissions", "grant"]:
+            grants.append(argv)
+            started.set()
+            try:
+                await approved.wait()
+            finally:
+                closed.set()
+        else:
+            # A synchronous wait for grant would deadlock before this UI command.
+            await started.wait()
+            approved.set()
+            await asyncio.sleep(0)
+        return OrchardExecResult(0, b"", b"")
+
+    client = SimpleNamespace(forward_vnc=forward, exec=execute)
+    task = asyncio.create_task(
+        permissions.authorize_driver(client, "owned", "uid", "admin", config(desktop_bootstrap={}))
+    )
+    await asyncio.wait_for(started.wait(), 1)
+    if cancel:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+        assert child.returncode == -9
+    else:
+        await asyncio.wait_for(task, 1)
+        assert approved.is_set()
+    assert closed.is_set() and tunnel_closed.is_set()
+    assert len(grants) == 1

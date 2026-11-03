@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -16,7 +17,7 @@ from pathlib import Path
 from ale.core.config import OrchardProviderConfig
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.run.framework import MACOS_DRIVER_SHA256, macos_driver_archive
-from ale.run.providers.orchard_client import OrchardClient
+from ale.run.providers.orchard_client import OrchardClient, OrchardExecResult
 
 _LOG = logging.getLogger(__name__)
 # Only a readiness boolean crosses Orchard. Images for UI decisions always come from VNC.
@@ -104,25 +105,6 @@ async def install_driver(
     )
     if result.exit_code:
         raise ProviderStartError("Installed CuaDriver failed signature verification")
-    result = await client.exec(
-        name,
-        [
-            "sudo",
-            "-n",
-            "-u",
-            user,
-            "/usr/bin/open",
-            "-a",
-            "/Applications/CuaDriver.app",
-            "--args",
-            "serve",
-            "--socket",
-            config.socket_path,
-        ],
-        deadline=deadline,
-    )
-    if result.exit_code:
-        raise ProviderStartError("Could not start CuaDriver in the task login session")
 
 
 async def authorize_driver(
@@ -156,6 +138,7 @@ async def authorize_driver(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
+            grant: asyncio.Task[OrchardExecResult] | None = None
             try:
                 settings = {
                     "port": port,
@@ -180,7 +163,44 @@ async def authorize_driver(
                 result = None
                 while line := await process.stdout.readline():
                     event = json.loads(line)
-                    if "guest" in event:
+                    if "grant" in event:
+                        action = event["grant"]
+                        if action not in {"start", "poll"}:
+                            raise ProviderStartError("Invalid permission grant action")
+                        # Keep the UI worker responsive while the official CLI waits
+                        # for the VNC-driven approvals. An unfinished grant is reused
+                        # across UI retries; never launch overlapping grant commands.
+                        if action == "start" and (grant is None or grant.done()):
+                            if grant is not None:
+                                grant.result()  # An uncertain transport failure is fatal.
+                            grant = asyncio.create_task(
+                                client.exec(
+                                    name,
+                                    [
+                                        "sudo",
+                                        "-n",
+                                        "-u",
+                                        user,
+                                        config.driver_path,
+                                        "permissions",
+                                        "grant",
+                                    ],
+                                    timeout_sec=config.boot_timeout_sec,
+                                )
+                            )
+                            _LOG.info("macOS permission grant started")
+                        if grant is None:
+                            raise ProviderStartError("Permission grant was not started")
+                        status = "running"
+                        if grant.done():
+                            reply = grant.result()
+                            status = "succeeded" if reply.exit_code == 0 else "failed"
+                            _LOG.info(
+                                "macOS permission grant %s (exit %s)", status, reply.exit_code
+                            )
+                        process.stdin.write(json.dumps({"status": status}).encode() + b"\n")
+                        await process.stdin.drain()
+                    elif "guest" in event:
                         argv = event["guest"]
                         reply = await client.exec(
                             name, ["sudo", "-n", "-u", user, *argv], timeout_sec=30
@@ -197,7 +217,14 @@ async def authorize_driver(
                     elif "result" in event:
                         result = event["result"]
                 code = await process.wait()
-                if code or not result or result.get("status") != "ui_enabled":
+                if (
+                    code
+                    or not result
+                    or result.get("status") != "ui_enabled"
+                    or grant is None
+                    or not grant.done()
+                    or grant.result().exit_code != 0
+                ):
                     raise ProviderStartError(
                         "macOS permission UI did not complete; bounded retries exhausted"
                     )
@@ -205,3 +232,9 @@ async def authorize_driver(
                 if process.returncode is None:
                     process.kill()
                 await process.wait()
+                if grant is not None:
+                    # Closing exec does not prove remote exit: on failure the owning
+                    # Provider destroys the VM, including the grant's app children.
+                    grant.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await grant

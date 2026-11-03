@@ -154,8 +154,10 @@ CPU/memory allocation; this trusts Orchard rather than independently measuring t
 Both stages check authenticated cluster access and an eligible ARM64 Tart worker.
 Orchard owns scheduling; provisioning and guest readiness have separate deadlines.
 
-`orchard_permissions.py` installs the pinned, signed Driver and authorizes it through
-System Settings. The `macos_permission_*` helpers isolate Host-side VNC/OCR dependencies
+`orchard_permissions.py` installs the pinned, signed Driver and runs its explicit
+`permissions grant` command while VNC handles the System Settings and direct-capture
+consent prompts. It restores ALE's service endpoint before checking actual capture.
+The `macos_permission_*` helpers isolate Host-side VNC/OCR dependencies
 from guestd. Passwords travel through a private pipe and verified TLS, never command
 arguments or Run records. SIP and TCC databases are unchanged. Helpers and tunnels close
 on success, failure and cancellation; `orchard_desktop.py` verifies actual capture as

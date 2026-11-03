@@ -83,6 +83,31 @@ def capture_consent(rows, label):
     return None
 
 
+def permission_prompt(rows, label):
+    """Open Settings only for the named app's Accessibility/Recording prompt."""
+    settings = unique(rows, ["Open System Settings"])
+    deny = unique(rows, ["Deny"])
+    if not settings or not deny:
+        return None
+    scale = settings.h / 14
+    text = (
+        " ".join(
+            r.text
+            for r in sorted(rows, key=lambda r: r.y)
+            if settings.x - 160 * scale < r.x < settings.x + settings.w + 160 * scale
+            and settings.y - 300 * scale < r.y < settings.y
+        )
+        .replace("“", '"')
+        .replace("”", '"')
+    )
+    if f'"{label}"' not in text:
+        return None
+    text = text.casefold()
+    if "accessibility" in text or ("record" in text and "screen" in text):
+        return settings.center
+    return None
+
+
 class RetryGuard:
     def __init__(self):
         self.counts = {}

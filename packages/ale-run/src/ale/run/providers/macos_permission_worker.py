@@ -20,6 +20,14 @@ def guest(*argv):
     return response["stdout"]
 
 
+def grant(action):
+    print(json.dumps({"grant": action}), flush=True)
+    response = json.loads(sys.stdin.readline())
+    if response["status"] == "failed":
+        raise RuntimeError("CuaDriver permissions grant failed")
+    return response["status"] == "succeeded"
+
+
 def main():
     settings = json.loads(sys.stdin.readline())
     tempfile.tempdir = settings["temporary"]
@@ -39,11 +47,20 @@ def main():
                 settings["password"],
             )
             runner = Bootstrap(guest, vnc, Path(settings["ocr"]), settings["password"])
+            # Connect and observe before any prompt-capable command is launched.
+            with tempfile.TemporaryDirectory(prefix="permission-connect-") as td:
+                vnc.capture(Path(td) / "frame.png")
+            grant("start")
             results = [
                 runner.ensure("/Applications/CuaDriver.app", "CuaDriver", p)
                 for p in ("accessibility", "screen_recording")
             ]
-            # Settings relaunch drops CLI arguments; re-establish the ALE endpoint.
+            # The CLI explicitly requests the extra direct-capture consent. VNC
+            # handles that prompt while the Host concurrently waits for the CLI.
+            runner.confirm_capture_ready("CuaDriver", lambda: grant("poll"))
+            runner.record("flow", "grant_completed")
+            # The grant CLI uses the default daemon endpoint. Settings can also
+            # relaunch without arguments. Restore ALE's endpoint after it finishes.
             guest("/bin/sh", "-c", "/usr/bin/killall cua-driver || test $? = 1")
             guest(
                 "/usr/bin/open",

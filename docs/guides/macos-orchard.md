@@ -139,6 +139,12 @@ Apple Vision OCR is compiled in a temporary Host directory. Permission UI screen
 come only from the scoped VNC connection. Missing or all-black frames fail the attempt.
 Screenshots and helper processes are scoped to provisioning. The normal desktop probe then verifies an
 actual PNG from the Driver in the intended account. A UI grant is not enough.
+ALE connects VNC before starting `cua-driver permissions grant` as the Task account.
+The grant command runs concurrently with VNC handling of the System Settings grants
+and the separate first-use direct-capture consent. After the command succeeds, ALE
+restores its configured Driver service endpoint and verifies capture through that
+endpoint. A pending grant is reused during UI retries; failure or cancellation tears
+down the owned VM, including any permission-request processes still running there.
 Failure stops provisioning and invokes owned-VM cleanup; no solver starts with
 unverified permissions. Three retries means four total UI attempts, bounded by the
 same boot deadline. Remote workers and arbitrary app authorization are unqualified.

@@ -18,6 +18,7 @@ from ale.run.providers.macos_permission_policy import (
     locate_toggle,
     pane_heading,
     permission_content,
+    permission_prompt,
     unique,
 )
 
@@ -161,6 +162,25 @@ class Bootstrap:
                 self.vnc.capture(screenshot)
                 rows = self.read_rows(screenshot)
                 image = Image.open(screenshot).convert("RGB")
+                prompt = permission_prompt(rows, label)
+                if prompt is not None:
+                    stable = 0
+                    guard.take("open_permission_settings", 4)
+                    self.vnc.click(*prompt)
+                    self.record(permission, "open_permission_settings")
+                    time.sleep(2)
+                    self.guest(
+                        "/usr/bin/open",
+                        f"x-apple.systempreferences:com.apple.preference.security?{pane}",
+                    )
+                    continue
+                consent = capture_consent(rows, label)
+                if consent is not None:
+                    stable = 0
+                    guard.take("allow_direct_capture", 3)
+                    self.vnc.click(*consent)
+                    self.record("screen_recording", "allow_direct_capture")
+                    continue
                 action = gate_action(rows)
                 if action == "authenticate":
                     stable = 0
