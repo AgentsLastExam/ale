@@ -143,9 +143,6 @@ def test_publish_keeps_exact_commit_and_resumes_same_draft(
         def __init__(self, *, token: object) -> None:
             self.token = token
 
-        def repo_info(self, *args: object, **kwargs: object) -> object:
-            return SimpleNamespace(private=True)
-
         def get_repo_discussions(self, *args: object, **kwargs: object) -> list[object]:
             return []
 
@@ -236,9 +233,6 @@ def test_private_org_repository_and_collection_are_enforced(
 
         def create_repo(self, repo: str, **kwargs: object) -> None:
             calls.append((repo, kwargs))
-
-        def repo_info(self, *args: object, **kwargs: object) -> object:
-            return SimpleNamespace(private=True)
 
         def list_collections(self, **kwargs: object) -> list[object]:
             assert kwargs == {"owner": namespace}
@@ -352,9 +346,6 @@ def test_publication_retry_does_not_overwrite_an_updated_pr(
     class Api:
         def __init__(self, *, token: object) -> None:
             self.token = token
-
-        def repo_info(self, *args: object, **kwargs: object) -> object:
-            return SimpleNamespace(private=True)
 
         def get_repo_discussions(self, *args: object, **kwargs: object) -> list[object]:
             return []
