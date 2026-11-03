@@ -18,6 +18,7 @@ from ale.run.harnesses.base import (
     CliCommand,
     CliHarness,
     NativeResult,
+    http_headers,
     install_skills,
 )
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -87,7 +88,7 @@ class ClaudeCodeHarness(CliHarness):
                         for key, value in server.environment.items()
                     }
             elif isinstance(server, StreamableHttpMcpServer):
-                native = {"type": "http", "url": server.url}
+                native = {"type": "http", "url": server.url, **http_headers(resolved)}
             else:  # pragma: no cover - the core discriminated union is exhaustive
                 raise ConfigError(f"unsupported MCP transport for {resolved.name}")
             mcp_servers[resolved.name] = native

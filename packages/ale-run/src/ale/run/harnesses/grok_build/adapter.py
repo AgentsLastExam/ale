@@ -192,6 +192,12 @@ class GrokBuildHarness(CliHarness):
                     lines.append(f"env = {{ {rendered} }}")
             else:
                 lines.append(f"url = {_toml(server.url)}")
+                if resolved.headers:
+                    rendered = ", ".join(
+                        f"{_toml(key)} = {_toml(value)}"
+                        for key, value in sorted(resolved.headers.items())
+                    )
+                    lines.append(f"headers = {{ {rendered} }}")
             lines.append("")
         await sandbox.write_file(
             grok_home / "config.toml",

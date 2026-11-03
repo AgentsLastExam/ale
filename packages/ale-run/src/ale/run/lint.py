@@ -9,8 +9,7 @@ from pathlib import Path
 
 from ale.core.errors import TaskDefinitionError
 from ale.core.task import Stage
-from ale.core.taskspec import OperatingSystem, VariableReference
-from ale.run.secrets import is_credential_name
+from ale.core.taskspec import OperatingSystem, VariableReference, is_credential_name
 from ale.run.tasksets.manifest import (
     ENVIRONMENT_DIR,
     INSTRUCTION,

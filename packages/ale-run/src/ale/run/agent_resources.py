@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
@@ -37,6 +38,7 @@ def resolve_agent_resources(
     task_source: TaskSource,
     network: NetworkPolicy | None = None,
     operating_system: OperatingSystem = OperatingSystem.LINUX,
+    mcp_headers: Mapping[str, dict[str, str]] | None = None,
 ) -> EffectiveAgentResources:
     """Resolve all declarations before a provider or sandbox is created.
 
@@ -59,7 +61,12 @@ def resolve_agent_resources(
         (
             *added,
             *(
-                _resolve_task_server(server, task_source=task_source, network=policy)
+                _resolve_task_server(
+                    server,
+                    task_source=task_source,
+                    network=policy,
+                    headers=(mcp_headers or {}).get(server.name, {}),
+                )
                 for server in task.mcp_servers
                 if server.name not in names
             ),
@@ -178,7 +185,11 @@ def _merge_skills(skills: list[ResolvedSkill]) -> tuple[ResolvedSkill, ...]:
 
 
 def _resolve_task_server(
-    server: McpServer, *, task_source: TaskSource, network: NetworkPolicy
+    server: McpServer,
+    *,
+    task_source: TaskSource,
+    network: NetworkPolicy,
+    headers: dict[str, str],
 ) -> ResolvedMcpServer:
     """A server of the Task's own: the image's identity covers what it runs."""
     _check_network(server, network)
@@ -199,6 +210,7 @@ def _resolve_task_server(
         source_version=task_source.commit if reportable else None,
         reportable=reportable,
         reportability_reason=reason,
+        headers=headers,
     )
 
 
@@ -264,10 +276,15 @@ def _check_network(server: McpServer, network: NetworkPolicy) -> None:
     host = (urlparse(server.url).hostname or "").lower()
     if network.mode is NetworkMode.BLOCK:
         raise AgentResourceError(f"remote MCP {server.name!r} is blocked by task network policy")
-    if network.mode is NetworkMode.ALLOWLIST and not host_allowed(host, network.allowed_hosts):
-        raise AgentResourceError(
-            f"remote MCP {server.name!r} host {host!r} is not in task allowed_hosts"
-        )
+    if network.mode is NetworkMode.ALLOWLIST:
+        if not host_allowed(host, network.allowed_hosts):
+            raise AgentResourceError(
+                f"remote MCP {server.name!r} host {host!r} is not in task allowed_hosts"
+            )
+        if urlparse(server.url).scheme != "https":
+            raise AgentResourceError(
+                f"remote MCP {server.name!r} needs an https URL: an allowlist carries TLS only"
+            )
 
 
 def _merge_mcp(servers: list[ResolvedMcpServer]) -> tuple[ResolvedMcpServer, ...]:

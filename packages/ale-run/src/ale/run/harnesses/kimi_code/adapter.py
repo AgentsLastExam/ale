@@ -21,6 +21,7 @@ from ale.run.harnesses.base import (
     CliCommand,
     CliHarness,
     NativeResult,
+    http_headers,
     install_skills,
     prompt_argument,
 )
@@ -144,7 +145,7 @@ class KimiCodeHarness(CliHarness):
                     }
             else:
                 # An entry with a URL and no transport is a Streamable HTTP server.
-                native = {"url": server.url}
+                native = {"url": server.url, **http_headers(resolved)}
             servers[resolved.name] = native
         await sandbox.write_file(
             kimi_home / "mcp.json",

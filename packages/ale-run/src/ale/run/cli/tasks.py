@@ -393,6 +393,7 @@ async def _run_one(
                 task_source=resolved.source,
                 network=task.spec.network,
                 operating_system=task.spec.os,
+                mcp_headers=task.variables.values.mcp_headers if task.variables else None,
             )
             harness.validate_resources(agent_resources)
             inputs = ProvenanceInputs(

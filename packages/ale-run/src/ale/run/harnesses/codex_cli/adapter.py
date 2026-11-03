@@ -89,6 +89,12 @@ class CodexCliHarness(CliHarness):
                     lines.append(f"env = {{ {rendered} }}")
             else:
                 lines.append(f"url = {json.dumps(server.url)}")
+                if resolved.headers:
+                    rendered = ", ".join(
+                        f"{json.dumps(key)} = {json.dumps(value)}"
+                        for key, value in sorted(resolved.headers.items())
+                    )
+                    lines.append(f"http_headers = {{ {rendered} }}")
             lines.append("")
         await sandbox.write_file(
             codex_home / "config.toml",

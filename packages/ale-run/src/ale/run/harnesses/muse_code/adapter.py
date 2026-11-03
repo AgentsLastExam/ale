@@ -21,6 +21,7 @@ from ale.run.harnesses.base import (
     CliCommand,
     CliHarness,
     NativeResult,
+    http_headers,
     install_skills,
 )
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -93,7 +94,11 @@ class MuseCodeHarness(CliHarness):
                         for key, value in server.environment.items()
                     }
             else:
-                native = {"transport": "streamable_http", "url": server.url}
+                native = {
+                    "transport": "streamable_http",
+                    "url": server.url,
+                    **http_headers(resolved),
+                }
             servers[resolved.name] = {**native, "enabled": True}
         settings = {
             "schema_version": 1,

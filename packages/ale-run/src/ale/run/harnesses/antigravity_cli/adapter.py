@@ -19,6 +19,7 @@ from ale.run.harnesses.base import (
     CliCommand,
     CliHarness,
     NativeResult,
+    http_headers,
     install_skills,
 )
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -133,7 +134,7 @@ class AntigravityCliHarness(CliHarness):
                 if server.cwd:
                     entry["cwd"] = server.cwd.replace("{home}", session.home)
             else:
-                entry = {"serverUrl": server.url}
+                entry = {"serverUrl": server.url, **http_headers(resolved)}
             servers[resolved.name] = entry
         await sandbox.write_file(
             gemini / "config" / "mcp_config.json",

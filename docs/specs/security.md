@@ -118,7 +118,9 @@ the proxy variables has nowhere to go**, so the failure mode is closed. Daytona'
 allowlist takes this role there, for the same two reasons (section 1).
 
 Matching is on the requested name, as in Harbor: `pypi.org` is that host, and `*.pypi.org`
-every name below it. It is deliberately *not* on a resolved address: a task declares `pypi.org` because that is what
+every name below it. An address or CIDR entry matches a client that asks for that address, and
+no name pattern admits an address. The proxy connects from the Host, so an entry reaching
+loopback or link-local addresses, cloud metadata included, fails when the Task loads. It is deliberately *not* on a resolved address: a task declares `pypi.org` because that is what
 it means, and pinning to whatever IP that resolved to once would break the task rather
 than tighten it.
 
@@ -288,9 +290,10 @@ different digests fail before provisioning. Operator stdio MCP descriptors and a
 are staged below the agent home; `{mcp}` resolves to that private resource directory.
 
 Local stdio MCP commands execute inside the sandbox and are checked after files and
-Skills are staged. Remote MCP is limited to unauthenticated Streamable HTTP endpoints
-whose host satisfies the Task network policy. Native Harness subscription credentials do
-not make arbitrary remote MCP authentication implicit; that remains a separate contract.
+Skills are staged. Remote MCP is limited to Streamable HTTP endpoints whose host satisfies
+the Task network policy. A Task authenticates to one only through the `headers` it declares,
+whose credentials come from the checkout's `.env` like any Task variable; Native Harness
+subscription credentials never reach one.
 
 `cua-desktop` follows the same opt-in MCP path. It is not automatically injected.
 

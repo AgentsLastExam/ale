@@ -23,6 +23,7 @@ from ale.run.harnesses.base import (
     CliCommand,
     CliHarness,
     NativeResult,
+    http_headers,
     install_skills,
 )
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -91,6 +92,7 @@ class ForgecodeHarness(CliHarness):
         super().__init__(cli_version=cli_version, settings=settings)
 
     def validate_resources(self, resources: EffectiveAgentResources) -> None:
+        super().validate_resources(resources)
         for resolved in resources.mcp_servers:
             if isinstance(resolved.server, StdioMcpServer) and resolved.server.cwd:
                 raise AgentUnsupportedError(
@@ -129,7 +131,7 @@ class ForgecodeHarness(CliHarness):
                     }
             else:
                 # Remote MCP authentication is never copied from the Host.
-                native = {"url": server.url, "oauth": False}
+                native = {"url": server.url, "oauth": False, **http_headers(resolved)}
             servers[resolved.name] = native
         await _write(
             sandbox,

@@ -21,6 +21,7 @@ from ale.run.harnesses.base import (
     CliCommand,
     CliHarness,
     NativeResult,
+    http_headers,
     install_skills,
 )
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -98,7 +99,7 @@ class PiCliHarness(CliHarness):
                         for key, value in server.environment.items()
                     }
             else:
-                native = {"url": server.url}
+                native = {"url": server.url, **http_headers(resolved)}
             # Declared to the model like built-in tools. Pi's default, codemode, reaches
             # them only from a script and does not record their results in the session.
             native["exposure"] = "direct"

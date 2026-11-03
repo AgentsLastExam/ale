@@ -161,6 +161,24 @@ def test_task_servers_resolve_from_their_entries_without_any_upload() -> None:
     assert "no immutable identity" in (external.reportability_reason or "")
 
 
+def test_a_task_server_carries_its_resolved_headers_outside_every_record() -> None:
+    plain = resolve_agent_resources(
+        task=ToolProvision(mcp_servers=(remote(),)),
+        task_source=source(),
+        network=NetworkPolicy(mode=NetworkMode.OPEN),
+    )
+    resources = resolve_agent_resources(
+        task=ToolProvision(mcp_servers=(remote(),)),
+        task_source=source(),
+        network=NetworkPolicy(mode=NetworkMode.OPEN),
+        mcp_headers={"remote": {"Authorization": "Bearer sk-value"}},
+    )
+    assert resources.mcp_servers[0].headers == {"Authorization": "Bearer sk-value"}
+    assert resources.digest == plain.digest
+    assert "sk-value" not in resources.model_dump_json()
+    assert "sk-value" not in repr(resources)
+
+
 def test_a_local_task_server_is_visible_but_not_reportable() -> None:
     resources = resolve_agent_resources(
         task=ToolProvision(mcp_servers=(stdio(),)), task_source=source("local")
@@ -258,6 +276,22 @@ def test_invalid_transport_auth_and_unknown_fields_fail(tmp_path: Path, body: st
         resolve_descriptors(
             mcp(tmp_path / "bad.toml", body), network=NetworkPolicy(mode=NetworkMode.OPEN)
         )
+
+
+def test_an_allowlisted_remote_server_needs_tls() -> None:
+    plain = StreamableHttpMcpServer(
+        name="plain", transport="streamable-http", url="http://mcp.example.com/api"
+    )
+    allowlist = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("mcp.example.com",))
+    with pytest.raises(AgentResourceError, match="needs an https URL"):
+        resolve_agent_resources(
+            task=ToolProvision(mcp_servers=(plain,)), task_source=source(), network=allowlist
+        )
+    resolve_agent_resources(
+        task=ToolProvision(mcp_servers=(plain,)),
+        task_source=source(),
+        network=NetworkPolicy(mode=NetworkMode.OPEN),
+    )
 
 
 def test_remote_mcp_obeys_network_policy() -> None:

@@ -304,6 +304,11 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
                 config.verifier.environment.env if config.verifier.environment else None
             ),
             solution=config.solution.env,
+            mcp_headers={
+                server.name: server.headers
+                for server in config.environment.mcp_servers
+                if server.headers
+            },
         ),
         metadata=config.metadata,
     )

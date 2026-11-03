@@ -30,6 +30,7 @@ from ale.run.harnesses.base import (
     CliCommand,
     CliHarness,
     NativeResult,
+    http_headers,
     install_skills,
     prompt_argument,
 )
@@ -246,7 +247,7 @@ class ZCodeHarness(CliHarness):
                         for key, value in server.environment.items()
                     }
             else:
-                native = {"type": "http", "url": server.url}
+                native = {"type": "http", "url": server.url, **http_headers(resolved)}
             servers[resolved.name] = {**native, "enabled": True}
         config: dict[str, Any] = {}
         if servers:

@@ -21,6 +21,7 @@ from ale.run.harnesses.base import (
     CliCommand,
     CliHarness,
     NativeResult,
+    http_headers,
     install_skills,
 )
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -70,6 +71,7 @@ class DroidHarness(CliHarness):
         super().__init__(cli_version=cli_version, settings=settings)
 
     def validate_resources(self, resources: EffectiveAgentResources) -> None:
+        super().validate_resources(resources)
         for resolved in resources.mcp_servers:
             if isinstance(resolved.server, StdioMcpServer) and resolved.server.cwd:
                 raise AgentUnsupportedError(
@@ -106,7 +108,12 @@ class DroidHarness(CliHarness):
             else:
                 # Remote MCP authentication is never copied from the Host, so there is
                 # nothing for an OAuth flow to sign in with.
-                native = {"type": "http", "url": server.url, "oauth": False}
+                native = {
+                    "type": "http",
+                    "url": server.url,
+                    "oauth": False,
+                    **http_headers(resolved),
+                }
             servers[resolved.name] = native
         await _write_json(sandbox, state / "mcp.json", {"mcpServers": servers})
 

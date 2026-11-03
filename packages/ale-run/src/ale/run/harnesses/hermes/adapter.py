@@ -28,6 +28,7 @@ from ale.run.harnesses.base import (
     CliCommand,
     CliHarness,
     NativeResult,
+    http_headers,
     install_skills,
 )
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -168,7 +169,7 @@ class HermesHarness(CliHarness):
                         for key, value in server.environment.items()
                     }
             else:
-                native = {"url": server.url}
+                native = {"url": server.url, **http_headers(resolved)}
             servers[resolved.name] = native
 
         transport, suffix = _TRANSPORTS[self.gateway_dialect]

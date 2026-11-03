@@ -20,6 +20,7 @@ from ale.run.harnesses.base import (
     CliCommand,
     CliHarness,
     NativeResult,
+    http_headers,
     install_skills,
 )
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -127,7 +128,11 @@ class OpenClawCliHarness(CliHarness):
                         for key, value in server.environment.items()
                     }
             else:
-                native = {"url": server.url, "transport": "streamable-http"}
+                native = {
+                    "url": server.url,
+                    "transport": "streamable-http",
+                    **http_headers(resolved),
+                }
             config["mcp"]["servers"][resolved.name] = native
         await sandbox.write_file(
             state / "openclaw.json",

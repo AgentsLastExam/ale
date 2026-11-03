@@ -81,10 +81,11 @@ skills_dir = "/skills"                      # absolute; the Task's Skills in the
 
 [[environment.mcp_servers]]                 # one table per server
 name = "search"
-transport = "stdio"                         # required: stdio | streamable-http
+transport = "stdio"                         # required: stdio | streamable-http (or http)
 command = "/opt/search-mcp/server"          # stdio: a program in the image
 args = ["--index", "/srv/index"]            # stdio
 # url = "https://mcp.example.org/mcp"       # streamable-http
+# headers = { Authorization = "Bearer ${SEARCH_TOKEN}" }  # streamable-http
 
 [agent]                                     # the evaluated agent and the oracle
 user = "user"                               # account; must exist in the image; default user
@@ -212,6 +213,7 @@ Harbor's `env` tables set environment variables for the Task's commands:
 | `[verifier].env` | the verifier |
 | `[verifier.environment].env` | a separate verifier, in place of `[environment].env` |
 | `[solution].env` | the oracle |
+| `[[environment.mcp_servers]].headers` | the agent's MCP client |
 
 A separate verifier without `[verifier.environment]` receives `[environment].env`, because
 Harbor copies `[environment]` for it. `[verifier].env` and `[solution].env` win over the table
@@ -332,11 +334,23 @@ below `environment/` and have the Dockerfile or `build.ps1` place them.
 `[environment].skills_dir` is an absolute directory in the image holding one directory per
 Skill. The Harness copies its contents to the agent's skills directory before the agent starts.
 
-`[[environment.mcp_servers]]` uses Harbor's `name`, `transport`, `command`, `args` and `url`.
-`transport` is required because Harbor's default, `sse`, is not implemented, and `headers` is
-not supported. A stdio server is a program in the image; one that needs its own directory or
-variables starts through a wrapper script there. A `streamable-http` URL must be reachable
-under `[agent]`'s network, which ALE checks before any Sandbox exists.
+`[[environment.mcp_servers]]` uses Harbor's `name`, `transport`, `command`, `args`, `url` and
+`headers`. `transport` is required because Harbor's default, `sse`, is not implemented; `http`
+means `streamable-http`, as in Harbor. A stdio server is a program in the image; one that needs
+its own directory or variables starts through a wrapper script there. A `streamable-http` URL
+must be reachable under `[agent]`'s network, which ALE checks before any Sandbox exists: under
+`allowlist` that means `https`.
+
+`headers` belongs to a `streamable-http` server. As in Harbor, and unlike an `env` value, a
+header holds `${NAME}` or `${NAME:-default}` anywhere in its text, so `Bearer ${SEARCH_TOKEN}`
+works. References resolve as [Variables](#variables) describe, for an agent's run only: an
+oracle has no MCP client. A credential header (`Authorization`, `Cookie`, or a name that marks
+a credential) holds only references with no default, after at most an auth scheme, because a
+`task.toml` is committed, and needs `https` unless the server is on the Sandbox's loopback.
+The Harness writes the resolved value into the agent's own MCP
+configuration, so the agent can read it: give the server a credential scoped to this use. Agent
+CLIs expand `$`, `{{` and a leading `!` in that configuration, so a value holding one fails
+before any Sandbox exists rather than arriving changed.
 
 An operator can add Skills and MCP servers for a run without rebuilding the image. They stay on
 the Host, are uploaded for the Episode, and, as in Harbor, replace a Task's of the same name for

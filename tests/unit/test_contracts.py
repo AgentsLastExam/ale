@@ -232,6 +232,32 @@ def test_task_config_rejects_unknown_keys() -> None:
             {"environment": {"mcp_servers": [{"name": "s", "transport": "streamable-http"}]}},
             "requires url",
         ),
+        *(
+            (
+                {
+                    "environment": {
+                        "mcp_servers": [
+                            {
+                                "name": "s",
+                                "transport": "streamable-http",
+                                "url": "https://x",
+                                "headers": headers,
+                            }
+                        ]
+                    }
+                },
+                message,
+            )
+            for headers, message in (
+                ({"Authorization": "Bearer sk-written-down"}, "holds a credential"),
+                ({"X-Api-Key": "${KEY:-sk-written-down}"}, "holds a credential"),
+                ({"Cookie": "session=abc"}, "holds a credential"),
+                ({"X Bad": "1"}, "not an HTTP header name"),
+                ({"X-Region": "a\nb"}, "line break"),
+                ({"X-Region": "${region"}, "must start"),
+                ({"X-Region": "${ALE_REGION}"}, "cannot refer"),
+            )
+        ),
         (
             {
                 "environment": {
@@ -245,7 +271,7 @@ def test_task_config_rejects_unknown_keys() -> None:
                     ]
                 }
             },
-            "headers is not supported",
+            "takes no url or headers",
         ),
         (
             {
@@ -294,6 +320,9 @@ def test_harbor_s_spellings_are_accepted() -> None:
     assert config({"environment": {"os": "Windows", "vm_image": "w.qcow2"}}).environment.os == (
         OperatingSystem.WINDOWS
     )
+    http = {"name": "s", "transport": "http", "url": "https://mcp.example.org/mcp"}
+    server = config({"environment": {"mcp_servers": [http]}}).environment.mcp_servers[0]
+    assert server.transport == "streamable-http"
 
 
 def test_allowed_hosts_take_harbor_s_normal_form() -> None:
@@ -326,6 +355,28 @@ def test_addresses_match_addresses_and_ranges(
     host: str, allowed: tuple[str, ...], admitted: bool
 ) -> None:
     assert host_allowed(host, allowed) is admitted
+
+
+def test_a_credential_header_stays_off_plain_http_outside_the_sandbox() -> None:
+    def server(url: str) -> dict[str, object]:
+        return {
+            "environment": {
+                "mcp_servers": [
+                    {
+                        "name": "s",
+                        "transport": "streamable-http",
+                        "url": url,
+                        "headers": {"Authorization": "Bearer ${TOKEN}"},
+                    }
+                ]
+            }
+        }
+
+    config(server("https://mcp.example.org/mcp"))
+    config(server("http://127.0.0.1:8000/mcp"))
+    config(server("http://localhost:8000/mcp"))
+    with pytest.raises(ValidationError, match="unencrypted"):
+        config(server("http://mcp.example.org/mcp"))
 
 
 def test_network_and_agent_resource_contracts_remain_strict() -> None:

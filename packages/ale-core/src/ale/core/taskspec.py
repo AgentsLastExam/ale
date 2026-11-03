@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal, NamedTuple, Self
+from urllib.parse import urlsplit
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -21,6 +22,7 @@ __all__ = [
     "EnvironmentTable",
     "ImageKind",
     "ImageSpec",
+    "McpHeaders",
     "McpServer",
     "McpServerTable",
     "McpSource",
@@ -46,6 +48,8 @@ __all__ = [
     "VerifierTable",
     "VerifySpec",
     "host_allowed",
+    "is_credential_header",
+    "is_credential_name",
 ]
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
@@ -330,6 +334,7 @@ class VerifySpec(BaseModel):
 
 _VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*))?\}", re.DOTALL)
+_EMBEDDED_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 #: The prefix of the framework's own variables: those it sets in the commands it runs, and
 #: the Host configuration it reads, model and Judge keys included.
 _RESERVED_PREFIX = "ALE_"
@@ -350,6 +355,18 @@ class VariableReference(NamedTuple):
         match = _REFERENCE.fullmatch(value)
         return cls(match[1], match[2]) if match else None
 
+    @classmethod
+    def embedded(cls, value: str) -> tuple[VariableReference, ...]:
+        """Every reference within ``value``, the form an MCP header takes, as in Harbor."""
+        if "${" in _EMBEDDED_REFERENCE.sub(" ", value):
+            raise ValueError("a ${ must start ${NAME} or ${NAME:-default}")
+        return tuple(cls(match[1], match[2]) for match in _EMBEDDED_REFERENCE.finditer(value))
+
+    @classmethod
+    def substitute(cls, value: str, found: Mapping[VariableReference, str]) -> str:
+        """``value`` with each of its embedded references replaced by what ``found`` holds."""
+        return _EMBEDDED_REFERENCE.sub(lambda match: found[cls(match[1], match[2])], value)
+
 
 def _valid_env(env: dict[str, str]) -> dict[str, str]:
     for key, value in env.items():
@@ -367,6 +384,48 @@ def _valid_env(env: dict[str, str]) -> dict[str, str]:
 
 #: A Harbor ``env`` table: names to literals or whole-value ``${NAME}`` references.
 TaskEnv = Annotated[dict[str, str], AfterValidator(_valid_env)]
+
+#: A name that marks a credential, as Harbor recognizes one; ``MAX_TOKENS`` is a count.
+_CREDENTIAL_NAME = re.compile(r"KEY|SECRET|TOKEN(?!S)|PASSWORD|CREDENTIAL|AUTH", re.IGNORECASE)
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+#: The one shape a credential header takes: an optional scheme, then only references.
+_CREDENTIAL_HEADER = re.compile(
+    r"\s*(?:[A-Za-z]+\s+)?\$\{[A-Za-z_][A-Za-z0-9_]*\}(?:[\s:-]*\$\{[A-Za-z_][A-Za-z0-9_]*\})*\s*"
+)
+
+
+def is_credential_name(name: str) -> bool:
+    return bool(_CREDENTIAL_NAME.search(name))
+
+
+def is_credential_header(name: str) -> bool:
+    return is_credential_name(name) or name.lower() in {"cookie", "set-cookie"}
+
+
+def _valid_headers(headers: dict[str, str]) -> dict[str, str]:
+    for name, value in headers.items():
+        if not _HEADER_NAME.fullmatch(name):
+            raise ValueError(f"{name!r} is not an HTTP header name")
+        if "\r" in value or "\n" in value:
+            raise ValueError(f"header {name} must not contain a line break")
+        try:
+            references = VariableReference.embedded(value)
+        except ValueError as error:
+            raise ValueError(f"header {name}: {error}") from error
+        for reference in references:
+            if reference.name.upper().startswith(_RESERVED_PREFIX):
+                raise ValueError(f"header {name}: a Task cannot refer to {reference.name}")
+        if is_credential_header(name) and not _CREDENTIAL_HEADER.fullmatch(value):
+            # A task.toml is committed, so it holds the variable, never the credential.
+            raise ValueError(
+                f"header {name} holds a credential; write it as ${{NAME}} or Bearer ${{NAME}}, "
+                "with no default, and set NAME in the checkout's .env"
+            )
+    return headers
+
+
+#: An MCP server's HTTP headers: literal text with ``${NAME}`` references inside it.
+McpHeaders = Annotated[dict[str, str], AfterValidator(_valid_headers)]
 
 
 class TaskVariables(BaseModel):
@@ -387,6 +446,8 @@ class TaskVariables(BaseModel):
     receives ``environment``, as Harbor copies ``[environment]`` for it."""
     solution: dict[str, str] = Field(default_factory=dict)
     """``[solution].env``: the oracle only."""
+    mcp_headers: dict[str, dict[str, str]] = Field(default_factory=dict)
+    """``[[environment.mcp_servers]].headers`` by server: what the agent's MCP client sends."""
 
     @property
     def tables(self) -> tuple[tuple[str, dict[str, str]], ...]:
@@ -510,6 +571,7 @@ class McpServerTable(BaseModel):
     command: str | None = Field(default=None, min_length=1)
     args: tuple[str, ...] = ()
     url: str | None = Field(default=None, pattern=r"^https?://")
+    headers: McpHeaders = Field(default_factory=dict)
 
     @property
     def server(self) -> StdioMcpServer | StreamableHttpMcpServer:
@@ -523,22 +585,35 @@ class McpServerTable(BaseModel):
 
     # --- validation ---
 
-    @model_validator(mode="before")
+    @field_validator("transport", mode="before")
     @classmethod
-    def _harbor_keys_ale_lacks(cls, data: Any) -> Any:
-        if isinstance(data, dict) and "headers" in data:
-            raise ValueError("headers is not supported by ALE")
-        return data
+    def _harbor_spelling(cls, value: Any) -> Any:
+        return "streamable-http" if value == "http" else value
 
     @model_validator(mode="after")
     def _fields_of_its_transport(self) -> Self:
-        if self.transport == "stdio" and (self.command is None or self.url is not None):
-            raise ValueError("transport 'stdio' requires command and takes no url")
+        if self.transport == "stdio" and (
+            self.command is None or self.url is not None or self.headers
+        ):
+            raise ValueError("transport 'stdio' requires command and takes no url or headers")
         if self.transport == "streamable-http" and (
             self.url is None or self.command is not None or self.args
         ):
             raise ValueError("transport 'streamable-http' requires url and takes no command")
         return self
+
+    @model_validator(mode="after")
+    def _credentials_stay_encrypted(self) -> Self:
+        parts = urlsplit(self.url or "")
+        if parts.scheme == "http" and not _is_loopback(parts.hostname or ""):
+            for name in filter(is_credential_header, self.headers):
+                raise ValueError(f"header {name} would cross the network unencrypted; use https")
+        return self
+
+
+def _is_loopback(host: str) -> bool:
+    address = _address(host)
+    return host == "localhost" or (address is not None and address.is_loopback)
 
 
 def _normal_host(host: str) -> str:

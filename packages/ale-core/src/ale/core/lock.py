@@ -86,8 +86,11 @@ class TaskVariableProvenance(BaseModel):
 
     model_config = _FROZEN
 
-    table: Literal["environment", "verifier", "verifier.environment", "solution"]
+    table: Literal[
+        "environment", "verifier", "verifier.environment", "solution", "environment.mcp_servers"
+    ]
     name: str = Field(min_length=1)
+    """The variable's name; ``server.header`` for an MCP header."""
     source: Literal["literal", "env_file", "default"]
 
 

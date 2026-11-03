@@ -523,7 +523,8 @@ async def run_episode(
     if task.variables is None:
         # Resolved by the caller for every Task at once, so a missing one fails the whole
         # selection before anything is built, started or spent.
-        if any(env for _, env in task.spec.variables.tables):
+        declared = task.spec.variables
+        if declared.mcp_headers or any(env for _, env in declared.tables):
             raise TaskDefinitionError(f"{task.spec.name}: its variables were not resolved")
         task.variables = ResolvedVariables()
     variables = task.variables

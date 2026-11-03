@@ -205,6 +205,75 @@ def test_credentials_from_the_env_file_are_the_secrets(
     assert task.variables.secrets == ("pw-database", "tok-service")
 
 
+def _with_headers(headers: dict[str, str]) -> dict[str, Any]:
+    server = {
+        "name": "search",
+        "transport": "streamable-http",
+        "url": "https://mcp.example.org/mcp",
+        "headers": headers,
+    }
+    return {
+        "environment": {"mcp_servers": [server]},
+        "agent": {"network_mode": "public"},
+    }
+
+
+def test_mcp_headers_resolve_references_inside_their_text(
+    tmp_path: Path, env_file: Callable[[str], None]
+) -> None:
+    env_file("SEARCH_TOKEN=sk-search-value\nSEARCH_TENANT=acme\n")
+    headers = {
+        "Authorization": "Bearer ${SEARCH_TOKEN}",
+        "X-Tenant": "tenant-${SEARCH_TENANT}",
+        "X-Region": "${REGION:-eu}",
+        "X-Client": "ale",
+    }
+    task = _resolved(tmp_path, _with_headers(headers), oracle=False)
+    assert task.spec.variables.mcp_headers == {"search": headers}
+    assert task.variables is not None
+    assert task.variables.values.mcp_headers == {
+        "search": {
+            "Authorization": "Bearer sk-search-value",
+            "X-Tenant": "tenant-acme",
+            "X-Region": "eu",
+            "X-Client": "ale",
+        }
+    }
+    # Only the credential is a secret: the tenant is an ordinary value in ordinary text.
+    assert task.variables.secrets == ("sk-search-value",)
+    assert {item.name: item.source for item in task.variables.provenance} == {
+        "search.Authorization": "env_file",
+        "search.X-Tenant": "env_file",
+        "search.X-Region": "default",
+        "search.X-Client": "literal",
+    }
+
+
+def test_mcp_headers_fail_with_the_other_variables_and_only_for_an_agent(
+    tmp_path: Path, env_file: Callable[[str], None]
+) -> None:
+    config = _with_headers({"Authorization": "Bearer ${SEARCH_TOKEN}"})
+    with pytest.raises(ConfigError, match=r"SEARCH_TOKEN \(MCP server search header"):
+        _resolved(tmp_path / "agent", config, oracle=False)
+    # An oracle has no MCP client, so validating a Task does not need the agent's credential.
+    task = _resolved(tmp_path / "oracle", config, oracle=True)
+    assert task.variables is not None
+    assert task.variables.values.mcp_headers == {}
+
+
+def test_an_mcp_header_never_carries_a_host_credential(
+    tmp_path: Path, env_file: Callable[[str], None]
+) -> None:
+    env_file("SEARCH_TOKEN=sk-host-held\n")
+    with pytest.raises(ConfigError, match="holds the Host credential ALE_ANTHROPIC_API_KEY"):
+        _resolved(
+            tmp_path,
+            _with_headers({"Authorization": "Bearer ${SEARCH_TOKEN}"}),
+            oracle=False,
+            protected={"ALE_ANTHROPIC_API_KEY": "sk-host-held"},
+        )
+
+
 async def test_an_episode_refuses_variables_nobody_resolved(tmp_path: Path) -> None:
     task = load_task_folder(_task(tmp_path, {"environment": {"env": {"A": "a"}}}))
     with pytest.raises(TaskDefinitionError, match="its variables were not resolved"):

@@ -138,6 +138,8 @@ class ResolvedMcpServer(BaseModel):
     reportable: bool
     reportability_reason: str | None = None
     staged_files: Path | None = None
+    headers: dict[str, str] = Field(default_factory=dict, exclude=True, repr=False)
+    """Resolved HTTP headers for the Harness to write; their values are never recorded."""
 
 
 class EffectiveAgentResources(BaseModel):

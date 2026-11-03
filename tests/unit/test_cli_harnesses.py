@@ -34,7 +34,7 @@ from ale.core.harness import (
     TrajectoryParseContext,
 )
 from ale.core.sandbox import ExecResult, SandboxFile
-from ale.core.taskspec import OperatingSystem, StdioMcpServer
+from ale.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
 from ale.core.trajectory import AtifTrajectory
 from ale.run.cli.tasks import PRESET_DIR, _harness
 from ale.run.harnesses import _release
@@ -45,6 +45,7 @@ from ale.run.harnesses._release import (
     ensure_release_binary,
     release_identity,
 )
+from ale.run.harnesses.antigravity_cli import AntigravityCliHarness
 from ale.run.harnesses.base import (
     CONTINUE_PROMPT,
     INVOCATIONS_PATH,
@@ -56,9 +57,18 @@ from ale.run.harnesses.builtin import NopHarness, OracleHarness, ScriptedPolicyH
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.computer_use import ComputerUseHarness
+from ale.run.harnesses.droid import DroidHarness
+from ale.run.harnesses.forgecode import ForgecodeHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
+from ale.run.harnesses.hermes import HermesHarness
+from ale.run.harnesses.kimi_code import KimiCodeHarness
+from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.harnesses.openclaw_cli.adapter import _supported_node
+from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
+from ale.run.harnesses.pi_cli import PiCliHarness
+from ale.run.harnesses.qwen_code import QwenCodeHarness
+from ale.run.harnesses.zcode import ZCodeHarness
 from ale.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
@@ -432,6 +442,67 @@ async def test_resource_translation_uses_episode_local_native_config(tmp_path: P
         assert "resource-proof" in sandbox.uploads[0][1]
         assert "http://gateway/v1" in rendered
         assert "token" not in rendered
+
+
+def _remote_with_headers(value: str) -> EffectiveAgentResources:
+    return EffectiveAgentResources(
+        mcp_servers=(
+            ResolvedMcpServer(
+                name="remote",
+                server=StreamableHttpMcpServer(
+                    name="remote", transport="streamable-http", url="https://mcp.example.org/mcp"
+                ),
+                source_layers=("task",),
+                declared_sources=("[[environment.mcp_servers]]",),
+                digest="sha256:" + "c" * 64,
+                reportable=False,
+                headers={"Authorization": value},
+            ),
+        ),
+        digest="sha256:" + "d" * 64,
+    )
+
+
+CLI_HARNESSES = [
+    (AntigravityCliHarness, '"headers"'),
+    (ClaudeCodeHarness, '"headers"'),
+    (CodexCliHarness, "http_headers = {"),
+    (DroidHarness, '"headers"'),
+    (ForgecodeHarness, '"headers"'),
+    (GrokBuildHarness, "headers = {"),
+    (HermesHarness, "headers:"),
+    (KimiCodeHarness, '"headers"'),
+    (MuseCodeHarness, '"headers"'),
+    (OpenClawCliHarness, '"headers"'),
+    (OpenHandsCliHarness, '"headers"'),
+    (PiCliHarness, '"headers"'),
+    (QwenCodeHarness, '"headers"'),
+    (ZCodeHarness, '"headers"'),
+]
+
+
+@pytest.mark.parametrize(("harness_type", "key"), CLI_HARNESSES)
+async def test_every_cli_writes_a_remote_server_s_headers_natively(harness_type, key: str) -> None:
+    resources = _remote_with_headers("Bearer sk-native-value")
+    harness = harness_type()
+    harness.validate_resources(resources)
+    sandbox = FakeSandbox()
+    # A model every CLI accepts: Antigravity checks its catalog.
+    current = session(model="gemini-3.8-flash")
+    await harness.install_resources(sandbox, current, resources)  # type: ignore[arg-type]
+    rendered = [data.decode() for data in sandbox.files.values() if b"sk-native-value" in data]
+    assert len(rendered) == 1
+    assert key in rendered[0]
+
+
+@pytest.mark.parametrize(("harness_type", "key"), CLI_HARNESSES)
+@pytest.mark.parametrize("value", ["pa$$word", "Bearer ${HOME}", "{{env.HOME}}", "!whoami"])
+def test_a_header_a_cli_would_expand_is_refused_for_every_cli(
+    harness_type, key: str, value: str
+) -> None:
+    with pytest.raises(AgentUnsupportedError, match="would change") as failure:
+        harness_type().validate_resources(_remote_with_headers(value))
+    assert value not in str(failure.value)
 
 
 async def test_grok_chat_gateway_selects_native_chat_backend(tmp_path: Path) -> None:

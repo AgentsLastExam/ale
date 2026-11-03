@@ -8,6 +8,7 @@ its output begins. Parsers read the same layout back from the Host mirror.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from abc import abstractmethod
 from collections.abc import Iterable
@@ -31,6 +32,7 @@ from ale.core.harness import (
     EffectiveAgentResources,
     HarnessSession,
     NativeContinuation,
+    ResolvedMcpServer,
     ResumeSupport,
     TrajectoryParseContext,
 )
@@ -65,6 +67,17 @@ def prompt_argument(prompt_path: str) -> tuple[str, str]:
         f'prompt="$(cat -- {shlex.quote(prompt_path)}; printf .)"; prompt="${{prompt%.}}"; ',
         '"$prompt"',
     )
+
+
+#: What a CLI rewrites in a value of its own configuration file: ``$`` references, Forge's
+#: ``{{ }}`` templates and Pi's leading ``!`` command. Several offer no escape, so a header is
+#: refused for all of them rather than arriving changed in some.
+_CONFIG_EXPANSION = re.compile(r"\$|\{\{|^!")
+
+
+def http_headers(resolved: ResolvedMcpServer) -> dict[str, dict[str, str]]:
+    """A remote server's ``headers`` entry, which most native configurations share."""
+    return {"headers": dict(resolved.headers)} if resolved.headers else {}
 
 
 @dataclass(frozen=True)
@@ -151,8 +164,14 @@ class CliHarness(AutonomousHarness):
         return f"npm:{self.package}@{self.version()}"
 
     def validate_resources(self, resources: EffectiveAgentResources) -> None:
-        """Every CLI here supports Skills and both canonical MCP transports."""
-        return None
+        """Every CLI here supports Skills, both canonical MCP transports and HTTP headers."""
+        for resolved in resources.mcp_servers:
+            for name, value in resolved.headers.items():
+                if _CONFIG_EXPANSION.search(value):
+                    raise AgentUnsupportedError(
+                        f"MCP server {resolved.name} header {name}: agent CLIs expand $, {{{{ and "
+                        "a leading ! in their configuration, so the value would change"
+                    )
 
     async def install(self, sandbox: Sandbox) -> str:
         if self.release_assets:
