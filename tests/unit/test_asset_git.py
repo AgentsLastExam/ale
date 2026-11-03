@@ -222,7 +222,7 @@ def test_repository_name_uses_origin_and_main_worktree(write_task_repo, tmp_path
 @pytest.mark.parametrize(
     ("configured", "namespace"), [(None, "agents-last-exam"), ("other-team", "other-team")]
 )
-def test_private_org_repository_and_collection_are_enforced(
+def test_a_new_dataset_is_gated_before_it_is_public(
     monkeypatch: pytest.MonkeyPatch, configured: str | None, namespace: str
 ) -> None:
     calls: list[tuple[str, object]] = []
@@ -231,8 +231,14 @@ def test_private_org_repository_and_collection_are_enforced(
         def __init__(self, *, token: object) -> None:
             calls.append(("token", token))
 
+        def repo_exists(self, repo: str, **kwargs: object) -> bool:
+            return False
+
         def create_repo(self, repo: str, **kwargs: object) -> None:
             calls.append((repo, kwargs))
+
+        def update_repo_settings(self, repo: str, **kwargs: object) -> None:
+            calls.append(("settings", kwargs))
 
         def list_collections(self, **kwargs: object) -> list[object]:
             assert kwargs == {"owner": namespace}
@@ -252,14 +258,45 @@ def test_private_org_repository_and_collection_are_enforced(
         f"{namespace}/tasks-example",
         f"{namespace}/assets-123",
     )
-    assert calls[:2] == [
+    assert calls[:4] == [
         ("token", "hf-checkout-token"),
         (
             f"{namespace}/tasks-example",
             {"repo_type": "dataset", "private": True, "exist_ok": True},
         ),
+        ("settings", {"repo_type": "dataset", "gated": "manual"}),
+        ("settings", {"repo_type": "dataset", "private": False}),
     ]
     AssetCheckpoint(repo_id=f"{namespace}/demo", task_path="tasks/demo", workspace=Path("/w"))
+
+
+def test_an_existing_dataset_keeps_its_owner_s_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    changed: list[object] = []
+
+    class Api:
+        def __init__(self, *, token: object) -> None:
+            pass
+
+        def repo_exists(self, repo: str, **kwargs: object) -> bool:
+            return True
+
+        def create_repo(self, repo: str, **kwargs: object) -> None:
+            changed.append(repo)
+
+        def update_repo_settings(self, repo: str, **kwargs: object) -> None:
+            changed.append(kwargs)
+
+        def list_collections(self, **kwargs: object) -> list[object]:
+            return [SimpleNamespace(title="assets", slug="agents-last-exam/assets-123")]
+
+        def add_collection_item(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    monkeypatch.delenv("ALE_ASSETS_COLLECTION", raising=False)
+    monkeypatch.delenv("ALE_ASSETS_NAMESPACE", raising=False)
+    monkeypatch.setattr("huggingface_hub.HfApi", Api)
+    ensure_asset_repository("tasks-example")
+    assert changed == []
 
 
 def test_removed_assets_have_a_deletion_commit(
