@@ -105,9 +105,14 @@ artifacts:
   - /Users/evaluator/output
 ```
 
-Replace the image reference, account and paths together. For `sudo: false`, the account
-must have no elevation rights. Use the [standard Task layout](../specs/task-authoring.md) with
-POSIX `run.sh` stage entries; install stable dependencies when preparing the image.
+Replace the image reference, account and paths together. For `sudo = false`, the account
+must have no elevation rights. Use the [standard Task layout](../specs/task-authoring.md):
+`environment/setup/setup.sh`, `tests/test.sh` and `solution/solve.sh`. Install stable
+dependencies when preparing the image. Tests use `$ALE_VERIFY_PYTHON` and
+`ale_verify.write({"reward": ...})`, which writes `/opt/ale/logs/verifier/reward.json`
+under the framework's protected root.
+The engine prepares, reads and clears this directory; no root-level `/logs` directory
+or change to the macOS system volume is needed.
 
 ## Install and authorize Driver in each VM
 

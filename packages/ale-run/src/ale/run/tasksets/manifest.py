@@ -206,7 +206,8 @@ class ManifestTask(Task):
     async def score(self, ctx: EpisodeContext) -> Rewards:
         if ctx.verified_rewards is None:
             raise TaskDefinitionError(
-                "verification produced no rewards; tests must write /logs/verifier/reward.json"
+                "verification produced no rewards; tests must write reward.json "
+                "in the platform verifier directory"
             )
         return {str(key): float(value) for key, value in ctx.verified_rewards.items()}
 

@@ -44,6 +44,7 @@ class MemoryGuest:
         fail_setup: bool = False,
         wait_oracle: bool = False,
         timeout_oracle: bool = False,
+        verify_failure: str | None = None,
         shared: MemoryGuest | None = None,
         user: str = "user",
     ) -> None:
@@ -57,6 +58,7 @@ class MemoryGuest:
         self.fail_setup = fail_setup
         self.wait_oracle = wait_oracle
         self.timeout_oracle = timeout_oracle
+        self.verify_failure = verify_failure
         self.oracle_started = asyncio.Event()
         self._upload: tuple[int, str] | None = None
         self._buffer = bytearray()
@@ -208,12 +210,25 @@ class MemoryGuest:
         if argv == ["bash", "run.sh"] and cwd == "/opt/ale/verify":
             assert "run_as" not in params
             self.stages.append("verify")
+            assert not any(path.startswith("/opt/ale/logs/verifier/") for path in self.files)
             score = float(self.files.get(OUTPUT) == b"hello macOS")
-            self.files[env["ALE_VERDICT_PATH"]] = json.dumps(
-                {"overall": score, "result": score}
+            self.files["/opt/ale/logs/verifier/verification.json"] = json.dumps(
+                {"reward": score, "result": score}
+            ).encode()
+            self.files["/opt/ale/logs/verifier/reward.json"] = json.dumps(
+                {"reward": score}
             ).encode()
             # The immutable host snapshot must remain the solver's original output.
             self.files[OUTPUT] = b"modified by verifier"
+            if self.verify_failure == "timeout":
+                return None
+            return (17 if self.verify_failure == "exit" else 0), b""
+        if argv[:2] == ["sh", "-c"] and argv[-1] == "/logs/verifier":
+            return 1, b"mkdir: /logs: Read-only file system"
+        if argv[:2] == ["sh", "-c"] and argv[-1] == "/opt/ale/logs/verifier":
+            for path in tuple(self.files):
+                if path.startswith("/opt/ale/logs/verifier/"):
+                    del self.files[path]
             return 0, b""
         if argv[:3] == ["rm", "-rf", "--"]:
             for root in argv[3:]:
@@ -384,6 +399,8 @@ async def test_orchard_episode_scores_and_captures_before_verify(
     oracle: bool,
 ) -> None:
     guest = MemoryGuest()
+    guest.files["/opt/ale/logs/verifier/reward.json"] = b'{"reward": 1}'
+    guest.files["/opt/ale/logs/verifier/verification.json"] = b'{"reward": 1}'
     task, providers, controller = episode_fixture(tmp_path, monkeypatch, guest)
     result = await run_episode(
         load_tasks(task)[0],
@@ -394,7 +411,14 @@ async def test_orchard_episode_scores_and_captures_before_verify(
     )
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": float(oracle)}
+    assert result.verdict.rewards == {"reward": float(oracle)}
+    resets = [
+        params["argv"]
+        for op, params in guest.operations
+        if op == "exec" and params["argv"][-1] == "/opt/ale/logs/verifier"
+    ]
+    assert resets, "verification must prepare its macOS result directory"
+    assert all(argv[-2] == "/opt/ale/logs" for argv in resets)
     assert guest.stages == (
         ["setup", "oracle", "capture", "verify"] if oracle else ["setup", "capture", "verify"]
     )
@@ -584,3 +608,23 @@ async def test_guestd_stdio_round_trip_is_local_and_unprivileged(tmp_path: Path)
         assert Path(stdout.strip()).resolve() == tmp_path.resolve()
     finally:
         await client.close()
+
+
+@pytest.mark.parametrize("failure", ["exit", "timeout"])
+async def test_macos_verifier_failure_does_not_accept_a_written_reward(
+    tmp_path, monkeypatch, failure
+):
+    guest = MemoryGuest(verify_failure=failure)
+    task, providers, controller = episode_fixture(tmp_path, monkeypatch, guest)
+    result = await run_episode(
+        load_tasks(task)[0],
+        EpisodeProtocol(OracleHarness(), timeouts=RunTimeouts(verify=0.05)),
+        providers,
+        run_dir=tmp_path / "runs",
+    )
+    assert "/opt/ale/logs/verifier/reward.json" in guest.files
+    expected = Status.TASK_ERROR if failure == "exit" else Status.TIMEOUT
+    assert result.verdict.status is expected
+    assert result.verdict.rewards is None
+    assert not (result.run_dir / "verification.json").exists()
+    assert controller.deleted == controller.created

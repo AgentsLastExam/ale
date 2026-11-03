@@ -136,9 +136,11 @@ def _layout(operating_system: OperatingSystem) -> _StageLayout:
 
 
 def _verifier_dir(operating_system: OperatingSystem) -> PurePath:
-    """Where verification writes ``reward.json``: Harbor's verifier directory."""
+    """Platform result directory; macOS cannot create Harbor's root-level /logs."""
     if operating_system is OperatingSystem.WINDOWS:
         return PureWindowsPath("C:/logs/verifier")
+    if operating_system is OperatingSystem.MACOS:
+        return PurePosixPath("/opt/ale/logs/verifier")
     return PurePosixPath("/logs/verifier")
 
 
@@ -146,18 +148,19 @@ def _verifier_dir(operating_system: OperatingSystem) -> PurePath:
 #: path, or a link at it, as its own account or with sudo, so a link or file where a
 #: directory belongs is removed rather than followed, the parent becomes root's and only
 #: root may change it, and the directory is made anew, readable by root alone.
-_LINUX_VERIFIER_RESET = """set -eu
+_POSIX_VERIFIER_RESET = """set -eu
 parent="$1" verifier="$2"
 if [ -L "$parent" ] || { [ -e "$parent" ] && [ ! -d "$parent" ]; }; then rm -f -- "$parent"; fi
 mkdir -p -- "$parent"
-chown 0:0 -- "$parent"
-chmod go-w -- "$parent"
+# Paths are absolute; BSD chown/chmod treat -- after the owner/mode as a filename.
+chown 0:0 "$parent"
+chmod go-w "$parent"
 rm -rf -- "$verifier"
 mkdir -m 0700 -- "$verifier"
 """
 
 #: Removes the verifier directory unless its parent is a link, which is the agent's own.
-_LINUX_VERIFIER_REMOVE = """set -eu
+_POSIX_VERIFIER_REMOVE = """set -eu
 if [ -d "$1" ] && [ ! -L "$1" ]; then rm -rf -- "$2"; fi
 """
 
@@ -231,7 +234,7 @@ if (Test-Directory (Get-Entry $parent)) { Remove-Entry $verifier }
 def _verifier_dir_command(operating_system: OperatingSystem, *, remove: bool) -> list[str]:
     directory = _verifier_dir(operating_system)
     if operating_system is not OperatingSystem.WINDOWS:
-        script = _LINUX_VERIFIER_REMOVE if remove else _LINUX_VERIFIER_RESET
+        script = _POSIX_VERIFIER_REMOVE if remove else _POSIX_VERIFIER_RESET
         return ["sh", "-c", script, "sh", str(directory.parent), str(directory)]
     return _powershell(
         f"$parent = {_powershell_literal(str(directory.parent))}; "

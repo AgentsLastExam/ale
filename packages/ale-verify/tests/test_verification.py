@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -42,8 +43,12 @@ def saved(verifier):
     )
 
 
-def test_verifier_directory_is_harbors():
-    assert str(ale_verify._VERIFIER_DIR) == "/logs/verifier"
+def test_verifier_directory_matches_the_platform():
+    expected = {
+        "win32": "C:/logs/verifier",
+        "darwin": "/opt/ale/logs/verifier",
+    }.get(sys.platform, "/logs/verifier")
+    assert ale_verify._VERIFIER_DIR.as_posix() == expected
 
 
 def test_plain_nested_result_and_repeated_write(verify_env):
