@@ -23,6 +23,14 @@ def default_ale_repo_path(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+# Git hooks and `git rebase --exec` export GIT_DIR and related variables to the commands
+# they run. Every Git command a test starts must act on its own temporary repository.
+@pytest.fixture(autouse=True)
+def isolated_git_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in [name for name in os.environ if name.startswith("GIT_")]:
+        monkeypatch.delenv(name)
+
+
 @pytest.fixture
 def ale_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "ale"
