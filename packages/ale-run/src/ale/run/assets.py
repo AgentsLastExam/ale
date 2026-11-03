@@ -64,7 +64,6 @@ class AssetRepositorySelection:
 class AssetSyncResult:
     repository: str
     remote_repo_id: str
-    collection_slug: str
     commit: str
     tasks: tuple[TaskAssetObservation, ...]
 
@@ -152,11 +151,11 @@ def select_asset_repositories(paths: Sequence[Path]) -> tuple[AssetRepositorySel
 def pull_assets(
     paths: Sequence[Path],
     *,
-    collection: str | None = None,
     force: bool = False,
     revision: str | None = None,
 ) -> tuple[AssetSyncResult, ...]:
     from huggingface_hub import HfApi, snapshot_download
+    from huggingface_hub.errors import HfHubHTTPError
 
     selections = select_asset_repositories(paths)
     if not force:
@@ -166,10 +165,10 @@ def pull_assets(
     results: list[AssetSyncResult] = []
     for selection in selections:
         remote_repo_id = asset_repo_id(selection.repository_name)
-        collection_slug = asset_collection(api, collection, create=False)
-        info = api.repo_info(remote_repo_id, repo_type="dataset", revision=revision or "main")
-        if not info.private:
-            raise AssetError(f"asset dataset must be private: {remote_repo_id}")
+        try:
+            info = api.repo_info(remote_repo_id, repo_type="dataset", revision=revision or "main")
+        except HfHubHTTPError as exc:
+            raise AssetError(f"could not read dataset {remote_repo_id}: {exc}") from exc
         commit = info.sha
         if not commit:
             raise AssetError(f"dataset {remote_repo_id} has no resolved commit")
@@ -203,7 +202,6 @@ def pull_assets(
             AssetSyncResult(
                 selection.repository_name,
                 remote_repo_id,
-                collection_slug,
                 commit,
                 observations,
             )
@@ -250,7 +248,6 @@ def push_assets(
                 AssetSyncResult(
                     selection.repository_name,
                     checkpoint.repo_id,
-                    checkpoint.collection_slug or "",
                     checkpoint.commit,
                     asset_status([task.folder.root]),
                 )
@@ -267,7 +264,7 @@ def asset_repo_id(repository_name: str) -> str:
     return f"{asset_namespace()}/{repository_name}"
 
 
-def asset_collection(api: HfApi, collection: str | None = None, *, create: bool) -> str:
+def asset_collection(api: HfApi, collection: str | None = None) -> str:
     """Resolve the namespace's assets collection without depending on the caller's account."""
     namespace = asset_namespace()
     configured = collection or os.environ.get("ALE_ASSETS_COLLECTION", "").strip()
@@ -280,7 +277,7 @@ def asset_collection(api: HfApi, collection: str | None = None, *, create: bool)
     matches = [item for item in api.list_collections(owner=namespace) if item.title == "assets"]
     if len(matches) == 1:
         return matches[0].slug
-    if not matches and create:
+    if not matches:
         return api.create_collection(
             "assets", namespace=namespace, private=True, exists_ok=True
         ).slug
@@ -293,9 +290,7 @@ def ensure_asset_repository(repository_name: str, collection: str | None = None)
     api = HfApi(token=hf_token())
     repo_id = asset_repo_id(repository_name)
     api.create_repo(repo_id, repo_type="dataset", private=True, exist_ok=True)
-    if not api.repo_info(repo_id, repo_type="dataset").private:
-        raise AssetError(f"asset dataset must be private: {repo_id}")
-    slug = asset_collection(api, collection, create=True)
+    slug = asset_collection(api, collection)
     api.add_collection_item(slug, repo_id, "dataset", exists_ok=True)
     return repo_id, slug
 

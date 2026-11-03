@@ -1,8 +1,6 @@
 # ALE documentation
 
-This directory is the maintained description of ALE. Feature work under the repository's
-top-level `specs/` directory is temporary planning material; once a feature lands, its
-lasting contract belongs here.
+This directory is the maintained description of ALE.
 
 | Need | Read |
 |---|---|
