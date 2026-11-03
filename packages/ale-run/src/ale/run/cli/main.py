@@ -331,6 +331,10 @@ def assets_pull(
         list[Path],
         typer.Argument(help="One or more Task or Task collection paths"),
     ],
+    collection: Annotated[
+        str | None,
+        typer.Option("--collection", help="Hugging Face collection slug"),
+    ] = None,
     force: Annotated[
         bool,
         typer.Option("--force", help="Replace existing selected asset roots"),
@@ -342,7 +346,7 @@ def assets_pull(
 ) -> None:
     """Pull selected asset roots directly into their Task folders."""
     try:
-        results = pull_assets(paths, force=force, revision=revision)
+        results = pull_assets(paths, collection=collection, force=force, revision=revision)
     except AleError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
@@ -371,7 +375,10 @@ def assets_push(
 
 def _print_asset_sync(results: Sequence[AssetSyncResult]) -> None:
     for result in results:
-        typer.echo(f"ok {result.repository} dataset={result.remote_repo_id} commit={result.commit}")
+        typer.echo(
+            f"ok {result.repository} dataset={result.remote_repo_id} "
+            f"collection={result.collection_slug} commit={result.commit}"
+        )
         for task in result.tasks:
             typer.echo(f"  {task.task_path} {'dirty' if task.dirty else 'clean'}")
 

@@ -181,18 +181,19 @@ def test_assets_without_a_build_are_reported(tmp_path: Path) -> None:
     assert "environment/assets is unused" in messages(task)
 
 
-def test_assets_cli_accepts_multiple_paths_and_force(
+def test_assets_cli_accepts_multiple_paths_collection_and_force(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: dict[str, object] = {}
 
-    def pull(paths, *, force, revision):  # type: ignore[no-untyped-def]
-        seen.update(paths=paths, force=force, revision=revision)
+    def pull(paths, *, collection, force, revision):  # type: ignore[no-untyped-def]
+        seen.update(paths=paths, collection=collection, force=force, revision=revision)
         return (
             SimpleNamespace(
                 repository="repo",
                 remote_repo_id="agents-last-exam/repo",
+                collection_slug="agents-last-exam/assets-1",
                 commit="a" * 40,
                 tasks=(),
             ),
@@ -209,6 +210,8 @@ def test_assets_cli_accepts_multiple_paths_and_force(
             "pull",
             str(first),
             str(second),
+            "--collection",
+            "agents-last-exam/assets-1",
             "--force",
             "--revision",
             "a" * 40,
@@ -217,6 +220,7 @@ def test_assets_cli_accepts_multiple_paths_and_force(
     assert result.exit_code == 0, result.output
     assert seen == {
         "paths": [first, second],
+        "collection": "agents-last-exam/assets-1",
         "force": True,
         "revision": "a" * 40,
     }

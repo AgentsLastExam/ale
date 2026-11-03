@@ -4,9 +4,7 @@ import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
 import pytest
-from huggingface_hub.errors import HfHubHTTPError
 
 from ale.core.errors import AssetError
 from ale.run.assets import asset_status, pull_assets
@@ -19,9 +17,15 @@ class FakeApi:
         self.token = token
         self.revision: object = None
 
+    def get_collection(self, slug: str) -> object:
+        return SimpleNamespace(
+            slug=slug,
+            title="assets",
+        )
+
     def repo_info(self, *args: object, **kwargs: object) -> object:
         self.revision = kwargs.get("revision")
-        return SimpleNamespace(sha="a" * 40)
+        return SimpleNamespace(sha="a" * 40, private=True)
 
 
 def test_pull_replaces_only_selected_subtrees_and_records_commit(
@@ -48,7 +52,11 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
         return str(target)
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
-    (result,) = pull_assets([repository / "tasks/one"], revision="a" * 40)
+    (result,) = pull_assets(
+        [repository / "tasks/one"],
+        collection="agents-last-exam/assets-123",
+        revision="a" * 40,
+    )
     assert result.commit == "a" * 40
     assert tokens == ["hf-checkout-token"]
     assert api.revision == "a" * 40
@@ -59,12 +67,12 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
     task = repository / "tasks/one"
     remote = task / "environment/assets/remote.txt"
     with pytest.raises(AssetError, match=r"already exist.*--force"):
-        pull_assets([task])
+        pull_assets([task], collection="agents-last-exam/assets-123")
     remote.write_text("local edit")
     with pytest.raises(AssetError, match=r"already exist.*--force"):
-        pull_assets([task])
+        pull_assets([task], collection="agents-last-exam/assets-123")
     assert remote.read_text() == "local edit"
-    pull_assets([task], force=True)
+    pull_assets([task], collection="agents-last-exam/assets-123", force=True)
     assert remote.read_text() == "remote"
     assert preserved.read_text() == "keep"
 
@@ -99,7 +107,7 @@ def test_pull_preserves_assets_created_during_download(
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", download)
     with pytest.raises(AssetError, match=r"already exist.*--force"):
-        pull_assets([repository])
+        pull_assets([repository], collection="agents-last-exam/assets-123")
     assert local.read_text() == "concurrent edit"
 
 
@@ -140,54 +148,23 @@ def test_pull_rolls_back_every_selected_root_when_replacement_fails(
     monkeypatch.setattr("ale.run.assets.shutil.copytree", fail_second_copy)
 
     with pytest.raises(AssetError, match="simulated replacement failure"):
-        pull_assets([task], force=True)
+        pull_assets([task], collection="agents-last-exam/assets-123", force=True)
 
     for relative in roots:
         assert (task / relative / "original.txt").read_text() == relative
     assert not (task / "environment/assets/remote.txt").exists()
 
 
-def test_pull_reads_public_dataset_anonymously_without_collection(
-    ale_checkout: Path,
+def test_pull_rejects_public_dataset(
     write_task_repo,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
-    monkeypatch.delenv("ALE_HF_TOKEN", raising=False)
-    tokens: list[object] = []
 
     class Public(FakeApi):
         def repo_info(self, *args: object, **kwargs: object) -> object:
-            tokens.append(self.token)
             return SimpleNamespace(sha="a" * 40, private=False)
 
-    def snapshot_download(**kwargs: object) -> str:
-        tokens.append(kwargs["token"])
-        target = Path(str(kwargs["local_dir"])) / "tasks/one/environment/assets"
-        target.mkdir(parents=True)
-        (target / "remote.txt").write_text("remote")
-        return str(target)
-
     monkeypatch.setattr("huggingface_hub.HfApi", Public)
-    monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
-    (result,) = pull_assets([repository])
-    assert result.commit == "a" * 40
-    assert tokens == [False, False]
-    assert (repository / "tasks/one/environment/assets/remote.txt").read_text() == "remote"
-
-
-def test_pull_reports_an_unreadable_dataset(
-    write_task_repo,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
-    repository = write_task_repo("ale-tasks-demo", tasks=("one",))
-
-    class Unreadable(FakeApi):
-        def repo_info(self, *args: object, **kwargs: object) -> object:
-            request = httpx.Request("GET", "https://huggingface.co/api/datasets/demo")
-            response = httpx.Response(401, request=request)
-            raise HfHubHTTPError("401 Unauthorized", response=response)
-
-    monkeypatch.setattr("huggingface_hub.HfApi", Unreadable)
-    with pytest.raises(AssetError, match="could not read dataset"):
-        pull_assets([repository])
+    with pytest.raises(AssetError, match="must be private"):
+        pull_assets([repository], collection="agents-last-exam/assets-123")

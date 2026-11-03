@@ -27,7 +27,7 @@ decided with this design's implementation.
 
 ## Publish and restore
 
-Use the existing dataset `agents-last-exam/<source-repository-name>`:
+Use the existing private dataset `agents-last-exam/<source-repository-name>`:
 
 ```text
 softwares/editor_1/Editor.msix      # one shared package directory

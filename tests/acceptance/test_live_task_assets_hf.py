@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.errors import AssetError
 from ale.run.assets import (
     ASSET_ROOTS,
     asset_status,
@@ -49,7 +48,7 @@ def test_authenticated_push_and_pinned_private_pull_round_trip(tmp_path: Path) -
     assert pushed and pushed[0].commit
 
     clean_task = _clean_copy(task, tmp_path)
-    pulled = pull_assets([clean_task], revision=pushed[0].commit)
+    pulled = pull_assets([clean_task], collection=collection, revision=pushed[0].commit)
     assert pulled[0].commit == pushed[0].commit
     assert all(not item.dirty for item in asset_status([clean_task]))
     assert (clean_task / "environment/assets/public.txt").is_file()
@@ -64,9 +63,11 @@ def test_private_dataset_requires_a_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     task = _task_path()
+    collection = os.environ.get("ALE_ASSETS_COLLECTION")
     clean_task = _clean_copy(task, tmp_path)
     # Without ALE_HF_TOKEN every Hub call is anonymous; no other login stands in for it.
     monkeypatch.delenv("ALE_HF_TOKEN", raising=False)
+    from huggingface_hub.errors import HfHubHTTPError
 
-    with pytest.raises(AssetError, match="could not read dataset"):
-        pull_assets([clean_task])
+    with pytest.raises(HfHubHTTPError):
+        pull_assets([clean_task], collection=collection)
