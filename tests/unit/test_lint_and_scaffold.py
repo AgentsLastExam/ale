@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from tests.support import VM_BASE
+from tests.support import edit_task_config as edit
 from typer.testing import CliRunner
 
 from ale.core.errors import TaskDefinitionError
@@ -104,11 +105,38 @@ def test_fixed_installation_in_setup_is_reported(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "base", ["python:3.12", "ghcr.io/agentslastexam/container-ubuntu22-base:latest", "debian"]
+    "base",
+    [
+        "python:3.12",
+        "ghcr.io/agentslastexam/container-ubuntu22-base:0.1.1",
+        "localhost:5000/base:1",
+        "debian@sha256:" + "a" * 64,
+        "scratch",
+        "${BASE}",
+    ],
 )
-def test_any_base_image_is_accepted(tmp_path: Path, base: str) -> None:
+def test_any_base_image_at_an_exact_version_is_accepted(tmp_path: Path, base: str) -> None:
     task = scaffold_task(tmp_path / "fresh")
     (task / "environment" / "Dockerfile").write_text(f"FROM {base}\n")
+    assert messages(task) == ""
+
+
+@pytest.mark.parametrize("base", ["debian", "python:latest", "localhost:5000/base"])
+def test_an_image_that_can_change_under_a_task_is_reported(tmp_path: Path, base: str) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    dockerfile = task / "environment" / "Dockerfile"
+    dockerfile.write_text(f"FROM --platform=linux/amd64 {base} AS build\nFROM build\n")
+    assert f"{base} can change" in messages(task)
+    dockerfile.write_text("FROM python:3.12\n")
+    edit(task, {"environment": {"docker_image": base}})
+    assert f"{base} can change" in messages(task)
+
+
+def test_a_public_network_needs_its_reason(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    edit(task, {"agent": {"network_mode": "public"}})
+    assert "needs a reason" in messages(task)
+    edit(task, {"metadata": {"network_justification": "reads a live catalog"}})
     assert messages(task) == ""
 
 

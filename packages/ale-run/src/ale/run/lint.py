@@ -33,6 +33,7 @@ _VM_RESERVED_NAMES = {
     "loader.conf",
     "mkosi.conf",
 }
+_FROM = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", re.I | re.M)
 _TOP_LEVEL = {
     TASK_CONFIG,
     INSTRUCTION,
@@ -167,7 +168,50 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
             )
         )
     findings.extend(_check_variables(folder.root / TASK_CONFIG, config))
+    findings.extend(_check_image_versions(folder, config))
+    agent, metadata = config.get("agent"), config.get("metadata")
+    if (
+        isinstance(agent, dict)
+        and agent.get("network_mode") == "public"
+        and not (isinstance(metadata, dict) and metadata.get("network_justification"))
+    ):
+        findings.append(
+            Finding(
+                folder.root / TASK_CONFIG,
+                "network_mode 'public' needs a reason in [metadata].network_justification",
+            )
+        )
     return findings
+
+
+def _moves(image: str) -> bool:
+    """Whether ``image`` can change under a Task: no digest, and no tag or ``latest``."""
+    if "@" in image or "$" in image:  # a build argument names it elsewhere
+        return False
+    return image.rpartition("/")[2].partition(":")[2] in ("", "latest")
+
+
+def _check_image_versions(folder: TaskFolder, config: dict[str, object]) -> list[Finding]:
+    """Every image a Task names, built on or used directly, at an exact version."""
+    named: list[tuple[Path, str]] = []
+    for dockerfile in (folder.dockerfile, folder.verifier_dockerfile):
+        if dockerfile is None:
+            continue
+        stages = _FROM.findall(dockerfile.read_text(encoding="utf-8", errors="replace"))
+        aliases = {alias.lower() for _, alias in stages} | {"scratch"}
+        named += [(dockerfile, base) for base, _ in stages if base.lower() not in aliases]
+    environment = config.get("environment")
+    verifier = config.get("verifier")
+    nested = verifier.get("environment") if isinstance(verifier, dict) else None
+    for table in (environment, nested):
+        image = table.get("docker_image") if isinstance(table, dict) else None
+        if isinstance(image, str):
+            named.append((folder.root / TASK_CONFIG, image))
+    return [
+        Finding(path, f"{image} can change under the Task; name an exact version")
+        for path, image in named
+        if _moves(image)
+    ]
 
 
 def _check_variables(path: Path, config: dict[str, object]) -> list[Finding]:

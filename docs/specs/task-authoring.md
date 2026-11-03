@@ -197,7 +197,7 @@ holding them) fail, because allowed traffic leaves from the Host. An allowlist c
 needs a client that honors the proxy variables, so raw TCP to an allowed address stays blocked.
 Setup and verification network is framework-controlled; its enforcement is specified in
 [Security](security.md). The quality standard owns resource feasibility and network-policy
-selection. A public-network justification uses `[metadata].network_justification`.
+selection. `ale lint` requires `[metadata].network_justification` for `public`.
 
 `[environment]` resources are the whole Sandbox's allocation. The image's own processes, such
 as the GUI base images' desktop, share it with the agent and every program the agent starts,
@@ -255,8 +255,9 @@ permission, and piece of initial state required by the Task. The Linux bases are
 - VM: `ghcr.io/agentslastexam/vm-ubuntu24-base` (Ubuntu 24.04).
 
 Name an exact version, such as `:0.1.1`, never `latest`; `ale new-task` writes the
-engine's current version. A Task keeps building from the version it names until its
-author moves it ([Sandbox image](sandbox-image.md#versions)).
+engine's current version, and `ale lint` reports a `FROM` or `docker_image` with no tag or
+`latest`. A Task keeps building from the version it names until its author moves it
+([Sandbox image](sandbox-image.md#versions)).
 
 The submitted initial environment must be reproducible from `environment/`; an exploratory
 sandbox snapshot is not Task source. A container image builds `environment/Dockerfile` with
