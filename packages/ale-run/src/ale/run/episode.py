@@ -321,12 +321,15 @@ class _Artifacts(ArtifactSink):
     retained: bool = True
     collected: list[str] = field(default_factory=list)
     entries: list[dict[str, object]] = field(default_factory=list)
+    truncated: list[str] = field(default_factory=list)
 
     @property
     def root(self) -> Path:
         return self.run_dir / "artifacts"
 
-    async def collect(self, sandbox: Sandbox, source: str, name: str) -> None:
+    async def collect(
+        self, sandbox: Sandbox, source: str, name: str, exclude: tuple[str, ...] = ()
+    ) -> None:
         if not self.enabled:
             return
         logger = logging.getLogger("ale.execution")
@@ -345,11 +348,13 @@ class _Artifacts(ArtifactSink):
         captured = {entry["source"] for entry in self.entries}
         try:
             probe = await sandbox.exec(
-                [python, "-c", script, "inspect", source], identity=Identity.FRAMEWORK
+                [python, "-c", script, "inspect", source, *exclude], identity=Identity.FRAMEWORK
             )
             if not probe.ok:
                 raise OSError(probe.stderr or "artifact inspection failed")
             details = json.loads(probe.stdout)
+            if details["truncated"]:
+                self.truncated.append(source)
             for reason in details["skipped"]:
                 logger.warning("artifact skipped: %s", reason)
             for item in details["entries"]:
@@ -410,6 +415,9 @@ class _Artifacts(ArtifactSink):
         return self.root / name
 
     async def restore(self, sandbox: Sandbox) -> None:
+        if self.truncated:
+            # A verifier scoring part of the output gives a wrong score, not a low one.
+            raise TaskError(f"artifacts too large to copy whole: {', '.join(self.truncated)}")
         if not self.enabled or not self.entries:
             return
         python = "python.exe" if sandbox.request.os is OperatingSystem.WINDOWS else "python3"

@@ -55,7 +55,7 @@ see or control the desktop.
 
 ## Guest contract
 
-- Task configuration: `[environment].os = "windows"`, `[ale].sandbox = "vm"`.
+- Task configuration: `[environment].os = "windows"`.
 - Stage entries: `environment/setup/setup.ps1`, `solution/solve.ps1`, and `tests/test.ps1`.
 - Framework root: `C:\ProgramData\ALE`; agent home: `C:\Users\user`.
 - The base signs the agent account in automatically (Winlogon `AutoAdminLogon` and
@@ -65,7 +65,7 @@ see or control the desktop.
   the disk offline, with a boot service that starts guestd and Cua Driver elevated in the
   agent's session; guestd then provides exec, file transfer, health, lifecycle, and the
   shared Sandbox protocol. Agent commands use the limited desktop token unless
-  `[ale].sudo` grants Administrator access.
+  `[agent].sudo` grants Administrator access.
 - Cua Driver exclusively provides screenshots and desktop input.
 
 Autonomous CLI Harnesses use native Windows Node.js and Git Bash; their CLI packages are

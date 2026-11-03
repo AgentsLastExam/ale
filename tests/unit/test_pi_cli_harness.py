@@ -116,7 +116,7 @@ async def test_skills_and_mcp_servers_are_direct_native_tools(tmp_path: Path) ->
         server=StreamableHttpMcpServer(
             name="remote", transport="streamable-http", url="https://mcp.test/mcp"
         ),
-        source_layers=("task",),
+        source_layers=("run",),
         declared_sources=("remote",),
         digest="sha256:" + "e" * 64,
         reportable=True,

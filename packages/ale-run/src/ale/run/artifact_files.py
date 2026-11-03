@@ -12,23 +12,28 @@ import json
 import os
 import stat
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 MAX_DEPTH = 64
 MAX_ENTRIES = 100_000
 
 
-def inspect(pattern: str) -> dict[str, list]:
+def inspect(pattern: str, exclude: Sequence[str] = ()) -> dict:
     entries: list[dict] = []
     skipped: list[str] = []
     seen: set[str] = set()
     visited = 0
+    truncated = False
 
     def visit(path: Path, parts: tuple[str, ...], depth: int) -> None:
-        nonlocal visited
+        nonlocal visited, truncated
+        if path != prefix and _excluded(path.relative_to(prefix).parts, exclude):
+            return
         visited += 1
         if depth > MAX_DEPTH:
             skipped.append(f"{path}: directory depth limit reached")
+            truncated = True
             return
         if visited > MAX_ENTRIES:
             raise ValueError("artifact traversal limit reached")
@@ -75,12 +80,13 @@ def inspect(pattern: str) -> dict[str, list]:
         prefix /= parts[0]
         parts = parts[1:]
     if (link := _link_on(prefix.parent)) is not None:
-        return {"entries": [], "skipped": [f"{link}: link"]}
+        return {"entries": [], "skipped": [f"{link}: link"], "truncated": False}
     try:
         visit(prefix, parts, 0)
     except ValueError as exc:
         skipped.append(str(exc))
-    return {"entries": entries, "skipped": skipped}
+        truncated = True
+    return {"entries": entries, "skipped": skipped, "truncated": truncated}
 
 
 def read(path: str) -> None:
@@ -95,6 +101,12 @@ def read(path: str) -> None:
             raise ValueError("artifact is no longer a regular file")
         while block := source.read(1024 * 1024):
             sys.stdout.buffer.write(block)
+
+
+def _excluded(parts: tuple[str, ...], patterns: Sequence[str]) -> bool:
+    """Whether a pattern matches ``parts``, or their tail: ``tar --exclude`` is unanchored."""
+    tails = ["/".join(parts[index:]) for index in range(len(parts))]
+    return any(fnmatch.fnmatch(tail, pattern) for tail in tails for pattern in patterns)
 
 
 def _is_link(info: os.stat_result) -> bool:
@@ -119,6 +131,6 @@ def _link_on(path: Path) -> Path | None:
 
 if __name__ == "__main__":
     if sys.argv[1] == "inspect":
-        print(json.dumps(inspect(sys.argv[2])))
+        print(json.dumps(inspect(sys.argv[2], sys.argv[3:])))
     else:
         read(sys.argv[2])

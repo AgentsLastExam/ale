@@ -57,7 +57,7 @@ def with_oracle(task_root: Path, body: str) -> None:
 
 
 def declare_sudo(task_root: Path) -> None:
-    edit_task_config(task_root, {"ale": {"sudo": True}})
+    edit_task_config(task_root, {"agent": {"sudo": True}})
 
 
 def collected(result, name: str) -> str:  # type: ignore[no-untyped-def]

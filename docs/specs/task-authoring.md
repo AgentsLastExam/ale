@@ -7,9 +7,11 @@ the [Task quality standard](task-quality-standard.md); scoring and Judge APIs be
 [Verification](verification.md).
 
 The format is Harbor's (`task.toml` schema 1.4, `environment/`, `tests/`, `solution/`): a
-field ALE implements as Harbor does keeps Harbor's name and place, and what ALE adds or means
-differently lives in an `[ale]` table or a file Harbor does not read, so no Harbor name carries
-another meaning. ALE runs Tasks in its own runtime; a Task need not run unmodified on Harbor.
+field ALE implements as Harbor does keeps Harbor's name, table and meaning. A field ALE adds
+sits in the Harbor table of what it configures, under a name Harbor gives no other meaning: a
+separate namespace would not stop one name meaning two things, and would have to mirror every
+table it extends. ALE runs Tasks in its own runtime and a Task reaches Harbor through a
+conversion, so `schema_version = "1.4+ale.1"` marks the file as ALE's.
 
 ## Task folder
 
@@ -26,88 +28,122 @@ my-task/
 │   ├── test.sh                # test.ps1 on Windows
 │   ├── verify.py
 │   └── Dockerfile             # optional separate-verifier image (context tests/)
-├── solution/                  # known-good solution for validation
-│   └── solve.sh               # solve.ps1 on Windows
-└── tools/                     # optional Task-requested agent resources
-    ├── skills/<name>/SKILL.md
-    └── mcp/<server>.toml
+└── solution/                  # known-good solution for validation
+    └── solve.sh               # solve.ps1 on Windows
 ```
 
 Required files are `task.toml`, `instruction.md`, and the tests and solution entries for the
 Task OS: `tests/test.sh` and `solution/solve.sh` on Linux, `test.ps1` and `solve.ps1` on
-Windows. `[ale].sandbox` and the OS decide what `environment/` builds. A container Task builds
-`environment/Dockerfile` or uses `[environment].docker_image`. A Linux VM Task builds
-`environment/Dockerfile` or uses `[ale].vm_image`. A Windows Task builds `environment/build.ps1`
-on `[ale].vm_base`, or uses `[ale].vm_image` alone. Every image build has `environment/` as its
-context, `setup/` excluded. A Linux image named directly wins over a build definition.
+Windows. `[environment]` decides what `environment/` builds. A container Task builds
+`environment/Dockerfile` or uses `docker_image`. A Linux VM Task sets `vm = true` to build
+`environment/Dockerfile`, or uses `vm_image`. A Windows Task builds `environment/build.ps1` on
+`vm_base`, or uses `vm_image` alone. Every image build has `environment/` as its context,
+`setup/` excluded. A Linux image named directly wins over a build definition.
 
 ## task.toml
 
-`task.toml` is strict. A Harbor field whose default differs from ALE's is required, so its
-value never depends on which runtime reads it. An unknown key fails, and a Harbor key ALE does
-not implement fails with a message saying so. The annotated shape below describes every key;
-omit optional ones the Task does not use.
+`task.toml` is strict, and small. Only `schema_version` and `[task].name` are required; every
+other key has a default, so a Task states what makes it different. An unknown key fails, and a
+Harbor key ALE does not implement fails with a message saying so. The annotated shape below
+describes every key, with `ALE` marking the ones Harbor does not have.
 
 ```toml
-schema_version = "1.4"                      # required; exactly "1.4"
-artifacts = ["/home/user/output", "/home/user/games/*.sgf"]  # optional outcome paths
+schema_version = "1.4+ale.1"                # required; exactly this
+artifacts = [                               # outcome paths
+  "output",                                 # below where the agent starts
+  "/home/user/games/*.sgf",
+  { source = "/srv/app", exclude = [".venv", "*.pyc"] },
+]
 
 [task]                                      # required
 name = "agentslastexam/my-task"             # required org/name, unique in its collection
-description = "Summarize the corpus."       # optional; descriptive
-version = "1.0"                             # optional; descriptive
-authors = [{ name = "Ada", email = "ada@example.org" }]  # optional; descriptive
-keywords = ["document-analysis"]            # optional; descriptive
+description = "Summarize the corpus."       # descriptive
+version = "1.0"                             # descriptive
+authors = [{ name = "Ada", email = "ada@example.org" }]  # descriptive
+keywords = ["document-analysis"]            # descriptive
 
-[metadata]                                  # optional free-form values; no runtime behavior
+[metadata]                                  # free-form values; no runtime behavior
 network_justification = "the Task reads one publisher's live catalog"
 
-[environment]                               # required: the solver's machine
-os = "linux"                                # optional: linux | windows; default linux
+[environment]                               # the solver's machine
+os = "linux"                                # linux | windows; default linux
+vm = false                                  # ALE; a Linux VM built from a Dockerfile
 # docker_image = "registry.example/image:tag"  # a container image used directly
-cpus = 1                                    # required; integer >= 1
-memory_mb = 4096                            # required; integer >= 128
-storage_mb = 8192                           # optional writable storage; integer >= 256
-gpus = 0                                    # optional GPU count, not indices; default 0
-env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # optional; see Variables
+# vm_image = "/path/to/disk.qcow2"          # ALE; a VM image used directly
+# vm_base = "/path/to/windows-base.qcow2"   # ALE; the base environment/build.ps1 builds on
+build_timeout_sec = 3600                    # seconds the Task's own build may run; default 3600
+cpus = 1                                    # whole CPUs; default 1
+memory_mb = 4096                            # default 4096
+storage_mb = 8192                           # writable storage; default the Provider's
+gpus = 0                                    # GPU count, not indices; default 0
+env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # see Variables
+skills_dir = "/skills"                      # absolute; the Task's Skills in the image
 
-[agent]                                     # required: the evaluated agent and the oracle
-user = "user"                               # required account; must exist in the image
-timeout_sec = 900                           # required positive seconds
-network_mode = "allowlist"                  # required: no-network | allowlist | public
+[[environment.mcp_servers]]                 # one table per server
+name = "search"
+transport = "stdio"                         # required: stdio | streamable-http
+command = "/opt/search-mcp/server"          # stdio: a program in the image
+args = ["--index", "/srv/index"]            # stdio
+# url = "https://mcp.example.org/mcp"       # streamable-http
+
+[agent]                                     # the evaluated agent and the oracle
+user = "user"                               # account; must exist in the image; default user
+timeout_sec = 900                           # positive seconds; default 900
+network_mode = "allowlist"                  # no-network | allowlist | public; default no-network
 allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
+sudo = false                                # ALE; working sudo (Administrator on Windows)
+# workdir = "project"                       # ALE; where the agent starts; default its home
 
-[verifier]                                  # required
-timeout_sec = 300                           # required positive seconds
-environment_mode = "separate"               # optional: shared | separate
-env = { REFERENCE_DB = "${REFERENCE_DB}" }  # optional; the verifier only
+[verifier]
+timeout_sec = 600                           # positive seconds; default 600
+environment_mode = "separate"               # shared | separate
+env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
 
-[verifier.environment]                      # optional: a separate verifier's own sandbox
+[verifier.environment]                      # a separate verifier's own sandbox
+vm = false                                  # ALE; tests/Dockerfile builds a VM
 # docker_image = "registry.example/verifier:tag"  # a container image used directly
-cpus = 1                                    # required in this table
-memory_mb = 4096                            # required in this table
-storage_mb = 8192                           # optional
-gpus = 0                                    # optional; default 0
-env = {}                                    # optional; replaces [environment].env
+# vm_image = "/path/to/verifier.qcow2"      # ALE; a VM image used directly
+build_timeout_sec = 3600                    # default 3600
+cpus = 1                                    # default [environment].cpus
+memory_mb = 4096                            # default [environment].memory_mb
+storage_mb = 8192                           # default the Provider's
+gpus = 0                                    # default 0
+env = {}                                    # replaces [environment].env
 
-[solution]                                  # optional
-env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # optional; the oracle only
-
-[ale]                                       # optional
-sandbox = "container"                       # container | vm; default container
-# vm_image = "/path/to/disk.qcow2"            # a VM image used directly
-# vm_base = "/path/to/windows-base.qcow2"     # the base environment/build.ps1 builds on
-sudo = false                                # working sudo (Administrator on Windows) for user
-skills = ["tools/skills/reviewer"]          # Task Skill directories
-mcp_servers = ["tools/mcp/search.toml"]     # Task MCP descriptors
-
-# [ale.verifier]                            # optional: a separate verifier in a VM
-# sandbox = "vm"
-# vm_image = "/path/to/verifier.qcow2"      # used directly; without it, tests/Dockerfile
+[solution]
+env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
 ```
 
-A Windows Task sets `os = "windows"` and `[ale].sandbox = "vm"`. `vm_image` and `vm_base` are
-mutually exclusive; `vm_base` requires Windows and `environment/build.ps1`.
+`vm = true` is needed only for a Linux VM built from a Dockerfile: `os = "windows"`, `vm_image`
+and `vm_base` already mean a VM. `vm_image` and `vm_base` are mutually exclusive; `vm_base`
+requires Windows and `environment/build.ps1`. `[agent].workdir` is below the agent's home when
+relative, so a Task need not spell its home per OS. It must be a directory when the agent
+starts; stages keep their fixed directories.
+
+Harbor's other fields fall into two groups. Nothing in ALE replaces multi-step Tasks (`steps`,
+`multi_step_reward_strategy`), compose sidecars (`docker-compose.yaml`, which `ale lint` refuses,
+an artifact's `service`, `[[verifier.collect]]`), or GPU type and TPU selection (`gpu_types`,
+`tpu`). ALE's design covers the rest. `environment/setup/` can wait for a service, so there is no
+`healthcheck`. Stages run in fixed directories under the framework's identity, so there is no
+`[environment].workdir` or `[verifier].user`. `[agent].network_mode` is the one network setting.
+ALE keeps its copies in an inventory of its own, so an artifact has no `destination`. An origin
+belongs in `[metadata]`, so there is no `source`.
+
+These values differ from Harbor's:
+
+- A Sandbox always has a size and a time limit, and its network stays closed until a Task opens
+  it, so some defaults differ: `cpus` is 1, `memory_mb` 4096 and `[agent].timeout_sec` 900, where
+  Harbor sets no limit; `[agent].user` is `user`, not the image's `USER`;
+  `[agent].network_mode` is `no-network`, not `public`; `build_timeout_sec` is 3600, not 600.
+- `os = "windows"` is a VM with `.ps1` stage entries, because ALE runs Windows in VMs, where
+  PowerShell is always available; Harbor's is a Windows container with `.bat` entries.
+- `artifacts` may be globs, and nothing is collected undeclared, where Harbor always collects
+  `/logs/artifacts`.
+- `${NAME}` in an `env` table resolves from the checkout's `.env`, not the process environment,
+  and an empty value counts as unset; see [Variables](#variables).
+- A `skills_dir` that does not exist fails the Episode.
+- `tests/Dockerfile` without separate verification fails, where Harbor ignores it.
+- The verifier writes `reward.json` only, with `reward` between 0 and 1; see [tests/](#tests).
 
 When the instruction requires deliverable files, every instructed destination must equal or be
 contained by a declared `artifacts` path, or matched by a declared glob. Commands and examples in `instruction.md` must write to
@@ -115,12 +151,19 @@ that same destination; do not declare one path while instructing the agent to us
 
 ### Artifact copying
 
-`artifacts` accepts absolute file paths, directory paths, and globs such as `*.sgf` or
-`**/*.json`. ALE copies each match according to its actual type and skips links, missing
-paths, and copy failures. No link is followed anywhere on an artifact's path, a directory
-above it included: one the agent made could point at a file only the framework may read.
-These are fixed defaults; the verifier decides how to score the resulting output. Copying uses the framework's
-privileged identity on every supported OS; see [Permissions](sandbox-image.md#permissions).
+`artifacts` accepts file paths, directory paths, and globs such as `*.sgf` or `**/*.json`. A
+relative path is below the directory the agent starts in. A table adds `exclude`, patterns that
+match as `tar --exclude` does, as in Harbor: `.venv` is that name at any depth and `*.pyc` every
+such file. ALE never walks what it leaves out, so a dependency tree costs nothing.
+
+ALE copies each match according to its actual type and skips links, missing paths, and copy
+failures. No link is followed anywhere on an artifact's path, a directory above it included:
+one the agent made could point at a file only the framework may read. These are fixed
+defaults; the verifier decides how to score the resulting output. A copy stops at 100,000
+entries or 64 directories deep. An artifact cut off there fails a separate verifier's Episode
+as a Task error, because scoring part of an output gives a wrong score rather than a low one.
+Copying uses the framework's privileged identity on every supported OS; see
+[Permissions](sandbox-image.md#permissions).
 
 Separate verification always transfers the declared artifacts to its verifier through the
 Host, as in Harbor. Run-level `artifacts.collect` decides only whether the episode keeps a
@@ -134,15 +177,15 @@ shared verification.
 Verification is shared unless `environment_mode = "separate"` or `[verifier.environment]`
 says otherwise, as in Harbor. Separate verification runs in an independent sandbox with the
 `[verifier.environment]` resources, or the solver's without sudo when that table is absent.
-Its image is the first of `[verifier.environment].docker_image` or `[ale.verifier].vm_image`,
-`tests/Dockerfile` (a VM when `[ale.verifier].sandbox = "vm"`), and the solver image.
-`[ale.verifier]` and `tests/Dockerfile` require separate verification. A Windows verifier
-reuses the solver image or names a `vm_image`. The Verification APIs and records are defined
-only in [Verification](verification.md).
+Its image is the first of `[verifier.environment].docker_image` or `vm_image`,
+`tests/Dockerfile` (a VM with `[verifier.environment].vm = true`), and the solver image.
+`tests/Dockerfile` requires separate verification. A Windows verifier reuses the solver image
+or names a `vm_image`. The Verification APIs and records are defined only in
+[Verification](verification.md).
 
 ### Resources and network
 
-`[ale].sandbox` selects container or VM behavior; Tasks never name a Provider.
+`[environment]` selects container or VM behavior; Tasks never name a Provider.
 `[agent].network_mode` applies to the evaluated agent and the oracle: `no-network` reaches only
 the Gateway, `allowlist` also the declared hosts, `public` everything. Setup and verification
 network is framework-controlled; its enforcement is specified in [Security](security.md).
@@ -211,7 +254,8 @@ The submitted initial environment must be reproducible from `environment/`; an e
 sandbox snapshot is not Task source. A container image builds `environment/Dockerfile` with
 `environment/` as context, `setup/` excluded. Build-local scripts may implement non-trivial
 installation and configuration. Build-only large inputs can use read-only BuildKit mounts;
-runtime data belongs in the image.
+runtime data belongs in the image. `build_timeout_sec` bounds the Task's own build, which is not
+part of the image's identity, so changing it rebuilds nothing.
 
 ```dockerfile
 FROM ghcr.io/agentslastexam/container-ubuntu22-base:0.1.1
@@ -230,9 +274,6 @@ A Windows Task declares a base and provides `environment/build.ps1`:
 ```toml
 [environment]
 os = "windows"
-
-[ale]
-sandbox = "vm"
 vm_base = "/path/to/windows-base.qcow2"
 ```
 
@@ -250,11 +291,11 @@ Copy-Item .\input.txt "$env:ALE_HOME\input.txt"
 `build.ps1` with that directory as cwd and `ALE_HOME` set to the agent home, installs ALE's
 current guestd and Cua Driver, then saves the configured qcow2. Scripts may use WinGet,
 Chocolatey, or local unattended installers; pin package versions where supported and check
-native command exit codes. Scripts must finish within one hour; nonzero exits fail the build. Suppress
+native command exit codes. Scripts must finish within `build_timeout_sec`; nonzero exits fail the build. Suppress
 installer reboots; builds requiring a mid-script restart are unsupported. ALE owns shutdown.
 Build-only materials are removed before saving; copy required files to their final locations.
 Only that context is staged, and the whole build is cached by base, builder, and every file
-in it. A prepared image used directly is named by `[ale].vm_image` without `build.ps1`.
+in it. A prepared image used directly is named by `[environment].vm_image` without `build.ps1`.
 
 ## environment/setup/
 
@@ -275,13 +316,26 @@ refer to the declared initial environment and artifacts. Use literal sandbox pat
 `/home/user/...` on Linux and `C:\Users\user\...` on Windows. ALE does not add or rewrite a
 workspace prefix.
 
-## tools/
+## Skills and MCP servers
 
 Skills and MCP are optional. Add them only when the Task concept or expert feedback explicitly
-requires a specific Skill or MCP server. Put Task-owned resources below `tools/skills/` and
-`tools/mcp/` and declare them in `[ale].skills` and `[ale].mcp_servers`; never depend on
-ambient Host configuration. ALE uploads them from the Task folder, while Harbor's
-`skills_dir` and `mcp_servers` describe resources already in the image.
+requires a specific Skill or MCP server; never depend on ambient Host configuration. As in
+Harbor, a Task's own are part of its image, so the image's identity covers them. Put their files
+below `environment/` and have the Dockerfile or `build.ps1` place them.
+
+`[environment].skills_dir` is an absolute directory in the image holding one directory per
+Skill. The Harness copies its contents to the agent's skills directory before the agent starts.
+
+`[[environment.mcp_servers]]` uses Harbor's `name`, `transport`, `command`, `args` and `url`.
+`transport` is required because Harbor's default, `sse`, is not implemented, and `headers` is
+not supported. A stdio server is a program in the image; one that needs its own directory or
+variables starts through a wrapper script there. A `streamable-http` URL must be reachable
+under `[agent]`'s network, which ALE checks before any Sandbox exists.
+
+An operator can add Skills and MCP servers for a run without rebuilding the image. They stay on
+the Host, are uploaded for the Episode, and, as in Harbor, replace a Task's of the same name for
+that run; the RunLock records what the run used. See
+[Security](security.md#8-agent-resources-are-declared-not-discovered).
 
 ## tests/
 

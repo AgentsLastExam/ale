@@ -67,14 +67,13 @@ def test_authoring_contract_names_the_current_task_shape() -> None:
     text = (ROOT / "docs/specs/task-authoring.md").read_text(encoding="utf-8")
     for required in (
         "task.toml",
-        "[ale]",
         "environment/Dockerfile",
         "environment/build.ps1",
         "environment/setup/",
         "tests/test.sh",
         "solution/solve.sh",
-        "tools/skills/",
-        "tools/mcp/",
+        "skills_dir",
+        "[[environment.mcp_servers]]",
         'environment_mode = "separate"',
         "vm-ubuntu24-base",
         "network_justification",

@@ -30,11 +30,20 @@ async def test_windows_framework_copies_protected_artifacts_and_verifies_as_admi
         tmp_path / "task",
         name="agentslastexam/windows-privileges",
         config={
-            "artifacts": [r"C:\ale-copy\*.sgf", r"C:\ale-copy\directory.json", r"C:\missing"],
-            "environment": {"os": "windows", "cpus": 2, "memory_mb": 8192},
-            "agent": {"timeout_sec": 60},
+            "artifacts": [
+                r"C:\ale-copy\*.sgf",
+                r"C:\ale-copy\directory.json",
+                r"C:\missing",
+                {"source": "kept", "exclude": ["*.tmp"]},
+            ],
+            "environment": {
+                "os": "windows",
+                "vm_image": "local/windows-privileges",
+                "cpus": 2,
+                "memory_mb": 8192,
+            },
+            "agent": {"timeout_sec": 60, "workdir": "Documents"},
             "verifier": {"environment_mode": mode},
-            "ale": {"sandbox": "vm", "vm_image": "local/windows-privileges"},
         },
         dockerfile=None,
         instruction="Leave the prepared outputs for verification.\n",
@@ -54,6 +63,9 @@ Set-Content C:\ale-copy\game.sgf 'protected' -NoNewline
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
     -Target C:\ale-copy\directory.json | Out-Null
+New-Item C:\Users\user\Documents\kept -ItemType Directory -Force | Out-Null
+Set-Content C:\Users\user\Documents\kept\note.txt 'kept' -NoNewline
+Set-Content C:\Users\user\Documents\kept\scratch.tmp 'left' -NoNewline
 """
     )
     (task / "solution/solve.ps1").write_text(
@@ -93,3 +105,6 @@ New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"reward": 1.0}
     assert (result.run_dir / "artifacts/0000/game.sgf").read_text() == "protected"
+    # A relative artifact starts at the relative workdir, below the agent's home.
+    assert (result.run_dir / "artifacts/0003/kept/note.txt").read_text() == "kept"
+    assert not (result.run_dir / "artifacts/0003/kept/scratch.tmp").exists()

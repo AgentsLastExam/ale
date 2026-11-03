@@ -8,16 +8,17 @@ from tests.support import MINIMAL_TASK_CONFIG, merged_config
 
 from ale.core.ids import TaskId, canonical_json, content_hash, task_component
 from ale.core.taskspec import (
+    Artifact,
     ImageKind,
     ImageSpec,
     McpSource,
     NetworkMode,
     NetworkPolicy,
+    OperatingSystem,
     SkillSource,
     StdioMcpServer,
     StreamableHttpMcpServer,
     TaskConfig,
-    TaskMcpSource,
     TaskSpec,
     ToolProvision,
     VerificationMode,
@@ -96,25 +97,25 @@ def test_task_ids_are_org_and_name_and_one_safe_component() -> None:
             TaskId(invalid)
 
 
-def test_task_config_requires_every_field_whose_default_differs_from_harbor() -> None:
-    assert config().ale.sandbox is ImageKind.CONTAINER
-    for table, key in (
-        ("", "schema_version"),
-        ("task", "name"),
-        ("environment", "cpus"),
-        ("environment", "memory_mb"),
-        ("agent", "user"),
-        ("agent", "timeout_sec"),
-        ("agent", "network_mode"),
-        ("verifier", "timeout_sec"),
-    ):
+def test_task_config_requires_only_its_version_and_name() -> None:
+    assert config().environment.kind is ImageKind.CONTAINER
+    minimal = TaskConfig.model_validate(
+        {"schema_version": "1.4+ale.1", "task": {"name": "org/demo"}}
+    )
+    assert (minimal.environment.cpus, minimal.environment.memory_mb) == (1, 4096)
+    assert minimal.environment.build_timeout_sec == 3600
+    assert (minimal.agent.user, minimal.agent.timeout_sec) == ("user", 900)
+    assert minimal.agent.network.mode is NetworkMode.BLOCK
+    assert minimal.verifier.timeout_sec == 600
+    for table, key in (("", "schema_version"), ("task", "name")):
         payload = merged_config(MINIMAL_TASK_CONFIG, {table: {key: None}} if table else {key: None})
         with pytest.raises(ValidationError) as raised:
             TaskConfig.model_validate(payload)
         assert raised.value.errors()[0]["type"] == "missing"
         assert raised.value.errors()[0]["loc"] == ((table, key) if table else (key,))
-    with pytest.raises(ValidationError, match=r"1\.4"):
-        config({"schema_version": "1.3"})
+    for version in ("1.3", "1.4"):
+        with pytest.raises(ValidationError, match=r"1\.4\+ale\.1"):
+            config({"schema_version": version})
 
 
 @pytest.mark.parametrize(
@@ -130,7 +131,8 @@ def test_task_config_requires_every_field_whose_default_differs_from_harbor() ->
             {"verifier": {"environment": {"cpus": 1, "memory_mb": 512, "os": "linux"}}},
             "verifier.environment.os",
         ),
-        ({"artifacts": [{"source": "/home/user/output"}]}, "table-form artifacts"),
+        ({"artifacts": [{"source": "/o", "destination": "o"}]}, "artifact destination"),
+        ({"artifacts": [{"source": "/o", "service": "db"}]}, "artifact service"),
     ],
 )
 def test_harbor_keys_ale_does_not_implement_say_so(layer: dict[str, object], key: str) -> None:
@@ -139,7 +141,7 @@ def test_harbor_keys_ale_does_not_implement_say_so(layer: dict[str, object], key
 
 
 def test_task_config_rejects_unknown_keys() -> None:
-    for layer in ({"domain": "demo"}, {"ale": {"variants": {}}}, {"task": {"org": "x"}}):
+    for layer in ({"domain": "demo"}, {"ale": {"sudo": True}}, {"task": {"org": "x"}}):
         with pytest.raises(ValidationError, match="Extra inputs"):
             config(layer)
 
@@ -147,18 +149,12 @@ def test_task_config_rejects_unknown_keys() -> None:
 @pytest.mark.parametrize(
     ("layer", "message"),
     [
-        ({"environment": {"os": "windows"}}, "requires \\[ale\\].sandbox 'vm'"),
+        ({"environment": {"docker_image": "x", "vm": True}}, "docker_image is a container"),
+        ({"environment": {"docker_image": "x", "vm_image": "d"}}, "docker_image is a container"),
+        ({"environment": {"docker_image": "x", "os": "windows"}}, "docker_image is a container"),
+        ({"environment": {"vm_base": "base.qcow2"}}, "vm_base requires os 'windows'"),
         (
-            {"environment": {"docker_image": "x"}, "ale": {"sandbox": "vm"}},
-            "docker_image requires",
-        ),
-        ({"ale": {"vm_image": "disk.qcow2"}}, "vm_image requires sandbox 'vm'"),
-        ({"ale": {"sandbox": "vm", "vm_base": "base.qcow2"}}, "vm_base requires os 'windows'"),
-        (
-            {
-                "environment": {"os": "windows"},
-                "ale": {"sandbox": "vm", "vm_base": "b.qcow2", "vm_image": "i.qcow2"},
-            },
+            {"environment": {"os": "windows", "vm_base": "b.qcow2", "vm_image": "i.qcow2"}},
             "mutually exclusive",
         ),
         ({"agent": {"network_mode": "allowlist"}}, "non-empty allowed_hosts"),
@@ -172,17 +168,71 @@ def test_task_config_rejects_unknown_keys() -> None:
             },
             "shared",
         ),
-        ({"ale": {"verifier": {"sandbox": "vm", "vm_image": "v.qcow2"}}}, "separate"),
         (
             {
-                "environment": {"os": "windows"},
-                "ale": {"sandbox": "vm", "vm_image": "w.qcow2"},
+                "verifier": {
+                    "environment": {"docker_image": "x", "vm": True, "cpus": 1, "memory_mb": 512}
+                }
+            },
+            "docker_image is a container",
+        ),
+        (
+            {
+                "environment": {"os": "windows", "vm_image": "w.qcow2"},
                 "verifier": {"environment": {"docker_image": "x", "cpus": 1, "memory_mb": 512}},
             },
             "Windows verifier runs in a VM",
         ),
         ({"environment": {"cpus": 1.5}}, "valid integer"),
-        ({"ale": {"sudo": "yes"}}, "valid boolean"),
+        ({"environment": {"skills_dir": "skills"}}, "skills_dir must be an absolute path"),
+        ({"environment": {"vm": "yes"}}, "valid boolean"),
+        ({"agent": {"sudo": "yes"}}, "valid boolean"),
+        (
+            {
+                "environment": {
+                    "mcp_servers": [{"name": "s", "transport": "sse", "url": "http://x"}]
+                }
+            },
+            "stdio",
+        ),
+        (
+            {
+                "environment": {
+                    "mcp_servers": [{"name": "s", "transport": "stdio", "url": "http://x"}]
+                }
+            },
+            "takes no url",
+        ),
+        (
+            {"environment": {"mcp_servers": [{"name": "s", "transport": "streamable-http"}]}},
+            "requires url",
+        ),
+        (
+            {
+                "environment": {
+                    "mcp_servers": [
+                        {
+                            "name": "s",
+                            "transport": "stdio",
+                            "command": "a",
+                            "headers": {"X-Region": "eu"},
+                        }
+                    ]
+                }
+            },
+            "headers is not supported",
+        ),
+        (
+            {
+                "environment": {
+                    "mcp_servers": [
+                        {"name": "s", "transport": "stdio", "command": "a"},
+                        {"name": "s", "transport": "stdio", "command": "b"},
+                    ]
+                }
+            },
+            "names must be unique",
+        ),
     ],
 )
 def test_task_config_cross_field_rules(layer: dict[str, object], message: str) -> None:
@@ -207,13 +257,18 @@ def test_network_modes_map_onto_the_runtime_policy() -> None:
     assert config({"agent": {"network_mode": "public"}}).agent.network.mode is NetworkMode.OPEN
 
 
-def test_windows_artifacts_use_windows_absolute_path_rules() -> None:
-    windows = {"environment": {"os": "windows"}, "ale": {"sandbox": "vm", "vm_image": "w.qcow2"}}
-    assert config(windows, {"artifacts": [r"C:\Users\user\output"]}).artifacts == (
-        r"C:\Users\user\output",
+def test_windows_artifacts_use_windows_path_rules() -> None:
+    windows = {"environment": {"os": "windows", "vm_image": "w.qcow2"}}
+    declared = config(windows, {"artifacts": [r"C:\Users\user\output"]}).artifacts
+    assert declared == (Artifact(source=r"C:\Users\user\output"),)
+    with pytest.raises(ValidationError, match="filesystem roots"):
+        config(windows, {"artifacts": ["C:\\"]})
+
+
+def test_harbor_s_spellings_are_accepted() -> None:
+    assert config({"environment": {"os": "Windows", "vm_image": "w.qcow2"}}).environment.os == (
+        OperatingSystem.WINDOWS
     )
-    with pytest.raises(ValidationError, match="absolute"):
-        config(windows, {"artifacts": ["output"]})
 
 
 def test_network_and_agent_resource_contracts_remain_strict() -> None:
@@ -221,8 +276,7 @@ def test_network_and_agent_resource_contracts_remain_strict() -> None:
         NetworkPolicy(mode=NetworkMode.ALLOWLIST)
     with pytest.raises(ValidationError):
         NetworkPolicy(mode=NetworkMode.BLOCK, allowed_hosts=("example.com",))
-    assert SkillSource(path="tools/skills/reviewer").path == "tools/skills/reviewer"
-    assert TaskMcpSource(path="tools/mcp/search.toml").path == "tools/mcp/search.toml"
+    assert SkillSource(path="/skills/reviewer").path == "/skills/reviewer"
     assert McpSource(builtin="cua-desktop").builtin == "cua-desktop"
     with pytest.raises(ValidationError):
         ToolProvision.model_validate({"mcp_servers": [{"builtin": "cua-desktop"}]})
@@ -296,12 +350,35 @@ def test_shared_and_separate_verification_contracts_are_strict() -> None:
 @pytest.mark.parametrize(
     "artifacts",
     [
-        ("relative",),
-        ("/output", "/output"),
         ("/output/../etc",),
+        ("../etc",),
         ("/",),
     ],
 )
-def test_artifacts_are_absolute_unique_and_safe(artifacts: tuple[str, ...]) -> None:
+def test_artifacts_stay_inside_the_filesystem_tree(artifacts: tuple[str, ...]) -> None:
     with pytest.raises(ValidationError):
         config({"artifacts": list(artifacts)})
+
+
+def test_artifacts_are_paths_or_tables_and_relative_ones_follow_the_agent() -> None:
+    declared = config(
+        {"artifacts": ["output", {"source": "/srv/app", "exclude": [".venv", "*.pyc"]}]}
+    ).artifacts
+    assert declared == (
+        Artifact(source="output"),
+        Artifact(source="/srv/app", exclude=(".venv", "*.pyc")),
+    )
+    spec = TaskSpec(
+        name="agentslastexam/demo",
+        image={"kind": "container"},
+        instruction="x",
+        workdir="project",
+        artifacts=declared,
+    )
+    assert spec.start_directory("/home/user") == "/home/user/project"
+    assert spec.artifact_path(declared[0], "/home/user") == "/home/user/project/output"
+    assert spec.artifact_path(declared[1], "/home/user") == "/srv/app"
+    windows = spec.model_copy(update={"os": OperatingSystem.WINDOWS})
+    assert windows.artifact_path(declared[0], r"C:\Users\user") == (r"C:\Users\user\project\output")
+    assert spec.model_copy(update={"workdir": "/srv"}).start_directory("/home/user") == "/srv"
+    assert spec.model_copy(update={"workdir": None}).start_directory("/home/user") == "/home/user"

@@ -62,7 +62,8 @@ optional and runs once.
 ALE rejects unsupported Harness/OS combinations before provisioning. It installs the
 selected Harness and its declared resources, validates staged stdio MCP
 commands, then applies the Task network policy. Autonomous Harnesses launch inside the
-sandbox; Policy Harnesses drive the framework-owned `TaskEnv`. The evaluated solver and
+sandbox, in `[agent].workdir` or else the agent's home; Policy Harnesses drive the
+framework-owned `TaskEnv`. The evaluated solver and
 the validation oracle both run as the image's agent account. Windows autonomous CLI
 Harnesses use the base's native Node.js and Git Bash.
 

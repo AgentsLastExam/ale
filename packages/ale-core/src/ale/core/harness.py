@@ -99,6 +99,13 @@ class HarnessSession(BaseModel):
             "about the agent or the task."
         ),
     )
+    workdir: str | None = Field(
+        default=None, description="Where the agent starts, when the Task names a directory."
+    )
+
+    @property
+    def start_dir(self) -> str:
+        return self.workdir or self.home
 
 
 class ResolvedSkill(BaseModel):
@@ -108,7 +115,7 @@ class ResolvedSkill(BaseModel):
 
     name: str
     path: Path
-    source_layers: tuple[Literal["task", "preset", "run", "cli"], ...]
+    source_layers: tuple[Literal["preset", "run", "cli"], ...]
     declared_sources: tuple[str, ...]
     digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     source_version: str | None = None
@@ -138,7 +145,10 @@ class EffectiveAgentResources(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    skills_dir: str | None = None
+    """The Task's Skills, in its image; the Harness copies them before ``skills``."""
     skills: tuple[ResolvedSkill, ...] = ()
+    """What an operator added, uploaded for the Episode."""
     mcp_servers: tuple[ResolvedMcpServer, ...] = ()
     digest: str = Field(
         default="sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -221,7 +231,7 @@ class Harness(ABC):
 
     def validate_resources(self, resources: EffectiveAgentResources) -> None:
         """Reject optional resources unless a concrete harness implements them."""
-        if resources.skills or resources.mcp_servers:
+        if resources.skills_dir or resources.skills or resources.mcp_servers:
             raise AgentUnsupportedError(f"{self.name} does not support agent resources")
 
     def validate_os(self, operating_system: OperatingSystem) -> None:

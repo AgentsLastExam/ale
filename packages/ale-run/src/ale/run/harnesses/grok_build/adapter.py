@@ -24,7 +24,13 @@ from ale.run.harnesses._npm import (
     npm_command,
     npm_env,
 )
-from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
+from ale.run.harnesses.base import (
+    LOG_ROOT,
+    CliCommand,
+    CliHarness,
+    NativeResult,
+    install_skills,
+)
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
@@ -121,14 +127,7 @@ class GrokBuildHarness(CliHarness):
         grok_home = agent_path(session.home) / ".grok-ale"
         skills_root = grok_home / "skills"
         await sandbox.exec(["mkdir", "-p", str(skills_root)], identity=Identity.AGENT)
-        for skill in resources.skills:
-            target = skills_root / skill.name
-            await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
-            if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+        await install_skills(sandbox, session, resources, skills_root)
 
         lines = [
             "[models]",
@@ -218,7 +217,7 @@ class GrokBuildHarness(CliHarness):
             "--prompt-file",
             prompt_path,
             "--cwd",
-            session.home,
+            session.start_dir,
             "--model",
             session.model,
             "--output-format",

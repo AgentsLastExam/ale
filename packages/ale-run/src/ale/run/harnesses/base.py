@@ -12,7 +12,7 @@ import shlex
 from abc import abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, ClassVar, final
 
 from pydantic import BaseModel, ValidationError
@@ -23,6 +23,7 @@ from ale.core.errors import (
     ConfigError,
     NativeContinuationError,
     PhaseTimeoutError,
+    TaskError,
 )
 from ale.core.harness import (
     AgentRun,
@@ -287,7 +288,7 @@ class CliHarness(AutonomousHarness):
                 f"2>> {shlex.quote(stderr_path)}",
                 login=False,
             ),
-            cwd=str(home),
+            cwd=str(agent_path(session.start_dir)),
             env=command.env,
             identity=Identity.AGENT,
             timeout_sec=timeout_sec,
@@ -323,6 +324,40 @@ class CliHarness(AutonomousHarness):
             final_message=native.final_message,
             continuation=NativeContinuation(harness=self.name, native_session_id=native.session_id),
         )
+
+
+async def install_skills(
+    sandbox: Sandbox,
+    session: HarnessSession,
+    resources: EffectiveAgentResources,
+    skills_root: PurePath,
+) -> None:
+    """Fill the agent's skills directory: the image's Skills, then the operator's.
+
+    An operator's Skill replaces the image's Skill of its name, as in Harbor.
+    """
+    if resources.skills_dir is not None:
+        root = shlex.quote(str(skills_root))
+        copy = f"mkdir -p -- {root} && cp -R -- {shlex.quote(resources.skills_dir + '/.')} {root}"
+        if resources.skills:
+            replaced = (shlex.quote(str(skills_root / skill.name)) for skill in resources.skills)
+            copy += f" && rm -rf -- {' '.join(replaced)}"
+        copied = await sandbox.exec(
+            bash_command(session.home, copy, login=False), identity=Identity.AGENT
+        )
+        if not copied.ok:
+            raise TaskError(
+                f"could not copy [environment].skills_dir {resources.skills_dir}: "
+                + (copied.stderr.strip() or f"exit {copied.exit_code}")
+            )
+    for skill in resources.skills:
+        target = skills_root / skill.name
+        await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
+        if skill.executable_files:
+            await sandbox.exec(
+                ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
+                identity=Identity.AGENT,
+            )
 
 
 # --- reading the mirrored evidence back ---

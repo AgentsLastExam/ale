@@ -190,7 +190,7 @@ The oracle sharing the agent's limits is the load-bearing half. `ale validate` i
 check a task gets before publication, and an oracle with more privilege would pass exactly
 the tasks a real agent then fails on access alone.
 
-A task may declare `[ale].sudo` when it genuinely needs to install software or change
+A task may declare `[agent].sudo` when it genuinely needs to install software or change
 system configuration. The grant is verified rather than assumed — writing a sudoers rule
 succeeds in an image with no `sudo` binary — and recorded in provenance, because an
 episode run that way was less isolated and the two should not be compared without that
@@ -207,7 +207,7 @@ memory. Container guest services are `docker exec` sessions with no listener.
 
 Daytona's in-sandbox daemon runs commands for anyone who connects, as root. The Provider
 blocks every non-root user from it and proves that as the agent before handing the
-sandbox out; an agent granted `[ale].sudo` can lift the block, as it can any rule.
+sandbox out; an agent granted `[agent].sudo` can lift the block, as it can any rule.
 
 The verifier writes its result to Harbor's `/logs/verifier` (`C:\logs\verifier`), a path the
 agent can create beforehand: with sudo on Linux, as any account on Windows. Before every
@@ -281,10 +281,11 @@ Task source contract.
 ALE never copies ambient host agent state. Host Skills, MCP configuration, and
 subscription profiles are outside the Task resource model.
 
-Only the effective union declared by the Task, harness preset, Run file, and CLI is
-staged. Task paths cannot escape `tools/skills/` or `tools/mcp/`. Same-name resources
-with different digests fail before provisioning. Task stdio MCP descriptors and adjacent
-code are staged below the agent home; `{mcp}` resolves to that private resource directory.
+A Task's Skills and MCP servers are in its image, which the RunLock identifies. Only what
+the harness preset, Run file, and CLI declare is added from the Host, and it replaces a Task's
+resource of the same name for that run, as in Harbor. Same-name operator resources with
+different digests fail before provisioning. Operator stdio MCP descriptors and adjacent code
+are staged below the agent home; `{mcp}` resolves to that private resource directory.
 
 Local stdio MCP commands execute inside the sandbox and are checked after files and
 Skills are staged. Remote MCP is limited to unauthenticated Streamable HTTP endpoints
@@ -342,7 +343,7 @@ Stating these plainly is part of the model. Treating an unlisted gap as covered 
 security claims rot.
 
 **A malicious task author.** A Task folder's setup and verification entries run as trusted
-framework-controlled code, and a Task may declare `[ale].sudo` for its agent. Tasks
+framework-controlled code, and a Task may declare `[agent].sudo` for its agent. Tasks
 are reviewed content, not untrusted input; the identity model protects a result from its
 *agent*, not a host from its Task. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are
 aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host Gateway; a

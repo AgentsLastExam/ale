@@ -40,9 +40,10 @@ _TOP_LEVEL = {
     ENVIRONMENT_DIR,
     Stage.TESTS,
     Stage.SOLUTION,
-    "tools",
     ".ale-cache",
 }
+#: Harbor's way to run sidecars. ALE has one machine per role, so these would silently do nothing.
+_COMPOSE_FILE = "docker-compose.yaml"
 
 
 @dataclass(frozen=True)
@@ -63,8 +64,8 @@ def lint_repository(path: Path) -> list[Finding]:
             ("kits", "move Task-specific helpers below the owning Task"),
             ("images", "put image build materials below each Task's environment/ directory"),
             ("files", "put content below the Task stage that owns it"),
-            ("skills", "move Task Skills below tools/skills/"),
-            ("mcp", "move Task MCP below tools/mcp/"),
+            ("skills", "build Task Skills into the image and set [environment].skills_dir"),
+            ("mcp", "build Task MCP servers into the image and list [[environment.mcp_servers]]"),
         ):
             candidate = source / removed
             if candidate.exists():
@@ -86,7 +87,7 @@ def lint_repository(path: Path) -> list[Finding]:
 
 def _check_folder(folder: TaskFolder) -> list[Finding]:
     findings: list[Finding] = []
-    for removed in ("files", "kits", "skills", "mcp"):
+    for removed in ("files", "kits", "skills", "mcp", "tools"):
         candidate = folder.root / removed
         if candidate.exists():
             findings.append(
@@ -100,6 +101,15 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
         if entry.name not in _TOP_LEVEL:
             findings.append(
                 Finding(entry, "unsupported top-level Task entry; move it into its owning stage")
+            )
+
+    for directory in (folder.environment_dir, folder.root / Stage.TESTS):
+        if (directory / _COMPOSE_FILE).is_file():
+            findings.append(
+                Finding(
+                    directory / _COMPOSE_FILE,
+                    "compose sidecars are not supported; run services in the Task's own image",
+                )
             )
 
     config = _read_config(folder.root / TASK_CONFIG)
@@ -125,8 +135,7 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
                 "environment/assets is unused without an image build",
             )
         )
-    ale = config.get("ale")
-    vm = isinstance(ale, dict) and ale.get("sandbox") == "vm"
+    vm = isinstance(environment, dict) and environment.get("vm") is True
     if vm and folder.dockerfile is not None:
         # Any base image is accepted; the engine adds what it needs when it prepares one.
         if _vm_boot_override(folder.dockerfile):

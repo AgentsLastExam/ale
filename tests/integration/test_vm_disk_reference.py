@@ -59,7 +59,7 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     def task_with_ref(name: str, disk: Path) -> Path:
         return write_repo(
             tmp_path / name,
-            config={"ale": {"sandbox": "vm", "vm_image": str(disk)}},
+            config={"environment": {"vm_image": str(disk)}},
             dockerfile=None,
         )
 

@@ -1,9 +1,9 @@
 # Container and VM sandbox image specification
 
 Normative for standard container and VM Tasks. Every solver and dedicated verifier runs
-in a container or a VM (`[ale].sandbox`). Linux builds a Dockerfile or uses an image directly
-(`[environment].docker_image`, `[ale].vm_image`); Windows uses `[ale].vm_image` directly, or
-builds `environment/build.ps1` on `[ale].vm_base`.
+in a container or a VM. Linux builds a Dockerfile (a VM with `[environment].vm = true`) or
+uses an image directly (`docker_image`, `vm_image`); Windows uses `vm_image` directly, or builds
+`environment/build.ps1` on `vm_base`.
 
 ## What a Linux image needs
 
@@ -26,7 +26,7 @@ of the Task's own build or the image it names (the framework layer):
 - for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
   Windows that also starts Cua Driver in the agent's session;
 - a check that the agent account exists, failing preparation if it does not;
-- working sudo for that account when the Task sets `[ale].sudo = true`, installing sudo
+- working sudo for that account when the Task sets `[agent].sudo = true`, installing sudo
   with the image's package manager when the image lacks it;
 - a marker file recording which framework the image carries: `/opt/ale/framework` on
   Linux, `C:\ProgramData\ALE\framework` on Windows.
@@ -70,7 +70,7 @@ later sandbox, and the Task's script cannot replace the framework's pieces:
   that account in, keeps UAC on, has the Python and was shut down completely (not left
   hibernated by Fast Startup), each failing with the one thing it lacks.
 
-Elevation for `[ale].sudo` is granted per boot by the Host, not built into the disk.
+Elevation for `[agent].sudo` is granted per boot by the Host, not built into the disk.
 A Windows sandbox has a desktop for ALE to drive exactly when its image carries the
 framework's Cua Driver, so the Provider waits for a screenshot in every sandbox it boots.
 How the install works, and what it costs, is in
@@ -133,15 +133,15 @@ allowed, but a Task never inherits another Task's final image or an ALE domain i
 There is no Image Tree. Docker layer caching handles repeated installation without adding
 a cross-Task contract.
 
-`COPY .` cannot expose `setup/`, `tests/`, `solution/`, or `tools/`: the last three are
-outside the build context, and ALE excludes `setup/` after the Task's own `.dockerignore`
+`COPY .` cannot expose `setup/`, `tests/`, or `solution/`: the last two are outside the
+build context, and ALE excludes `setup/` after the Task's own `.dockerignore`
 rules, so a Task cannot bring it back. Files in the context, its asset root included, use
 ordinary relative `COPY`; ALE creates no generated view or named BuildKit context.
 
 ## Source selection and identity
 
 Before any solver model call, ALE builds the Task's Linux Dockerfile or Windows
-`environment/build.ps1`; failure is terminal. A Windows build uses `[ale].vm_base` as the
+`environment/build.ps1`; failure is terminal. A Windows build uses `[environment].vm_base` as the
 base. `docker_image` and `vm_image` always name an image for direct use, win over a build
 definition, and exclude `vm_base`. A base requires the Windows solver build script; it is
 unsupported for Linux and separate verifier declarations. An image named directly is
@@ -257,10 +257,9 @@ Runtime never downloads it.
 
 Shared verification uses the solver image. Separate verification uses, in Harbor's order:
 
-1. a container `[verifier.environment].docker_image` or VM `[ale.verifier].vm_image`, resolved
-   through the matching Provider;
-2. on Linux, `tests/Dockerfile` built with `tests/` as context, as a VM when
-   `[ale.verifier].sandbox = "vm"`;
+1. `[verifier.environment].docker_image` or `vm_image`, resolved through the matching Provider;
+2. on Linux, `tests/Dockerfile` built with `tests/` as context, as a VM with
+   `[verifier.environment].vm = true`;
 3. the prepared solver image.
 
 The local verifier context is fixed at `tests/`; its Dockerfile is the declaration. Named
@@ -331,7 +330,7 @@ passthrough remains a Provider capability, not a Task image declaration.
 
 Setup, artifact collection/restoration, and verification use the framework's elevated
 identity: root on Linux, Administrator on Windows. This applies to shared and separate
-verification independently of the agent's `[ale].sudo` setting.
+verification independently of the agent's `[agent].sudo` setting.
 
 Directory uploads ignore Host permissions: Linux files use `0644`, directories `0755`,
 owned by the selected framework or agent identity. Windows resets ACLs to grant
@@ -369,7 +368,7 @@ command and file semantics (guestd), credentials (the Gateway) or image and Task
 | Guarantee | Enforced by | Conformance test |
 |---|---|---|
 | Every sandbox runs the framework of the engine driving it, whatever image or disk it was handed | Provider in `create` | `test_a_sandbox_carries_the_engines_framework` |
-| Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[ale].sudo` asks | Provider check in `create`, both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected` |
+| Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[agent].sudo` asks | Provider check in `create`, both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |
 | Framework phases have the network; after `close_egress` the agent reaches its Gateway (and, for `allowlist`, the declared hosts) and nothing else; `open` Tasks are never sealed; the Gateway address never moves | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |

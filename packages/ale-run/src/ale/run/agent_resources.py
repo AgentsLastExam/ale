@@ -33,75 +33,55 @@ def resolve_agent_resources(
     task: ToolProvision,
     agent_skills: tuple[SkillSource, ...] = (),
     agent_mcp_servers: tuple[McpSource, ...] = (),
-    task_root: Path,
     task_source: TaskSource,
     network: NetworkPolicy | None = None,
     operating_system: OperatingSystem = OperatingSystem.LINUX,
 ) -> EffectiveAgentResources:
-    """Resolve all declarations before a provider or sandbox is created."""
-    skill_sources = [
-        *agent_skills,
-        *(
-            source.model_copy(
-                update={"origin": "task", "declared": source.path},
-            )
-            for source in task.skills
-        ),
-    ]
+    """Resolve all declarations before a provider or sandbox is created.
+
+    A Task's Skills and MCP servers are in its image, so only their declarations are here.
+    What an operator adds comes from the Host, and an operator's server replaces a Task's of
+    the same name, as in Harbor.
+    """
+    policy = network or NetworkPolicy()
     skills = _merge_skills(
+        [resolved for source in agent_skills for resolved in _resolve_skill_source(source)]
+    )
+    added = _merge_mcp(
         [
-            resolved
-            for source in skill_sources
-            for resolved in _resolve_skill_source(source, task_root, task_source)
+            _resolve_mcp_source(source, network=policy, operating_system=operating_system)
+            for source in agent_mcp_servers
         ]
     )
-    mcp_sources = [
-        *agent_mcp_servers,
-        *(
-            McpSource(
-                path=source.path,
-                origin="task",
-                declared=source.path,
-            )
-            for source in task.mcp_servers
+    names = {server.name for server in added}
+    mcp_servers = sorted(
+        (
+            *added,
+            *(
+                _resolve_task_server(server, task_source=task_source, network=policy)
+                for server in task.mcp_servers
+                if server.name not in names
+            ),
         ),
-    ]
-    mcp_servers = _merge_mcp(
-        [
-            _resolve_mcp_source(
-                source,
-                task_root=task_root,
-                task_source=task_source,
-                network=network or NetworkPolicy(),
-                operating_system=operating_system,
-            )
-            for source in mcp_sources
-        ]
+        key=lambda server: server.name,
     )
     digest = content_hash(
-        [{"kind": "skill", "name": skill.name, "digest": skill.digest} for skill in skills]
+        [{"kind": "skills_dir", "path": task.skills_dir}]
+        + [{"kind": "skill", "name": skill.name, "digest": skill.digest} for skill in skills]
         + [{"kind": "mcp", "name": server.name, "digest": server.digest} for server in mcp_servers]
     )
-    return EffectiveAgentResources(skills=skills, mcp_servers=mcp_servers, digest=digest)
+    return EffectiveAgentResources(
+        skills_dir=task.skills_dir,
+        skills=skills,
+        mcp_servers=tuple(mcp_servers),
+        digest=digest,
+    )
 
 
-def _resolve_skill_source(
-    source: SkillSource, task_root: Path, task_source: TaskSource
-) -> tuple[ResolvedSkill, ...]:
+def _resolve_skill_source(source: SkillSource) -> tuple[ResolvedSkill, ...]:
     origin = source.origin or "run"
     declared = source.declared or source.path
-    path = Path(source.path)
-    if origin == "task":
-        if path.is_absolute():
-            raise AgentResourceError(f"Task Skill path must be relative: {declared}")
-        root = task_root.resolve()
-        path = (root / path).resolve()
-        _inside(path, root, f"Task Skill {declared!r}")
-        relative = path.relative_to(root)
-        if relative.parts[:2] != ("tools", "skills"):
-            raise AgentResourceError(f"Task Skill {declared!r} must be below tools/skills/")
-    else:
-        path = path.resolve()
+    path = Path(source.path).resolve()
 
     if not path.is_dir():
         raise AgentResourceError(f"Skill source is not a directory: {declared}")
@@ -123,31 +103,10 @@ def _resolve_skill_source(
             )
         directories = children
 
-    reportable = origin == "task" and task_source.is_reproducible
-    version = task_source.commit if reportable else None
-    reason = None if reportable else _reportability_reason(origin, task_source)
-    return tuple(
-        _resolved_skill(
-            directory,
-            origin=origin,
-            declared=declared,
-            reportable=reportable,
-            source_version=version,
-            reason=reason,
-        )
-        for directory in directories
-    )
+    return tuple(_resolved_skill(directory, origin, declared) for directory in directories)
 
 
-def _resolved_skill(
-    path: Path,
-    *,
-    origin: str,
-    declared: str,
-    reportable: bool,
-    source_version: str | None,
-    reason: str | None,
-) -> ResolvedSkill:
+def _resolved_skill(path: Path, origin: str, declared: str) -> ResolvedSkill:
     digest, executables = _directory_digest(path, path)
     return ResolvedSkill(
         name=path.name,
@@ -155,9 +114,9 @@ def _resolved_skill(
         source_layers=(origin,),  # type: ignore[arg-type]
         declared_sources=(declared,),
         digest=digest,
-        source_version=source_version,
-        reportable=reportable,
-        reportability_reason=reason,
+        source_version=None,
+        reportable=False,
+        reportability_reason=_operator_resource_reason(origin),
         executable_files=executables,
     )
 
@@ -217,11 +176,34 @@ def _merge_skills(skills: list[ResolvedSkill]) -> tuple[ResolvedSkill, ...]:
     return tuple(merged[name] for name in sorted(merged))
 
 
+def _resolve_task_server(
+    server: McpServer, *, task_source: TaskSource, network: NetworkPolicy
+) -> ResolvedMcpServer:
+    """A server of the Task's own: the image's identity covers what it runs."""
+    _check_network(server, network)
+    external = isinstance(server, StreamableHttpMcpServer)
+    reportable = task_source.is_reproducible and not external
+    if external:
+        reason = "external Streamable HTTP service has no immutable identity"
+    elif reportable:
+        reason = None
+    else:
+        reason = "task resource came from a Task that is not committed in a git repository"
+    return ResolvedMcpServer(
+        name=server.name,
+        server=server,
+        source_layers=("task",),
+        declared_sources=("[[environment.mcp_servers]]",),
+        digest=content_hash({"server": server.model_dump(mode="json"), "files": None}),
+        source_version=task_source.commit if reportable else None,
+        reportable=reportable,
+        reportability_reason=reason,
+    )
+
+
 def _resolve_mcp_source(
     source: McpSource,
     *,
-    task_root: Path,
-    task_source: TaskSource,
     network: NetworkPolicy,
     operating_system: OperatingSystem,
 ) -> ResolvedMcpServer:
@@ -241,18 +223,7 @@ def _resolve_mcp_source(
         )
 
     assert source.path is not None
-    path = Path(source.path)
-    if origin == "task":
-        if path.is_absolute():
-            raise AgentResourceError(f"Task MCP path must be relative: {declared}")
-        root = task_root.resolve()
-        path = (root / path).resolve()
-        _inside(path, root, f"Task MCP {declared!r}")
-        relative = path.relative_to(root)
-        if relative.parts[:2] != ("tools", "mcp"):
-            raise AgentResourceError(f"Task MCP {declared!r} must be below tools/mcp/")
-    else:
-        path = path.resolve()
+    path = Path(source.path).resolve()
     if not path.is_file():
         raise AgentResourceError(f"MCP descriptor is not a file: {declared}")
 
@@ -268,16 +239,6 @@ def _resolve_mcp_source(
     if isinstance(server, StdioMcpServer):
         staged_files = path.parent
 
-    external = isinstance(server, StreamableHttpMcpServer)
-    reportable = origin == "task" and task_source.is_reproducible and not external
-    version = task_source.commit if reportable else None
-    reason = (
-        "external Streamable HTTP service has no immutable identity"
-        if external
-        else None
-        if reportable
-        else _reportability_reason(origin, task_source)
-    )
     files_digest = _directory_digest(staged_files, staged_files)[0] if staged_files else None
     return ResolvedMcpServer(
         name=server.name,
@@ -285,9 +246,13 @@ def _resolve_mcp_source(
         source_layers=(origin,),  # type: ignore[arg-type]
         declared_sources=(declared,),
         digest=content_hash({"server": server.model_dump(mode="json"), "files": files_digest}),
-        source_version=version,
-        reportable=reportable,
-        reportability_reason=reason,
+        source_version=None,
+        reportable=False,
+        reportability_reason=(
+            "external Streamable HTTP service has no immutable identity"
+            if isinstance(server, StreamableHttpMcpServer)
+            else _operator_resource_reason(origin)
+        ),
         staged_files=staged_files,
     )
 
@@ -340,7 +305,5 @@ def _inside(path: Path, root: Path, label: str) -> None:
         raise AgentResourceError(f"{label} escapes {root}") from exc
 
 
-def _reportability_reason(origin: str, task_source: TaskSource) -> str:
-    if origin == "task" and not task_source.is_reproducible:
-        return "task resource came from a Task that is not committed in a git repository"
+def _operator_resource_reason(origin: str) -> str:
     return f"{origin} local resource cannot be re-fetched"

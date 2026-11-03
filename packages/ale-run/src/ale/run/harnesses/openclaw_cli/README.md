@@ -11,6 +11,9 @@ session that spawned it. A child's first user message is the task as OpenClaw de
 it. Any other transcript there is named in `parse_issues`; the session index, runtime
 traces, locks and cached prompts beside them are not.
 
+The CLI starts in `[agent].workdir` when a Task sets one, but its tools resolve paths against
+its own workspace, `.openclaw-ale/workspace`, where its Skills live.
+
 OpenClaw 2026.7.1 holds about 250–400 MB while it works and briefly reaches about 700 MB
 as it starts and runs tools. The Linux base image's desktop already uses about 650 MB, so
 in a 1 GiB Sandbox the kernel OOM-kills the CLI part-way through a turn; run it in at
