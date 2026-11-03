@@ -47,7 +47,7 @@ egress policy.
 Daytona has neither bridge nor runner. It enforces `block` (`networkBlockAll`) and
 `allowlist` (its own domain allowlist) outside the sandbox, where the agent cannot lift
 them, so allowed traffic goes straight from the cloud to its host instead of through the
-Host. Daytona's allowlist takes names and `*.` patterns, as the proxy does, but also passes
+Host. Daytona's allowlist matches names and `*.` patterns as the proxy does, but also passes
 plain HTTP and other ports of an allowed host. It refuses every connection from the
 sandbox to the Host, so the Host carries the Gateway in over SSH, and the sandbox can name
 only the Gateway, never an address.
@@ -117,8 +117,8 @@ and it does not depend on tooling in an image we did not build. **Traffic that i
 the proxy variables has nowhere to go**, so the failure mode is closed. Daytona's own
 allowlist takes this role there, for the same two reasons (section 1).
 
-Matching is on the requested name, as in Harbor: `pypi.org` is that host, and `*.pypi.org`
-every name below it. An address or CIDR entry matches a client that asks for that address, and
+Matching is on the requested name: `pypi.org` is that host, and `*.pypi.org`
+that host and every name below it. An address or CIDR entry matches a client that asks for that address, and
 no name pattern admits an address. The proxy connects from the Host, so an entry reaching
 loopback or link-local addresses, cloud metadata included, fails when the Task loads. It is deliberately *not* on a resolved address: a task declares `pypi.org` because that is what
 it means, and pinning to whatever IP that resolved to once would break the task rather

@@ -1163,9 +1163,9 @@ def _tunnel_plan(
 def _domain_allowlist(hosts: Sequence[str]) -> str:
     """The Task's allowed hosts as Daytona's domain allowlist.
 
-    Daytona matches names, as ALE does, and writes a subdomain pattern as ALE does, but takes
-    no address or port, and at most ``_DOMAIN_LIMIT`` entries; a Task that needs those is
-    refused rather than widened.
+    Daytona matches names and ``*.name`` patterns as ALE does, but takes at most
+    ``_DOMAIN_LIMIT`` and no address or port; a Task that needs those is refused rather than
+    widened.
     """
     names = sorted({host.lower().rstrip(".") for host in hosts})
     unusable = [name for name in names if not _DNS_NAME.fullmatch(name.removeprefix("*."))]

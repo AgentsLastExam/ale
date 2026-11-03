@@ -189,10 +189,10 @@ or names a `vm_image`. The Verification APIs and records are defined only in
 
 `[environment]` selects container or VM behavior; Tasks never name a Provider.
 `[agent].network_mode` applies to the evaluated agent and the oracle: `no-network` reaches only
-the Gateway, `allowlist` also the declared hosts, `public` everything. As in Harbor, an
-`allowed_hosts` entry `pypi.org` is that host, `*.pypi.org` every name below it, not `pypi.org`
-itself, and an address or CIDR range matches a client connecting to that address, never a name
-that resolves into it. Entries reaching the Host itself (loopback, link-local, and ranges
+the Gateway, `allowlist` also the declared hosts, `public` everything. An `allowed_hosts`
+entry `pypi.org` is that host alone, `*.pypi.org` that host and every name below it at any
+depth, which every Provider can enforce, and an address or CIDR range a client connecting to
+that address, never a name that resolves into it. Entries reaching the Host itself (loopback, link-local, and ranges
 holding them) fail, because allowed traffic leaves from the Host. An allowlist carries TLS and
 needs a client that honors the proxy variables, so raw TCP to an allowed address stays blocked.
 Setup and verification network is framework-controlled; its enforcement is specified in

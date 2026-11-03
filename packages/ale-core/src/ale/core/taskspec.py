@@ -177,17 +177,18 @@ def _address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
 
 
 def host_allowed(host: str, allowed_hosts: Iterable[str]) -> bool:
-    """Whether ``allowed_hosts`` admits ``host``, with Harbor's matching.
+    """Whether ``allowed_hosts`` admits ``host``.
 
-    A name matches itself; ``*.example.org`` matches every name below ``example.org``, at any
-    depth, and not ``example.org`` itself. An address matches itself and any range holding it,
-    and never a name pattern.
+    A name matches itself; ``*.example.org`` matches ``example.org`` and every name below it,
+    at any depth, which every Provider can enforce. An address matches itself and any range
+    holding it, and never a name pattern.
     """
     name = host.lower().rstrip(".")
     address = _address(name)
     for allowed in (entry.lower() for entry in allowed_hosts):
         if address is None:
-            if name == allowed or (allowed.startswith("*.") and name.endswith(allowed[1:])):
+            pattern = allowed.removeprefix("*.") if allowed.startswith("*.") else None
+            if name in (allowed, pattern) or (pattern and name.endswith("." + pattern)):
                 return True
         elif allowed == address.compressed or (
             "/" in allowed and address in ipaddress.ip_network(allowed)

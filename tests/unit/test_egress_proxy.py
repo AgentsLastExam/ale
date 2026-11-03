@@ -25,14 +25,16 @@ class TestAllowlistMatching:
         assert self.session("example.com").may_reach("example.com")
 
     def test_a_declared_host_is_that_host_only(self) -> None:
-        """As in Harbor: a Task reaches below a name by writing ``*.name``."""
+        """A Task reaches below a name by writing ``*.name``."""
         assert not self.session("example.com").may_reach("files.example.com")
 
-    def test_a_pattern_matches_below_its_name_and_not_the_name(self) -> None:
+    def test_a_pattern_matches_its_name_and_every_name_below_it(self) -> None:
+        """As Daytona's allowlist does, so every Provider admits the same hosts."""
         session = self.session("*.example.com")
         assert session.may_reach("files.example.com")
         assert session.may_reach("a.b.example.com")
-        assert not session.may_reach("example.com")
+        assert session.may_reach("example.com")
+        assert not session.may_reach("notexample.com")
 
     def test_a_lookalike_suffix_is_not_allowed(self) -> None:
         """`notexample.com` ends with the declared string and is a different site."""

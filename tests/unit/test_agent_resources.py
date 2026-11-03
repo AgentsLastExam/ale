@@ -307,7 +307,7 @@ def test_remote_mcp_obeys_network_policy() -> None:
 
     with pytest.raises(AgentResourceError, match="blocked"):
         resolved()
-    # A name matches itself; only a pattern reaches below it, as in Harbor.
+    # A name matches itself; only a pattern reaches below it.
     for hosts in (("other.example.com",), ("example.com",)):
         with pytest.raises(AgentResourceError, match="allowed_hosts"):
             resolved(allowlist(*hosts))

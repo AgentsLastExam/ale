@@ -130,16 +130,20 @@ def allowlist(*hosts: str) -> NetworkPolicy:
 
 
 def test_the_allowlist_becomes_daytonas_with_names_and_patterns_as_written() -> None:
-    assert _domain_allowlist(("PyPI.org.", "*.pythonhosted.org", "pypi.org")) == (
-        "*.pythonhosted.org,pypi.org"
+    assert _domain_allowlist(("PyPI.org.", "*.pypi.org", "pypi.org", "files.pythonhosted.org")) == (
+        "*.pypi.org,files.pythonhosted.org,pypi.org"
     )
     provider = DaytonaProvider()
     provider.accepts(request(network=allowlist("example.com")))
-    for unusable in ("10.0.0.1", "example.com:8443", "https://example.com"):
+    for unusable in ("10.0.0.1", "10.0.0.0/8", "2001:db8::1", "example.com:8443"):
         with pytest.raises(ProviderCapabilityError, match="takes domain names"):
             provider.accepts(request(network=allowlist(unusable)))
     with pytest.raises(ProviderCapabilityError, match="at most 100"):
         _domain_allowlist(tuple(f"host{index}.example" for index in range(101)))
+
+
+def test_a_pattern_alone_is_accepted() -> None:
+    DaytonaProvider().accepts(request(network=allowlist("*.example.com")))
 
 
 def test_egress_is_probed_with_an_endpoint_the_allowlist_leaves_out() -> None:
