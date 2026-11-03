@@ -32,7 +32,8 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
   edge adapters. Cross boundaries through public types, not `Any`, ambient state or
   private imports.
 - Start at `docs/README.md` and read the owning living specification before changing a
-  contract. Top-level feature specs are temporary plans, not lasting documentation.
+  contract. A design that is not implemented belongs in an issue or pull request, never
+  in a repository file.
 - Use a dedicated worktree for non-trivial changes. Review and run the checks below
   before merging the tested branch into `main`.
 

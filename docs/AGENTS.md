@@ -16,8 +16,8 @@
   operator needs it. Adding a Provider, Harness or dialect normally changes a spec by a
   list entry or a link, not a section.
 - `guides/` teaches an operator or contributor how to perform a workflow.
-- Top-level `../specs/` is temporary feature planning and is removed after its durable
-  behavior is incorporated here.
+- A design that is not implemented belongs in an issue or pull request, never in a
+  repository file.
 - Give the reason for a cross-module choice in a sentence or two where the spec states
   it; superseded decisions live in Git history.
 - Keep one fact in one owner and link to it; do not repeat command sequences across the

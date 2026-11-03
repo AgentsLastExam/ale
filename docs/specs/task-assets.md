@@ -47,9 +47,7 @@ credentials out of assets. Validate from a clean base as the actual agent user, 
 writes, child tools and save/reopen, without repeating the interactive acquisition process.
 
 Asset commands treat these as ordinary Task-local files and mirror their paths to HF. They do
-not consolidate software into a repository-level directory; the agreed
-[repository software publication design](../../specs/task-software-publication.md) describes
-that pending change, not the current CLI contract.
+not consolidate software into a repository-level directory.
 
 ## Repository and access
 
