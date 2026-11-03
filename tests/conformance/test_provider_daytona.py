@@ -167,7 +167,7 @@ class TestDaytonaProvider(ProviderConformance):
                 assert agent.ok, agent.stderr
                 assert json.loads(agent.stdout) == {
                     "example.com": "open",
-                    "www.example.com": "open",  # a subdomain, as ALE's allowlist matches
+                    "www.example.com": "closed",  # a name is that host alone
                     "one.one.one.one at 1.1.1.1": "closed",
                     "1.1.1.1 with no name": "closed",
                     "github.com resolves": "closed",
@@ -177,6 +177,28 @@ class TestDaytonaProvider(ProviderConformance):
                 await sandbox.open_egress()  # verification gets the network back
                 reopened = await sandbox.exec(["python3", "-c", ALLOWLIST_PROBE, "http://0:1"])
                 assert json.loads(reopened.stdout)["one.one.one.one at 1.1.1.1"] == "open"
+
+    @pytest.mark.asyncio
+    async def test_a_pattern_reaches_its_name_and_the_names_below_it(self) -> None:
+        """As ALE's own proxy matches it, so a Task gets the same hosts on every Provider."""
+        async with _gateway() as port:
+            request = await self.request(
+                network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("*.example.com",)),
+                gateway_url=f"http://127.0.0.1:{port}",
+            )
+            async with await self.provider.create(request) as sandbox:
+                await sandbox.open_egress()
+                await sandbox.close_egress()
+                agent = await sandbox.exec(
+                    ["python3", "-c", ALLOWLIST_PROBE, str(sandbox.gateway_url)],
+                    identity=Identity.AGENT,
+                    timeout_sec=120,
+                )
+                assert agent.ok, agent.stderr
+                seen = json.loads(agent.stdout)
+                assert seen["example.com"] == "open"
+                assert seen["www.example.com"] == "open"
+                assert seen["github.com resolves"] == "closed"
 
 
 #: Initializes CUDA through the driver alone, so it needs no toolkit in the image, and
