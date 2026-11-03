@@ -24,11 +24,15 @@ class TestAllowlistMatching:
     def test_declared_host_is_allowed(self) -> None:
         assert self.session("example.com").may_reach("example.com")
 
-    def test_subdomains_of_a_declared_host_are_allowed(self) -> None:
-        """Declaring a service means its service, not one exact label."""
-        session = self.session("example.com")
+    def test_a_declared_host_is_that_host_only(self) -> None:
+        """As in Harbor: a Task reaches below a name by writing ``*.name``."""
+        assert not self.session("example.com").may_reach("files.example.com")
+
+    def test_a_pattern_matches_below_its_name_and_not_the_name(self) -> None:
+        session = self.session("*.example.com")
         assert session.may_reach("files.example.com")
         assert session.may_reach("a.b.example.com")
+        assert not session.may_reach("example.com")
 
     def test_a_lookalike_suffix_is_not_allowed(self) -> None:
         """`notexample.com` ends with the declared string and is a different site."""
@@ -41,6 +45,12 @@ class TestAllowlistMatching:
         session = self.session("Example.COM")
         assert session.may_reach("EXAMPLE.com")
         assert session.may_reach("example.com.")
+
+    def test_addresses_match_with_their_colons_intact(self) -> None:
+        session = self.session("2001:db8::1", "10.0.0.0/8")
+        assert session.may_reach("2001:db8::1")
+        assert session.may_reach("10.1.2.3:443")
+        assert not session.may_reach("2001:db8::2")
 
     def test_declaring_nothing_allows_nothing(self) -> None:
         """The default is no additional egress, and it cannot be acquired by asking."""
@@ -74,6 +84,21 @@ class TestProxyEnforcement:
             yield proxy, session
         finally:
             await proxy.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_bracketed_address_is_matched_without_its_brackets(self) -> None:
+        registry = SessionRegistry()
+        session = registry.open(
+            GatewaySession(episode_id="e", model="m", allowed_hosts=frozenset({"::2"}))
+        )
+        server = EgressProxy(registry, host="127.0.0.1")
+        await server.start()
+        try:
+            allowed, _ = await self.connect(server, "[::2]:1", session.token)
+            refused, _ = await self.connect(server, "[::3]:1", session.token)
+        finally:
+            await server.stop()
+        assert (allowed, refused) == (502, 403)
 
     @pytest.mark.asyncio
     async def test_an_undeclared_host_is_refused(self, proxy) -> None:  # type: ignore[no-untyped-def]

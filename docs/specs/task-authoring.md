@@ -143,6 +143,7 @@ These values differ from Harbor's:
   and an empty value counts as unset; see [Variables](#variables).
 - A `skills_dir` that does not exist fails the Episode.
 - `tests/Dockerfile` without separate verification fails, where Harbor ignores it.
+- `allowed_hosts` refuses entries that reach the Host; see [Resources and network](#resources-and-network).
 - The verifier writes `reward.json` only, with `reward` between 0 and 1; see [tests/](#tests).
 
 When the instruction requires deliverable files, every instructed destination must equal or be
@@ -187,10 +188,15 @@ or names a `vm_image`. The Verification APIs and records are defined only in
 
 `[environment]` selects container or VM behavior; Tasks never name a Provider.
 `[agent].network_mode` applies to the evaluated agent and the oracle: `no-network` reaches only
-the Gateway, `allowlist` also the declared hosts, `public` everything. Setup and verification
-network is framework-controlled; its enforcement is specified in [Security](security.md).
-The quality standard owns resource feasibility and network-policy selection. A public-network
-justification uses `[metadata].network_justification`.
+the Gateway, `allowlist` also the declared hosts, `public` everything. As in Harbor, an
+`allowed_hosts` entry `pypi.org` is that host, `*.pypi.org` every name below it, not `pypi.org`
+itself, and an address or CIDR range matches a client connecting to that address, never a name
+that resolves into it. Entries reaching the Host itself (loopback, link-local, and ranges
+holding them) fail, because allowed traffic leaves from the Host. An allowlist carries TLS and
+needs a client that honors the proxy variables, so raw TCP to an allowed address stays blocked.
+Setup and verification network is framework-controlled; its enforcement is specified in
+[Security](security.md). The quality standard owns resource feasibility and network-policy
+selection. A public-network justification uses `[metadata].network_justification`.
 
 `[environment]` resources are the whole Sandbox's allocation. The image's own processes, such
 as the GUI base images' desktop, share it with the agent and every program the agent starts,

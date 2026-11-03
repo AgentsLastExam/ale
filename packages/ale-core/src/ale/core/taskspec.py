@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
+from collections.abc import Iterable
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal, NamedTuple, Self
@@ -43,6 +45,7 @@ __all__ = [
     "VerifierResources",
     "VerifierTable",
     "VerifySpec",
+    "host_allowed",
 ]
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
@@ -93,6 +96,22 @@ def _validate_artifact_paths(
 
 
 _ACCOUNT = r"^[a-z_][a-z0-9_-]{0,31}$"
+_DNS_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_ALLOWED_HOST = re.compile(rf"(?:\*\.)?{_DNS_LABEL}(?:\.{_DNS_LABEL})*")
+#: The egress proxy runs on the Host, so an entry reaching these would reach the Host itself
+#: or, on a cloud machine, its metadata service. ``0.0.0.0/0`` overlaps them; ``public`` exists.
+_HOST_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in (
+        "0.0.0.0/8",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "::/128",
+        "::1/128",
+        "::ffff:0:0/96",
+        "fe80::/10",
+    )
+)
 
 
 class ImageSpec(BaseModel):
@@ -144,6 +163,33 @@ class NetworkMode(StrEnum):
     BLOCK = "block"
     ALLOWLIST = "allowlist"
     OPEN = "open"
+
+
+def _address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
+
+
+def host_allowed(host: str, allowed_hosts: Iterable[str]) -> bool:
+    """Whether ``allowed_hosts`` admits ``host``, with Harbor's matching.
+
+    A name matches itself; ``*.example.org`` matches every name below ``example.org``, at any
+    depth, and not ``example.org`` itself. An address matches itself and any range holding it,
+    and never a name pattern.
+    """
+    name = host.lower().rstrip(".")
+    address = _address(name)
+    for allowed in (entry.lower() for entry in allowed_hosts):
+        if address is None:
+            if name == allowed or (allowed.startswith("*.") and name.endswith(allowed[1:])):
+                return True
+        elif allowed == address.compressed or (
+            "/" in allowed and address in ipaddress.ip_network(allowed)
+        ):
+            return True
+    return False
 
 
 class NetworkPolicy(BaseModel):
@@ -495,6 +541,25 @@ class McpServerTable(BaseModel):
         return self
 
 
+def _normal_host(host: str) -> str:
+    """An ``allowed_hosts`` entry in Harbor's normal form."""
+    name = host.strip().lower().rstrip(".")
+    try:
+        network = ipaddress.ip_network(name)
+    except ValueError:
+        if not _ALLOWED_HOST.fullmatch(name):
+            raise ValueError(
+                f"{host!r} is not a hostname, *.hostname, address or CIDR range"
+            ) from None
+        return name
+    if any(
+        network.version == reserved.version and network.overlaps(reserved)
+        for reserved in _HOST_NETWORKS
+    ):
+        raise ValueError(f"{host} reaches the Host itself or its cloud metadata service")
+    return network.compressed if "/" in name else network.network_address.compressed
+
+
 class EnvironmentTable(BaseModel):
     """``[environment]``: the machine the agent starts on."""
 
@@ -548,6 +613,11 @@ class AgentTable(BaseModel):
         )
 
     # --- validation ---
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _normal_hosts(cls, hosts: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        return None if hosts is None else tuple(_normal_host(host) for host in hosts)
 
     @model_validator(mode="after")
     def _hosts_only_for_allowlist(self) -> Self:

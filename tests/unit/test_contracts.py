@@ -24,6 +24,7 @@ from ale.core.taskspec import (
     VerificationMode,
     VerifierResources,
     VerifySpec,
+    host_allowed,
 )
 from ale.core.verdict import Status, Verdict
 
@@ -159,6 +160,30 @@ def test_task_config_rejects_unknown_keys() -> None:
         ),
         ({"agent": {"network_mode": "allowlist"}}, "non-empty allowed_hosts"),
         ({"agent": {"allowed_hosts": ["example.org"]}}, "requires network_mode 'allowlist'"),
+        *(
+            (
+                {"agent": {"network_mode": "allowlist", "allowed_hosts": [host]}},
+                "reaches the Host",
+            )
+            for host in (
+                "127.0.0.1",
+                "127.0.0.0/8",
+                "169.254.169.254",
+                "0.0.0.0/0",
+                "::1",
+                "::/0",
+                "::ffff:127.0.0.1",
+                "fe80::1",
+            )
+        ),
+        (
+            {"agent": {"network_mode": "allowlist", "allowed_hosts": ["10.0.0.1/8"]}},
+            "not a hostname",
+        ),
+        (
+            {"agent": {"network_mode": "allowlist", "allowed_hosts": ["foo.*.org"]}},
+            "not a hostname",
+        ),
         (
             {
                 "verifier": {
@@ -269,6 +294,38 @@ def test_harbor_s_spellings_are_accepted() -> None:
     assert config({"environment": {"os": "Windows", "vm_image": "w.qcow2"}}).environment.os == (
         OperatingSystem.WINDOWS
     )
+
+
+def test_allowed_hosts_take_harbor_s_normal_form() -> None:
+    hosts = ["PyPI.org.", " files.pythonhosted.org", "10.0.0.1", "10.0.0.0/8", "2001:0DB8::1"]
+    agent = config({"agent": {"network_mode": "allowlist", "allowed_hosts": hosts}}).agent
+    assert agent.allowed_hosts == (
+        "pypi.org",
+        "files.pythonhosted.org",
+        "10.0.0.1",
+        "10.0.0.0/8",
+        "2001:db8::1",
+    )
+
+
+@pytest.mark.parametrize(
+    ("host", "allowed", "admitted"),
+    [
+        ("10.1.2.3", ("10.0.0.0/8",), True),
+        ("11.1.2.3", ("10.0.0.0/8",), False),
+        ("10.0.0.1", ("10.0.0.1",), True),
+        ("2001:0db8::1", ("2001:db8::1",), True),
+        ("2001:db8::1", ("2001:db8::/32",), True),
+        ("2001:db8::1", ("10.0.0.0/8",), False),
+        ("internal.example.org", ("10.0.0.0/8",), False),
+        # A name pattern never admits an address, or `*.0.0.1` would reach the Host.
+        ("127.0.0.1", ("*.0.0.1",), False),
+    ],
+)
+def test_addresses_match_addresses_and_ranges(
+    host: str, allowed: tuple[str, ...], admitted: bool
+) -> None:
+    assert host_allowed(host, allowed) is admitted
 
 
 def test_network_and_agent_resource_contracts_remain_strict() -> None:
