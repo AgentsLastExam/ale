@@ -53,7 +53,7 @@ that pending change, not the current CLI contract.
 
 ## Repository and access
 
-Each Task source repository has one private Hugging Face dataset named
+Each Task source repository has one Hugging Face dataset named
 `<namespace>/<source-repository-name>`, in that namespace's `assets` collection. The
 namespace is `agents-last-exam` unless `ALE_ASSETS_NAMESPACE` names another organization
 or user, so a Task repository maintained elsewhere keeps its assets in its own namespace.
@@ -61,13 +61,16 @@ The source repository name comes from its `origin` URL, falling back to the main
 directory. A linked worktree's directory name is never the dataset name. Dataset paths
 mirror source paths, for example `tasks/example/tests/assets/expected.json`.
 
-The first asset checkpoint may create the missing private dataset and empty collection.
-It does not upload Task files. An existing public dataset is rejected. Commands pass
-`ALE_HF_TOKEN` from the checkout's `.env` explicitly to every Hugging Face call and Git
-request; without it they are anonymous. The operator's own `HF_TOKEN` or cached Hugging
-Face login is never used, so the checkout alone decides which account ALE acts as.
-Credentials never enter a remote Git URL or the Task definition. Git and Git LFS must be
-installed for local checkpoints and uploads. `ALE_ASSETS_COLLECTION` or `--collection`, when supplied for manual sync,
+The first asset checkpoint may create the missing dataset and empty collection. Both start
+private, because tests, solutions and licensed software must not become public by accident.
+It does not upload Task files. An existing dataset keeps the visibility its owner chose, and
+ALE treats a public or gated one like a private one, so a Task repository can offer its assets
+openly. Commands pass `ALE_HF_TOKEN` from the checkout's `.env` explicitly to every Hugging Face
+call and Git request; without it they are anonymous, which is enough to pull a public dataset.
+The operator's own `HF_TOKEN` or cached Hugging Face login is never used, so the checkout alone
+decides which account ALE acts as. Credentials never enter a remote Git URL or the Task
+definition. Git and Git LFS must be installed for local checkpoints and uploads. Pull does not
+read the collection. `ALE_ASSETS_COLLECTION` or `--collection`, when supplied for manual push,
 must identify the namespace's collection titled `assets`; otherwise it is discovered.
 
 ## Local versions
