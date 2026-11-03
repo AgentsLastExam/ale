@@ -15,7 +15,14 @@ from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
 from ale.run.harnesses._npm import agent_path, npm_env
-from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
+from ale.run.harnesses.base import (
+    LOG_ROOT,
+    CliCommand,
+    CliHarness,
+    NativeResult,
+    http_headers,
+    install_skills,
+)
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
@@ -56,14 +63,7 @@ class OpenClawCliHarness(CliHarness):
             ["mkdir", "-p", str(skills_root), str(agent_path(session.home) / trajectory.SESSIONS)],
             identity=Identity.AGENT,
         )
-        for skill in resources.skills:
-            target = skills_root / skill.name
-            await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
-            if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+        await install_skills(sandbox, session, resources, skills_root)
 
         model_ref = f"{self.settings.provider}/{session.model}"
         model_entry: dict[str, Any] = {"agentRuntime": {"id": "openclaw"}}
@@ -128,7 +128,11 @@ class OpenClawCliHarness(CliHarness):
                         for key, value in server.environment.items()
                     }
             else:
-                native = {"url": server.url, "transport": "streamable-http"}
+                native = {
+                    "url": server.url,
+                    "transport": "streamable-http",
+                    **http_headers(resolved),
+                }
             config["mcp"]["servers"][resolved.name] = native
         await sandbox.write_file(
             state / "openclaw.json",

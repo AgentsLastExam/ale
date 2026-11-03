@@ -26,7 +26,12 @@ from typing import Literal
 from ale.core.errors import ConfigError
 from ale.core.lock import TaskVariableProvenance
 from ale.core.task import ResolvedVariables, Task
-from ale.core.taskspec import TaskVariables, VariableReference
+from ale.core.taskspec import (
+    TaskVariables,
+    VariableReference,
+    is_credential_header,
+    is_credential_name,
+)
 
 __all__ = [
     "ENV_FILE",
@@ -34,7 +39,6 @@ __all__ = [
     "find_env_file",
     "hf_token",
     "host_credentials",
-    "is_credential_name",
     "load_env",
     "provider_credentials",
     "provider_endpoint",
@@ -96,14 +100,8 @@ def load_env(path: Path | None = None, *, override: bool = False) -> dict[str, s
     return loaded
 
 
-#: A name that marks a credential, as Harbor recognizes one; ``MAX_TOKENS`` is a count.
-_CREDENTIAL_NAME = re.compile(r"KEY|SECRET|TOKEN(?!S)|PASSWORD|CREDENTIAL|AUTH", re.IGNORECASE)
 #: Values too common to redact: replacing every ``1`` or ``true`` would corrupt the record.
 _COMMON_VALUE = re.compile(r"\d*|true|false|yes|no", re.IGNORECASE)
-
-
-def is_credential_name(name: str) -> bool:
-    return bool(_CREDENTIAL_NAME.search(name))
 
 
 def host_credentials(names: Iterable[str] = ()) -> dict[str, str]:
@@ -154,6 +152,23 @@ def _resolve(
     secrets: set[str] = set()
     missing: list[str] = []
     leaked: list[str] = []
+
+    def lookup(
+        reference: VariableReference, where: str, *, credential: bool
+    ) -> tuple[str, Literal["env_file", "default"]] | None:
+        # Empty counts as unset, as a shell's ``${NAME:-default}`` treats it: an empty line
+        # copied from an example file is not a credential.
+        if found := values.get(reference.name, ""):
+            if (credential or is_credential_name(reference.name)) and not (
+                _COMMON_VALUE.fullmatch(found)
+            ):
+                secrets.add(found)
+            return found, "env_file"
+        if reference.default is not None:
+            return reference.default, "default"
+        missing.append(f"{reference.name} ({where})")
+        return None
+
     for table, env in declared.tables:
         if table == "solution" and not oracle:
             continue
@@ -162,19 +177,10 @@ def _resolve(
             reference = VariableReference.parse(value)
             source: Literal["literal", "env_file", "default"] = "literal"
             if reference is not None:
-                # Empty counts as unset, as a shell's ``${NAME:-default}`` treats it: an
-                # empty line copied from an example file is not a credential.
-                if found := values.get(reference.name, ""):
-                    value, source = found, "env_file"
-                    if (
-                        is_credential_name(key) or is_credential_name(reference.name)
-                    ) and not _COMMON_VALUE.fullmatch(found):
-                        secrets.add(found)
-                elif reference.default is not None:
-                    value, source = reference.default, "default"
-                else:
-                    missing.append(f"{reference.name} ([{table}].env)")
+                found = lookup(reference, f"[{table}].env", credential=is_credential_name(key))
+                if found is None:
                     continue
+                value, source = found
             if value in held:
                 leaked.append(
                     f"[{table}].env {key} holds the Host credential {held[value]}, which "
@@ -182,11 +188,45 @@ def _resolve(
                 )
             resolved[key] = value
             provenance.append(TaskVariableProvenance(table=table, name=key, source=source))  # type: ignore[arg-type]
+
+    # An oracle has no MCP client, so it needs none of these.
+    mcp_headers: dict[str, dict[str, str]] = {}
+    for server, headers in {} if oracle else declared.mcp_headers.items():
+        for header, value in headers.items():
+            where = f"MCP server {server} header {header}"
+            credential = is_credential_header(header)
+            references = dict.fromkeys(VariableReference.embedded(value))
+            hits = {
+                reference: hit
+                for reference in references
+                if (hit := lookup(reference, where, credential=credential)) is not None
+            }
+            if len(hits) < len(references):
+                continue
+            leaked.extend(
+                f"{where} holds the Host credential {held[text]}, which reaches a model "
+                "through the Gateway only"
+                for text, _ in hits.values()
+                if text in held
+            )
+            mcp_headers.setdefault(server, {})[header] = VariableReference.substitute(
+                value, {reference: text for reference, (text, _) in hits.items()}
+            )
+            kinds = {kind for _, kind in hits.values()}
+            provenance.append(
+                TaskVariableProvenance(
+                    table="environment.mcp_servers",
+                    name=f"{server}.{header}",
+                    source="env_file" if "env_file" in kinds else "default" if kinds else "literal",
+                )
+            )
+
     variables = TaskVariables(
         environment=tables["environment"],
         verifier=tables["verifier"],
         verifier_environment=tables.get("verifier.environment"),
         solution=tables.get("solution", {}),
+        mcp_headers=mcp_headers,
     )
     return (
         ResolvedVariables(

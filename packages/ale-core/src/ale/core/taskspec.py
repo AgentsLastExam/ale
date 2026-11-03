@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
+from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal, NamedTuple, Self
+from urllib.parse import urlsplit
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -14,13 +17,14 @@ from ale.core.ids import TaskId, content_hash
 __all__ = [
     "SCHEMA_VERSION",
     "AgentTable",
-    "AleTable",
-    "AleVerifierTable",
+    "Artifact",
     "Author",
     "EnvironmentTable",
     "ImageKind",
     "ImageSpec",
+    "McpHeaders",
     "McpServer",
+    "McpServerTable",
     "McpSource",
     "NetworkMode",
     "NetworkPolicy",
@@ -33,7 +37,6 @@ __all__ = [
     "StreamableHttpMcpServer",
     "TaskConfig",
     "TaskEnv",
-    "TaskMcpSource",
     "TaskSpec",
     "TaskTable",
     "TaskVariables",
@@ -44,6 +47,9 @@ __all__ = [
     "VerifierResources",
     "VerifierTable",
     "VerifySpec",
+    "host_allowed",
+    "is_credential_header",
+    "is_credential_name",
 ]
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
@@ -64,21 +70,52 @@ def _task_path(path: str, operating_system: OperatingSystem) -> PurePosixPath | 
     return path_type(path)
 
 
-def _validate_artifact_paths(paths: tuple[str, ...], operating_system: OperatingSystem) -> None:
-    normalized = [_task_path(path, operating_system) for path in paths]
-    relative = [
-        path for path, parsed in zip(paths, normalized, strict=True) if not parsed.is_absolute()
-    ]
-    if relative:
-        raise ValueError("artifact paths must be absolute: " + ", ".join(relative))
-    if len(normalized) != len(set(normalized)):
-        raise ValueError("artifact paths must be unique")
-    for path in normalized:
-        if ".." in path.parts or path == path.parent:
+class Artifact(BaseModel):
+    """One ``artifacts`` entry: a path or glob, below where the agent starts when relative.
+
+    A plain string when nothing is left out. ``exclude`` takes ``tar --exclude`` patterns, as
+    in Harbor: they match after any ``/``, so ``.venv`` is that name at any depth.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source: str = Field(min_length=1)
+    exclude: tuple[str, ...] = ()
+
+    # --- validation ---
+
+    @model_validator(mode="before")
+    @classmethod
+    def _plain_path(cls, data: Any) -> Any:
+        return {"source": data} if isinstance(data, str) else data
+
+
+def _validate_artifact_paths(
+    artifacts: tuple[Artifact, ...], operating_system: OperatingSystem
+) -> None:
+    for artifact in artifacts:
+        path = _task_path(artifact.source, operating_system)
+        if ".." in path.parts or (path.is_absolute() and path == path.parent):
             raise ValueError("artifact paths must not be filesystem roots or contain '..'")
 
 
 _ACCOUNT = r"^[a-z_][a-z0-9_-]{0,31}$"
+_DNS_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_ALLOWED_HOST = re.compile(rf"(?:\*\.)?{_DNS_LABEL}(?:\.{_DNS_LABEL})*")
+#: The egress proxy runs on the Host, so an entry reaching these would reach the Host itself
+#: or, on a cloud machine, its metadata service. ``0.0.0.0/0`` overlaps them; ``public`` exists.
+_HOST_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in (
+        "0.0.0.0/8",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "::/128",
+        "::1/128",
+        "::ffff:0:0/96",
+        "fe80::/10",
+    )
+)
 
 
 class ImageSpec(BaseModel):
@@ -94,6 +131,8 @@ class ImageSpec(BaseModel):
     base_ref: str | None = Field(default=None, min_length=1)
     user: str = Field(default="user", pattern=_ACCOUNT)
     """The agent account. It must exist in the image; preparation fails if it does not."""
+    build_timeout_sec: float = Field(default=3600, gt=0)
+    """How long the Task's own build may run. Not part of the image's identity."""
 
     # --- validation ---
 
@@ -118,8 +157,8 @@ class Resources(BaseModel):
     model_config = _FROZEN
 
     cpus: int = Field(default=1, ge=1)
-    memory_mb: int = Field(default=4096, ge=128)
-    storage_mb: int | None = Field(default=None, ge=256)
+    memory_mb: int = Field(default=4096, ge=1)
+    storage_mb: int | None = Field(default=None, ge=1)
     gpus: int = Field(default=0, ge=0)
     sudo: bool = False
 
@@ -128,6 +167,33 @@ class NetworkMode(StrEnum):
     BLOCK = "block"
     ALLOWLIST = "allowlist"
     OPEN = "open"
+
+
+def _address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
+
+
+def host_allowed(host: str, allowed_hosts: Iterable[str]) -> bool:
+    """Whether ``allowed_hosts`` admits ``host``, with Harbor's matching.
+
+    A name matches itself; ``*.example.org`` matches every name below ``example.org``, at any
+    depth, and not ``example.org`` itself. An address matches itself and any range holding it,
+    and never a name pattern.
+    """
+    name = host.lower().rstrip(".")
+    address = _address(name)
+    for allowed in (entry.lower() for entry in allowed_hosts):
+        if address is None:
+            if name == allowed or (allowed.startswith("*.") and name.endswith(allowed[1:])):
+                return True
+        elif allowed == address.compressed or (
+            "/" in allowed and address in ipaddress.ip_network(allowed)
+        ):
+            return True
+    return False
 
 
 class NetworkPolicy(BaseModel):
@@ -149,14 +215,14 @@ class PhaseTimeouts(BaseModel):
     model_config = _FROZEN
 
     agent: float = Field(default=900, gt=0)
-    verify: float = Field(default=300, gt=0)
+    verify: float = Field(default=600, gt=0)
 
 
 class SkillSource(BaseModel):
     model_config = _FROZEN
 
     path: str = Field(min_length=1)
-    origin: Literal["task", "preset", "run", "cli"] | None = Field(default=None, exclude=True)
+    origin: Literal["preset", "run", "cli"] | None = Field(default=None, exclude=True)
     declared: str | None = Field(default=None, exclude=True)
 
 
@@ -165,7 +231,7 @@ class McpSource(BaseModel):
 
     path: str | None = Field(default=None, min_length=1)
     builtin: str | None = Field(default=None, min_length=1)
-    origin: Literal["task", "preset", "run", "cli"] | None = Field(default=None, exclude=True)
+    origin: Literal["preset", "run", "cli"] | None = Field(default=None, exclude=True)
     declared: str | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
@@ -173,12 +239,6 @@ class McpSource(BaseModel):
         if (self.path is None) == (self.builtin is None):
             raise ValueError("an MCP source requires exactly one of path or builtin")
         return self
-
-
-class TaskMcpSource(BaseModel):
-    model_config = _FROZEN
-
-    path: str = Field(min_length=1)
 
 
 class StdioMcpServer(BaseModel):
@@ -220,10 +280,12 @@ McpServer = Annotated[
 
 
 class ToolProvision(BaseModel):
+    """What a Task's image gives its agent, as ``[environment]`` declares it."""
+
     model_config = _FROZEN
 
-    skills: tuple[SkillSource, ...] = ()
-    mcp_servers: tuple[TaskMcpSource, ...] = ()
+    skills_dir: str | None = None
+    mcp_servers: tuple[McpServer, ...] = ()
 
 
 class VerificationMode(StrEnum):
@@ -237,8 +299,8 @@ class VerifierResources(BaseModel):
     model_config = _FROZEN
 
     cpus: int = Field(ge=1)
-    memory_mb: int = Field(ge=128)
-    storage_mb: int | None = Field(ge=256)
+    memory_mb: int = Field(ge=1)
+    storage_mb: int | None = Field(ge=1)
     gpus: int = Field(ge=0)
 
     def as_resources(self) -> Resources:
@@ -272,6 +334,7 @@ class VerifySpec(BaseModel):
 
 _VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*))?\}", re.DOTALL)
+_EMBEDDED_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 #: The prefix of the framework's own variables: those it sets in the commands it runs, and
 #: the Host configuration it reads, model and Judge keys included.
 _RESERVED_PREFIX = "ALE_"
@@ -292,6 +355,18 @@ class VariableReference(NamedTuple):
         match = _REFERENCE.fullmatch(value)
         return cls(match[1], match[2]) if match else None
 
+    @classmethod
+    def embedded(cls, value: str) -> tuple[VariableReference, ...]:
+        """Every reference within ``value``, the form an MCP header takes, as in Harbor."""
+        if "${" in _EMBEDDED_REFERENCE.sub(" ", value):
+            raise ValueError("a ${ must start ${NAME} or ${NAME:-default}")
+        return tuple(cls(match[1], match[2]) for match in _EMBEDDED_REFERENCE.finditer(value))
+
+    @classmethod
+    def substitute(cls, value: str, found: Mapping[VariableReference, str]) -> str:
+        """``value`` with each of its embedded references replaced by what ``found`` holds."""
+        return _EMBEDDED_REFERENCE.sub(lambda match: found[cls(match[1], match[2])], value)
+
 
 def _valid_env(env: dict[str, str]) -> dict[str, str]:
     for key, value in env.items():
@@ -309,6 +384,48 @@ def _valid_env(env: dict[str, str]) -> dict[str, str]:
 
 #: A Harbor ``env`` table: names to literals or whole-value ``${NAME}`` references.
 TaskEnv = Annotated[dict[str, str], AfterValidator(_valid_env)]
+
+#: A name that marks a credential, as Harbor recognizes one; ``MAX_TOKENS`` is a count.
+_CREDENTIAL_NAME = re.compile(r"KEY|SECRET|TOKEN(?!S)|PASSWORD|CREDENTIAL|AUTH", re.IGNORECASE)
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+#: The one shape a credential header takes: an optional scheme, then only references.
+_CREDENTIAL_HEADER = re.compile(
+    r"\s*(?:[A-Za-z]+\s+)?\$\{[A-Za-z_][A-Za-z0-9_]*\}(?:[\s:-]*\$\{[A-Za-z_][A-Za-z0-9_]*\})*\s*"
+)
+
+
+def is_credential_name(name: str) -> bool:
+    return bool(_CREDENTIAL_NAME.search(name))
+
+
+def is_credential_header(name: str) -> bool:
+    return is_credential_name(name) or name.lower() in {"cookie", "set-cookie"}
+
+
+def _valid_headers(headers: dict[str, str]) -> dict[str, str]:
+    for name, value in headers.items():
+        if not _HEADER_NAME.fullmatch(name):
+            raise ValueError(f"{name!r} is not an HTTP header name")
+        if "\r" in value or "\n" in value:
+            raise ValueError(f"header {name} must not contain a line break")
+        try:
+            references = VariableReference.embedded(value)
+        except ValueError as error:
+            raise ValueError(f"header {name}: {error}") from error
+        for reference in references:
+            if reference.name.upper().startswith(_RESERVED_PREFIX):
+                raise ValueError(f"header {name}: a Task cannot refer to {reference.name}")
+        if is_credential_header(name) and not _CREDENTIAL_HEADER.fullmatch(value):
+            # A task.toml is committed, so it holds the variable, never the credential.
+            raise ValueError(
+                f"header {name} holds a credential; write it as ${{NAME}} or Bearer ${{NAME}}, "
+                "with no default, and set NAME in the checkout's .env"
+            )
+    return headers
+
+
+#: An MCP server's HTTP headers: literal text with ``${NAME}`` references inside it.
+McpHeaders = Annotated[dict[str, str], AfterValidator(_valid_headers)]
 
 
 class TaskVariables(BaseModel):
@@ -329,6 +446,8 @@ class TaskVariables(BaseModel):
     receives ``environment``, as Harbor copies ``[environment]`` for it."""
     solution: dict[str, str] = Field(default_factory=dict)
     """``[solution].env``: the oracle only."""
+    mcp_headers: dict[str, dict[str, str]] = Field(default_factory=dict)
+    """``[[environment.mcp_servers]].headers`` by server: what the agent's MCP client sends."""
 
     @property
     def tables(self) -> tuple[tuple[str, dict[str, str]], ...]:
@@ -358,8 +477,11 @@ class TaskSpec(BaseModel):
     instruction: str
     resources: Resources = Resources()
     network: NetworkPolicy = NetworkPolicy()
+    workdir: str | None = None
+    """``[agent].workdir``: where the evaluated agent starts, below its home when relative;
+    ``None`` for its home."""
     timeouts: PhaseTimeouts = PhaseTimeouts()
-    artifacts: tuple[str, ...] = ()
+    artifacts: tuple[Artifact, ...] = ()
     tools: ToolProvision = ToolProvision()
     verify: VerifySpec = VerifySpec()
     variables: TaskVariables = TaskVariables()
@@ -369,6 +491,14 @@ class TaskSpec(BaseModel):
     def spec_hash(self) -> str:
         return content_hash(self.model_dump(mode="json"))
 
+    def start_directory(self, home: str) -> str:
+        """Where the agent starts, given the agent's ``home``."""
+        return str(_task_path(home, self.os) / (self.workdir or ""))
+
+    def artifact_path(self, artifact: Artifact, home: str) -> str:
+        """Where ``artifact`` is, given the agent's ``home``."""
+        return str(_task_path(self.start_directory(home), self.os) / artifact.source)
+
     # --- validation ---
 
     @model_validator(mode="after")
@@ -377,8 +507,9 @@ class TaskSpec(BaseModel):
         return self
 
 
-#: The ``task.toml`` schema ALE reads: a subset of Harbor's schema 1.4 plus an ``[ale]`` table.
-SCHEMA_VERSION = "1.4"
+#: The ``task.toml`` schema ALE reads: revision 1 of ALE's fields on Harbor's schema 1.4. Plain
+#: ``1.4`` is a Harbor file, which a conversion turns into this one.
+SCHEMA_VERSION = "1.4+ale.1"
 
 #: ``task.toml`` network modes and what they mean for the evaluated agent and the oracle.
 _NETWORK_MODES = {
@@ -391,13 +522,10 @@ _HARBOR_ENVIRONMENT_ONLY = frozenset(
     {
         "allow_internet",
         "allowed_hosts",
-        "build_timeout_sec",
         "gpu_types",
         "healthcheck",
-        "mcp_servers",
         "memory",
         "network_mode",
-        "skills_dir",
         "storage",
         "tpu",
         "workdir",
@@ -410,7 +538,7 @@ _UNSUPPORTED_HARBOR_KEYS: dict[tuple[str, ...], frozenset[str]] = {
     (): frozenset({"multi_step_reward_strategy", "source", "steps"}),
     ("environment",): _HARBOR_ENVIRONMENT_ONLY,
     ("verifier",): frozenset({"allowed_hosts", "collect", "network_mode", "user"}),
-    ("verifier", "environment"): _HARBOR_ENVIRONMENT_ONLY | {"os"},
+    ("verifier", "environment"): _HARBOR_ENVIRONMENT_ONLY | {"mcp_servers", "os", "skills_dir"},
 }
 
 
@@ -433,18 +561,112 @@ class TaskTable(BaseModel):
     keywords: tuple[str, ...] = ()
 
 
+class McpServerTable(BaseModel):
+    """``[[environment.mcp_servers]]``: Harbor's entry for a server the image provides."""
+
+    model_config = _FROZEN
+
+    name: str = Field(pattern=r"^[A-Za-z0-9._-]+$")
+    transport: Literal["stdio", "streamable-http"]
+    command: str | None = Field(default=None, min_length=1)
+    args: tuple[str, ...] = ()
+    url: str | None = Field(default=None, pattern=r"^https?://")
+    headers: McpHeaders = Field(default_factory=dict)
+
+    @property
+    def server(self) -> StdioMcpServer | StreamableHttpMcpServer:
+        if self.transport == "stdio":
+            assert self.command is not None
+            return StdioMcpServer(
+                name=self.name, transport="stdio", command=self.command, args=self.args
+            )
+        assert self.url is not None
+        return StreamableHttpMcpServer(name=self.name, transport="streamable-http", url=self.url)
+
+    # --- validation ---
+
+    @field_validator("transport", mode="before")
+    @classmethod
+    def _harbor_spelling(cls, value: Any) -> Any:
+        return "streamable-http" if value == "http" else value
+
+    @model_validator(mode="after")
+    def _fields_of_its_transport(self) -> Self:
+        if self.transport == "stdio" and (
+            self.command is None or self.url is not None or self.headers
+        ):
+            raise ValueError("transport 'stdio' requires command and takes no url or headers")
+        if self.transport == "streamable-http" and (
+            self.url is None or self.command is not None or self.args
+        ):
+            raise ValueError("transport 'streamable-http' requires url and takes no command")
+        return self
+
+    @model_validator(mode="after")
+    def _credentials_stay_encrypted(self) -> Self:
+        parts = urlsplit(self.url or "")
+        if parts.scheme == "http" and not _is_loopback(parts.hostname or ""):
+            for name in filter(is_credential_header, self.headers):
+                raise ValueError(f"header {name} would cross the network unencrypted; use https")
+        return self
+
+
+def _is_loopback(host: str) -> bool:
+    address = _address(host)
+    return host == "localhost" or (address is not None and address.is_loopback)
+
+
+def _normal_host(host: str) -> str:
+    """An ``allowed_hosts`` entry in Harbor's normal form."""
+    name = host.strip().lower().rstrip(".")
+    try:
+        network = ipaddress.ip_network(name)
+    except ValueError:
+        if not _ALLOWED_HOST.fullmatch(name):
+            raise ValueError(
+                f"{host!r} is not a hostname, *.hostname, address or CIDR range"
+            ) from None
+        return name
+    if any(
+        network.version == reserved.version and network.overlaps(reserved)
+        for reserved in _HOST_NETWORKS
+    ):
+        raise ValueError(f"{host} reaches the Host itself or its cloud metadata service")
+    return network.compressed if "/" in name else network.network_address.compressed
+
+
 class EnvironmentTable(BaseModel):
     """``[environment]``: the machine the agent starts on."""
 
     model_config = _FROZEN
 
     os: OperatingSystem = OperatingSystem.LINUX
+    vm: bool = Field(default=False, strict=True)
     docker_image: str | None = Field(default=None, min_length=1)
-    cpus: int = Field(ge=1, strict=True)
-    memory_mb: int = Field(ge=128, strict=True)
-    storage_mb: int | None = Field(default=None, ge=256, strict=True)
+    vm_image: str | None = Field(default=None, min_length=1)
+    vm_base: str | None = Field(default=None, min_length=1)
+    build_timeout_sec: float = Field(default=3600, gt=0, allow_inf_nan=False, strict=True)
+    cpus: int = Field(default=1, ge=1, strict=True)
+    memory_mb: int = Field(default=4096, ge=1, strict=True)
+    storage_mb: int | None = Field(default=None, ge=1, strict=True)
     gpus: int = Field(default=0, ge=0, strict=True)
     env: TaskEnv = Field(default_factory=dict)
+    skills_dir: str | None = Field(default=None, min_length=1)
+    mcp_servers: tuple[McpServerTable, ...] = ()
+
+    @property
+    def kind(self) -> ImageKind:
+        """A VM when anything here says so; only a Linux VM built from a Dockerfile sets ``vm``."""
+        windows = self.os is OperatingSystem.WINDOWS
+        vm = self.vm or windows or self.vm_image is not None or self.vm_base is not None
+        return ImageKind.VM if vm else ImageKind.CONTAINER
+
+    # --- validation ---
+
+    @field_validator("os", mode="before")
+    @classmethod
+    def _any_case(cls, value: Any) -> Any:
+        return value.lower() if isinstance(value, str) else value
 
 
 class AgentTable(BaseModel):
@@ -452,10 +674,12 @@ class AgentTable(BaseModel):
 
     model_config = _FROZEN
 
-    user: str = Field(pattern=_ACCOUNT)
-    timeout_sec: float = Field(gt=0, allow_inf_nan=False, strict=True)
-    network_mode: Literal["no-network", "allowlist", "public"]
+    user: str = Field(default="user", pattern=_ACCOUNT)
+    timeout_sec: float = Field(default=900, gt=0, allow_inf_nan=False, strict=True)
+    network_mode: Literal["no-network", "allowlist", "public"] = "no-network"
     allowed_hosts: tuple[str, ...] | None = None
+    sudo: bool = Field(default=False, strict=True)
+    workdir: str | None = Field(default=None, min_length=1)
 
     @property
     def network(self) -> NetworkPolicy:
@@ -464,6 +688,11 @@ class AgentTable(BaseModel):
         )
 
     # --- validation ---
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _normal_hosts(cls, hosts: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        return None if hosts is None else tuple(_normal_host(host) for host in hosts)
 
     @model_validator(mode="after")
     def _hosts_only_for_allowlist(self) -> Self:
@@ -475,16 +704,26 @@ class AgentTable(BaseModel):
 
 
 class VerifierEnvironmentTable(BaseModel):
-    """``[verifier.environment]``: a separate verifier's own image and resources."""
+    """``[verifier.environment]``: a separate verifier's own image and resources.
+
+    ``cpus`` and ``memory_mb`` fall back to ``[environment]``'s.
+    """
 
     model_config = _FROZEN
 
+    vm: bool = Field(default=False, strict=True)
     docker_image: str | None = Field(default=None, min_length=1)
-    cpus: int = Field(ge=1, strict=True)
-    memory_mb: int = Field(ge=128, strict=True)
-    storage_mb: int | None = Field(default=None, ge=256, strict=True)
+    vm_image: str | None = Field(default=None, min_length=1)
+    build_timeout_sec: float = Field(default=3600, gt=0, allow_inf_nan=False, strict=True)
+    cpus: int | None = Field(default=None, ge=1, strict=True)
+    memory_mb: int | None = Field(default=None, ge=1, strict=True)
+    storage_mb: int | None = Field(default=None, ge=1, strict=True)
     gpus: int = Field(default=0, ge=0, strict=True)
     env: TaskEnv = Field(default_factory=dict)
+
+    @property
+    def kind(self) -> ImageKind:
+        return ImageKind.VM if self.vm or self.vm_image is not None else ImageKind.CONTAINER
 
 
 class VerifierTable(BaseModel):
@@ -492,7 +731,7 @@ class VerifierTable(BaseModel):
 
     model_config = _FROZEN
 
-    timeout_sec: float = Field(gt=0, allow_inf_nan=False, strict=True)
+    timeout_sec: float = Field(default=600, gt=0, allow_inf_nan=False, strict=True)
     env: TaskEnv = Field(default_factory=dict)
     environment_mode: VerificationMode | None = None
     environment: VerifierEnvironmentTable | None = None
@@ -523,67 +762,24 @@ class SolutionTable(BaseModel):
     env: TaskEnv = Field(default_factory=dict)
 
 
-class AleVerifierTable(BaseModel):
-    """``[ale.verifier]``: a separate verifier in a VM."""
-
-    model_config = _FROZEN
-
-    sandbox: ImageKind = ImageKind.CONTAINER
-    vm_image: str | None = Field(default=None, min_length=1)
-
-    # --- validation ---
-
-    @model_validator(mode="after")
-    def _vm_image_needs_vm(self) -> Self:
-        if self.vm_image is not None and self.sandbox is not ImageKind.VM:
-            raise ValueError("vm_image requires sandbox 'vm'")
-        return self
-
-
-class AleTable(BaseModel):
-    """``[ale]``: what ALE adds to Harbor's schema, or means differently."""
-
-    model_config = _FROZEN
-
-    sandbox: ImageKind = ImageKind.CONTAINER
-    vm_image: str | None = Field(default=None, min_length=1)
-    vm_base: str | None = Field(default=None, min_length=1)
-    sudo: bool = Field(default=False, strict=True)
-    skills: tuple[str, ...] = ()
-    mcp_servers: tuple[str, ...] = ()
-    verifier: AleVerifierTable | None = None
-
-    # --- validation ---
-
-    @model_validator(mode="after")
-    def _valid_vm_source(self) -> Self:
-        if self.sandbox is not ImageKind.VM:
-            for key in ("vm_image", "vm_base"):
-                if getattr(self, key) is not None:
-                    raise ValueError(f"{key} requires sandbox 'vm'")
-        if self.vm_image is not None and self.vm_base is not None:
-            raise ValueError("vm_image and vm_base are mutually exclusive")
-        return self
-
-
 class TaskConfig(BaseModel):
     """The strict authored shape of ``task.toml``.
 
-    A Harbor field keeps Harbor's meaning; what ALE adds or means differently is in
-    ``[ale]``. Every Harbor field whose default differs from ALE's is required.
+    A Harbor field keeps Harbor's meaning. A field ALE adds sits in the Harbor table of what
+    it configures, under a name Harbor gives no other meaning. Only ``schema_version`` and
+    ``[task].name`` are required.
     """
 
     model_config = _FROZEN
 
-    schema_version: Literal["1.4"]
-    artifacts: tuple[str, ...] = ()
+    schema_version: Literal["1.4+ale.1"]
+    artifacts: tuple[Artifact, ...] = ()
     task: TaskTable
     metadata: dict[str, Any] = Field(default_factory=dict)
-    environment: EnvironmentTable
-    agent: AgentTable
-    verifier: VerifierTable
+    environment: EnvironmentTable = EnvironmentTable()
+    agent: AgentTable = AgentTable()
+    verifier: VerifierTable = VerifierTable()
     solution: SolutionTable = SolutionTable()
-    ale: AleTable = AleTable()
 
     # --- validation ---
 
@@ -603,35 +799,38 @@ class TaskConfig(BaseModel):
                     for key in sorted(keys & table.keys())
                 )
         artifacts = data.get("artifacts")
-        if isinstance(artifacts, list) and any(isinstance(item, dict) for item in artifacts):
-            unsupported.append("table-form artifacts are not supported by ALE")
+        for item in artifacts if isinstance(artifacts, list) else ():
+            if isinstance(item, dict):
+                unsupported.extend(
+                    f"artifact {key} is not supported by ALE"
+                    for key in sorted({"destination", "service"} & item.keys())
+                )
         if unsupported:
             raise ValueError("; ".join(unsupported))
         return data
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
-        environment, ale, verifier = self.environment, self.ale, self.verifier
+        environment, verifier = self.environment, self.verifier
         windows = environment.os is OperatingSystem.WINDOWS
-        if windows and ale.sandbox is not ImageKind.VM:
-            raise ValueError("os 'windows' requires [ale].sandbox 'vm'")
-        if environment.docker_image is not None and ale.sandbox is not ImageKind.CONTAINER:
-            raise ValueError("[environment].docker_image requires [ale].sandbox 'container'")
-        if ale.vm_base is not None and not windows:
-            raise ValueError("[ale].vm_base requires os 'windows'")
-        verifier_image = verifier.environment.docker_image if verifier.environment else None
-        if ale.verifier is not None:
-            if verifier.mode is VerificationMode.SHARED:
-                raise ValueError("[ale.verifier] requires environment_mode 'separate'")
-            if verifier_image is not None and ale.verifier.sandbox is not ImageKind.CONTAINER:
+        if environment.docker_image is not None and environment.kind is ImageKind.VM:
+            raise ValueError("[environment].docker_image is a container image; a VM has vm_image")
+        if environment.vm_image is not None and environment.vm_base is not None:
+            raise ValueError("vm_image and vm_base are mutually exclusive")
+        if environment.vm_base is not None and not windows:
+            raise ValueError("[environment].vm_base requires os 'windows'")
+        names = [server.name for server in environment.mcp_servers]
+        if len(names) != len(set(names)):
+            raise ValueError("[[environment.mcp_servers]] names must be unique")
+        skills_dir = environment.skills_dir
+        if skills_dir is not None and not _task_path(skills_dir, environment.os).is_absolute():
+            raise ValueError("[environment].skills_dir must be an absolute path")
+        if verifier.environment is not None and verifier.environment.docker_image is not None:
+            if verifier.environment.kind is ImageKind.VM:
                 raise ValueError(
-                    "[verifier.environment].docker_image requires [ale.verifier].sandbox "
-                    "'container'"
+                    "[verifier.environment].docker_image is a container image; a VM has vm_image"
                 )
-        if windows and (
-            verifier_image is not None
-            or (ale.verifier is not None and ale.verifier.sandbox is not ImageKind.VM)
-        ):
-            raise ValueError("a Windows verifier runs in a VM")
+            if windows:
+                raise ValueError("a Windows verifier runs in a VM")
         _validate_artifact_paths(self.artifacts, environment.os)
         return self

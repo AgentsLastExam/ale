@@ -23,7 +23,14 @@ from ale.run.harnesses._npm import (
     npm_env,
     reported_version,
 )
-from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
+from ale.run.harnesses.base import (
+    LOG_ROOT,
+    CliCommand,
+    CliHarness,
+    NativeResult,
+    http_headers,
+    install_skills,
+)
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
@@ -142,14 +149,7 @@ class HermesHarness(CliHarness):
             ["mkdir", "-p", str(skills_root), str(home / trajectory.EXPORTS)],
             identity=Identity.AGENT,
         )
-        for skill in resources.skills:
-            target = skills_root / skill.name
-            await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
-            if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+        await install_skills(sandbox, session, resources, skills_root)
 
         servers: dict[str, dict[str, Any]] = {}
         for resolved in resources.mcp_servers:
@@ -169,7 +169,7 @@ class HermesHarness(CliHarness):
                         for key, value in server.environment.items()
                     }
             else:
-                native = {"url": server.url}
+                native = {"url": server.url, **http_headers(resolved)}
             servers[resolved.name] = native
 
         transport, suffix = _TRANSPORTS[self.gateway_dialect]

@@ -9,8 +9,7 @@ from pathlib import Path
 
 from ale.core.errors import TaskDefinitionError
 from ale.core.task import Stage
-from ale.core.taskspec import OperatingSystem, VariableReference
-from ale.run.secrets import is_credential_name
+from ale.core.taskspec import OperatingSystem, VariableReference, is_credential_name
 from ale.run.tasksets.manifest import (
     ENVIRONMENT_DIR,
     INSTRUCTION,
@@ -34,15 +33,17 @@ _VM_RESERVED_NAMES = {
     "loader.conf",
     "mkosi.conf",
 }
+_FROM = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", re.I | re.M)
 _TOP_LEVEL = {
     TASK_CONFIG,
     INSTRUCTION,
     ENVIRONMENT_DIR,
     Stage.TESTS,
     Stage.SOLUTION,
-    "tools",
     ".ale-cache",
 }
+#: Harbor's way to run sidecars. ALE has one machine per role, so these would silently do nothing.
+_COMPOSE_FILE = "docker-compose.yaml"
 
 
 @dataclass(frozen=True)
@@ -63,8 +64,8 @@ def lint_repository(path: Path) -> list[Finding]:
             ("kits", "move Task-specific helpers below the owning Task"),
             ("images", "put image build materials below each Task's environment/ directory"),
             ("files", "put content below the Task stage that owns it"),
-            ("skills", "move Task Skills below tools/skills/"),
-            ("mcp", "move Task MCP below tools/mcp/"),
+            ("skills", "build Task Skills into the image and set [environment].skills_dir"),
+            ("mcp", "build Task MCP servers into the image and list [[environment.mcp_servers]]"),
         ):
             candidate = source / removed
             if candidate.exists():
@@ -86,7 +87,7 @@ def lint_repository(path: Path) -> list[Finding]:
 
 def _check_folder(folder: TaskFolder) -> list[Finding]:
     findings: list[Finding] = []
-    for removed in ("files", "kits", "skills", "mcp"):
+    for removed in ("files", "kits", "skills", "mcp", "tools"):
         candidate = folder.root / removed
         if candidate.exists():
             findings.append(
@@ -100,6 +101,15 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
         if entry.name not in _TOP_LEVEL:
             findings.append(
                 Finding(entry, "unsupported top-level Task entry; move it into its owning stage")
+            )
+
+    for directory in (folder.environment_dir, folder.root / Stage.TESTS):
+        if (directory / _COMPOSE_FILE).is_file():
+            findings.append(
+                Finding(
+                    directory / _COMPOSE_FILE,
+                    "compose sidecars are not supported; run services in the Task's own image",
+                )
             )
 
     config = _read_config(folder.root / TASK_CONFIG)
@@ -125,8 +135,7 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
                 "environment/assets is unused without an image build",
             )
         )
-    ale = config.get("ale")
-    vm = isinstance(ale, dict) and ale.get("sandbox") == "vm"
+    vm = isinstance(environment, dict) and environment.get("vm") is True
     if vm and folder.dockerfile is not None:
         # Any base image is accepted; the engine adds what it needs when it prepares one.
         if _vm_boot_override(folder.dockerfile):
@@ -159,7 +168,50 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
             )
         )
     findings.extend(_check_variables(folder.root / TASK_CONFIG, config))
+    findings.extend(_check_image_versions(folder, config))
+    agent, metadata = config.get("agent"), config.get("metadata")
+    if (
+        isinstance(agent, dict)
+        and agent.get("network_mode") == "public"
+        and not (isinstance(metadata, dict) and metadata.get("network_justification"))
+    ):
+        findings.append(
+            Finding(
+                folder.root / TASK_CONFIG,
+                "network_mode 'public' needs a reason in [metadata].network_justification",
+            )
+        )
     return findings
+
+
+def _moves(image: str) -> bool:
+    """Whether ``image`` can change under a Task: no digest, and no tag or ``latest``."""
+    if "@" in image or "$" in image:  # a build argument names it elsewhere
+        return False
+    return image.rpartition("/")[2].partition(":")[2] in ("", "latest")
+
+
+def _check_image_versions(folder: TaskFolder, config: dict[str, object]) -> list[Finding]:
+    """Every image a Task names, built on or used directly, at an exact version."""
+    named: list[tuple[Path, str]] = []
+    for dockerfile in (folder.dockerfile, folder.verifier_dockerfile):
+        if dockerfile is None:
+            continue
+        stages = _FROM.findall(dockerfile.read_text(encoding="utf-8", errors="replace"))
+        aliases = {alias.lower() for _, alias in stages} | {"scratch"}
+        named += [(dockerfile, base) for base, _ in stages if base.lower() not in aliases]
+    environment = config.get("environment")
+    verifier = config.get("verifier")
+    nested = verifier.get("environment") if isinstance(verifier, dict) else None
+    for table in (environment, nested):
+        image = table.get("docker_image") if isinstance(table, dict) else None
+        if isinstance(image, str):
+            named.append((folder.root / TASK_CONFIG, image))
+    return [
+        Finding(path, f"{image} can change under the Task; name an exact version")
+        for path, image in named
+        if _moves(image)
+    ]
 
 
 def _check_variables(path: Path, config: dict[str, object]) -> list[Finding]:

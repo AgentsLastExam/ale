@@ -78,6 +78,7 @@ class EgressProxy:
         host, _, port_text = parts[1].rpartition(":")
         if not host:
             host, port_text = parts[1], "443"
+        host = host.removeprefix("[").removesuffix("]")  # an IPv6 address
 
         if not session.may_reach(host):
             declared = ", ".join(sorted(session.allowed_hosts)) or "none"

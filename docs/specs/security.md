@@ -47,8 +47,8 @@ egress policy.
 Daytona has neither bridge nor runner. It enforces `block` (`networkBlockAll`) and
 `allowlist` (its own domain allowlist) outside the sandbox, where the agent cannot lift
 them, so allowed traffic goes straight from the cloud to its host instead of through the
-Host. Daytona's allowlist matches names with their subdomains, as the proxy does, but also
-passes plain HTTP and other ports of an allowed host. It refuses every connection from the
+Host. Daytona's allowlist takes names and `*.` patterns, as the proxy does, but also passes
+plain HTTP and other ports of an allowed host. It refuses every connection from the
 sandbox to the Host, so the Host carries the Gateway in over SSH, and the sandbox can name
 only the Gateway, never an address.
 
@@ -117,8 +117,10 @@ and it does not depend on tooling in an image we did not build. **Traffic that i
 the proxy variables has nowhere to go**, so the failure mode is closed. Daytona's own
 allowlist takes this role there, for the same two reasons (section 1).
 
-Matching is on the requested name, with subdomains of a declared host included. It is
-deliberately *not* on a resolved address: a task declares `pypi.org` because that is what
+Matching is on the requested name, as in Harbor: `pypi.org` is that host, and `*.pypi.org`
+every name below it. An address or CIDR entry matches a client that asks for that address, and
+no name pattern admits an address. The proxy connects from the Host, so an entry reaching
+loopback or link-local addresses, cloud metadata included, fails when the Task loads. It is deliberately *not* on a resolved address: a task declares `pypi.org` because that is what
 it means, and pinning to whatever IP that resolved to once would break the task rather
 than tighten it.
 
@@ -190,7 +192,7 @@ The oracle sharing the agent's limits is the load-bearing half. `ale validate` i
 check a task gets before publication, and an oracle with more privilege would pass exactly
 the tasks a real agent then fails on access alone.
 
-A task may declare `[ale].sudo` when it genuinely needs to install software or change
+A task may declare `[agent].sudo` when it genuinely needs to install software or change
 system configuration. The grant is verified rather than assumed — writing a sudoers rule
 succeeds in an image with no `sudo` binary — and recorded in provenance, because an
 episode run that way was less isolated and the two should not be compared without that
@@ -207,7 +209,7 @@ memory. Container guest services are `docker exec` sessions with no listener.
 
 Daytona's in-sandbox daemon runs commands for anyone who connects, as root. The Provider
 blocks every non-root user from it and proves that as the agent before handing the
-sandbox out; an agent granted `[ale].sudo` can lift the block, as it can any rule.
+sandbox out; an agent granted `[agent].sudo` can lift the block, as it can any rule.
 
 The verifier writes its result to Harbor's `/logs/verifier` (`C:\logs\verifier`), a path the
 agent can create beforehand: with sudo on Linux, as any account on Windows. Before every
@@ -281,15 +283,17 @@ Task source contract.
 ALE never copies ambient host agent state. Host Skills, MCP configuration, and
 subscription profiles are outside the Task resource model.
 
-Only the effective union declared by the Task, harness preset, Run file, and CLI is
-staged. Task paths cannot escape `tools/skills/` or `tools/mcp/`. Same-name resources
-with different digests fail before provisioning. Task stdio MCP descriptors and adjacent
-code are staged below the agent home; `{mcp}` resolves to that private resource directory.
+A Task's Skills and MCP servers are in its image, which the RunLock identifies. Only what
+the harness preset, Run file, and CLI declare is added from the Host, and it replaces a Task's
+resource of the same name for that run, as in Harbor. Same-name operator resources with
+different digests fail before provisioning. Operator stdio MCP descriptors and adjacent code
+are staged below the agent home; `{mcp}` resolves to that private resource directory.
 
 Local stdio MCP commands execute inside the sandbox and are checked after files and
-Skills are staged. Remote MCP is limited to unauthenticated Streamable HTTP endpoints
-whose host satisfies the Task network policy. Native Harness subscription credentials do
-not make arbitrary remote MCP authentication implicit; that remains a separate contract.
+Skills are staged. Remote MCP is limited to Streamable HTTP endpoints whose host satisfies
+the Task network policy. A Task authenticates to one only through the `headers` it declares,
+whose credentials come from the checkout's `.env` like any Task variable; Native Harness
+subscription credentials never reach one.
 
 `cua-desktop` follows the same opt-in MCP path. It is not automatically injected.
 
@@ -342,7 +346,7 @@ Stating these plainly is part of the model. Treating an unlisted gap as covered 
 security claims rot.
 
 **A malicious task author.** A Task folder's setup and verification entries run as trusted
-framework-controlled code, and a Task may declare `[ale].sudo` for its agent. Tasks
+framework-controlled code, and a Task may declare `[agent].sudo` for its agent. Tasks
 are reviewed content, not untrusted input; the identity model protects a result from its
 *agent*, not a host from its Task. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are
 aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host Gateway; a

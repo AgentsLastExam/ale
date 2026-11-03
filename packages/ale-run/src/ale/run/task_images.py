@@ -212,6 +212,7 @@ async def prepare_task_image_result(
         kind=spec.kind,
         user=spec.user,
         sudo=task.spec.resources.sudo,
+        build_timeout_sec=spec.build_timeout_sec,
     )
     image = await _stage("artifact-check", provider.prepare_image(candidate))
     steps.append(
@@ -307,6 +308,7 @@ async def prepare_verifier_image_result(
         kind=verify.image.kind,
         user=verify.image.user,
         sudo=False,
+        build_timeout_sec=verify.image.build_timeout_sec,
     )
     image = await _stage("artifact-check", provider.prepare_image(candidate))
     steps.append(
@@ -340,6 +342,7 @@ async def _prepare_local(
     kind: ImageKind,
     user: str,
     sudo: bool,
+    build_timeout_sec: float,
 ) -> tuple[PreparedTaskImage, list[ImagePreparationStep]]:
     """The Task's own build with the framework layer on top, built once per input.
 
@@ -372,6 +375,7 @@ async def _prepare_local(
                         exclude=exclude,
                         source_digest=source_digest,
                         source=source,
+                        timeout=build_timeout_sec,
                     ),
                 )
                 layered = await _stage(
@@ -536,7 +540,13 @@ async def _prepare_windows_image(
                     staged = Path(temporary) / "context"
                     _stage_windows_context(context, staged)
                     await _build_windows_image(
-                        base, staged, output, resources, runner_identity, user=user
+                        base,
+                        staged,
+                        output,
+                        resources,
+                        runner_identity,
+                        user=user,
+                        timeout_sec=task.spec.image.build_timeout_sec,
                     )
                     if _windows_context_identity(context) != context_identity:
                         raise TaskDefinitionError("Windows image inputs changed during build")
@@ -602,6 +612,7 @@ async def _build_windows_image(
     runner_identity: str,
     *,
     user: str,
+    timeout_sec: float,
 ) -> None:
     provider = QemuProvider(overlay_dir=output.parent / "vm", runner_image=runner_identity)
     sandbox = await provider.create(
@@ -631,7 +642,7 @@ async def _build_windows_image(
             ],
             cwd=target,
             env={"ALE_HOME": sandbox.agent_home},
-            timeout_sec=3600,
+            timeout_sec=timeout_sec,
         )
         if not result.ok:
             raise TaskDefinitionError(
@@ -657,7 +668,12 @@ async def _build_windows_image(
 
 
 async def _build_oci(
-    *, dockerfile: Path, exclude: tuple[str, ...], source_digest: str, source: str
+    *,
+    dockerfile: Path,
+    exclude: tuple[str, ...],
+    source_digest: str,
+    source: str,
+    timeout: float,
 ) -> _OciBuild:
     """Build ``dockerfile`` with its directory as context, less the excluded directories.
 
@@ -698,6 +714,7 @@ async def _build_oci(
             str(metadata_file),
             *file_arguments,
             str(context),
+            timeout=timeout,
         )
         if code != 0:
             raise TaskDefinitionError(f"Task image build failed: {stderr.strip()}")

@@ -61,7 +61,7 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, OperatingSystem
+from ale.core.taskspec import NetworkMode, OperatingSystem, host_allowed
 from ale.run.framework import MARKER, framework_identity, with_framework
 from ale.run.gpu import parse_nvidia_smi
 from ale.run.guestd.tunnel import Mux
@@ -1163,12 +1163,12 @@ def _tunnel_plan(
 def _domain_allowlist(hosts: Sequence[str]) -> str:
     """The Task's allowed hosts as Daytona's domain allowlist.
 
-    ALE allows a declared name and its subdomains, which Daytona writes ``*.name``. Daytona
-    matches names, as ALE does, but takes no address, port or pattern, and at most
-    ``_DOMAIN_LIMIT`` entries; a Task that needs those is refused rather than widened.
+    Daytona matches names, as ALE does, and writes a subdomain pattern as ALE does, but takes
+    no address or port, and at most ``_DOMAIN_LIMIT`` entries; a Task that needs those is
+    refused rather than widened.
     """
     names = sorted({host.lower().rstrip(".") for host in hosts})
-    unusable = [name for name in names if not _DNS_NAME.fullmatch(name)]
+    unusable = [name for name in names if not _DNS_NAME.fullmatch(name.removeprefix("*."))]
     if unusable:
         raise ProviderCapabilityError(
             f"Daytona's allowlist takes domain names; {', '.join(unusable)} is not one"
@@ -1177,14 +1177,13 @@ def _domain_allowlist(hosts: Sequence[str]) -> str:
         raise ProviderCapabilityError(
             f"Daytona's allowlist takes at most {_DOMAIN_LIMIT} domains, not {len(names)}"
         )
-    return ",".join(f"*.{name}" for name in names)
+    return ",".join(names)
 
 
 def _egress_probe(allowed_hosts: Sequence[str]) -> tuple[str, str]:
     """A public TLS endpoint whose name the allowlist does not cover, to probe egress with."""
-    allowed = [host.lower().rstrip(".") for host in allowed_hosts]
     for address, name in _EGRESS_PROBES:
-        if not any(name == host or name.endswith(f".{host}") for host in allowed):
+        if not host_allowed(name, allowed_hosts):
             return address, name
     raise ProviderCapabilityError(
         "the allowlist covers every endpoint the Provider checks egress with: "

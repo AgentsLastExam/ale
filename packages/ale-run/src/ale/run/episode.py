@@ -73,8 +73,11 @@ _STATUS_BY_ERROR: tuple[tuple[type[BaseException], Status], ...] = (
 
 
 #: Outcomes another attempt must not replace. A completed zero is a score, and a limit
-#: termination is the measured agent's own result: retrying it would grant a fresh budget.
-_FINAL_STATUSES = frozenset({Status.COMPLETED, Status.TIMEOUT, Status.BUDGET_EXCEEDED})
+#: termination or a refusal is the measured agent's own result: retrying a limit would grant
+#: a fresh budget.
+_FINAL_STATUSES = frozenset(
+    {Status.COMPLETED, Status.TIMEOUT, Status.BUDGET_EXCEEDED, Status.REFUSED}
+)
 
 
 def status_for(error: BaseException) -> Status:
@@ -321,12 +324,15 @@ class _Artifacts(ArtifactSink):
     retained: bool = True
     collected: list[str] = field(default_factory=list)
     entries: list[dict[str, object]] = field(default_factory=list)
+    truncated: list[str] = field(default_factory=list)
 
     @property
     def root(self) -> Path:
         return self.run_dir / "artifacts"
 
-    async def collect(self, sandbox: Sandbox, source: str, name: str) -> None:
+    async def collect(
+        self, sandbox: Sandbox, source: str, name: str, exclude: tuple[str, ...] = ()
+    ) -> None:
         if not self.enabled:
             return
         logger = logging.getLogger("ale.execution")
@@ -345,11 +351,13 @@ class _Artifacts(ArtifactSink):
         captured = {entry["source"] for entry in self.entries}
         try:
             probe = await sandbox.exec(
-                [python, "-c", script, "inspect", source], identity=Identity.FRAMEWORK
+                [python, "-c", script, "inspect", source, *exclude], identity=Identity.FRAMEWORK
             )
             if not probe.ok:
                 raise OSError(probe.stderr or "artifact inspection failed")
             details = json.loads(probe.stdout)
+            if details["truncated"]:
+                self.truncated.append(source)
             for reason in details["skipped"]:
                 logger.warning("artifact skipped: %s", reason)
             for item in details["entries"]:
@@ -410,6 +418,9 @@ class _Artifacts(ArtifactSink):
         return self.root / name
 
     async def restore(self, sandbox: Sandbox) -> None:
+        if self.truncated:
+            # A verifier scoring part of the output gives a wrong score, not a low one.
+            raise TaskError(f"artifacts too large to copy whole: {', '.join(self.truncated)}")
         if not self.enabled or not self.entries:
             return
         python = "python.exe" if sandbox.request.os is OperatingSystem.WINDOWS else "python3"
@@ -512,7 +523,8 @@ async def run_episode(
     if task.variables is None:
         # Resolved by the caller for every Task at once, so a missing one fails the whole
         # selection before anything is built, started or spent.
-        if any(env for _, env in task.spec.variables.tables):
+        declared = task.spec.variables
+        if declared.mcp_headers or any(env for _, env in declared.tables):
             raise TaskDefinitionError(f"{task.spec.name}: its variables were not resolved")
         task.variables = ResolvedVariables()
     variables = task.variables
@@ -631,7 +643,13 @@ async def run_episode(
                 reason=type(exc).__name__,
             )
         phase = _phase_of(exc, ctx.failure_phase)
-        verdict = Verdict.failed(status_for(exc), exc, phase=phase, message=redact(str(exc)))
+        verdict = Verdict.failed(
+            status_for(exc),
+            exc,
+            phase=phase,
+            message=redact(str(exc)),
+            rewards=ctx.stopped_rewards,
+        )
         recording.execution.append(
             ExecutionFailure(
                 episode_id=episode_id,

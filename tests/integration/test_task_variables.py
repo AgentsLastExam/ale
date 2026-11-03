@@ -82,11 +82,16 @@ def _task(root: Path, kind: str, verifier: dict[str, Any]) -> ManifestTask:
         "solution": {"env": {"SOLUTION_ONLY": "solution"}},
     }
     if kind == "vm":
-        config |= {"environment": {"env": ENVIRONMENT, "cpus": 2}, "ale": {"sandbox": "vm"}}
+        config |= {"environment": {"env": ENVIRONMENT, "cpus": 2, "vm": True}}
     if windows:
         config |= {
-            "environment": {"env": ENVIRONMENT, "os": "windows", "cpus": 2, "memory_mb": 8192},
-            "ale": {"sandbox": "vm", "vm_image": "local/windows-variables"},
+            "environment": {
+                "env": ENVIRONMENT,
+                "os": "windows",
+                "vm_image": "local/windows-variables",
+                "cpus": 2,
+                "memory_mb": 8192,
+            },
         }
     write_task(
         root,

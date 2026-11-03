@@ -14,7 +14,14 @@ from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
 from ale.run.harnesses._npm import agent_path, is_windows, npm_env
 from ale.run.harnesses._release import ReleaseAsset
-from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
+from ale.run.harnesses.base import (
+    LOG_ROOT,
+    CliCommand,
+    CliHarness,
+    NativeResult,
+    http_headers,
+    install_skills,
+)
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
@@ -108,14 +115,7 @@ class AntigravityCliHarness(CliHarness):
             (json.dumps({"modelProvider": "gemini"}, indent=2) + "\n").encode(),
             identity=Identity.AGENT,
         )
-        for skill in resources.skills:
-            target = skills_root / skill.name
-            await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
-            if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+        await install_skills(sandbox, session, resources, skills_root)
         servers: dict[str, dict[str, Any]] = {}
         for resolved in resources.mcp_servers:
             server = resolved.server
@@ -134,7 +134,7 @@ class AntigravityCliHarness(CliHarness):
                 if server.cwd:
                     entry["cwd"] = server.cwd.replace("{home}", session.home)
             else:
-                entry = {"serverUrl": server.url}
+                entry = {"serverUrl": server.url, **http_headers(resolved)}
             servers[resolved.name] = entry
         await sandbox.write_file(
             gemini / "config" / "mcp_config.json",

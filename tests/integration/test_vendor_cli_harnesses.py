@@ -492,7 +492,7 @@ def _resources(tmp_path: Path) -> EffectiveAgentResources:
             ResolvedSkill(
                 name=SKILL,
                 path=skill,
-                source_layers=("task",),
+                source_layers=("run",),
                 declared_sources=(f"skills/{SKILL}",),
                 digest="sha256:" + "b" * 64,
                 reportable=True,
@@ -504,7 +504,7 @@ def _resources(tmp_path: Path) -> EffectiveAgentResources:
                 server=StdioMcpServer(
                     name="proof", transport="stdio", command="python3", args=("{home}/mcp.py",)
                 ),
-                source_layers=("task",),
+                source_layers=("run",),
                 declared_sources=("mcp/proof.toml",),
                 digest="sha256:" + "c" * 64,
                 reportable=True,

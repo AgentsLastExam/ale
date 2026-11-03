@@ -294,8 +294,8 @@ class ResourceAllocation(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     cpus: int = Field(ge=1)
-    memory_mb: int = Field(ge=128)
-    storage_mb: int | None = Field(default=None, ge=256)
+    memory_mb: int = Field(ge=1)
+    storage_mb: int | None = Field(default=None, ge=1)
     gpu: GpuAllocation | None = None
     sudo: bool
     network_mode: NetworkMode

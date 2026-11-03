@@ -11,8 +11,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from ale.core.errors import TaskError
 from ale.core.sandbox import ExecResult, Identity
 from ale.core.taskspec import OperatingSystem, TaskSpec
+from ale.run import artifact_files
 from ale.run.artifact_files import inspect, read
 from ale.run.episode import _Artifacts
 
@@ -49,7 +51,11 @@ def test_a_link_above_the_artifact_is_not_followed_either(tmp_path):
     (tmp_path / "output").symlink_to(protected, target_is_directory=True)
     for pattern in ("output/result.txt", "output/*.txt"):
         result = inspect(str(tmp_path / pattern))
-        assert result == {"entries": [], "skipped": [f"{tmp_path / 'output'}: link"]}
+        assert result == {
+            "entries": [],
+            "skipped": [f"{tmp_path / 'output'}: link"],
+            "truncated": False,
+        }
     with pytest.raises(ValueError, match="is a link"):
         read(str(tmp_path / "output" / "result.txt"))
 
@@ -142,6 +148,66 @@ async def test_collection_none_never_inspects_guest(tmp_path):
     await sink.collect(NoCalls(), "/anything", "anything")
     await sink.restore(NoCalls())
     assert not sink.root.exists()
+
+
+def _project(root: Path) -> Path:
+    project = root / "project"
+    for relative in (
+        "keep.txt",
+        "src/keep.py",
+        "src/cache.pyc",
+        ".venv/bin/python",
+        "nested/.venv/lib/module.py",
+        "logs/run.tmp",
+    ):
+        path = project / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x")
+    return project
+
+
+def _kept(result: dict, project: Path) -> set[str]:
+    return {
+        Path(entry["source"]).relative_to(project).as_posix()
+        for entry in result["entries"]
+        if entry["kind"] == "file"
+    }
+
+
+def test_exclude_matches_as_tar_does_and_never_walks_what_it_leaves_out(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    excluded = inspect(str(project), [".venv", "*.pyc", "logs/*.tmp"])
+    assert _kept(excluded, project) == {"keep.txt", "src/keep.py"}
+    # Nothing below a left-out directory counts against the traversal limit.
+    monkeypatch.setattr("ale.run.artifact_files.MAX_ENTRIES", 8)
+    assert inspect(str(project), [".venv"])["truncated"] is False
+    assert inspect(str(project))["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_collected_exclude_reaches_the_sandbox_side(tmp_path):
+    project = _project(tmp_path)
+    sink = _Artifacts(tmp_path / "run")
+    await sink.collect(LocalSandbox(), str(project), "project", (".venv", "*.pyc"))
+    stored = {entry["stored_path"].split("/", 1)[1] for entry in sink.entries}
+    assert "project/keep.txt" in stored
+    assert not any(".venv" in path or path.endswith(".pyc") for path in stored)
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_artifact_is_never_handed_to_a_verifier(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    source = (Path(artifact_files.__file__).read_text()).replace(
+        "MAX_ENTRIES = 100_000", "MAX_ENTRIES = 3"
+    )
+    limited = tmp_path / "limited.py"
+    limited.write_text(source)
+    monkeypatch.setattr("ale.run.episode.artifact_files", SimpleNamespace(__file__=str(limited)))
+    sink = _Artifacts(tmp_path / "run")
+    await sink.collect(LocalSandbox(), str(project), "project")
+    assert sink.truncated == [str(project)]
+    with pytest.raises(TaskError, match="too large to copy whole"):
+        await sink.restore(LocalSandbox())
 
 
 def test_artifacts_accept_file_directory_and_overlapping_glob_paths():

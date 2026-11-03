@@ -21,6 +21,8 @@ from ale.run.harnesses.base import (
     CliCommand,
     CliHarness,
     NativeResult,
+    http_headers,
+    install_skills,
     prompt_argument,
 )
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
@@ -78,14 +80,7 @@ class KimiCodeHarness(CliHarness):
         kimi_home = agent_path(session.home) / trajectory.HOME
         skills_root = kimi_home / "skills"
         await sandbox.exec(["mkdir", "-p", str(skills_root)], identity=Identity.AGENT)
-        for skill in resources.skills:
-            target = skills_root / skill.name
-            await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
-            if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+        await install_skills(sandbox, session, resources, skills_root)
 
         provider_type, suffix = _PROVIDERS[self.gateway_dialect]
         model = _toml(session.model)
@@ -150,7 +145,7 @@ class KimiCodeHarness(CliHarness):
                     }
             else:
                 # An entry with a URL and no transport is a Streamable HTTP server.
-                native = {"url": server.url}
+                native = {"url": server.url, **http_headers(resolved)}
             servers[resolved.name] = native
         await sandbox.write_file(
             kimi_home / "mcp.json",

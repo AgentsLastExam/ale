@@ -16,7 +16,14 @@ from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
 from ale.run.harnesses._npm import agent_path, npm_env
-from ale.run.harnesses.base import LOG_ROOT, CliCommand, CliHarness, NativeResult
+from ale.run.harnesses.base import (
+    LOG_ROOT,
+    CliCommand,
+    CliHarness,
+    NativeResult,
+    http_headers,
+    install_skills,
+)
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
@@ -64,6 +71,7 @@ class DroidHarness(CliHarness):
         super().__init__(cli_version=cli_version, settings=settings)
 
     def validate_resources(self, resources: EffectiveAgentResources) -> None:
+        super().validate_resources(resources)
         for resolved in resources.mcp_servers:
             if isinstance(resolved.server, StdioMcpServer) and resolved.server.cwd:
                 raise AgentUnsupportedError(
@@ -79,14 +87,7 @@ class DroidHarness(CliHarness):
         state = agent_path(session.home) / STATE
         skills_root = state / "skills"
         await sandbox.exec(["mkdir", "-p", str(skills_root)], identity=Identity.AGENT)
-        for skill in resources.skills:
-            target = skills_root / skill.name
-            await sandbox.upload_dir(str(skill.path), target, identity=Identity.AGENT)
-            if skill.executable_files:
-                await sandbox.exec(
-                    ["chmod", "+x", *(str(target / path) for path in skill.executable_files)],
-                    identity=Identity.AGENT,
-                )
+        await install_skills(sandbox, session, resources, skills_root)
 
         servers: dict[str, dict[str, Any]] = {}
         for resolved in resources.mcp_servers:
@@ -107,7 +108,12 @@ class DroidHarness(CliHarness):
             else:
                 # Remote MCP authentication is never copied from the Host, so there is
                 # nothing for an OAuth flow to sign in with.
-                native = {"type": "http", "url": server.url, "oauth": False}
+                native = {
+                    "type": "http",
+                    "url": server.url,
+                    "oauth": False,
+                    **http_headers(resolved),
+                }
             servers[resolved.name] = native
         await _write_json(sandbox, state / "mcp.json", {"mcpServers": servers})
 
@@ -146,7 +152,7 @@ class DroidHarness(CliHarness):
             "stream-json",
             "--skip-permissions-unsafe",
             "--cwd",
-            session.home,
+            session.start_dir,
             "--model",
             _MODEL_ID,
             "--remove-tools",

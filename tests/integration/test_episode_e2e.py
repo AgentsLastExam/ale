@@ -26,7 +26,7 @@ from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import provider_registry
+from tests.support import CONTAINER_BASE, provider_registry, write_task
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -53,6 +53,38 @@ async def test_oracle_solves_the_task(tmp_path: Path, write_repo: Callable[..., 
 
 
 @pytest.mark.asyncio
+async def test_a_relative_artifact_reaches_a_separate_verifier_without_what_it_excludes(
+    tmp_path: Path,
+) -> None:
+    task_root = write_task(
+        tmp_path / "repo",
+        config={
+            "artifacts": [{"source": "out", "exclude": [".venv"]}],
+            "agent": {"workdir": "project"},
+            "verifier": {"environment_mode": "separate"},
+        },
+        dockerfile=(f"FROM {CONTAINER_BASE}\nRUN install -d -o user -g user /home/user/project\n"),
+        solve=(
+            "#!/bin/sh\n"
+            "mkdir -p /home/user/project/out/.venv/lib\n"
+            "echo kept > /home/user/project/out/result\n"
+            "echo left > /home/user/project/out/.venv/lib/module\n"
+        ),
+        test=(
+            "#!/bin/sh\n"
+            "reward=0\n"
+            "if [ -f /home/user/project/out/result ] && "
+            "[ ! -e /home/user/project/out/.venv ]; then reward=1; fi\n"
+            'printf \'{"reward": %s}\' "$reward" > /logs/verifier/reward.json\n'
+        ),
+    )
+    result = await run_one(task_root, tmp_path / "runs", OracleHarness())
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"reward": 1.0}
+
+
+@pytest.mark.asyncio
 async def test_idle_agent_scores_zero_but_completes(
     tmp_path: Path, write_repo: Callable[..., Path]
 ) -> None:
@@ -62,6 +94,17 @@ async def test_idle_agent_scores_zero_but_completes(
 
     assert result.verdict.status is Status.COMPLETED
     assert result.verdict.rewards == {"reward": 0.0}
+
+
+@pytest.mark.asyncio
+async def test_a_workdir_that_is_no_directory_is_a_task_error(
+    tmp_path: Path, write_repo: Callable[..., Path]
+) -> None:
+    task_root = write_repo(tmp_path / "repo", config={"agent": {"workdir": "/no/such/directory"}})
+    result = await run_one(task_root, tmp_path / "runs", OracleHarness())
+
+    assert result.verdict.status is Status.TASK_ERROR
+    assert "[agent].workdir" in result.verdict.failure.message
 
 
 @pytest.mark.asyncio
