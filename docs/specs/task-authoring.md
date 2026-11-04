@@ -88,11 +88,11 @@ args = ["--index", "/srv/index"]            # stdio
 # headers = { Authorization = "Bearer ${SEARCH_TOKEN}" }  # streamable-http
 
 [agent]                                     # the evaluated agent and the oracle
-user = "user"                               # account; must exist in the image; default user
+user = "user"                               # account in the image; root needs sudo; default user
 timeout_sec = 900                           # positive seconds; default 900
 network_mode = "allowlist"                  # no-network | allowlist | public; default no-network
 allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
-sudo = false                                # ALE; working sudo (Administrator on Windows)
+sudo = false                                # ALE; sudo works exactly when true (Administrator on Windows)
 # workdir = "project"                       # ALE; where the agent starts; default its home
 
 [verifier]

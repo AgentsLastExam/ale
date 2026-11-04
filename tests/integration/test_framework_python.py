@@ -67,7 +67,7 @@ async def test_an_image_without_python_gets_the_frameworks(tmp_path: Path) -> No
         own = await sandbox.exec(["sh", "-c", "command -v python3 || echo none"])
         assert own.stdout.strip() == "none"
         marker = await sandbox.read_file(MARKER)
-        assert marker.decode().strip() == framework_identity(user="user", sudo=False, vm=False)
+        assert marker.decode().strip() == framework_identity(user="user", vm=False)
         version = await sandbox.exec(
             [guestd.PYTHON["linux"], "-c", "import sys; print(sys.version_info[:2])"]
         )
@@ -82,4 +82,4 @@ async def test_an_image_without_python_gets_the_frameworks(tmp_path: Path) -> No
 async def test_an_image_without_glibc_is_refused_by_name(tmp_path: Path) -> None:
     image = _built(tmp_path, MUSL, "ale-test-musl:latest")
     with pytest.raises(TaskDefinitionError, match="glibc"):
-        await with_framework(image.runtime_ref, user="user", sudo=False)
+        await with_framework(image.runtime_ref, user="user")

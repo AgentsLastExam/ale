@@ -76,7 +76,7 @@ from ale.run.providers.daytona_image import (
     image_config,
 )
 from ale.run.providers.docker import DockerProvider
-from ale.run.providers.privileges import verify_identities
+from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, StdioTransport
 
@@ -652,7 +652,7 @@ class DaytonaProvider(Provider):
         if request.image_kind is not ImageKind.CONTAINER:
             raise ProviderCapabilityError("DaytonaProvider requires a container image")
         local = await resolve_prepared_container_image(request.prepared_image)
-        framed = await with_framework(local.observed_identity, user=request.user, sudo=request.sudo)
+        framed = await with_framework(local.observed_identity, user=request.user)
         await self._require_usable(request.prepared_image.runtime_ref, framed)
         config = await image_config(framed)
 
@@ -679,6 +679,7 @@ class DaytonaProvider(Provider):
             client = await _connect(ssh, request.user, environment)
             agent_home, has_desktop = await _guest_contract(client)
             await _require_framework(client, request)
+            await set_elevation(client, request.user, sudo=request.sudo)
             await verify_identities(client, request.user, sudo=request.sudo)
             await _seal_daemon(client, request.user)
             if request.resources.gpus:
@@ -850,7 +851,7 @@ class DaytonaProvider(Provider):
             raise ProviderStartError(f"retained sandbox {handle!r} is not running")
 
         local = await resolve_prepared_container_image(request.prepared_image)
-        framed = await with_framework(local.observed_identity, user=request.user, sudo=request.sudo)
+        framed = await with_framework(local.observed_identity, user=request.user)
         if _from_reference(data) != image.observed_ref:
             raise ProviderCapabilityError(f"{handle!r} does not use the expected solver image")
         attached = request.model_copy(update={"role": SandboxRole(role)})
@@ -987,7 +988,7 @@ async def _await_desktop(client: GuestClient, timeout_sec: float = 120) -> None:
 
 async def _require_framework(client: GuestClient, request: SandboxRequest) -> None:
     """The sandbox carries the framework this engine expects, not an older push."""
-    expected = framework_identity(user=request.user, sudo=request.sudo, vm=False)
+    expected = framework_identity(user=request.user, vm=False)
     code, stdout, stderr, _ = await client.exec(["cat", MARKER], timeout_sec=30)
     if code != 0 or stdout.strip() != expected:
         raise ProviderStartError(

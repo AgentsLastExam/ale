@@ -12,7 +12,10 @@ layer:
   image has one;
 - for a VM, the systemd unit that starts guestd at boot;
 - a check that the Task's agent account exists in the image;
-- working sudo for that account when the Task requests it, installing sudo if needed.
+- sudo, installed when the image lacks it, so that any sandbox can be granted elevation.
+  The grant is never part of the image: the Provider makes or revokes it at every sandbox
+  start (``providers/privileges.py``), so one prepared image serves a Task with and
+  without ``[agent].sudo``.
 
 The result is an ordinary image built on the Task image, so Docker runs it and VM
 preparation materializes it. A label records what it was built with, which makes adding
@@ -27,7 +30,7 @@ On Windows the pieces are guestd, Cua Driver and a boot service that starts both
 agent's session, which replaces the logon tasks only a running Windows could register
 (``framework_windows.py`` installs them). A Windows Task image is built from a framed copy
 of its base, so the framework is already there when the Task's own image script runs.
-Elevation is not part of the image; the Host grants it per boot.
+There too elevation is not part of the image; the Host grants it per boot.
 """
 
 from __future__ import annotations
@@ -128,9 +131,8 @@ WantedBy=multi-user.target
 #: Run as root while the layer is built. POSIX sh, so it works in any Linux image.
 _SETUP = r"""set -eu
 user="$1"
-sudo_requested="$2"
-identity="$3"
-python="$4"
+identity="$2"
+python="$3"
 if ! id -u "$user" >/dev/null 2>&1; then
     echo "ALE: the agent account '$user' does not exist in this image; create it in the" \
         "image or name an existing account with [agent].user in task.toml" >&2
@@ -154,39 +156,24 @@ if [ -f /etc/systemd/system/ale-guestd.service ]; then
     ln -sf /etc/systemd/system/ale-guestd.service \
         /etc/systemd/system/multi-user.target.wants/ale-guestd.service
 fi
-if [ "$sudo_requested" = true ]; then
-    if ! command -v sudo >/dev/null 2>&1; then
-        if command -v apt-get >/dev/null 2>&1; then
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update && apt-get install -y --no-install-recommends sudo
-            rm -rf /var/lib/apt/lists/*
-        elif command -v dnf >/dev/null 2>&1; then dnf install -y sudo && dnf clean all
-        elif command -v microdnf >/dev/null 2>&1; then microdnf install -y sudo
-        elif command -v yum >/dev/null 2>&1; then yum install -y sudo && yum clean all
-        elif command -v apk >/dev/null 2>&1; then apk add --no-cache sudo
-        elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install sudo
-        else
-            echo "ALE: sudo was requested, but this image has neither sudo nor a package" \
-                "manager to install it with" >&2
-            exit 1
-        fi
-    fi
-    mkdir -p /etc/sudoers.d
-    printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$user" > /etc/sudoers.d/ale-agent
-    chmod 0440 /etc/sudoers.d/ale-agent
-    if ! sudo -n -l -U "$user" 2>/dev/null | grep -q 'NOPASSWD: ALL'; then
-        printf '@includedir /etc/sudoers.d\n' >> /etc/sudoers
-    fi
-    if ! sudo -n -l -U "$user" 2>/dev/null | grep -q 'NOPASSWD: ALL'; then
-        echo "ALE: sudo for '$user' could not be configured in this image" >&2
-        exit 1
+# Only the program: the grant is made at every sandbox start. An image with neither sudo
+# nor a package manager can still serve a Task that does not ask for elevation.
+if ! command -v sudo >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update && apt-get install -y --no-install-recommends sudo
+        rm -rf /var/lib/apt/lists/*
+    elif command -v dnf >/dev/null 2>&1; then dnf install -y sudo && dnf clean all
+    elif command -v microdnf >/dev/null 2>&1; then microdnf install -y sudo
+    elif command -v yum >/dev/null 2>&1; then yum install -y sudo && yum clean all
+    elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install sudo
     fi
 fi
 printf '%s\n' "$identity" > /opt/ale/framework
 """
 
 
-def framework_identity(*, user: str, sudo: bool, vm: bool) -> str:
+def framework_identity(*, user: str, vm: bool) -> str:
     """Everything the Linux layer is built from, so a change to any of it rebuilds it."""
     return content_hash(
         {
@@ -196,7 +183,6 @@ def framework_identity(*, user: str, sudo: bool, vm: bool) -> str:
             "setup": _SETUP,
             "unit": _GUEST_UNIT if vm else None,
             "user": user,
-            "sudo": sudo,
         }
     )
 
@@ -222,13 +208,13 @@ def _guestd_digests() -> dict[str, str]:
     }
 
 
-async def with_framework(image: str, *, user: str, sudo: bool, vm: bool = False) -> str:
+async def with_framework(image: str, *, user: str, vm: bool = False) -> str:
     """Return the local identity of ``image`` with the framework layer added.
 
     ``image`` is a local image ID or reference. Building is serialized per result, and an
     image that already carries this exact layer is returned unchanged.
     """
-    identity = framework_identity(user=user, sudo=sudo, vm=vm)
+    identity = framework_identity(user=user, vm=vm)
     config = await _inspect(image)
     if (config.get("Labels") or {}).get(LABEL) == identity:
         return config["Id"]
@@ -242,26 +228,25 @@ async def with_framework(image: str, *, user: str, sudo: bool, vm: bool = False)
             built = await _inspect(tag, missing_ok=True)
             if built and (built.get("Labels") or {}).get(LABEL) == identity:
                 return built["Id"]
-            await _build(config, tag, identity, user=user, sudo=sudo, vm=vm)
+            await _build(config, tag, identity, user=user, vm=vm)
             return (await _inspect(tag))["Id"]
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 async def framed_disk(
-    image: PreparedTaskImage, *, operating_system: OperatingSystem, user: str, sudo: bool
+    image: PreparedTaskImage, *, operating_system: OperatingSystem, user: str
 ) -> tuple[PreparedTaskImage, bool]:
     """A VM disk with the framework installed, and whether it was already there.
 
     A copy of the disk is framed once per disk, framework and builder, and then used
     directly. A disk that already carries this exact framework, such as one ALE prepared,
-    is used as it is; that is read from the disk once and then recorded. Windows does not
-    take ``sudo``: the Host grants Administrator access per boot, not in the disk.
+    is used as it is; that is read from the disk once and then recorded.
     """
     identity = (
         windows_framework_identity(user=user)
         if operating_system is OperatingSystem.WINDOWS
-        else framework_identity(user=user, sudo=sudo, vm=True)
+        else framework_identity(user=user, vm=True)
     )
     key = content_hash(
         {
@@ -300,7 +285,6 @@ async def framed_disk(
                     output,
                     operating_system=operating_system,
                     user=user,
-                    sudo=sudo,
                     builder=MATERIALIZER_IMAGE,
                 )
                 if not await _valid_qcow2(output):
@@ -345,7 +329,7 @@ async def framework_on_disk(
 
 
 async def frame_disk(
-    disk: Path, *, operating_system: OperatingSystem, user: str, sudo: bool, builder: str
+    disk: Path, *, operating_system: OperatingSystem, user: str, builder: str
 ) -> None:
     """Install the framework into a standalone VM disk, in place, without booting it.
 
@@ -355,7 +339,7 @@ async def frame_disk(
     if operating_system is OperatingSystem.WINDOWS:
         await _frame_windows_disk(disk, user=user, builder=builder)
     else:
-        await _frame_linux_disk(disk, user=user, sudo=sudo, builder=builder)
+        await _frame_linux_disk(disk, user=user, builder=builder)
 
 
 async def _frame_windows_disk(disk: Path, *, user: str, builder: str) -> None:
@@ -384,17 +368,15 @@ async def _frame_windows_disk(disk: Path, *, user: str, builder: str) -> None:
         )
 
 
-async def _frame_linux_disk(disk: Path, *, user: str, sudo: bool, builder: str) -> None:
-    """Run the setup script inside the disk's own appliance VM; sudo installs use its network."""
-    identity = framework_identity(user=user, sudo=sudo, vm=True)
+async def _frame_linux_disk(disk: Path, *, user: str, builder: str) -> None:
+    """Run the setup script inside the disk's own appliance VM; installing sudo uses its network."""
+    identity = framework_identity(user=user, vm=True)
     driver = await asyncio.to_thread(_cua_driver, "linux")
     python = await asyncio.to_thread(_python, "linux")
     with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
         context = Path(temporary)
         _stage(context, driver, user=user, vm=True)
-        setup = shlex.join(
-            ["/bin/sh", "/opt/ale/setup.sh", user, _flag(sudo), identity, "/tmp/python"]
-        )
+        setup = shlex.join(["/bin/sh", "/opt/ale/setup.sh", user, identity, "/tmp/python"])
         code, output, stderr = await _in_container(
             "--device=/dev/kvm",
             "--mount", f"type=bind,src={disk.parent.resolve()},dst=/disk",
@@ -430,7 +412,7 @@ def _explained(stderr: str, stdout: str = "") -> str:
     return " ".join(said) if said else stderr.strip()[-2000:]
 
 
-async def _build(base: dict, tag: str, identity: str, *, user: str, sudo: bool, vm: bool) -> None:
+async def _build(base: dict, tag: str, identity: str, *, user: str, vm: bool) -> None:
     driver = await asyncio.to_thread(_cua_driver, "linux")
     python = await asyncio.to_thread(_python, "linux")
     base_tag = f"ale-framework-base:{base['Id'].removeprefix('sha256:')}"
@@ -453,9 +435,7 @@ async def _build(base: dict, tag: str, identity: str, *, user: str, sudo: bool, 
         # into /opt/ale/python.
         lines.append(
             "RUN --mount=type=bind,from=python,target=/tmp/python "
-            + json.dumps(
-                ["/bin/sh", "/opt/ale/setup.sh", user, _flag(sudo), identity, "/tmp/python"]
-            )
+            + json.dumps(["/bin/sh", "/opt/ale/setup.sh", user, identity, "/tmp/python"])
         )
         if base.get("User"):
             lines.append(f"USER {base['User']}")
@@ -480,10 +460,6 @@ def _stage(context: Path, driver: Path, *, user: str, vm: bool) -> None:
     (context / "setup.sh").write_text(_SETUP)
     if vm:
         (context / "ale-guestd.service").write_text(_GUEST_UNIT.format(user=user))
-
-
-def _flag(value: bool) -> str:
-    return "true" if value else "false"
 
 
 def _only(names: tuple[str, ...]):  # type: ignore[no-untyped-def]

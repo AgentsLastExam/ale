@@ -36,6 +36,15 @@ ELEVATION_PROBE = """
     else echo no > /home/user/output/sudo; fi
     """
 
+#: Every way up an image commonly gives its account: a sudoers rule naming it, membership in
+#: the administrators' group, and that group's password-gated rule with a password the agent
+#: knows (the base sets the account's password to its name).
+GRANTS = (
+    "RUN usermod -aG sudo user \\\n"
+    " && echo 'user ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/90-user \\\n"
+    " && chmod 0440 /etc/sudoers.d/90-user\n"
+)
+
 
 async def run_one(task_root: Path, run_dir: Path, **kwargs):  # type: ignore[no-untyped-def]
     task = load_tasks(task_root)[0]
@@ -170,6 +179,46 @@ class TestPrivilegeDeclaration:
 
         result = await run_one(task_root, tmp_path / "runs")
         assert collected(result, "sudo") == "no"
+
+    @pytest.mark.asyncio
+    async def test_an_image_that_lets_the_agent_elevate_is_revoked_unless_the_task_asked(
+        self, tmp_path: Path, write_repo: Callable[..., Path]
+    ) -> None:
+        """Elevation is set at every start, so an image's own grants do not decide it."""
+        task_root = write_repo(tmp_path / "repo")
+        dockerfile = task_root / "environment" / "Dockerfile"
+        dockerfile.write_text(dockerfile.read_text() + GRANTS)
+        with_oracle(
+            task_root,
+            ELEVATION_PROBE
+            + """
+            if echo user | sudo -S true 2>/dev/null; then echo yes > /home/user/output/password
+            else echo no > /home/user/output/password; fi
+            id -nG > /home/user/output/groups
+            ls /etc/sudoers.d > /home/user/output/rules
+            """,
+        )
+
+        result = await run_one(task_root, tmp_path / "runs")
+        assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+        assert collected(result, "sudo") == "no"
+        assert collected(result, "password") == "no"
+        assert "sudo" not in collected(result, "groups").split()
+        # Overridden, not deleted: the image's own rule is still there.
+        assert "90-user" in collected(result, "rules").split()
+
+    @pytest.mark.asyncio
+    async def test_a_root_agent_must_declare_its_elevation(
+        self, tmp_path: Path, write_repo: Callable[..., Path]
+    ) -> None:
+        """Nothing can keep root from elevating, so that combination is the Task's error."""
+        task_root = write_repo(tmp_path / "repo")
+        edit_task_config(task_root, {"agent": {"user": "root"}})
+
+        result = await run_one(task_root, tmp_path / "runs")
+        assert result.verdict.status is not Status.COMPLETED
+        assert result.verdict.failure is not None
+        assert "[agent].sudo = true" in result.verdict.failure.message
 
     @pytest.mark.asyncio
     async def test_a_declared_need_is_actually_granted(

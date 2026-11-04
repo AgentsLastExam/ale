@@ -36,7 +36,7 @@ class TestDockerProvider(ProviderConformance):
         reference=CONTAINER_BASE,
     )
     #: The base carries no framework; the Provider adds it.
-    framework = framework_identity(user="user", sudo=False, vm=False)
+    framework = framework_identity(user="user", vm=False)
 
 
 @pytest.mark.asyncio

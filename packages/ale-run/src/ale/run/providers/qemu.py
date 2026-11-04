@@ -67,7 +67,7 @@ from ale.run.images import (
     resolve_prepared_vm_image,
     resolve_vm_image,
 )
-from ale.run.providers.privileges import verify_identities
+from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, TcpTransport
 
@@ -799,6 +799,7 @@ class QemuProvider(Provider):
             if request.os is OperatingSystem.WINDOWS:
                 await self._verify_windows_privileges(client, agent_user, request.sudo)
             else:
+                await set_elevation(client, agent_user, sudo=request.sudo)
                 await verify_identities(client, agent_user, sudo=request.sudo)
             file_client = await _connect(host_port, guest_token)
             clients.append(file_client)
@@ -975,10 +976,7 @@ class QemuProvider(Provider):
         the Provider, so any VM disk can serve as a sandbox, as any image can under Docker.
         """
         framed, _ = await framed_disk(
-            request.prepared_image,
-            operating_system=request.os,
-            user=request.user,
-            sudo=request.sudo,
+            request.prepared_image, operating_system=request.os, user=request.user
         )
         if framed == request.prepared_image:
             return resolved

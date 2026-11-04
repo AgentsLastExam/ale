@@ -63,7 +63,7 @@ class TestQemuProvider(ProviderConformance):
     #: The same disk. There is one VM guest and it has a desktop, so the GUI half of
     #: the shared suite runs against it rather than being skipped.
     gui_image = image
-    framework = framework_identity(user="user", sudo=False, vm=True)
+    framework = framework_identity(user="user", vm=True)
 
     @pytest.fixture(autouse=True)
     def _provider(self, vm_disk: Path) -> None:

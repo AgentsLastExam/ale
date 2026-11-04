@@ -44,13 +44,12 @@ def pythons(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_the_layer_identity_follows_everything_it_is_built_from(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    base = framework_identity(user="user", sudo=False, vm=False)
-    assert framework_identity(user="user", sudo=False, vm=False) == base
-    assert framework_identity(user="app", sudo=False, vm=False) != base
-    assert framework_identity(user="user", sudo=True, vm=False) != base
-    assert framework_identity(user="user", sudo=False, vm=True) != base
+    base = framework_identity(user="user", vm=False)
+    assert framework_identity(user="user", vm=False) == base
+    assert framework_identity(user="app", vm=False) != base
+    assert framework_identity(user="user", vm=True) != base
     monkeypatch.setattr(framework, "_SETUP", "true\n")
-    assert framework_identity(user="user", sudo=False, vm=False) != base
+    assert framework_identity(user="user", vm=False) != base
 
 
 @pytest.mark.asyncio
@@ -79,20 +78,20 @@ async def test_the_layer_is_built_on_the_task_image(
             built["files"] = sorted(path.name for path in context.rglob("*"))
             built["unit"] = (context / "ale-guestd.service").read_text()
             tag = argv[argv.index("--tag") + 1]
-            identity = framework_identity(user="app", sudo=True, vm=True)
+            identity = framework_identity(user="app", vm=True)
             images[tag] = {"Id": "sha256:" + "2" * 64, "Labels": {LABEL: identity}}
         return 0, "", ""
 
     monkeypatch.setattr(framework, "_inspect", inspect)
     monkeypatch.setattr(framework, "_run", run)
-    layered = await with_framework("task", user="app", sudo=True, vm=True)
+    layered = await with_framework("task", user="app", vm=True)
     assert layered == "sha256:" + "2" * 64
     dockerfile = built["dockerfile"]
     assert dockerfile.startswith("FROM ale-framework-base:" + "1" * 64)
     assert "COPY guestd/ /opt/ale/guestd/" in dockerfile
     assert "COPY --chmod=0755 cua-driver /usr/local/bin/cua-driver" in dockerfile
-    identity = framework_identity(user="app", sudo=True, vm=True)
-    setup = ["/bin/sh", "/opt/ale/setup.sh", "app", "true", identity, "/tmp/python"]
+    identity = framework_identity(user="app", vm=True)
+    setup = ["/bin/sh", "/opt/ale/setup.sh", "app", identity, "/tmp/python"]
     # The Python is mounted for the setup to install, never copied into the layer twice.
     assert (
         "RUN --mount=type=bind,from=python,target=/tmp/python " + json.dumps(setup)
@@ -104,7 +103,7 @@ async def test_the_layer_is_built_on_the_task_image(
     assert f"--tcp 0.0.0.0:{guestd.PORT}" in built["unit"]
     # The same layer again is a no-op.
     images["task"] = {**images["task"], "Labels": {}}
-    assert await with_framework("task", user="app", sudo=True, vm=True) == layered
+    assert await with_framework("task", user="app", vm=True) == layered
 
 
 @pytest.mark.asyncio
@@ -128,17 +127,15 @@ async def test_a_vm_disk_gets_the_same_pieces_offline(
 
     monkeypatch.setattr(framework, "_run", run)
     disk = tmp_path / "disk.qcow2"
-    await frame_disk(
-        disk, operating_system=OperatingSystem.LINUX, user="app", sudo=True, builder="builder:1"
-    )
+    await frame_disk(disk, operating_system=OperatingSystem.LINUX, user="app", builder="builder:1")
     argv = seen["argv"]
     assert isinstance(argv, tuple)
     assert argv[argv.index("--entrypoint") + 1] == "virt-customize"
     assert f"type=bind,src={tmp_path},dst=/disk" in argv
     assert argv[argv.index("--add") + 1] == "/disk/disk.qcow2"
-    identity = framework_identity(user="app", sudo=True, vm=True)
+    identity = framework_identity(user="app", vm=True)
     setup = argv[argv.index("--run-command") + 1]
-    assert setup == f"/bin/sh /opt/ale/setup.sh app true {identity} /tmp/python"
+    assert setup == f"/bin/sh /opt/ale/setup.sh app {identity} /tmp/python"
     assert f"type=bind,src={pythons / 'linux' / 'python'},dst=/python,readonly" in argv
     assert "/python:/tmp" in argv
     assert argv[-2:] == ("--delete", "/tmp/python")  # after the setup installed it
@@ -165,7 +162,6 @@ async def test_a_disk_that_cannot_be_framed_fails_with_the_reason(
             tmp_path / "disk.qcow2",
             operating_system=OperatingSystem.LINUX,
             user="app",
-            sudo=False,
             builder="b",
         )
     assert str(failure.value).endswith(reason)
@@ -231,7 +227,7 @@ def framing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object
         return 0, "", ""
 
     async def frame(
-        disk: Path, *, operating_system: OperatingSystem, user: str, sudo: bool, builder: str
+        disk: Path, *, operating_system: OperatingSystem, user: str, builder: str
     ) -> None:
         assert builder == MATERIALIZER_IMAGE
         seen["framed"].append((disk, operating_system))  # type: ignore[attr-defined]
@@ -258,26 +254,26 @@ async def test_a_vm_disk_is_framed_once_and_a_framed_disk_is_used_as_it_is(
     image = _external_disk(str(source), "sha256:" + "d" * 64)
     linux = {"operating_system": OperatingSystem.LINUX, "user": "user"}
 
-    first, reused = await framed_disk(image, sudo=False, **linux)  # type: ignore[arg-type]
+    first, reused = await framed_disk(image, **linux)  # type: ignore[arg-type]
     assert not reused and len(framed) == 1
     assert first.runtime_ref != image.runtime_ref
     assert first.resolved_reference == image.resolved_reference
     assert first.prepared_identity != image.prepared_identity
-    assert await framed_disk(image, sudo=False, **linux) == (first, True)  # type: ignore[arg-type]
+    assert await framed_disk(image, **linux) == (first, True)  # type: ignore[arg-type]
     assert len(framed) == 1
-    await framed_disk(image, sudo=True, **linux)  # type: ignore[arg-type]
+    await framed_disk(image, **{**linux, "user": "other"})  # type: ignore[arg-type]
     assert len(framed) == 2  # another framework is another copy
 
     ready = image.model_copy(update={"prepared_identity": "sha256:" + "e" * 64})
-    carried[source] = framework_identity(user="user", sudo=False, vm=True)
-    assert await framed_disk(ready, sudo=False, **linux) == (ready, True)  # type: ignore[arg-type]
+    carried[source] = framework_identity(user="user", vm=True)
+    assert await framed_disk(ready, **linux) == (ready, True)  # type: ignore[arg-type]
     carried.clear()  # recorded once, not looked at again
-    assert await framed_disk(ready, sudo=False, **linux) == (ready, True)  # type: ignore[arg-type]
+    assert await framed_disk(ready, **linux) == (ready, True)  # type: ignore[arg-type]
     assert len(framed) == 2
 
 
 @pytest.mark.asyncio
-async def test_a_windows_disk_is_framed_for_its_account_whatever_sudo_says(
+async def test_a_windows_disk_is_framed_for_its_account(
     tmp_path: Path, framing: dict[str, object]
 ) -> None:
     source = tmp_path / "windows.qcow2"
@@ -287,15 +283,14 @@ async def test_a_windows_disk_is_framed_for_its_account_whatever_sudo_says(
     image = _external_disk(str(source), "sha256:" + "d" * 64)
     windows = {"operating_system": OperatingSystem.WINDOWS}
 
-    first, reused = await framed_disk(image, user="user", sudo=True, **windows)  # type: ignore[arg-type]
+    first, reused = await framed_disk(image, user="user", **windows)  # type: ignore[arg-type]
     assert not reused and framed[0][1] is OperatingSystem.WINDOWS
-    # The Host grants Administrator access per boot, so it is not in the disk.
-    assert await framed_disk(image, user="user", sudo=False, **windows) == (first, True)  # type: ignore[arg-type]
-    await framed_disk(image, user="other", sudo=True, **windows)  # type: ignore[arg-type]
-    assert len(framed) == 2  # but the account is
+    assert await framed_disk(image, user="user", **windows) == (first, True)  # type: ignore[arg-type]
+    await framed_disk(image, user="other", **windows)  # type: ignore[arg-type]
+    assert len(framed) == 2  # the account is part of the framework
     carried[source] = windows_framework_identity(user="user")
     ready = image.model_copy(update={"prepared_identity": "sha256:" + "e" * 64})
-    assert await framed_disk(ready, user="user", sudo=True, **windows) == (ready, True)  # type: ignore[arg-type]
+    assert await framed_disk(ready, user="user", **windows) == (ready, True)  # type: ignore[arg-type]
     assert len(framed) == 2
 
 
@@ -332,7 +327,7 @@ async def test_docker_frames_an_image_unless_it_carries_exactly_this_framework(
     framed = "sha256:" + "2" * 64
     answers = iter([original, framed])
 
-    async def layer(image: str, *, user: str, sudo: bool) -> str:
+    async def layer(image: str, *, user: str) -> str:
         return next(answers)
 
     monkeypatch.setattr(docker, "with_framework", layer)
@@ -342,7 +337,7 @@ async def test_docker_frames_an_image_unless_it_carries_exactly_this_framework(
         observed_identity=original,
         observed_ref="ghcr.io/acme/task@sha256:" + "3" * 64,
     )
-    request = SimpleNamespace(user="user", sudo=False)
+    request = SimpleNamespace(user="user")
     provider = docker.DockerProvider()
     assert await provider._framed(resolved, request) == resolved  # type: ignore[arg-type]
     reframed = await provider._framed(resolved, request)  # type: ignore[arg-type]
@@ -364,12 +359,12 @@ async def test_qemu_frames_a_disk_unless_it_carries_exactly_this_framework(
         update={"runtime_ref": "/cache/framed.qcow2", "prepared_identity": framed}
     )
     answers = iter([prepared, copy, copy])
-    asked: list[tuple[PreparedTaskImage, OperatingSystem, str, bool]] = []
+    asked: list[tuple[PreparedTaskImage, OperatingSystem, str]] = []
 
     async def frame(
-        image: PreparedTaskImage, *, operating_system: OperatingSystem, user: str, sudo: bool
+        image: PreparedTaskImage, *, operating_system: OperatingSystem, user: str
     ) -> tuple:
-        asked.append((image, operating_system, user, sudo))
+        asked.append((image, operating_system, user))
         return next(answers), False
 
     monkeypatch.setattr(qemu, "framed_disk", frame)
@@ -392,10 +387,10 @@ async def test_qemu_frames_a_disk_unless_it_carries_exactly_this_framework(
     reframed = await provider._framed(resolved, request)
     assert reframed.prepared_identity == original  # what the request named, still
     assert (reframed.observed_identity, reframed.observed_ref) == (framed, copy.runtime_ref)
-    assert asked == [(prepared, OperatingSystem.LINUX, "app", True)] * 2
+    assert asked == [(prepared, OperatingSystem.LINUX, "app")] * 2
     windows = request.model_copy(update={"os": OperatingSystem.WINDOWS})
     assert (await provider._framed(resolved, windows)).observed_ref == copy.runtime_ref
-    assert asked[-1] == (prepared, OperatingSystem.WINDOWS, "app", True)
+    assert asked[-1] == (prepared, OperatingSystem.WINDOWS, "app")
 
 
 def _zip(files: dict[str, bytes]) -> bytes:
@@ -515,7 +510,6 @@ async def test_a_windows_disk_is_framed_by_the_installer_inside_the_builder(
         tmp_path / "disk.qcow2",
         operating_system=OperatingSystem.WINDOWS,
         user="user",
-        sudo=True,
         builder="builder:1",
     )
     argv = seen["argv"]
@@ -550,7 +544,6 @@ async def test_a_windows_disk_that_cannot_be_framed_fails_with_the_reason(
             tmp_path / "disk.qcow2",
             operating_system=OperatingSystem.WINDOWS,
             user="app",
-            sudo=False,
             builder="b",
         )
     assert str(failure.value).endswith(reason)

@@ -49,7 +49,7 @@ from ale.run import ale_image, guestd
 from ale.run.framework import with_framework
 from ale.run.gpu import GpuLease, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
-from ale.run.providers.privileges import verify_identities
+from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, StdioTransport
 
@@ -584,6 +584,7 @@ class DockerProvider(Provider):
             client = await self._connect(container, agent_user)
             clients.append(client)
             agent_home, has_desktop = await self._guest_contract(client)
+            await set_elevation(client, agent_user, sudo=request.sudo)
             await verify_identities(client, agent_user, sudo=request.sudo)
             observed_gpu = await self._container_gpus(client) if selected else ()
             if selected:
@@ -802,9 +803,7 @@ class DockerProvider(Provider):
         Task preparation adds the layer already; this covers an image handed straight to
         the Provider, so any image can serve as a sandbox.
         """
-        layered = await with_framework(
-            resolved.observed_identity, user=request.user, sudo=request.sudo
-        )
+        layered = await with_framework(resolved.observed_identity, user=request.user)
         if layered == resolved.observed_identity:
             return resolved
         return resolved.model_copy(update={"observed_identity": layered, "observed_ref": layered})

@@ -193,10 +193,12 @@ check a task gets before publication, and an oracle with more privilege would pa
 the tasks a real agent then fails on access alone.
 
 A task may declare `[agent].sudo` when it genuinely needs to install software or change
-system configuration. The grant is verified rather than assumed — writing a sudoers rule
-succeeds in an image with no `sudo` binary — and recorded in provenance, because an
-episode run that way was less isolated and the two should not be compared without that
-being visible.
+system configuration. The Provider makes the grant at every sandbox start and, without the
+declaration, revokes whatever way up the image gives the agent, so an image never decides
+the agent's privileges ([Permissions](sandbox-image.md#permissions)). The grant is verified
+rather than assumed — writing a sudoers rule succeeds in an image with no `sudo` binary —
+and recorded in provenance, because an episode run that way was less isolated and the two
+should not be compared without that being visible.
 
 A VM guest service listens on TCP, which the agent can reach over loopback and every Host
 account can reach through the forwarded port. Each connection must therefore first present

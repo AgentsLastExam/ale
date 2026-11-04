@@ -164,7 +164,7 @@ async def prepare_task_image_result(
         if spec.kind is ImageKind.CONTAINER:
             image = await _stage(
                 "framework-layer",
-                _framed_reference(image, user=spec.user, sudo=task.spec.resources.sudo),
+                _framed_reference(image, user=spec.user),
             )
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
@@ -172,12 +172,7 @@ async def prepare_task_image_result(
         else:
             image, reused = await _stage(
                 "framework-layer",
-                framed_disk(
-                    image,
-                    operating_system=task.spec.os,
-                    user=spec.user,
-                    sudo=task.spec.resources.sudo,
-                ),
+                framed_disk(image, operating_system=task.spec.os, user=spec.user),
             )
             steps.append(
                 ImagePreparationStep(
@@ -211,7 +206,6 @@ async def prepare_task_image_result(
         source="solver-local",
         kind=spec.kind,
         user=spec.user,
-        sudo=task.spec.resources.sudo,
         build_timeout_sec=spec.build_timeout_sec,
     )
     image = await _stage("artifact-check", provider.prepare_image(candidate))
@@ -266,7 +260,7 @@ async def prepare_verifier_image_result(
         ]
         if verify.image.kind is ImageKind.CONTAINER:
             image = await _stage(
-                "framework-layer", _framed_reference(image, user=verify.image.user, sudo=False)
+                "framework-layer", _framed_reference(image, user=verify.image.user)
             )
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
@@ -274,9 +268,7 @@ async def prepare_verifier_image_result(
         else:
             image, reused = await _stage(
                 "framework-layer",
-                framed_disk(
-                    image, operating_system=task.spec.os, user=verify.image.user, sudo=False
-                ),
+                framed_disk(image, operating_system=task.spec.os, user=verify.image.user),
             )
             steps.append(
                 ImagePreparationStep(
@@ -307,7 +299,6 @@ async def prepare_verifier_image_result(
         source="verifier-local",
         kind=verify.image.kind,
         user=verify.image.user,
-        sudo=False,
         build_timeout_sec=verify.image.build_timeout_sec,
     )
     image = await _stage("artifact-check", provider.prepare_image(candidate))
@@ -341,7 +332,6 @@ async def _prepare_local(
     source: str,
     kind: ImageKind,
     user: str,
-    sudo: bool,
     build_timeout_sec: float,
 ) -> tuple[PreparedTaskImage, list[ImagePreparationStep]]:
     """The Task's own build with the framework layer on top, built once per input.
@@ -356,7 +346,7 @@ async def _prepare_local(
         {
             "source": source,
             "context": _context_identity(context, exclude=exclude),
-            "framework": framework_identity(user=user, sudo=sudo, vm=vm),
+            "framework": framework_identity(user=user, vm=vm),
         }
     )
     root = cache_root() / "images"
@@ -380,7 +370,7 @@ async def _prepare_local(
                 )
                 layered = await _stage(
                     "framework-layer",
-                    with_framework(build.runtime_ref, user=user, sudo=sudo, vm=vm),
+                    with_framework(build.runtime_ref, user=user, vm=vm),
                 )
                 found = (
                     build.oci_identity,
@@ -479,10 +469,8 @@ def _record(record: Path, built: str, build: _OciBuild) -> None:
     os.replace(partial, record)
 
 
-async def _framed_reference(
-    image: PreparedTaskImage, *, user: str, sudo: bool
-) -> PreparedTaskImage:
-    layered = await with_framework(image.runtime_ref, user=user, sudo=sudo)
+async def _framed_reference(image: PreparedTaskImage, *, user: str) -> PreparedTaskImage:
+    layered = await with_framework(image.runtime_ref, user=user)
     return image.model_copy(update={"runtime_ref": layered, "prepared_identity": layered})
 
 

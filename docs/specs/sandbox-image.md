@@ -28,8 +28,9 @@ of the Task's own build or the image it names (the framework layer):
 - for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
   Windows that also starts Cua Driver in the agent's session;
 - a check that the agent account exists, failing preparation if it does not;
-- working sudo for that account when the Task sets `[agent].sudo = true`, installing sudo
-  with the image's package manager when the image lacks it;
+- sudo, installed with the image's package manager when the image lacks it, so that any
+  sandbox can be granted elevation; the grant itself is never part of the image
+  ([Permissions](#permissions));
 - a marker file recording which framework the image carries: `/opt/ale/framework` on
   Linux, `C:\ProgramData\ALE\framework` on Windows.
 
@@ -72,9 +73,10 @@ every later sandbox, and the Task's script cannot replace the framework's pieces
   that account in, keeps UAC on and was shut down completely (not left hibernated by Fast
   Startup), each failing with the one thing it lacks.
 
-Elevation for `[agent].sudo` is granted per boot by the Host, not built into the disk.
-A Windows sandbox has a desktop for ALE to drive exactly when its image carries the
-framework's Cua Driver, so the Provider waits for a screenshot in every sandbox it boots.
+Elevation for `[agent].sudo` is granted per boot by the Host, not built into the disk, as
+on Linux ([Permissions](#permissions)). A Windows sandbox has a desktop for ALE to drive
+exactly when its image carries the framework's Cua Driver, so the Provider waits for a
+screenshot in every sandbox it boots.
 How the install works, and what it costs, is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#qemu).
 
@@ -355,11 +357,22 @@ account's interactive session and launches agent commands with the desktop's lim
 token, unless the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a limited
 desktop session are required; the Provider checks both framework and agent privileges
 before Task execution. A Windows Task image is rebuilt when the framework changes, and a
-direct `vm_image` disk is framed like any other. Linux configures requested
-sudo during image preparation. Grants, and their absence, are verified and recorded: a
+direct `vm_image` disk is framed like any other.
+
+Elevation is never part of an image. On both systems the Provider sets it at every sandbox
+start, before Task code runs, so one prepared image serves a Task with and without
+`[agent].sudo`, its solver and its verifier alike, and a Sandbox continued from a snapshot
+gets what its own request asks for. On Linux the root guestd grants the agent's account
+elevation, or revokes every way up through sudo and the groups distributions make
+administrators; how is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#agent-elevation-on-linux).
+Nothing can keep a root account from elevating, so a Task whose `[agent].user` is root
+must declare `[agent].sudo = true`. Grants, and their absence, are verified and recorded: a
 Linux sandbox is refused when its guest service is not root, when a requested grant does
-not work, or when an agent that did not request one is root or can use sudo. ALE does not pre-create
-artifacts or repair their ownership: image/setup/agent code owns their type and existence.
+not work, or when an agent that did not request one can still use sudo.
+
+ALE does not pre-create artifacts or repair their ownership: image/setup/agent code owns
+their type and existence.
 
 ## Provider contract
 
@@ -374,7 +387,7 @@ Task content (the engine).
 | Guarantee | Enforced by | Conformance test |
 |---|---|---|
 | Every sandbox runs the framework of the engine driving it, whatever image or disk it was handed | Provider in `create` | `test_a_sandbox_carries_the_engines_framework` |
-| Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[agent].sudo` asks | Provider check in `create`, both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected` |
+| Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[agent].sudo` asks, whatever image or snapshot it starts from | Provider in `create`: set at every start, then checked both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected`, `test_one_image_serves_an_agent_with_and_without_elevation`, `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |
 | Framework phases have the network; after `close_egress` the agent reaches its Gateway (and, for `allowlist`, the declared hosts) and nothing else; `open` Tasks are never sealed | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |

@@ -52,6 +52,13 @@ for target in sys.argv[1:]:
         print(target, "closed")
 """
 
+
+async def _elevates(sandbox: Sandbox) -> bool:
+    """Whether the agent can elevate without a password."""
+    result = await sandbox.exec(["sh", "-c", "sudo -n true 2>/dev/null"], identity=Identity.AGENT)
+    return result.ok
+
+
 _UPLOAD_MODES = """
 import os, pwd, stat, sys
 root, owner = sys.argv[1:]
@@ -238,6 +245,24 @@ class ProviderConformance:
             await sandbox.destroy()
 
     @pytest.mark.asyncio
+    async def test_one_image_serves_an_agent_with_and_without_elevation(self) -> None:
+        """Elevation is set at every start, never built into the image.
+
+        So one prepared image serves a Task with and without sudo, and its solver and
+        verifier alike.
+        """
+        prepared = await self.provider.prepare_image(self.image)
+        for sudo in (True, False):
+            request = await self.request(
+                prepared_image=prepared,
+                resources=Resources(cpus=1, memory_mb=512, sudo=sudo),
+                sudo=sudo,
+            )
+            async with await self.provider.create(request) as sandbox:
+                assert sandbox.allocation.sudo is sudo
+                assert await _elevates(sandbox) is sudo
+
+    @pytest.mark.asyncio
     async def test_the_agent_and_the_framework_are_different_accounts(self) -> None:
         """Agent work runs as the Task's account; framework work runs as root.
 
@@ -400,12 +425,15 @@ class ProviderConformance:
 
     @pytest.mark.asyncio
     async def test_a_snapshot_boots_new_sandboxes_with_its_files(self) -> None:
-        """A snapshot keeps the disk, and every Sandbox booted from it starts from that disk."""
+        """A snapshot keeps the disk, and every Sandbox booted from it starts from that disk.
+
+        Each gets the elevation its own request asks for, whatever the snapshot's had.
+        """
         if not self.provider.capabilities().snapshot:
             with pytest.raises(ProviderCapabilityError):
                 await self.provider.create(await self.request(retention="snapshot"))
             return
-        sandbox = await self.provider.create(await self.request(retention="snapshot"))
+        sandbox = await self.provider.create(await self.request(retention="snapshot", sudo=True))
         kept = str(PurePosixPath(sandbox.agent_home) / "kept.txt")
         try:
             await sandbox.write_file(kept, b"kept", identity=Identity.AGENT)
@@ -416,16 +444,19 @@ class ProviderConformance:
             assert retained.handle.startswith(f"{self.provider.name}:")
             listed = {record["handle"] for record in await self.provider.list_retained()}
             assert retained.handle in listed
-            requests = [await self.request(snapshot=retained.handle) for _ in range(2)]
+            requests = [
+                await self.request(snapshot=retained.handle, sudo=sudo) for sudo in (True, False)
+            ]
             booted = await asyncio.gather(
                 *(self.provider.create(item) for item in requests), return_exceptions=True
             )
             forks = [fork for fork in booted if isinstance(fork, Sandbox)]
             try:
-                for fork in booted:
+                for fork, request in zip(booted, requests, strict=True):
                     if isinstance(fork, BaseException):
                         raise fork
                     assert await fork.read_file(kept) == b"kept"
+                    assert await _elevates(fork) is request.sudo
             finally:
                 for fork in forks:
                     await fork.destroy()
