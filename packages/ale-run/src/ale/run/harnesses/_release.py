@@ -13,6 +13,7 @@ from ale.core.taskspec import OperatingSystem
 from ale.run.harnesses._npm import (
     agent_home,
     agent_path,
+    agent_python,
     bash_command,
     is_windows,
     reported_version,
@@ -141,7 +142,7 @@ async def ensure_release_binary(
     target = f"{agent_path(home)}/.local/bin/{binary}" + (".exe" if is_windows(home) else "")
     result = await sandbox.exec(
         [
-            "python" if is_windows(home) else "python3",
+            agent_python(system),
             "-c",
             _INSTALL,
             asset.url,

@@ -94,11 +94,11 @@ private registries. Digest-pinned references need neither, and Tart pulls the im
 
 Only `network_mode = "public"` is supported. Use the
 [standard Task layout](../specs/task-authoring.md) with `.sh` stage entries; the reward
-goes to `/opt/ale/logs/verifier`, because the macOS root volume is read-only. Codex CLI,
-Claude Code, Grok Build, OpenClaw CLI, computer-use, oracle and nop support macOS; the
-four CLI Harnesses also need Node/npm at the
+goes to `/opt/ale/logs/verifier`, because the macOS root volume is read-only. Every
+shipped Harness supports macOS. The npm-installed CLIs need Node/npm at the
 [required runtime version](../specs/autonomous-harness.md#shipped-integrations) in the
-image. The `computer-use` Harness needs an Anthropic-compatible Gateway and a model
+image, and Hermes and OpenHands CLI need Git, which the ALE bases provide on Linux and
+Windows. The `computer-use` Harness needs an Anthropic-compatible Gateway and a model
 endpoint that accepts its computer tool schema. ALE appends the dialect route to
 `gateway.base_url`: use the origin without a trailing `/v1` for an OpenAI-compatible endpoint.
 
@@ -124,8 +124,9 @@ needed, creates a VM and exercises setup, output collection and verification.
 
 For Provider conformance tests, set `ALE_TEST_ORCHARD=1`, `ALE_ORCHARD_TEST_IMAGE` to a
 disposable image reference and `ALE_ORCHARD_TEST_USER` to the account it signs in, other
-than `admin`, then run `uv run pytest tests/conformance/test_provider_orchard.py`. The suite creates fresh VMs
-and checks cleanup.
+than `admin`, then run `uv run pytest tests/conformance/test_provider_orchard.py`. The
+suite creates fresh VMs and checks cleanup. The CLI Harness integration tests run in
+macOS VMs as well ([Tests](../../tests/README.md)).
 
 ## Clean up
 

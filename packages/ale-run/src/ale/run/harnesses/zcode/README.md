@@ -1,23 +1,24 @@
 # ZCode
 
-Z.ai publishes no CLI package. Its only official distribution is the desktop release,
-whose installers carry the CLI as one JavaScript bundle, byte-identical on every
-platform. The adapter downloads the Linux `.deb` of release 3.16.3 with the Sandbox's own
-Python, accepts it only by the sha512 the release's `latest.yml` publishes (pinned in
-code, never fetched at run time), and unpacks just `resources/glm/zcode.cjs` and
+Z.ai publishes no CLI package. Its only official distribution is the desktop release, whose
+installers carry the CLI as one JavaScript bundle, byte-identical on every platform. The
+adapter downloads the Linux `.deb` of release 3.16.3 with the Sandbox's own Python (on macOS
+the framework's), accepts it only by the sha512 the release's `latest.yml` publishes (pinned
+in code, never fetched at run time), and unpacks just `resources/glm/zcode.cjs` and
 `resources/config/provider/zcode-builtin.json` into `.local/lib/zcode`, each accepted only
-by its own sha256. The base Node runs it on Linux and Windows. The integrity is the
-digest of those two files; the CLI reports version 0.17.0. Its public settings are
-`disallowed_tools`, `workflow_mode` and `toolsearch_mode`.
+by its own sha256. The image's Node runs it on every system. The integrity is the digest of
+those two files; the CLI reports version 0.17.0. Its public settings are `disallowed_tools`,
+`workflow_mode` and `toolsearch_mode`.
 
 The run is `node zcode.cjs --mode yolo --output-format stream-json --cwd <home>`. Headless
-ZCode takes the prompt only as an argument, so it receives the recorded prompt file's
-exact bytes as one, with Git Bash path conversion off on Windows. The prompt is then
-bounded by 128 KiB per argument on Linux and about 32,000 characters for the whole Windows
-command line; a longer one fails at launch instead of being truncated. The model route is a personal provider file named
-by `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE`. ZCode reads only a literal API key there, so the
-file holds the episode token, readable by the agent account alone and never mirrored.
-Each Gateway dialect selects ZCode's `anthropic-messages`, `openai-chat-completions` or
+ZCode takes the prompt only as an argument, so it receives the recorded prompt file's exact
+bytes as one, with Git Bash path conversion off on Windows. The prompt is then bounded by
+128 KiB per argument on Linux, 1 MiB for the whole command line and environment on macOS,
+and about 32,000 characters for the whole Windows command line; a longer one fails at launch
+instead of being truncated. The model route is a personal provider file named by
+`ZCODE_PERSONAL_PROVIDER_CONFIG_FILE`. ZCode reads only a literal API key there, so the file
+holds the episode token, readable by the agent account alone and never mirrored. Each
+Gateway dialect selects ZCode's `anthropic-messages`, `openai-chat-completions` or
 `openai-responses` API. The preset speaks `anthropic` to the `zai` provider, Z.ai's own
 Anthropic endpoint, so it uses the Z.ai key and never the Anthropic one. MCP servers go to
 `.zcode/cli/config.json` with `features.mcp` on; Skills to `.zcode/skills`. ZCode sends

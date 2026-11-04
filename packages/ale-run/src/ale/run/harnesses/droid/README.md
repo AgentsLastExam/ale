@@ -2,9 +2,10 @@
 
 Runs Factory's `droid exec --output-format stream-json` with `--file` reading the prompt.
 The official npm package `droid`, pinned at 0.249.0, carries the platform binary as an
-exact-version optional dependency, so Linux and Windows install the same way. `FACTORY_HOME_OVERRIDE` moves all of
-Droid's state to `.droid-ale/.factory`, where ALE writes `settings.json` with one BYOK
-custom model, the episode Gateway, and `mcp.json`; Skills go to `.droid-ale/.factory/skills`.
+exact-version optional dependency, so every system installs the same way.
+`FACTORY_HOME_OVERRIDE` moves all of Droid's state to `.droid-ale/.factory`, where ALE
+writes `settings.json` with one BYOK custom model, the episode Gateway, and `mcp.json`;
+Skills go to `.droid-ale/.factory/skills`.
 
 The Gateway dialect selects the BYOK provider: `anthropic`, `openai` (Responses) or
 `generic-chat-completion-api`. The API key is the `${ALE_GATEWAY_TOKEN}` reference, which

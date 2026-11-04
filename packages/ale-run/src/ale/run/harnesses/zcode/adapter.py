@@ -18,6 +18,7 @@ from ale.core.trajectory import AtifTrajectory
 from ale.run.harnesses._npm import (
     agent_home,
     agent_path,
+    agent_python,
     bash_command,
     is_windows,
     npm_env,
@@ -193,7 +194,7 @@ class ZCodeHarness(CliHarness):
             "files": {member: list(entry) for member, entry in FILES.items()},
         }
         result = await sandbox.exec(
-            ["python" if is_windows(home) else "python3", "-c", _INSTALL, json.dumps(spec)],
+            [agent_python(sandbox.request.os), "-c", _INSTALL, json.dumps(spec)],
             timeout_sec=1200,
             identity=Identity.AGENT,
         )
@@ -355,7 +356,7 @@ class ZCodeHarness(CliHarness):
         )
         result = await sandbox.exec(
             [
-                "python" if is_windows(session.home) else "python3",
+                agent_python(session.os),
                 "-c",
                 script,
                 str(agent_path(session.home) / trajectory.DB),

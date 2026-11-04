@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import subprocess
 import tomllib
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from ale.core.config import RunConfig
-from ale.core.sandbox import ImageRef, PreparedTaskImage, Provider
-from ale.core.taskspec import ImageKind
+from ale.core.sandbox import ImageRef, PreparedTaskImage, Provider, Sandbox, SandboxRequest
+from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from ale.run import ale_image
 from ale.run.providers import ProviderRegistry
 
@@ -137,3 +140,89 @@ def edit_task_config(task: Path, layer: Mapping[str, Any]) -> None:
     """Merge ``layer`` into a Task folder's ``task.toml``; a ``None`` value removes a key."""
     path = task / "task.toml"
     path.write_text(task_toml(merged_config(tomllib.loads(path.read_text()), layer)))
+
+
+#: The pinned Tahoe base the macOS fixture Tasks use; it signs ``admin`` in.
+MACOS_BASE = (
+    "ghcr.io/cirruslabs/macos-tahoe-base@sha256:"
+    "4aaa751fa7538902d73c767f27a066fc87e83f183069da4e4b5022863abd4c77"
+)
+#: ``environment/build.sh`` of a macOS image with the runtimes the ALE bases provide CLIs:
+#: the Node.js they pin, and the base's own Git and Python.
+MACOS_RUNTIME_BUILD = """\
+set -euo pipefail
+node=node-v24.15.0-darwin-arm64
+curl -fsSL --retry 3 -o "/tmp/$node.tar.gz" "https://nodejs.org/dist/v24.15.0/$node.tar.gz"
+echo "372331b969779ab5d15b949884fc6eaf88d5afe87bde8ba881d6400b9100ffc4  /tmp/$node.tar.gz" |
+    shasum -a 256 -c -
+tar -xzf "/tmp/$node.tar.gz" -C /usr/local --strip-components 1 \\
+    "$node/bin" "$node/include" "$node/lib" "$node/share"
+rm "/tmp/$node.tar.gz"
+/usr/local/bin/node --version
+git --version
+python3 --version
+"""
+
+
+def cli_os() -> OperatingSystem:
+    """The system CLI integration tests run their programs on.
+
+    Linux, in a container of the current base; or macOS with ``ALE_TEST_CLI_OS=macos`` on
+    a Mac whose local Orchard ``scripts/setup_macos.py`` keeps running.
+    """
+    return OperatingSystem(os.environ.get("ALE_TEST_CLI_OS", "linux"))
+
+
+@asynccontextmanager
+async def cli_sandbox(
+    episode_id: str, gateway_url: str, work: Path
+) -> AsyncIterator[tuple[Sandbox, str]]:
+    """A Sandbox an agent CLI installs into and runs in, and the agent's home there.
+
+    On macOS it is a VM of an image built once, as a Task's ``build.sh`` would, on
+    ``MACOS_BASE``; the agent is ``admin``, which a macOS Task may run as with sudo.
+    """
+    registry = ProviderRegistry(RunConfig())
+    if cli_os() is OperatingSystem.MACOS:
+        from ale.run.task_images import prepare_task_image
+        from ale.run.tasksets.manifest import load_tasks
+
+        folder = work / "cli-runtime"
+        write_task(
+            folder,
+            name="agentslastexam/cli-runtime",
+            config={
+                "environment": {"os": "macos", "vm_base": MACOS_BASE},
+                "agent": {"user": "admin", "sudo": True, "network_mode": "public"},
+            },
+            dockerfile=None,
+        )
+        (folder / "environment").mkdir()
+        (folder / "environment" / "build.sh").write_text(MACOS_RUNTIME_BUILD)
+        subprocess.run(["git", "init", "-q", str(folder)], check=True)
+        image = await prepare_task_image(load_tasks(folder)[0], registry)
+        request = SandboxRequest(
+            episode_id=episode_id,
+            os=OperatingSystem.MACOS,
+            prepared_image=image,
+            resources=Resources(cpus=2, memory_mb=4096),
+            network=NetworkPolicy(mode=NetworkMode.OPEN),
+            gateway_url=gateway_url,
+            user="admin",
+            sudo=True,
+        )
+        provider = registry.get(ImageKind.VM, OperatingSystem.MACOS)
+    else:
+        provider = registry.get(ImageKind.CONTAINER, OperatingSystem.LINUX)
+        request = SandboxRequest(
+            episode_id=episode_id,
+            prepared_image=await prepare_reference(provider, CONTAINER_BASE),
+            resources=Resources(cpus=2, memory_mb=4096),
+            network=NetworkPolicy(),
+            gateway_url=gateway_url,
+        )
+    sandbox = await provider.create(request)
+    try:
+        yield sandbox, sandbox.agent_home
+    finally:
+        await sandbox.destroy()

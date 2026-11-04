@@ -44,19 +44,19 @@ ALE integrates these official upstream agent programs:
 | `codex-cli` | `@openai/codex@0.146.0` | OpenAI Responses | `reasoning_effort`, `web_search` |
 | `openclaw-cli` | `openclaw@2026.7.1` | OpenAI Responses | `provider`, `thinking`, `timeout_seconds`, `tool_profile`, `tools_allow`, `tools_deny`, `model_params` |
 
-Each integration installs its program's official distribution; ALE does not install a
-fork or carry agent-program patches. That is the npm package when upstream publishes
-one. Otherwise it is the official release executable, pinned per OS and architecture by
-URL and SHA-256 in the adapter's `release_assets`; when upstream ships it inside a tar or
-zip archive, only that one member is taken, pinned by its own SHA-256 too. The Sandbox's
-own Python downloads it as the agent and installs it only if every digest matches, so an
-unverifiable build never runs. Its integrity is the digest of that whole table. A program
-upstream distributes only through its own installer is installed by its adapter from one
-pinned artifact: a source installer at one commit, reported as
+Each integration installs its program's official distribution; ALE does not install a fork
+or carry agent-program patches. That is the npm package when upstream publishes one.
+Otherwise it is the official release executable, pinned per OS and architecture by URL and
+SHA-256 in the adapter's `release_assets`; when upstream ships it inside a tar or zip
+archive, only that one member is taken, pinned by its own SHA-256 too. The Sandbox's own
+Python, on macOS the framework's, downloads it as the agent and installs it only if every
+digest matches, so an unverifiable build never runs. Its integrity is the digest of that
+whole table. A program upstream distributes only through its own installer is installed by
+its adapter from one pinned artifact: a source installer at one commit, reported as
 `git:<repository>@<commit>`, or an installer package it verifies and unpacks, reported as
-the `sha256:` of the files it runs. Bases provide runtimes, not agent CLI packages; they
-pin Node.js 24.15.0. Each run installs and configures the selected CLI before applying the
-Task network policy.
+the `sha256:` of the files it runs. Bases provide runtimes, not agent CLI packages; they pin
+Node.js 24.15.0, which a macOS image, having no ALE base, provides itself. Each run installs
+and configures the selected CLI before applying the Task network policy.
 
 Every other adapter gives its pin, Gateway dialects and public settings in its own README,
 listed in the [Harness index](../../packages/ale-run/src/ale/run/harnesses/README.md).
@@ -67,8 +67,8 @@ version's digests are known. An already matching installation may be reused.
 
 Harnesses declare `supported_os` and validate it before Sandbox creation; the CLI also
 checks it before image preparation. The default is Linux only. An npm CLI adapter
-supports Linux and Windows, and macOS where it says so. A release-binary adapter supports exactly the systems its
-table covers, and its README names any system upstream ships no build for. Unsupported
+supports Linux, Windows and macOS. A release-binary adapter supports exactly the systems
+its table covers, and its README names any system upstream ships no build for. Unsupported
 systems raise `AgentUnsupportedError` before installation; an architecture with no
 pinned asset raises it during installation.
 
@@ -77,8 +77,9 @@ puts its `bin` and `usr/bin` directories on `PATH`. Harnesses use Git Bash to la
 the native Windows CLI packages; WSL is not required. npm installs and release
 binaries stay under the agent's `.local` directory, and the inherited Windows tool
 search path is preserved.
-The built-in `cua-desktop` uses the OS's system Python. A Task's own Skills and MCP
-commands must themselves work on Windows.
+The built-in `cua-desktop` uses the OS's system Python, and on macOS, which has none recent
+enough, the framework's, as do the adapters' own helper scripts. A Task's own Skills and
+MCP commands must themselves work on the Task's system.
 
 Every CLI adapter supports local Skills, canonical stdio and Streamable HTTP MCP
 servers, and native resume at its pinned version, except for a limit its

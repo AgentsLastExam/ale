@@ -1,11 +1,11 @@
 # ForgeCode
 
-Runs `forge --conversation-id <id>` with the prompt on stdin. ForgeCode ships as
-single-file release binaries; its npm package stopped at 2.13.21. ALE pins the official
-v2.14.0 assets for Linux (static musl) and Windows. `FORGE_CONFIG` is `.forge-ale`, where
-ALE writes `.forge.toml`, `.credentials.json` with the episode token, `.mcp.json` and the
-declared Skills. The provider is forge's own compatible provider for the Gateway dialect,
-with the model listed in the configuration so forge never asks for `/v1/models`.
+Runs `forge --conversation-id <id>` with the prompt on stdin. ForgeCode ships as single-file
+release binaries; its npm package stopped at 2.13.21. ALE pins the official v2.14.0 assets
+for Linux (static musl), Windows and macOS. `FORGE_CONFIG` is `.forge-ale`, where ALE writes
+`.forge.toml`, `.credentials.json` with the episode token, `.mcp.json` and the declared
+Skills. The provider is forge's own compatible provider for the Gateway dialect, with the
+model listed in the configuration so forge never asks for `/v1/models`.
 
 Forge would update itself and exit before running the prompt, so updates are off in the
 configuration and in the environment. Its cloud services URL points nowhere. Its PostHog

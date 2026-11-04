@@ -1,8 +1,8 @@
 # Muse Code
 
-Pinned to Muse Code `1.4.13-R6996.1`, Meta's release binaries for Linux x86_64 and
-aarch64 and Windows x86_64. Its public settings are `reasoning_effort`, `max_model_steps`,
-`reminders` and `web_tools`.
+Pinned to Muse Code `1.4.13-R6996.1`, Meta's release binaries for Linux x86_64 and aarch64,
+Windows x86_64 and macOS arm64. Its public settings are `reasoning_effort`,
+`max_model_steps`, `reminders` and `web_tools`.
 
 Runs Meta's Muse Code headless: `muse exec --json --prompt-file`, with `--yolo`, so
 neither Muse's approval nor its own sandbox stands between the agent and the ALE

@@ -17,6 +17,7 @@ from ale.core.harness import EffectiveAgentResources, ResolvedMcpServer, Traject
 from ale.core.taskspec import OperatingSystem, StreamableHttpMcpServer
 from ale.core.testkit import AutonomousHarnessConformance
 from ale.run.cli.tasks import PRESET_DIR, _harness
+from ale.run.framework import MACOS_PYTHON
 from ale.run.harnesses._release import release_identity
 from ale.run.harnesses.antigravity_cli import AntigravityCliHarness
 from ale.run.harnesses.antigravity_cli import adapter as agy
@@ -64,11 +65,11 @@ def test_release_table_pins_every_official_build() -> None:
         (system, architecture)
         for system in (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
         for architecture in ("x86_64", "aarch64")
-    }
+    } | {(OperatingSystem.MACOS, "aarch64")}
     for (system, _), asset in agy.RELEASE_ASSETS.items():
         assert asset.url.startswith(agy._RELEASE)
-        # Linux ships a tar.gz holding the executable; Windows ships the .exe itself.
-        assert asset.member == ("antigravity" if system is OperatingSystem.LINUX else None)
+        # Linux and macOS ship a tar.gz holding the executable; Windows ships the .exe itself.
+        assert asset.member == (None if system is OperatingSystem.WINDOWS else "antigravity")
 
 
 async def test_configuration_is_episode_local_and_selects_api_key_mode(tmp_path: Path) -> None:
@@ -197,12 +198,22 @@ async def test_windows_command_runs_the_exe_with_the_os_python() -> None:
     command = await AntigravityCliHarness().prepare_command(
         "C:/Users/agent/.ale-harness/prompt.md",
         sandbox,  # type: ignore[arg-type]
-        session(model=MODEL, home="C:/Users/agent"),
+        session(model=MODEL, home="C:/Users/agent", os=OperatingSystem.WINDOWS),
         native_session_id=None,
     )
     assert "; python -Ic " in command.script
     assert "C:/Users/agent/.local/bin/agy.exe --dangerously-skip-permissions" in command.script
     assert command.env["HOME"] == "C:/Users/agent"
+
+
+async def test_macos_command_wraps_the_prompt_with_the_framework_python() -> None:
+    command = await AntigravityCliHarness().prepare_command(
+        "/Users/agent/.ale-harness/prompt.md",
+        FakeSandbox(),  # type: ignore[arg-type]
+        session(model=MODEL, home="/Users/agent", os=OperatingSystem.MACOS),
+        native_session_id=None,
+    )
+    assert f"; {MACOS_PYTHON} -Ic " in command.script
 
 
 @pytest.mark.parametrize(

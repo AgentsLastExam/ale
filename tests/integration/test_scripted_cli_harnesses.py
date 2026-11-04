@@ -1,9 +1,10 @@
 """Each pinned native CLI, really installed, runs a scripted episode through the real Gateway.
 
 The model is scripted, so the run is deterministic and unbilled while everything else is
-the production path: the official program in a sealed Docker sandbox, its generated
-native configuration, the Gateway as its only way out, a launch and two native resumes,
-the Host log mirror, and the parser reading what was mirrored.
+the production path: the official program in a sealed sandbox (``tests.support.cli_sandbox``:
+a container of the current base, or a macOS VM), its generated native configuration, the
+Gateway as its only way out, a launch and two native resumes, the Host log mirror, and the
+parser reading what was mirrored.
 """
 
 from __future__ import annotations
@@ -17,8 +18,8 @@ from pathlib import Path
 import pytest
 
 from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox, SandboxRequest
-from ale.core.taskspec import NetworkPolicy, Resources
+from ale.core.sandbox import Identity, Sandbox
+from ale.core.taskspec import OperatingSystem
 from ale.core.trace import read_jsonl
 from ale.core.trajectory import AtifTrajectory
 from ale.run.gateway.server import Gateway
@@ -30,12 +31,15 @@ from ale.run.harnesses.hermes import HermesHarness
 from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.protocol.log_mirror import LogMirror
-from ale.run.providers.docker import DockerProvider
 from ale.run.recording import BlobStore, EpisodeRecording
 from tests.integration.scripted_model import FINAL, ScriptedModel
-from tests.support import CONTAINER_BASE, prepare_reference
+from tests.support import cli_os, cli_sandbox
 
-pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_cli_install]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.needs_cli_install,
+    pytest.mark.needs_orchard if cli_os() is OperatingSystem.MACOS else pytest.mark.needs_docker,
+]
 
 
 @dataclass(frozen=True)
@@ -107,35 +111,24 @@ async def scripted(
     gateway_session = gateway.open_session(
         GatewaySession(episode_id=f"scripted-{name}", model=case.model), recording.transport
     )
-    sandbox = None
     try:
-        provider = DockerProvider()
-        sandbox = await provider.create(
-            SandboxRequest(
+        async with cli_sandbox(f"scripted-{name}", gateway.base_url, tmp_path) as (sandbox, home):
+            await sandbox.open_egress()
+            observed = await harness.install(sandbox)
+            assert observed == harness.version()
+            session = HarnessSession(
                 episode_id=f"scripted-{name}",
-                prepared_image=await prepare_reference(provider, CONTAINER_BASE),
-                resources=Resources(cpus=2, memory_mb=4096),
-                network=NetworkPolicy(),
-                gateway_url=gateway.base_url,
+                gateway_url=sandbox.gateway_url or gateway.base_url,
+                token=gateway_session.token,
+                model=case.model,
+                sandbox_id=sandbox.sandbox_id,
+                home=home,
+                os=cli_os(),
             )
-        )
-        await sandbox.open_egress()
-        observed = await harness.install(sandbox)
-        assert observed == harness.version()
-        session = HarnessSession(
-            episode_id=f"scripted-{name}",
-            gateway_url=sandbox.gateway_url or gateway.base_url,
-            token=gateway_session.token,
-            model=case.model,
-            sandbox_id=sandbox.sandbox_id,
-            home="/home/user",
-        )
-        await harness.install_resources(sandbox, session, EffectiveAgentResources())
-        await sandbox.close_egress()
-        yield Episode(harness, sandbox, session, observed)
+            await harness.install_resources(sandbox, session, EffectiveAgentResources())
+            await sandbox.close_egress()
+            yield Episode(harness, sandbox, session, observed)
     finally:
-        if sandbox is not None:
-            await sandbox.destroy()
         gateway.close_session(gateway_session)
         await gateway.stop()
         await model.stop()
@@ -190,7 +183,7 @@ async def test_cli_runs_a_scripted_episode_through_the_gateway(tmp_path: Path, n
             if run.continuation is not None
         } == {native_id}
         proof = await sandbox.exec(
-            ["cat", "/home/user/scripted-proof.txt"], identity=Identity.AGENT
+            ["cat", f"{session.home}/scripted-proof.txt"], identity=Identity.AGENT
         )
         assert proof.stdout.strip() == "scripted"
         trajectory = await mirrored_trajectory(tmp_path, episode, prompts[0], native_id)

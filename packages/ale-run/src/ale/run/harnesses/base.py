@@ -130,7 +130,7 @@ class CliHarness(AutonomousHarness):
     settings_type: ClassVar[type[BaseModel]]
     settings: BaseModel
 
-    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS, OperatingSystem.MACOS)
     resume_support = ResumeSupport.NATIVE
 
     def __init__(

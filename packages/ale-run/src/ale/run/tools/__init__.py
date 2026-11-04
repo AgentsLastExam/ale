@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from ale.core.harness import ResolvedMcpServer
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import OperatingSystem, StdioMcpServer
-from ale.run.framework import MACOS_PYTHON
+from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
 
 __all__ = ["CUA_DESKTOP_NAME", "resolved_cua_desktop", "stage_cua_desktop"]
 
@@ -28,8 +29,17 @@ def resolved_cua_desktop(
         # macOS has no Python 3.12 of its own; the framework's is readable by every account.
         OperatingSystem.MACOS: MACOS_PYTHON,
     }.get(operating_system, "python3")
+    # On macOS the Provider starts the Driver, so the server is told where it is rather
+    # than starting its own; the values are not secret, and a CLI that filters its MCP
+    # children's environment still passes what their configuration names.
+    environment = (
+        {"ALE_CUA_DRIVER": MACOS_DRIVER, "ALE_CUA_DRIVER_SOCKET": MACOS_DRIVER_SOCKET}
+        if operating_system is OperatingSystem.MACOS
+        else {}
+    )
     hasher = hashlib.sha256()
     hasher.update(command.encode() + b"\0")
+    hasher.update(json.dumps(environment, sort_keys=True).encode() + b"\0")
     for source in _SOURCES:
         hasher.update(source.name.encode())
         hasher.update(b"\0")
@@ -42,6 +52,7 @@ def resolved_cua_desktop(
             transport="stdio",
             command=command,
             args=("{home}/.ale-cua-desktop/cua_desktop_mcp.py",),
+            environment=environment,
         ),
         source_layers=("run",),
         declared_sources=(CUA_DESKTOP_NAME,),

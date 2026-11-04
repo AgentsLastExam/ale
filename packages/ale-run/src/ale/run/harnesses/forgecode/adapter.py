@@ -74,6 +74,10 @@ class ForgecodeHarness(CliHarness):
             f"{_RELEASE}/forge-aarch64-pc-windows-msvc.exe",
             "6201e8287686fb8b41572ca19edf3773158facf612f746475dd10a7f564d3176",
         ),
+        (OperatingSystem.MACOS, "aarch64"): ReleaseAsset(
+            f"{_RELEASE}/forge-aarch64-apple-darwin",
+            "cf1137552122c3477a9763e3a76d29464ea3863645bcaf1876925356a2266f47",
+        ),
     }
     settings_type = ForgecodeSettings
     settings: ForgecodeSettings

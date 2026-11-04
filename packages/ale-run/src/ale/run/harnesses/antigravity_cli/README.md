@@ -14,7 +14,8 @@ used: its backend cannot be redirected to the Gateway.
 
 `agy` is not on npm. Its `release_assets` pin Google's 1.4.7 release by URL and
 SHA-256: a `tar.gz` holding the single executable `antigravity` on Linux (x86_64 and
-aarch64), whose member is pinned too, and a bare `.exe` on Windows (x86_64 and aarch64).
+aarch64) and macOS (arm64), whose member is pinned too, and a bare `.exe` on Windows
+(x86_64 and aarch64).
 Google's updater manifest names only the latest build, which is why the URL is pinned.
 `AGY_CLI_DISABLE_AUTO_UPDATE=true` stops the background updater; `1` does not.
 

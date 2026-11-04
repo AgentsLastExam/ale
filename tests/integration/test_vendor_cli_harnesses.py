@@ -26,8 +26,8 @@ from ale.core.harness import (
     ResolvedSkill,
     TrajectoryParseContext,
 )
-from ale.core.sandbox import Identity, Sandbox, SandboxRequest
-from ale.core.taskspec import NetworkPolicy, Resources, StdioMcpServer
+from ale.core.sandbox import Identity, Sandbox
+from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.core.trace import read_jsonl
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
@@ -37,11 +37,14 @@ from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
 from ale.run.harnesses.zcode import ZCodeHarness
 from ale.run.protocol.log_mirror import LogMirror
-from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
-from tests.support import CONTAINER_BASE, prepare_reference
+from tests.support import cli_os, cli_sandbox
 
-pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_cli_install]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.needs_cli_install,
+    pytest.mark.needs_orchard if cli_os() is OperatingSystem.MACOS else pytest.mark.needs_docker,
+]
 
 HOST_SECRET = "host-only-secret"
 MODEL = "scripted-model"
@@ -385,7 +388,7 @@ async def _qwen_mcp_list(sandbox: Sandbox, session: HarnessSession) -> None:
         timeout_sec=120,
     )
     assert result.ok, result.stdout + result.stderr
-    assert "proof: python3 /home/user/mcp.py (stdio) - Connected" in result.stdout
+    assert f"proof: python3 {session.home}/mcp.py (stdio) - Connected" in result.stdout
 
 
 async def _muse_skills(sandbox: Sandbox, session: HarnessSession) -> None:
@@ -539,57 +542,53 @@ async def test_cli_runs_through_the_gateway_with_resources_and_resumes(
         GatewaySession(episode_id=f"vendor-{harness.name}", model=MODEL), recording.transport
     )
     resources = _resources(tmp_path)
-    provider = DockerProvider()
-    sandbox = await provider.create(
-        SandboxRequest(
-            episode_id=f"vendor-{harness.name}",
-            prepared_image=await prepare_reference(provider, CONTAINER_BASE),
-            resources=Resources(cpus=2, memory_mb=4096),
-            network=NetworkPolicy(),
-            gateway_url=gateway.base_url,
-        )
-    )
     try:
-        await sandbox.open_egress()
-        version = await harness.install(sandbox)
-        session = HarnessSession(
-            episode_id=f"vendor-{harness.name}",
-            gateway_url=sandbox.gateway_url or gateway.base_url,
-            token=gateway_session.token,
-            model=MODEL,
-            sandbox_id=sandbox.sandbox_id,
-            resources_digest=resources.digest,
-            home="/home/user",
-        )
-        await sandbox.write_file("/home/user/mcp.py", MCP_SERVER.encode(), identity=Identity.AGENT)
-        harness.validate_resources(resources)
-        await harness.install_resources(sandbox, session, resources)
-        await sandbox.close_egress()
-        await case.check_config(sandbox, session)
+        async with cli_sandbox(f"vendor-{harness.name}", gateway.base_url, tmp_path) as (
+            sandbox,
+            home,
+        ):
+            await sandbox.open_egress()
+            version = await harness.install(sandbox)
+            session = HarnessSession(
+                episode_id=f"vendor-{harness.name}",
+                gateway_url=sandbox.gateway_url or gateway.base_url,
+                token=gateway_session.token,
+                model=MODEL,
+                sandbox_id=sandbox.sandbox_id,
+                resources_digest=resources.digest,
+                home=home,
+                os=cli_os(),
+            )
+            await sandbox.write_file(f"{home}/mcp.py", MCP_SERVER.encode(), identity=Identity.AGENT)
+            harness.validate_resources(resources)
+            await harness.install_resources(sandbox, session, resources)
+            await sandbox.close_egress()
+            await case.check_config(sandbox, session)
 
-        first = await harness.launch(first_prompt, sandbox, session, timeout_sec=300)
-        assert first.continuation is not None
-        assert first.final_message == "FIRST-DONE"
-        second = await harness.resume(
-            "second", first.continuation, sandbox, session, timeout_sec=300
-        )
-        assert second.continuation is not None
-        assert second.final_message == "SECOND-DONE"
-        third = await harness.resume(None, second.continuation, sandbox, session, timeout_sec=300)
-        assert third.continuation is not None
-        assert third.final_message == "THIRD-DONE"
-        assert {item.native_session_id for item in (second.continuation, third.continuation)} == {
-            first.continuation.native_session_id
-        }
+            first = await harness.launch(first_prompt, sandbox, session, timeout_sec=300)
+            assert first.continuation is not None
+            assert first.final_message == "FIRST-DONE"
+            second = await harness.resume(
+                "second", first.continuation, sandbox, session, timeout_sec=300
+            )
+            assert second.continuation is not None
+            assert second.final_message == "SECOND-DONE"
+            third = await harness.resume(
+                None, second.continuation, sandbox, session, timeout_sec=300
+            )
+            assert third.continuation is not None
+            assert third.final_message == "THIRD-DONE"
+            assert {
+                item.native_session_id for item in (second.continuation, third.continuation)
+            } == {first.continuation.native_session_id}
 
-        logs = tmp_path / "logs"
-        mirror = LogMirror(
-            sandbox, home=session.home, os=session.os, paths=harness.logs, target=logs
-        )
-        await mirror.sync(final=True)
-        assert not mirror.incomplete
+            logs = tmp_path / "logs"
+            mirror = LogMirror(
+                sandbox, home=session.home, os=session.os, paths=harness.logs, target=logs
+            )
+            await mirror.sync(final=True)
+            assert not mirror.incomplete
     finally:
-        await sandbox.destroy()
         gateway.close_session(gateway_session)
         await gateway.stop()
         await upstream.stop()

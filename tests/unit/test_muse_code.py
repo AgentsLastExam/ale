@@ -44,13 +44,14 @@ def test_other_gateway_dialects_are_rejected() -> None:
         _harness(config)
 
 
-def test_release_binaries_are_pinned_for_both_systems() -> None:
+def test_release_binaries_are_pinned_for_every_system() -> None:
     harness = MuseCodeHarness()
-    assert set(harness.supported_os) == {OperatingSystem.LINUX, OperatingSystem.WINDOWS}
+    assert set(harness.supported_os) == set(OperatingSystem)
     assert {key for key in harness.release_assets} == {
         (OperatingSystem.LINUX, "x86_64"),
         (OperatingSystem.LINUX, "aarch64"),
         (OperatingSystem.WINDOWS, "x86_64"),
+        (OperatingSystem.MACOS, "aarch64"),
     }
     assert all(
         f"version={harness.default_version}&" in asset.url

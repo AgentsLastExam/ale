@@ -11,7 +11,7 @@ dependency environment again. The Anthropic dialect also installs the lockfile's
 `anthropic` extra. On Windows the same commit's `install.ps1` runs from Git Bash with the
 same choices and publishes `hermes.exe` in `.hermes-ale/bin`. Upstream supports native
 Windows, so the Harness declares it, but the Windows path is unverified until a Windows
-guest runs it.
+guest runs it. On macOS `install.sh` takes its Darwin path; the image must provide Git.
 
 `config.yaml` makes the episode Gateway the one custom provider, with Hermes' transport for
 the Gateway dialect and the key as the `ALE_GATEWAY_TOKEN` variable, and turns off update

@@ -30,7 +30,7 @@ def test_preset_pins_the_final_linux_release() -> None:
     assert harness.gateway_dialect == config.gateway.dialect == "anthropic"
     assert config.gateway.provider == "anthropic"
     assert harness.version() == "1.16.0"
-    assert harness.supported_os == (OperatingSystem.LINUX,)
+    assert harness.supported_os == (OperatingSystem.LINUX, OperatingSystem.MACOS)
     with pytest.raises(Exception, match="windows"):
         harness.validate_os(OperatingSystem.WINDOWS)
 

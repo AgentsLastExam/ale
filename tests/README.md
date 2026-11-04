@@ -16,7 +16,10 @@ just lint             # formatting, lint and import boundaries
 ```
 
 Run `just test-harnesses` after changing a Harness, a Gateway dialect or a CLI pin, and
-`just test-vm` after changing VM or Windows behavior. CI's backend jobs run all three.
+`just test-vm` after changing VM or Windows behavior. CI's backend jobs run all three. On a
+Mac whose local Orchard `scripts/setup_macos.py` keeps running,
+`ALE_TEST_CLI_OS=macos just test-harnesses` installs and runs every CLI in a macOS VM
+instead of a container: one of an image of the pinned Tahoe base with Node.js, built once.
 
 Tests that require infrastructure must carry the matching marker (`needs_docker`,
 `needs_kvm`, `needs_gui`, `needs_llm`, `needs_cli_install`, or a Hugging Face marker) so local and CI runs can

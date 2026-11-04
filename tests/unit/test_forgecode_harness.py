@@ -47,7 +47,7 @@ def test_preset_pins_release_binaries_for_both_systems() -> None:
     assert harness.gateway_dialect == config.gateway.dialect == "anthropic"
     assert config.gateway.provider == "anthropic"
     assert harness.version() == "2.14.0"
-    assert set(harness.supported_os) == {OperatingSystem.LINUX, OperatingSystem.WINDOWS}
+    assert set(harness.supported_os) == set(OperatingSystem)
     assert harness.integrity().startswith("sha256:")
     assert all(
         asset.url.startswith("https://github.com/tailcallhq/forgecode/releases/download/v2.14.0/")

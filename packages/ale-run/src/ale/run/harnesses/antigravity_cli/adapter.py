@@ -12,7 +12,7 @@ from ale.core.harness import EffectiveAgentResources, HarnessSession, Trajectory
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, is_windows, npm_env
+from ale.run.harnesses._npm import agent_path, agent_python, is_windows, npm_env
 from ale.run.harnesses._release import ReleaseAsset
 from ale.run.harnesses.base import (
     LOG_ROOT,
@@ -32,7 +32,7 @@ _RELEASE = (
     "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.7-5900205422411776"
 )
 #: Google's 1.4.7 builds, from its updater manifests (`/manifests/<os>_<arch>.json`), which
-#: name only the latest build. Linux ships a tar.gz holding the one executable.
+#: name only the latest build. Linux and macOS ship a tar.gz holding the one executable.
 RELEASE_ASSETS = {
     (OperatingSystem.LINUX, "x86_64"): ReleaseAsset(
         f"{_RELEASE}/linux-x64/cli_linux_x64.tar.gz",
@@ -53,6 +53,12 @@ RELEASE_ASSETS = {
     (OperatingSystem.WINDOWS, "aarch64"): ReleaseAsset(
         f"{_RELEASE}/windows-arm/cli_windows_arm64.exe",
         "eafcb0ccd9afd60c78983dc7d64d859635bb065bce1bb05817b0422f334d1b1e",
+    ),
+    (OperatingSystem.MACOS, "aarch64"): ReleaseAsset(
+        f"{_RELEASE}/darwin-arm/cli_mac_arm64.tar.gz",
+        "9fed7bfe90cb158ac00b5b2da64dd54af732f7c062259e68ebd060b827fd0d88",
+        member="antigravity",
+        member_sha256="b7a13e53c9f49921692676ef8edc2e60ceb67064c00bc732d9a364ec3ad75b32",
     ),
 }
 
@@ -167,7 +173,7 @@ class AntigravityCliHarness(CliHarness):
             argv.extend(["--effort", self.settings.effort])
         if native_session_id is not None:
             argv.extend(["--conversation", native_session_id])
-        python = "python" if is_windows(session.home) else "python3"
+        python = agent_python(session.os)
         script = (
             f"unset {' '.join(_AMBIENT)}; "
             f"{shlex.join([python, '-Ic', _REQUEST, prompt_path, request_path])} && "

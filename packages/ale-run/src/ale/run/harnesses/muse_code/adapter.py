@@ -60,6 +60,10 @@ class MuseCodeHarness(CliHarness):
             _RELEASE + "muse-x86-windows.exe",
             "239c993cedc3768a99103a90b2f7e3d560375036104980e30227ffebf9de0303",
         ),
+        (OperatingSystem.MACOS, "aarch64"): ReleaseAsset(
+            _RELEASE + "muse-aarch64-macos",
+            "9fd40ae9c6dfb847e3ef58b61405c004d0ebbf19ceb0297be966f750b3b84aa0",
+        ),
     }
     settings_type = MuseCodeSettings
     settings: MuseCodeSettings

@@ -9,11 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
+import ale.run.cli.tasks  # noqa: F401  (imports every shipped adapter)
 from ale.core.errors import AgentError
 from ale.core.harness import EffectiveAgentResources, HarnessSession, ResolvedMcpServer
 from ale.core.sandbox import ExecResult, Identity, SandboxFile
 from ale.core.taskspec import OperatingSystem, StdioMcpServer
-from ale.run.harnesses._npm import npm_env
+from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET
+from ale.run.harnesses._npm import agent_python, npm_env
+from ale.run.harnesses.base import CliHarness
 from ale.run.harnesses.builtin import NopHarness, OracleHarness, ScriptedPolicyHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
@@ -24,6 +27,15 @@ from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.tools import resolved_cua_desktop
 
 pytestmark = pytest.mark.unit
+
+
+def _cli_adapters(base: type[CliHarness] = CliHarness) -> list[type[CliHarness]]:
+    found = []
+    for child in base.__subclasses__():
+        if child.__module__.startswith("ale.run.harnesses."):
+            found.append(child)
+        found.extend(_cli_adapters(child))
+    return found
 
 
 @pytest.mark.parametrize("operating_system", [OperatingSystem.MACOS, OperatingSystem.LINUX])
@@ -77,18 +89,30 @@ async def test_staged_mcp_command_is_executable_after_upload(tmp_path, operating
 @pytest.mark.parametrize(
     "harness",
     [
-        CodexCliHarness(),
-        ClaudeCodeHarness(),
-        GrokBuildHarness(),
-        OpenClawCliHarness(),
+        *(adapter() for adapter in _cli_adapters()),
         ComputerUseHarness(),
         NopHarness(),
         OracleHarness(),
         ScriptedPolicyHarness(),
     ],
+    ids=lambda harness: harness.name,
 )
 def test_macos_harnesses_accept_the_guest_system(harness) -> None:
     harness.validate_os(OperatingSystem.MACOS)
+
+
+@pytest.mark.parametrize(
+    ("operating_system", "python"),
+    [
+        (OperatingSystem.LINUX, "python3"),
+        (OperatingSystem.WINDOWS, "python"),
+        (OperatingSystem.MACOS, "/opt/ale/python/bin/python3"),
+    ],
+)
+def test_helper_scripts_run_on_a_python_every_system_has(operating_system, python) -> None:
+    # A stock macOS has no Python 3.12, and its `python3` may be a stub until the
+    # Command Line Tools are installed; the agent may run the framework's.
+    assert agent_python(operating_system) == python
 
 
 async def test_macos_npm_path_includes_apple_silicon_runtime() -> None:
@@ -198,48 +222,46 @@ async def test_macos_native_launch_uses_episode_gateway_and_agent_identity(harne
 
 
 @pytest.mark.parametrize("operating_system", [OperatingSystem.MACOS, OperatingSystem.LINUX])
-@pytest.mark.parametrize("harness", [CodexCliHarness(), OpenClawCliHarness()])
-async def test_builtin_desktop_explicitly_inherits_only_macos_driver_settings(
-    operating_system: OperatingSystem,
-    harness,
+@pytest.mark.parametrize("adapter", _cli_adapters(), ids=lambda adapter: adapter.name)
+async def test_every_cli_tells_the_desktop_server_where_the_macos_driver_is(
+    operating_system: OperatingSystem, adapter: type[CliHarness]
 ) -> None:
+    """The Provider starts the Driver on macOS; some CLIs pass their MCP servers only the
+    environment their configuration names, so every one names the Driver's locations."""
     files: dict[str, bytes] = {}
 
     async def write(path, data: bytes, **kwargs: object) -> None:
         files[str(path)] = data
 
+    async def read(path, **kwargs: object) -> bytes:
+        return files.get(str(path), b"")
+
     async def execute(argv, **kwargs: object) -> ExecResult:
-        return ExecResult(exit_code=0)
+        return ExecResult(exit_code=0, stdout="/usr/bin:/bin")
 
     sandbox = SimpleNamespace(
-        exec=execute, write_file=write, request=SimpleNamespace(os=operating_system)
+        exec=execute, write_file=write, read_file=read, request=SimpleNamespace(os=operating_system)
     )
     session = HarnessSession(
         episode_id="episode",
         gateway_url="http://gateway",
         token="episode-token",
-        model="test",
+        model="gemini-3.8-flash" if adapter.name == "antigravity-cli" else "test",
         sandbox_id="sandbox",
         resources_digest="sha256:" + "a" * 64,
         home="/Users/agent",
         os=operating_system,
     )
     resources = EffectiveAgentResources(mcp_servers=(resolved_cua_desktop(operating_system),))
-    await harness.install_resources(sandbox, session, resources)
-    if isinstance(harness, CodexCliHarness):
-        config = tomllib.loads(files["/Users/agent/.codex-ale/config.toml"].decode())
-        desktop = config["mcp_servers"]["cua-desktop"]
-        if operating_system is OperatingSystem.MACOS:
-            assert desktop["env_vars"] == ["ALE_CUA_DRIVER", "ALE_CUA_DRIVER_SOCKET"]
-        else:
-            assert "env_vars" not in desktop
+    await adapter().install_resources(sandbox, session, resources)
+    # The staged server's own sources are not its configuration.
+    configs = [data for path, data in files.items() if "/.ale-cua-desktop/" not in path]
+    named = [
+        data
+        for data in configs
+        if MACOS_DRIVER.encode() in data and MACOS_DRIVER_SOCKET.encode() in data
+    ]
+    if operating_system is OperatingSystem.MACOS:
+        assert named
     else:
-        config = json.loads(files["/Users/agent/.openclaw-ale/openclaw.json"])
-        desktop = config["mcp"]["servers"]["cua-desktop"]
-        if operating_system is OperatingSystem.MACOS:
-            assert desktop["env"] == {
-                "ALE_CUA_DRIVER": "${ALE_CUA_DRIVER}",
-                "ALE_CUA_DRIVER_SOCKET": "${ALE_CUA_DRIVER_SOCKET}",
-            }
-        else:
-            assert "env" not in desktop
+        assert not any(b"ALE_CUA_DRIVER" in data for data in configs)
