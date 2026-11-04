@@ -7,12 +7,10 @@ pinned to the Tahoe image inspected on 2026-10-27. Its default admin account req
 
 ## Run prerequisites
 
-The image alone does not supply ALE's authorized desktop service. The deployment must
-provide a compatible CuaDriver, its permissions and a logged-in admin desktop before
-the solver begins. Runtime Driver installation is being integrated separately; this
-Task neither installs Driver nor changes system permissions. Use a fresh VM per run.
-For `codex-cli`, enable the Run-level `cua-desktop` MCP; `computer-use` uses the Sandbox
-desktop API directly. Keep the Task input identical between both runs.
+The image alone does not supply ALE's authorized desktop service: use `desktop_bootstrap`
+from the [macOS guide](../../../../../docs/guides/macos-orchard.md), or an image with its own
+authorized Driver. For `codex-cli`, enable the Run-level `cua-desktop` MCP; `computer-use` uses
+the Sandbox desktop API directly. Keep the Task input identical between both runs.
 
 ## Verification
 
@@ -21,5 +19,5 @@ checks cover readable RTF, title, event details, updated time, agenda, contact, 
 order, title formatting and body formatting. Whitespace and blank lines are tolerated.
 The oracle supplies a reference RTF to validate these outcome checks.
 
-Run `uv run ale lint tasks/macos-textedit-notice` for structural checks. Full validation
+Run `uv run ale lint tests/fixtures/tasks/macos-textedit-notice` for structural checks. Full validation
 and model runs require the desktop-ready deployment above.
