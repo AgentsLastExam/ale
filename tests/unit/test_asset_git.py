@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -468,3 +470,37 @@ def test_pr_cross_link_preserves_body_and_is_idempotent(
     comment_asset_pr(checkpoint, publication, message)
     comment_asset_pr(checkpoint, publication, message)
     assert updates == ["Task build evidence\n\n" + message]
+
+
+def test_an_exported_git_dir_is_left_untouched(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    # `git rebase --exec` and Git hooks run this suite with GIT_DIR naming their repository.
+    caller = tmp_path / "caller"
+    subprocess.run(["git", "init", "-q", str(caller)], check=True)
+
+    def snapshot() -> dict[Path, bytes]:
+        return {path: path.read_bytes() for path in caller.rglob("*") if path.is_file()}
+
+    before = snapshot()
+    module = request.node.path
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            f"--basetemp={tmp_path / 'run'}",
+            f"{module}::{test_checkpoint_restore_and_isolated_task_worktrees.__name__}",
+            f"{module}::{test_repository_name_uses_origin_and_main_worktree.__name__}",
+        ],
+        cwd=request.config.rootpath,
+        env={**os.environ, "GIT_DIR": str(caller / ".git")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout
+    assert snapshot() == before
