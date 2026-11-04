@@ -64,7 +64,8 @@ _IMAGE = re.compile(
     r"(?:@(?P<digest>sha256:[0-9a-f]{64}))?$"
 )
 _ROOT = "/opt/ale"
-_PATH = "/opt/ale/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+#: The framework's Python is named by its path, never found on PATH, as on Linux.
+_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _READ_CHUNK_BYTES = 64 * 1024
 #: From a framed clone's first boot to a guest whose account and desktop are checked.
 _BOOT_TIMEOUT_SEC = 300

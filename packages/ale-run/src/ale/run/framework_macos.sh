@@ -5,8 +5,8 @@
 #
 # DISK is the disk.img of an ale-frame-* Tart VM owned by the calling user, USER the Task's
 # account, CONTROL the account the Provider logs in as, and IDENTITY the framework identity
-# recorded in /opt/ale/framework. The payload holds python.tar.gz, driver.tar.gz and
-# guestd/*.py. On success it prints the account's home and uid as JSON.
+# recorded in /opt/ale/framework. The payload holds the framework's python/ tree,
+# driver.tar.gz and guestd/*.py. On success it prints the account's home and uid as JSON.
 #
 # The disk is the image's own, so nothing on it is trusted: no path is followed through a
 # link, its volumes are mounted without device files or set-uid programs, and none of its
@@ -141,13 +141,13 @@ need opt/ale
 [ -d "$mnt/opt" ] || mkdir -m 0755 "$mnt/opt"
 rm -rf "$mnt/opt/ale"
 mkdir -m 0755 "$mnt/opt/ale"
-tar -xzf "$staging/payload/python.tar.gz" -C "$mnt/opt/ale"
+[ -x "$staging/payload/python/bin/python3" ] || fail "the payload has no framework Python"
+ditto "$staging/payload/python" "$mnt/opt/ale/python"
 chown -R 0:0 "$mnt/opt/ale"
 chmod -R go-w "$mnt/opt/ale/python"
-mkdir -m 0700 "$mnt/opt/ale/guestd" "$mnt/opt/ale/bin"
+mkdir -m 0700 "$mnt/opt/ale/guestd"
 cp -P "$staging"/payload/guestd/*.py "$mnt/opt/ale/guestd/"
 chmod 0600 "$mnt"/opt/ale/guestd/*.py
-ln -s /opt/ale/python/bin/python3 "$mnt/opt/ale/bin/python3"
 
 # Cua Driver, signed, where LaunchServices starts it under its own identity.
 tar -xzf "$staging/payload/driver.tar.gz" -C "$staging/driver"

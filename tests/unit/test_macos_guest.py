@@ -93,7 +93,7 @@ def test_macos_desktop_reports_actual_driver_failure(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(gui.sys, "platform", "darwin")
     monkeypatch.setattr(gui.os, "geteuid", lambda: 501)
     monkeypatch.setenv("ALE_CUA_DRIVER_SOCKET", "/tmp/ale-desktop.sock")
-    monkeypatch.setenv("ALE_CUA_DRIVER", "/opt/ale/bin/cua-driver")
+    monkeypatch.setenv("ALE_CUA_DRIVER", "/Applications/CuaDriver.app/Contents/MacOS/cua-driver")
     calls: list[list[str]] = []
 
     def run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:

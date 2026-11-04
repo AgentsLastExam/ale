@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from ale.core.taskspec import OperatingSystem, TaskSpec
 from ale.run import artifact_files
 from ale.run.artifact_files import inspect, read
 from ale.run.episode import _Artifacts
+from ale.run.framework import MACOS_PYTHON
 
 pytestmark = pytest.mark.unit
 
@@ -24,8 +26,16 @@ pytestmark = pytest.mark.unit
 class LocalSandbox:
     request = SimpleNamespace(os=OperatingSystem.LINUX)
 
+    def __init__(self) -> None:
+        self.pythons: set[str] = set()
+
     async def exec(self, argv, *, identity=Identity.FRAMEWORK, output_sink=None, **kwargs):
         assert identity is Identity.FRAMEWORK
+        if "python" in argv[0]:
+            self.pythons.add(argv[0])
+        if argv[0] == MACOS_PYTHON:
+            # This Host has no framework installed; the tests' own Python stands in for it.
+            argv = [sys.executable, *argv[1:]]
         process = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
@@ -118,6 +128,10 @@ async def test_copy_restore_skips_missing_and_links_and_preserves_bytes_types_an
     assert not (output / "loop").exists()
     assert not (output / "stale.txt").exists()
     assert json.loads((sink.root / "snapshot.json").read_text())["entries"]
+    # A macOS image may have no Python of its own; the framework always has one.
+    assert sandbox.pythons == {
+        MACOS_PYTHON if operating_system is OperatingSystem.MACOS else "python3"
+    }
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,7 @@ from ale.core.errors import GuestUnreachableError
 from ale.core.verdict import Status
 from ale.run import guestd
 from ale.run.episode import run_episode
+from ale.run.framework import MACOS_PYTHON
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers import ProviderRegistry, orchard, privileges
@@ -251,6 +252,8 @@ class MemoryGuest:
                         del self.files[path]
             return 0, b""
         if len(argv) == 5 and argv[3] == "inspect":
+            # The image may have no Python of its own; the framework always has one.
+            assert argv[0] == MACOS_PYTHON
             self.stages.append("capture")
             entries = (
                 [{"source": OUTPUT, "kind": "file", "mode": self.modes[OUTPUT]}]
@@ -260,7 +263,7 @@ class MemoryGuest:
             return 0, json.dumps({"entries": entries, "skipped": [], "truncated": False}).encode()
         if len(argv) == 5 and argv[3] == "read":
             return 0, self.files[argv[4]]
-        if argv[:2] == ["python3", "-c"] and "p.parent).mkdir" in argv[2]:
+        if argv[:2] == [MACOS_PYTHON, "-c"] and "p.parent).mkdir" in argv[2]:
             assert "run_as" not in params
             self.files.pop(argv[3], None)
             return 0, b""

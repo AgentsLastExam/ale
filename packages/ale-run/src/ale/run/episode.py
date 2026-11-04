@@ -47,6 +47,7 @@ from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import Status, Verdict
 from ale.run import artifact_files
 from ale.run.assets import observe_task_assets
+from ale.run.framework import MACOS_PYTHON
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, Limits, SessionRegistry
 from ale.run.protocol.episode_protocol import SETUP_TIMEOUT_SEC, EpisodeProtocol
@@ -340,6 +341,17 @@ def _retained_outcome(entry: _LeaseEntry, retained: RetainedSandbox) -> SandboxO
     )
 
 
+def _artifact_python(operating_system: OperatingSystem) -> str:
+    """The Python the framework copies artifacts with.
+
+    The image's own, except on macOS, which may have none, where it is the framework's.
+    """
+    return {
+        OperatingSystem.WINDOWS: "python.exe",
+        OperatingSystem.MACOS: MACOS_PYTHON,
+    }.get(operating_system, "python3")
+
+
 @dataclass
 class _Artifacts(ArtifactSink):
     """Immutable solver output, captured for the Host or for a separate verifier.
@@ -366,7 +378,7 @@ class _Artifacts(ArtifactSink):
         if not self.enabled:
             return
         logger = logging.getLogger("ale.execution")
-        python = "python.exe" if sandbox.request.os is OperatingSystem.WINDOWS else "python3"
+        python = _artifact_python(sandbox.request.os)
         script = Path(artifact_files.__file__).read_text()
         path_type = (
             PureWindowsPath if sandbox.request.os is OperatingSystem.WINDOWS else PurePosixPath
@@ -453,7 +465,7 @@ class _Artifacts(ArtifactSink):
             raise TaskError(f"artifacts too large to copy whole: {', '.join(self.truncated)}")
         if not self.enabled or not self.entries:
             return
-        python = "python.exe" if sandbox.request.os is OperatingSystem.WINDOWS else "python3"
+        python = _artifact_python(sandbox.request.os)
         roots: list[PurePosixPath | PureWindowsPath] = []
         path_type = (
             PureWindowsPath if sandbox.request.os is OperatingSystem.WINDOWS else PurePosixPath

@@ -1121,6 +1121,9 @@ async def test_a_build_vm_changes_nothing_for_the_agent_and_keeps_its_disk(backe
     assert not elevation_changes(guest)
     assert not api.desktops
     assert not any(f"ALE_CUA_DRIVER={orchard.MACOS_DRIVER}" in argv for argv in argvs)
+    # Agent commands search this PATH too, so it names no directory only root may enter;
+    # a lookup through one fails with EACCES instead of "not found".
+    assert argvs and all("PATH=/usr/bin:/bin:/usr/sbin:/sbin" in argv for argv in argvs)
     saved = []
     shut_down = AsyncMock()
     monkeypatch.setattr(

@@ -33,10 +33,10 @@ of its base, so the framework is already there when the Task's own image script 
 There too elevation is not part of the image; the Host grants it per boot.
 
 A macOS disk is APFS, which only macOS reads, so the Orchard Provider frames a copy of it
-offline on the Mac itself with ``framework_macos.sh``. The pieces are guestd, a Python of
-the framework's own (a stock macOS has no Python 3.12) and Cua Driver with the privacy
-grants macOS otherwise takes only through its settings. The Provider starts the Driver in
-the agent's session, which the image signs in at boot.
+offline on the Mac itself with ``framework_macos.sh``. The pieces are guestd, the
+framework's Python and Cua Driver with the privacy grants macOS otherwise takes only
+through its settings. The Provider starts the Driver in the agent's session, which the
+image signs in at boot, and sets elevation at every start, as on Linux.
 """
 
 from __future__ import annotations
@@ -109,6 +109,10 @@ _PYTHON = {
         "cpython-3.12.15+20261013-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
         "7a2aef48e5ee569e310b29b32681debbc5d888e92790d85331a47736c6b06aad",
     ),
+    "macos": (
+        "cpython-3.12.15+20261013-aarch64-apple-darwin-install_only_stripped.tar.gz",
+        "9866e11cf2ae9caa1e671383786f248859a52dd8bfb702fb4c0dc2c65f1d36de",
+    ),
 }
 #: Release asset and its published SHA-256, per guest platform.
 _CUA_DRIVER = {
@@ -128,12 +132,6 @@ _CUA_DRIVER = {
 _CUA_DRIVER_BINARY = {"linux": "cua-driver", "windows": "cua-driver.exe"}
 #: Run inside the VM builder to install the Windows framework into a disk.
 _WINDOWS_INSTALLER = Path(__file__).with_name("framework_windows.py")
-#: The standalone Python the macOS framework installs: the build ALE's container base uses.
-_MACOS_PYTHON = (
-    "https://github.com/astral-sh/python-build-standalone/releases/download/20260814/",
-    "cpython-3.12.14+20260814-aarch64-apple-darwin-install_only_stripped.tar.gz",
-    "dd5b76ab11451a4a4367c17c61d944dded56b425396b07f102922a7ebef7d55f",
-)
 #: Where the macOS framework puts its Python, readable by every account so the agent's
 #: desktop tool can run it, and writable by root alone.
 MACOS_PYTHON = guestd.PYTHON["macos"]
@@ -235,13 +233,13 @@ def windows_framework_identity(*, user: str) -> str:
 def macos_framework_identity(*, user: str) -> str:
     """Everything the macOS framework is installed from, so a change to any of it reframes.
 
-    Elevation is not part of it: as on Windows, the Provider grants it per boot.
+    Elevation is not part of it: as on Linux and Windows, the Provider sets it per boot.
     """
     return content_hash(
         {
             "guestd": _guestd_digests(),
             "cua_driver": _CUA_DRIVER["macos"][1],
-            "python": _MACOS_PYTHON[2],
+            "python": _PYTHON["macos"][1],
             "framer": hashlib.sha256(MACOS_FRAMER.read_bytes()).hexdigest(),
             "user": user,
         }
@@ -251,12 +249,12 @@ def macos_framework_identity(*, user: str) -> str:
 def macos_framework_payload() -> bytes:
     """The tar stream ``framework_macos.sh`` installs: the Python, the Driver and guestd."""
     members = {
-        "python.tar.gz": _macos_python_archive(),
         "driver.tar.gz": macos_driver_archive(),
         **{f"guestd/{name}": (guestd.SOURCE / name).read_bytes() for name in guestd.FILES},
     }
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w") as bundle:
+        bundle.add(_python("macos"), arcname="python")
         for name, data in members.items():
             info = tarfile.TarInfo(name)
             info.size = len(data)
@@ -623,33 +621,6 @@ def macos_driver_archive() -> bytes:
         what="Cua Driver",
     )
     return (files / asset).read_bytes()
-
-
-def _macos_python_archive() -> bytes:
-    """The pinned standalone Python for macOS, downloaded once and verified."""
-    base, asset, sha256 = _MACOS_PYTHON
-    root = cache_root() / "python"
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / asset
-    with (root / "download.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if path.is_file():
-            payload = path.read_bytes()
-            if hashlib.sha256(payload).hexdigest() == sha256:
-                return payload
-        try:
-            with urllib.request.urlopen(base + asset.replace("+", "%2B"), timeout=300) as response:
-                payload = response.read()
-        except OSError as exc:
-            raise ProviderStartError(
-                f"could not download the macOS framework Python: {exc}"
-            ) from exc
-        if hashlib.sha256(payload).hexdigest() != sha256:
-            raise ProviderStartError(
-                "the macOS framework Python does not match its pinned checksum"
-            )
-        path.write_bytes(payload)
-        return payload
 
 
 def _archive_files(asset: str, payload: bytes) -> Iterator[tuple[str, bytes]]:
