@@ -33,7 +33,9 @@ RunLock and the configuration hash without changing the Task identity. The Agent
 starts at Harness launch (or policy rollout), after installation, resource staging, and
 network sealing. Evidence capture, verification, and cleanup do not consume it. An Agent
 timeout terminates execution, is not retried, and destroys its Sandbox even if retention was
-requested, after verification. Teardown is cancellation-shielded on every exit path.
+requested, after verification. Teardown is cancellation-shielded on every exit path, and
+SIGTERM cancels a command as Ctrl-C does, so a supervisor or timeout that stops `ale` still
+lets it destroy every Sandbox it created.
 
 ### Provision
 

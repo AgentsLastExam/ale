@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-from collections.abc import Sequence
+import signal
+from collections.abc import Coroutine, Sequence
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -166,7 +167,7 @@ def run(
     if api_key_env:
         flags.append(f"gateway.api_key_env={api_key_env}")
     settings = _config(config, flags, agent=agent, model=model)
-    exit_code = asyncio.run(
+    exit_code = _run_async(
         _run_one(reference, settings, runs_dir, run_id, require_reportable, continue_from)
     )
     raise typer.Exit(exit_code)
@@ -184,7 +185,7 @@ def validate(
     Verification uses the same run-level judge configuration as an ordinary episode.
     """
     settings = _config(config, overrides, agent="oracle", model="")
-    exit_code = asyncio.run(_validate(reference, settings, runs_dir))
+    exit_code = _run_async(_validate(reference, settings, runs_dir))
     raise typer.Exit(exit_code)
 
 
@@ -196,7 +197,7 @@ def prepare(
 ) -> None:
     """Build or acquire Task images without starting an episode."""
     settings = _config(config, overrides, agent="oracle", model="")
-    raise typer.Exit(asyncio.run(_prepare_only(reference, settings)))
+    raise typer.Exit(_run_async(_prepare_only(reference, settings)))
 
 
 @app.command(hidden=True)
@@ -219,7 +220,7 @@ def reverify(
     if episode_retries is not None:
         flags.append(f"episode_retries={episode_retries}")
     settings = _config(config, flags, agent="nop", model="")
-    raise typer.Exit(asyncio.run(_reverify(reference, source_run, settings, runs_dir)))
+    raise typer.Exit(_run_async(_reverify(reference, source_run, settings, runs_dir)))
 
 
 @app.command()
@@ -250,7 +251,7 @@ def vm_image_push(
 
     typer.echo(f"pushing {source} to {reference}")
     try:
-        resolved = asyncio.run(publish_vm_image(source, reference))
+        resolved = _run_async(publish_vm_image(source, reference))
     except AleError as error:
         typer.echo(str(error), err=True)
         return EXIT_BAD_REFERENCE
@@ -273,7 +274,7 @@ def vm_image_pull(
 
     typer.echo(f"pulling {reference}")
     try:
-        prepared = asyncio.run(resolve_vm_image(ImageRef(kind="vm", reference=reference)))
+        prepared = _run_async(resolve_vm_image(ImageRef(kind="vm", reference=reference)))
     except AleError as error:
         typer.echo(str(error), err=True)
         return EXIT_BAD_REFERENCE
@@ -382,7 +383,7 @@ def _print_asset_sync(results: Sequence[AssetSyncResult]) -> None:
 def sandbox_list() -> None:
     """List ALE-managed sandboxes and snapshots requested for retention."""
     try:
-        records = asyncio.run(_list_retained_sandboxes())
+        records = _run_async(_list_retained_sandboxes())
     except AleError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_PROVIDER) from error
@@ -399,7 +400,7 @@ def sandbox_destroy(
 ) -> None:
     """Destroy one ALE-retained sandbox or snapshot and its owned resources."""
     try:
-        asyncio.run(_destroy_retained_sandbox(handle))
+        _run_async(_destroy_retained_sandbox(handle))
     except AleError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_PROVIDER) from error
@@ -421,6 +422,40 @@ async def _destroy_retained_sandbox(handle: str) -> None:
         offered = ", ".join(f"'{provider}:'" for provider in RETAINING_PROVIDERS)
         raise ProviderCapabilityError(f"retained sandbox handle must start with {offered}")
     await provider_named(name).destroy_retained(handle)
+
+
+def _run_async[T](main: Coroutine[Any, Any, T]) -> T:
+    """Run a command's coroutine, cancelling it on SIGTERM as asyncio does on Ctrl-C.
+
+    asyncio turns only SIGINT into cancellation. Without this, the SIGTERM of `kill`,
+    `timeout` or a supervisor ends the process before the cancellation-shielded teardown
+    destroys the Sandboxes the command created. A second SIGTERM kills at once.
+    """
+
+    async def cancelled_by_sigterm() -> T:
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        assert task is not None
+        terminated = False
+
+        def terminate() -> None:
+            nonlocal terminated
+            terminated = True
+            loop.remove_signal_handler(signal.SIGTERM)
+            task.cancel()
+
+        loop.add_signal_handler(signal.SIGTERM, terminate)
+        try:
+            return await main
+        except asyncio.CancelledError:
+            if terminated:
+                # 143, as Ctrl-C ends with 130: the shell's status for death by the signal.
+                raise typer.Exit(128 + signal.SIGTERM) from None
+            raise
+        finally:
+            loop.remove_signal_handler(signal.SIGTERM)
+
+    return asyncio.run(cancelled_by_sigterm())
 
 
 def main() -> None:

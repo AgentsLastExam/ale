@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 from collections import Counter
 from datetime import UTC, datetime
 from importlib import import_module
@@ -291,6 +292,27 @@ async def test_runtime_cleans_sandboxes_for_late_failure_and_cancellation(
         assert result.record.sandboxes[0].outcome == "destroyed"
         sandbox.retain.assert_awaited_once()
     sandbox.destroy.assert_awaited_once()
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_sigterm_cancels_a_command_as_ctrl_c_does(
+    monkeypatch: pytest.MonkeyPatch, signum: signal.Signals
+) -> None:
+    cli = import_module("ale.run.cli.main")
+    torn_down: list[signal.Signals] = []
+
+    async def workflow(*_args: object) -> int:
+        asyncio.get_running_loop().call_soon(signal.raise_signal, signum)
+        try:
+            await asyncio.sleep(60)
+        finally:
+            torn_down.append(signum)
+        return 0
+
+    monkeypatch.setattr(cli, "_run_one", workflow)
+    result = CliRunner().invoke(cli.app, ["run", "task", "--agent", "nop"])
+    assert torn_down == [signum]
+    assert result.exit_code == 128 + signum, result.output
 
 
 def test_reverification_source_discovery_accepts_three_levels_without_archived_results(
