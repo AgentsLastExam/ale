@@ -67,7 +67,7 @@ version's digests are known. An already matching installation may be reused.
 
 Harnesses declare `supported_os` and validate it before Sandbox creation; the CLI also
 checks it before image preparation. The default is Linux only. An npm CLI adapter
-declares its supported systems explicitly. A release-binary adapter supports exactly the systems its
+supports Linux and Windows, and macOS where it says so. A release-binary adapter supports exactly the systems its
 table covers, and its README names any system upstream ships no build for. Unsupported
 systems raise `AgentUnsupportedError` before installation; an architecture with no
 pinned asset raises it during installation.

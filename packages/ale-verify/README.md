@@ -10,11 +10,10 @@ check = checks.text_equals("/home/user/output/result.txt", "hello world")
 write({"reward": check["score"], "content": check})
 ```
 
-`write` saves `{"reward": ...}` to `reward.json` and the complete result to
-`verification.json` beside it. The directory is `/logs/verifier` on Linux,
-`C:\logs\verifier` on Windows, and `/opt/ale/logs/verifier` on macOS; see the
-[platform result contract](../../docs/specs/verification.md#result). Only `reward` has
-framework scoring semantics; other fields may be nested JSON.
+`write` saves `{"reward": ...}` to Harbor's `/logs/verifier/reward.json`
+(`C:\logs\verifier\reward.json` on Windows, `/opt/ale/logs/verifier/reward.json` on macOS)
+and the complete result to `verification.json` beside it. Only `reward` has framework
+scoring semantics; other fields may be nested JSON.
 Task code may write `reward.json` directly without this package. The program must exit
 successfully for ALE to accept it. Judge logs are independent.
 

@@ -55,9 +55,6 @@ only the Gateway, never an address.
 `open` is a deliberate escape hatch: an ordinary bridge with normal egress. A task must
 declare it, and the declaration is recorded in provenance.
 
-The Orchard macOS Provider supports explicit `open` policy only; its infrastructure
-requirements are in [Providers](../../packages/ale-run/src/ale/run/providers/README.md#orchard).
-
 Verified by `tests/integration/test_gateway_isolation.py`, including that a sealed
 sandbox reaches no other host port, by the QEMU Provider unit tests for the runner rules,
 and by the `demo-netprobe` task, which attempts DNS resolution and a raw TCP connection
@@ -216,11 +213,9 @@ Daytona's in-sandbox daemon runs commands for anyone who connects, as root. The 
 blocks every non-root user from it and proves that as the agent before handing the
 sandbox out; an agent granted `[agent].sudo` can lift the block, as it can any rule.
 
-The verifier uses the [platform result directory](verification.md#result). An agent can
-plant entries beforehand with sudo on Linux/macOS or as any account at the Windows
-root. On macOS the result directory is under the protected `/opt/ale` framework root;
-that root must remain a real directory, owned by root and inaccessible to the agent.
-Before every verification attempt ALE therefore removes a link or file at either level instead of
+The verifier writes its result to Harbor's `/logs/verifier` (`C:\logs\verifier`, macOS `/opt/ale/logs/verifier`), a path the
+agent can create beforehand: with sudo on Linux and macOS, as any account on Windows. Before every
+verification attempt ALE therefore removes a link or file at either level instead of
 following it, makes the parent the framework's and writable by it alone, and recreates the
 verifier directory empty and accessible only to the framework. A result the agent planted
 is gone, and nothing it left running can write or redirect one.

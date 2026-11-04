@@ -363,7 +363,8 @@ that run; the RunLock records what the run used. See
 ## tests/
 
 `tests/test.sh` (or Windows `tests/test.ps1`) evaluates the final outcome and writes its
-`reward` to `reward.json` in the [platform verifier directory](verification.md#result). Verifier
+`reward` to `/logs/verifier/reward.json` (Windows `C:\logs\verifier\reward.json`; macOS, whose
+root volume is read-only, `/opt/ale/logs/verifier/reward.json`). Verifier
 implementation conventionally lives in `tests/verify.py`. ALE uploads the whole directory to
 its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
 directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal

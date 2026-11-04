@@ -6,11 +6,9 @@ scoring registry, automatic aggregation, callback, or required order of tool cal
 
 ## Result
 
-The verifier writes `reward.json` in the platform's verifier directory: `/logs/verifier`
-on Linux, `C:\logs\verifier` on Windows, and `/opt/ale/logs/verifier` on macOS. The macOS
-path stays under the framework's writable root because its system root is read-only;
-Linux and Windows retain Harbor's paths. The file is a flat JSON object whose values
-are numbers. The engine and `ale_verify.write` must use the same platform directory.
+The verifier writes Harbor's reward file, `/logs/verifier/reward.json`
+(`C:\logs\verifier\reward.json` on Windows; on macOS, whose root volume is read-only,
+`/opt/ale/logs/verifier/reward.json`): a flat JSON object whose values are numbers.
 Its `reward` must be a finite number from 0 through 1; booleans and numeric strings are not
 numbers. ALE interprets only `reward` and never averages or treats other values as rewards.
 Beside it, `verification.json` may hold the complete result: any JSON object, nested values
