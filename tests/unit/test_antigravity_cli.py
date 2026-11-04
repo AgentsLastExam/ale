@@ -62,7 +62,7 @@ def test_release_table_pins_every_official_build() -> None:
     assert harness.integrity() == release_identity(agy.RELEASE_ASSETS)
     assert set(agy.RELEASE_ASSETS) == {
         (system, architecture)
-        for system in OperatingSystem
+        for system in (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
         for architecture in ("x86_64", "aarch64")
     }
     for (system, _), asset in agy.RELEASE_ASSETS.items():

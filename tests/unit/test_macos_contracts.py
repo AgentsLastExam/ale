@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from tests.support import merged_config, write_task
 
 from ale.core.config import OrchardProviderConfig, RunConfig, load_run_config
 from ale.core.errors import ConfigError, TaskDefinitionError
-from ale.core.taskspec import ImageKind, OperatingSystem, TaskManifestV1, TaskSpec
+from ale.core.taskspec import ImageKind, OperatingSystem
 from ale.run.providers import ProviderRegistry
 from ale.run.tasksets.manifest import load_tasks
 
@@ -70,111 +71,46 @@ def test_invalid_orchard_settings_fail_before_connecting(overrides: dict) -> Non
         )
 
 
-def test_macos_task_accepts_posix_artifacts_and_existing_vm_image() -> None:
-    spec = TaskSpec.model_validate(
-        {
-            "name": "macos-smoke",
-            "os": "macos",
-            "image": {"kind": "vm", "ref": IMAGE, "user": "admin"},
-            "instruction": "Save a document.",
-            "artifacts": ["/Users/admin/output"],
-            "network": {"mode": "open"},
-        }
-    )
+def _macos_task(path: Path, layer: dict | None = None, dockerfile: str | None = None) -> Path:
+    base = {
+        "artifacts": ["/Users/admin/output"],
+        "environment": {"os": "macos", "vm_image": IMAGE, "cpus": 2, "memory_mb": 4096},
+        "agent": {"user": "admin", "network_mode": "public"},
+    }
+    return write_task(path, config=merged_config(base, layer), dockerfile=dockerfile)
+
+
+def test_macos_task_is_a_vm_named_directly(tmp_path: Path) -> None:
+    spec = load_tasks(_macos_task(tmp_path / "task"))[0].spec
     assert spec.os is OperatingSystem.MACOS
     assert spec.image.kind is ImageKind.VM
-
-
-@pytest.mark.parametrize("model", [TaskSpec, TaskManifestV1])
-@pytest.mark.parametrize(
-    ("role", "image"),
-    [
-        ("solver", {"kind": "vm", "base_ref": IMAGE}),
-        ("solver", {"kind": "vm"}),
-        ("verifier", {"kind": "vm"}),
-    ],
-)
-def test_macos_schema_leaves_image_sources_to_preparation(model, role, image):
-    values = {
-        "spec_type": "core/v1",
-        "name": "macos-smoke",
-        "os": "macos",
-        "image": image if role == "solver" else {"kind": "vm", "ref": IMAGE},
-    }
-    if role == "verifier":
-        values["verify"] = {
-            "environment_mode": "separate",
-            "image": image,
-            "resources": {"cpus": 1, "memory_mb": 512, "storage_mb": None, "gpus": 0},
-        }
-    if model is TaskSpec:
-        values["instruction"] = "Save a document."
-    model.model_validate(values)
-
-
-@pytest.mark.parametrize("model", [TaskSpec, TaskManifestV1])
-def test_macos_images_require_vm_kind(model):
-    values = {
-        "spec_type": "core/v1",
-        "name": "macos-smoke",
-        "os": "macos",
-        "image": {"kind": "container", "ref": IMAGE},
-    }
-    if model is TaskSpec:
-        values["instruction"] = "Save a document."
-    with pytest.raises(ValidationError, match=r"macOS solver images require image\.kind: vm"):
-        model.model_validate(values)
+    assert spec.image.ref == IMAGE
 
 
 @pytest.mark.parametrize(
-    ("role", "image"),
+    ("layer", "dockerfile"),
     [
-        ("solver", {"kind": "vm", "base_ref": IMAGE}),
-        ("solver", {"kind": "vm"}),
-        ("verifier", {"kind": "vm"}),
+        ({"environment": {"vm_image": None}}, None),
+        ({}, "FROM scratch\n"),
+        ({"environment": {"vm_image": None}}, "FROM scratch\n"),
     ],
 )
-def test_macos_loading_rejects_sources_without_supported_preparation(write_task_repo, role, image):
-    root = write_task_repo(
-        image=image if role == "solver" else {"kind": "vm", "ref": IMAGE},
-        with_image_dockerfile=False,
-        verifier_image=image if role == "verifier" else None,
-        manifest_suffix="os: macos\n",
-    )
-    with pytest.raises(
-        TaskDefinitionError, match=r"image\.base_ref requires|requires .*image\.ref"
-    ):
-        load_tasks(root / "tasks/demo")
+def test_macos_task_names_its_image(tmp_path: Path, layer: dict, dockerfile: str | None) -> None:
+    with pytest.raises(TaskDefinitionError, match="macOS Task names its image"):
+        load_tasks(_macos_task(tmp_path / "task", layer, dockerfile))
 
 
-def test_macos_separate_verifier_cannot_select_container() -> None:
-    with pytest.raises(ValidationError, match="macOS verifier"):
-        TaskSpec.model_validate(
-            {
-                "name": "macos-smoke",
-                "os": "macos",
-                "image": {"kind": "vm", "ref": IMAGE},
-                "instruction": "Save a document.",
-                "verify": {
-                    "environment_mode": "separate",
-                    "image": {"kind": "container", "ref": "ubuntu:24.04"},
-                    "resources": {"cpus": 1, "memory_mb": 512, "storage_mb": None, "gpus": 0},
-                },
-            }
-        )
+def test_macos_verifier_builds_no_image(tmp_path: Path) -> None:
+    task = _macos_task(tmp_path / "task", {"verifier": {"environment_mode": "separate"}})
+    (task / "tests" / "Dockerfile").write_text("FROM scratch\n")
+    with pytest.raises(TaskDefinitionError, match="only a Linux verifier builds"):
+        load_tasks(task)
 
 
-@pytest.mark.parametrize("role", ["solver", "verifier"])
-def test_macos_task_loading_rejects_docker_builds(write_task_repo, role: str) -> None:
-    root = write_task_repo(
-        image={"kind": "vm", "ref": IMAGE},
-        with_image_dockerfile=role == "solver",
-        verifier_image={"kind": "vm", "ref": IMAGE} if role == "verifier" else None,
-        with_verifier_dockerfile=role == "verifier",
-        manifest_suffix="os: macos\n",
-    )
-    with pytest.raises(TaskDefinitionError, match="macOS"):
-        load_tasks(root / "tasks/demo")
+def test_macos_verifier_cannot_run_in_a_container(tmp_path: Path) -> None:
+    layer = {"verifier": {"environment": {"docker_image": "ubuntu:24.04"}}}
+    with pytest.raises(TaskDefinitionError, match="only a Linux verifier runs in a container"):
+        load_tasks(_macos_task(tmp_path / "task", layer))
 
 
 def test_registry_selects_orchard_without_creating_a_vm(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3,7 +3,7 @@
 Normative for standard container and VM Tasks. Every solver and dedicated verifier runs
 in a container or a VM. Linux builds a Dockerfile (a VM with `[environment].vm = true`) or
 uses an image directly (`docker_image`, `vm_image`); Windows uses `vm_image` directly, or builds
-`environment/build.ps1` on `vm_base`.
+`environment/build.ps1` on `vm_base`; macOS uses `vm_image` directly.
 
 ## What a Linux image needs
 
@@ -179,11 +179,6 @@ cache keys include the actual image asset bytes. Dirty or unsynchronized assets 
 RunLock schema 2 records declaration, preparation, Provider, and exact observed identity;
 it does not invent a whole-disk content digest. Local Linux VMs record OCI and materializer
 identities; local Windows VMs record builder identity and resolved base materials.
-
-macOS requires `image.kind: vm` and an external Tart OCI `image.ref` (tag or SHA-256
-digest). Local paths and image-build recipes are unsupported. Preparation records the
-resolved immutable identity; [Orchard](../../packages/ale-run/src/ale/run/providers/README.md#orchard)
-describes how the Provider resolves and checks it.
 
 ## Reverification
 

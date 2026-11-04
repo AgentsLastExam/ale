@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 import pytest
+from tests.support import edit_task_config, write_task
 
 from ale.core.config import OrchardProviderConfig, RunConfig, RunTimeouts
 from ale.core.errors import GuestUnreachableError
@@ -95,6 +96,15 @@ class MemoryGuest:
             }
         elif op == "disk_usage":
             data = {"total": 64 * 1024**3, "used": 1024**3, "free": 63 * 1024**3}
+        elif op == "list_files":
+            root = str(params["path"]) + "/"
+            data = {
+                "files": [
+                    {"path": path, "size": len(content)}
+                    for path, content in self.files.items()
+                    if path.startswith(root)
+                ]
+            }
         elif op == "write_file":
             previous = self.files.get(params["path"], b"") if params.get("append") else b""
             self.files[params["path"]] = previous + base64.b64decode(params["b64"])
@@ -116,7 +126,7 @@ class MemoryGuest:
             self._chunk(req_id, "chunk", content)
         elif op == "put_tree":
             self._upload = req_id, params["path"]
-            if params["path"] == "/Users/user/.ale-oracle":
+            if params["path"] == "/Users/user/.ale-solution":
                 assert params["run_as"] == "user"
             elif params["path"].startswith("/opt/ale/"):
                 assert "run_as" not in params
@@ -190,16 +200,16 @@ class MemoryGuest:
             return 1, b""
         if argv[:2] == ["sh", "-c"] and "$(id -u)" in argv[2]:
             return 0, b"501 no" if params.get("run_as") == self.user else b"0 yes"
-        if argv == ["bash", "run.sh"] and cwd == "/opt/ale/setup":
-            assert not any(path.startswith("/opt/ale/verify/") for path in self.files)
-            assert not any(".ale-oracle" in path for path in self.files)
+        if argv == ["bash", "setup.sh"] and cwd == "/opt/ale/setup":
+            assert not any(path.startswith("/opt/ale/tests/") for path in self.files)
+            assert not any(".ale-solution" in path for path in self.files)
             assert env["ALE_HOME"] == "/Users/user"
             self.stages.append("setup")
             return (17 if self.fail_setup else 0), b""
-        if argv == ["bash", "/Users/user/.ale-oracle/run.sh"]:
+        if argv == ["bash", "/Users/user/.ale-solution/solve.sh"]:
             assert params["run_as"] == "user"
             assert argv[1] in self.files
-            assert not any(path.startswith("/opt/ale/verify/") for path in self.files)
+            assert not any(path.startswith("/opt/ale/tests/") for path in self.files)
             self.stages.append("oracle")
             self.oracle_started.set()
             self.files[OUTPUT] = b"hello macOS"
@@ -207,7 +217,7 @@ class MemoryGuest:
             if self.wait_oracle:
                 return None
             return 0, b"oracle finished\n"
-        if argv == ["bash", "run.sh"] and cwd == "/opt/ale/verify":
+        if argv == ["bash", "test.sh"] and cwd == "/opt/ale/tests":
             assert "run_as" not in params
             self.stages.append("verify")
             assert not any(path.startswith("/opt/ale/logs/verifier/") for path in self.files)
@@ -243,16 +253,19 @@ class MemoryGuest:
                 if OUTPUT in self.files
                 else []
             )
-            return 0, json.dumps({"entries": entries, "skipped": []}).encode()
+            return 0, json.dumps({"entries": entries, "skipped": [], "truncated": False}).encode()
         if len(argv) == 5 and argv[3] == "read":
             return 0, self.files[argv[4]]
         if argv[:2] == ["python3", "-c"] and "p.parent).mkdir" in argv[2]:
             assert "run_as" not in params
             self.files.pop(argv[3], None)
             return 0, b""
-        if argv[:2] == ["python3", "-c"] and "os.chmod" in argv[2]:
+        if argv[:2] == ["chmod", "--"]:
             assert "run_as" not in params
-            self.modes[argv[3]] = int(argv[4])
+            self.modes[argv[3]] = int(argv[2], 8)
+            return 0, b""
+        if argv[:2] == ["sh", "-c"] and "verifier" in argv[2]:
+            assert argv[-2:] == ["/opt/ale/logs", "/opt/ale/logs/verifier"]
             return 0, b""
         if argv[:2] == ["sh", "-c"] and "sysconfig.get_paths()" in argv[-1]:
             return 0, b"/opt/homebrew/lib/python3.12/site-packages\n"
@@ -371,17 +384,20 @@ class MemoryOrchard:
 def episode_fixture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guest: MemoryGuest
 ) -> tuple[Path, ProviderRegistry, MemoryOrchard]:
-    task = tmp_path / "task"
-    task.mkdir()
-    (task / "task.yaml").write_text(
-        "spec_type: core/v1\nname: mac-fixture\nos: macos\n"
-        f"image: {{kind: vm, ref: '{IMAGE}'}}\nnetwork: {{mode: open}}\n"
-        f"artifacts: ['{OUTPUT}']\n"
+    task = write_task(
+        tmp_path / "task",
+        name="agentslastexam/mac-fixture",
+        config={
+            "artifacts": [OUTPUT],
+            "environment": {"os": "macos", "vm_image": IMAGE},
+            "agent": {"network_mode": "public"},
+        },
+        dockerfile=None,
+        instruction="Write hello macOS to the output file.\n",
     )
-    (task / "instruction.md").write_text("Write hello macOS to the output file.\n")
-    for stage in ("setup", "oracle", "verify"):
-        (task / stage).mkdir()
-        (task / stage / "run.sh").write_text("#!/bin/bash\n# In-memory phase fixture.\n")
+    setup = task / "environment" / "setup" / "setup.sh"
+    setup.parent.mkdir(parents=True)
+    setup.write_text("#!/bin/bash\n# In-memory phase fixture.\n")
     config = OrchardProviderConfig(endpoint="https://orchard.invalid")
     registry = ProviderRegistry(RunConfig(vm={"provider": "orchard", "orchard": config}))
     provider = registry.get(load_tasks(task)[0].spec.image.kind)
@@ -429,7 +445,7 @@ async def test_orchard_episode_scores_and_captures_before_verify(
         assert not artifact.exists()
     assert (result.run_dir / "verification.json").is_file()
     assert json.loads((result.run_dir / "verification.json").read_text()) == {
-        "overall": float(oracle),
+        "reward": float(oracle),
         "result": float(oracle),
     }
     assert (result.run_dir / "trajectory.json").is_file()
@@ -447,16 +463,15 @@ async def test_orchard_separate_verifier_restores_solver_artifacts_and_modes(
 ) -> None:
     solver = MemoryGuest()
     task, providers, solver_controller = episode_fixture(tmp_path, monkeypatch, solver)
-    manifest = task / "task.yaml"
-    manifest.write_text(
-        manifest.read_text()
-        + (
-            "verify:\n  environment_mode: separate\n"
-            f"  image: {{kind: vm, ref: '{IMAGE}', user: reviewer}}\n"
-            "  resources: {cpus: 2, memory_mb: 4096, storage_mb: null, gpus: 0}\n"
-        )
+    edit_task_config(
+        task,
+        {
+            "verifier": {
+                "environment": {"vm_image": IMAGE, "cpus": 2, "memory_mb": 4096},
+            }
+        },
     )
-    verifier = MemoryGuest(user="reviewer")
+    verifier = MemoryGuest()
     verifier_controller = MemoryOrchard(verifier)
     provider = providers.get(load_tasks(task)[0].spec.image.kind)
     monkeypatch.setattr(
@@ -474,7 +489,7 @@ async def test_orchard_separate_verifier_restores_solver_artifacts_and_modes(
     )
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     assert solver_controller.created != verifier_controller.created
     assert solver.files is not verifier.files
     assert solver.stages == ["setup", "oracle", "capture"]
@@ -483,7 +498,7 @@ async def test_orchard_separate_verifier_restores_solver_artifacts_and_modes(
     assert solver.files[OUTPUT] == b"hello macOS"
     assert verifier.files[OUTPUT] == b"modified by verifier"
     assert (result.run_dir / "artifacts/0000/result.txt").read_bytes() == b"hello macOS"
-    assert not any(".ale-oracle" in path for path in verifier.files)
+    assert not any(".ale-solution" in path for path in verifier.files)
     assert not any(path.startswith("/opt/ale/setup/") for path in verifier.files)
     restored = [
         args for op, args in verifier.operations if op == "write_file" and args["path"] == OUTPUT
@@ -492,7 +507,7 @@ async def test_orchard_separate_verifier_restores_solver_artifacts_and_modes(
     verification = [
         args
         for op, args in verifier.operations
-        if op == "exec" and args.get("cwd") == "/opt/ale/verify"
+        if op == "exec" and args.get("cwd") == "/opt/ale/tests"
     ]
     assert len(verification) == 1 and "run_as" not in verification[0]
     for controller in (solver_controller, verifier_controller):
@@ -554,7 +569,7 @@ async def test_orchard_cancelled_episode_stops_its_owned_vm(
 
 
 @pytest.mark.asyncio
-async def test_orchard_agent_timeout_is_not_a_completed_zero(
+async def test_orchard_agent_timeout_keeps_its_status_and_scores_what_it_left(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -568,11 +583,11 @@ async def test_orchard_agent_timeout_is_not_a_completed_zero(
     )
     assert guest.oracle_started.is_set()
     assert result.verdict.status is Status.TIMEOUT
-    assert result.verdict.rewards is None
+    assert result.verdict.rewards == {"reward": 1.0}
     assert controller.deleted == controller.created
     assert len(controller.deleted) == 1
     assert controller.vm is None and controller.closed and guest.closed
-    assert "verify" not in guest.stages
+    assert guest.stages[-1] == "verify"
 
 
 @pytest.mark.asyncio

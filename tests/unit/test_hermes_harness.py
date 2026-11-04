@@ -31,7 +31,7 @@ def test_preset_pins_the_official_commit() -> None:
     assert harness.gateway_dialect == config.gateway.dialect == "openai-chat-completions"
     assert config.gateway.provider == "openai"
     assert harness.integrity() == f"git:NousResearch/hermes-agent@{COMMIT}"
-    assert set(harness.supported_os) == set(OperatingSystem)
+    assert set(harness.supported_os) == {OperatingSystem.LINUX, OperatingSystem.WINDOWS}
 
 
 @pytest.mark.parametrize(

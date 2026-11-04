@@ -492,13 +492,7 @@ class _Artifacts(ArtifactSink):
                     )
                 if sandbox.request.os is not OperatingSystem.WINDOWS:
                     mode = await sandbox.exec(
-                        [
-                            python,
-                            "-c",
-                            "import os,sys; os.chmod(sys.argv[1], int(sys.argv[2]))",
-                            source,
-                            str(int(entry["mode"])),
-                        ],
+                        ["chmod", "--", f"{int(entry['mode']):o}", source],
                         identity=Identity.FRAMEWORK,
                     )
                     if not mode.ok:

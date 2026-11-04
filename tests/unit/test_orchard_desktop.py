@@ -40,11 +40,9 @@ def desktop(monkeypatch):
 
     def run(argv, **kwargs):
         calls.append(argv)
-        return SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps({"screenshot_png_b64": base64.b64encode(PNG).decode()}),
-            stderr="",
-        )
+        image = {"type": "image", "data": base64.b64encode(PNG).decode()}
+        reply = {"jsonrpc": "2.0", "id": 1, "result": {"content": [image]}}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(reply) + "\n", stderr="")
 
     monkeypatch.setattr(gui.subprocess, "run", run)
     return console, socket, calls
@@ -53,7 +51,7 @@ def desktop(monkeypatch):
 def test_agent_desktop_probe_uses_the_framework_capture_path(desktop):
     _, _, calls = desktop
     gui.probe_macos_desktop("evaluator", DRIVER, SOCKET)
-    assert calls == [[DRIVER, "call", "get_desktop_state", "{}", "--socket", SOCKET]]
+    assert calls == [[DRIVER, "mcp", "--socket", SOCKET]]
 
 
 @pytest.mark.parametrize("uid", [0, 501])

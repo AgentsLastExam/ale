@@ -44,7 +44,7 @@ def score(lines):
         "body_format": len(lines) > 1 and all(formatted(line, 12, 0) for line in lines[1:]),
     }
     return {
-        "overall": sum(checks.values()) / len(checks),
+        "reward": sum(checks.values()) / len(checks),
         "checks": {name: {"score": float(value)} for name, value in checks.items()},
     }
 

@@ -206,7 +206,7 @@ def test_task_config_rejects_unknown_keys() -> None:
                 "environment": {"os": "windows", "vm_image": "w.qcow2"},
                 "verifier": {"environment": {"docker_image": "x", "cpus": 1, "memory_mb": 512}},
             },
-            "Windows verifier runs in a VM",
+            "only a Linux verifier runs in a container",
         ),
         ({"environment": {"cpus": 1.5}}, "valid integer"),
         ({"environment": {"skills_dir": "skills"}}, "skills_dir must be an absolute path"),

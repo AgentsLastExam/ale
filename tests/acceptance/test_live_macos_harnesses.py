@@ -16,7 +16,6 @@ import shlex
 from pathlib import Path
 
 import pytest
-import yaml
 
 from ale.core.config import LoggingPolicy, load_run_config
 from ale.core.harness import EffectiveAgentResources
@@ -32,7 +31,7 @@ from ale.run.providers.orchard import OrchardProvider
 from ale.run.secrets import provider_credentials
 from ale.run.tasksets.manifest import load_task_folder
 from ale.run.tools import resolved_cua_desktop
-from tests.support import provider_registry
+from tests.support import provider_registry, write_task
 
 from .trajectory import LIVE, native_session_file, trajectory_mcp_calls
 
@@ -41,22 +40,6 @@ pytestmark = [pytest.mark.needs_orchard, pytest.mark.needs_gui, pytest.mark.need
 
 def _write_task(root: Path, image: str, user: str, *, policy: bool) -> Path:
     home = f"/Users/{user}"
-    for stage in ("setup", "verify", "oracle"):
-        (root / stage).mkdir(parents=True)
-    (root / "task.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "spec_type": "core/v1",
-                "name": "macos-harness-acceptance",
-                "os": "macos",
-                "image": {"kind": "vm", "ref": image, "user": user},
-                "resources": {"cpus": 2, "memory_mb": 4096, "sudo": True},
-                "network": {"mode": "open"},
-                "timeouts": {"setup": 120, "agent": 600, "verify": 120},
-                "artifacts": [f"{home}/output"],
-            }
-        )
-    )
     output = shlex.quote(f"{home}/output")
     setup = f"#!/bin/sh\nset -eu\nmkdir -p {output}\n: > {output}/result.txt\n"
     setup += f"chown -R {shlex.quote(user)} {output}\n"
@@ -73,18 +56,27 @@ def _write_task(root: Path, image: str, user: str, *, policy: bool) -> Path:
             f"Then use your file or shell tools to write exactly ALE macOS verified to "
             f"{home}/output/result.txt. Confirm the saved content and finish."
         )
-    (root / "instruction.md").write_text(instruction + "\n")
-    (root / "setup/run.sh").write_text(setup)
-    (root / "oracle/run.sh").write_text(
-        f"#!/bin/sh\nset -eu\nprintf 'ALE macOS verified\\n' > {output}/result.txt\n"
+    task = write_task(
+        root,
+        name="agentslastexam/macos-harness-acceptance",
+        config={
+            "artifacts": [f"{home}/output"],
+            "environment": {"os": "macos", "vm_image": image, "cpus": 2, "memory_mb": 4096},
+            "agent": {"user": user, "timeout_sec": 600, "network_mode": "public", "sudo": True},
+        },
+        dockerfile=None,
+        instruction=instruction + "\n",
+        test='#!/bin/sh\nset -eu\nexec "$ALE_VERIFY_PYTHON" verify.py\n',
+        solve=f"#!/bin/sh\nset -eu\nprintf 'ALE macOS verified\\n' > {output}/result.txt\n",
     )
-    (root / "verify/run.sh").write_text("#!/bin/sh\nset -eu\nexec python3 verify.py\n")
-    (root / "verify/verify.py").write_text(
-        "import os\nfrom pathlib import Path\nfrom ale_verify import write\n"
-        "p = Path(os.environ['ALE_HOME']) / 'output/result.txt'\n"
-        "write({'overall': float(p.is_file() and p.read_text().strip() == 'ALE macOS verified')})\n"
+    (task / "environment" / "setup").mkdir(parents=True)
+    (task / "environment" / "setup" / "setup.sh").write_text(setup)
+    (task / "tests" / "verify.py").write_text(
+        "from pathlib import Path\nfrom ale_verify import write\n"
+        f"p = Path({f'{home}/output/result.txt'!r})\n"
+        "write({'reward': float(p.is_file() and p.read_text().strip() == 'ALE macOS verified')})\n"
     )
-    return root
+    return task
 
 
 @pytest.mark.parametrize("name", ["grok-build", "openclaw-cli", "computer-use"])
@@ -132,7 +124,7 @@ async def test_macos_harness_completes_task_and_records_tools(tmp_path: Path, na
     finally:
         await gateway.stop()
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert result.verdict.rewards == {"overall": 1.0}
+    assert result.verdict.rewards == {"reward": 1.0}
     trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
     steps = trajectory["steps"]
     if policy:

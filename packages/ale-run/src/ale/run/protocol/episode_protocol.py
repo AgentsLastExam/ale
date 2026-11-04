@@ -136,7 +136,10 @@ def _layout(operating_system: OperatingSystem) -> _StageLayout:
 
 
 def _verifier_dir(operating_system: OperatingSystem) -> PurePath:
-    """Platform result directory; macOS cannot create Harbor's root-level /logs."""
+    """Where verification writes ``reward.json``: Harbor's verifier directory.
+
+    macOS seals its root volume, so the directory sits below the framework's own root there.
+    """
     if operating_system is OperatingSystem.WINDOWS:
         return PureWindowsPath("C:/logs/verifier")
     if operating_system is OperatingSystem.MACOS:
@@ -152,9 +155,8 @@ _POSIX_VERIFIER_RESET = """set -eu
 parent="$1" verifier="$2"
 if [ -L "$parent" ] || { [ -e "$parent" ] && [ ! -d "$parent" ]; }; then rm -f -- "$parent"; fi
 mkdir -p -- "$parent"
-# Paths are absolute; BSD chown/chmod treat -- after the owner/mode as a filename.
-chown 0:0 "$parent"
-chmod go-w "$parent"
+chown -- 0:0 "$parent"
+chmod -- go-w "$parent"
 rm -rf -- "$verifier"
 mkdir -m 0700 -- "$verifier"
 """
@@ -609,7 +611,7 @@ class EpisodeProtocol:
                     # The declared command, rather than a Host mode, requests execution.
                     executable = server.command.replace("{mcp}", target)
                     result = await sandbox.exec(
-                        ["chmod", "u+x", executable], identity=Identity.AGENT
+                        ["chmod", "--", "u+x", executable], identity=Identity.AGENT
                     )
                     if not result.ok:
                         raise TaskError(f"could not prepare MCP command: {executable}")

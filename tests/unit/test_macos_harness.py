@@ -121,7 +121,7 @@ async def test_macos_oracle_uses_agent_account_and_posix_path() -> None:
         os=OperatingSystem.MACOS,
     )
     await OracleHarness().launch("work", SimpleNamespace(exec=execute), session, timeout_sec=10)
-    assert calls[0][0] == ["bash", "/Users/agent/.ale-oracle/run.sh"]
+    assert calls[0][0] == ["bash", "/Users/agent/.ale-solution/solve.sh"]
     assert calls[0][1]["identity"] is Identity.AGENT
 
 

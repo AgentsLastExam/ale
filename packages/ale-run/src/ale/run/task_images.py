@@ -169,7 +169,8 @@ async def prepare_task_image_result(
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
             )
-        else:
+        elif task.spec.os is not OperatingSystem.MACOS:
+            # The Provider installs the framework into each macOS VM it boots.
             image, reused = await _stage(
                 "framework-layer",
                 framed_disk(image, operating_system=task.spec.os, user=spec.user),
@@ -265,7 +266,7 @@ async def prepare_verifier_image_result(
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
             )
-        else:
+        elif task.spec.os is not OperatingSystem.MACOS:
             image, reused = await _stage(
                 "framework-layer",
                 framed_disk(image, operating_system=task.spec.os, user=verify.image.user),

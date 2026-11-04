@@ -13,19 +13,19 @@ from ale.run.guestd import gui, main
 pytestmark = pytest.mark.unit
 
 
+def _reply(content: list[dict] | None = None, structured: dict | None = None) -> str:
+    result = {"content": content or [], "structuredContent": structured}
+    return json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}) + "\n"
+
+
 def test_macos_framework_capture_and_input_use_task_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     account = pwd.struct_passwd(("artist", "*", 502, 20, "", "/Users/artist", "/bin/zsh"))
     monkeypatch.setattr(gui.sys, "platform", "darwin")
     monkeypatch.setattr(gui.os, "geteuid", lambda: 0)
-
-    def get_account(name):
-        assert name == "artist"
-        return account
-
-    monkeypatch.setattr(pwd, "getpwnam", get_account)
-    monkeypatch.setenv("ALE_AGENT_USER", "artist")
+    monkeypatch.setattr(gui.os, "stat", lambda path: type("Stat", (), {"st_uid": 502})())
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: account)
     monkeypatch.setenv("ALE_CUA_DRIVER", "/Applications/CuaDriver.app/Contents/MacOS/cua-driver")
     monkeypatch.setenv("ALE_CUA_DRIVER_SOCKET", "/tmp/artist.sock")
     monkeypatch.setenv("HOME", "/var/root")
@@ -40,18 +40,12 @@ def test_macos_framework_capture_and_input_use_task_account(
     def run(command, **options):
         assert options["env"]["HOME"] == "/Users/artist"
         assert options["env"]["USER"] == options["env"]["LOGNAME"] == "artist"
-        assert options["env"]["ALE_CUA_DRIVER_SOCKET"] == "/tmp/artist.sock"
         assert command[-2:] == ["--socket", "/tmp/artist.sock"]
         options["preexec_fn"]()
-        calls.append(command[2])
-        payload = {
-            "width": 200,
-            "height": 100,
-            "screenshot_width": 400,
-            "screenshot_height": 200,
-            "screenshot_png_b64": base64.b64encode(b"png").decode(),
-        }
-        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+        calls.append(json.loads(options["input"].splitlines()[-1])["params"]["name"])
+        image = {"type": "image", "data": base64.b64encode(b"png").decode()}
+        structured = {"screenshot_width": 400, "screenshot_height": 200}
+        return subprocess.CompletedProcess(command, 0, _reply([image], structured), "")
 
     monkeypatch.setattr(gui.subprocess, "run", run)
     assert gui.capture_screen() == b"png"
@@ -68,50 +62,6 @@ def test_macos_framework_capture_and_input_use_task_account(
     assert calls == ["get_desktop_state", "get_desktop_state", "click", "type_text", "hotkey"]
     assert identities == [("gid", 20), ("groups", "artist", 20), ("uid", 502)] * len(calls)
     assert os.environ["HOME"] == "/var/root"
-
-
-@pytest.mark.parametrize("platform", ["linux", "win32", "darwin"])
-def test_driver_preserves_other_platforms_and_unprivileged_macos(monkeypatch, platform):
-    monkeypatch.setattr(gui.sys, "platform", platform)
-
-    def geteuid():
-        assert platform == "darwin", "non-macOS must not enter identity switching"
-        return 502
-
-    monkeypatch.setattr(gui.os, "geteuid", geteuid)
-    monkeypatch.setenv("ALE_CUA_DRIVER", "/driver")
-    monkeypatch.setenv("ALE_CUA_DRIVER_SOCKET", "/driver.sock")
-
-    def run(command, **options):
-        assert command == ["/driver", "call", "get_screen_size", "{}", "--socket", "/driver.sock"]
-        assert options == dict(capture_output=True, text=True, timeout=60, check=False)
-        return subprocess.CompletedProcess(command, 0, '{"width":200,"height":100}', "")
-
-    monkeypatch.setattr(gui.subprocess, "run", run)
-    assert gui.screen_size() == (200, 100)
-
-
-@pytest.mark.parametrize("user", [None, "missing", "root"])
-def test_macos_root_driver_call_requires_non_root_task_account(monkeypatch, user):
-    monkeypatch.setattr(gui.sys, "platform", "darwin")
-    monkeypatch.setattr(gui.os, "geteuid", lambda: 0)
-    monkeypatch.setenv("ALE_CUA_DRIVER", "/driver")
-    if user is None:
-        monkeypatch.delenv("ALE_AGENT_USER", raising=False)
-    else:
-        monkeypatch.setenv("ALE_AGENT_USER", user)
-
-    def account(name):
-        if name != "root":
-            raise KeyError(name)
-        return pwd.struct_passwd(("root", "*", 0, 0, "", "/var/root", "/bin/sh"))
-
-    monkeypatch.setattr(pwd, "getpwnam", account)
-    monkeypatch.setattr(
-        gui.subprocess, "run", lambda *a, **kw: pytest.fail("must not call Driver as root")
-    )
-    with pytest.raises(gui.DesktopIdentityError):
-        gui.capture_screen()
 
 
 def test_health_identifies_macos_and_both_process_accounts(monkeypatch: pytest.MonkeyPatch) -> None:

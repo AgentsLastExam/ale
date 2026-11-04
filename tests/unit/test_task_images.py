@@ -688,10 +688,12 @@ async def test_failed_vm_materialization_leaves_no_reusable_artifact(
 async def test_macos_external_images_skip_linux_framework_preparation(write_task_repo) -> None:
     reference = "ghcr.io/example/macos@sha256:" + "a" * 64
     repository = write_task_repo(
-        image={"kind": "vm", "ref": reference, "user": "admin"},
-        verifier_image={"kind": "vm", "ref": reference, "user": "admin"},
-        with_image_dockerfile=False,
-        manifest_suffix="os: macos\n",
+        config={
+            "environment": {"os": "macos", "vm_image": reference},
+            "agent": {"user": "admin", "network_mode": "public"},
+            "verifier": {"environment": {"vm_image": reference}},
+        },
+        dockerfile=None,
     )
     task = load_tasks(repository / "tasks/demo")[0]
     registry = _Registry()

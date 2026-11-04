@@ -355,6 +355,12 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
             build_timeout_sec=timeout,
         )
 
+    if environment.os is OperatingSystem.MACOS and (
+        environment.vm_image is None or folder.dockerfile is not None
+    ):
+        raise TaskDefinitionError(
+            "a macOS Task names its image in [environment].vm_image; ALE builds no macOS image"
+        )
     if environment.vm_image is None and folder.dockerfile is None:
         raise TaskDefinitionError(
             "a Linux VM Task requires environment/Dockerfile or [environment].vm_image"
@@ -372,8 +378,11 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
         if dockerfile is not None:
             raise TaskDefinitionError("tests/Dockerfile requires separate verification")
         return VerifySpec()
-    if dockerfile is not None and config.environment.os is OperatingSystem.WINDOWS:
-        raise TaskDefinitionError("a Windows verifier reuses the solver image or names a vm_image")
+    if dockerfile is not None and config.environment.os is not OperatingSystem.LINUX:
+        raise TaskDefinitionError(
+            "only a Linux verifier builds tests/Dockerfile; reuse the solver image or name a "
+            "vm_image"
+        )
 
     environment = verifier.environment
     # Without a verifier environment, a separate verifier gets the solver's resources.

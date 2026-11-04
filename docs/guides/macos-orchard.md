@@ -85,34 +85,31 @@ from unprivileged writes. Make `python3` available through `/usr/local/bin` or
 applications and licenses, with no preexisting model credentials. For desktop Tasks, either configure both Driver paths and preauthorize the service,
 or opt into installation and UI authorization below.
 
-Declare the image in `task.yaml`:
+Declare the image in `task.toml`:
 
-```yaml
-spec_type: core/v1
-name: macos-example
-os: macos
-image:
-  kind: vm
-  ref: registry.example.test/ale/macos:v1
-  user: evaluator
-resources:
-  cpus: 2
-  memory_mb: 4096
-  sudo: false
-network:
-  mode: open
-artifacts:
-  - /Users/evaluator/output
+```toml
+schema_version = "1.4+ale.1"
+artifacts = ["/Users/evaluator/output"]
+
+[task]
+name = "acme/macos-example"
+
+[environment]
+os = "macos"
+vm_image = "registry.example.test/ale/macos:v1"
+cpus = 2
+memory_mb = 4096
+
+[agent]
+user = "evaluator"
+network_mode = "public"
 ```
 
-Replace the image reference, account and paths together. For `sudo = false`, the account
-must have no elevation rights. Use the [standard Task layout](../specs/task-authoring.md):
-`environment/setup/setup.sh`, `tests/test.sh` and `solution/solve.sh`. Install stable
-dependencies when preparing the image. Tests use `$ALE_VERIFY_PYTHON` and
-`ale_verify.write({"reward": ...})`, which writes `/opt/ale/logs/verifier/reward.json`
-under the framework's protected root.
-The engine prepares, reads and clears this directory; no root-level `/logs` directory
-or change to the macOS system volume is needed.
+Replace the image reference, account and paths together. Without `[agent].sudo = true`, the
+account must have no elevation rights. Orchard supports `network_mode = "public"` only. Use the
+[standard Task layout](../specs/task-authoring.md) with `.sh` stage entries; the reward goes to
+`/opt/ale/logs/verifier`, because the macOS root volume is read-only. Install stable
+dependencies when preparing the image.
 
 ## Install and authorize Driver in each VM
 
@@ -135,10 +132,11 @@ retries = 3
 Set `vm.orchard.boot_timeout_sec` to e.g. 600 seconds in the existing Orchard section.
 Supply the named password via your credential mechanism. It is the logged-in Task
 admin account's password, used for Screen Sharing and the Settings authorization
-sheet; never put it in a TOML or command argument. Declare `resources.sudo: true`.
+sheet; never put it in a TOML or command argument. Declare `[agent].sudo = true`.
 Leave `driver_path` and `socket_path` unset: ALE selects its installed bundle and
-socket. ALE downloads CuaDriver 0.12.6, verifies the release archive checksum and
-installed app signature, and starts it in the Task account. The base is unchanged.
+socket. ALE downloads the Cua Driver release it pins for every platform, verifies the
+archive checksum and installed app signature, and starts it in the Task account. The base
+is unchanged.
 
 Apple Vision OCR is compiled in a temporary Host directory. Permission UI screenshots
 come only from the scoped VNC connection. Missing or all-black frames fail the attempt.

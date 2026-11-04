@@ -183,7 +183,7 @@ def test_posix_verifier_reset_and_remove_on_native_tools(tmp_path: Path, entry: 
 
     # Exercise native BSD/GNU utilities without sudo or Host framework paths.
     # Only the ownership target changes to the test runner's own account.
-    reset = _POSIX_VERIFIER_RESET.replace("chown 0:0", f"chown {os.getuid()}:{os.getgid()}")
+    reset = _POSIX_VERIFIER_RESET.replace("chown -- 0:0", f"chown -- {os.getuid()}:{os.getgid()}")
     subprocess.run(["sh", "-c", reset, "sh", str(parent), str(verifier)], check=True)
     assert not parent.is_symlink() and not verifier.is_symlink()
     assert parent.stat().st_uid == os.getuid() and parent.stat().st_mode & 0o022 == 0

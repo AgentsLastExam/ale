@@ -53,12 +53,14 @@ __all__ = [
     "write",
 ]
 
-#: Match the engine's platform directory; macOS keeps results on its writable volume.
+#: Where a verifier leaves its result: Harbor's verifier directory. macOS seals its root
+#: volume, so the directory sits below the framework's own root there.
 _VERIFIER_DIR = Path(
-    {
-        "win32": "C:/logs/verifier",
-        "darwin": "/opt/ale/logs/verifier",
-    }.get(sys.platform, "/logs/verifier")
+    "C:/logs/verifier"
+    if sys.platform == "win32"
+    else "/opt/ale/logs/verifier"
+    if sys.platform == "darwin"
+    else "/logs/verifier"
 )
 
 

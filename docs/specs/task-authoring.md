@@ -37,7 +37,8 @@ Task OS: `tests/test.sh` and `solution/solve.sh` on Linux and macOS, `test.ps1` 
 on Windows. `[environment]` decides what `environment/` builds. A container Task builds
 `environment/Dockerfile` or uses `docker_image`. A Linux VM Task sets `vm = true` to build
 `environment/Dockerfile`, or uses `vm_image`. A Windows Task builds `environment/build.ps1` on
-`vm_base`, or uses `vm_image` alone. Every image build has `environment/` as its context,
+`vm_base`, or uses `vm_image` alone. A macOS Task uses `vm_image` alone; ALE builds no macOS
+image. Every image build has `environment/` as its context,
 `setup/` excluded. A Linux image named directly wins over a build definition.
 
 ## task.toml
@@ -115,8 +116,8 @@ env = {}                                    # replaces [environment].env
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
 ```
 
-`vm = true` is needed only for a Linux VM built from a Dockerfile: `os = "windows"`, `vm_image`
-and `vm_base` already mean a VM. `vm_image` and `vm_base` are mutually exclusive; `vm_base`
+`vm = true` is needed only for a Linux VM built from a Dockerfile: an `os` other than Linux,
+`vm_image` and `vm_base` already mean a VM. `vm_image` and `vm_base` are mutually exclusive; `vm_base`
 requires Windows and `environment/build.ps1`. `[agent].workdir` is below the agent's home when
 relative, so a Task need not spell its home per OS. It must be a directory when the agent
 starts; stages keep their fixed directories.
@@ -138,6 +139,7 @@ These values differ from Harbor's:
   `[agent].network_mode` is `no-network`, not `public`; `build_timeout_sec` is 3600, not 600.
 - `os = "windows"` is a VM with `.ps1` stage entries, because ALE runs Windows in VMs, where
   PowerShell is always available; Harbor's is a Windows container with `.bat` entries.
+- `os = "macos"` is ALE's: a macOS VM with `.sh` stage entries, which Harbor does not run.
 - `artifacts` may be globs, and nothing is collected undeclared, where Harbor always collects
   `/logs/artifacts`.
 - `${NAME}` in an `env` table resolves from the checkout's `.env`, not the process environment,

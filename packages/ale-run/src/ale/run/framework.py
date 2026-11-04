@@ -107,6 +107,10 @@ _CUA_DRIVER = {
         f"cua-driver-rs-{CUA_DRIVER_VERSION}-windows-x86_64-binary.zip",
         "5edaa74d0afa1b55a9668dbc4f32736507bd2bd4d75b18ca1dc8881bb12402b5",
     ),
+    "macos": (
+        f"cua-driver-rs-{CUA_DRIVER_VERSION}-darwin-arm64.tar.gz",
+        "5f71191c082ca07c9dfc13b7c9a6eec60a82818c245a93534cc0eb7911471d72",
+    ),
 }
 _CUA_DRIVER_BINARY = {"linux": "cua-driver", "windows": "cua-driver.exe"}
 #: Run inside the VM builder to install the Windows framework into a disk.
@@ -544,31 +548,25 @@ def _fetched(
     return root
 
 
-MACOS_DRIVER_SHA256 = "c64017d5878d022df34137082fb918ae0d4304e28890569ff14458f1a54fd361"
+MACOS_DRIVER_SHA256 = _CUA_DRIVER["macos"][1]
 
 
 def macos_driver_archive() -> bytes:
-    """Preserve the signed app bundle; flattened binary extraction cannot do that."""
-    asset = f"cua-driver-rs-{CUA_DRIVER_VERSION}-darwin-arm64.tar.gz"
-    root = cache_root() / "cua-driver" / CUA_DRIVER_VERSION
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / asset
-    with (root / "download.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if path.is_file():
-            payload = path.read_bytes()
-            if hashlib.sha256(payload).hexdigest() == MACOS_DRIVER_SHA256:
-                return payload
-        url = f"https://github.com/trycua/cua/releases/download/cua-driver-rs-v{CUA_DRIVER_VERSION}/{asset}"
-        try:
-            with urllib.request.urlopen(url, timeout=120) as response:
-                payload = response.read(128 * 1024 * 1024 + 1)
-        except OSError:
-            raise ProviderStartError("could not download the pinned macOS Cua Driver") from None
-        if hashlib.sha256(payload).hexdigest() != MACOS_DRIVER_SHA256:
-            raise ProviderStartError("macOS Cua Driver archive checksum mismatch")
-        path.write_bytes(payload)
-        return payload
+    """The macOS release as published: its signed app bundle must stay whole."""
+    asset, sha256 = _CUA_DRIVER["macos"]
+
+    def keep(payload: bytes, into: Path) -> None:
+        (into / asset).write_bytes(payload)
+
+    files = _fetched(
+        cache_root() / "cua-driver" / CUA_DRIVER_VERSION / "macos",
+        "https://github.com/trycua/cua/releases/download/"
+        f"cua-driver-rs-v{CUA_DRIVER_VERSION}/{asset}",
+        sha256,
+        keep,
+        what="Cua Driver",
+    )
+    return (files / asset).read_bytes()
 
 
 def _archive_files(asset: str, payload: bytes) -> Iterator[tuple[str, bytes]]:
