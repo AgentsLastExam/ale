@@ -3,6 +3,10 @@
 
 Run with uv; this script uses only Python's standard library. It never changes
 Homebrew, launchd, system trust, desktop permissions, or the shared Tart home.
+
+It stays in the foreground as the worker's parent. macOS's Local Network privacy lets a
+program started from a Terminal or SSH login reach the VMs only while it descends from
+that login, so a worker left behind as an orphan fails with "no route to host".
 """
 
 from __future__ import annotations
@@ -194,10 +198,11 @@ def environment(root: Path, tart: str) -> dict[str, str]:
 
 def start_process(
     root: Path, state: dict, role: str, argv: list[str], env: dict, token: str | None = None
-) -> None:
+) -> subprocess.Popen | None:
+    """Start ``role`` unless it runs already; the new process, or ``None`` if it did."""
     old = state["processes"].get(role)
     if old and process_matches(old):
-        return
+        return None
     log = root / f"{role}.log"
     private_write(log, "")
     with log.open("a") as stream:
@@ -207,7 +212,7 @@ def start_process(
             stdin=subprocess.PIPE if token else subprocess.DEVNULL,
             stdout=stream,
             stderr=stream,
-            start_new_session=True,
+            start_new_session=role == "controller",
         )
     if token:
         try:
@@ -220,6 +225,7 @@ def start_process(
     save_state(root, state)
     if process.poll() is not None:
         raise SetupError(f"{role} exited; inspect its private log")
+    return process
 
 
 def api(root: Path, state: dict, resource: str) -> list:
@@ -320,7 +326,10 @@ def write_config(root: Path, state: dict, password: str) -> None:
     )
 
 
-def initialize(root: Path, orchard_path: str | None, tart_path: str | None) -> dict:
+def initialize(
+    root: Path, orchard_path: str | None, tart_path: str | None
+) -> subprocess.Popen | None:
+    """Start what is missing; the worker this run started, which it must stay the parent of."""
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise SetupError("Local Tart setup requires an Apple Silicon Mac")
     if root.exists():
@@ -413,7 +422,7 @@ def initialize(root: Path, orchard_path: str | None, tart_path: str | None) -> d
     )
     wait_for(lambda: api(root, state, "workers") is not None, "controller")
     token = run([str(orchard), "get", "bootstrap-token", "bootstrap-admin"], env=env)
-    start_process(
+    worker = start_process(
         root,
         state,
         "worker",
@@ -431,7 +440,7 @@ def initialize(root: Path, orchard_path: str | None, tart_path: str | None) -> d
     )
     wait_for(lambda: ready(root, state), "registered Tart worker")
     write_config(root, state, password)
-    return state
+    return worker
 
 
 def cleanup(root: Path, state: dict) -> None:
@@ -454,6 +463,15 @@ def cleanup(root: Path, state: dict) -> None:
         if record := state["processes"].get(role):
             stop_process(record)
     shutil.rmtree(root)
+
+
+def hold(worker: subprocess.Popen) -> None:
+    """Stay the worker's parent until it exits; Ctrl-C reaches it as part of this group."""
+    print("Keep this command running while Tasks run. Ctrl-C stops the worker.", flush=True)
+    try:
+        worker.wait()
+    except KeyboardInterrupt:
+        worker.wait()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -481,16 +499,19 @@ def main(argv: list[str] | None = None) -> int:
         # A sibling lock does not disappear while cleanup removes the state directory.
         root.parent.mkdir(parents=True, exist_ok=True)
         lock_path = root.parent / (root.name + ".lock")
+        worker = None
         with lock_path.open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             if args.cleanup:
                 cleanup(root, load_state(root))
                 print("Removed owned local services and setup data.")
             else:
-                initialize(root, args.orchard_path, args.tart_path)
+                worker = initialize(root, args.orchard_path, args.tart_path)
                 print(f"Ready. Run: source {shlex.quote(str(root / 'credentials.env'))}")
                 print(f"Then: uv run ale run TASK --config {shlex.quote(str(root / 'run.toml'))}")
                 print("Provide a prepared OCI image with the required guest apps and permissions.")
+        if worker is not None:
+            hold(worker)
         return 0
     except (SetupError, OSError, ValueError) as exc:
         print(f"Setup failed: {exc}", file=sys.stderr)

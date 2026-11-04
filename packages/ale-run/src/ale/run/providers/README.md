@@ -145,7 +145,8 @@ Images provide Python 3.12+, the Task account and its home, required application
 an execution account with passwordless sudo for guest bootstrap. ALE installs guestd
 in each new VM without changing the shared image; it does not build macOS images.
 Desktop Tasks use either a preauthorized CuaDriver service in the Task account's login
-session or the optional `desktop_bootstrap` flow described in the guide.
+session or the optional `desktop_bootstrap` flow described in the guide. A separate
+verifier VM runs no agent, so it gets neither the Driver nor the account checks.
 
 Preparation resolves OCI tags through registry manifest metadata without downloading
 VM disks or checking the worker cache. VM creation uses that pinned digest even if the

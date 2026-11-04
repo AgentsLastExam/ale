@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -156,7 +157,8 @@ def test_initialize_leaves_task_placement_to_orchard(tmp_path, monkeypatch):
         setup, "start_process", lambda root, state, role, argv, *args: commands.update({role: argv})
     )
     monkeypatch.setattr(setup, "wait_for", lambda *args: None)
-    state = setup.initialize(root, None, None)
+    setup.initialize(root, None, None)
+    state = setup.load_state(root)
     args = commands["worker"]
     assert args[args.index("--name") + 1] == state["worker"]
     assert "--labels" not in args
@@ -169,6 +171,35 @@ def test_setup_starts_with_no_arguments_using_default_state_directory(tmp_path, 
     monkeypatch.setattr(setup, "initialize", lambda *args: calls.append(args))
     assert setup.main([]) == 0
     assert calls == [(tmp_path / ".local/share/ale/macos", None, None)]
+
+
+def test_setup_stays_the_parent_of_the_worker_it_started(tmp_path, monkeypatch):
+    class Worker:
+        waited = False
+
+        def wait(self):
+            self.waited = True
+
+    worker = Worker()
+    monkeypatch.setattr(setup, "initialize", lambda *args: worker)
+    assert setup.main(["--state-dir", str(tmp_path / "state")]) == 0
+    assert worker.waited
+
+
+def test_only_the_controller_outlives_the_setup_command(tmp_path, monkeypatch):
+    sessions = {}
+    real = subprocess.Popen
+
+    def popen(argv, **kwargs):
+        sessions[argv[0]] = kwargs["start_new_session"]
+        return real(["true"], stdin=subprocess.DEVNULL)
+
+    monkeypatch.setattr(setup.subprocess, "Popen", popen)
+    monkeypatch.setattr(setup, "process_info", lambda pid: ("", ""))
+    state = {"owner": setup.OWNER, "processes": {}}
+    setup.start_process(tmp_path, state, "controller", ["controller"], {})
+    setup.start_process(tmp_path, state, "worker", ["worker"], {})
+    assert sessions == {"controller": True, "worker": False}
 
 
 def test_setup_help_has_no_gateway_option(capsys):

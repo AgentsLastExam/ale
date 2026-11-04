@@ -37,6 +37,7 @@ from ale.core.sandbox import (
     Sandbox,
     SandboxFile,
     SandboxRequest,
+    SandboxRole,
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem
@@ -521,7 +522,11 @@ class OrchardProvider(Provider):
 
     def accepts(self, request: SandboxRequest) -> None:
         super().accepts(request)
-        if self.config.desktop_bootstrap is not None and not request.sudo:
+        if (
+            self.config.desktop_bootstrap is not None
+            and request.role is not SandboxRole.VERIFIER
+            and not request.sudo
+        ):
             raise ProviderCapabilityError(
                 "UI bootstrap currently requires the task's logged-in admin account with sudo=true"
             )
@@ -596,6 +601,8 @@ class OrchardProvider(Provider):
     async def create(self, request: SandboxRequest) -> OrchardSandbox:
         self.accepts(request)
         image = await self.prepare_image(request.prepared_image)
+        # A verifier runs no agent: it needs no desktop, and its account's rights are moot.
+        agent = request.role is not SandboxRole.VERIFIER
         name = "ale-" + uuid.uuid4().hex
         client = self._new_client()
         uid: str | None = None
@@ -660,7 +667,7 @@ class OrchardProvider(Provider):
                     or record.get("assignedMemory") != request.resources.memory_mb
                 ):
                     raise ProviderStartError("Orchard assigned resources differ from request")
-                if self.config.desktop_bootstrap is not None:
+                if agent and self.config.desktop_bootstrap is not None:
                     await orchard_permissions.install_driver(
                         client, name, request.user, self.config, deadline
                     )
@@ -678,7 +685,7 @@ class OrchardProvider(Provider):
                         "-c",
                         _BOOTSTRAP,
                         request.user,
-                        "true" if request.sudo else "false",
+                        "true" if request.sudo or not agent else "false",
                         self.config.driver_path or "",
                     ],
                     stdin=_sources(),
@@ -696,9 +703,9 @@ class OrchardProvider(Provider):
                     "PATH": _PATH,
                     "HOME": "/var/root",
                 }
-                if self.config.driver_path:
+                if agent and self.config.driver_path:
                     env["ALE_CUA_DRIVER"] = self.config.driver_path
-                if self.config.socket_path:
+                if agent and self.config.socket_path:
                     env["ALE_CUA_DRIVER_SOCKET"] = self.config.socket_path
                 guest_argv = [
                     "sudo",
@@ -735,25 +742,28 @@ class OrchardProvider(Provider):
                 ):
                     raise ProviderCapabilityError("Guest macOS/account/root identity check failed")
                 gateway_host = await self._resolve_gateway_host(guest, request)
-                await verify_identities(guest, request.user, sudo=request.sudo)
-                # Query all grants as root; a failed noninteractive sudo probe alone
-                # would miss password-protected elevation rights.
-                code, _, _, timed_out = await guest.exec(
-                    ["/usr/bin/sudo", "-l", "-U", request.user], timeout_sec=15
-                )
-                if timed_out or code not in (0, 1):
-                    raise ProviderCapabilityError("Could not verify agent sudo policy")
-                if not request.sudo and code == 0:
-                    raise ProviderCapabilityError("Image grants sudo but task declares sudo=false")
+                if agent:
+                    await verify_identities(guest, request.user, sudo=request.sudo)
+                    # Query all grants as root; a failed noninteractive sudo probe alone
+                    # would miss password-protected elevation rights.
+                    code, _, _, timed_out = await guest.exec(
+                        ["/usr/bin/sudo", "-l", "-U", request.user], timeout_sec=15
+                    )
+                    if timed_out or code not in (0, 1):
+                        raise ProviderCapabilityError("Could not verify agent sudo policy")
+                    if not request.sudo and code == 0:
+                        raise ProviderCapabilityError(
+                            "Image grants sudo but task declares sudo=false"
+                        )
                 total, _, _ = await guest.disk_usage("/")
                 storage = total // (1024 * 1024)
                 if request.resources.storage_mb and storage < request.resources.storage_mb:
                     raise ProviderCapabilityError("VM root disk is smaller than requested storage")
-                if self.config.desktop_bootstrap is not None:
+                if agent and self.config.desktop_bootstrap is not None:
                     await orchard_permissions.authorize_driver(
                         client, name, uid, request.user, self.config
                     )
-                if self.config.driver_path and self.config.socket_path:
+                if agent and self.config.driver_path and self.config.socket_path:
                     await await_desktop(
                         guest,
                         agent_user=request.user,

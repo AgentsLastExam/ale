@@ -69,6 +69,24 @@ async def test_forward_closes_connection_and_listener():
         await asyncio.open_connection("127.0.0.1", port)
 
 
+async def test_forward_closes_a_connection_its_relay_left_open():
+    client = OrchardClient("https://localhost", username="fake", password="fake")
+    entered = asyncio.Event()
+
+    async def relay(name, uid, reader, writer):
+        entered.set()
+        await asyncio.Event().wait()
+
+    client._relay_vnc = relay
+    async with asyncio.timeout(5):
+        async with client.forward_vnc("owned", "uid") as port:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            await entered.wait()
+    assert await reader.read() == b""
+    writer.close()
+    await writer.wait_closed()
+
+
 async def test_forward_refuses_changed_uid():
     client = OrchardClient("https://localhost", username="fake", password="fake")
     client.get_vm = AsyncMock(return_value={"uid": "replacement"})

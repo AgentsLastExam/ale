@@ -45,6 +45,7 @@ class MemoryGuest:
         fail_setup: bool = False,
         wait_oracle: bool = False,
         timeout_oracle: bool = False,
+        sudo_flag: str = "false",
         verify_failure: str | None = None,
         shared: MemoryGuest | None = None,
         user: str = "user",
@@ -59,6 +60,7 @@ class MemoryGuest:
         self.fail_setup = fail_setup
         self.wait_oracle = wait_oracle
         self.timeout_oracle = timeout_oracle
+        self.sudo_flag = sudo_flag
         self.verify_failure = verify_failure
         self.oracle_started = asyncio.Event()
         self._upload: tuple[int, str] | None = None
@@ -367,7 +369,7 @@ class MemoryOrchard:
         assert argv[:2] == ["sudo", "-n"]
         assert "main.py" in json.loads(stdin)
         assert argv[-3] == self.guest.user
-        assert argv[-2] == "false"
+        assert argv[-2] == self.guest.sudo_flag
         return OrchardExecResult(
             0, json.dumps({"agent_home": f"/Users/{self.guest.user}"}).encode(), b""
         )
@@ -471,7 +473,7 @@ async def test_orchard_separate_verifier_restores_solver_artifacts_and_modes(
             }
         },
     )
-    verifier = MemoryGuest()
+    verifier = MemoryGuest(sudo_flag="true")
     verifier_controller = MemoryOrchard(verifier)
     provider = providers.get(load_tasks(task)[0].spec.image.kind)
     monkeypatch.setattr(

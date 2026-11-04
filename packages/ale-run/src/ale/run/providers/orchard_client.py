@@ -208,8 +208,10 @@ class OrchardClient:
     async def forward_vnc(self, name: str, uid: str):
         """A scoped loopback listener for one owned VM's Screen Sharing port."""
         tasks: set[asyncio.Task] = set()
+        writers: list[asyncio.StreamWriter] = []
 
         def accept(reader, writer):
+            writers.append(writer)
             task = asyncio.create_task(self._relay_vnc(name, uid, reader, writer))
             tasks.add(task)
             task.add_done_callback(tasks.discard)
@@ -219,6 +221,10 @@ class OrchardClient:
             yield server.sockets[0].getsockname()[1]
         finally:
             server.close()
+            # wait_closed() waits for every accepted connection, and a relay cancelled
+            # before or during its own cleanup never closes its writer.
+            for writer in writers:
+                writer.close()
             pending = list(tasks)
             for task in pending:
                 task.cancel()

@@ -7,17 +7,27 @@ Supported capabilities and cleanup behavior follow the
 
 ## Install and start locally
 
-On Apple Silicon, run the setup script from the ALE checkout:
+On Apple Silicon, run the setup script from the ALE checkout and leave it running:
 
 ```bash
 uv run scripts/setup_macos.py
+```
+
+Then, in another shell:
+
+```bash
 uv run scripts/setup_macos.py --check
 source "$HOME/.local/share/ale/macos/credentials.env"
 ```
 
 Setup pins Orchard **0.55.0** and Tart **2.41.1**, verifies release checksums, and starts
 an isolated controller and worker with private state and TLS configuration. Existing
-services and system trust settings are unchanged. To reuse installed binaries at these
+services and system trust settings are unchanged. The worker is a child of the setup
+command, which stays in the foreground: macOS's Local Network privacy lets a program started
+from a Terminal or SSH login reach the VMs only while it descends from that login, and a
+worker left behind fails every VM with `no route to host`. Ctrl-C or closing the login stops
+the worker; run setup again to restart it. An unattended worker needs another way past that
+check, such as Orchard's `--user` option for a worker started as root. To reuse installed binaries at these
 versions, pass `--orchard-path` and `--tart-path`. Signature failures require a trusted,
 working binary; setup does not bypass macOS security checks.
 
