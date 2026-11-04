@@ -81,6 +81,25 @@ def test_root_calls_the_driver_as_the_account_that_runs_it(
     assert gui._as_daemon_owner(str(socket)) == {}  # already that account
 
 
+def test_drag_without_a_start_begins_at_the_cursor(monkeypatch):
+    monkeypatch.setattr(gui.sys, "platform", "linux")
+    calls = []
+
+    def call(tool, arguments=None):
+        calls.append((tool, arguments))
+        if tool == "get_cursor_position":
+            return {"x": 960, "y": 540}
+        if tool == "get_screen_size":
+            return {"width": 1920, "height": 1080}
+        return {}
+
+    monkeypatch.setattr(gui, "_call", call)
+    assert gui.dispatch_actions([{"type": "drag", "to": [750, 750]}]) == 1
+    drag = next(arguments for name, arguments in calls if name == "drag")
+    assert (drag["from_x"], drag["from_y"]) == (960, 540)
+    assert (drag["to_x"], drag["to_y"]) == (1440, 810)
+
+
 def test_mouse_actions_without_coordinates_use_current_cursor(monkeypatch):
     monkeypatch.setattr(gui.sys, "platform", "linux")
     calls = []
@@ -151,6 +170,30 @@ def test_macos_current_cursor_is_converted_to_screenshot_pixels(monkeypatch, act
     monkeypatch.setattr(gui.sys, "platform", "darwin")
     monkeypatch.setattr(gui, "_call", call)
     gui.dispatch_actions([{"type": action, "to": [750, 750]}])
+    args = calls[-1][1]
+    keys = ("from_x", "from_y") if action == "drag" else ("x", "y")
+    assert tuple(args[k] for k in keys) == (512, 384)
+
+
+@pytest.mark.parametrize("action", ["click", "move", "scroll", "drag"])
+def test_macos_input_takes_native_pixels_when_the_screenshot_is_scaled_down(monkeypatch, action):
+    # As Cua Driver 0.38.0 reports a 1024x768-point Retina desktop: it returns a smaller
+    # screenshot, but converts input from the display's own pixels.
+    state = {
+        "screenshot_width": 1366,
+        "screenshot_height": 1025,
+        "screenshot_original_width": 2048,
+        "screenshot_original_height": 1536,
+    }
+    calls = []
+
+    def call(tool, arguments=None):
+        calls.append((tool, arguments))
+        return {"get_desktop_state": state}.get(tool, {})
+
+    monkeypatch.setattr(gui.sys, "platform", "darwin")
+    monkeypatch.setattr(gui, "_call", call)
+    gui.dispatch_actions([{"type": action, "coordinate": [250, 250], "to": [750, 750]}])
     args = calls[-1][1]
     keys = ("from_x", "from_y") if action == "drag" else ("x", "y")
     assert tuple(args[k] for k in keys) == (512, 384)

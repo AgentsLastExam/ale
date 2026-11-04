@@ -410,11 +410,13 @@ def screen_size() -> tuple[int, int]:
 
 def _to_pixels(coordinate: list[int] | tuple[int, int]) -> tuple[int, int]:
     if sys.platform == "darwin":
-        # macOS desktop input takes native screenshot pixels. get_screen_size
-        # and get_cursor_position return logical points; the Driver converts
-        # input pixels to points itself. Its scale_factor can under-report Retina.
+        # macOS desktop input takes the display's native pixels, which the Driver converts
+        # to points itself; get_screen_size and get_cursor_position return points, and
+        # its scale_factor can under-report Retina. The screenshot it returns may be
+        # scaled down, so the native size is its original one when it gives that.
         payload = _call("get_desktop_state")
-        width, height = payload.get("screenshot_width"), payload.get("screenshot_height")
+        width = payload.get("screenshot_original_width", payload.get("screenshot_width"))
+        height = payload.get("screenshot_original_height", payload.get("screenshot_height"))
         if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
             raise GuiUnavailable("cua-driver omitted valid desktop screenshot dimensions")
     else:
@@ -490,10 +492,7 @@ def dispatch_actions(actions: list[dict[str, Any]]) -> int:
             _call("move_cursor", _pointer({"x": x, "y": y}))
         elif kind == "drag":
             end_x, end_y = _point(action, "to")
-            start = action.get("coordinate")
-            start_x, start_y = _to_pixels(start) if start else cursor_position()
-            if not start and sys.platform == "darwin":
-                start_x, start_y = _to_pixels((start_x, start_y))
+            start_x, start_y = _to_pixels(action.get("coordinate") or cursor_position())
             _call(
                 "drag",
                 _pointer(
