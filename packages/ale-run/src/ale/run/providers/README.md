@@ -30,6 +30,7 @@ serves it on.
 | Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone |
 | QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
 | Daytona | `guestd/tunnel.py` listens at 7412 on the sandbox's loopback |
+| Orchard | A relay the Provider starts as root at boot listens at `127.0.0.1:7412` in the VM and connects to the Gateway's port at the Host address below; it lives until the VM is deleted |
 
 ## Snapshots
 
@@ -168,8 +169,8 @@ cursor read-back uses logical points, following the Driver's coordinate contract
 Commands and file reads use separate authenticated WebSocket exec channels. File reads
 are bounded, screenshot transfers are integrity-checked, and command output is
 acknowledged after Host consumption to avoid overrunning the relay's output queue.
-For local default NAT, the Provider discovers the Host Gateway address from the guest's
-IPv4 route; `gateway_host` overrides it for other network layouts.
+For local default NAT, the Gateway relay reaches the Host at the guest's IPv4 default
+route; `gateway_host` overrides it for other network layouts.
 
 Only explicit `network.mode: open` is supported. Restricted networking needs integration
 and validation across Orchard/Tart versions and worker network configurations. GPU,

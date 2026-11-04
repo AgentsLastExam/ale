@@ -67,7 +67,8 @@ use `ca_file` for a private CA. The current integration is validated with ALE an
 Tart worker on the same Mac; remote-worker deployments have not been validated.
 When ALE and the Tart worker run on the same Mac with
 default NAT networking, the Provider discovers the Host address from the VM's IPv4
-route and preserves the Gateway's allocated port. No Gateway setting is needed at setup.
+route, and agents reach the Gateway at `127.0.0.1:7412` inside the VM. No Gateway setting
+is needed at setup.
 For another network layout, supply a reachable address in the run configuration or with
 `uv run ale run TASK --set vm.orchard.gateway_host=ale-host.example.test`.
 Add the selected Harness and model settings to the run configuration;

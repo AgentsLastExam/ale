@@ -24,6 +24,7 @@ from urllib.parse import urlsplit, urlunsplit
 from ale.core.config import OrchardProviderConfig
 from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
+    SANDBOX_GATEWAY_PORT,
     Capabilities,
     ExecOutputSink,
     ExecResult,
@@ -100,6 +101,41 @@ python=binpath/'python3'
 if python.exists() or python.is_symlink(): python.unlink()
 python.symlink_to(sys.executable)
 print(json.dumps({'agent_home':account.pw_dir}))
+"""
+
+
+# Runs as root in the VM and forwards the fixed Gateway port on its loopback to the Host's
+# Gateway until the VM is deleted. It forks only once it listens, so a port that cannot be
+# bound fails the command; it prints the bound port and the relay's process ID.
+_GATEWAY_RELAY = r"""
+import asyncio,os,socket,sys
+host,port,listen=sys.argv[1],int(sys.argv[2]),int(sys.argv[3])
+listener=socket.create_server(('127.0.0.1',listen))
+pid=os.fork()
+if pid:
+    print(listener.getsockname()[1],pid);sys.exit(0)
+os.setsid()
+null=os.open(os.devnull,os.O_RDWR)
+for fd in (0,1,2): os.dup2(null,fd)
+async def pipe(reader,writer):
+    try:
+        while data:=await reader.read(65536):
+            writer.write(data);await writer.drain()
+    except OSError:
+        pass
+async def relay(reader,writer):
+    try:
+        upstream_reader,upstream=await asyncio.open_connection(host,port)
+    except OSError:
+        writer.close();return
+    flows=[asyncio.ensure_future(pipe(reader,upstream)),asyncio.ensure_future(pipe(upstream_reader,writer))]
+    await asyncio.wait(flows,return_when=asyncio.FIRST_COMPLETED)
+    for flow in flows: flow.cancel()
+    writer.close();upstream.close()
+async def main():
+    server=await asyncio.start_server(relay,sock=listener)
+    await server.serve_forever()
+asyncio.run(main())
 """
 
 
@@ -220,7 +256,6 @@ class OrchardSandbox(Sandbox):
         self,
         *,
         request: SandboxRequest,
-        gateway_host: str | None,
         orchard: OrchardClient,
         client: GuestClient,
         file_client: GuestClient,
@@ -238,7 +273,6 @@ class OrchardSandbox(Sandbox):
             agent_user=request.user,
             agent_home=agent_home,
         )
-        self._gateway_host = gateway_host
         self._orchard = orchard
         self._client = client
         self._file_client = file_client
@@ -249,15 +283,11 @@ class OrchardSandbox(Sandbox):
 
     @property
     def gateway_url(self) -> str | None:
+        """The Gateway on the VM's own loopback, where the relay delivers it."""
         if not self.request.gateway_url:
             return None
         parsed = urlsplit(self.request.gateway_url)
-        host = self._gateway_host
-        if not host:
-            raise ProviderCapabilityError("Orchard requires gateway_host for model access")
-        if ":" in host:
-            host = f"[{host}]"
-        return urlunsplit(parsed._replace(netloc=host + (f":{parsed.port}" if parsed.port else "")))
+        return urlunsplit(parsed._replace(netloc=f"127.0.0.1:{SANDBOX_GATEWAY_PORT}"))
 
     def _as(self, identity: Identity) -> str | None:
         return self.agent_user if identity is Identity.AGENT else None
@@ -598,6 +628,29 @@ class OrchardProvider(Provider):
             "use default NAT networking or set vm.orchard.gateway_host in the run configuration"
         )
 
+    async def _start_gateway_relay(
+        self, guest: GuestClient, host: str, request: SandboxRequest
+    ) -> None:
+        assert request.gateway_url is not None
+        port = urlsplit(request.gateway_url).port
+        if port is None:
+            raise ProviderCapabilityError(f"{request.gateway_url!r} has no explicit port to relay")
+        code, _, _, timed_out = await guest.exec(
+            [
+                self.config.python_path,
+                "-I",
+                "-S",
+                "-c",
+                _GATEWAY_RELAY,
+                host,
+                str(port),
+                str(SANDBOX_GATEWAY_PORT),
+            ],
+            timeout_sec=15,
+        )
+        if code or timed_out:
+            raise ProviderStartError("Could not start the Gateway relay in the VM")
+
     async def create(self, request: SandboxRequest) -> OrchardSandbox:
         self.accepts(request)
         image = await self.prepare_image(request.prepared_image)
@@ -742,6 +795,8 @@ class OrchardProvider(Provider):
                 ):
                     raise ProviderCapabilityError("Guest macOS/account/root identity check failed")
                 gateway_host = await self._resolve_gateway_host(guest, request)
+                if gateway_host is not None:
+                    await self._start_gateway_relay(guest, gateway_host, request)
                 if agent:
                     await verify_identities(guest, request.user, sudo=request.sudo)
                     # Query all grants as root; a failed noninteractive sudo probe alone
@@ -774,7 +829,6 @@ class OrchardProvider(Provider):
                     )
             return OrchardSandbox(
                 request=request,
-                gateway_host=gateway_host,
                 orchard=client,
                 client=guest,
                 file_client=file_guest,

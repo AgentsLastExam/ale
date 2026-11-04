@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import signal
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -89,6 +93,7 @@ class FakeGuest:
     def __init__(self, transport):
         self.commands = []
         self.route = (0, "gateway: 192.168.64.1\ninterface: en0\n", "", False)
+        self.relay = (0, "7412 4242\n", "", False)
         self.files = {}
         self.sudo = False
         self.failure = None
@@ -112,6 +117,8 @@ class FakeGuest:
             raise self.failure
         if argv[:2] == ["/sbin/route", "-n"]:
             return self.route
+        if orchard._GATEWAY_RELAY in argv:
+            return self.relay
         if argv[:2] == ["sh", "-c"]:
             user = kwargs.get("run_as")
             return 0, ("501 yes" if self.sudo else "501 no") if user else "0 yes", "", False
@@ -379,13 +386,57 @@ async def test_upload_uses_shared_guest_tree_protocol(backend, tmp_path):
     await sandbox.destroy()
 
 
+def relays(guest):
+    return [c[0][-3:] for c in guest.commands if orchard._GATEWAY_RELAY in c[0]]
+
+
 @pytest.mark.asyncio
-async def test_remote_gateway_preserves_port_and_path(backend):
-    provider, _, _ = backend
+async def test_gateway_is_reached_at_the_fixed_port_on_loopback(backend):
+    provider, _, guest = backend
     provider.config.gateway_host = "10.0.0.9"
     sandbox = await provider.create(await request(provider, gateway_url="http://127.0.0.1:42/v1"))
-    assert sandbox.gateway_url == "http://10.0.0.9:42/v1"
+    assert sandbox.gateway_url == "http://127.0.0.1:7412/v1"
+    assert relays(guest) == [["10.0.0.9", "42", "7412"]]
     await sandbox.destroy()
+
+
+@pytest.mark.asyncio
+async def test_failed_gateway_relay_deletes_the_vm(backend):
+    provider, api, guest = backend
+    guest.relay = (1, "", "Address already in use", False)
+    with pytest.raises(ProviderStartError, match="Gateway relay"):
+        await provider.create(await request(provider, gateway_url="http://127.0.0.1:42/v1"))
+    assert api.deleted == [api.created[0]["name"]]
+
+
+@pytest.mark.asyncio
+async def test_gateway_relay_carries_both_directions():
+    async def echo(reader, writer):
+        while data := await reader.read(1024):
+            writer.write(data.upper())
+            await writer.drain()
+        writer.close()
+
+    upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
+    port = upstream.sockets[0].getsockname()[1]
+    started = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", orchard._GATEWAY_RELAY, "127.0.0.1", str(port), "0"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+    )
+    listen, pid = map(int, started.stdout.split())
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", listen)
+        writer.write(b"model request")
+        await writer.drain()
+        assert await reader.readexactly(13) == b"MODEL REQUEST"
+        writer.close()
+    finally:
+        os.kill(pid, signal.SIGKILL)
+        upstream.close()
+        await upstream.wait_closed()
 
 
 @pytest.mark.asyncio
@@ -560,7 +611,6 @@ async def test_file_contract_and_streamed_upload_with_unprivileged_guestd(backen
     }
     sandbox = orchard.OrchardSandbox(
         request=req,
-        gateway_host=None,
         orchard=api,
         client=GuestClient(command_transport),
         file_client=GuestClient(file_transport),
@@ -771,7 +821,7 @@ async def test_local_gateway_is_discovered_from_guest_route(backend, host):
     provider, _, guest = backend
     guest.route = (0, f"route to: default\n    gateway: {host}\ninterface: en0\n", "", False)
     sandbox = await provider.create(await request(provider, gateway_url="http://0.0.0.0:4567/v1"))
-    assert sandbox.gateway_url == f"http://{host}:4567/v1"
+    assert relays(guest) == [[host, "4567", "7412"]]
     assert provider.config.gateway_host is None
     route_calls = [c for c in guest.commands if c[0][0] == "/sbin/route"]
     assert len(route_calls) == 1
@@ -787,8 +837,7 @@ async def test_gateway_override_skips_route_discovery(backend, host):
     provider.config.gateway_host = host
     guest.route = (1, "", "route unavailable", False)
     sandbox = await provider.create(await request(provider, gateway_url="http://127.0.0.1:42/v1"))
-    authority = f"[{host}]" if ":" in host else host
-    assert sandbox.gateway_url == f"http://{authority}:42/v1"
+    assert relays(guest) == [[host, "42", "7412"]]
     assert not any(c[0][0] == "/sbin/route" for c in guest.commands)
     await sandbox.destroy()
 
@@ -800,6 +849,7 @@ async def test_no_model_gateway_needs_no_route_discovery(backend):
     sandbox = await provider.create(await request(provider))
     assert sandbox.gateway_url is None
     assert not any(c[0][0] == "/sbin/route" for c in guest.commands)
+    assert not relays(guest)
     await sandbox.destroy()
 
 
