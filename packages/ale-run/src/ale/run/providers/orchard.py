@@ -99,6 +99,10 @@ _GUESTD = (
     "import runpy,sys; sys.path.insert(0,'/opt/ale/guestd'); "
     "runpy.run_path('/opt/ale/guestd/main.py',run_name='__main__')"
 )
+#: Prints the home of the account named by its argument, or nothing when there is none.
+_ACCOUNT_HOME = (
+    "import pwd,sys\ntry: print(pwd.getpwnam(sys.argv[1]).pw_dir)\nexcept KeyError: pass"
+)
 
 # Runs as root in the VM and forwards the fixed Gateway port on its loopback to the Host's
 # Gateway until the VM is deleted. It forks only once it listens, so a port that cannot be
@@ -305,6 +309,21 @@ class OrchardSandbox(Sandbox):
         payload = [a if isinstance(a, dict) else a.model_dump(mode="json") for a in actions]  # type: ignore[union-attr]
         return await self._client.inject_input(payload)
 
+    async def account_home(self, user: str) -> str | None:
+        """The home of the account ``user`` in this VM, or None when it has no such account."""
+        result = await self.exec([MACOS_PYTHON, "-I", "-S", "-c", _ACCOUNT_HOME, user])
+        if not result.ok:
+            raise ProviderStartError(f"could not look up the account {user!r}: {result.stderr}")
+        return result.stdout.strip() or None
+
+    async def save_image(self, image: PreparedTaskImage) -> None:
+        """Stop this VM and keep its disk as the local image ``image`` names.
+
+        A sandbox frames that image for its Task's account when it first uses it.
+        """
+        await self._local.shut_down(self._orchard, self._owned)
+        await self._local.save(self._owned, image.runtime_ref)
+
     async def destroy(self) -> None:
         async with self._destroy_lock:
             if self.state is SandboxState.DESTROYED:
@@ -389,6 +408,11 @@ class OrchardProvider(Provider):
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
         if image.kind is not ImageKind.VM:
             raise ProviderCapabilityError("Orchard only accepts VM images")
+        if isinstance(image, PreparedTaskImage) and image.source != "external-ref":
+            # A Task image ALE built and keeps on the local worker.
+            if image.runtime_ref not in await self._local().local_images():
+                raise ProviderCapabilityError(f"the local image {image.runtime_ref} is missing")
+            return image
         reference = image.runtime_ref if isinstance(image, PreparedTaskImage) else image.reference
         match = _IMAGE.fullmatch(reference)
         if match is None:
@@ -499,6 +523,13 @@ class OrchardProvider(Provider):
     async def create(self, request: SandboxRequest) -> OrchardSandbox:
         # A verifier runs no agent: it needs no desktop, and its account's rights are moot.
         return await self._create(request, agent=request.role is not SandboxRole.VERIFIER)
+
+    async def create_builder(self, request: SandboxRequest) -> OrchardSandbox:
+        """A VM of the framed base for ``build.sh``, which runs as root and needs no agent.
+
+        Nothing is changed for an agent either: the image is kept as the build left it.
+        """
+        return await self._create(request, agent=False)
 
     async def _create(self, request: SandboxRequest, *, agent: bool) -> OrchardSandbox:
         self.accepts(request)

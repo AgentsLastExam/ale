@@ -1031,8 +1031,8 @@ async def _prepare_images(
                 "user": spec.user,
             }
         )
-        windows_build = spec.base_ref is not None
-        image = None if windows_build else by_source.get(key)
+        base_build = spec.base_ref is not None
+        image = None if base_build else by_source.get(key)
         if image is None:
             prepared = await prepare_task_image_result(task, providers)
             image = prepared.image

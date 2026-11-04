@@ -54,9 +54,43 @@ def test_macos_task_is_a_vm_named_directly(tmp_path: Path) -> None:
         ({"environment": {"vm_image": None}}, "FROM scratch\n"),
     ],
 )
-def test_macos_task_names_its_image(tmp_path: Path, layer: dict, dockerfile: str | None) -> None:
-    with pytest.raises(TaskDefinitionError, match="macOS Task names its image"):
+def test_macos_task_names_or_builds_its_image(
+    tmp_path: Path, layer: dict, dockerfile: str | None
+) -> None:
+    with pytest.raises(TaskDefinitionError, match="macOS Task"):
         load_tasks(_macos_task(tmp_path / "task", layer, dockerfile))
+
+
+def _built_macos_task(path: Path, *, base: bool = True, script: bool = True) -> Path:
+    layer = {"environment": {"vm_image": None, "vm_base": IMAGE if base else None}}
+    task = _macos_task(path, layer)
+    if script:
+        (task / "environment").mkdir(exist_ok=True)
+        (task / "environment" / "build.sh").write_text("echo installed\n")
+    return task
+
+
+def test_macos_task_builds_on_its_base(tmp_path: Path) -> None:
+    spec = load_tasks(_built_macos_task(tmp_path / "task"))[0].spec
+    assert spec.image.kind is ImageKind.VM
+    assert (spec.image.ref, spec.image.base_ref) == (None, IMAGE)
+
+
+@pytest.mark.parametrize(
+    ("base", "script", "message"),
+    [(True, False, "vm_base requires environment/build.sh"), (False, True, "requires .*vm_base")],
+)
+def test_macos_build_needs_both_base_and_script(
+    tmp_path: Path, base: bool, script: bool, message: str
+) -> None:
+    with pytest.raises(TaskDefinitionError, match=message):
+        load_tasks(_built_macos_task(tmp_path / "task", base=base, script=script))
+
+
+def test_a_linux_build_helper_named_build_sh_is_only_a_file(tmp_path: Path) -> None:
+    task = write_task(tmp_path / "task", dockerfile="FROM scratch\n")
+    (task / "environment" / "build.sh").write_text("echo helper\n")
+    assert load_tasks(task)[0].spec.image.base_ref is None
 
 
 def test_macos_verifier_builds_no_image(tmp_path: Path) -> None:

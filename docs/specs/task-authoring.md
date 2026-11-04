@@ -22,6 +22,7 @@ my-task/
 ├── environment/               # the machine the agent starts on
 │   ├── Dockerfile             # container or Linux VM image; context environment/ without setup/
 │   ├── build.ps1              # Windows image, on the same context
+│   ├── build.sh               # macOS image, on the same context; Linux uses the Dockerfile
 │   └── setup/                 # optional per-episode initialization
 │       └── setup.sh           # setup.ps1 on Windows
 ├── tests/                     # verification
@@ -37,8 +38,8 @@ Task OS: `tests/test.sh` and `solution/solve.sh` on Linux and macOS, `test.ps1` 
 on Windows. `[environment]` decides what `environment/` builds. A container Task builds
 `environment/Dockerfile` or uses `docker_image`. A Linux VM Task sets `vm = true` to build
 `environment/Dockerfile`, or uses `vm_image`. A Windows Task builds `environment/build.ps1` on
-`vm_base`, or uses `vm_image` alone. A macOS Task uses `vm_image` alone; ALE builds no macOS
-image. Every image build has `environment/` as its context,
+`vm_base`, or uses `vm_image` alone; a macOS Task does the same with `environment/build.sh`.
+Every image build has `environment/` as its context,
 `setup/` excluded. A Linux image named directly wins over a build definition.
 
 ## task.toml
@@ -71,7 +72,7 @@ os = "linux"                                # linux | windows | macos; default l
 vm = false                                  # ALE; a Linux VM built from a Dockerfile
 # docker_image = "registry.example/image:tag"  # a container image used directly
 # vm_image = "/path/to/disk.qcow2"          # ALE; a VM image used directly
-# vm_base = "/path/to/windows-base.qcow2"   # ALE; the base environment/build.ps1 builds on
+# vm_base = "/path/to/windows-base.qcow2"   # ALE; the base build.ps1 or build.sh builds on
 build_timeout_sec = 3600                    # seconds the Task's own build may run; default 3600
 cpus = 1                                    # whole CPUs; default 1
 memory_mb = 4096                            # default 4096
@@ -118,7 +119,7 @@ env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
 
 `vm = true` is needed only for a Linux VM built from a Dockerfile: an `os` other than Linux,
 `vm_image` and `vm_base` already mean a VM. `vm_image` and `vm_base` are mutually exclusive; `vm_base`
-requires Windows and `environment/build.ps1`. `[agent].workdir` is below the agent's home when
+requires Windows with `environment/build.ps1` or macOS with `environment/build.sh`. `[agent].workdir` is below the agent's home when
 relative, so a Task need not spell its home per OS. It must be a directory when the agent
 starts; stages keep their fixed directories.
 
@@ -308,6 +309,27 @@ Build-only materials are removed before saving; copy required files to their fin
 Only that context is staged, and the whole build is cached by base, builder, and every file
 in it. A prepared image used directly is named by `[environment].vm_image` without `build.ps1`.
 
+A macOS Task builds the same way on a Tart image named by `vm_base`, with
+`environment/build.sh`:
+
+```toml
+[environment]
+os = "macos"
+vm_base = "ghcr.io/cirruslabs/macos-tahoe-base:latest"
+```
+
+`ale prepare TASK` boots the base with ALE's framework installed, copies `environment/`,
+less `setup/`, into it and runs `bash build.sh` as root with that directory as cwd and
+`ALE_HOME` set to the agent home, as for `build.ps1`, then removes the directory and keeps
+the VM's disk as a local image on the Mac. The same rules as for `build.ps1` apply: finish
+within `build_timeout_sec`, no reboots, and copy what the image needs out of the build
+directory. ALE frames the result for `[agent].user` when a sandbox first uses it, so
+`build.sh` may create that account; `ALE_HOME` is then `/Users/<user>`, the home the build
+must give it, and the build fails if the account is missing or lives elsewhere. Such an
+account must sign in automatically with its first login settings done, as the
+[macOS guide](../guides/macos-orchard.md#choose-an-image) says. As `build.sh` runs as root,
+it sets the owner of what it writes there.
+
 ## environment/setup/
 
 `environment/setup/` is optional framework-controlled initialization executed after the
@@ -332,7 +354,7 @@ workspace prefix.
 Skills and MCP are optional. Add them only when the Task concept or expert feedback explicitly
 requires a specific Skill or MCP server; never depend on ambient Host configuration. As in
 Harbor, a Task's own are part of its image, so the image's identity covers them. Put their files
-below `environment/` and have the Dockerfile or `build.ps1` place them.
+below `environment/` and have the Dockerfile, `build.ps1` or `build.sh` place them.
 
 `[environment].skills_dir` is an absolute directory in the image holding one directory per
 Skill. The Harness copies its contents to the agent's skills directory before the agent starts.

@@ -167,8 +167,8 @@ posts a never-booted disk's background-item notice a few seconds after it regist
 items and reports neither the notice nor having none. Notification Center shows a notice
 nobody dismissed again at every login, so the account's delivered notifications are then
 cleared from its `usernoted` database, as the account, and `usernoted` is killed before it
-can write them back at shutdown. The guest then shuts itself down before its disk is
-kept: Orchard stops a VM with `tart stop --timeout 5`, which powers
+can write them back at shutdown. The guest then shuts itself down, as a `build.sh` VM's
+does before its disk is kept: Orchard stops a VM with `tart stop --timeout 5`, which powers
 macOS off when its signed-in desktop does not shut down at once and loses what is still in
 memory. The stopped VM becomes the local Tart image `ale-framed-<identity>`; every Sandbox
 clones it, which on APFS copies no data.
@@ -183,7 +183,7 @@ account out of the `admin` group, whose members sudo and approve system changes 
 password, and deletes sudoers lines that name it; either way the account's rights are then
 checked. `admin` keeps passwordless sudo for ALE, so a Task running as `admin` must declare
 `sudo = true`. A separate verifier VM runs no agent, so it gets neither the desktop nor the
-account changes and checks.
+account changes and checks, and a `build.sh` VM is kept exactly as the build left it.
 
 Preparation resolves OCI tags through registry manifest metadata without downloading
 VM disks or checking the worker cache, and framing clones the digest-pinned reference.

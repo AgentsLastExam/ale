@@ -5,13 +5,15 @@ import io
 import json
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from tests.support import CONTAINER_BASE
 
-from ale.core.errors import ProviderStartError, TaskDefinitionError
+from ale.core.errors import ProviderCapabilityError, ProviderStartError, TaskDefinitionError
 from ale.core.ids import content_hash
-from ale.core.sandbox import Capabilities, ImageRef, PreparedTaskImage
+from ale.core.sandbox import Capabilities, ExecResult, ImageRef, PreparedTaskImage
 from ale.core.task import Task
 from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, VerifySpec
 from ale.run.cli.tasks import _prepare_images
@@ -242,6 +244,148 @@ async def test_failed_windows_build_does_not_publish_or_fall_back(
     assert len(registry.get(ImageKind.VM).inputs) == 1
     assert isinstance(registry.get(ImageKind.VM).inputs[0], ImageRef)
     assert list(cache.rglob("*.qcow2")) == []
+
+
+@pytest.fixture
+def macos_task(write_task_repo) -> Task:  # type: ignore[no-untyped-def]
+    repository = write_task_repo(
+        config={
+            "environment": {"os": "macos", "vm_base": "ghcr.io/acme/macos:latest"},
+            "agent": {"user": "admin", "network_mode": "public", "sudo": True},
+        },
+        dockerfile=None,
+    )
+    folder = repository / "tasks/demo"
+    (folder / "environment").mkdir()
+    (folder / "environment/build.sh").write_text("echo installed\n")
+    return load_tasks(folder)[0]
+
+
+def _macos_builder(  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    build_exit: int = 0,
+    homes: tuple[str | None, str | None] = ("/Users/admin", "/Users/admin"),
+):
+    from ale.run.providers.orchard import OrchardProvider, OrchardSandbox
+
+    provider = OrchardProvider(SimpleNamespace())
+    base = _prepared(ImageKind.VM, "external-ref")
+    kept: set[str] = set()
+
+    async def prepare(image):  # type: ignore[no-untyped-def]
+        if isinstance(image, ImageRef):
+            return base
+        if image.runtime_ref not in kept:
+            raise ProviderCapabilityError("missing")
+        return image
+
+    sandbox = AsyncMock(spec=OrchardSandbox)
+    sandbox.agent_home = "/Users/admin"
+    sandbox.account_home.side_effect = list(homes)
+    sandbox.exec.side_effect = [
+        ExecResult(exit_code=build_exit, stderr="build failed" if build_exit else ""),
+        ExecResult(exit_code=0),
+    ]
+    sandbox.save_image.side_effect = lambda image: kept.add(image.runtime_ref)
+    requests = []
+
+    async def create(request):  # type: ignore[no-untyped-def]
+        requests.append(request)
+        return sandbox
+
+    monkeypatch.setattr(provider, "prepare_image", prepare)
+    monkeypatch.setattr(provider, "create_builder", create)
+    return SimpleNamespace(get=lambda kind, os: provider), sandbox, requests, base
+
+
+@pytest.mark.asyncio
+async def test_macos_image_is_built_once_on_its_base(
+    macos_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ale.run.task_images as images
+
+    monkeypatch.setattr(images, "cache_root", lambda: tmp_path / "cache")
+    registry, sandbox, requests, base = _macos_builder(monkeypatch)
+    first = await prepare_task_image_result(macos_task, registry)  # type: ignore[arg-type]
+    second = await prepare_task_image_result(macos_task, registry)  # type: ignore[arg-type]
+    assert [step.name for step in first.steps] == [
+        "lint",
+        "base-resolution",
+        "macos-build",
+        "artifact-check",
+    ]
+    assert second.steps[2].outcome == "reused" and first.image == second.image
+    assert first.image.runtime_ref.startswith("ale-built-")
+    assert first.image.base_materials == (base.prepared_identity,)
+    (request,) = requests
+    assert request.os is OperatingSystem.MACOS and request.prepared_image == base
+    assert (request.user, request.sudo) == ("admin", True)
+    build, cleanup = sandbox.exec.await_args_list
+    assert build.args[0] == ["bash", "build.sh"]
+    assert build.kwargs["cwd"] == "/opt/ale/environment"
+    assert build.kwargs["env"] == {"ALE_HOME": "/Users/admin"}
+    assert cleanup.args[0] == ["rm", "-rf", "/opt/ale/environment"]
+    sandbox.save_image.assert_awaited_once_with(first.image)
+    sandbox.destroy.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_macos_build_gets_the_home_of_the_account_it_creates(
+    write_task_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    import ale.run.task_images as images
+
+    repository = write_task_repo(
+        config={
+            "environment": {"os": "macos", "vm_base": "ghcr.io/acme/macos:latest"},
+            "agent": {"user": "tester", "network_mode": "public"},
+        },
+        dockerfile=None,
+    )
+    folder = repository / "tasks/demo"
+    (folder / "environment").mkdir()
+    (folder / "environment/build.sh").write_text("sysadminctl -addUser tester\n")
+    task = load_tasks(folder)[0]
+    monkeypatch.setattr(images, "cache_root", lambda: tmp_path / "cache")
+    registry, sandbox, requests, _ = _macos_builder(monkeypatch, homes=(None, "/Users/tester"))
+    await prepare_task_image(task, registry)  # type: ignore[arg-type]
+    (request,) = requests
+    assert (request.user, request.sudo) == ("admin", True)
+    sandbox.account_home.assert_awaited_with("tester")
+    build, _ = sandbox.exec.await_args_list
+    assert build.kwargs["env"] == {"ALE_HOME": "/Users/tester"}
+
+
+@pytest.mark.parametrize(
+    ("built", "message"),
+    [(None, r"has no account 'admin'"), ("/Users/elsewhere", r"not ALE_HOME \(/Users/admin\)")],
+)
+@pytest.mark.asyncio
+async def test_macos_build_must_leave_the_account_at_ale_home(
+    macos_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, built, message
+) -> None:  # type: ignore[no-untyped-def]
+    import ale.run.task_images as images
+
+    monkeypatch.setattr(images, "cache_root", lambda: tmp_path / "cache")
+    registry, sandbox, _, _ = _macos_builder(monkeypatch, homes=("/Users/admin", built))
+    with pytest.raises(TaskDefinitionError, match=message):
+        await prepare_task_image(macos_task, registry)  # type: ignore[arg-type]
+    sandbox.save_image.assert_not_awaited()
+    sandbox.destroy.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_macos_build_keeps_no_image(
+    macos_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ale.run.task_images as images
+
+    monkeypatch.setattr(images, "cache_root", lambda: tmp_path / "cache")
+    registry, sandbox, _, _ = _macos_builder(monkeypatch, build_exit=1)
+    with pytest.raises(TaskDefinitionError, match=r"macos-build:.*build failed"):
+        await prepare_task_image(macos_task, registry)  # type: ignore[arg-type]
+    sandbox.save_image.assert_not_awaited()
+    sandbox.destroy.assert_awaited_once()
 
 
 @pytest.mark.asyncio

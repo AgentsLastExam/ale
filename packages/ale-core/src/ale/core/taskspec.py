@@ -814,13 +814,13 @@ class TaskConfig(BaseModel):
     @model_validator(mode="after")
     def _consistent(self) -> Self:
         environment, verifier = self.environment, self.verifier
-        windows = environment.os is OperatingSystem.WINDOWS
+        linux = environment.os is OperatingSystem.LINUX
         if environment.docker_image is not None and environment.kind is ImageKind.VM:
             raise ValueError("[environment].docker_image is a container image; a VM has vm_image")
         if environment.vm_image is not None and environment.vm_base is not None:
             raise ValueError("vm_image and vm_base are mutually exclusive")
-        if environment.vm_base is not None and not windows:
-            raise ValueError("[environment].vm_base requires os 'windows'")
+        if environment.vm_base is not None and linux:
+            raise ValueError("[environment].vm_base requires os 'windows' or 'macos'")
         names = [server.name for server in environment.mcp_servers]
         if len(names) != len(set(names)):
             raise ValueError("[[environment.mcp_servers]] names must be unique")

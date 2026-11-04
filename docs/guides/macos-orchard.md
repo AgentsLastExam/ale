@@ -75,11 +75,19 @@ The image needs:
   done, so no Setup Assistant appears;
 - FileVault off, so its disk can be framed;
 - the applications and licenses the Task uses, with no preexisting model credentials.
+  To install them on a stock image instead, name it as `vm_base` and add
+  `environment/build.sh`, which ALE runs once as root in a VM of the base framed for
+  `admin`, so the base must sign `admin` in, and keeps; the result is framed for the
+  Task's account when a sandbox first uses it, so the build may create that account
+  ([Task authoring](../specs/task-authoring.md#environment)).
 
 `[agent].sudo` is applied at every boot: with `true` the account gets passwordless sudo,
 with `false` ALE takes it out of the `admin` group and removes the sudoers rules that name
 it. `admin` keeps passwordless sudo for ALE itself, so a Task that runs as `admin` must
-declare `sudo = true`; a Task without it needs an image that signs in another account.
+declare `sudo = true`; for a Task without it, create and sign in another account in
+`build.sh`: add it with `sysadminctl` and its home at `$ALE_HOME`, set `autoLoginUser` in
+`/Library/Preferences/com.apple.loginwindow` and its password in `/etc/kcpassword`, and
+mark the account's Setup Assistant panes seen.
 
 Tag resolution needs the Docker CLI with Buildx (no Docker daemon); use `docker login` for
 private registries. Digest-pinned references need neither, and Tart pulls the image itself.
@@ -98,6 +106,10 @@ endpoint that accepts its computer tool schema. ALE appends the dialect route to
 Driver screenshot, clicks, types and saves in TextEdit, and its verifier checks the file.
 The click matters: a window in front does not hold the keyboard until its document is
 clicked.
+`tests/fixtures/tasks/macos-unprivileged` builds an administrator with passwordless sudo
+on the base, with its home and a file in it at `ALE_HOME`, and signs it in; with
+`sudo = false`, its oracle finds the account out of the `admin` group, without sudo, and
+the file its build left.
 
 ## Run and validate
 

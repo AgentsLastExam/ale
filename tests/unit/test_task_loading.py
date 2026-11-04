@@ -9,7 +9,7 @@ from tests.support import edit_task_config as edit
 
 from ale.core.errors import TaskDefinitionError
 from ale.core.task import Stage
-from ale.core.taskspec import ImageKind, NetworkMode, VerificationMode
+from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, VerificationMode
 from ale.run.assets import ASSET_ROOTS
 from ale.run.lint import lint_repository
 from ale.run.scaffold import scaffold_task
@@ -275,7 +275,7 @@ def test_windows_build_script_tracks_source_and_ignores_assets(tmp_path: Path) -
     helper = task / "environment/install.ps1"
     helper.write_text("choco install -y git\n")
     loaded = load_tasks(task)[0]
-    assert loaded.folder.build_script == entry
+    assert loaded.folder.build_script(OperatingSystem.WINDOWS) == entry
     assert loaded.spec.image.base_ref == "/images/windows-base.qcow2"
     assert loaded.spec.image.ref is None
     assert loaded.image_source_digest is not None

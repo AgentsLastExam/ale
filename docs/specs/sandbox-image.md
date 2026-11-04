@@ -2,8 +2,8 @@
 
 Normative for standard container and VM Tasks. Every solver and dedicated verifier runs
 in a container or a VM. Linux builds a Dockerfile (a VM with `[environment].vm = true`) or
-uses an image directly (`docker_image`, `vm_image`); Windows uses `vm_image` directly, or builds
-`environment/build.ps1` on `vm_base`; macOS uses `vm_image` directly.
+uses an image directly (`docker_image`, `vm_image`); Windows and macOS use `vm_image` directly,
+or build `environment/build.ps1` or `environment/build.sh` on `vm_base`.
 
 ## What a Linux image needs
 
@@ -88,7 +88,9 @@ a copy of the image, once per image, framework and account: guestd, a Python of 
 framework's own, since a stock macOS has none recent enough, and Cua Driver with the
 privacy grants macOS otherwise takes only through its settings. The copy is booted once so
 macOS finishes the account's first login, whose one-time notices would otherwise appear in
-every sandbox, and kept as the local image every sandbox starts from. Every macOS
+every sandbox, and kept as the local image every sandbox starts from. A Task's `build.sh` runs as root in
+a VM of its framed base, and the image it leaves is framed in turn for the Task's account,
+which the build may create. Every macOS
 sandbox the agent works in shows that account's desktop. Elevation for `[agent].sudo` is
 granted or taken away at each boot, as on Windows. What else the image must allow is in
 the [Orchard Provider](../../packages/ale-run/src/ale/run/providers/README.md#orchard).

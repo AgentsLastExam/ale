@@ -10,6 +10,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -617,7 +618,9 @@ async def test_terminal_failed_condition_is_not_physical_stop_proof(backend, mon
 
 
 @pytest.mark.asyncio
-async def test_file_contract_and_streamed_upload_with_unprivileged_guestd(backend, tmp_path):
+async def test_file_contract_and_streamed_upload_with_unprivileged_guestd(
+    backend, tmp_path, monkeypatch
+):
     """Exercise real guest protocol locally; neither Orchard nor a VM is started."""
     import hashlib
     import os
@@ -704,6 +707,10 @@ async def test_file_contract_and_streamed_upload_with_unprivileged_guestd(backen
             with pytest.raises(GuestUnreachableError):
                 await op
         assert await sandbox.list_files(str(target / "missing")) == ()
+        monkeypatch.setattr(orchard, "MACOS_PYTHON", sys.executable)
+        me = pwd.getpwuid(os.getuid())
+        assert await sandbox.account_home(me.pw_name) == me.pw_dir
+        assert await sandbox.account_home("ale-no-such-account") is None
         await sandbox.open_egress()
         await sandbox.close_egress()
         assert (await task).ok
@@ -1111,6 +1118,39 @@ async def test_the_control_account_cannot_run_a_task_without_sudo(backend):
         await request(provider, user=orchard.CONTROL_ACCOUNT, role=SandboxRole.VERIFIER)
     )
     provider.accepts(await request(provider, user=orchard.CONTROL_ACCOUNT, sudo=True))
+
+
+async def test_a_build_vm_changes_nothing_for_the_agent_and_keeps_its_disk(backend, monkeypatch):
+    provider, api, guest = backend
+    argvs = []
+    connect_guest = api.connect_guest
+
+    async def connect(name, argv, *, deadline):
+        argvs.append(argv)
+        return await connect_guest(name, argv, deadline=deadline)
+
+    monkeypatch.setattr(api, "connect_guest", connect)
+    sandbox = await provider.create_builder(await request(provider, sudo=False))
+    assert not any(
+        orchard._GRANT_SUDO in argv or orchard._REVOKE_SUDO in argv for argv, _ in guest.commands
+    )
+    assert not api.desktops
+    assert not any(f"ALE_CUA_DRIVER={orchard.MACOS_DRIVER}" in argv for argv in argvs)
+    saved = []
+    shut_down = AsyncMock()
+    monkeypatch.setattr(
+        sandbox,
+        "_local",
+        SimpleNamespace(
+            save=AsyncMock(side_effect=lambda *a: saved.append(a)), shut_down=shut_down
+        ),
+    )
+    image = sandbox.request.prepared_image.model_copy(update={"runtime_ref": "ale-built-x"})
+    await sandbox.save_image(image)
+    # The guest shuts itself down, so everything the build wrote is on the kept disk.
+    shut_down.assert_awaited_once_with(api, sandbox._owned)
+    assert saved and saved[0][1] == "ale-built-x"
+    await sandbox.destroy()
 
 
 @pytest.mark.parametrize(
