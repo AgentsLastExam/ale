@@ -20,8 +20,12 @@ boots it. Windows preparation already produces qcow2, so it goes directly to the
 The image contract, identity rules and required labels are defined in
 [`../docs/specs/sandbox-image.md`](../docs/specs/sandbox-image.md).
 
-Every image is published under the engine version (`packages/ale-run/pyproject.toml`)
-once and never overwritten, so a changed image ships with the next engine version.
+Every image is published once per version and never overwritten. The builder and runner
+run the engine's own logic, so they share the engine's version
+(`packages/ale-run/pyproject.toml`) and a changed one ships with the next engine version.
+A base carries no part of the framework and has its own version: the Linux bases' are in
+`BASES` in `packages/ale-run/src/ale/run/__init__.py`, the Windows base's in its README.
+Raise a base's version to publish it changed.
 
 ```bash
 just images                                  # pull published images, build unpublished ones

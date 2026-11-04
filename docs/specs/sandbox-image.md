@@ -7,10 +7,8 @@ uses an image directly (`docker_image`, `vm_image`); Windows uses `vm_image` dir
 
 ## What a Linux image needs
 
-A Linux Task may build from any image that has:
+A Linux Task may build from any x86-64 image with glibc that has:
 
-- `python3` for the guest service (3.12+ in containers); Linux VMs may retain
-  Python 3.10+ when `python3.12` is available for verification;
 - the agent account the Task names with `[agent].user`, with a home;
 - for a container, a long-lived command that ALE does not replace;
 - for a VM, a bootable systemd system (the VM base provides one);
@@ -21,13 +19,18 @@ of the Task's own build or the image it names (the framework layer):
 
 - guestd, the guest service every sandbox operation goes through, under root-only
   `/opt/ale`, so it always speaks the protocol of the engine driving it;
+- the framework's own Python at a pinned version, which guestd runs on whatever Python
+  the image has (or lacks): `/opt/ale/python` on Linux and `C:\ProgramData\ALE\python` on
+  Windows. Only the framework's identity can run it, and the agent's PATH does not
+  include it;
 - Cua Driver at a pinned version, the one desktop capture and input implementation, which
   every account may run, because the agent's `cua-desktop` MCP server runs it too;
 - for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
   Windows that also starts Cua Driver in the agent's session;
 - a check that the agent account exists, failing preparation if it does not;
-- working sudo for that account when the Task sets `[agent].sudo = true`, installing sudo
-  with the image's package manager when the image lacks it;
+- sudo, installed with the image's package manager when the image lacks it, so that any
+  sandbox can be granted elevation; the grant itself is never part of the image
+  ([Permissions](#permissions));
 - a marker file recording which framework the image carries: `/opt/ale/framework` on
   Linux, `C:\ProgramData\ALE\framework` on Windows.
 
@@ -55,24 +58,25 @@ once its window manager or shell runs.
 ## What a Windows image needs
 
 A Windows Task builds `environment/build.ps1` on an ALE Windows base. The base signs its agent
-account in to a desktop automatically, with UAC on and Python 3.12 or newer installed for
-all users, and carries none of the framework. ALE installs the framework offline into a
-copy of the base before the build VM boots, so the build talks to the same guestd as every
-later sandbox, and the Task's script cannot replace the framework's pieces:
+account in to a desktop automatically, with UAC on, and carries none of the framework; the
+Python it installs for all users is for Tasks and agents. ALE installs the framework offline
+into a copy of the base before the build VM boots, so the build talks to the same guestd as
+every later sandbox, and the Task's script cannot replace the framework's pieces:
 
-- the current guestd under `C:\ProgramData\ALE\guestd`, and Cua Driver at the pinned
-  version under `C:\ProgramData\ALE\cua-driver`;
-- a boot service, running as the system, that starts both in the agent's session with the
-  account's elevated token, so Cua Driver can reach elevated windows. The service limits
-  those files to the system and Administrators, except that every account may run Cua
-  Driver, as on Linux;
+- the current guestd under `C:\ProgramData\ALE\guestd`, Cua Driver at the pinned version
+  under `C:\ProgramData\ALE\cua-driver`, and the framework's own Python;
+- a boot service, running as the system on that Python, that starts guestd and Cua
+  Driver in the agent's session with the account's elevated token, so Cua Driver can reach
+  elevated windows. The service limits those files to the system and Administrators,
+  except that every account may run Cua Driver, as on Linux;
 - a check, before anything is written, that the disk has the agent account, signs exactly
-  that account in, keeps UAC on, has the Python and was shut down completely (not left
-  hibernated by Fast Startup), each failing with the one thing it lacks.
+  that account in, keeps UAC on and was shut down completely (not left hibernated by Fast
+  Startup), each failing with the one thing it lacks.
 
-Elevation for `[agent].sudo` is granted per boot by the Host, not built into the disk.
-A Windows sandbox has a desktop for ALE to drive exactly when its image carries the
-framework's Cua Driver, so the Provider waits for a screenshot in every sandbox it boots.
+Elevation for `[agent].sudo` is granted per boot by the Host, not built into the disk, as
+on Linux ([Permissions](#permissions)). A Windows sandbox has a desktop for ALE to drive
+exactly when its image carries the framework's Cua Driver, so the Provider waits for a
+screenshot in every sandbox it boots.
 How the install works, and what it costs, is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#qemu).
 
@@ -98,18 +102,20 @@ qcow2 and installs the framework into a Linux or Windows qcow2 named by referenc
 
 ## Versions
 
-Every ALE image is published under the engine's version, such as `0.1.1`, once and never
-overwritten: the publishing workflow skips a version the registry already has, and no
-`latest` tag is published. An engine runs exactly the images of its own version, so a
-checkout that stays on one engine version keeps the same images whatever later versions
-publish. Publishing a changed image therefore means releasing a new engine version.
-A tag that every change overwrote would carry one engine's change into every checkout's
-next build, including checkouts whose engine does not speak the new guest protocol.
+Every ALE image is published once per version and never overwritten: the publishing
+workflow skips a version the registry already has, and no `latest` tag is published, since
+a tag that every change overwrote would change every checkout's next build behind its back.
+
+The VM builder and the QEMU runner run the engine's own logic, so they are published under
+the engine's version, such as `0.1.1`; an engine runs exactly those of its own version, and
+a changed one ships with the next engine version. A base carries no part of the framework,
+so nothing in it depends on the engine: each base has its own version, raised when the base
+itself changes, and any engine runs any version of it.
 
 A Task may build from any image. Task repositories maintained with ALE name an exact
 version of an ALE base, such as `container-ubuntu22-base:0.1.1`, so that a Task keeps
-building from the same base until its author moves it; `ale new-task` writes the
-engine's current version.
+building from the same base until its author moves it; `ale new-task` writes the base's
+current version.
 
 ## Task image
 
@@ -267,9 +273,8 @@ The local verifier context is fixed at `tests/`; its Dockerfile is the declarati
 images are pulled and resolved to an immutable repository/content identity before
 solver execution.
 
-Any verifier image must satisfy the same guest contract, expose system Python 3.12 or
-newer, and permit ALE to stage `ale_verify`. Verification runs as framework-controlled
-Task code.
+Any verifier image must satisfy the same guest contract and permit ALE to stage
+`ale_verify`. Verification runs as framework-controlled Task code.
 
 ## Runtime behavior
 
@@ -352,11 +357,22 @@ account's interactive session and launches agent commands with the desktop's lim
 token, unless the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a limited
 desktop session are required; the Provider checks both framework and agent privileges
 before Task execution. A Windows Task image is rebuilt when the framework changes, and a
-direct `vm_image` disk is framed like any other. Linux configures requested
-sudo during image preparation. Grants, and their absence, are verified and recorded: a
+direct `vm_image` disk is framed like any other.
+
+Elevation is never part of an image. On both systems the Provider sets it at every sandbox
+start, before Task code runs, so one prepared image serves a Task with and without
+`[agent].sudo`, its solver and its verifier alike, and a Sandbox continued from a snapshot
+gets what its own request asks for. On Linux the root guestd grants the agent's account
+elevation, or revokes every way up through sudo and the groups distributions make
+administrators; how is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#agent-elevation-on-linux).
+Nothing can keep a root account from elevating, so a Task whose `[agent].user` is root
+must declare `[agent].sudo = true`. Grants, and their absence, are verified and recorded: a
 Linux sandbox is refused when its guest service is not root, when a requested grant does
-not work, or when an agent that did not request one is root or can use sudo. ALE does not pre-create
-artifacts or repair their ownership: image/setup/agent code owns their type and existence.
+not work, or when an agent that did not request one can still use sudo.
+
+ALE does not pre-create artifacts or repair their ownership: image/setup/agent code owns
+their type and existence.
 
 ## Provider contract
 
@@ -371,7 +387,7 @@ Task content (the engine).
 | Guarantee | Enforced by | Conformance test |
 |---|---|---|
 | Every sandbox runs the framework of the engine driving it, whatever image or disk it was handed | Provider in `create` | `test_a_sandbox_carries_the_engines_framework` |
-| Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[agent].sudo` asks | Provider check in `create`, both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected` |
+| Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[agent].sudo` asks, whatever image or snapshot it starts from | Provider in `create`: set at every start, then checked both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected`, `test_one_image_serves_an_agent_with_and_without_elevation`, `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |
 | Framework phases have the network; after `close_egress` the agent reaches its Gateway (and, for `allowlist`, the declared hosts) and nothing else; `open` Tasks are never sealed | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |

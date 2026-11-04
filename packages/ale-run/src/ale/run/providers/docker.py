@@ -45,11 +45,11 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem
-from ale.run import ale_image
+from ale.run import ale_image, guestd
 from ale.run.framework import with_framework
 from ale.run.gpu import GpuLease, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
-from ale.run.providers.privileges import verify_identities
+from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, StdioTransport
 
@@ -584,6 +584,7 @@ class DockerProvider(Provider):
             client = await self._connect(container, agent_user)
             clients.append(client)
             agent_home, has_desktop = await self._guest_contract(client)
+            await set_elevation(client, agent_user, sudo=request.sudo)
             await verify_identities(client, agent_user, sudo=request.sudo)
             observed_gpu = await self._container_gpus(client) if selected else ()
             if selected:
@@ -793,25 +794,6 @@ class DockerProvider(Provider):
                 "no command: a container lives exactly as long as its command, and the "
                 "engine will not supply one"
             )
-
-        probe = await _docker(
-            "run",
-            "--rm",
-            "--entrypoint",
-            "sh",
-            reference,
-            "-c",
-            "if command -v python3 >/dev/null; then "
-            "python3 -c 'import sys; raise SystemExit(sys.version_info < (3,12))' "
-            ">/dev/null 2>&1 || echo old-python3; else echo no-python3; fi",
-            timeout=120,
-        )
-        for line in probe[1].split():
-            if line == "no-python3":
-                missing.append("no python3 on PATH: the guest service runs on it")
-            elif line == "old-python3":
-                missing.append("python3 on PATH is older than 3.12: ale_verify cannot run on it")
-
         self._checked[reference] = missing
         return missing
 
@@ -821,9 +803,7 @@ class DockerProvider(Provider):
         Task preparation adds the layer already; this covers an image handed straight to
         the Provider, so any image can serve as a sandbox.
         """
-        layered = await with_framework(
-            resolved.observed_identity, user=request.user, sudo=request.sudo
-        )
+        layered = await with_framework(resolved.observed_identity, user=request.user)
         if layered == resolved.observed_identity:
             return resolved
         return resolved.model_copy(update={"observed_identity": layered, "observed_ref": layered})
@@ -870,10 +850,8 @@ class DockerProvider(Provider):
                 "--env",
                 f"ALE_AGENT_USER={agent_user}",
                 container,
-                # One interpreter, and it is the image's own. An image that needs the
-                # guest service to have Pillow installs it there; choosing between
-                # interpreters was a rule that existed only to be got wrong.
-                "python3",
+                # The framework's own Python, whatever the image has.
+                guestd.PYTHON["linux"],
                 str(GUESTD_DIR / "main.py"),
                 "--stdio",
             ]

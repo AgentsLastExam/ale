@@ -69,7 +69,7 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     assert _steps(first)["framework-layer"] == "executed"
     framed = Path(first.image.runtime_ref)
     assert framed != bare and first.image.resolved_reference == bare.as_uri()
-    identity = framework_identity(user="user", sudo=False, vm=True)
+    identity = framework_identity(user="user", vm=True)
     assert await framework_on_disk(framed, operating_system=linux, builder=builder) == identity
 
     second = await prepare_task_image_result(load_tasks(task_path)[0], registry)

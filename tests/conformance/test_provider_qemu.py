@@ -4,7 +4,7 @@ One suite, two backends, no per-provider assertions: that is what makes "the san
 contract is real" a claim rather than an aspiration, and what turns the future OS
 roadmap into "swap the guest image".
 
-The disk is this engine version's VM base, materialized once per host, without the
+The disk is the current VM base, materialized once per host, without the
 framework: the Provider adds it, as Docker adds it to the container base. Set
 ``ALE_QEMU_IMAGE`` to run the suite on another Linux disk. Needs KVM and Docker.
 """
@@ -63,7 +63,7 @@ class TestQemuProvider(ProviderConformance):
     #: The same disk. There is one VM guest and it has a desktop, so the GUI half of
     #: the shared suite runs against it rather than being skipped.
     gui_image = image
-    framework = framework_identity(user="user", sudo=False, vm=True)
+    framework = framework_identity(user="user", vm=True)
 
     @pytest.fixture(autouse=True)
     def _provider(self, vm_disk: Path) -> None:

@@ -1028,7 +1028,6 @@ async def _prepare_images(
                 "ref": spec.ref,
                 "base_ref": spec.base_ref,
                 "user": spec.user,
-                "sudo": task.spec.resources.sudo,
             }
         )
         windows_build = spec.base_ref is not None

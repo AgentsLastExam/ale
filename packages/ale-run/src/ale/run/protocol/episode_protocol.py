@@ -77,6 +77,7 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.core.verdict import Verdict
+from ale.run import guestd
 from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
 from ale.run.harnesses.builtin import solution_dir
 from ale.run.protocol.log_mirror import (
@@ -1268,9 +1269,11 @@ class EpisodeProtocol:
             "f'ale_verify requires Python 3.12+, got {sys.version.split()[0]}';"
             f"print({destination})"
         )
+        # The image's own Python first, since that is where the Task's packages are; the
+        # framework's own when the image has none recent enough.
         candidates = (
             ("python.exe",) if ctx.spec.os is OperatingSystem.WINDOWS else ("python3", "python3.12")
-        )
+        ) + (guestd.PYTHON[ctx.spec.os.value],)
         failures = []
         for python in candidates:
             argv = [python, "-c", script]

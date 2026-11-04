@@ -88,11 +88,11 @@ args = ["--index", "/srv/index"]            # stdio
 # headers = { Authorization = "Bearer ${SEARCH_TOKEN}" }  # streamable-http
 
 [agent]                                     # the evaluated agent and the oracle
-user = "user"                               # account; must exist in the image; default user
+user = "user"                               # account in the image; root needs sudo; default user
 timeout_sec = 900                           # positive seconds; default 900
 network_mode = "allowlist"                  # no-network | allowlist | public; default no-network
 allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
-sudo = false                                # ALE; working sudo (Administrator on Windows)
+sudo = false                                # ALE; sudo works exactly when true (Administrator on Windows)
 # workdir = "project"                       # ALE; where the agent starts; default its home
 
 [verifier]
@@ -255,7 +255,7 @@ permission, and piece of initial state required by the Task. The Linux bases are
 - VM: `ghcr.io/agentslastexam/vm-ubuntu24-base` (Ubuntu 24.04).
 
 Name an exact version, such as `:0.1.1`, never `latest`; `ale new-task` writes the
-engine's current version, and `ale lint` reports a `FROM` or `docker_image` with no tag or
+base's current version, and `ale lint` reports a `FROM` or `docker_image` with no tag or
 `latest`. A Task keeps building from the version it names until its author moves it
 ([Sandbox image](sandbox-image.md#versions)).
 
@@ -365,13 +365,15 @@ that run; the RunLock records what the run used. See
 implementation conventionally lives in `tests/verify.py`. ALE uploads the whole directory to
 its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
 directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal
-absolute paths. The verification image must expose system Python 3.12
-or newer. Before each tests entrypoint starts, ALE selects an existing compatible Python,
-stages `ale_verify` and its schema validator into that interpreter's site-packages, checks
-the import, then sets `ALE_VERIFY_PYTHON` in the entrypoint's process environment.
+absolute paths. Before each tests entrypoint starts, ALE selects a Python 3.12+: the image's
+own when it has one, since that is where the Task installs what `verify.py` imports, and
+otherwise the framework's own. It stages `ale_verify` and its schema validator into that
+interpreter's site-packages, checks the import, then sets `ALE_VERIFY_PYTHON` in the
+entrypoint's process environment.
 It is available to the tests and their child processes, including during `validate` and
 `reverify`; it is not initialized by the image build, setup stage, or SDK import.
-ALE does not install Python or replace the solver's default interpreter.
+ALE does not install Python into the image's environment or replace the solver's default
+interpreter.
 
 The Linux entry is:
 

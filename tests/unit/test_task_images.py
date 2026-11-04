@@ -28,21 +28,21 @@ from ale.run.tasksets.manifest import load_tasks
 pytestmark = pytest.mark.unit
 
 #: What the framework layer was asked for, by the tests that look.
-LAYERED: list[tuple[str, str, bool, bool]] = []
+LAYERED: list[tuple[str, str, bool]] = []
 
 
 @pytest.fixture(autouse=True)
 def framework_layer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """These tests exercise the pipeline; the layer itself is tested in test_framework."""
 
-    async def layer(image: str, *, user: str, sudo: bool, vm: bool = False) -> str:
-        LAYERED.append((image, user, sudo, vm))
+    async def layer(image: str, *, user: str, vm: bool = False) -> str:
+        LAYERED.append((image, user, vm))
         return image
 
     async def frame(
-        image: PreparedTaskImage, *, operating_system: OperatingSystem, user: str, sudo: bool
+        image: PreparedTaskImage, *, operating_system: OperatingSystem, user: str
     ) -> tuple:
-        LAYERED.append((image.runtime_ref, user, sudo, True))
+        LAYERED.append((image.runtime_ref, user, True))
         return image, False
 
     LAYERED.clear()
@@ -282,7 +282,7 @@ async def test_buildx_uses_fixed_context_and_observes_container_identity(
     assert inspect[-1] == prepared.prepared_identity
     assert prepared.prepared_identity == "sha256:" + "c" * 64
     assert registry.get(ImageKind.CONTAINER).inputs == [prepared]
-    assert [(prepared.runtime_ref, "user", False, False)] == LAYERED
+    assert [(prepared.runtime_ref, "user", False)] == LAYERED
 
 
 @pytest.mark.asyncio
@@ -359,15 +359,16 @@ async def test_unchanged_task_uses_its_prepared_image_without_building(
     await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
     assert len(builds) == 2
 
+    # Elevation is set at every sandbox start, so the image serves either declaration.
     task.spec = task.spec.model_copy(
         update={"resources": task.spec.resources.model_copy(update={"sudo": True})}
     )
     await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
-    assert len(builds) == 3
+    assert len(builds) == 2
 
     images.clear()
     await prepare_task_image(task, _Registry())  # type: ignore[arg-type]
-    assert len(builds) == 4
+    assert len(builds) == 3
 
 
 @pytest.mark.asyncio
@@ -430,7 +431,7 @@ async def test_preparation_result_orders_ref_and_artifact_stages(write_task_repo
         "framework-layer",
         "artifact-check",
     ]
-    assert LAYERED == [("/cache/disk.qcow2", "user", False, True)]
+    assert LAYERED == [("/cache/disk.qcow2", "user", True)]
     assert all(step.outcome == "executed" for step in result.steps)
 
 

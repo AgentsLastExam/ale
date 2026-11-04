@@ -38,6 +38,30 @@ serves it on.
 | QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay is then rebased on its own base and converted into a standalone zstd-compressed qcow2 in `~/.cache/ale/qemu-snapshots/<sandbox id>/`, beside `snapshot.json` with its episode, role, OS, prepared image and disk digest. Standalone, it outlives the image cache. Compression made a 23 GB Windows disk 15 GB and exported it in 71 s rather than 82 s. A VM boots from it through a fresh overlay. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so `accepts` refuses them |
 
+## Agent elevation on Linux
+
+The framework layer installs `sudo` with the image's package manager when the image lacks
+it, and grants nothing. Every Linux Provider calls `privileges.set_elevation` through the
+root guestd, then `privileges.verify_identities`, before any Task code runs: Docker once
+`docker exec` has started guestd, QEMU once the booted guest answers, Daytona before it
+starts the image's own command. The script runs on the framework's Python:
+
+- It replaces the last two lines of `/etc/sudoers`, a marker comment and one rule:
+  `<user> ALL=(ALL:ALL) NOPASSWD: ALL` to grant, `<user> ALL=(ALL:ALL) !ALL` to revoke.
+  Sudo applies the last rule that matches, so that rule decides whatever the image's own
+  rules, drop-ins and groups say, including for processes the image started before it,
+  such as Docker's container command and a VM's desktop session. A snapshot carries the
+  rule its Sandbox had, and the next start replaces it.
+- Revoking also takes the account out of `sudo`, `wheel` and `admin` in `/etc/group` and
+  `/etc/gshadow`, the groups distributions make administrators, which polkit and others
+  trust without asking sudo.
+- An account that is uid 0 cannot be revoked, so `[agent].user` naming one without
+  `[agent].sudo = true` is a `TaskDefinitionError`.
+
+`verify_identities` then checks `sudo -n true` as the agent, so a grant that does not work
+(an image with no sudo and no package manager to install it) is refused with that reason,
+as is a way up the revocation missed.
+
 ## Daytona
 
 Daytona's sandboxes are built for a different trust model than ALE's, so `daytona.py`
@@ -93,10 +117,11 @@ framework is a Windows service instead. It is a registry key under the control s
 disk boots from, written into the SYSTEM hive with hivex, plus files copied into
 `C:\ProgramData\ALE`:
 
-- Checks first, from the hives alone (SAM for the account, SOFTWARE for automatic sign-in,
-  UAC and Python 3.12+ for all users): each failure names the one thing the disk lacks.
-  A disk left hibernated by Fast Startup cannot be written, and says so.
-- The service `ALEGuestd` runs `guestd/service.py` as LocalSystem. At boot it limits
+- Checks first, from the hives alone (SAM for the account, SOFTWARE for automatic sign-in
+  and UAC): each failure names the one thing the disk lacks. A disk left hibernated by
+  Fast Startup cannot be written, and says so.
+- The service `ALEGuestd` runs `guestd/service.py` as LocalSystem on the framework's own
+  Python, copied to `C:\ProgramData\ALE\python`, as is guestd. At boot it limits
   `C:\ProgramData\ALE` to the system and Administrators, because files written offline
   carry no access list and otherwise come out writable by everyone, then gives Users read
   and execute access to `cua-driver`. It opens guestd's port to the runner's address only,

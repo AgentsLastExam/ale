@@ -16,3 +16,9 @@ PORT = 7411
 #: The Host's address on a VM's network. It is the only address a VM's firewall lets reach the
 #: guest service.
 HOST_ADDRESS = "172.30.0.1"
+#: The framework's own Python, which guestd runs on, per guest operating system. Only the
+#: framework's identity can run it: root on Linux, the system and Administrators on Windows.
+PYTHON = {
+    "linux": "/opt/ale/python/bin/python3",
+    "windows": r"C:\ProgramData\ALE\python\python.exe",
+}
