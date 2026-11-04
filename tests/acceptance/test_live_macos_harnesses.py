@@ -1,9 +1,10 @@
 """Opt-in macOS Harness acceptance on disposable Orchard VMs.
 
-Set ALE_RUN_LIVE_ACCEPTANCE=1, ALE_LIVE_MACOS_CONFIG to a private run TOML,
-and ALE_ORCHARD_TEST_IMAGE / ALE_ORCHARD_TEST_USER to a prepared desktop image
-and its account. The TOML supplies Orchard and API-key Gateway configuration;
-credentials stay in the environment. Select one Harness with pytest -k and use
+Run on a Mac whose local Orchard ``scripts/setup_macos.py`` keeps running. Set
+ALE_RUN_LIVE_ACCEPTANCE=1, ALE_LIVE_MACOS_CONFIG to a private run TOML, and
+ALE_ORCHARD_TEST_IMAGE / ALE_ORCHARD_TEST_USER to an image that logs that account in
+automatically. The TOML supplies the API-key Gateway configuration; credentials stay
+in the environment. Select one Harness with pytest -k and use
 its Gateway dialect: Responses for the CLIs, Anthropic for computer-use. Each test
 creates and destroys its own VM.
 """
@@ -19,7 +20,7 @@ import pytest
 
 from ale.core.config import LoggingPolicy, load_run_config
 from ale.core.harness import EffectiveAgentResources
-from ale.core.taskspec import ImageKind, OperatingSystem
+from ale.core.taskspec import OperatingSystem
 from ale.core.verdict import Status
 from ale.run.cli.tasks import PRESET_DIR, _harness
 from ale.run.episode import run_episode
@@ -27,7 +28,6 @@ from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
 from ale.run.harnesses.base import STDOUT_PATH
 from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.orchard import OrchardProvider
 from ale.run.secrets import provider_credentials
 from ale.run.tasksets.manifest import load_task_folder
 from ale.run.tools import resolved_cua_desktop
@@ -92,8 +92,6 @@ async def test_macos_harness_completes_task_and_records_tools(tmp_path: Path, na
         run_path=Path(config_path),
         overrides=[f"agent.name={name}", "agent.authentication=api-key"],
     )
-    assert config.vm.provider == "orchard"
-    assert config.vm.orchard.driver_path and config.vm.orchard.socket_path
     harness = _harness(config)
     harness.validate_os(OperatingSystem.MACOS)
     policy = name == "computer-use"
@@ -112,7 +110,7 @@ async def test_macos_harness_completes_task_and_records_tools(tmp_path: Path, na
         result = await run_episode(
             task,
             EpisodeProtocol(harness, max_steps=20, stall_limit=6),
-            provider_registry(OrchardProvider(config.vm.orchard), kind=ImageKind.VM),
+            provider_registry(),
             run_dir=tmp_path / "runs",
             gateway_url=gateway.base_url,
             gateway=gateway,

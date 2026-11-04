@@ -166,7 +166,7 @@ class _Lease:
 
     async def acquire(self, request: SandboxRequest) -> Sandbox:
         roles, policy = self._policy(request)
-        provider = self.providers.get(request.image_kind)
+        provider = self.providers.get(request.image_kind, request.os)
         sandbox = await provider.create(request.model_copy(update={"retention": policy}))
         self.live.append(_LeaseEntry(sandbox, provider.name, roles, policy))
         return sandbox
@@ -264,7 +264,9 @@ class _Lease:
 
     async def _destroy_snapshot(self, entry: _LeaseEntry, handle: str) -> None:
         try:
-            await self.providers.get(entry.sandbox.request.image_kind).destroy_retained(handle)
+            sandbox_request = entry.sandbox.request
+            provider = self.providers.get(sandbox_request.image_kind, sandbox_request.os)
+            await provider.destroy_retained(handle)
         except Exception as exc:
             entry.sanitation_reason = str(exc)
             raise RetentionFinalizationError(f"could not destroy snapshot {handle}: {exc}") from exc

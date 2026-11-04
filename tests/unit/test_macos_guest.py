@@ -35,14 +35,16 @@ def test_macos_framework_capture_and_input_use_task_account(
         gui.os, "initgroups", lambda name, gid: identities.append(("groups", name, gid))
     )
     monkeypatch.setattr(gui.os, "setuid", lambda uid: identities.append(("uid", uid)))
-    calls = []
+    calls, arguments = [], []
 
     def run(command, **options):
         assert options["env"]["HOME"] == "/Users/artist"
         assert options["env"]["USER"] == options["env"]["LOGNAME"] == "artist"
         assert command[-2:] == ["--socket", "/tmp/artist.sock"]
         options["preexec_fn"]()
-        calls.append(json.loads(options["input"].splitlines()[-1])["params"]["name"])
+        params = json.loads(options["input"].splitlines()[-1])["params"]
+        calls.append(params["name"])
+        arguments.append(params.get("arguments") or {})
         image = {"type": "image", "data": base64.b64encode(b"png").decode()}
         structured = {"screenshot_width": 400, "screenshot_height": 200}
         return subprocess.CompletedProcess(command, 0, _reply([image], structured), "")
@@ -60,6 +62,9 @@ def test_macos_framework_capture_and_input_use_task_account(
         == 3
     )
     assert calls == ["get_desktop_state", "get_desktop_state", "click", "type_text", "hotkey"]
+    # No one else uses a sandbox's screen, so the pointer is driven even over background apps.
+    assert arguments[2]["scope"] == "desktop" and arguments[2]["delivery_mode"] == "foreground"
+    assert "delivery_mode" not in arguments[3] and "delivery_mode" not in arguments[4]
     assert identities == [("gid", 20), ("groups", "artist", 20), ("uid", 502)] * len(calls)
     assert os.environ["HOME"] == "/var/root"
 

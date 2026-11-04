@@ -13,20 +13,21 @@ import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 from tests.support import edit_task_config, write_task
 
-from ale.core.config import OrchardProviderConfig, RunConfig, RunTimeouts
+from ale.core.config import RunConfig, RunTimeouts
 from ale.core.errors import GuestUnreachableError
 from ale.core.verdict import Status
 from ale.run import guestd
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers import ProviderRegistry
+from ale.run.providers import ProviderRegistry, orchard
 from ale.run.providers.orchard import OrchardProvider
-from ale.run.providers.orchard_client import OrchardExecResult
+from ale.run.providers.orchard_framing import FramedImage
 from ale.run.tasksets.manifest import load_tasks
 from ale.run.transport import GuestClient, StdioTransport
 
@@ -45,7 +46,6 @@ class MemoryGuest:
         fail_setup: bool = False,
         wait_oracle: bool = False,
         timeout_oracle: bool = False,
-        sudo_flag: str = "false",
         verify_failure: str | None = None,
         shared: MemoryGuest | None = None,
         user: str = "user",
@@ -56,11 +56,11 @@ class MemoryGuest:
         self.operations: list[tuple[str, dict[str, object]]] = shared.operations if shared else []
         self.responses: asyncio.Queue[str] = asyncio.Queue()
         self.stages: list[str] = shared.stages if shared else []
+        self.privileges: list[str] = shared.privileges if shared else []
         self.closed = False
         self.fail_setup = fail_setup
         self.wait_oracle = wait_oracle
         self.timeout_oracle = timeout_oracle
-        self.sudo_flag = sudo_flag
         self.verify_failure = verify_failure
         self.oracle_started = asyncio.Event()
         self._upload: tuple[int, str] | None = None
@@ -199,7 +199,10 @@ class MemoryGuest:
         assert isinstance(argv, list)
         cwd, env = params.get("cwd"), params.get("env", {})
         if argv[:3] == ["/usr/bin/sudo", "-l", "-U"]:
-            return 1, b""
+            return 0, f"User {self.user} is not allowed to run sudo on mac.\n".encode()
+        if argv[:2] == ["/bin/sh", "-c"] and argv[2] in (orchard._GRANT_SUDO, orchard._REVOKE_SUDO):
+            self.privileges.append("grant" if argv[2] == orchard._GRANT_SUDO else "revoke")
+            return 0, b""
         if argv[:2] == ["sh", "-c"] and "$(id -u)" in argv[2]:
             return 0, b"501 no" if params.get("run_as") == self.user else b"0 yes"
         if argv == ["bash", "setup.sh"] and cwd == "/opt/ale/setup":
@@ -356,24 +359,6 @@ class MemoryOrchard:
         self.deleted.append(name)
         self.vm = None
 
-    async def exec(
-        self,
-        name: str,
-        argv: Sequence[str],
-        *,
-        stdin: bytes,
-        timeout_sec: float,
-        deadline: float | None = None,
-    ) -> OrchardExecResult:
-        assert self.vm and self.vm["name"] == name
-        assert argv[:2] == ["sudo", "-n"]
-        assert "main.py" in json.loads(stdin)
-        assert argv[-3] == self.guest.user
-        assert argv[-2] == self.guest.sudo_flag
-        return OrchardExecResult(
-            0, json.dumps({"agent_home": f"/Users/{self.guest.user}"}).encode(), b""
-        )
-
     async def connect_guest(
         self, name: str, argv: Sequence[str], *, deadline: float | None = None
     ) -> MemoryGuest:
@@ -400,13 +385,29 @@ def episode_fixture(
     setup = task / "environment" / "setup" / "setup.sh"
     setup.parent.mkdir(parents=True)
     setup.write_text("#!/bin/bash\n# In-memory phase fixture.\n")
-    config = OrchardProviderConfig(endpoint="https://orchard.invalid")
-    registry = ProviderRegistry(RunConfig(vm={"provider": "orchard", "orchard": config}))
-    provider = registry.get(load_tasks(task)[0].spec.image.kind)
+    spec = load_tasks(task)[0].spec
+    registry = ProviderRegistry(RunConfig())
+    provider = registry.get(spec.image.kind, spec.os)
     assert isinstance(provider, OrchardProvider)
     controller = MemoryOrchard(guest)
-    monkeypatch.setattr(provider, "_new_client", lambda: controller)
+    monkeypatch.setattr(provider, "_local_orchard", SimpleNamespace(client=lambda: controller))
+    monkeypatch.setattr(orchard, "frame_image", _framed)
+    monkeypatch.setattr(orchard, "check_framer", lambda: None)
+    monkeypatch.setattr(orchard, "await_desktop", _desktop)
     return task, registry, controller
+
+
+async def _framed(local, image, *, user) -> FramedImage:
+    return FramedImage(
+        name="ale-framed-fixture",
+        identity="sha256:" + "e" * 64,
+        agent_home=f"/Users/{user}",
+        agent_uid=501,
+    )
+
+
+async def _desktop(client, *, agent_user, agent_uid, timeout_sec) -> None:
+    pass
 
 
 @pytest.mark.asyncio
@@ -440,6 +441,8 @@ async def test_orchard_episode_scores_and_captures_before_verify(
     assert guest.stages == (
         ["setup", "oracle", "capture", "verify"] if oracle else ["setup", "capture", "verify"]
     )
+    # The Task declares no sudo, so the agent's sandbox takes it away at boot.
+    assert guest.privileges == ["revoke"]
     artifact = result.run_dir / "artifacts/0000/result.txt"
     if oracle:
         assert artifact.read_bytes() == b"hello macOS"
@@ -473,13 +476,16 @@ async def test_orchard_separate_verifier_restores_solver_artifacts_and_modes(
             }
         },
     )
-    verifier = MemoryGuest(sudo_flag="true")
+    verifier = MemoryGuest()
     verifier_controller = MemoryOrchard(verifier)
-    provider = providers.get(load_tasks(task)[0].spec.image.kind)
+    spec = load_tasks(task)[0].spec
+    provider = providers.get(spec.image.kind, spec.os)
     monkeypatch.setattr(
         provider,
-        "_new_client",
-        lambda: verifier_controller if solver_controller.created else solver_controller,
+        "_local_orchard",
+        SimpleNamespace(
+            client=lambda: verifier_controller if solver_controller.created else solver_controller
+        ),
     )
 
     result = await run_episode(

@@ -7,14 +7,13 @@ import base64
 import json
 import stat
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
 from ale.run.guestd import gui
 from ale.run.providers import orchard_desktop
-from ale.run.transport import GuestClient
 
 pytestmark = pytest.mark.unit
 
@@ -121,55 +120,97 @@ def test_desktop_probe_rejects_non_image_capture(desktop, monkeypatch):
         gui.probe_macos_desktop("evaluator", DRIVER, SOCKET)
 
 
+class Guest:
+    """The guest as readiness sees it: who holds the console, then each probe's result."""
+
+    def __init__(self, *probes, console=("evaluator",), start=(0, "", "", False)):
+        self.console, self.probes, self.start = list(console), list(probes), start
+        self.calls = []
+
+    @staticmethod
+    def _next(results):
+        return results.pop(0) if len(results) > 1 else results[0]
+
+    async def exec(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        if argv[0] == "/usr/bin/stat":
+            result = self._next(self.console)
+            return await result() if callable(result) else (0, result + "\n", "", False)
+        if argv[0] == "/bin/launchctl":
+            return self.start
+        result = self._next(self.probes)
+        return await result() if callable(result) else result
+
+    def probe_calls(self):
+        return [call for call in self.calls if call[0][0] == MACOS_PYTHON]
+
+
 async def wait(client, **kwargs):
-    await orchard_desktop.await_desktop(
-        client,
-        agent_user="evaluator",
-        python_path="/usr/local/bin/python3",
-        driver_path=DRIVER,
-        socket_path=SOCKET,
-        **kwargs,
-    )
+    await orchard_desktop.await_desktop(client, agent_user="evaluator", agent_uid=502, **kwargs)
 
 
-async def test_readiness_runs_capture_as_agent_without_root_fallback():
-    client = AsyncMock(spec=GuestClient)
-    client.exec.return_value = (0, "ready\n", "", False)
+async def test_readiness_starts_the_driver_in_the_signed_in_session_then_probes_as_agent(
+    monkeypatch,
+):
+    monkeypatch.setattr(orchard_desktop, "_RETRY_INTERVAL", 0)
+    client = Guest((0, "ready\n", "", False), console=("root", "evaluator"))
     await wait(client)
-    argv = client.exec.call_args.args[0]
-    assert argv[:4] == ["/usr/local/bin/python3", "-I", "-S", "-c"]
-    assert argv[-3:] == ["evaluator", DRIVER, SOCKET]
-    assert client.exec.call_args.kwargs["run_as"] == "evaluator"
-    client.screenshot.assert_not_called()
+    starts = [call for call in client.calls if call[0][0] == "/bin/launchctl"]
+    assert starts == [(orchard_desktop.driver_argv("evaluator", 502), {"timeout_sec": 30})]
+    assert starts[0][0][:7] == [
+        "/bin/launchctl",
+        "asuser",
+        "502",
+        "/usr/bin/sudo",
+        "-u",
+        "evaluator",
+        "/usr/bin/open",
+    ]
+    assert MACOS_DRIVER_SOCKET in starts[0][0]
+    ((argv, kwargs),) = client.probe_calls()
+    assert argv[:4] == [MACOS_PYTHON, "-I", "-S", "-c"]
+    assert argv[-3:] == ["evaluator", MACOS_DRIVER, MACOS_DRIVER_SOCKET]
+    assert kwargs["run_as"] == "evaluator"
 
 
 async def test_readiness_retries_starting_desktop(monkeypatch):
     monkeypatch.setattr(orchard_desktop, "_RETRY_INTERVAL", 0)
-    client = AsyncMock(spec=GuestClient)
-    client.exec.side_effect = [(75, "", "not ready", False), (0, "ready\n", "", False)]
+    client = Guest((75, "", "not ready", False), (0, "ready\n", "", False))
     await wait(client)
-    assert client.exec.call_count == 2
+    assert len(client.probe_calls()) == 2
+    assert sum(call[0][0] == "/bin/launchctl" for call in client.calls) == 1
 
 
 async def test_readiness_fails_identity_mismatch_without_retry():
-    client = AsyncMock(spec=GuestClient)
-    client.exec.return_value = (78, "", "console uid differs", False)
+    client = Guest((78, "", "console uid differs", False))
     with pytest.raises(ProviderCapabilityError, match="console uid differs"):
         await wait(client)
-    assert client.exec.call_count == 1
+    assert len(client.probe_calls()) == 1
 
 
 async def test_readiness_failure_has_bounded_wait_and_last_diagnostic(monkeypatch):
     monkeypatch.setattr(orchard_desktop, "_RETRY_INTERVAL", 0)
-    client = AsyncMock(spec=GuestClient)
-    client.exec.return_value = (75, "", "Permission denied", False)
+    client = Guest((75, "", "Permission denied", False))
     with pytest.raises(ProviderStartError, match="Permission denied"):
         await wait(client, timeout_sec=0.01)
 
 
+async def test_readiness_waits_for_the_account_to_sign_in(monkeypatch):
+    monkeypatch.setattr(orchard_desktop, "_RETRY_INTERVAL", 0)
+    client = Guest((0, "ready\n", "", False), console=("root",))
+    with pytest.raises(ProviderStartError, match="not signed in"):
+        await wait(client, timeout_sec=0.01)
+    assert not client.probe_calls()
+
+
+async def test_a_driver_that_cannot_start_fails_readiness():
+    client = Guest((0, "ready\n", "", False), start=(1, "", "LSOpen failed", False))
+    with pytest.raises(ProviderStartError, match="LSOpen failed"):
+        await wait(client)
+
+
 async def test_readiness_does_not_accept_invalid_success():
-    client = AsyncMock(spec=GuestClient)
-    client.exec.return_value = (0, "unexpected", "", False)
+    client = Guest((0, "unexpected", "", False))
     with pytest.raises(ProviderStartError, match="invalid"):
         await wait(client)
 
@@ -177,26 +218,22 @@ async def test_readiness_does_not_accept_invalid_success():
 async def test_readiness_cancellation_is_not_retried():
     entered = asyncio.Event()
 
-    async def hanging(*args, **kwargs):
+    async def hanging():
         entered.set()
         await asyncio.Event().wait()
 
-    client = AsyncMock(spec=GuestClient)
-    client.exec.side_effect = hanging
+    client = Guest(hanging)
     task = asyncio.create_task(wait(client))
     await entered.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert client.exec.call_count == 1
+    assert len(client.probe_calls()) == 1
 
 
 async def test_readiness_overall_deadline_bounds_stuck_transport():
-    client = AsyncMock(spec=GuestClient)
-
-    async def hanging(*args, **kwargs):
+    async def hanging():
         await asyncio.Event().wait()
 
-    client.exec.side_effect = hanging
     with pytest.raises(ProviderStartError, match="did not become ready"):
-        await wait(client, timeout_sec=0.01)
+        await wait(Guest(hanging, console=(hanging,)), timeout_sec=0.01)

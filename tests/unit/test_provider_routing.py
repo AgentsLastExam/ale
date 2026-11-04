@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from ale.core.config import RunConfig, SandboxRetentionConfig
 from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import ImageKind, PreparedTaskImage, SandboxRequest
-from ale.core.taskspec import NetworkPolicy, Resources
+from ale.core.taskspec import NetworkPolicy, OperatingSystem, Resources
 from ale.run.cli.main import _destroy_retained_sandbox, _list_retained_sandboxes, app
 from ale.run.episode import _Lease
 from ale.run.providers import ProviderRegistry
@@ -35,12 +35,12 @@ def test_provider_slots_are_strict_and_default_to_builtins() -> None:
 def test_provider_registry_is_lazy_and_reuses_each_slot() -> None:
     registry = ProviderRegistry(RunConfig())
     assert registry._instances == {}
-    container = registry.get(ImageKind.CONTAINER)
-    machine = registry.get(ImageKind.VM)
+    container = registry.get(ImageKind.CONTAINER, OperatingSystem.LINUX)
+    machine = registry.get(ImageKind.VM, OperatingSystem.LINUX)
     assert isinstance(container, DockerProvider)
     assert isinstance(machine, QemuProvider)
-    assert registry.get(ImageKind.CONTAINER) is container
-    assert registry.get(ImageKind.VM) is machine
+    assert registry.get(ImageKind.CONTAINER, OperatingSystem.LINUX) is container
+    assert registry.get(ImageKind.VM, OperatingSystem.LINUX) is machine
 
 
 def test_legacy_provider_option_is_not_public() -> None:
@@ -94,7 +94,7 @@ class _Provider:
 async def test_one_lease_routes_each_request_and_attributes_its_provider() -> None:
     container = _Provider("docker")
     vm = _Provider("qemu")
-    registry = SimpleNamespace(get=lambda kind: container if kind is ImageKind.CONTAINER else vm)
+    registry = SimpleNamespace(get=lambda kind, _: container if kind is ImageKind.CONTAINER else vm)
     lease = _Lease(registry, SandboxRetentionConfig())  # type: ignore[arg-type]
 
     solver = await lease.acquire(_request(ImageKind.CONTAINER))
@@ -110,7 +110,7 @@ async def test_one_lease_routes_each_request_and_attributes_its_provider() -> No
 @pytest.mark.asyncio
 async def test_missing_provider_fails_at_request_admission() -> None:
     class Registry:
-        def get(self, kind: ImageKind) -> None:
+        def get(self, kind: ImageKind, operating_system: object) -> None:
             raise ProviderCapabilityError(f"no provider for {kind}")
 
     lease = _Lease(Registry(), SandboxRetentionConfig())  # type: ignore[arg-type]

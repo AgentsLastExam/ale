@@ -82,9 +82,16 @@ How the install works, and what it costs, is in
 
 ## What a macOS image needs
 
-ALE neither builds nor frames a macOS image: the Provider installs guestd into each VM it
-boots, because macOS images cannot be modified offline. What the image must carry is in the
-[Orchard Provider](../../packages/ale-run/src/ale/run/providers/README.md#orchard).
+A macOS Task may use any Tart image that signs the Task's account in to its desktop
+automatically. ALE adds the framework as it does to a Linux or Windows disk, offline into
+a copy of the image, once per image, framework and account: guestd, a Python of the
+framework's own, since a stock macOS has none recent enough, and Cua Driver with the
+privacy grants macOS otherwise takes only through its settings. The copy is booted once so
+macOS finishes the account's first login, whose one-time notices would otherwise appear in
+every sandbox, and kept as the local image every sandbox starts from. Every macOS
+sandbox the agent works in shows that account's desktop. Elevation for `[agent].sudo` is
+granted or taken away at each boot, as on Windows. What else the image must allow is in
+the [Orchard Provider](../../packages/ale-run/src/ale/run/providers/README.md#orchard).
 
 ## ALE base images
 
@@ -365,18 +372,17 @@ desktop session are required; the Provider checks both framework and agent privi
 before Task execution. A Windows Task image is rebuilt when the framework changes, and a
 direct `vm_image` disk is framed like any other.
 
-Elevation is never part of a Linux or Windows image. On both systems the Provider sets it at
-every sandbox start, before Task code runs, so one prepared image serves a Task with and
-without `[agent].sudo`, its solver and its verifier alike, and a Sandbox continued from a
-snapshot gets what its own request asks for. On Linux the root guestd grants the agent's
-account elevation, or revokes every way up through sudo and the groups distributions make
+Elevation is never part of an image. On every system the Provider sets it at every sandbox
+start, before Task code runs, so one prepared image serves a Task with and without
+`[agent].sudo`, its solver and its verifier alike, and a Sandbox continued from a snapshot
+gets what its own request asks for. On Linux and macOS the root guestd grants the agent's
+account elevation, or revokes every way up through sudo and the groups that make
 administrators; how is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#agent-elevation-on-linux).
-A macOS image brings its account's grants itself. Nothing can keep a root account from
-elevating, so a Task whose `[agent].user` is root must declare `[agent].sudo = true`. Grants,
-and their absence, are verified and recorded: a Linux or macOS sandbox is refused when its
-guest service is not root, when a requested grant does not work, or when an agent that did
-not request one is root or can use sudo.
+Nothing can keep a root account from elevating, so a Task whose `[agent].user` is root
+must declare `[agent].sudo = true`. Grants, and their absence, are verified and recorded: a
+Linux or macOS sandbox is refused when its guest service is not root, when a requested
+grant does not work, or when an agent that did not request one can still use sudo.
 
 ALE does not pre-create artifacts or repair their ownership: image/setup/agent code owns
 their type and existence.

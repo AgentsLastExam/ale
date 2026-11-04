@@ -1,13 +1,11 @@
 """Opt-in Orchard qualification against the shared Sandbox contract.
 
-Run only against a disposable worker/image with ALE_TEST_ORCHARD=1,
-ALE_ORCHARD_TEST_CONFIG (an OrchardProviderConfig JSON object),
-ALE_ORCHARD_TEST_IMAGE (digest-pinned OCI reference), and ALE_ORCHARD_TEST_USER.
-The configured account must satisfy sudo=false. Credentials use the config's
-explicit environment-variable names; this suite never loads a checkout config.
-The suite uses one image. Configure driver_path and socket_path for that image
-to include desktop capture/input checks; omit them for headless qualification.
-Each test creates and destroys its own VM; none adopts an existing VM.
+Run on a Mac whose local Orchard ``scripts/setup_macos.py`` keeps running, with
+ALE_TEST_ORCHARD=1, ALE_ORCHARD_TEST_IMAGE (digest-pinned OCI reference) and
+ALE_ORCHARD_TEST_USER, the account the image signs in automatically, other than ``admin``
+so that the sudo=false cases apply. Every macOS sandbox has that account's desktop, so the
+desktop capture and input checks always run. Each test creates and destroys its own VM;
+none adopts an existing VM.
 """
 
 from __future__ import annotations
@@ -16,7 +14,6 @@ import os
 
 import pytest
 
-from ale.core.config import OrchardProviderConfig
 from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import ImageRef, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
@@ -34,7 +31,7 @@ pytestmark = [
 
 
 class TestOrchardProvider(ProviderConformance):
-    """Shared file, identity, lifecycle, resource and optional desktop guarantees.
+    """Shared file, identity, lifecycle, resource and desktop guarantees.
 
     Orchard rejects sealed networks and retention at admission. Those two inherited
     cases check that rejection explicitly; all other shared assertions run unchanged.
@@ -42,11 +39,10 @@ class TestOrchardProvider(ProviderConformance):
 
     @pytest.fixture(autouse=True)
     def configure(self) -> None:
-        config = OrchardProviderConfig.model_validate_json(os.environ["ALE_ORCHARD_TEST_CONFIG"])
-        self.provider = OrchardProvider(config)
+        self.provider = OrchardProvider()
         self.image = ImageRef(kind="vm", reference=os.environ["ALE_ORCHARD_TEST_IMAGE"])
         self.user = os.environ["ALE_ORCHARD_TEST_USER"]
-        self.gui_image = self.image if config.driver_path else None
+        self.gui_image = self.image
 
     async def request(self, **overrides: object) -> SandboxRequest:
         resources = overrides.get("resources", Resources())

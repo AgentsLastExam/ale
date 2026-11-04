@@ -88,7 +88,7 @@ async def test_mixed_provider_retention_keeps_actual_provider_attribution() -> N
             return Sandbox(self.name, request)
 
     docker, qemu = Provider("docker"), Provider("qemu")
-    registry = SimpleNamespace(get=lambda kind: docker if kind is ImageKind.CONTAINER else qemu)
+    registry = SimpleNamespace(get=lambda kind, _: docker if kind is ImageKind.CONTAINER else qemu)
     lease = _Lease(
         registry,  # type: ignore[arg-type]
         SandboxRetentionConfig(solver="keep", verifier="destroy"),

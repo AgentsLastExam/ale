@@ -30,7 +30,7 @@ serves it on.
 | Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone |
 | QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
 | Daytona | `guestd/tunnel.py` listens at 7412 on the sandbox's loopback |
-| Orchard | A relay the Provider starts as root at boot listens at `127.0.0.1:7412` in the VM and connects to the Gateway's port at the Host address below; it lives until the VM is deleted |
+| Orchard | A relay the Provider starts as root at boot listens at `127.0.0.1:7412` in the VM and connects to the Gateway's port at the Mac, the VM's default IPv4 route; it lives until the VM is deleted |
 
 ## Snapshots
 
@@ -137,40 +137,68 @@ disk boots from, written into the SYSTEM hive with hivex, plus files copied into
 
 ## Orchard
 
-Orchard creates a fresh Tart VM per Sandbox. Select it with `vm.provider = "orchard"`;
-QEMU remains the default. Local Apple Silicon deployments are validated; remote workers
-are unvalidated. Setup, configuration and cleanup are in the
+Every macOS VM is a fresh Tart VM on the local Orchard controller and worker that
+`scripts/setup_macos.py` runs; the Provider reads their address, credentials and Tart
+from its state directory, so macOS needs no run settings. Setup and cleanup are in the
 [macOS guide](../../../../../../docs/guides/macos-orchard.md).
 
-Images provide Python 3.12+, the Task account and its home, required applications, and
-an execution account with passwordless sudo for guest bootstrap. ALE installs guestd
-in each new VM without changing the shared image; it does not build macOS images.
-Desktop Tasks use either a preauthorized CuaDriver service in the Task account's login
-session or the optional `desktop_bootstrap` flow described in the guide. A separate
-verifier VM runs no agent, so it gets neither the Driver nor the account checks.
+A Tart disk is APFS, which only macOS reads, so `orchard_framing.py` frames an image on
+the Mac, once per image, framework and account, the way the QEMU Provider frames a qcow2:
+it clones the image with Tart and has `framework_macos.sh` change the clone's disk offline.
+`scripts/setup_macos.py` installs that script root-owned as
+`/usr/local/libexec/ale/framework-macos` with a sudoers rule for it alone, and the Provider
+refuses to frame when the installed copy differs from its own. The framer attaches the disk
+without mounting it, mounts only its Data volume, hidden from the Finder and without device
+files or set-uid programs, follows no link on it and runs none of its programs. It checks
+that the Task's account exists with a home and is signed in automatically (`autoLoginUser`
+and `/etc/kcpassword`), then installs:
+
+- guestd and a standalone Python under `/opt/ale` (the Python readable by every account,
+  for the agent's desktop tool);
+- Cua Driver in `/Applications`, with Accessibility and Screen Recording rows in the
+  system TCC database carrying the app's designated requirement, as System Settings
+  writes them, and the account's replayd approval to capture without the system window
+  picker, with the dates replayd checks and a reminder date far ahead;
+- Remote Login and passwordless sudo for `admin`, the account Orchard logs in as.
+
+The clone is then booted once, without the agent or the Driver, until the account is
+signed in and `sfltool dumpbtm` shows its LaunchAgents registered, plus 30 seconds: macOS
+posts a never-booted disk's background-item notice a few seconds after it registers the
+items and reports neither the notice nor having none. Notification Center shows a notice
+nobody dismissed again at every login, so the account's delivered notifications are then
+cleared from its `usernoted` database, as the account, and `usernoted` is killed before it
+can write them back at shutdown. The guest then shuts itself down before its disk is
+kept: Orchard stops a VM with `tart stop --timeout 5`, which powers
+macOS off when its signed-in desktop does not shut down at once and loses what is still in
+memory. The stopped VM becomes the local Tart image `ale-framed-<identity>`; every Sandbox
+clones it, which on APFS copies no data.
+
+In each Sandbox the agent works in, the Provider starts the Driver in the account's login
+session (`launchctl asuser`, then `open` so LaunchServices runs it under the identity the
+grants name) and waits until it captures. guestd sends desktop pointer actions with
+`delivery_mode: foreground`, because the Driver otherwise refuses to move the real pointer
+over a background app's window. Elevation for `[agent].sudo` is not part of the image: as
+on Windows, it is set per boot. `true` adds a passwordless sudoers rule; `false` takes the
+account out of the `admin` group, whose members sudo and approve system changes with their
+password, and deletes sudoers lines that name it; either way the account's rights are then
+checked. `admin` keeps passwordless sudo for ALE, so a Task running as `admin` must declare
+`sudo = true`. A separate verifier VM runs no agent, so it gets neither the desktop nor the
+account changes and checks.
 
 Preparation resolves OCI tags through registry manifest metadata without downloading
-VM disks or checking the worker cache. VM creation uses that pinned digest even if the
-tag changes afterward. Provisioning checks the controller-reported image digest and
-CPU/memory allocation; this trusts Orchard rather than independently measuring the disk.
-Both stages check authenticated cluster access and an eligible ARM64 Tart worker.
-Orchard owns scheduling; provisioning and guest readiness have separate deadlines.
+VM disks or checking the worker cache, and framing clones the digest-pinned reference.
+Provisioning checks the framed image and CPU/memory allocation the controller reports; this trusts Orchard rather than independently measuring the disk. Both stages
+check the local controller and an eligible ARM64 Tart worker. Provisioning (1800 s,
+with queueing and pulls) and guest readiness (300 s) have separate deadlines.
 
-`orchard_permissions.py` installs the pinned, signed Driver and runs its explicit
-`permissions grant` command while VNC handles the System Settings and direct-capture
-consent prompts. It restores ALE's service endpoint before checking actual capture.
-The `macos_permission_*` helpers isolate Host-side VNC/OCR dependencies
-from guestd. Passwords travel through a private pipe and verified TLS, never command
-arguments or Run records. SIP and TCC databases are unchanged. Helpers and tunnels close
-on success, failure and cancellation; `orchard_desktop.py` verifies actual capture as
-the Task account before the solver starts. Desktop input uses native screenshot pixels;
-cursor read-back uses logical points, following the Driver's coordinate contract.
+Orchard credentials travel through verified TLS, never command arguments or Run records.
+SIP is unchanged. `orchard_desktop.py` verifies actual capture as the Task account in every
+agent Sandbox before the solver starts. Desktop input uses native screenshot pixels; cursor
+read-back uses logical points, following the Driver's coordinate contract.
 
 Commands and file reads use separate authenticated WebSocket exec channels. File reads
 are bounded, screenshot transfers are integrity-checked, and command output is
 acknowledged after Host consumption to avoid overrunning the relay's output queue.
-For local default NAT, the Gateway relay reaches the Host at the guest's IPv4 default
-route; `gateway_host` overrides it for other network layouts.
 
 Only explicit `network.mode: open` is supported. Restricted networking needs integration
 and validation across Orchard/Tart versions and worker network configurations. GPU,

@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from ale.core.harness import ResolvedMcpServer
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import OperatingSystem, StdioMcpServer
+from ale.run.framework import MACOS_PYTHON
 
 __all__ = ["CUA_DESKTOP_NAME", "resolved_cua_desktop", "stage_cua_desktop"]
 
@@ -22,7 +23,11 @@ def resolved_cua_desktop(
     operating_system: OperatingSystem = OperatingSystem.LINUX,
 ) -> ResolvedMcpServer:
     """Return the built-in through the same canonical contract as external servers."""
-    command = "python.exe" if operating_system is OperatingSystem.WINDOWS else "python3"
+    command = {
+        OperatingSystem.WINDOWS: "python.exe",
+        # macOS has no Python 3.12 of its own; the framework's is readable by every account.
+        OperatingSystem.MACOS: MACOS_PYTHON,
+    }.get(operating_system, "python3")
     hasher = hashlib.sha256()
     hasher.update(command.encode() + b"\0")
     for source in _SOURCES:

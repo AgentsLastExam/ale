@@ -17,9 +17,19 @@ setup = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(setup)
 
 
-def test_check_missing_does_not_create_state(tmp_path):
+@pytest.fixture(autouse=True)
+def no_root_changes(monkeypatch):
+    """Nothing here may run sudo; the framer tests exercise it with a fake runner."""
+    changes = []
+    monkeypatch.setattr(setup, "install_framer", lambda: changes.append("install"))
+    monkeypatch.setattr(setup, "remove_framer", lambda: changes.append("remove"))
+    return changes
+
+
+def test_check_missing_does_not_create_state(tmp_path, monkeypatch):
     root = tmp_path / "absent"
-    assert setup.main(["--state-dir", str(root), "--check"]) == 1
+    monkeypatch.setattr(setup, "STATE_DIR", root)
+    assert setup.main(["--check"]) == 1
     assert not root.exists()
 
 
@@ -30,13 +40,10 @@ def test_rejects_foreign_directory(tmp_path):
     assert (tmp_path / "important.txt").read_text() == "keep"
 
 
-def test_config_contains_names_not_credentials(tmp_path):
-    state = {"port": 10443, "worker": "ale-local-test"}
-    setup.write_config(tmp_path, state, "secret-test-value")
-    config = (tmp_path / "run.toml").read_text()
-    assert "secret-test-value" not in config
-    assert "gateway_host" not in config
-    assert (tmp_path / "credentials.env").stat().st_mode & 0o777 == 0o600
+def test_the_provider_reads_the_state_setup_writes():
+    from ale.run.providers.orchard_client import STATE_DIR
+
+    assert setup.STATE_DIR == STATE_DIR
 
 
 def test_cleanup_refuses_vms_before_stopping_processes(tmp_path, monkeypatch):
@@ -74,6 +81,20 @@ def test_cleanup_preserves_local_vm_disks_even_without_controller(tmp_path, monk
     with pytest.raises(setup.SetupError, match="contains VMs"):
         setup.cleanup(tmp_path, state)
     assert disk.read_bytes() == b"retained task data"
+
+
+def test_cleanup_removes_the_images_ale_cached(tmp_path, monkeypatch):
+    root = tmp_path / "state"
+    for name in ("ale-framed-0123", "ale-built-4567"):
+        (root / "tart-home/vms" / name).mkdir(parents=True)
+    state = {"processes": {"controller": {"pid": 42}, "worker": {"pid": 43}}}
+    monkeypatch.setattr(setup, "process_matches", lambda record: True)
+    monkeypatch.setattr(setup, "api", lambda *args: [])
+    stopped = []
+    monkeypatch.setattr(setup, "stop_process", lambda record: stopped.append(record["pid"]))
+    setup.cleanup(root, state)
+    assert stopped == [43, 42]
+    assert not root.exists()
 
 
 @pytest.mark.parametrize("stamp", ["2000-01-01T00:00:00Z", None, "bad", "2026-01-01T00:00:00"])
@@ -162,15 +183,18 @@ def test_initialize_leaves_task_placement_to_orchard(tmp_path, monkeypatch):
     args = commands["worker"]
     assert args[args.index("--name") + 1] == state["worker"]
     assert "--labels" not in args
-    assert state["worker"] not in (root / "run.toml").read_text()
+    assert not (root / "run.toml").exists() and not (root / "credentials.env").exists()
 
 
-def test_setup_starts_with_no_arguments_using_default_state_directory(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+def test_setup_starts_with_no_arguments_in_its_state_directory(
+    tmp_path, monkeypatch, no_root_changes
+):
+    monkeypatch.setattr(setup, "STATE_DIR", tmp_path / "state")
     calls = []
     monkeypatch.setattr(setup, "initialize", lambda *args: calls.append(args))
     assert setup.main([]) == 0
-    assert calls == [(tmp_path / ".local/share/ale/macos", None, None)]
+    assert calls == [(tmp_path / "state", None, None)]
+    assert no_root_changes == ["install"]
 
 
 def test_setup_stays_the_parent_of_the_worker_it_started(tmp_path, monkeypatch):
@@ -181,8 +205,9 @@ def test_setup_stays_the_parent_of_the_worker_it_started(tmp_path, monkeypatch):
             self.waited = True
 
     worker = Worker()
+    monkeypatch.setattr(setup, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(setup, "initialize", lambda *args: worker)
-    assert setup.main(["--state-dir", str(tmp_path / "state")]) == 0
+    assert setup.main([]) == 0
     assert worker.waited
 
 
@@ -202,8 +227,64 @@ def test_only_the_controller_outlives_the_setup_command(tmp_path, monkeypatch):
     assert sessions == {"controller": True, "worker": False}
 
 
-def test_setup_help_has_no_gateway_option(capsys):
+def test_setup_help_has_no_gateway_or_location_option(capsys):
     with pytest.raises(SystemExit) as result:
         setup.main(["--help"])
     assert result.value.code == 0
-    assert "gateway-host" not in capsys.readouterr().out
+    usage = capsys.readouterr().out
+    assert "gateway-host" not in usage and "state-dir" not in usage
+
+
+def framer_install(monkeypatch, tmp_path, installed: bytes | None):
+    framer = tmp_path / "libexec" / "framework-macos"
+    if installed is not None:
+        framer.parent.mkdir()
+        framer.write_bytes(installed)
+        (tmp_path / "rule").write_text("rule\n")
+    monkeypatch.setattr(setup, "FRAMER", framer)
+    monkeypatch.setattr(setup, "FRAMER_RULE", tmp_path / "rule")
+    monkeypatch.setattr(setup.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(setup.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(setup, "run", lambda argv: "tester\n")
+    commands = []
+
+    def sudo(argv, check):
+        assert argv[0] == "/usr/bin/sudo"
+        if argv[1] == "/usr/sbin/visudo":
+            commands.append(("rule", Path(argv[-1]).read_text()))
+        commands.append(tuple(argv[1:2]) + tuple(argv[-2:]))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(setup.subprocess, "run", sudo)
+    return framer, commands
+
+
+@pytest.mark.parametrize("installed", [None, b"#!/bin/sh\nold\n"])
+def test_the_framer_and_its_sudoers_rule_are_installed_when_missing_or_stale(
+    tmp_path, monkeypatch, installed
+):
+    monkeypatch.undo()
+    framer, commands = framer_install(monkeypatch, tmp_path, installed)
+    setup.install_framer()
+    assert commands[0] == ("rule", f"tester ALL=(root) NOPASSWD: {framer}\n")
+    assert [command[-1] for command in commands[2:]] == [
+        str(framer.parent),
+        str(framer),
+        str(tmp_path / "rule"),
+    ]
+    assert commands[3][-2] == str(setup.FRAMER_SOURCE)
+
+
+def test_a_current_framer_is_left_alone(tmp_path, monkeypatch):
+    monkeypatch.undo()
+    _, commands = framer_install(monkeypatch, tmp_path, setup.FRAMER_SOURCE.read_bytes())
+    setup.install_framer()
+    assert commands == []
+
+
+def test_the_framer_is_installed_only_on_an_apple_silicon_mac(tmp_path, monkeypatch):
+    monkeypatch.undo()
+    framer_install(monkeypatch, tmp_path, None)
+    monkeypatch.setattr(setup.platform, "system", lambda: "Linux")
+    with pytest.raises(setup.SetupError, match="Apple Silicon"):
+        setup.install_framer()

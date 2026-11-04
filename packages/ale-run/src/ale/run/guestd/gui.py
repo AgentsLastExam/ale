@@ -53,7 +53,7 @@ def probe_macos_desktop(agent_user: str, driver_path: str, socket_path: str) -> 
     """Capture through the same client as agent tools, as the actual task account.
 
     A socket's owner is a prerequisite, not an attestation of the server process's
-    identity. macOS images must run their preauthorized Driver in this login session.
+    identity. The framework starts its authorized Driver in this login session at login.
     This probe neither changes TCC grants nor starts a service in another session.
     """
     import pwd
@@ -108,8 +108,8 @@ def has_desktop() -> bool:
     if os.name == "nt":
         return os.path.isfile(_WINDOWS_DRIVER)
     if sys.platform == "darwin":
-        # macOS images supply a preauthorized service in the logged-in agent session.
-        # Declaring that service does not attest capture permission; readiness probes it.
+        # The Provider starts the framework's Driver in the agent's login session, which the
+        # image signs in at boot. Declaring it does not attest capture; readiness probes it.
         if not os.environ.get("ALE_CUA_DRIVER_SOCKET"):
             return False
         try:
@@ -454,6 +454,18 @@ def _point(action: dict[str, Any], key: str = "coordinate") -> tuple[int, int]:
     return _to_pixels(coordinate)
 
 
+def _pointer(arguments: dict[str, Any]) -> dict[str, Any]:
+    """A desktop pointer action, which on macOS must say that nobody else uses this screen.
+
+    There Cua Driver otherwise refuses to move the real pointer over a background app's
+    window, since that would take the pointer from a person at the Mac.
+    """
+    arguments["scope"] = "desktop"
+    if sys.platform == "darwin":
+        arguments["delivery_mode"] = "foreground"
+    return arguments
+
+
 def dispatch_actions(actions: list[dict[str, Any]]) -> int:
     applied = 0
     for action in actions:
@@ -462,17 +474,20 @@ def dispatch_actions(actions: list[dict[str, Any]]) -> int:
             x, y = _point(action)
             _call(
                 "click",
-                {
-                    "x": x,
-                    "y": y,
-                    "scope": "desktop",
-                    "button": "right" if kind == "right_click" else action.get("button", "left"),
-                    "count": 2 if kind == "double_click" else int(action.get("clicks") or 1),
-                },
+                _pointer(
+                    {
+                        "x": x,
+                        "y": y,
+                        "button": "right"
+                        if kind == "right_click"
+                        else action.get("button", "left"),
+                        "count": 2 if kind == "double_click" else int(action.get("clicks") or 1),
+                    }
+                ),
             )
         elif kind == "move":
             x, y = _point(action)
-            _call("move_cursor", {"x": x, "y": y, "scope": "desktop"})
+            _call("move_cursor", _pointer({"x": x, "y": y}))
         elif kind == "drag":
             end_x, end_y = _point(action, "to")
             start = action.get("coordinate")
@@ -481,26 +496,28 @@ def dispatch_actions(actions: list[dict[str, Any]]) -> int:
                 start_x, start_y = _to_pixels((start_x, start_y))
             _call(
                 "drag",
-                {
-                    "from_x": start_x,
-                    "from_y": start_y,
-                    "to_x": end_x,
-                    "to_y": end_y,
-                    "scope": "desktop",
-                    "button": action.get("button", "left"),
-                },
+                _pointer(
+                    {
+                        "from_x": start_x,
+                        "from_y": start_y,
+                        "to_x": end_x,
+                        "to_y": end_y,
+                        "button": action.get("button", "left"),
+                    }
+                ),
             )
         elif kind == "scroll":
             x, y = _point(action)
             _call(
                 "scroll",
-                {
-                    "x": x,
-                    "y": y,
-                    "direction": action.get("direction", "down"),
-                    "amount": max(1, min(50, int(action.get("amount") or 3))),
-                    "scope": "desktop",
-                },
+                _pointer(
+                    {
+                        "x": x,
+                        "y": y,
+                        "direction": action.get("direction", "down"),
+                        "amount": max(1, min(50, int(action.get("amount") or 3))),
+                    }
+                ),
             )
         elif kind == "type":
             _call("type_text", {"text": action.get("text") or "", "scope": "desktop"})

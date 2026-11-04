@@ -34,7 +34,7 @@ def provider_registry(
 ) -> ProviderRegistry:
     registry = ProviderRegistry(RunConfig())
     if provider is not None:
-        registry._instances[kind] = provider
+        registry._instances[(kind, False)] = provider
     return registry
 
 

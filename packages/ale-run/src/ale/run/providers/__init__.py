@@ -10,7 +10,7 @@ from __future__ import annotations
 from ale.core.config import RunConfig
 from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import Provider
-from ale.core.taskspec import ImageKind
+from ale.core.taskspec import ImageKind, OperatingSystem
 
 __all__ = ["RETAINING_PROVIDERS", "ProviderRegistry", "provider_named"]
 
@@ -20,36 +20,38 @@ RETAINING_PROVIDERS = ("docker", "qemu", "daytona")
 
 
 class ProviderRegistry:
-    """Lazily construct and reuse the configured Provider for each image kind."""
+    """Lazily construct and reuse the configured Provider for each image kind.
+
+    macOS VMs have one Provider, the local Orchard, so they are not configured.
+    """
 
     def __init__(self, settings: RunConfig) -> None:
         self.settings = settings
-        self._instances: dict[ImageKind, Provider] = {}
+        self._instances: dict[tuple[ImageKind, bool], Provider] = {}
 
-    def get(self, kind: ImageKind) -> Provider:
-        if kind in self._instances:
-            return self._instances[kind]
-        if kind is ImageKind.CONTAINER:
+    def get(self, kind: ImageKind, operating_system: OperatingSystem) -> Provider:
+        macos = kind is ImageKind.VM and operating_system is OperatingSystem.MACOS
+        if (kind, macos) in self._instances:
+            return self._instances[(kind, macos)]
+        if macos:
+            from ale.run.providers.orchard import OrchardProvider
+
+            provider: Provider = OrchardProvider()
+        elif kind is ImageKind.CONTAINER:
             config = self.settings.container
             if config.provider == "daytona":
                 from ale.run.providers.daytona import DaytonaProvider
 
-                provider: Provider = DaytonaProvider(config.daytona)
+                provider = DaytonaProvider(config.daytona)
             else:
                 from ale.run.providers.docker import DockerProvider
 
                 provider = DockerProvider(gpus=config.gpus)
-        elif self.settings.vm.provider == "orchard":
-            from ale.run.providers.orchard import OrchardProvider
-
-            orchard_config = self.settings.vm.orchard
-            assert orchard_config is not None
-            provider = OrchardProvider(orchard_config)
         else:
             from ale.run.providers.qemu import QemuProvider
 
             provider = QemuProvider()
-        self._instances[kind] = provider
+        self._instances[(kind, macos)] = provider
         return provider
 
 

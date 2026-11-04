@@ -1,4 +1,4 @@
-"""macOS task and Orchard configuration contracts, without infrastructure access."""
+"""macOS task and Provider selection contracts, without infrastructure access."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import pytest
 from pydantic import ValidationError
 from tests.support import merged_config, write_task
 
-from ale.core.config import OrchardProviderConfig, RunConfig, load_run_config
-from ale.core.errors import ConfigError, TaskDefinitionError
+from ale.core.config import RunConfig
+from ale.core.errors import TaskDefinitionError
 from ale.core.taskspec import ImageKind, OperatingSystem
 from ale.run.providers import ProviderRegistry
 from ale.run.tasksets.manifest import load_tasks
@@ -18,57 +18,16 @@ pytestmark = pytest.mark.unit
 IMAGE = "ghcr.io/example/macos@sha256:" + "a" * 64
 
 
-def test_orchard_configuration_uses_host_environment_names(tmp_path: Path) -> None:
-    config = tmp_path / "run.toml"
-    config.write_text(
-        "[vm]\nprovider='orchard'\n[vm.orchard]\n"
-        "endpoint='https://orchard.example.test/'\n"
-        "gateway_host='ale.example.test'\n"
-    )
-    settings = load_run_config(run_path=config)
-    orchard = settings.vm.orchard
-    assert orchard is not None
-    assert orchard.endpoint == "https://orchard.example.test"
-    assert orchard.username_env == "ALE_ORCHARD_USERNAME"
-    assert orchard.password_env == "ALE_ORCHARD_PASSWORD"
-    assert orchard.python_path == "/opt/homebrew/bin/python3"
-    assert (
-        settings.model_dump(mode="json")["vm"]["orchard"]["password_env"] == "ALE_ORCHARD_PASSWORD"
-    )
-
-
 @pytest.mark.parametrize(
-    "values",
+    "vm",
     [
         {"provider": "orchard"},
-        {"provider": "qemu", "orchard": {"endpoint": "https://orchard.example.test"}},
+        {"orchard": {"endpoint": "https://orchard.example.test"}},
     ],
 )
-def test_provider_selection_requires_matching_configuration(values: dict) -> None:
+def test_macos_vms_need_no_run_settings(vm: dict) -> None:
     with pytest.raises(ValidationError):
-        RunConfig.model_validate({"vm": values})
-
-
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        {"endpoint": "https://user:secret@orchard.example.test"},
-        {"endpoint": "https://orchard.example.test?password=secret"},
-        {"endpoint": "file:///tmp/orchard"},
-        {"endpoint": "http://orchard.example.test"},
-        {"endpoint": "https://orchard.example.test:invalid"},
-        {"password_env": "secret value"},
-        {"python_path": "python3"},
-        {"python_path": "/opt/../python3"},
-        {"boot_timeout_sec": 0},
-        {"driver_path": "/opt/driver"},
-    ],
-)
-def test_invalid_orchard_settings_fail_before_connecting(overrides: dict) -> None:
-    with pytest.raises(ValidationError):
-        OrchardProviderConfig.model_validate(
-            {"endpoint": "https://orchard.example.test", **overrides}
-        )
+        RunConfig.model_validate({"vm": vm})
 
 
 def _macos_task(path: Path, layer: dict | None = None, dockerfile: str | None = None) -> Path:
@@ -113,69 +72,22 @@ def test_macos_verifier_cannot_run_in_a_container(tmp_path: Path) -> None:
         load_tasks(_macos_task(tmp_path / "task", layer))
 
 
-def test_registry_selects_orchard_without_creating_a_vm(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ale.run.providers import orchard
+def test_registry_sends_macos_vms_to_orchard(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ale.run.providers import orchard, qemu
 
-    configured = OrchardProviderConfig(endpoint="https://orchard.example.test")
-    settings = RunConfig.model_validate({"vm": {"provider": "orchard", "orchard": configured}})
-    instances = []
+    built = []
 
-    def construct(config):
-        assert config == configured
-        instance = object()
-        instances.append(instance)
-        return instance
+    def construct(name):
+        def make():
+            built.append(name)
+            return object()
 
-    monkeypatch.setattr(orchard, "OrchardProvider", construct)
-    registry = ProviderRegistry(settings)
-    assert registry.get(ImageKind.VM) is registry.get(ImageKind.VM)
-    assert len(instances) == 1
+        return make
 
-
-@pytest.mark.parametrize(
-    "host",
-    [
-        "localhost",
-        "localhost.",
-        "x.localhost",
-        "127.0.0.1",
-        "::1",
-        "0.0.0.0",
-        "::",
-        "::ffff:127.0.0.1",
-        "https://ale.test",
-        "ale.test/path",
-        "user@ale.test",
-        "ale.test:8080",
-        "ale test",
-    ],
-)
-def test_gateway_host_requires_remote_host_without_url_or_port(host: str) -> None:
-    with pytest.raises(ValidationError, match="gateway_host"):
-        OrchardProviderConfig(endpoint="https://orchard.test", gateway_host=host)
-
-
-@pytest.mark.parametrize("host", ["ale.example.test", "192.0.2.10", "2001:db8::10"])
-def test_gateway_host_accepts_remote_dns_and_ip_literals(host: str) -> None:
-    assert (
-        OrchardProviderConfig(endpoint="https://orchard.test", gateway_host=host).gateway_host
-        == host
-    )
-
-
-@pytest.mark.parametrize("via_override", [False, True])
-def test_worker_selection_is_rejected_in_files_and_overrides(tmp_path, via_override):
-    config = tmp_path / "run.toml"
-    config.write_text(
-        "[vm]\nprovider='orchard'\n[vm.orchard]\nendpoint='https://orchard.test'\n"
-        + ("" if via_override else "worker='mac-1'\n")
-    )
-    with pytest.raises(ConfigError, match="worker"):
-        load_run_config(
-            run_path=config, overrides=["vm.orchard.worker=mac-1"] if via_override else []
-        )
-
-
-def test_removed_local_image_configuration_is_rejected(tmp_path):
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        OrchardProviderConfig(endpoint="https://127.0.0.1:6120", local_tart_home=tmp_path)
+    monkeypatch.setattr(orchard, "OrchardProvider", construct("orchard"))
+    monkeypatch.setattr(qemu, "QemuProvider", construct("qemu"))
+    registry = ProviderRegistry(RunConfig())
+    macos = registry.get(ImageKind.VM, OperatingSystem.MACOS)
+    assert registry.get(ImageKind.VM, OperatingSystem.MACOS) is macos
+    assert registry.get(ImageKind.VM, OperatingSystem.WINDOWS) is not macos
+    assert built == ["orchard", "qemu"]

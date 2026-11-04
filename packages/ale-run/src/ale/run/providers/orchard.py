@@ -1,27 +1,23 @@
-"""Remote macOS sandboxes on an existing Orchard/Tart control plane.
+"""macOS sandboxes on the local Orchard controller and Tart worker.
 
-The control plane owns placement. ALE owns only VMs created for one episode; it
-never discovers spare machines, adopts existing VMs, or changes their base images.
+``scripts/setup_macos.py`` runs both on this Mac. Every VM ALE creates is a clone of a local
+image that carries the framework (``orchard_framing``); ALE owns only the VMs it creates for
+one episode, and never adopts existing VMs or changes the images it is given. Each sandbox
+the agent works in shows the desktop its image signs the Task's account in to.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import ipaddress
-import json
 import logging
-import os
 import re
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from ale.core.config import OrchardProviderConfig
 from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -42,11 +38,21 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem
-from ale.run import guestd
+from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
 from ale.run.images import resolve_registry_reference
-from ale.run.providers import orchard_permissions
-from ale.run.providers.orchard_client import OrchardClient
+from ale.run.providers.orchard_client import (
+    CONTROL_ACCOUNT,
+    LocalOrchard,
+    OrchardClient,
+    OwnedVM,
+    await_running,
+    check_framer,
+    create_owned,
+    delete_owned,
+    vm_spec,
+)
 from ale.run.providers.orchard_desktop import await_desktop
+from ale.run.providers.orchard_framing import frame_image
 from ale.run.providers.privileges import verify_identities
 from ale.run.transport import GuestClient
 
@@ -60,49 +66,39 @@ _IMAGE = re.compile(
 _ROOT = "/opt/ale"
 _PATH = "/opt/ale/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 _READ_CHUNK_BYTES = 64 * 1024
-
-# This source executes only in a newly created VM, as root. Input is copied through
-# stdin, never a command URL. Refuse symlinked framework roots before installing.
-_BOOTSTRAP = r"""
-import base64,json,os,pathlib,platform,pwd,sys
-if os.geteuid()!=0 or platform.system()!='Darwin' or sys.version_info<(3,12):
-    raise RuntimeError('macOS, root and Python 3.12+ are required')
-account=pwd.getpwnam(sys.argv[1])
-if account.pw_uid==0 or not pathlib.Path(account.pw_dir).is_dir():
-    raise RuntimeError('agent must be an existing non-root account with a home')
-# A solver without sudo must not be able to replace a later verifier's Python or
-# the root-invoked desktop client. Check resolved targets and every ancestor.
-if sys.argv[2]=='false':
-    roots=[sys.executable,sys.prefix,sys.base_prefix,*sys.path]
-    if sys.argv[3]: roots.append(sys.argv[3])
-    for raw in roots:
-        if not raw: continue
-        original=pathlib.Path(raw).absolute()
-        for candidate in [original,original.resolve()]:
-            for p in [candidate,*candidate.parents]:
-                if not p.exists(): continue
-                st=p.stat()
-                if st.st_uid!=0 or st.st_mode&0o022:
-                    raise RuntimeError('unprotected framework runtime: '+str(p))
-for raw in ['/opt','/opt/ale','/opt/ale/guestd']:
-    p=pathlib.Path(raw)
-    if p.is_symlink(): raise RuntimeError('framework path must not be a symlink')
-    p.mkdir(exist_ok=True)
-    if raw!='/opt': os.chown(p,0,0);p.chmod(0o700)
-for name,data in json.load(sys.stdin).items():
-    if pathlib.PurePosixPath(name).name!=name: raise RuntimeError('invalid source name')
-    p=pathlib.Path('/opt/ale/guestd')/name
-    if p.is_symlink(): raise RuntimeError('framework source must not be a symlink')
-    p.write_bytes(base64.b64decode(data,validate=True));os.chown(p,0,0);p.chmod(0o600)
-binpath=pathlib.Path('/opt/ale/bin')
-if binpath.is_symlink(): raise RuntimeError('framework bin must not be a symlink')
-binpath.mkdir(exist_ok=True);os.chown(binpath,0,0);binpath.chmod(0o700)
-python=binpath/'python3'
-if python.exists() or python.is_symlink(): python.unlink()
-python.symlink_to(sys.executable)
-print(json.dumps({'agent_home':account.pw_dir}))
+#: From a framed clone's first boot to a guest whose account and desktop are checked.
+_BOOT_TIMEOUT_SEC = 300
+#: Elevation for ``[agent].sudo`` is granted or taken away at each boot, as on Windows, so
+#: one framed image serves every Task of its account whatever its image allows.
+_GRANT_SUDO = r"""set -eu
+if ! sudo -n -l -U "$1" 2>/dev/null | grep -q 'NOPASSWD: ALL'; then
+    printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$1" > /etc/sudoers.d/ale-agent
+    chmod 0440 /etc/sudoers.d/ale-agent
+fi
 """
-
+#: Every way up macOS gives an account: the admin group, whose members sudo and approve
+#: system changes with their password, and sudoers rules that name it.
+_REVOKE_SUDO = r"""set -eu
+user=$1
+pattern=$(printf '%s' "$user" | sed 's/[.]/[.]/g')
+if dseditgroup -o checkmember -m "$user" admin >/dev/null 2>&1; then
+    dseditgroup -o edit -d "$user" -t user admin
+fi
+for file in /etc/sudoers /etc/sudoers.d/*; do
+    [ -f "$file" ] || continue
+    if grep -Eq "^[[:space:]]*$pattern[[:space:],=]" "$file"; then
+        sed -i '' -E "/^[[:space:]]*$pattern[[:space:],=]/d" "$file"
+        # Only this file's syntax: images ship sudoers files whose mode visudo -c rejects.
+        visudo -cqf "$file"
+    fi
+done
+dscacheutil -flushcache
+"""
+#: guestd from the sources framing installed, on the framework's Python.
+_GUESTD = (
+    "import runpy,sys; sys.path.insert(0,'/opt/ale/guestd'); "
+    "runpy.run_path('/opt/ale/guestd/main.py',run_name='__main__')"
+)
 
 # Runs as root in the VM and forwards the fixed Gateway port on its loopback to the Host's
 # Gateway until the VM is deleted. It forks only once it listens, so a port that cannot be
@@ -139,123 +135,12 @@ asyncio.run(main())
 """
 
 
-def _sources() -> bytes:
-    root = Path(guestd.__file__).parent
-    return json.dumps(
-        {
-            p.name: base64.b64encode(p.read_bytes()).decode("ascii")
-            for p in sorted(root.glob("*.py"))
-        },
-        sort_keys=True,
-    ).encode()
-
-
-def _identity(reference: str) -> tuple[str, str]:
-    match = _IMAGE.fullmatch(reference)
-    if match is None or match["digest"] is None:
-        raise ProviderCapabilityError(
-            "Prepared Orchard images require a digest-pinned OCI image reference"
-        )
-    digest = match["digest"]
-    # Preparation identity includes the guest service installed into the VM. The
-    # observed base identity remains the image reference attested by Orchard.
-    prepared = (
-        "sha256:"
-        + hashlib.sha256(reference.encode() + b"\0" + _BOOTSTRAP.encode() + _sources()).hexdigest()
-    )
-    return digest, prepared
-
-
-@dataclass
-class _OwnedVM:
-    name: str
-    uid: str
-    stopped: bool = False
-
-
-async def _delete_owned(client: OrchardClient, owned: _OwnedVM) -> None:
-    name, uid = owned.name, owned.uid
-    record = await client.get_vm(name)
-    if record is None:
-        if owned.stopped:
-            return
-        raise ProviderStartError(f"Orchard VM {name} is absent; physical stop is unconfirmed")
-    if record.get("uid") != uid:
-        raise ProviderStartError(f"Refusing to delete Orchard VM {name}: UID changed")
-    if record.get("status") == "failed":
-        # Orchard synthesizes running=false for failed/offline workers too. A
-        # terminal record cannot accept PUT and is not physical stop evidence.
-        raise ProviderStartError(
-            f"Orchard VM {name} (UID {uid}) is terminal failed; controller rejects stop; "
-            "physical stop unconfirmed, inspect worker before cleanup"
-        )
-    # PUT replaces VMSpec. Forward only public mutable fields, never credentials
-    # or metadata from the controller's full VM record.
-    fields = (
-        "os",
-        "arch",
-        "runtime",
-        "hostProcesses",
-        "endpoints",
-        "net-softnet",
-        "netSoftnet",
-        "netSoftnetAllow",
-        "netSoftnetBlock",
-        "suspendable",
-        "usbAccessories",
-    )
-    spec = {key: record[key] for key in fields if key in record}
-    spec["powerState"] = "stopped"
-    try:
-        changed = (
-            record if record.get("powerState") == "stopped" else await client.update_vm(name, spec)
-        )
-        generation = changed.get("generation")
-        if changed.get("uid") != uid or type(generation) is not int:
-            raise ProviderStartError(f"Orchard stop identity/generation mismatch for {name}")
-        async with asyncio.timeout(60):
-            while True:
-                record = await client.get_vm(name)
-                if record is None or record.get("uid") != uid:
-                    raise ProviderStartError(
-                        f"Orchard VM {name} disappeared or changed during stop"
-                    )
-                observed = record.get("observedGeneration")
-                conditions = record.get("conditions")
-                stopped = isinstance(conditions, list) and any(
-                    isinstance(item, dict)
-                    and item.get("type") == "running"
-                    and item.get("state") == "false"
-                    for item in conditions
-                )
-                if type(observed) is int and observed >= generation and stopped:
-                    owned.stopped = True
-                    break
-                await asyncio.sleep(1)
-    except Exception as exc:
-        # Keep the record inspectable when power-off cannot be proved. Deleting it
-        # would destroy the only controller-side evidence needed for recovery.
-        raise ProviderStartError(
-            f"Orchard VM {name} (UID {uid}) stop unconfirmed; inspect worker cleanup"
-        ) from exc
-    current = await client.get_vm(name)
-    if current is None or current.get("uid") != uid:
-        raise ProviderStartError(f"Orchard VM {name} changed before deletion")
-    await client.delete_vm(name)
-    # The worker acknowledged stopped before DELETE. Disk removal is eventually
-    # reconciled by Orchard; controller absence alone never proves a process exit.
-    async with asyncio.timeout(60):
-        while (record := await client.get_vm(name)) is not None:
-            if record.get("uid") != uid:
-                raise ProviderStartError(f"Orchard VM {name} was replaced during cleanup")
-            await asyncio.sleep(1)
-
-
 class OrchardSandbox(Sandbox):
     def __init__(
         self,
         *,
         request: SandboxRequest,
+        local: LocalOrchard,
         orchard: OrchardClient,
         client: GuestClient,
         file_client: GuestClient,
@@ -273,11 +158,12 @@ class OrchardSandbox(Sandbox):
             agent_user=request.user,
             agent_home=agent_home,
         )
+        self._local = local
         self._orchard = orchard
         self._client = client
         self._file_client = file_client
         self._uid = uid
-        self._owned = _OwnedVM(name, uid)
+        self._owned = OwnedVM(name, uid)
         self._destroy_lock = asyncio.Lock()
         self.state = SandboxState.READY
 
@@ -427,7 +313,7 @@ class OrchardSandbox(Sandbox):
             # explicit retry, while releasing host-side sockets in every outcome.
             await self._orchard.start()
             try:
-                await _delete_owned(self._orchard, self._owned)
+                await delete_owned(self._orchard, self._owned)
                 self.state = SandboxState.DESTROYED
                 self.release_resources()
             finally:
@@ -443,58 +329,44 @@ class OrchardSandbox(Sandbox):
 class OrchardProvider(Provider):
     name = "orchard"
 
-    def __init__(self, config: OrchardProviderConfig) -> None:
-        self.config = config
+    def __init__(self, local: LocalOrchard | None = None) -> None:
+        self._local_orchard = local
 
-    def _new_client(self) -> OrchardClient:
-        username = os.environ.get(self.config.username_env, "")
-        password = os.environ.get(self.config.password_env, "")
-        if not username or not password:
-            raise ProviderCapabilityError(
-                "Orchard username/password environment variables are required"
-            )
-        return OrchardClient(
-            self.config.endpoint,
-            username=username,
-            password=password,
-            ca_file=self.config.ca_file,
-            server_hostname=self.config.server_hostname,
-        )
+    def _local(self) -> LocalOrchard:
+        if self._local_orchard is None:
+            self._local_orchard = LocalOrchard.load()
+        return self._local_orchard
 
     def capabilities(self) -> Capabilities:
         return Capabilities(
             operating_systems=frozenset({OperatingSystem.MACOS}),
-            gui=bool(self.config.driver_path and self.config.socket_path),
+            # Framing requires the image to sign the Task's account in to a desktop.
+            gui=True,
             network_modes=frozenset({NetworkMode.OPEN}),
         )
 
     async def preflight(self) -> None:
-        orchard_permissions.preflight(self.config)
-        client = self._new_client()
+        check_framer()
+        client = self._local().client()
         try:
             await client.start()
             workers = await client.list_workers()
         except ProviderStartError as exc:
             raise ProviderStartError(
-                f"Orchard preflight failed: {exc}. Check the controller endpoint, TLS and "
-                "credentials; start local services with scripts/setup_macos.py if needed"
+                f"the local Orchard did not answer: {exc}. Start it with "
+                "`uv run scripts/setup_macos.py` and keep it running"
             ) from None
         finally:
             await client.close()
-        if not workers:
-            raise ProviderStartError(
-                "No Orchard workers are registered; start and register a worker"
-            )
         workers = [
             worker
             for worker in workers
-            if worker.get("arch") == "arm64" and worker.get("runtime") == "tart"
+            if worker.get("arch") == "arm64"
+            and worker.get("runtime") == "tart"
+            and worker.get("scheduling_paused", False) is False
         ]
         if not workers:
-            raise ProviderStartError("No ARM64 Tart worker is registered with Orchard")
-        workers = [worker for worker in workers if worker.get("scheduling_paused", False) is False]
-        if not workers:
-            raise ProviderStartError("Orchard worker scheduling is paused or unavailable")
+            raise ProviderStartError("the local Orchard has no ARM64 Tart worker taking VMs")
         now = datetime.now(UTC)
         for worker in workers:
             stamp = worker.get("last_seen")
@@ -505,14 +377,13 @@ class OrchardProvider(Provider):
                 age = (now - seen).total_seconds()
             except (ValueError, TypeError, OverflowError):
                 continue
-            # ALE's freshness check, independent of Orchard's configurable offline
-            # timeout. Small host/worker clock skew is tolerated; capacity is not
-            # checked here because busy workers must remain eligible for queueing.
+            # Small Host/worker clock skew is tolerated; capacity is not checked here
+            # because a busy worker must remain eligible for queueing.
             if -30 <= age <= 180:
                 return
         raise ProviderStartError(
-            "No eligible Orchard worker has a fresh heartbeat (180 seconds); "
-            "check worker connectivity and host/worker clocks"
+            "the local Orchard worker has no fresh heartbeat (180 seconds); "
+            "restart it with `uv run scripts/setup_macos.py`"
         )
 
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
@@ -531,35 +402,22 @@ class OrchardProvider(Provider):
             reference = await resolve_registry_reference(reference)
         else:
             reference = f"{match['repository']}@{match['digest']}"
-        digest, prepared = _identity(reference)
-        if self.config.desktop_bootstrap is not None:
-            prepared = (
-                "sha256:"
-                + hashlib.sha256((prepared + orchard_permissions.identity()).encode()).hexdigest()
-            )
+        digest = reference.rsplit("@", 1)[1]
         result = PreparedTaskImage(
             kind=ImageKind.VM,
             source="external-ref",
             input_identity=digest,
             runtime_ref=reference,
-            prepared_identity=prepared,
+            prepared_identity=digest,
             resolved_reference=reference,
             base_materials=(reference,),
         )
         if isinstance(image, PreparedTaskImage) and image != result:
-            raise ProviderCapabilityError("Prepared Orchard image does not match this framework")
+            raise ProviderCapabilityError("the prepared Orchard image does not match its reference")
         return result
 
     def accepts(self, request: SandboxRequest) -> None:
         super().accepts(request)
-        if (
-            self.config.desktop_bootstrap is not None
-            and request.role is not SandboxRole.VERIFIER
-            and not request.sudo
-        ):
-            raise ProviderCapabilityError(
-                "UI bootstrap currently requires the task's logged-in admin account with sudo=true"
-            )
         if request.resources.gpus:
             raise ProviderCapabilityError("Orchard GPU allocations are not supported")
         if request.retention != "destroy":
@@ -579,36 +437,23 @@ class OrchardProvider(Provider):
             raise ProviderCapabilityError("Task cannot override trusted framework environment")
         if request.user == "root":
             raise ProviderCapabilityError("The agent account must not be root")
-
-    async def _await_running(self, client: OrchardClient, name: str, uid: str) -> dict[str, object]:
-        last: object = "not observed"
-        try:
-            async with asyncio.timeout(self.config.provision_timeout_sec):
-                while True:
-                    record = await client.get_vm(name)
-                    if record is None or record.get("uid") != uid:
-                        raise ProviderStartError(f"Orchard VM {name} disappeared or changed UID")
-                    last = record.get("status")
-                    if last == "failed":
-                        raise ProviderStartError(f"Orchard VM {name} failed to start")
-                    if last == "running":
-                        return record
-                    await asyncio.sleep(1)
-        except TimeoutError as exc:
-            raise ProviderStartError(
-                f"Orchard VM {name} provisioning exceeded {self.config.provision_timeout_sec:g}s "
-                f"while waiting for scheduling, image pull and boot; last status: {last}"
-            ) from exc
+        if (
+            request.user == CONTROL_ACCOUNT
+            and not request.sudo
+            and request.role is not SandboxRole.VERIFIER
+        ):
+            raise ProviderCapabilityError(
+                f"ALE controls macOS VMs through the {CONTROL_ACCOUNT} account, which keeps "
+                "passwordless sudo, so a Task that runs as it must declare [agent].sudo = true; "
+                "use another account for a Task without elevated privileges"
+            )
 
     async def _resolve_gateway_host(
         self, guest: GuestClient, request: SandboxRequest
     ) -> str | None:
         if not request.gateway_url:
             return None
-        if self.config.gateway_host:
-            return self.config.gateway_host
-        # In Tart's default NAT network, the guest's router is its Mac host.
-        # Resolve per VM so a customized vmnet subnet needs no ALE configuration.
+        # In Tart's NAT network, the guest's router is its Mac host.
         code, stdout, _, timed_out = await guest.exec(
             ["/sbin/route", "-n", "get", "-inet", "default"],
             run_as=request.user,
@@ -624,8 +469,8 @@ class OrchardProvider(Provider):
                 if not (address.is_loopback or address.is_unspecified or address.is_multicast):
                     return str(address)
         raise ProviderStartError(
-            "Could not discover the local Tart host from the VM's default IPv4 route; "
-            "use default NAT networking or set vm.orchard.gateway_host in the run configuration"
+            "could not find the Mac from the VM's default IPv4 route; "
+            "the local Tart worker must use its default NAT network"
         )
 
     async def _start_gateway_relay(
@@ -637,7 +482,7 @@ class OrchardProvider(Provider):
             raise ProviderCapabilityError(f"{request.gateway_url!r} has no explicit port to relay")
         code, _, _, timed_out = await guest.exec(
             [
-                self.config.python_path,
+                MACOS_PYTHON,
                 "-I",
                 "-S",
                 "-c",
@@ -652,136 +497,72 @@ class OrchardProvider(Provider):
             raise ProviderStartError("Could not start the Gateway relay in the VM")
 
     async def create(self, request: SandboxRequest) -> OrchardSandbox:
+        # A verifier runs no agent: it needs no desktop, and its account's rights are moot.
+        return await self._create(request, agent=request.role is not SandboxRole.VERIFIER)
+
+    async def _create(self, request: SandboxRequest, *, agent: bool) -> OrchardSandbox:
         self.accepts(request)
         image = await self.prepare_image(request.prepared_image)
-        # A verifier runs no agent: it needs no desktop, and its account's rights are moot.
-        agent = request.role is not SandboxRole.VERIFIER
-        name = "ale-" + uuid.uuid4().hex
-        client = self._new_client()
-        uid: str | None = None
+        local = self._local()
+        framed = await frame_image(local, image, user=request.user)
+        client = local.client()
+        owned: OwnedVM | None = None
         guest: GuestClient | None = None
         file_guest: GuestClient | None = None
         readiness_started = False
         try:
             await client.start()
-            if await client.get_vm(name) is not None:
-                raise ProviderStartError(f"Orchard VM name collision: {name}")
-            spec: dict[str, object] = {
-                "name": name,
-                "image": image.runtime_ref,
-                "cpu": request.resources.cpus,
-                "memory": request.resources.memory_mb,
-                "os": "darwin",
-                "arch": "arm64",
-                "runtime": "tart",
-                "headless": True,
-                "restart_policy": "Never",
-                "imagePullPolicy": "IfNotPresent",
-                "resources": {
-                    "org.cirruslabs.tart-vms": 1,
-                    "org.cirruslabs.logical-cores": request.resources.cpus,
-                    "org.cirruslabs.memory-mib": request.resources.memory_mb,
-                },
-            }
-            if request.resources.storage_mb:
-                spec["diskSize"] = request.resources.storage_mb // 1024
-            try:
-                created = await client.create_vm(spec)
-            except BaseException as exc:
-                # There is no control-plane idempotency key. Query once to aid manual
-                # recovery, never adopt/delete a VM without the returned ownership UID.
-                try:
-                    record = await asyncio.shield(client.get_vm(name))
-                except BaseException as reconcile_error:
-                    raise ProviderStartError(
-                        f"Orchard create outcome uncertain for {name}; reconciliation failed; "
-                        "inspect and clean it up manually; creation was not retried"
-                    ) from reconcile_error
-                detail = f", UID {record.get('uid')}" if record is not None else ""
-                raise ProviderStartError(
-                    f"Orchard create outcome uncertain for {name}{detail}; "
-                    "inspect and clean it up manually; creation was not retried"
-                ) from exc
-            uid = str(created["uid"])
-            record = await self._await_running(client, name, uid)
+            spec = vm_spec(
+                "ale-" + uuid.uuid4().hex,
+                framed.name,
+                cpus=request.resources.cpus,
+                memory_mb=request.resources.memory_mb,
+                storage_mb=request.resources.storage_mb,
+            )
+            owned = await create_owned(client, spec)
+            record = await await_running(client, owned)
             readiness_started = True
             loop = asyncio.get_running_loop()
-            deadline = loop.time() + self.config.boot_timeout_sec
+            deadline = loop.time() + _BOOT_TIMEOUT_SEC
             async with asyncio.timeout_at(deadline):
                 for key in ("image", "cpu", "memory", "os", "arch", "runtime"):
                     if record.get(key) != spec[key]:
                         raise ProviderStartError(f"Orchard VM does not attest requested {key}")
-                observed = str(record.get("image_fqn") or "")
-                observed_identity, _ = _identity(observed)
-                if observed_identity != image.input_identity:
-                    raise ProviderStartError("Orchard image differs from prepared content identity")
                 if (
                     record.get("assignedCPU") != request.resources.cpus
                     or record.get("assignedMemory") != request.resources.memory_mb
                 ):
                     raise ProviderStartError("Orchard assigned resources differ from request")
-                if agent and self.config.desktop_bootstrap is not None:
-                    await orchard_permissions.install_driver(
-                        client, name, request.user, self.config, deadline
-                    )
-                bootstrap = await client.exec(
-                    name,
-                    [
-                        "sudo",
-                        "-n",
-                        "/usr/bin/env",
-                        "-i",
-                        "PATH=/usr/bin:/bin",
-                        self.config.python_path,
-                        "-I",
-                        "-S",
-                        "-c",
-                        _BOOTSTRAP,
-                        request.user,
-                        "true" if request.sudo or not agent else "false",
-                        self.config.driver_path or "",
-                    ],
-                    stdin=_sources(),
-                    timeout_sec=deadline - loop.time(),
-                    deadline=deadline,
-                )
-                if bootstrap.exit_code:
-                    raise ProviderStartError(
-                        "Could not install guestd: image needs root bootstrap and Python 3.12+"
-                    )
-                home = json.loads(bootstrap.stdout)["agent_home"]
                 env = dict(request.env) | {
                     "ALE_AGENT_USER": request.user,
-                    "ALE_AGENT_HOME": home,
+                    "ALE_AGENT_HOME": framed.agent_home,
                     "PATH": _PATH,
                     "HOME": "/var/root",
                 }
-                if agent and self.config.driver_path:
-                    env["ALE_CUA_DRIVER"] = self.config.driver_path
-                if agent and self.config.socket_path:
-                    env["ALE_CUA_DRIVER_SOCKET"] = self.config.socket_path
+                if agent:
+                    env["ALE_CUA_DRIVER"] = MACOS_DRIVER
+                    env["ALE_CUA_DRIVER_SOCKET"] = MACOS_DRIVER_SOCKET
                 guest_argv = [
                     "sudo",
                     "-n",
                     "/usr/bin/env",
                     "-i",
                     *(f"{k}={v}" for k, v in env.items()),
-                    self.config.python_path,
+                    MACOS_PYTHON,
                     "-I",
                     "-S",
                     "-c",
-                    "import runpy,sys; sys.path.insert(0,'/opt/ale/guestd'); "
-                    "runpy.run_path('/opt/ale/guestd/main.py',run_name='__main__')",
+                    _GUESTD,
                     "--stdio",
                 ]
                 guest = GuestClient(
-                    await client.connect_guest(name, guest_argv, deadline=deadline),
+                    await client.connect_guest(owned.name, guest_argv, deadline=deadline),
                     acknowledge_exec_output=True,
                 )
                 # A separate stdio process permits live evidence reads while the
                 # command session is occupied by a long-running native Harness.
                 file_guest = GuestClient(
-                    await client.connect_guest(name, guest_argv, deadline=deadline)
+                    await client.connect_guest(owned.name, guest_argv, deadline=deadline)
                 )
                 await file_guest.health()
                 health = await guest.health()
@@ -791,55 +572,61 @@ class OrchardProvider(Provider):
                     or not isinstance(health.get("agent_uid"), int)
                     or health["agent_uid"] == 0
                     or health.get("agent_user") != request.user
-                    or health.get("agent_home") != home
+                    or health.get("agent_home") != framed.agent_home
                 ):
                     raise ProviderCapabilityError("Guest macOS/account/root identity check failed")
                 gateway_host = await self._resolve_gateway_host(guest, request)
                 if gateway_host is not None:
                     await self._start_gateway_relay(guest, gateway_host, request)
                 if agent:
+                    change = _GRANT_SUDO if request.sudo else _REVOKE_SUDO
+                    code, _, stderr, timed_out = await guest.exec(
+                        ["/bin/sh", "-c", change, "sh", request.user], timeout_sec=60
+                    )
+                    if code or timed_out:
+                        action = "grant" if request.sudo else "take away"
+                        raise ProviderStartError(
+                            f"could not {action} sudo for {request.user}: {stderr.strip()}"
+                        )
                     await verify_identities(guest, request.user, sudo=request.sudo)
                     # Query all grants as root; a failed noninteractive sudo probe alone
                     # would miss password-protected elevation rights.
-                    code, _, _, timed_out = await guest.exec(
+                    code, listed, _, timed_out = await guest.exec(
                         ["/usr/bin/sudo", "-l", "-U", request.user], timeout_sec=15
                     )
                     if timed_out or code not in (0, 1):
                         raise ProviderCapabilityError("Could not verify agent sudo policy")
-                    if not request.sudo and code == 0:
+                    # macOS sudo exits 0 whether or not the account may run anything, so the
+                    # listing decides; guestd runs it without a locale, in English.
+                    if not request.sudo and "is not allowed to run sudo" not in listed:
                         raise ProviderCapabilityError(
-                            "Image grants sudo but task declares sudo=false"
+                            f"the image still lets {request.user} use sudo after ALE took it away"
                         )
                 total, _, _ = await guest.disk_usage("/")
                 storage = total // (1024 * 1024)
                 if request.resources.storage_mb and storage < request.resources.storage_mb:
                     raise ProviderCapabilityError("VM root disk is smaller than requested storage")
-                if agent and self.config.desktop_bootstrap is not None:
-                    await orchard_permissions.authorize_driver(
-                        client, name, uid, request.user, self.config
-                    )
-                if agent and self.config.driver_path and self.config.socket_path:
+                if agent:
                     await await_desktop(
                         guest,
                         agent_user=request.user,
-                        python_path=self.config.python_path,
-                        driver_path=self.config.driver_path,
-                        socket_path=self.config.socket_path,
+                        agent_uid=framed.agent_uid,
                         timeout_sec=deadline - loop.time(),
                     )
             return OrchardSandbox(
                 request=request,
+                local=local,
                 orchard=client,
                 client=guest,
                 file_client=file_guest,
-                name=name,
-                uid=uid,
-                agent_home=home,
+                name=owned.name,
+                uid=owned.uid,
+                agent_home=framed.agent_home,
                 resolved_image=ResolvedImage(
                     kind=ImageKind.VM,
                     prepared_identity=image.prepared_identity,
-                    observed_identity=observed_identity,
-                    observed_ref=observed,
+                    observed_identity=framed.identity,
+                    observed_ref=framed.name,
                 ),
                 allocation=ResourceAllocation(
                     cpus=int(record["assignedCPU"]),
@@ -852,9 +639,9 @@ class OrchardProvider(Provider):
             )
         except BaseException as provision_error:
             try:
-                if uid is not None:
+                if owned is not None:
                     try:
-                        await asyncio.shield(_delete_owned(client, _OwnedVM(name, uid)))
+                        await asyncio.shield(delete_owned(client, owned))
                     except ProviderStartError as cleanup_error:
                         raise ProviderStartError(
                             f"Provisioning failed ({type(provision_error).__name__}); "
@@ -872,6 +659,6 @@ class OrchardProvider(Provider):
                         await client.close()
             if readiness_started and isinstance(provision_error, TimeoutError):
                 raise ProviderStartError(
-                    f"Orchard VM {name} guest readiness exceeded {self.config.boot_timeout_sec:g}s"
+                    f"Orchard VM guest readiness exceeded {_BOOT_TIMEOUT_SEC}s"
                 ) from provision_error
             raise

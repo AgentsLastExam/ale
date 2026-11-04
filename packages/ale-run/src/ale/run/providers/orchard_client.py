@@ -1,4 +1,4 @@
-"""Verified Orchard REST and WebSocket boundary; no Lab service dependency.
+"""Verified Orchard REST and WebSocket boundary, and the local Orchard ALE runs on.
 
 Closing an exec channel does not prove the guest command stopped. The owning
 Provider must tear down its VM on cancellation or uncertain execution failure.
@@ -11,19 +11,35 @@ import base64
 import contextlib
 import json
 import math
+import os
 import shlex
 import ssl
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
 
 from ale.core.errors import GuestUnreachableError, ProviderStartError
+from ale.run.framework import MACOS_FRAMER
 
 _CHUNK_BYTES = 16 * 1024
 _FRAME_BYTES = 1024 * 1024
 _LINE_BYTES = 16 * 1024 * 1024
+#: Where ``scripts/setup_macos.py`` keeps the local controller, worker and their secrets.
+STATE_DIR = Path.home() / ".local/share/ale/macos"
+#: Covers scheduling, an image pull and boot.
+PROVISION_TIMEOUT_SEC = 1800
+#: The account Orchard logs in to every VM as, with its default password ``admin``.
+CONTROL_ACCOUNT = "admin"
+#: Where ``scripts/setup_macos.py`` installs ``framework_macos.sh``, owned by root, with a
+#: sudoers rule that lets the Orchard user run this program alone as root.
+FRAMER = Path("/usr/local/libexec/ale/framework-macos")
+#: Pulling a macOS image of tens of gigabytes.
+PULL_TIMEOUT_SEC = 7200
+#: A guest's own shutdown, which writes everything it holds to disk.
+SHUTDOWN_TIMEOUT_SEC = 180
 
 
 @dataclass(frozen=True)
@@ -203,74 +219,6 @@ class OrchardClient:
             raise GuestUnreachableError(
                 "Orchard exec connection failed; command was not retried"
             ) from None
-
-    @contextlib.asynccontextmanager
-    async def forward_vnc(self, name: str, uid: str):
-        """A scoped loopback listener for one owned VM's Screen Sharing port."""
-        tasks: set[asyncio.Task] = set()
-        writers: list[asyncio.StreamWriter] = []
-
-        def accept(reader, writer):
-            writers.append(writer)
-            task = asyncio.create_task(self._relay_vnc(name, uid, reader, writer))
-            tasks.add(task)
-            task.add_done_callback(tasks.discard)
-
-        server = await asyncio.start_server(accept, "127.0.0.1", 0)
-        try:
-            yield server.sockets[0].getsockname()[1]
-        finally:
-            server.close()
-            # wait_closed() waits for every accepted connection, and a relay cancelled
-            # before or during its own cleanup never closes its writer.
-            for writer in writers:
-                writer.close()
-            pending = list(tasks)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            await server.wait_closed()
-
-    async def _relay_vnc(self, name, uid, reader, writer):
-        socket = None
-        upstream = None
-        try:
-            record = await self.get_vm(name)
-            if record is None or record.get("uid") != uid:
-                return
-            url = self._url + "/vms/" + quote(name, safe="") + "/port-forward"
-            async with asyncio.timeout(30):
-                socket = await self._require_session().ws_connect(
-                    url,
-                    params={"port": "5900", "wait": "20"},
-                    ssl=self._ssl,
-                    server_hostname=self._server_hostname,
-                    max_msg_size=16 * _FRAME_BYTES,
-                )
-
-            async def send():
-                while data := await reader.read(64 * 1024):
-                    await socket.send_bytes(data)
-                await socket.close()
-
-            upstream = asyncio.create_task(send())
-            async for message in socket:
-                if message.type != aiohttp.WSMsgType.BINARY:
-                    break
-                writer.write(message.data)
-                await writer.drain()
-        except (aiohttp.ClientError, OSError, TimeoutError, ProviderStartError):
-            # Transport failure closes RFB; never expose controller credentials.
-            pass
-        finally:
-            if upstream is not None:
-                upstream.cancel()
-                await asyncio.gather(upstream, return_exceptions=True)
-            if socket is not None:
-                await socket.close()
-            writer.close()
-            with contextlib.suppress(OSError):
-                await writer.wait_closed()
 
     async def connect_guest(
         self, name: str, argv: Sequence[str], *, deadline: float | None = None
@@ -454,3 +402,324 @@ class OrchardTransport:
         with contextlib.suppress(asyncio.CancelledError):
             await self._reader
         await self._socket.close()
+
+
+@dataclass(frozen=True)
+class LocalOrchard:
+    """The controller and Tart worker ``scripts/setup_macos.py`` runs on this Mac."""
+
+    endpoint: str
+    password: str
+    ca_file: Path
+    tart_binary: Path
+    tart_home: Path
+
+    @classmethod
+    def load(cls, root: Path = STATE_DIR) -> LocalOrchard:
+        try:
+            state = json.loads((root / "state.json").read_text())
+            password = (root / "password").read_text().strip()
+            port = int(state["port"])
+            tart = Path(state["binaries"]["tart"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ProviderStartError(
+                "macOS Tasks run on the local Orchard; start it with "
+                "`uv run scripts/setup_macos.py` and keep it running"
+            ) from exc
+        return cls(
+            endpoint=f"https://localhost:{port}",
+            password=password,
+            ca_file=root / "controller.crt",
+            tart_binary=tart,
+            tart_home=root / "tart-home",
+        )
+
+    def client(self) -> OrchardClient:
+        return OrchardClient(
+            self.endpoint,
+            username="bootstrap-admin",
+            password=self.password,
+            ca_file=str(self.ca_file),
+        )
+
+    async def tart(self, *args: str, timeout_sec: float = 600) -> str:
+        """Run Tart on the worker's own images. Pruning stays off: the cache is the worker's."""
+        env = {key: value for key, value in os.environ.items() if not key.startswith("TART_")}
+        env |= {"TART_HOME": str(self.tart_home), "TART_NO_AUTO_PRUNE": "1"}
+        process = await asyncio.create_subprocess_exec(
+            str(self.tart_binary),
+            *args,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_sec)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise ProviderStartError(f"tart {args[0]} did not finish in {timeout_sec:g}s") from None
+        if process.returncode:
+            detail = stderr.decode(errors="replace").strip()[-500:]
+            raise ProviderStartError(f"tart {args[0]} failed: {detail}")
+        return stdout.decode()
+
+    async def local_images(self) -> set[str]:
+        listing = json.loads(await self.tart("list", "--source", "local", "--format", "json"))
+        return {str(entry["Name"]) for entry in listing}
+
+    async def frame_disk(
+        self, name: str, *, user: str, identity: str, payload: bytes
+    ) -> dict[str, object]:
+        """Install the framework into the stopped local VM ``name``; what it found as JSON."""
+        check_framer()
+        disk = self.tart_home / "vms" / name / "disk.img"
+        process = await asyncio.create_subprocess_exec(
+            "/usr/bin/sudo",
+            "-n",
+            str(FRAMER),
+            str(disk),
+            user,
+            CONTROL_ACCOUNT,
+            identity,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(payload), 600)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise ProviderStartError("framing the macOS disk did not finish in 600s") from None
+        if process.returncode:
+            detail = stderr.decode(errors="replace").strip()[-1000:]
+            raise ProviderStartError(f"could not install the macOS framework: {detail}")
+        try:
+            facts = json.loads(stdout)
+        except ValueError:
+            raise ProviderStartError("the macOS framer printed no result") from None
+        if not isinstance(facts.get("agent_home"), str) or type(facts.get("agent_uid")) is not int:
+            raise ProviderStartError("the macOS framer printed an invalid result")
+        return facts
+
+    async def _tart_vm(self, owned: OwnedVM) -> dict[str, object]:
+        prefix = f"orchard-{owned.name}-{owned.uid}-"
+        listing = json.loads(await self.tart("list", "--source", "local", "--format", "json"))
+        found = [entry for entry in listing if str(entry["Name"]).startswith(prefix)]
+        if len(found) != 1:
+            raise ProviderStartError(f"cannot find the Tart VM of {owned.name} on the worker")
+        return found[0]
+
+    async def save(self, owned: OwnedVM, name: str) -> None:
+        """Keep a stopped VM's disk as the local image ``name``; on APFS this copies no data."""
+        source = await self._tart_vm(owned)
+        await self.tart("clone", "--overwrite", str(source["Name"]), name)
+
+    async def shut_down(self, client: OrchardClient, owned: OwnedVM) -> None:
+        """Shut the guest down from inside, then wait until its Tart VM has stopped.
+
+        Orchard stops a VM with ``tart stop --timeout 5``, which powers macOS off when its
+        signed-in desktop does not shut down at once, losing what is still in memory, so a
+        disk ALE keeps is shut down by its guest. Orchard then reports the VM failed, its
+        record of a VM that exited by itself.
+        """
+        try:
+            result = await client.exec(
+                owned.name, ["sudo", "-n", "/sbin/shutdown", "-h", "now"], timeout_sec=30
+            )
+        except GuestUnreachableError:
+            pass  # The guest went down with the command's session.
+        else:
+            if result.exit_code:
+                detail = result.stderr.decode(errors="replace").strip()
+                raise ProviderStartError(f"could not shut {owned.name} down: {detail}")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SHUTDOWN_TIMEOUT_SEC
+        while (await self._tart_vm(owned)).get("State") != "stopped":
+            if loop.time() > deadline:
+                raise ProviderStartError(
+                    f"{owned.name} did not shut down within {SHUTDOWN_TIMEOUT_SEC}s"
+                )
+            await asyncio.sleep(2)
+        owned.stopped = True
+
+
+def check_framer() -> None:
+    """Refuse to frame with an installed framer other than this ALE's own."""
+    try:
+        current = FRAMER.read_bytes() == MACOS_FRAMER.read_bytes()
+    except OSError:
+        current = False
+    if not current:
+        raise ProviderStartError(
+            f"{FRAMER} is missing or differs from this ALE's; run "
+            "`uv run scripts/setup_macos.py` to install it"
+        )
+
+
+@dataclass
+class OwnedVM:
+    name: str
+    uid: str
+    stopped: bool = False
+
+
+def vm_spec(
+    name: str, image: str, *, cpus: int, memory_mb: int, storage_mb: int | None = None
+) -> dict[str, object]:
+    spec: dict[str, object] = {
+        "name": name,
+        "image": image,
+        "cpu": cpus,
+        "memory": memory_mb,
+        "os": "darwin",
+        "arch": "arm64",
+        "runtime": "tart",
+        "headless": True,
+        "restart_policy": "Never",
+        "imagePullPolicy": "IfNotPresent",
+        "resources": {
+            "org.cirruslabs.tart-vms": 1,
+            "org.cirruslabs.logical-cores": cpus,
+            "org.cirruslabs.memory-mib": memory_mb,
+        },
+    }
+    if storage_mb:
+        spec["diskSize"] = storage_mb // 1024
+    return spec
+
+
+async def create_owned(client: OrchardClient, spec: Mapping[str, object]) -> OwnedVM:
+    name = str(spec["name"])
+    if await client.get_vm(name) is not None:
+        raise ProviderStartError(f"Orchard VM name collision: {name}")
+    try:
+        created = await client.create_vm(spec)
+    except BaseException as exc:
+        # There is no control-plane idempotency key. Query once to aid manual
+        # recovery, never adopt/delete a VM without the returned ownership UID.
+        try:
+            record = await asyncio.shield(client.get_vm(name))
+        except BaseException as reconcile_error:
+            raise ProviderStartError(
+                f"Orchard create outcome uncertain for {name}; reconciliation failed; "
+                "inspect and clean it up manually; creation was not retried"
+            ) from reconcile_error
+        detail = f", UID {record.get('uid')}" if record is not None else ""
+        raise ProviderStartError(
+            f"Orchard create outcome uncertain for {name}{detail}; "
+            "inspect and clean it up manually; creation was not retried"
+        ) from exc
+    return OwnedVM(name, str(created["uid"]))
+
+
+async def await_running(client: OrchardClient, owned: OwnedVM) -> dict[str, object]:
+    name, uid = owned.name, owned.uid
+    last: object = "not observed"
+    try:
+        async with asyncio.timeout(PROVISION_TIMEOUT_SEC):
+            while True:
+                record = await client.get_vm(name)
+                if record is None or record.get("uid") != uid:
+                    raise ProviderStartError(f"Orchard VM {name} disappeared or changed UID")
+                last = record.get("status")
+                if last == "failed":
+                    raise ProviderStartError(f"Orchard VM {name} failed to start")
+                if last == "running":
+                    return record
+                await asyncio.sleep(1)
+    except TimeoutError as exc:
+        raise ProviderStartError(
+            f"Orchard VM {name} provisioning exceeded {PROVISION_TIMEOUT_SEC}s "
+            f"while waiting for scheduling, image pull and boot; last status: {last}"
+        ) from exc
+
+
+async def stop_owned(client: OrchardClient, owned: OwnedVM) -> None:
+    """Stop an owned VM and wait for its worker to acknowledge it."""
+    if owned.stopped:
+        return
+    name, uid = owned.name, owned.uid
+    record = await client.get_vm(name)
+    if record is None:
+        if owned.stopped:
+            return
+        raise ProviderStartError(f"Orchard VM {name} is absent; physical stop is unconfirmed")
+    if record.get("uid") != uid:
+        raise ProviderStartError(f"Refusing to stop Orchard VM {name}: UID changed")
+    if record.get("status") == "failed":
+        # Orchard synthesizes running=false for failed/offline workers too. A
+        # terminal record cannot accept PUT and is not physical stop evidence.
+        raise ProviderStartError(
+            f"Orchard VM {name} (UID {uid}) is terminal failed; controller rejects stop; "
+            "physical stop unconfirmed, inspect worker before cleanup"
+        )
+    # PUT replaces VMSpec. Forward only public mutable fields, never credentials
+    # or metadata from the controller's full VM record.
+    fields = (
+        "os",
+        "arch",
+        "runtime",
+        "hostProcesses",
+        "endpoints",
+        "net-softnet",
+        "netSoftnet",
+        "netSoftnetAllow",
+        "netSoftnetBlock",
+        "suspendable",
+        "usbAccessories",
+    )
+    spec = {key: record[key] for key in fields if key in record}
+    spec["powerState"] = "stopped"
+    try:
+        changed = (
+            record if record.get("powerState") == "stopped" else await client.update_vm(name, spec)
+        )
+        generation = changed.get("generation")
+        if changed.get("uid") != uid or type(generation) is not int:
+            raise ProviderStartError(f"Orchard stop identity/generation mismatch for {name}")
+        async with asyncio.timeout(60):
+            while True:
+                record = await client.get_vm(name)
+                if record is None or record.get("uid") != uid:
+                    raise ProviderStartError(
+                        f"Orchard VM {name} disappeared or changed during stop"
+                    )
+                observed = record.get("observedGeneration")
+                conditions = record.get("conditions")
+                stopped = isinstance(conditions, list) and any(
+                    isinstance(item, dict)
+                    and item.get("type") == "running"
+                    and item.get("state") == "false"
+                    for item in conditions
+                )
+                if type(observed) is int and observed >= generation and stopped:
+                    owned.stopped = True
+                    break
+                await asyncio.sleep(1)
+    except Exception as exc:
+        # Keep the record inspectable when power-off cannot be proved. Deleting it
+        # would destroy the only controller-side evidence needed for recovery.
+        raise ProviderStartError(
+            f"Orchard VM {name} (UID {uid}) stop unconfirmed; inspect worker cleanup"
+        ) from exc
+
+
+async def delete_owned(client: OrchardClient, owned: OwnedVM) -> None:
+    """Stop an owned VM, then delete it; never one whose UID changed."""
+    await stop_owned(client, owned)
+    name, uid = owned.name, owned.uid
+    current = await client.get_vm(name)
+    if current is None and owned.stopped:
+        return
+    if current is None or current.get("uid") != uid:
+        raise ProviderStartError(f"Orchard VM {name} changed before deletion")
+    await client.delete_vm(name)
+    # The worker acknowledged stopped before DELETE. Disk removal is eventually
+    # reconciled by Orchard; controller absence alone never proves a process exit.
+    async with asyncio.timeout(60):
+        while (record := await client.get_vm(name)) is not None:
+            if record.get("uid") != uid:
+                raise ProviderStartError(f"Orchard VM {name} was replaced during cleanup")
+            await asyncio.sleep(1)

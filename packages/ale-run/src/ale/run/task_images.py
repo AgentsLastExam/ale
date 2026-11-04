@@ -126,7 +126,7 @@ async def prepare_task_image_result(
     task: Task, providers: ProviderRegistry
 ) -> ImagePreparationResult:
     spec = task.spec.image
-    provider = providers.get(spec.kind)
+    provider = providers.get(spec.kind, task.spec.os)
     folder = _task_folder(task)
     if spec.base_ref is not None:
         base = await _stage(
@@ -170,7 +170,7 @@ async def prepare_task_image_result(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
             )
         elif task.spec.os is not OperatingSystem.MACOS:
-            # The Provider installs the framework into each macOS VM it boots.
+            # The Orchard Provider frames a macOS image the first time it boots it.
             image, reused = await _stage(
                 "framework-layer",
                 framed_disk(image, operating_system=task.spec.os, user=spec.user),
@@ -245,7 +245,7 @@ async def prepare_verifier_image_result(
             ),
         )
 
-    provider = providers.get(verify.image.kind)
+    provider = providers.get(verify.image.kind, task.spec.os)
     if verify.image.ref is not None:
         image = await _stage(
             "reference-resolution",

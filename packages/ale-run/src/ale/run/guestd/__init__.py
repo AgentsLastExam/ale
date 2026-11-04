@@ -17,10 +17,10 @@ PORT = 7411
 #: guest service.
 HOST_ADDRESS = "172.30.0.1"
 #: The framework's own Python, which guestd runs on, per guest operating system. Only the
-#: framework's identity can run it: root on Linux and macOS, the system and Administrators on
-#: Windows. On macOS it is the Python the Provider bootstraps guestd with, linked there.
+#: framework's identity can run it: root on Linux, the system and Administrators on Windows.
+#: On macOS every account may, because the agent's desktop tool runs on it there.
 PYTHON = {
     "linux": "/opt/ale/python/bin/python3",
     "windows": r"C:\ProgramData\ALE\python\python.exe",
-    "macos": "/opt/ale/bin/python3",
+    "macos": "/opt/ale/python/bin/python3",
 }

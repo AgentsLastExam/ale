@@ -2,7 +2,10 @@
 """Prepare a private local Orchard controller and Tart worker for ALE.
 
 Run with uv; this script uses only Python's standard library. It never changes
-Homebrew, launchd, system trust, desktop permissions, or the shared Tart home.
+Homebrew, launchd, system trust, desktop permissions, or the shared Tart home. With sudo,
+which asks for this account's password, it installs ALE's macOS framer: a root-owned copy of
+``framework_macos.sh`` and a sudoers rule that lets this account run that program alone as
+root, which framing an image offline needs.
 
 It stays in the foreground as the worker's parent. macOS's Local Network privacy lets a
 program started from a Terminal or SSH login reach the VMs only while it descends from
@@ -20,7 +23,6 @@ import os
 import platform
 import re
 import secrets
-import shlex
 import shutil
 import signal
 import socket
@@ -36,6 +38,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 OWNER = "ale-local-orchard-v1"
+#: The Orchard Provider reads the controller, its credentials and Tart from here.
+STATE_DIR = Path.home() / ".local/share/ale/macos"
+#: Local Tart images ALE keeps as a cache, which cleanup removes with the rest.
+CACHED_IMAGES = ("ale-framed-", "ale-built-")
+#: The framer the Orchard Provider runs through sudo, and the rule that allows only it.
+FRAMER = Path("/usr/local/libexec/ale/framework-macos")
+FRAMER_SOURCE = (
+    Path(__file__).resolve().parents[1] / "packages/ale-run/src/ale/run/framework_macos.sh"
+)
+FRAMER_RULE = Path("/etc/sudoers.d/ale-framework-macos")
 RELEASES = {
     "orchard": (
         "0.55.0",
@@ -292,40 +304,6 @@ def wait_for(predicate, description: str, timeout: float = 45) -> None:
     raise SetupError(f"Timed out waiting for {description}; inspect the private service logs")
 
 
-def write_config(root: Path, state: dict, password: str) -> None:
-    private_write(
-        root / "run.toml",
-        "\n".join(
-            [
-                "[vm]",
-                'provider = "orchard"',
-                "",
-                "[vm.orchard]",
-                f'endpoint = "https://localhost:{state["port"]}"',
-                'username_env = "ALE_ORCHARD_USERNAME"',
-                'password_env = "ALE_ORCHARD_PASSWORD"',
-                f"ca_file = {json.dumps(str(root / 'controller.crt'))}",
-                'python_path = "/opt/homebrew/bin/python3"',
-                "",
-                "[artifacts]",
-                'collect = "host"',
-                "",
-            ]
-        ),
-    )
-    private_write(
-        root / "credentials.env",
-        "\n".join(
-            [
-                "export ALE_ORCHARD_USERNAME=bootstrap-admin",
-                f"export ALE_ORCHARD_PASSWORD={shlex.quote(password)}",
-                f"export ALE_RUN_CONFIG={shlex.quote(str(root / 'run.toml'))}",
-                "",
-            ]
-        ),
-    )
-
-
 def initialize(
     root: Path, orchard_path: str | None, tart_path: str | None
 ) -> subprocess.Popen | None:
@@ -439,14 +417,80 @@ def initialize(
         token,
     )
     wait_for(lambda: ready(root, state), "registered Tart worker")
-    write_config(root, state, password)
     return worker
+
+
+def install_framer() -> None:
+    """Install this checkout's framer root-owned, and the rule to run it, when either differs."""
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise SetupError("Local Tart setup requires an Apple Silicon Mac")
+    account = run(["/usr/bin/id", "-un"]).strip()
+    rule = f"{account} ALL=(root) NOPASSWD: {FRAMER}\n"
+    source = FRAMER_SOURCE.read_bytes()
+    try:
+        current = FRAMER.read_bytes() == source and FRAMER_RULE.is_file()
+    except OSError:
+        current = False
+    if current:
+        return
+    print("Installing the macOS framer as root; sudo may ask for this account's password.")
+    with tempfile.TemporaryDirectory() as staging:
+        rule_file = Path(staging) / "rule"
+        rule_file.write_text(rule)
+        for argv in (
+            ["/usr/sbin/visudo", "-cqf", str(rule_file)],
+            [
+                "/usr/bin/install",
+                "-d",
+                "-o",
+                "root",
+                "-g",
+                "wheel",
+                "-m",
+                "0755",
+                str(FRAMER.parent),
+            ],
+            [
+                "/usr/bin/install",
+                "-o",
+                "root",
+                "-g",
+                "wheel",
+                "-m",
+                "0755",
+                str(FRAMER_SOURCE),
+                str(FRAMER),
+            ],
+            [
+                "/usr/bin/install",
+                "-o",
+                "root",
+                "-g",
+                "wheel",
+                "-m",
+                "0440",
+                str(rule_file),
+                str(FRAMER_RULE),
+            ],
+        ):
+            if subprocess.run(["/usr/bin/sudo", *argv], check=False).returncode:
+                raise SetupError(f"could not install the macOS framer ({Path(argv[0]).name})")
+
+
+def remove_framer() -> None:
+    if FRAMER.exists() or FRAMER_RULE.exists():
+        argv = ["/usr/bin/sudo", "/bin/rm", "-f", str(FRAMER_RULE), str(FRAMER)]
+        if subprocess.run(argv, check=False).returncode:
+            raise SetupError("could not remove the macOS framer")
 
 
 def cleanup(root: Path, state: dict) -> None:
     # A stopped controller does not prove that its Tart VM disks were removed.
     local_vms = root / "tart-home" / "vms"
-    if local_vms.is_symlink() or (local_vms.exists() and any(local_vms.iterdir())):
+    if local_vms.is_symlink() or (
+        local_vms.exists()
+        and any(not vm.name.startswith(CACHED_IMAGES) for vm in local_vms.iterdir())
+    ):
         raise SetupError(
             "Private Tart home still contains VMs; collect and delete them before cleanup"
         )
@@ -463,6 +507,7 @@ def cleanup(root: Path, state: dict) -> None:
         if record := state["processes"].get(role):
             stop_process(record)
     shutil.rmtree(root)
+    remove_framer()
 
 
 def hold(worker: subprocess.Popen) -> None:
@@ -476,14 +521,13 @@ def hold(worker: subprocess.Popen) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state-dir", type=Path, default=Path.home() / ".local/share/ale/macos")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--check", action="store_true")
     action.add_argument("--cleanup", action="store_true")
     parser.add_argument("--orchard-path", help="Use an explicitly installed compatible Orchard")
     parser.add_argument("--tart-path", help="Use an explicitly installed compatible Tart")
     args = parser.parse_args(argv)
-    root = args.state_dir.expanduser().absolute()
+    root = STATE_DIR
     try:
         if args.cleanup and not root.exists():
             print("No local setup to clean up.")
@@ -506,10 +550,9 @@ def main(argv: list[str] | None = None) -> int:
                 cleanup(root, load_state(root))
                 print("Removed owned local services and setup data.")
             else:
+                install_framer()
                 worker = initialize(root, args.orchard_path, args.tart_path)
-                print(f"Ready. Run: source {shlex.quote(str(root / 'credentials.env'))}")
-                print(f"Then: uv run ale run TASK --config {shlex.quote(str(root / 'run.toml'))}")
-                print("Provide a prepared OCI image with the required guest apps and permissions.")
+                print("Ready. In another shell, run macOS Tasks with: uv run ale run TASK")
         if worker is not None:
             hold(worker)
         return 0

@@ -1,4 +1,4 @@
-"""Ownership, provenance and failure semantics of the remote macOS provider."""
+"""Ownership, provenance and failure semantics of the macOS Provider."""
 
 from __future__ import annotations
 
@@ -9,19 +9,33 @@ import signal
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
-from ale.core.config import OrchardProviderConfig
 from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
-from ale.core.sandbox import Identity, ImageKind, ImageRef, SandboxRequest, SandboxState
+from ale.core.sandbox import (
+    Identity,
+    ImageKind,
+    ImageRef,
+    SandboxRequest,
+    SandboxRole,
+    SandboxState,
+)
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.run.providers import orchard
+from ale.run.providers import orchard, orchard_client
 from ale.run.providers.orchard_client import OrchardExecResult
+from ale.run.providers.orchard_framing import FramedImage
 
 pytestmark = pytest.mark.unit
 
 REF = "registry.example/macos@sha256:" + "a" * 64
+FRAMED = FramedImage(
+    name="ale-framed-" + "f" * 32,
+    identity="sha256:" + "f" * 64,
+    agent_home="/Users/user",
+    agent_uid=501,
+)
 
 
 class FakeOrchard:
@@ -96,6 +110,7 @@ class FakeGuest:
         self.relay = (0, "7412 4242\n", "", False)
         self.files = {}
         self.sudo = False
+        self.listed_sudo = False
         self.failure = None
         self.health_override = {}
         self.uploads = []
@@ -123,7 +138,9 @@ class FakeGuest:
             user = kwargs.get("run_as")
             return 0, ("501 yes" if self.sudo else "501 no") if user else "0 yes", "", False
         if argv[:2] == ["/usr/bin/sudo", "-l"]:
-            return (0 if self.sudo else 1), "", "", False
+            if self.sudo or self.listed_sudo:
+                return 0, "User user may run the following commands on mac:\n", "", False
+            return 0, "User user is not allowed to run sudo on mac.\n", "", False
         return 0, "done", "", False
 
     async def disk_usage(self, path):
@@ -150,8 +167,22 @@ class FakeGuest:
 def backend(monkeypatch):
     api = FakeOrchard()
     guest = FakeGuest(None)
-    provider = orchard.OrchardProvider(OrchardProviderConfig(endpoint="https://orchard.example"))
-    monkeypatch.setattr(provider, "_new_client", lambda: api)
+    provider = orchard.OrchardProvider(SimpleNamespace(client=lambda: api))
+    api.framed = FRAMED
+    api.frames = []
+
+    async def frame(local, image, *, user):
+        api.frames.append((image, user))
+        return api.framed
+
+    api.desktops = []
+
+    async def desktop(client, *, agent_user, agent_uid, timeout_sec):
+        api.desktops.append((agent_user, agent_uid))
+
+    monkeypatch.setattr(orchard, "frame_image", frame)
+    monkeypatch.setattr(orchard, "await_desktop", desktop)
+    monkeypatch.setattr(orchard, "check_framer", lambda: None)
     monkeypatch.setattr(orchard, "GuestClient", lambda transport, **kwargs: guest)
     return provider, api, guest
 
@@ -174,8 +205,11 @@ async def test_fresh_owned_vm_and_idempotent_teardown(backend):
     sandbox = await provider.create(await request(provider))
     assert sandbox.state == SandboxState.READY
     assert "labels" not in api.created[0]
-    assert sandbox.resolved_image.observed_identity == "sha256:" + "a" * 64
-    assert sandbox.resolved_image.prepared_identity != sandbox.resolved_image.observed_identity
+    assert api.created[0]["image"] == FRAMED.name
+    assert api.frames == [(sandbox.request.prepared_image, "user")]
+    assert sandbox.resolved_image.prepared_identity == "sha256:" + "a" * 64
+    assert sandbox.resolved_image.observed_identity == FRAMED.identity
+    assert sandbox.resolved_image.observed_ref == FRAMED.name
     assert sandbox.allocation.storage_mb == 65536
     result = await sandbox.exec(["echo", "hi"], identity=Identity.AGENT)
     assert result.ok and guest.commands[-1][1]["run_as"] == "user"
@@ -282,12 +316,20 @@ async def test_sudo_false_rejects_privileged_image(backend):
     assert len(api.deleted) == 1
 
 
+async def test_a_rule_left_after_sudo_is_taken_away_fails_the_sandbox(backend):
+    # A password rule survives the noninteractive probe; only the listing shows it.
+    provider, api, guest = backend
+    guest.listed_sudo = True
+    with pytest.raises(ProviderCapabilityError, match="still lets user use sudo"):
+        await provider.create(await request(provider))
+    assert len(api.deleted) == 1
+
+
 @pytest.mark.asyncio
 async def test_queue_and_pull_do_not_consume_guest_ready_budget(backend, monkeypatch):
     provider, api, _ = backend
-    provider.config = provider.config.model_copy(
-        update={"provision_timeout_sec": 1, "boot_timeout_sec": 0.02}
-    )
+    monkeypatch.setattr(orchard_client, "PROVISION_TIMEOUT_SEC", 1)
+    monkeypatch.setattr(orchard, "_BOOT_TIMEOUT_SEC", 0.02)
     get_vm = api.get_vm
     delayed = False
 
@@ -307,7 +349,7 @@ async def test_queue_and_pull_do_not_consume_guest_ready_budget(backend, monkeyp
 @pytest.mark.asyncio
 async def test_provision_timeout_reports_last_control_plane_state(backend, monkeypatch):
     provider, api, _ = backend
-    provider.config = provider.config.model_copy(update={"provision_timeout_sec": 0.02})
+    monkeypatch.setattr(orchard_client, "PROVISION_TIMEOUT_SEC", 0.02)
     create_vm = api.create_vm
 
     async def pending_vm(spec):
@@ -324,7 +366,7 @@ async def test_provision_timeout_reports_last_control_plane_state(backend, monke
 @pytest.mark.asyncio
 async def test_guest_ready_timeout_has_distinct_diagnostic(backend, monkeypatch):
     provider, api, guest = backend
-    provider.config = provider.config.model_copy(update={"boot_timeout_sec": 0.01})
+    monkeypatch.setattr(orchard, "_BOOT_TIMEOUT_SEC", 0.01)
 
     async def silent_guest():
         await asyncio.Event().wait()
@@ -336,27 +378,20 @@ async def test_guest_ready_timeout_has_distinct_diagnostic(backend, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_and_guest_connections_share_startup_deadline(backend, monkeypatch):
+async def test_guest_connections_share_the_startup_deadline(backend, monkeypatch):
     provider, api, _ = backend
     deadlines = []
-    bootstrap_exec = api.exec
     connect_guest = api.connect_guest
 
-    async def bootstrap(name, argv, **kwargs):
-        deadline = kwargs["deadline"]
-        deadlines.append(deadline)
-        assert 179 < deadline - asyncio.get_running_loop().time() <= 180
-        assert 179 < kwargs["timeout_sec"] <= 180
-        return await bootstrap_exec(name, argv, **kwargs)
-
     async def connect(name, argv, *, deadline):
+        assert 299 < deadline - asyncio.get_running_loop().time() <= 300
+        assert argv[argv.index("-i") + 1 :][-6:-2] == [orchard.MACOS_PYTHON, "-I", "-S", "-c"]
         deadlines.append(deadline)
         return await connect_guest(name, argv, deadline=deadline)
 
-    monkeypatch.setattr(api, "exec", bootstrap)
     monkeypatch.setattr(api, "connect_guest", connect)
     sandbox = await provider.create(await request(provider))
-    assert len(deadlines) == 3
+    assert len(deadlines) == 2
     assert len(set(deadlines)) == 1
     await sandbox.destroy()
 
@@ -393,10 +428,9 @@ def relays(guest):
 @pytest.mark.asyncio
 async def test_gateway_is_reached_at_the_fixed_port_on_loopback(backend):
     provider, _, guest = backend
-    provider.config.gateway_host = "10.0.0.9"
     sandbox = await provider.create(await request(provider, gateway_url="http://127.0.0.1:42/v1"))
     assert sandbox.gateway_url == "http://127.0.0.1:7412/v1"
-    assert relays(guest) == [["10.0.0.9", "42", "7412"]]
+    assert relays(guest) == [["192.168.64.1", "42", "7412"]]
     await sandbox.destroy()
 
 
@@ -478,7 +512,7 @@ async def test_failed_stop_is_not_successful_destruction(backend, monkeypatch):
     [
         {"assignedCPU": 99},
         {"assignedMemory": 128},
-        {"image_fqn": "registry.example/macos@sha256:" + "b" * 64},
+        {"image": "ale-framed-other"},
     ],
 )
 async def test_actual_observation_differs_from_request(backend, monkeypatch, change):
@@ -611,6 +645,7 @@ async def test_file_contract_and_streamed_upload_with_unprivileged_guestd(backen
     }
     sandbox = orchard.OrchardSandbox(
         request=req,
+        local=SimpleNamespace(client=lambda: api),
         orchard=api,
         client=GuestClient(command_transport),
         file_client=GuestClient(file_transport),
@@ -683,9 +718,9 @@ async def test_file_contract_and_streamed_upload_with_unprivileged_guestd(backen
 @pytest.mark.parametrize(
     "workers, message",
     [
-        ([], "No Orchard workers"),
-        ([{"name": "mac-1", "arch": "amd64", "runtime": "tart"}], "ARM64 Tart"),
-        ([{"name": "mac-1", "arch": "arm64", "runtime": "docker"}], "ARM64 Tart"),
+        ([], "no ARM64 Tart worker"),
+        ([{"name": "mac-1", "arch": "amd64", "runtime": "tart"}], "ARM64 Tart worker"),
+        ([{"name": "mac-1", "arch": "arm64", "runtime": "docker"}], "ARM64 Tart worker"),
     ],
 )
 async def test_prepare_rejects_unavailable_cluster_before_creating_vm(backend, workers, message):
@@ -699,7 +734,7 @@ async def test_prepare_rejects_unavailable_cluster_before_creating_vm(backend, w
 @pytest.mark.parametrize(
     "update, message",
     [
-        ({"scheduling_paused": True}, "paused"),
+        ({"scheduling_paused": True}, "taking VMs"),
         ({"last_seen": "2000-01-01T00:00:00Z"}, "heartbeat"),
         ({"last_seen": "invalid"}, "heartbeat"),
         ({"last_seen": "2026-01-01T00:00:00"}, "heartbeat"),
@@ -719,7 +754,7 @@ async def test_busy_workers_pass_and_provision_rechecks_after_preparation(backen
     prepared_request = await request(provider)
     assert api.worker_reads == 1 and not api.created
     api.workers = []
-    with pytest.raises(ProviderStartError, match="No Orchard workers"):
+    with pytest.raises(ProviderStartError, match="no ARM64 Tart worker"):
         await provider.create(prepared_request)
     assert api.worker_reads == 2 and not api.created
 
@@ -755,9 +790,8 @@ async def test_tag_is_pinned_before_vm_creation_and_not_reresolved(backend, monk
     assert prepared.input_identity == "sha256:" + "a" * 64
     req = await request(provider)
     sandbox = await provider.create(req.model_copy(update={"prepared_image": prepared}))
-    assert api.created[0]["image"] == REF
+    assert api.frames[0][0].runtime_ref == REF
     assert resolved == [reference]
-    assert sandbox.resolved_image.observed_ref == REF
     await sandbox.destroy()
 
 
@@ -822,23 +856,10 @@ async def test_local_gateway_is_discovered_from_guest_route(backend, host):
     guest.route = (0, f"route to: default\n    gateway: {host}\ninterface: en0\n", "", False)
     sandbox = await provider.create(await request(provider, gateway_url="http://0.0.0.0:4567/v1"))
     assert relays(guest) == [[host, "4567", "7412"]]
-    assert provider.config.gateway_host is None
     route_calls = [c for c in guest.commands if c[0][0] == "/sbin/route"]
     assert len(route_calls) == 1
     assert route_calls[0][0] == ["/sbin/route", "-n", "get", "-inet", "default"]
     assert route_calls[0][1]["run_as"] == "user"
-    await sandbox.destroy()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("host", ["10.0.0.9", "ale.example.test", "2001:db8::1"])
-async def test_gateway_override_skips_route_discovery(backend, host):
-    provider, _, guest = backend
-    provider.config.gateway_host = host
-    guest.route = (1, "", "route unavailable", False)
-    sandbox = await provider.create(await request(provider, gateway_url="http://127.0.0.1:42/v1"))
-    assert relays(guest) == [[host, "42", "7412"]]
-    assert not any(c[0][0] == "/sbin/route" for c in guest.commands)
     await sandbox.destroy()
 
 
@@ -869,47 +890,9 @@ async def test_no_model_gateway_needs_no_route_discovery(backend):
 async def test_invalid_gateway_discovery_cleans_up_vm(backend, route):
     provider, api, guest = backend
     guest.route = route
-    with pytest.raises(ProviderStartError, match=r"vm\.orchard\.gateway_host"):
+    with pytest.raises(ProviderStartError, match="default NAT network"):
         await provider.create(await request(provider, gateway_url="http://0.0.0.0:4567"))
     assert len(api.deleted) == 1
-
-
-@pytest.mark.parametrize("fail_authorization", [False, True])
-async def test_bootstrap_installs_authorizes_then_probes_and_cleans_failure(
-    backend, monkeypatch, fail_authorization
-):
-    provider, api, guest = backend
-    provider.config = OrchardProviderConfig(
-        endpoint="https://orchard.example", desktop_bootstrap={}
-    )
-    guest.sudo = True
-    monkeypatch.setattr(orchard.orchard_permissions, "preflight", lambda config: None)
-    steps = []
-
-    async def install(*args):
-        steps.append("install")
-
-    async def authorize(*args):
-        steps.append("authorize")
-        if fail_authorization:
-            raise ProviderStartError("UI failed")
-
-    async def probe(*args, **kwargs):
-        steps.append("actual_capture")
-
-    monkeypatch.setattr(orchard.orchard_permissions, "install_driver", install)
-    monkeypatch.setattr(orchard.orchard_permissions, "authorize_driver", authorize)
-    monkeypatch.setattr(orchard, "await_desktop", probe)
-    req = await request(provider, sudo=True)
-    if fail_authorization:
-        with pytest.raises(ProviderStartError, match="UI failed"):
-            await provider.create(req)
-        assert steps == ["install", "authorize"]
-        assert len(api.deleted) == 1
-    else:
-        sandbox = await provider.create(req)
-        assert steps == ["install", "authorize", "actual_capture"]
-        await sandbox.destroy()
 
 
 @pytest.mark.asyncio
@@ -972,22 +955,31 @@ async def test_screenshots_use_bounded_reads_and_always_remove_the_guest_file(
 async def test_large_screenshot_round_trip_over_bounded_guest_responses(
     backend, monkeypatch, tmp_path
 ):
-    import io
     import json
     import random
+    import struct
     import sys
-
-    from PIL import Image
+    import zlib
 
     from ale.run.guestd import gui
     from ale.run.guestd.main import Handler
     from ale.run.transport import GuestClient
 
-    buffer = io.BytesIO()
-    Image.frombytes("RGB", (1400, 1200), random.Random(1).randbytes(1400 * 1200 * 3)).save(
-        buffer, format="PNG"
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+        )
+
+    # Random pixels barely compress, so the PNG is several megabytes.
+    width, height = 1400, 1200
+    pixels = random.Random(1).randbytes(width * height * 3)
+    rows = b"".join(b"\0" + pixels[y * width * 3 : (y + 1) * width * 3] for y in range(height))
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(rows, 1))
+        + chunk(b"IEND", b"")
     )
-    png = buffer.getvalue()
     assert len(png) > 4 * 1024**2
     monkeypatch.setitem(sys.modules, "gui", gui)
     monkeypatch.setattr(gui, "capture_screen", lambda: png)
@@ -1085,3 +1077,70 @@ async def test_file_read_failure_does_not_return_partial_data_or_retry(
     with pytest.raises(type(failure)):
         await sandbox.read_file("/log")
     assert calls == 2
+
+
+@pytest.mark.parametrize(
+    ("sudo", "role", "change"),
+    [
+        (True, SandboxRole.SOLVER, orchard._GRANT_SUDO),
+        (False, SandboxRole.SOLVER, orchard._REVOKE_SUDO),
+        (True, SandboxRole.VERIFIER, None),
+        (False, SandboxRole.VERIFIER, None),
+    ],
+)
+async def test_sudo_is_granted_or_taken_away_per_boot(backend, sudo, role, change):
+    provider, api, guest = backend
+    guest.sudo = sudo
+    sandbox = await provider.create(await request(provider, sudo=sudo, role=role))
+    changes = [
+        argv
+        for argv, _ in guest.commands
+        if orchard._GRANT_SUDO in argv or orchard._REVOKE_SUDO in argv
+    ]
+    assert changes == ([["/bin/sh", "-c", change, "sh", "user"]] if change else [])
+    assert api.frames == [(sandbox.request.prepared_image, "user")]
+    await sandbox.destroy()
+
+
+async def test_the_control_account_cannot_run_a_task_without_sudo(backend):
+    provider, api, _ = backend
+    with pytest.raises(ProviderCapabilityError, match=r"must declare \[agent\]\.sudo = true"):
+        await provider.create(await request(provider, user=orchard.CONTROL_ACCOUNT))
+    assert not api.created
+    provider.accepts(
+        await request(provider, user=orchard.CONTROL_ACCOUNT, role=SandboxRole.VERIFIER)
+    )
+    provider.accepts(await request(provider, user=orchard.CONTROL_ACCOUNT, sudo=True))
+
+
+@pytest.mark.parametrize(
+    ("role", "probed"), [(SandboxRole.SOLVER, True), (SandboxRole.VERIFIER, False)]
+)
+async def test_an_agent_waits_for_its_desktop(backend, monkeypatch, role, probed):
+    provider, api, guest = backend
+    guest.sudo = True
+    argvs = []
+    connect_guest = api.connect_guest
+
+    async def connect(name, argv, *, deadline):
+        argvs.append(argv)
+        return await connect_guest(name, argv, deadline=deadline)
+
+    monkeypatch.setattr(api, "connect_guest", connect)
+    sandbox = await provider.create(await request(provider, sudo=True, role=role))
+    assert api.desktops == ([("user", 501)] if probed else [])
+    driver = f"ALE_CUA_DRIVER={orchard.MACOS_DRIVER}"
+    assert all((driver in argv) is probed for argv in argvs)
+    await sandbox.destroy()
+
+
+async def test_preflight_requires_the_installed_framer(monkeypatch, tmp_path):
+    framer = tmp_path / "framework-macos"
+    monkeypatch.setattr(orchard_client, "FRAMER", framer)
+    with pytest.raises(ProviderStartError, match=r"setup_macos\.py"):
+        orchard_client.check_framer()
+    framer.write_bytes(orchard_client.MACOS_FRAMER.read_bytes() + b"# changed\n")
+    with pytest.raises(ProviderStartError, match="differs"):
+        orchard_client.check_framer()
+    framer.write_bytes(orchard_client.MACOS_FRAMER.read_bytes())
+    orchard_client.check_framer()

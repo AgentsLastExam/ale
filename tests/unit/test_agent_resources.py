@@ -20,6 +20,7 @@ from ale.core.taskspec import (
     ToolProvision,
 )
 from ale.run.agent_resources import resolve_agent_resources
+from ale.run.framework import MACOS_PYTHON
 
 pytestmark = pytest.mark.unit
 
@@ -341,7 +342,9 @@ def test_builtin_cua_desktop_is_opt_in_and_deduplicates(operating_system: Operat
     server = resources.mcp_servers[0].server
     assert isinstance(server, StdioMcpServer)
     assert server.command == (
-        "python.exe" if operating_system is OperatingSystem.WINDOWS else "python3"
+        {OperatingSystem.WINDOWS: "python.exe", OperatingSystem.MACOS: MACOS_PYTHON}.get(
+            operating_system, "python3"
+        )
     )
 
     with pytest.raises(AgentResourceError, match="unknown built-in"):

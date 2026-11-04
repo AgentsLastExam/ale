@@ -168,7 +168,7 @@ async def test_undoing_a_snapshot_removes_it() -> None:
     sandbox = _kept()
     sandbox.snapshot = AsyncMock(return_value=_retained("docker:snapshot:kept"))
     provider = SimpleNamespace(destroy_retained=AsyncMock())
-    lease = await _snapshotting_lease(sandbox, SimpleNamespace(get=lambda kind: provider))
+    lease = await _snapshotting_lease(sandbox, SimpleNamespace(get=lambda kind, _: provider))
     await lease.finalize()
     await lease.destroy_retained()
     provider.destroy_retained.assert_awaited_once_with("docker:snapshot:kept")

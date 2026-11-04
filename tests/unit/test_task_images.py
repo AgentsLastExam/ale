@@ -109,7 +109,7 @@ class _Registry:
     def __init__(self) -> None:
         self.providers = {kind: _Provider(kind) for kind in ImageKind}
 
-    def get(self, kind: ImageKind) -> _Provider:
+    def get(self, kind: ImageKind, operating_system: object = None) -> _Provider:
         return self.providers[kind]
 
 
@@ -453,7 +453,7 @@ async def test_preparation_failure_names_and_bounds_its_stage(write_task_repo) -
             raise ProviderStartError("x" * 3000 + "tail-marker")
 
     class _FailingRegistry:
-        def get(self, kind):  # type: ignore[no-untyped-def]
+        def get(self, kind, operating_system):  # type: ignore[no-untyped-def]
             return _FailingProvider()
 
     with pytest.raises(ProviderStartError, match=r"^reference-resolution: ") as caught:
