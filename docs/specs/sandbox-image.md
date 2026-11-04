@@ -380,7 +380,7 @@ start, before Task code runs, so one prepared image serves a Task with and witho
 gets what its own request asks for. On Linux and macOS the root guestd grants the agent's
 account elevation, or revokes every way up through sudo and the groups that make
 administrators; how is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#agent-elevation-on-linux).
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#agent-elevation-on-linux-and-macos).
 Nothing can keep a root account from elevating, so a Task whose `[agent].user` is root
 must declare `[agent].sudo = true`. Grants, and their absence, are verified and recorded: a
 Linux or macOS sandbox is refused when its guest service is not root, when a requested

@@ -81,10 +81,10 @@ The image needs:
   Task's account when a sandbox first uses it, so the build may create that account
   ([Task authoring](../specs/task-authoring.md#environment)).
 
-`[agent].sudo` is applied at every boot: with `true` the account gets passwordless sudo,
-with `false` ALE takes it out of the `admin` group and removes the sudoers rules that name
-it. `admin` keeps passwordless sudo for ALE itself, so a Task that runs as `admin` must
-declare `sudo = true`; for a Task without it, create and sign in another account in
+`[agent].sudo` is applied at every boot, as on Linux: a last sudoers rule gives the account
+passwordless sudo, or with `false` denies it every command, and ALE also takes it out of the
+`admin` group. `admin` keeps passwordless sudo for ALE itself, so a Task that runs as
+`admin` must declare `sudo = true`; for a Task without it, create and sign in another account in
 `build.sh`: add it with `sysadminctl` and its home at `$ALE_HOME`, set `autoLoginUser` in
 `/Library/Preferences/com.apple.loginwindow` and its password in `/etc/kcpassword`, and
 mark the account's Setup Assistant panes seen.

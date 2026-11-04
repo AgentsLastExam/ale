@@ -584,7 +584,9 @@ class DockerProvider(Provider):
             client = await self._connect(container, agent_user)
             clients.append(client)
             agent_home, has_desktop = await self._guest_contract(client)
-            await set_elevation(client, agent_user, sudo=request.sudo)
+            await set_elevation(
+                client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
+            )
             await verify_identities(client, agent_user, sudo=request.sudo)
             observed_gpu = await self._container_gpus(client) if selected else ()
             if selected:

@@ -24,7 +24,7 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.run.providers import orchard, orchard_client
+from ale.run.providers import orchard, orchard_client, privileges
 from ale.run.providers.orchard_client import OrchardExecResult
 from ale.run.providers.orchard_framing import FramedImage
 
@@ -111,7 +111,6 @@ class FakeGuest:
         self.relay = (0, "7412 4242\n", "", False)
         self.files = {}
         self.sudo = False
-        self.listed_sudo = False
         self.failure = None
         self.health_override = {}
         self.uploads = []
@@ -138,10 +137,6 @@ class FakeGuest:
         if argv[:2] == ["sh", "-c"]:
             user = kwargs.get("run_as")
             return 0, ("501 yes" if self.sudo else "501 no") if user else "0 yes", "", False
-        if argv[:2] == ["/usr/bin/sudo", "-l"]:
-            if self.sudo or self.listed_sudo:
-                return 0, "User user may run the following commands on mac:\n", "", False
-            return 0, "User user is not allowed to run sudo on mac.\n", "", False
         return 0, "done", "", False
 
     async def disk_usage(self, path):
@@ -313,15 +308,6 @@ async def test_sudo_false_rejects_privileged_image(backend):
     provider, api, guest = backend
     guest.sudo = True
     with pytest.raises(ProviderCapabilityError, match="did not request elevated privileges"):
-        await provider.create(await request(provider))
-    assert len(api.deleted) == 1
-
-
-async def test_a_rule_left_after_sudo_is_taken_away_fails_the_sandbox(backend):
-    # A password rule survives the noninteractive probe; only the listing shows it.
-    provider, api, guest = backend
-    guest.listed_sudo = True
-    with pytest.raises(ProviderCapabilityError, match="still lets user use sudo"):
         await provider.create(await request(provider))
     assert len(api.deleted) == 1
 
@@ -1086,25 +1072,26 @@ async def test_file_read_failure_does_not_return_partial_data_or_retry(
     assert calls == 2
 
 
+def elevation_changes(guest):
+    return [argv for argv, _ in guest.commands if privileges._SET in argv]
+
+
 @pytest.mark.parametrize(
     ("sudo", "role", "change"),
     [
-        (True, SandboxRole.SOLVER, orchard._GRANT_SUDO),
-        (False, SandboxRole.SOLVER, orchard._REVOKE_SUDO),
+        (True, SandboxRole.SOLVER, "true"),
+        (False, SandboxRole.SOLVER, "false"),
         (True, SandboxRole.VERIFIER, None),
         (False, SandboxRole.VERIFIER, None),
     ],
 )
 async def test_sudo_is_granted_or_taken_away_per_boot(backend, sudo, role, change):
+    # As on Linux: the root guestd sets the last sudoers rule on the framework's Python.
     provider, api, guest = backend
     guest.sudo = sudo
     sandbox = await provider.create(await request(provider, sudo=sudo, role=role))
-    changes = [
-        argv
-        for argv, _ in guest.commands
-        if orchard._GRANT_SUDO in argv or orchard._REVOKE_SUDO in argv
-    ]
-    assert changes == ([["/bin/sh", "-c", change, "sh", "user"]] if change else [])
+    expected = [orchard.MACOS_PYTHON, "-I", "-c", privileges._SET, "user", change]
+    assert elevation_changes(guest) == ([expected] if change else [])
     assert api.frames == [(sandbox.request.prepared_image, "user")]
     await sandbox.destroy()
 
@@ -1131,9 +1118,7 @@ async def test_a_build_vm_changes_nothing_for_the_agent_and_keeps_its_disk(backe
 
     monkeypatch.setattr(api, "connect_guest", connect)
     sandbox = await provider.create_builder(await request(provider, sudo=False))
-    assert not any(
-        orchard._GRANT_SUDO in argv or orchard._REVOKE_SUDO in argv for argv, _ in guest.commands
-    )
+    assert not elevation_changes(guest)
     assert not api.desktops
     assert not any(f"ALE_CUA_DRIVER={orchard.MACOS_DRIVER}" in argv for argv in argvs)
     saved = []

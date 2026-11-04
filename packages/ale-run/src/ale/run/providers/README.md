@@ -40,13 +40,14 @@ serves it on.
 | QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay is then rebased on its own base and converted into a standalone zstd-compressed qcow2 in `~/.cache/ale/qemu-snapshots/<sandbox id>/`, beside `snapshot.json` with its episode, role, OS, prepared image and disk digest. Standalone, it outlives the image cache. Compression made a 23 GB Windows disk 15 GB and exported it in 71 s rather than 82 s. A VM boots from it through a fresh overlay. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so `accepts` refuses them |
 
-## Agent elevation on Linux
+## Agent elevation on Linux and macOS
 
-The framework layer installs `sudo` with the image's package manager when the image lacks
-it, and grants nothing. Every Linux Provider calls `privileges.set_elevation` through the
-root guestd, then `privileges.verify_identities`, before any Task code runs: Docker once
-`docker exec` has started guestd, QEMU once the booted guest answers, Daytona before it
-starts the image's own command. The script runs on the framework's Python:
+The Linux framework layer installs `sudo` with the image's package manager when the image
+lacks it, and grants nothing. Every Linux and macOS Provider calls
+`privileges.set_elevation` through the root guestd, then `privileges.verify_identities`,
+before any Task code runs: Docker once `docker exec` has started guestd, QEMU once the
+booted guest answers, Daytona before it starts the image's own command, Orchard once
+guestd answers in an agent's VM. The script runs on the framework's Python:
 
 - It replaces the last two lines of `/etc/sudoers`, a marker comment and one rule:
   `<user> ALL=(ALL:ALL) NOPASSWD: ALL` to grant, `<user> ALL=(ALL:ALL) !ALL` to revoke.
@@ -54,9 +55,12 @@ starts the image's own command. The script runs on the framework's Python:
   rules, drop-ins and groups say, including for processes the image started before it,
   such as Docker's container command and a VM's desktop session. A snapshot carries the
   rule its Sandbox had, and the next start replaces it.
-- Revoking also takes the account out of `sudo`, `wheel` and `admin` in `/etc/group` and
-  `/etc/gshadow`, the groups distributions make administrators, which polkit and others
-  trust without asking sudo.
+- Revoking also takes the account out of `sudo`, `wheel` and `admin`, the groups that make
+  administrators, which other programs trust without asking sudo: on Linux in `/etc/group`
+  and `/etc/gshadow`, for polkit and others; on macOS with `dseditgroup`, since Directory
+  Services keeps its groups and `admin` members approve system changes with their password.
+  macOS's `/etc/sudoers` ends by including `sudoers.d`, so the appended rule comes last
+  there too.
 - An account that is uid 0 cannot be revoked, so `[agent].user` naming one without
   `[agent].sudo = true` is a `TaskDefinitionError`.
 
@@ -177,13 +181,11 @@ In each Sandbox the agent works in, the Provider starts the Driver in the accoun
 session (`launchctl asuser`, then `open` so LaunchServices runs it under the identity the
 grants name) and waits until it captures. guestd sends desktop pointer actions with
 `delivery_mode: foreground`, because the Driver otherwise refuses to move the real pointer
-over a background app's window. Elevation for `[agent].sudo` is not part of the image: as
-on Windows, it is set per boot. `true` adds a passwordless sudoers rule; `false` takes the
-account out of the `admin` group, whose members sudo and approve system changes with their
-password, and deletes sudoers lines that name it; either way the account's rights are then
-checked. `admin` keeps passwordless sudo for ALE, so a Task running as `admin` must declare
+over a background app's window. Elevation for `[agent].sudo` is set at every boot, as on
+Linux ([Agent elevation](#agent-elevation-on-linux-and-macos)). `admin` keeps passwordless
+sudo for ALE, which runs as root through it, so a Task running as `admin` must declare
 `sudo = true`. A separate verifier VM runs no agent, so it gets neither the desktop nor the
-account changes and checks, and a `build.sh` VM is kept exactly as the build left it.
+elevation and its checks, and a `build.sh` VM is kept exactly as the build left it.
 
 Preparation resolves OCI tags through registry manifest metadata without downloading
 VM disks or checking the worker cache, and framing clones the digest-pinned reference.

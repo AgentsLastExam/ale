@@ -1,4 +1,4 @@
-"""The agent's elevation, set at every Linux sandbox start, and the check that proves it.
+"""The agent's elevation, set at every Linux and macOS sandbox start, and its proof.
 
 Elevation is not part of a prepared image, so one image serves a Task with and without
 ``[agent].sudo``, its solver and its verifier, and a Sandbox continued from a snapshot of
@@ -9,6 +9,7 @@ any Task code runs, then proves both identities.
 from __future__ import annotations
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError, TaskDefinitionError
+from ale.core.taskspec import OperatingSystem
 from ale.run import guestd
 from ale.run.transport import GuestClient
 
@@ -21,9 +22,10 @@ _PROBE = (
 #: Run as root on the framework's Python. Sudo applies the last rule that matches, so the
 #: rule appended to /etc/sudoers decides, whatever the image's own rules, the groups and
 #: the account's running processes say. Revoking also takes the account out of the groups
-#: distributions make administrators, which programs other than sudo, such as polkit, trust.
+#: that make administrators, which programs other than sudo trust: polkit on Linux, and on
+#: macOS the authorization dialogs, whose groups Directory Services keeps.
 _SET = r"""
-import os, pwd, sys
+import os, pwd, subprocess, sys
 
 user, sudo = sys.argv[1], sys.argv[2] == "true"
 if pwd.getpwnam(user).pw_uid == 0 and not sudo:
@@ -73,21 +75,30 @@ def without_user(*columns):
 
 
 rewrite("/etc/sudoers", policy, create=sudo)
-if not sudo:
+if not sudo and sys.platform == "darwin":
+    for group in sorted(ADMINISTRATORS):
+        member = ["/usr/sbin/dseditgroup", "-o", "checkmember", "-m", user, group]
+        if subprocess.run(member, capture_output=True).returncode == 0:
+            remove = ["/usr/sbin/dseditgroup", "-o", "edit", "-d", user, "-t", "user", group]
+            subprocess.run(remove, check=True, capture_output=True)
+    subprocess.run(["/usr/bin/dscacheutil", "-flushcache"], check=True)
+elif not sudo:
     rewrite("/etc/group", without_user(3))
     rewrite("/etc/gshadow", without_user(2, 3))
 """
 
 
-async def set_elevation(client: GuestClient, agent_user: str, *, sudo: bool) -> None:
+async def set_elevation(
+    client: GuestClient, agent_user: str, *, sudo: bool, operating_system: OperatingSystem
+) -> None:
     """Grant the agent elevation for this start when ``sudo``, else revoke every way up.
 
     An account that is root cannot be kept from elevating, so a Task that names one without
     declaring ``[agent].sudo`` is refused.
     """
+    python = guestd.PYTHON[operating_system.value]
     code, _, stderr, _ = await client.exec(
-        [guestd.PYTHON["linux"], "-I", "-c", _SET, agent_user, "true" if sudo else "false"],
-        timeout_sec=60,
+        [python, "-I", "-c", _SET, agent_user, "true" if sudo else "false"], timeout_sec=60
     )
     if code == 3:
         raise TaskDefinitionError(

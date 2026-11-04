@@ -799,7 +799,9 @@ class QemuProvider(Provider):
             if request.os is OperatingSystem.WINDOWS:
                 await self._verify_windows_privileges(client, agent_user, request.sudo)
             else:
-                await set_elevation(client, agent_user, sudo=request.sudo)
+                await set_elevation(
+                    client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
+                )
                 await verify_identities(client, agent_user, sudo=request.sudo)
             file_client = await _connect(host_port, guest_token)
             clients.append(file_client)

@@ -25,7 +25,7 @@ from ale.run import guestd
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers import ProviderRegistry, orchard
+from ale.run.providers import ProviderRegistry, orchard, privileges
 from ale.run.providers.orchard import OrchardProvider
 from ale.run.providers.orchard_framing import FramedImage
 from ale.run.tasksets.manifest import load_tasks
@@ -198,10 +198,9 @@ class MemoryGuest:
         argv = params["argv"]
         assert isinstance(argv, list)
         cwd, env = params.get("cwd"), params.get("env", {})
-        if argv[:3] == ["/usr/bin/sudo", "-l", "-U"]:
-            return 0, f"User {self.user} is not allowed to run sudo on mac.\n".encode()
-        if argv[:2] == ["/bin/sh", "-c"] and argv[2] in (orchard._GRANT_SUDO, orchard._REVOKE_SUDO):
-            self.privileges.append("grant" if argv[2] == orchard._GRANT_SUDO else "revoke")
+        if argv[1:4] == ["-I", "-c", privileges._SET]:
+            assert argv[0] == guestd.PYTHON["macos"] and argv[4] == self.user
+            self.privileges.append("grant" if argv[5] == "true" else "revoke")
             return 0, b""
         if argv[:2] == ["sh", "-c"] and "$(id -u)" in argv[2]:
             return 0, b"501 no" if params.get("run_as") == self.user else b"0 yes"

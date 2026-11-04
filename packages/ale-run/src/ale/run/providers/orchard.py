@@ -53,7 +53,7 @@ from ale.run.providers.orchard_client import (
 )
 from ale.run.providers.orchard_desktop import await_desktop
 from ale.run.providers.orchard_framing import frame_image
-from ale.run.providers.privileges import verify_identities
+from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.transport import GuestClient
 
 _IMAGE = re.compile(
@@ -68,32 +68,6 @@ _PATH = "/opt/ale/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 _READ_CHUNK_BYTES = 64 * 1024
 #: From a framed clone's first boot to a guest whose account and desktop are checked.
 _BOOT_TIMEOUT_SEC = 300
-#: Elevation for ``[agent].sudo`` is granted or taken away at each boot, as on Windows, so
-#: one framed image serves every Task of its account whatever its image allows.
-_GRANT_SUDO = r"""set -eu
-if ! sudo -n -l -U "$1" 2>/dev/null | grep -q 'NOPASSWD: ALL'; then
-    printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$1" > /etc/sudoers.d/ale-agent
-    chmod 0440 /etc/sudoers.d/ale-agent
-fi
-"""
-#: Every way up macOS gives an account: the admin group, whose members sudo and approve
-#: system changes with their password, and sudoers rules that name it.
-_REVOKE_SUDO = r"""set -eu
-user=$1
-pattern=$(printf '%s' "$user" | sed 's/[.]/[.]/g')
-if dseditgroup -o checkmember -m "$user" admin >/dev/null 2>&1; then
-    dseditgroup -o edit -d "$user" -t user admin
-fi
-for file in /etc/sudoers /etc/sudoers.d/*; do
-    [ -f "$file" ] || continue
-    if grep -Eq "^[[:space:]]*$pattern[[:space:],=]" "$file"; then
-        sed -i '' -E "/^[[:space:]]*$pattern[[:space:],=]/d" "$file"
-        # Only this file's syntax: images ship sudoers files whose mode visudo -c rejects.
-        visudo -cqf "$file"
-    fi
-done
-dscacheutil -flushcache
-"""
 #: guestd from the sources framing installed, on the framework's Python.
 _GUESTD = (
     "import runpy,sys; sys.path.insert(0,'/opt/ale/guestd'); "
@@ -466,6 +440,8 @@ class OrchardProvider(Provider):
             and not request.sudo
             and request.role is not SandboxRole.VERIFIER
         ):
+            # Revoking would take the account's sudo from ALE too, which runs as root
+            # through it.
             raise ProviderCapabilityError(
                 f"ALE controls macOS VMs through the {CONTROL_ACCOUNT} account, which keeps "
                 "passwordless sudo, so a Task that runs as it must declare [agent].sudo = true; "
@@ -610,29 +586,13 @@ class OrchardProvider(Provider):
                 if gateway_host is not None:
                     await self._start_gateway_relay(guest, gateway_host, request)
                 if agent:
-                    change = _GRANT_SUDO if request.sudo else _REVOKE_SUDO
-                    code, _, stderr, timed_out = await guest.exec(
-                        ["/bin/sh", "-c", change, "sh", request.user], timeout_sec=60
+                    await set_elevation(
+                        guest,
+                        request.user,
+                        sudo=request.sudo,
+                        operating_system=OperatingSystem.MACOS,
                     )
-                    if code or timed_out:
-                        action = "grant" if request.sudo else "take away"
-                        raise ProviderStartError(
-                            f"could not {action} sudo for {request.user}: {stderr.strip()}"
-                        )
                     await verify_identities(guest, request.user, sudo=request.sudo)
-                    # Query all grants as root; a failed noninteractive sudo probe alone
-                    # would miss password-protected elevation rights.
-                    code, listed, _, timed_out = await guest.exec(
-                        ["/usr/bin/sudo", "-l", "-U", request.user], timeout_sec=15
-                    )
-                    if timed_out or code not in (0, 1):
-                        raise ProviderCapabilityError("Could not verify agent sudo policy")
-                    # macOS sudo exits 0 whether or not the account may run anything, so the
-                    # listing decides; guestd runs it without a locale, in English.
-                    if not request.sudo and "is not allowed to run sudo" not in listed:
-                        raise ProviderCapabilityError(
-                            f"the image still lets {request.user} use sudo after ALE took it away"
-                        )
                 total, _, _ = await guest.disk_usage("/")
                 storage = total // (1024 * 1024)
                 if request.resources.storage_mb and storage < request.resources.storage_mb:

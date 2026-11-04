@@ -679,7 +679,9 @@ class DaytonaProvider(Provider):
             client = await _connect(ssh, request.user, environment)
             agent_home, has_desktop = await _guest_contract(client)
             await _require_framework(client, request)
-            await set_elevation(client, request.user, sudo=request.sudo)
+            await set_elevation(
+                client, request.user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
+            )
             await verify_identities(client, request.user, sudo=request.sudo)
             await _seal_daemon(client, request.user)
             if request.resources.gpus:
