@@ -101,8 +101,10 @@ A Host whose Docker default runtime is `nvidia-container-runtime` was not measur
 
 The hook mounts no Vulkan ICD or GLVND EGL vendor file. An image that renders ships them at
 the paths the NVIDIA CDI spec uses, `/etc/vulkan/icd.d/nvidia_icd.json` and
-`/usr/share/glvnd/egl_vendor.d/10_nvidia.json`; on a CDI Host the spec's bind mounts replace
-them, so either path ends with exactly one NVIDIA manifest of each kind. The hook also mounts
+`/usr/share/glvnd/egl_vendor.d/10_nvidia.json`. A CDI spec mounts the Host's own manifests at
+the Host's paths, which replace these where the paths match, as on the measured Host and on
+Daytona; a driver installed from Ubuntu's packages keeps its Vulkan ICD in
+`/usr/share/vulkan/icd.d`, and the sandbox then has both. The hook also mounts
 no `/usr/share/nvidia/nvoptix.bin`: OVRTX then logs that it cannot load the OptiX denoiser
 weights, skips denoising, and its image differs from the CDI path's.
 
@@ -110,6 +112,16 @@ weights, skips denoising, and its image differs from the CDI path's.
 file whatever is requested, and anything less would leave a sandbox on the hook path short
 of what the same Task gets there. On the hook path `display` adds `/dev/nvidia-modeset`,
 `video` the codec libraries (NVENC, NVDEC) and `ngx` the DLSS library.
+
+Daytona mounts its Host's whole driver into a GPU sandbox, as the CDI path does, and
+ignores `NVIDIA_DRIVER_CAPABILITIES`: `compute,utility`, `compute,utility,graphics` and no
+value gave the same files on an H100 with driver 580.178.04. It registers none of them with
+the linker, though. Before the Provider runs `ldconfig`, the linker cache holds no NVIDIA
+library and `libEGL_nvidia.so.0` and `libGLX_nvidia.so.0`, the names the EGL vendor file
+and the Vulkan ICD load, do not exist: neither loads for the agent, and `vkCreateInstance`
+fails with `VK_ERROR_INCOMPATIBLE_DRIVER`, as on Docker's hook path without `graphics`.
+Afterwards EGL initializes the GPU and Vulkan lists the H100. The other sonames,
+`libcuda.so.1` among them, exist either way, which is why CUDA worked without it.
 
 ## Daytona
 
@@ -127,6 +139,7 @@ live organization (daemon 0.225.2). Operating it is in
 | Accepts no connection from the sandbox outward; its SSH gateway refuses `-R` | guestd runs over two SSH exec sessions, one for commands and one for file reads. A third carries `guestd/tunnel.py`, which delivers the Gateway on the sandbox's loopback; the sandbox names an index into the Host's list, never an address |
 | Switches `networkBlockAll` and a domain allowlist at runtime (Tier 3 or 4 only), asynchronously | `block` uses `networkBlockAll`. `allowlist` uses `domainAllowList` with the hosts as declared, which Daytona matches as ALE does. `accepts` refuses addresses, ports and more than 100 hosts. Every switch waits for a TLS handshake with a public host the Task did not declare to behave as the setting says |
 | Serves GPUs from its own region, in several models, optionally as spot capacity it may reclaim | Asks for `gpu_types` in order of preference and never spot. The GPUs are read with `nvidia-smi` as the agent and recorded; another count or model, or a GPU the agent cannot open, destroys the sandbox |
+| Mounts the Host driver's libraries without registering them with the linker (see [GPU driver capabilities](#gpu-driver-capabilities)) | Runs `ldconfig` as root before it reads the GPUs, as Docker's NVIDIA paths do with their linker-cache hook; a sandbox where it fails is destroyed |
 | Rate-limits creates | A create answered 429 made nothing and is retried, honoring `Retry-After`, for up to five minutes. No other failed create is repeated, since it may have made a sandbox |
 | Creates a sandbox even when the caller is cancelled mid-request | Every way out of a start deletes what Daytona made; a create whose reply was lost is found by its unique name |
 | Organizations are shared between tools | Labels live under `ale.run.*`, and listing and destroying act only on those. Every sandbox has a lifetime (`ttlMinutes`), so one a crashed run leaves behind is deleted by Daytona |

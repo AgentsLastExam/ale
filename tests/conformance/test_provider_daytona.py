@@ -217,6 +217,35 @@ assert cuda.cuMemFree_v2(memory) == 0
 print(count.value)
 """
 
+#: Loads the library the NVIDIA Vulkan ICD names and initializes EGL on every device through
+#: GLVND, as an offscreen renderer does, so it needs nothing beyond the ALE base. Prints the
+#: vendors of the devices that initialized.
+RENDERING = r"""
+import ctypes, json
+ctypes.CDLL("libGLX_nvidia.so.0")
+egl = ctypes.CDLL("libEGL.so.1")
+egl.eglGetProcAddress.restype = ctypes.c_void_p
+egl.eglGetProcAddress.argtypes = [ctypes.c_char_p]
+query_devices = ctypes.CFUNCTYPE(
+    ctypes.c_uint, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_int)
+)(egl.eglGetProcAddress(b"eglQueryDevicesEXT"))
+pointer = ctypes.c_void_p
+platform_display = ctypes.CFUNCTYPE(pointer, ctypes.c_uint, pointer, pointer)(
+    egl.eglGetProcAddress(b"eglGetPlatformDisplayEXT")
+)
+egl.eglInitialize.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+egl.eglQueryString.restype = ctypes.c_char_p
+egl.eglQueryString.argtypes = [ctypes.c_void_p, ctypes.c_int]
+devices, count = (ctypes.c_void_p * 16)(), ctypes.c_int()
+query_devices(16, devices, ctypes.byref(count))
+vendors = []
+for device in devices[: count.value]:
+    display = platform_display(0x313F, device, None)  # EGL_PLATFORM_DEVICE_EXT
+    if egl.eglInitialize(display, None, None):
+        vendors.append(egl.eglQueryString(display, 0x3053).decode())  # EGL_VENDOR
+print(json.dumps(vendors))
+"""
+
 
 @pytest.mark.needs_gpu
 @pytest.mark.skipif(
@@ -248,3 +277,11 @@ class TestDaytonaGpuProvider(TestDaytonaProvider):
                 identity=Identity.AGENT,
             )
             assert listed.stdout.strip() == device.id
+
+    @pytest.mark.asyncio
+    async def test_the_agent_finds_the_rendering_drivers(self) -> None:
+        """EGL and Vulkan load the NVIDIA driver by the sonames GLVND and the ICD name."""
+        async with await self.provider.create(await self.request()) as sandbox:
+            found = await sandbox.exec(["python3", "-c", RENDERING], identity=Identity.AGENT)
+            assert found.ok, found.stderr
+            assert "NVIDIA" in json.loads(found.stdout), found.stdout

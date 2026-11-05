@@ -38,6 +38,7 @@ from ale.run.providers.daytona import (
     _observed_allocation,
     _observed_gpus,
     _parse_ssh,
+    _register_driver_libraries,
     _same_model,
     _sandbox_name,
     _seal_daemon,
@@ -414,6 +415,26 @@ async def test_gpus_other_than_requested_stop_the_sandbox() -> None:
         await _observed_gpus(GpuClient("", code=9), gpu_request(), SANDBOX, ())  # type: ignore[arg-type]
     with pytest.raises(ProviderStartError, match="gave 0 GPUs"):
         _observed_allocation(gpu_request(), {"cpu": 2, "memory": 8, "disk": 512})
+
+
+class LinkerClient:
+    """Answers ``ldconfig`` with the given exit code and records who ran it."""
+
+    def __init__(self, code: int = 0) -> None:
+        self.code = code
+        self.calls: list[tuple[list[str], str | None]] = []
+
+    async def exec(self, argv: list[str], *, run_as: str | None = None, **_: Any):
+        self.calls.append((argv, run_as))
+        return self.code, "", "" if self.code == 0 else "ldconfig: Permission denied", False
+
+
+async def test_the_driver_libraries_daytona_mounts_are_registered_by_root() -> None:
+    client = LinkerClient()
+    await _register_driver_libraries(client)  # type: ignore[arg-type]
+    assert client.calls == [(["/sbin/ldconfig"], None)]
+    with pytest.raises(ProviderCapabilityError, match="linker: ldconfig: Permission denied"):
+        await _register_driver_libraries(LinkerClient(code=1))  # type: ignore[arg-type]
 
 
 def test_daytona_gpu_type_names_match_what_nvidia_smi_reports() -> None:

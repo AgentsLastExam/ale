@@ -20,8 +20,9 @@ works within that:
   command, so the Provider starts those itself, as the image's user and with its
   environment and working directory, and waits for the desktop when the image has one.
 * **GPUs.** A request for GPUs names the configured models; Daytona places the sandbox in
-  its GPU region. The RunLock records the GPUs as the agent sees them, and a sandbox whose
-  GPUs differ from the request is destroyed.
+  its GPU region. Daytona mounts the Host driver's libraries without registering them with
+  the linker, so the Provider runs ``ldconfig``. The RunLock records the GPUs as the agent
+  sees them, and a sandbox whose GPUs differ from the request is destroyed.
 """
 
 from __future__ import annotations
@@ -686,6 +687,7 @@ class DaytonaProvider(Provider):
             await verify_identities(client, request.user, sudo=request.sudo)
             await _seal_daemon(client, request.user)
             if request.resources.gpus:
+                await _register_driver_libraries(client)
                 gpus = await _observed_gpus(client, request, data, self.config.gpu_types)
                 allocation = allocation.model_copy(update={"gpu": gpus})
             if listeners:
@@ -1011,6 +1013,22 @@ async def _require_framework(client: GuestClient, request: SandboxRequest) -> No
         raise ProviderStartError(
             "the sandbox image does not carry this engine's framework layer "
             f"(found {stdout.strip() or stderr.strip() or 'none'}, expected {expected})"
+        )
+
+
+async def _register_driver_libraries(client: GuestClient) -> None:
+    """Give the driver libraries Daytona mounts their sonames and linker-cache entries.
+
+    Daytona mounts the Host driver's files, graphics included, but runs no linker-cache
+    hook, as Docker's NVIDIA paths do. ``libEGL_nvidia.so.0`` and ``libGLX_nvidia.so.0``,
+    which the GLVND EGL vendor file and the Vulkan ICD name, then do not exist, and EGL and
+    Vulkan cannot load the NVIDIA driver. ``ldconfig``, as root, creates them.
+    """
+    code, stdout, stderr, _ = await client.exec(["/sbin/ldconfig"], timeout_sec=120)
+    if code != 0:
+        raise ProviderCapabilityError(
+            "could not register the GPU driver libraries with the sandbox's linker: "
+            f"{(stderr or stdout).strip()[-500:]}"
         )
 
 
