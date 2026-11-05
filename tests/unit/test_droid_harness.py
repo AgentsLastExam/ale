@@ -391,6 +391,28 @@ def test_notices_and_failed_turns_become_system_steps_and_mcp_is_named(tmp_path:
     ]
 
 
+def test_a_message_droid_writes_as_the_user_is_a_notice(tmp_path: Path) -> None:
+    warning = "Error: Your custom model appears to be a Claude model."
+    record(tmp_path, "Go.")
+    write_session(
+        tmp_path,
+        SESSION_ID,
+        message("user", {"type": "text", "text": warning}, visibility="both", id="warning"),
+        message("user", {"type": "text", "text": "<system-reminder>"}, visibility="llm_only"),
+        message("user", {"type": "text", "text": "Go."}),
+        message("assistant", {"type": "text", "text": "Done."}),
+        {"type": "agent_turn_outcome", "reason": "completed"},
+    )
+    trajectory = DroidHarness().parse_trajectory(recorded_context(tmp_path, session_id=SESSION_ID))
+
+    assert [(step.source, step.message) for step in trajectory.steps] == [
+        ("system", warning),
+        ("user", "Go."),
+        ("agent", "Done."),
+    ]
+    assert not trajectory.extra
+
+
 def test_a_failure_only_the_stream_reports_ends_its_turn(tmp_path: Path) -> None:
     record(
         tmp_path,

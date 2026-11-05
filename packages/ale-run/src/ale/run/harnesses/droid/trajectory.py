@@ -90,13 +90,13 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
             name="droid", version=context.agent_version, model_name=context.model or None
         ),
     )
-    turns = list(_native_turns(events, issues))
+    turns = list(_native_turns(events, issues, [item.prompt for item in recorded]))
     if events and len(turns) < len(recorded):
         issues.append({"reason": "prompt_not_in_native_session", "invocation": len(turns) + 1})
     for index, item in enumerate(recorded):
         stream = streams[index]
         if index < len(turns):
-            reported = _native_steps(builder, turns[index], context)
+            reported = _native_steps(builder, turns[index], item.prompt, context)
             if not reported and (error := _stream_error(stream)):
                 builder.add(source="system", message=error)
         else:
@@ -132,14 +132,18 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
 
 
 def _native_turns(
-    events: list[dict[str, Any]], issues: list[dict[str, Any]]
+    events: list[dict[str, Any]], issues: list[dict[str, Any]], prompts: list[str]
 ) -> Iterator[list[dict[str, Any]]]:
-    """The session's turns, each opened by one prompt ALE sent, in native order.
+    """The session's turns, each holding the next of ``prompts``, in native order.
 
     Droid injects its own context before each prompt as ``llm_only`` messages; those are
-    not task input and are skipped.
+    not task input and are skipped. A message Droid writes as the user's, such as a warning
+    that the model's name suggests another provider, opens no turn: it stays a notice in
+    the turn it falls in, or the first one.
     """
-    turn: list[dict[str, Any]] | None = None
+    turn: list[dict[str, Any]] = []
+    waiting = [prompt.strip() for prompt in prompts]
+    opened = False
     unknown: set[str] = set()
     for event in events:
         kind = event.get("type")
@@ -149,26 +153,30 @@ def _native_turns(
             message = event.get("message")
             if not isinstance(message, dict) or message.get("visibility") == "llm_only":
                 continue
-            if _is_prompt(message):
-                if turn is not None:
+            if _is_prompt(message) and waiting and _text(message).strip() == waiting[0]:
+                waiting.pop(0)
+                if opened:
                     yield turn
-                turn = [event]
-                continue
+                    turn = []
+                opened = True
         elif kind != "agent_turn_outcome":
             unknown.add(str(kind))
             continue
-        if turn is not None:
-            turn.append(event)
-    if turn is not None:
+        turn.append(event)
+    if opened:
         yield turn
     if unknown:
         issues.append({"reason": "unknown_native_event_types", "types": sorted(unknown)[:10]})
 
 
 def _native_steps(
-    builder: TrajectoryBuilder, turn: list[dict[str, Any]], context: TrajectoryParseContext
+    builder: TrajectoryBuilder,
+    turn: list[dict[str, Any]],
+    prompt: str,
+    context: TrajectoryParseContext,
 ) -> bool:
-    """Add one native turn; whether the session itself reports how the turn failed."""
+    """Add one native turn, prompted by ``prompt``; whether the session itself reports how
+    the turn failed."""
     results: dict[str, AtifObservationResult] = {}
     for event in turn:
         for block in _blocks(event, "user"):
@@ -196,7 +204,9 @@ def _native_steps(
             builder.add(source="system", message=_text(message), timestamp=timestamp, extra=extra)
             reported = True
         elif role == "user" and _is_prompt(message):
-            builder.add(source="user", message=_text(message), timestamp=timestamp, extra=extra)
+            # The prompt, or a notice Droid sent the model in the user's place.
+            source = "user" if _text(message).strip() == prompt.strip() else "system"
+            builder.add(source=source, message=_text(message), timestamp=timestamp, extra=extra)
         elif role == "assistant":
             text: list[str] = []
             reasoning: list[str] = []

@@ -18,7 +18,9 @@ those requests, session sync included, leave the Sandbox.
 chooses the ID of every new session. The session is
 `.droid-ale/.factory/sessions/<cwd>/<session id>.jsonl`. The parser follows it, skipping
 the context Droid injects before each prompt (`llm_only` messages) and turning the notices
-it shows its user (`user_only`) into system steps. Stream-json supplies the per-invocation
+it shows its user (`user_only`) into system steps. A turn opens only at the prompt ALE
+sent: a message Droid writes as the user's, such as its warning that the model's name
+suggests another provider, is a system step too. Stream-json supplies the per-invocation
 usage, a failure the session does not record, and every turn the session lacks.
 
 Task subagents need Factory's daemon and a signed-in Factory user, so ALE always removes
