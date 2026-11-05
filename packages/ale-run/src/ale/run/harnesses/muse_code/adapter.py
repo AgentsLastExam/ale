@@ -46,7 +46,7 @@ class MuseCodeHarness(CliHarness):
     package = "lookaside.facebook.com/lookaside/muse"
     binary = "muse"
     default_version = DEFAULT_CLI_VERSION
-    # Meta's release manifest for this version; upstream ships no Windows ARM build.
+    # Meta's release manifest for this version.
     release_assets: ClassVar[ReleaseAssets] = {
         (OperatingSystem.LINUX, "x86_64"): ReleaseAsset(
             _RELEASE + "muse-x86-linux",
@@ -59,6 +59,10 @@ class MuseCodeHarness(CliHarness):
         (OperatingSystem.WINDOWS, "x86_64"): ReleaseAsset(
             _RELEASE + "muse-x86-windows.exe",
             "239c993cedc3768a99103a90b2f7e3d560375036104980e30227ffebf9de0303",
+        ),
+        (OperatingSystem.WINDOWS, "aarch64"): ReleaseAsset(
+            _RELEASE + "muse-aarch64-windows.exe",
+            "45ee9d43a2a7f99d7d67c90b8b44bb8d7ef653ed4fdf205453716162db611e2b",
         ),
         (OperatingSystem.MACOS, "aarch64"): ReleaseAsset(
             _RELEASE + "muse-aarch64-macos",

@@ -51,6 +51,7 @@ def test_release_binaries_are_pinned_for_every_system() -> None:
         (OperatingSystem.LINUX, "x86_64"),
         (OperatingSystem.LINUX, "aarch64"),
         (OperatingSystem.WINDOWS, "x86_64"),
+        (OperatingSystem.WINDOWS, "aarch64"),
         (OperatingSystem.MACOS, "aarch64"),
     }
     assert all(
