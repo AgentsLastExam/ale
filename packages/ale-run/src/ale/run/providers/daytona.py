@@ -12,6 +12,8 @@ works within that:
 * **Network.** Daytona's ``networkBlockAll`` and domain allowlist apply outside the
   sandbox, where the agent cannot lift them; they replace the internal bridge and the
   Host's egress proxy that Docker uses, so allowed traffic never passes through the Host.
+  A GPU runner also names a proxy of its own in every process's environment, which nothing
+  needs, so guestd starts without it.
 * **Daemon.** Daytona's daemon listens, without authentication, on a few local ports and
   runs what it is asked as root. The Provider rejects connections to them from every
   non-root user, then proves it by connecting as the agent. A sandbox that cannot be sealed
@@ -97,6 +99,17 @@ GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
 PYTHON = guestd.PYTHON["linux"]
 #: Local ports of Daytona's daemon: toolbox API, SSH server, web terminal, and one more.
 DAEMON_PORTS = (2280, 22220, 22222, 33333)
+#: What a Daytona GPU runner adds to the environment of every process in a sandbox, naming a
+#: proxy of its own. A CPU runner adds none, and Daytona's network settings apply without
+#: them, so guestd starts without them unless the image or the Task sets them.
+_RUNNER_PROXY_VARIABLES = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
 #: How long a fresh SSH access token lives. Sessions already open outlive it.
 _SSH_MINUTES = 60
 _START_TIMEOUT_SEC = 900
@@ -919,11 +932,7 @@ async def _connect(
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_sec
-    assignments = " ".join(
-        shlex.quote(f"{name}={value}")
-        for name, value in {**environment, "ALE_AGENT_USER": agent_user}.items()
-    )
-    command = f"exec env {assignments} {PYTHON} {GUESTD_DIR / 'main.py'} --stdio"
+    command = _guestd_command(agent_user, environment)
     last: Exception | None = None
     while True:
         transport = StdioTransport(await ssh.argv(command))
@@ -938,6 +947,20 @@ async def _connect(
         if loop.time() >= deadline:
             raise ProviderStartError(f"guest service did not answer over SSH: {last}")
         await asyncio.sleep(2)
+
+
+def _guestd_command(agent_user: str, environment: dict[str, str]) -> str:
+    """The shell command that starts guestd, without the runner's proxy variables.
+
+    ``env`` removes those before it applies the image's and the Task's variables, so a value
+    either of them sets still reaches every command.
+    """
+    removed = " ".join(f"-u {name}" for name in _RUNNER_PROXY_VARIABLES)
+    assignments = " ".join(
+        shlex.quote(f"{name}={value}")
+        for name, value in {**environment, "ALE_AGENT_USER": agent_user}.items()
+    )
+    return f"exec env {removed} {assignments} {PYTHON} {GUESTD_DIR / 'main.py'} --stdio"
 
 
 async def _guest_contract(client: GuestClient) -> tuple[str, bool]:

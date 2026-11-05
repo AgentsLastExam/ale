@@ -39,14 +39,19 @@ __all__ = ["ProviderConformance"]
 #: An address off every host, reached by IP so no resolver is involved.
 INTERNET = "1.1.1.1:443"
 
-#: Reports, per ``kind=address`` argument, whether the sandbox reached it.
+#: Reports, per ``kind=address`` argument, whether the sandbox reached it: ``http`` gets an
+#: answer, ``tls`` completes a handshake (verified against the address), ``tcp`` connects.
 _REACH = """
-import socket, sys, urllib.request
+import socket, ssl, sys, urllib.request
 for target in sys.argv[1:]:
     kind, _, address = target.partition("=")
     try:
         if kind == "http":
             urllib.request.urlopen(address, timeout=10).read()
+        elif kind == "tls":
+            host, port = address.rsplit(":", 1)
+            with socket.create_connection((host, int(port)), timeout=10) as raw:
+                ssl.create_default_context().wrap_socket(raw, server_hostname=host).close()
         else:
             host, port = address.rsplit(":", 1)
             socket.create_connection((host, int(port)), timeout=10).close()
@@ -364,7 +369,9 @@ class ProviderConformance:
         Framework phases have the network; the agent phase reaches only the episode's
         Gateway, not the Internet and not any other service on the Host; verification
         gets the network back. The Gateway's address never moves in between, and is at the
-        same port whatever port the Host serves it on.
+        same port whatever port the Host serves it on. Reaching the Internet means
+        completing a TLS handshake with a public host: a backend's network may accept a
+        connection outside the sandbox and pass nothing on.
         """
         async with _host_services() as (gateway_port, other_port):
             request = await self.request(gateway_url=f"http://127.0.0.1:{gateway_port}")
@@ -374,23 +381,23 @@ class ProviderConformance:
                 assert urlsplit(gateway).port == SANDBOX_GATEWAY_PORT
                 host = urlsplit(gateway).hostname
                 await sandbox.open_egress()
-                opened = await _reach(sandbox, f"tcp={INTERNET}", identity=Identity.FRAMEWORK)
-                assert opened[f"tcp={INTERNET}"], "framework phases must have the network"
+                opened = await _reach(sandbox, f"tls={INTERNET}", identity=Identity.FRAMEWORK)
+                assert opened[f"tls={INTERNET}"], "framework phases must have the network"
 
                 await sandbox.close_egress()
                 sealed = await _reach(
-                    sandbox, f"http={gateway}", f"tcp={INTERNET}", f"tcp={host}:{other_port}"
+                    sandbox, f"http={gateway}", f"tls={INTERNET}", f"tcp={host}:{other_port}"
                 )
                 assert sealed == {
                     f"http={gateway}": True,
-                    f"tcp={INTERNET}": False,
+                    f"tls={INTERNET}": False,
                     f"tcp={host}:{other_port}": False,
                 }, sealed
                 assert sandbox.gateway_url == gateway
 
                 await sandbox.open_egress()
-                reopened = await _reach(sandbox, f"tcp={INTERNET}", identity=Identity.FRAMEWORK)
-                assert reopened[f"tcp={INTERNET}"], "verification must get the network back"
+                reopened = await _reach(sandbox, f"tls={INTERNET}", identity=Identity.FRAMEWORK)
+                assert reopened[f"tls={INTERNET}"], "verification must get the network back"
 
     @pytest.mark.asyncio
     async def test_a_task_that_declared_open_is_never_sealed(self) -> None:

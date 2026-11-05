@@ -34,6 +34,7 @@ from ale.run.providers.daytona import (
     _domain_allowlist,
     _egress_probe,
     _guest_environment,
+    _guestd_command,
     _image_unavailable,
     _observed_allocation,
     _observed_gpus,
@@ -234,6 +235,25 @@ async def test_the_agent_gets_daytonas_allowlist_and_no_proxy_variables() -> Non
     blocked, _ = network_sandbox(api, NetworkPolicy(mode=NetworkMode.BLOCK))
     await blocked.close_egress()
     assert api.sent[-1] == {"networkBlockAll": True}
+
+
+def test_guestd_starts_without_the_runners_proxy_variables() -> None:
+    """A GPU runner names its own proxy in every process's environment; a CPU runner none."""
+    words = shlex.split(_guestd_command("user", {"PATH": "/usr/bin", "HTTPS_PROXY": "http://p"}))
+    assert words[:2] == ["exec", "env"]
+    removed = {words[i + 1] for i, word in enumerate(words) if word == "-u"}
+    assert removed == {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    }
+    # env applies assignments after removals, so the image's or Task's own value survives.
+    first_assignment = next(i for i, word in enumerate(words) if "=" in word)
+    assert max(i for i, word in enumerate(words) if word == "-u") < first_assignment
+    assert "HTTPS_PROXY=http://p" in words and "ALE_AGENT_USER=user" in words
 
 
 async def test_a_setting_daytona_did_not_store_stops_the_phase() -> None:
