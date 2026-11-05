@@ -25,9 +25,13 @@ from ale.core.trajectory import AtifTrajectory
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
+from ale.run.harnesses.claude_code import ClaudeCodeHarness
+from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.droid import DroidHarness
 from ale.run.harnesses.forgecode import ForgecodeHarness
+from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.hermes import HermesHarness
+from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.protocol.log_mirror import LogMirror
@@ -48,11 +52,26 @@ class Case:
     dialect: str
     tool_pattern: str
     model: str = "scripted-model"
+    #: Parse issues the CLI's evidence always raises, by reason.
+    expected_issues: frozenset[str] = frozenset()
 
 
 DIALECTS = ("anthropic", "openai-chat-completions", "openai-responses")
 #: Each shipped native CLI, by test ID, with the dialect and native shell tool it uses.
 CASES: dict[str, Case] = {
+    "claude-code-anthropic": Case(ClaudeCodeHarness, "anthropic", r"^Bash$"),
+    "codex-cli-openai-responses": Case(
+        CodexCliHarness, "openai-responses", r"^(shell|exec_command)$"
+    ),
+    # Grok keeps its prompt history, search index and a log beside the sessions it mirrors;
+    # the parser leaves them as raw evidence.
+    "grok-build-openai-responses": Case(
+        GrokBuildHarness,
+        "openai-responses",
+        r"^run_terminal_command$",
+        expected_issues=frozenset({"unconverted_native_files"}),
+    ),
+    "openclaw-cli-openai-responses": Case(OpenClawCliHarness, "openai-responses", r"^exec$"),
     **{
         f"droid-{dialect}": Case(
             partial(DroidHarness, gateway_dialect=dialect), dialect, r"^Execute$"
@@ -168,6 +187,9 @@ async def test_cli_runs_a_scripted_episode_through_the_gateway(tmp_path: Path, n
     prompts = ("Write the proof file.", "Write it once more.", CONTINUE_PROMPT)
     async with scripted(tmp_path, name, case, model) as episode:
         harness, sandbox, session = episode.harness, episode.sandbox, episode.session
+        # Named absolutely: some CLIs run their tools in a workspace of their own.
+        proof_path = f"{session.home}/scripted-proof.txt"
+        model.command = f"echo scripted > {proof_path} && cat {proof_path}"
         first = await harness.launch(prompts[0], sandbox, session, timeout_sec=300)
         assert first.continuation is not None
         second = await harness.resume(
@@ -182,13 +204,12 @@ async def test_cli_runs_a_scripted_episode_through_the_gateway(tmp_path: Path, n
             for run in (first, second, third)
             if run.continuation is not None
         } == {native_id}
-        proof = await sandbox.exec(
-            ["cat", f"{session.home}/scripted-proof.txt"], identity=Identity.AGENT
-        )
+        proof = await sandbox.exec(["cat", proof_path], identity=Identity.AGENT)
         assert proof.stdout.strip() == "scripted"
         trajectory = await mirrored_trajectory(tmp_path, episode, prompts[0], native_id)
 
-    assert not (trajectory.extra or {}).get("ale", {}).get("parse_issues")
+    issues = (trajectory.extra or {}).get("ale", {}).get("parse_issues") or ()
+    assert {issue["reason"] for issue in issues} <= case.expected_issues
     users = [step.message for step in trajectory.steps if step.source == "user"]
     assert users == list(prompts)
     calls = [call for step in trajectory.steps for call in step.tool_calls or ()]
