@@ -166,9 +166,11 @@ def _parse_host_nvidia_smi(output: str) -> dict[int, GpuDevice]:
 
 
 def _gpu_run_args(uuids: tuple[str, ...]) -> list[str]:
+    # Docker reads --gpus as one CSV record, so an unquoted comma would make the second
+    # UUID a count field; the quotes keep the whole device list in one field.
     return [
         "--gpus",
-        f"device={','.join(uuids)}",
+        f'"device={",".join(uuids)}"',
         "--env",
         "NVIDIA_DRIVER_CAPABILITIES=compute,utility",
     ]
