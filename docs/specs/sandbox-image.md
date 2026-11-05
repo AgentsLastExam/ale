@@ -329,10 +329,20 @@ Retained handles are always provider-qualified: `docker:<runtime-id>` for contai
 are rejected. Listing, destroying and attaching are Provider operations, routed by the
 Provider a handle or RunLock names, so a new backend needs no CLI change.
 
-GPU workload libraries such as CUDA, PyTorch, and simulators remain Task Dockerfile
-responsibility. Tasks request a count only; Provider configuration selects eligible
-devices (host indices, or models on Daytona) and ALE records actual UUIDs. QEMU GPU
-passthrough remains a Provider capability, not a Task image declaration.
+GPU workload libraries such as CUDA, PyTorch, and simulators, and the Vulkan ICD and GLVND
+EGL vendor files a renderer loads, remain Task Dockerfile responsibility: not every
+injection path mounts those files. Tasks request a count only; Provider configuration
+selects eligible devices (host indices, or models on Daytona) and ALE records actual UUIDs.
+QEMU GPU passthrough remains a Provider capability, not a Task image declaration.
+
+For a Docker GPU sandbox the Provider, not the image, sets the NVIDIA driver capabilities
+(`NVIDIA_DRIVER_CAPABILITIES`), because on the NVIDIA runtime-hook path they decide which
+Host driver libraries enter the sandbox. It requests compute, utility and graphics, so a
+Task that renders offscreen through Vulkan or EGL finds its driver on every path. A Host
+on the CDI path ignores the request and injects whatever its CDI spec lists, display and
+video files included; a Task may rely on CUDA, Vulkan and EGL, not on those. What each
+path mounts is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-driver-capabilities).
 
 ## Permissions
 

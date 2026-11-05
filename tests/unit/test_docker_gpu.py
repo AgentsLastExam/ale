@@ -42,7 +42,7 @@ def test_docker_receives_only_selected_uuids() -> None:
         "--gpus",
         f'"device={UUID}"',
         "--env",
-        "NVIDIA_DRIVER_CAPABILITIES=compute,utility",
+        "NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics",
     ]
 
 
