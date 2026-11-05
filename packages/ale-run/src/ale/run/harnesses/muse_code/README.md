@@ -26,9 +26,11 @@ not enough, so the Gateway URL is set there. Before each run Muse fetches
 A launch passes a new UUID to `--session-id`, and a resume passes the same ID again. The
 session is `.local/share/muse/sessions/<year>/<month>/<day>/<session id>/session.jsonl`.
 The parser unwraps retained frames, drops repeated records, and follows the `run` events
-in native order: one agent step per model response, with its usage. A tool's failure is a
-`task` failure linked by `tool:<call id>`. A run Muse starts itself has no prompt; what it
-delivers, such as a subagent's result, is a system step.
+in native order: one agent step per model response, with its usage. A call names an MCP
+tool `mcp__<server>__<tool>`, each part sanitized; the parser takes the server and tool as
+declared from the session's catalog of its MCP tools. A tool's failure is a `task` failure
+linked by `tool:<call id>`. A run Muse starts itself has no prompt; what it delivers, such
+as a subagent's result, is a system step.
 
 A subagent's start is attested with the call that dispatched it and its child session,
 stored in the parent's `subagent/<child id>/`. It becomes an embedded trajectory when
