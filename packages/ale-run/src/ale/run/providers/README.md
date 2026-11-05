@@ -82,6 +82,34 @@ guestd answers in an agent's VM. The script runs on the framework's Python:
 (an image with no sudo and no package manager to install it) is refused with that reason,
 as is a way up the revocation missed.
 
+## GPU driver capabilities
+
+A Docker GPU sandbox is started with `--gpus` and the argument `"device=<uuid>,<uuid>"`,
+double quotes included: Docker reads the value as one CSV record, and the quotes keep the
+list of UUIDs in one field (in a shell, `--gpus '"device=<uuid>,<uuid>"'`). It also gets
+`NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics`. Docker serves the request on one of
+two NVIDIA paths, and only one of them reads that variable. Measured with Docker 29.7.2,
+NVIDIA Container Toolkit 1.20.0 and driver 580.178.04 on an RTX 4090, with NVIDIA OVRTX 0.6
+(a Vulkan path tracer) as the renderer:
+
+| Path | What enters the sandbox |
+|---|---|
+| CDI (Container Device Interface): Docker 29.7.2 tries it first when the Host has an NVIDIA CDI spec | The selected GPUs' own device nodes plus every library and shared device node the spec lists (`/dev/nvidia-modeset`, the video codec libraries and the Vulkan ICD manifest included), whatever the variable says: `compute,utility` and `all` give the same set |
+| NVIDIA runtime hook: older Docker, a Host without a CDI spec, or `--gpus driver=nvidia.runtime-hook,...` | Only the libraries of the requested capabilities. With `compute,utility` there is no `libGLX_nvidia`, `libEGL_nvidia` or `libnvidia-rtcore`, and OVRTX fails at `vkCreateInstance` with `VK_ERROR_INCOMPATIBLE_DRIVER`; with `graphics` added it renders |
+
+A Host whose Docker default runtime is `nvidia-container-runtime` was not measured.
+
+The hook mounts no Vulkan ICD or GLVND EGL vendor file. An image that renders ships them at
+the paths the NVIDIA CDI spec uses, `/etc/vulkan/icd.d/nvidia_icd.json` and
+`/usr/share/glvnd/egl_vendor.d/10_nvidia.json`; on a CDI Host the spec's bind mounts replace
+them, so either path ends with exactly one NVIDIA manifest of each kind. The hook also mounts
+no `/usr/share/nvidia/nvoptix.bin`: OVRTX then logs that it cannot load the OptiX denoiser
+weights, skips denoising, and its image differs from the CDI path's.
+
+`display` is not requested: on the hook path it adds `/dev/nvidia-modeset`, and offscreen
+rendering does not need it. `video` is not requested: no Task has needed the codecs. `ngx`
+(DLSS) is not requested: OVRTX's output was the same with and without it.
+
 ## Daytona
 
 Daytona's sandboxes are built for a different trust model than ALE's, so `daytona.py`
