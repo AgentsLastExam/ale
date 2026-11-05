@@ -32,16 +32,19 @@ pytestmark = [
 ]
 
 
+def _gpu_image_reference() -> str:
+    default_image = "ghcr.io/agentslastexam/container-ubuntu22-base"
+    return (
+        f"{os.environ.get('ALE_TEST_DOCKER_GPU_IMAGE', default_image)}:"
+        f"{os.environ.get('ALE_TEST_DOCKER_GPU_TAG', 'latest')}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_live_docker_gpu_operation_and_exclusive_lease() -> None:
     index = int(os.environ.get("ALE_TEST_DOCKER_GPU_INDEX", "0"))
     provider = DockerProvider(gpus=(index,))
-    default_image = "ghcr.io/agentslastexam/container-ubuntu22-base"
-    reference = (
-        f"{os.environ.get('ALE_TEST_DOCKER_GPU_IMAGE', default_image)}:"
-        f"{os.environ.get('ALE_TEST_DOCKER_GPU_TAG', 'latest')}"
-    )
-    prepared = await prepare_reference(provider, reference)
+    prepared = await prepare_reference(provider, _gpu_image_reference())
     request = SandboxRequest(
         episode_id="live-docker-gpu",
         prepared_image=prepared,
@@ -59,6 +62,29 @@ async def test_live_docker_gpu_operation_and_exclusive_lease() -> None:
         contender = DockerProvider(gpus=(index,))
         with pytest.raises(ProviderCapabilityError, match=r"available|candidates"):
             await contender.create(request.model_copy(update={"episode_id": "gpu-contender"}))
+    finally:
+        await sandbox.destroy()
+
+
+@pytest.mark.asyncio
+async def test_live_docker_gpu_two_devices_in_one_sandbox() -> None:
+    indices = _gpu_indices()
+    if len(indices) < 2:
+        pytest.skip("two physical NVIDIA GPUs are required")
+    provider = DockerProvider(gpus=indices[:2])
+    prepared = await prepare_reference(provider, _gpu_image_reference())
+    sandbox = await provider.create(
+        SandboxRequest(
+            episode_id="live-docker-two-gpus",
+            prepared_image=prepared,
+            resources=Resources(gpus=2),
+            network=NetworkPolicy(),
+        )
+    )
+    try:
+        allocation = sandbox.allocation.gpu
+        assert allocation is not None
+        assert len(allocation.observed_devices) == 2
     finally:
         await sandbox.destroy()
 
