@@ -23,7 +23,7 @@ Source digests leave the asset roots out; assets have their own commit identity.
 
 ## Offline software
 
-On either OS, install software directly in the image recipe when a clean base can acquire the
+On every OS, install software directly in the image recipe when a clean base can acquire the
 pinned version and deploy it unattended from declared inputs. Machine authentication is allowed;
 interactive login, verification codes, browser sessions and manual installer steps are not a
 repeatable build input. Version pins alone do not guarantee that an upstream keeps old files.
@@ -37,10 +37,11 @@ existing package before preparing another. Slow acquisition or compilation can a
 offline asset. Installed VM state alone is not a rebuildable asset.
 
 Keep deployment scripts and Task-specific configuration beside the build definition: the
-Dockerfile on Linux, `build.ps1` on Windows. Scripts consume Task-local materials, choose their
-own extraction or installation method, and declare external dependencies. Linux has no required
-package format. For Windows software requiring repackaging, prefer the
-[MSIX workflow](../guides/windows-task-images.md). No Task depends on another Task's files.
+Dockerfile on Linux, `build.ps1` on Windows, `build.sh` on macOS. Scripts consume Task-local
+materials, choose their own extraction or installation method, and declare external
+dependencies. Linux has no required package format. For Windows software requiring
+repackaging, prefer the [MSIX workflow](../guides/windows-task-images.md). No Task depends
+on another Task's files.
 
 Record the source, version, integrity hash, compatible base, and deployment requirements. Keep
 credentials out of assets. Validate from a clean base as the actual agent user, including required

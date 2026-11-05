@@ -2,8 +2,8 @@
 
 The second backend exists to prove the sandbox contract is real. If a task, a harness
 and a verdict all behave the same against a container and against a VM, then what they
-depend on is the contract rather than Docker — and the future OS roadmap (Windows,
-macOS guests) becomes "swap the guest image" rather than "write another framework".
+depend on is the contract rather than Docker. It also runs Windows guests; macOS guests
+run on the Orchard Provider, since only a Mac may host them.
 
 Three choices are worth stating, because each has a plausible alternative:
 

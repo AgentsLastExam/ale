@@ -103,7 +103,8 @@ async def relay(reader,writer):
         upstream_reader,upstream=await asyncio.open_connection(host,port)
     except OSError:
         writer.close();return
-    flows=[asyncio.ensure_future(pipe(reader,upstream)),asyncio.ensure_future(pipe(upstream_reader,writer))]
+    flows=[asyncio.ensure_future(pipe(reader,upstream)),
+           asyncio.ensure_future(pipe(upstream_reader,writer))]
     await asyncio.wait(flows,return_when=asyncio.FIRST_COMPLETED)
     for flow in flows: flow.cancel()
     writer.close();upstream.close()

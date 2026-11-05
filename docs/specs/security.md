@@ -52,6 +52,10 @@ plain HTTP and other ports of an allowed host. It refuses every connection from 
 sandbox to the Host, so the Host carries the Gateway in over SSH, and the sandbox can name
 only the Gateway, never an address.
 
+Orchard enforces neither `block` nor `allowlist`, so it accepts only Tasks that declare
+`public` (`open`) and refuses the others before provisioning: a macOS sandbox has the
+ordinary network of Tart's NAT.
+
 `open` is a deliberate escape hatch: an ordinary bridge with normal egress. A task must
 declare it, and the declaration is recorded in provenance.
 
@@ -175,13 +179,13 @@ Gateway this way. `[environment].env` reaches the agent, and the agent can read 
 
 ## 4. The agent cannot change what it is measured under
 
-The agent runs as the account the image declares, and so does the oracle that stands in
-for it during validation. Framework work runs as root on Linux and Administrator on
-Windows. Windows guestd stays in the interactive session but launches agent commands
-with the desktop's limited token. Only the Host's SMBIOS `ale-sudo` marker, supplied for
+The agent runs as the account the image declares, and so does the oracle that stands in for
+it during validation. Framework work runs as root on Linux and macOS and Administrator on
+Windows. Windows guestd stays in the interactive session but launches agent commands with
+the desktop's limited token. Only the Host's SMBIOS `ale-sudo` marker, supplied for
 `request.sudo`, permits elevated agent commands. The Provider verifies both tokens before
-Task code runs; image builds request elevation explicitly. Material visibility still
-follows phase ordering. See [Permissions](sandbox-image.md#permissions).
+Task code runs; image builds request elevation explicitly. Material visibility still follows
+phase ordering. See [Permissions](sandbox-image.md#permissions).
 
 This is what stops an agent rewriting the network policy that isolates it, the clock its
 timeouts are measured against, or the guest service driving its own sandbox. None of that
@@ -200,21 +204,23 @@ rather than assumed — writing a sudoers rule succeeds in an image with no `sud
 and recorded in provenance, because an episode run that way was less isolated and the two
 should not be compared without that being visible.
 
-A VM guest service listens on TCP, which the agent can reach over loopback and every Host
-account can reach through the forwarded port. Each connection must therefore first present
-the sandbox's token, which the framework's first connection to the freshly booted guest
-claims; anything else is refused before an operation runs. The claim is sound because
-nothing but trusted image services runs in a cold-booted guest before that connection.
-Linux keeps the claimed token in root-only `/run/ale/guestd-token`, so a restarted guest
-service stays claimed while a reboot or a saved disk carries none; Windows keeps it in
-memory. Container guest services are `docker exec` sessions with no listener.
+A QEMU VM's guest service listens on TCP, which the agent can reach over loopback and every
+Host account can reach through the forwarded port. Each connection must therefore first
+present the sandbox's token, which the framework's first connection to the freshly booted
+guest claims; anything else is refused before an operation runs. The claim is sound because
+nothing but trusted image services runs in a cold-booted guest before that connection. Linux
+keeps the claimed token in root-only `/run/ale/guestd-token`, so a restarted guest service
+stays claimed while a reboot or a saved disk carries none; Windows keeps it in memory.
+Container guest services are `docker exec` sessions with no listener, and a macOS VM's are
+`--stdio` sessions over Orchard's authenticated exec, which listen on nothing.
 
 Daytona's in-sandbox daemon runs commands for anyone who connects, as root. The Provider
 blocks every non-root user from it and proves that as the agent before handing the
 sandbox out; an agent granted `[agent].sudo` can lift the block, as it can any rule.
 
-The verifier writes its result to Harbor's `/logs/verifier` (`C:\logs\verifier`, macOS `/opt/ale/logs/verifier`), a path the
-agent can create beforehand: with sudo on Linux and macOS, as any account on Windows. Before every
+The verifier writes its result to Harbor's `/logs/verifier` (`C:\logs\verifier`, macOS
+`/opt/ale/logs/verifier`), a path the agent can create beforehand: with sudo on Linux and
+macOS, as any account on Windows. Before every
 verification attempt ALE therefore removes a link or file at either level instead of
 following it, makes the parent the framework's and writable by it alone, and recreates the
 verifier directory empty and accessible only to the framework. A result the agent planted

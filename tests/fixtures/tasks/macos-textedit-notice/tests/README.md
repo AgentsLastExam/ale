@@ -2,9 +2,9 @@
 
 A twenty-minute desktop Task for the same input under `computer-use` and `codex-cli`.
 The only deliverable is `notice.rtf`; TextEdit ships with macOS. The public base is
-pinned to the Tahoe image inspected on 2026-10-27. It signs only its `admin` account in, which
-ALE also controls the VM through, so the Task declares `sudo = true` even though editing the
-document needs no elevation.
+pinned to the Tahoe image inspected on 2026-10-27. It signs only its `admin` account in,
+which ALE also controls the VM through, so the Task declares `sudo = true` even though
+editing the document needs no elevation.
 
 ## Run prerequisites
 
@@ -20,5 +20,5 @@ checks cover readable RTF, title, event details, updated time, agenda, contact, 
 order, title formatting and body formatting. Whitespace and blank lines are tolerated.
 The oracle supplies a reference RTF to validate these outcome checks.
 
-Run `uv run ale lint tests/fixtures/tasks/macos-textedit-notice` for structural checks. Full validation
-and model runs require the local Orchard from the guide.
+Run `uv run ale lint tests/fixtures/tasks/macos-textedit-notice` for structural checks.
+Full validation and model runs require the local Orchard from the guide.

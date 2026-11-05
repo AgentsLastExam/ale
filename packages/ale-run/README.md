@@ -15,7 +15,7 @@ CLI → Task loading/image preparation → Episode → EpisodeProtocol
 | `src/ale/run/cli/main.py` | Typer command definitions and presentation |
 | `src/ale/run/cli/tasks.py` | Task run, validation and image-preparation composition |
 | `src/ale/run/protocol/` | the episode protocol: phase ordering for one Task episode |
-| `src/ale/run/providers/` | Docker and QEMU Sandbox implementations; see its local README |
+| `src/ale/run/providers/` | Docker, QEMU, Daytona and Orchard (macOS) Sandbox implementations; see its local README |
 | `src/ale/run/harnesses/` | native agent adapters; see its local README |
 | `src/ale/run/gateway/` | authenticated model routing, limits and Transport Trace; see its local README |
 | `src/ale/run/guestd/` | dependency-free service running inside the Sandbox |

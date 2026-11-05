@@ -63,7 +63,7 @@ def npm_command(home: str, *args: str) -> list[str]:
 async def npm_env(sandbox: Sandbox, home: str) -> dict[str, str]:
     """The agent's own npm prefix ahead of the Sandbox's inherited search path.
 
-    Inherited on both systems, so a tool the image put on its ``PATH`` stays reachable.
+    Inherited on every system, so a tool the image put on its ``PATH`` stays reachable.
     """
     home = str(agent_path(home))
     prefix = f"{home}/.local"

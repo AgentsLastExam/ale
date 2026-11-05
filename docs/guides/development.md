@@ -66,9 +66,10 @@ even before `uv sync`.
 |---|---|---|
 | container (default) | Docker Engine (or Podman) reachable | `just doctor` |
 | virtual machine | `/dev/kvm` plus `qemu-system-x86_64`, `qemu-img` | `just doctor` |
+| macOS VM | an Apple Silicon Mac running the local Orchard of `scripts/setup_macos.py` | `uv run scripts/setup_macos.py --check` |
 
-Machines without KVM can still run everything on the container backend; machines
-without a container runtime cannot run the default path.
+Machines without KVM can still run every Linux container Task; machines without a
+container runtime cannot run the default path.
 
 ## Workflow
 

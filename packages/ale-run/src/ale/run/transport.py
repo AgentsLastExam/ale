@@ -2,8 +2,8 @@
 
 One client, two transports. Containers get a piped ``exec`` session (no published
 ports, no readiness handshake, and roughly an order of magnitude less latency than an
-in-container HTTP server); virtual machines get a socket through a forwarded port.
-Callers see neither difference.
+in-container HTTP server); QEMU VMs get a socket through a forwarded port, and Orchard
+supplies its own exec-session transport for macOS VMs. Callers see none of the difference.
 
 Requests are serialised per connection: the guest answers one at a time, and a trace
 that can be replayed is worth more than overlapping streams.

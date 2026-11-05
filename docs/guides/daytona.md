@@ -3,8 +3,8 @@
 The Daytona backend runs Linux container Tasks on [Daytona](https://www.daytona.io)'s cloud
 instead of the local Docker daemon. Use it when the Host cannot run enough sandboxes at
 once. Docker stays on the Host: it builds and checks each Task image, and the Provider
-pushes the result to Daytona. VMs and Windows stay with the QEMU backend. How the backend
-holds ALE's guarantees on Daytona is in
+pushes the result to Daytona. Linux and Windows VMs stay with the QEMU backend, macOS VMs
+with the local Orchard. How the backend holds ALE's guarantees on Daytona is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#daytona).
 
 ## Before the first run

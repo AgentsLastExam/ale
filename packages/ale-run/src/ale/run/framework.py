@@ -89,7 +89,8 @@ __all__ = [
 ]
 
 LABEL = "ale.framework"
-#: Where a prepared Linux image records the framework identity it carries.
+#: Where a prepared Linux image, or a framed macOS disk, records the framework identity it
+#: carries.
 MARKER = "/opt/ale/framework"
 #: The same for a Windows disk, as libguestfs names ``C:\ProgramData\ALE\framework``.
 WINDOWS_MARKER = "/ProgramData/ALE/framework"
@@ -133,7 +134,7 @@ _CUA_DRIVER_BINARY = {"linux": "cua-driver", "windows": "cua-driver.exe"}
 #: Run inside the VM builder to install the Windows framework into a disk.
 _WINDOWS_INSTALLER = Path(__file__).with_name("framework_windows.py")
 #: Where the macOS framework puts its Python, readable by every account so the agent's
-#: desktop tool can run it, and writable by root alone.
+#: desktop tool and Harness helpers can run it, and writable by root alone.
 MACOS_PYTHON = guestd.PYTHON["macos"]
 MACOS_DRIVER_APP = "/Applications/CuaDriver.app"
 MACOS_DRIVER = f"{MACOS_DRIVER_APP}/Contents/MacOS/cua-driver"

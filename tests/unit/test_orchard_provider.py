@@ -1162,7 +1162,7 @@ async def test_an_agent_waits_for_its_desktop(backend, monkeypatch, role, probed
     await sandbox.destroy()
 
 
-async def test_preflight_requires_the_installed_framer(monkeypatch, tmp_path):
+async def test_framing_requires_the_installed_framer(monkeypatch, tmp_path):
     framer = tmp_path / "framework-macos"
     monkeypatch.setattr(orchard_client, "FRAMER", framer)
     with pytest.raises(ProviderStartError, match=r"setup_macos\.py"):

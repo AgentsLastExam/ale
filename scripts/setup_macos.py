@@ -421,7 +421,10 @@ def initialize(
 
 
 def install_framer() -> None:
-    """Install this checkout's framer root-owned, and the rule to run it, when either differs."""
+    """Install this checkout's framer root-owned, and the rule to run it, unless both are in place.
+
+    The rule file is readable by root alone, so only its presence is checked.
+    """
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise SetupError("Local Tart setup requires an Apple Silicon Mac")
     account = run(["/usr/bin/id", "-un"]).strip()

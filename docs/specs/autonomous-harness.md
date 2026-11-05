@@ -175,15 +175,16 @@ sent. A CLI that takes a prompt only as an argument is the exception: it receive
 file's exact bytes as one argument, expanded from the file and never re-quoted, so the
 OS's argument limits bound the prompt and a longer one fails at launch instead of being
 truncated. A CLI that reads a headless prompt from stdin only inside a structured message
-gets the file's exact text wrapped into that message by the Sandbox's Python first. Every
+gets the file's exact text wrapped into that message by the Sandbox's Python (on macOS
+the framework's) first. Every
 invocation, launch or resume, appends to `.ale-harness/stdout.log` and
 `.ale-harness/stderr.log` and records its prompt, requested session ID, and stream offsets
 in `.ale-harness/invocations.jsonl`. Result interpretation sees only the current
 invocation's output, so it cannot reuse the success or session ID of an earlier turn.
 
-The CLI starts from a non-login shell, POSIX `sh` on Linux and macOS, and Git Bash on Windows, with
-the Sandbox's own `PATH` behind the agent's npm prefix. Profile scripts are not sourced,
-so the measured program's environment is the image's declared one.
+The CLI starts from a non-login shell, POSIX `sh` on Linux and macOS and Git Bash on
+Windows, with the Sandbox's own `PATH` behind the agent's npm prefix. Profile scripts are
+not sourced, so the measured program's environment is the image's declared one.
 
 A failed launch retains the process exit code and a bounded, credential-redacted diagnostic
 from native error events and stderr. Stderr warnings must not displace the native failure

@@ -2,8 +2,8 @@
 
 Normative for standard container and VM Tasks. Every solver and dedicated verifier runs
 in a container or a VM. Linux builds a Dockerfile (a VM with `[environment].vm = true`) or
-uses an image directly (`docker_image`, `vm_image`); Windows and macOS use `vm_image` directly,
-or build `environment/build.ps1` or `environment/build.sh` on `vm_base`.
+uses an image directly (`docker_image`, `vm_image`); Windows and macOS use `vm_image`
+directly, or build `environment/build.ps1` or `environment/build.sh` on `vm_base`.
 
 ## What a Linux image needs
 
@@ -19,20 +19,21 @@ of the Task's own build or the image it names (the framework layer):
 
 - guestd, the guest service every sandbox operation goes through, under root-only
   `/opt/ale`, so it always speaks the protocol of the engine driving it;
-- the framework's own Python at a pinned version, which guestd runs on whatever Python
-  the image has (or lacks): `/opt/ale/python` on Linux and `C:\ProgramData\ALE\python` on
-  Windows. Only the framework's identity can run it, and the agent's PATH does not
-  include it;
+- the framework's own Python at a pinned version, which guestd runs on whatever Python the
+  image has (or lacks): `/opt/ale/python` on Linux and macOS, `C:\ProgramData\ALE\python` on
+  Windows. Only the framework's identity can run it, except on macOS, where the agent's
+  desktop tool and Harness helpers run it too; the agent's PATH never includes it;
 - Cua Driver at a pinned version, the one desktop capture and input implementation, which
   every account may run, because the agent's `cua-desktop` MCP server runs it too;
 - for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
-  Windows that also starts Cua Driver in the agent's session;
+  Windows that also starts Cua Driver in the agent's session; a macOS VM has none, since
+  the Orchard Provider starts guestd through Orchard's exec for each connection;
 - a check that the agent account exists, failing preparation if it does not;
 - sudo, installed with the image's package manager when the image lacks it, so that any
   sandbox can be granted elevation; the grant itself is never part of the image
   ([Permissions](#permissions));
 - a marker file recording which framework the image carries: `/opt/ale/framework` on
-  Linux, `C:\ProgramData\ALE\framework` on Windows.
+  Linux and macOS, `C:\ProgramData\ALE\framework` on Windows.
 
 A VM disk named by a qcow2 `vm_image` gets the same pieces, installed offline into a copy of
 the disk by the VM builder's libguestfs, so nothing on the disk runs on the Host. On Linux
@@ -88,12 +89,13 @@ a copy of the image, once per image, framework and account: guestd, a Python of 
 framework's own, since a stock macOS has none recent enough, and Cua Driver with the
 privacy grants macOS otherwise takes only through its settings. The copy is booted once so
 macOS finishes the account's first login, whose one-time notices would otherwise appear in
-every sandbox, and kept as the local image every sandbox starts from. A Task's `build.sh` runs as root in
-a VM of its framed base, and the image it leaves is framed in turn for the Task's account,
-which the build may create. Every macOS
-sandbox the agent works in shows that account's desktop. Elevation for `[agent].sudo` is
-granted or taken away at each boot, as on Windows. What else the image must allow is in
-the [Orchard Provider](../../packages/ale-run/src/ale/run/providers/README.md#orchard).
+every sandbox, and kept as the local image every sandbox starts from. A Task's `build.sh`
+runs as root in a VM of its base framed for `admin`, the account ALE controls the VM
+through, and the image it leaves is framed in turn for the Task's account, which the build
+may create. Every macOS sandbox the agent works in shows that account's desktop.
+Elevation for `[agent].sudo` is granted or taken away at each boot, as on Linux
+([Permissions](#permissions)). What else the image must allow is in the
+[Orchard Provider](../../packages/ale-run/src/ale/run/providers/README.md#orchard).
 
 ## ALE base images
 
@@ -161,31 +163,34 @@ ordinary relative `COPY`; ALE creates no generated view or named BuildKit contex
 
 ## Source selection and identity
 
-Before any solver model call, ALE builds the Task's Linux Dockerfile or Windows
-`environment/build.ps1`; failure is terminal. A Windows build uses `[environment].vm_base` as the
-base. `docker_image` and `vm_image` always name an image for direct use, win over a build
-definition, and exclude `vm_base`. A base requires the Windows solver build script; it is
-unsupported for Linux and separate verifier declarations. An image named directly is
+Before any solver model call, ALE builds the Task's Linux Dockerfile, Windows
+`environment/build.ps1` or macOS `environment/build.sh`; failure is terminal. A Windows or
+macOS build uses `[environment].vm_base` as the base. `docker_image` and `vm_image` always
+name an image for direct use and exclude `vm_base`; on Linux one wins over a Dockerfile. A
+base requires the solver's build script for its OS; it is unsupported for Linux and
+separate verifier declarations. An image named directly is
 resolved by the matching Provider. Container and VM images are both supported and recorded
 immutably.
 
-A `vm_image` or `vm_base` may also be an absolute host path to a standalone
-qcow2. Local disks are structurally checked and their actual file bytes are SHA-256
-hashed at preparation, without contacting a registry. Disks with backing or external data
-files are rejected; convert them to a standalone qcow2 so its identity covers the complete disk.
-The operator must keep prepared local disks unchanged while they are in use.
+On Linux and Windows, a `vm_image` or `vm_base` may also be an absolute host path to a
+standalone qcow2; a macOS image is always a Tart OCI reference. Local disks are structurally
+checked and their actual file bytes are SHA-256 hashed at preparation, without contacting a
+registry. Disks with backing or external data files are rejected; convert them to a
+standalone qcow2 so its identity covers the complete disk. The operator must keep prepared
+local disks unchanged while they are in use.
 
-The authored image source digest covers the build context except its asset root
-([Task assets](task-assets.md)) and `setup/`, so normal Task identity and
-asset provenance remain separate and a setup change never rebuilds the image. A prepared
-Linux image is recorded under the same context's file contents, its asset inventory (path,
-size, modification time and mode, as for asset dirtiness) and the framework identity. An
-unchanged Task finds its image there and uses it directly, without asking Docker to build or
-check anything, so a base tag that moves is not followed: name exact base versions. Windows
-cache keys include the actual image asset bytes. Dirty or unsynchronized assets disable resume and reporting.
-RunLock schema 2 records declaration, preparation, Provider, and exact observed identity;
-it does not invent a whole-disk content digest. Local Linux VMs record OCI and materializer
-identities; local Windows VMs record builder identity and resolved base materials.
+The authored image source digest covers the build context except its asset root ([Task
+assets](task-assets.md)) and `setup/`, so normal Task identity and asset provenance remain
+separate and a setup change never rebuilds the image. A prepared Linux image is recorded
+under the same context's file contents, its asset inventory (path, size, modification time
+and mode, as for asset dirtiness) and the framework identity. An unchanged Task finds its
+image there and uses it directly, without asking Docker to build or check anything, so a
+base tag that moves is not followed: name exact base versions. Windows and macOS cache keys
+include the actual image asset bytes. Dirty or unsynchronized assets disable resume and
+reporting. RunLock schema 2 records declaration, preparation, Provider, and exact observed
+identity; it does not invent a whole-disk content digest. Local Linux VMs record OCI and
+materializer identities; local Windows and macOS VMs record builder identity and resolved
+base materials.
 
 ## Reverification
 
@@ -232,7 +237,11 @@ Reuse covers the whole build and is keyed by base, builder, and every file stage
 there is no per-command cache or new recipe language. Authoring details belong to
 [Task authoring](task-authoring.md#environment).
 
-Software assets are deployed during image construction and saved into the Task qcow2.
+A macOS Task image builds the same way on the local Orchard: `build.sh` runs as root in a
+VM of the base framed for `admin`, and the stopped VM is kept as a local Tart image on the
+Mac ([What a macOS image needs](#what-a-macos-image-needs)).
+
+Software assets are deployed during image construction and saved into the Task image.
 An episode overlay isolates disk changes while preserving Windows permissions and package
 execution rules. Use each asset's qualified deployment recipe; see the
 [Windows Task image guide](../guides/windows-task-images.md).
@@ -295,9 +304,9 @@ Any verifier image must satisfy the same guest contract and permit ALE to stage
 
 Each Sandbox owns two fixed guest connections: one for commands and one for file
 discovery and reads. A long-running command must not block periodic log collection.
-Docker uses two stdio guest sessions, Daytona two over SSH; QEMU uses two authenticated
-connections to the same guest server and port. Providers close both on startup failure,
-retention, destruction, and image export.
+Docker uses two stdio guest sessions, Daytona two over SSH, Orchard two over its exec
+WebSocket; QEMU uses two authenticated connections to the same guest server and port.
+Providers close both on startup failure, retention, destruction, and image export.
 
 `Sandbox.list_files(path)` returns the regular files at or below an absolute path, sorted,
 with byte sizes; a missing path returns none. `Sandbox.read_file` reads a regular file or
@@ -340,7 +349,8 @@ Daytona's registry, and memory and writable storage must be whole GiB, refused r
 than rounded.
 
 Retained handles are always provider-qualified: `docker:<runtime-id>` for containers,
-`qemu:<runtime-id>` for VMs and `daytona:<sandbox-id>` for Daytona. Unqualified handles
+`qemu:<runtime-id>` for QEMU VMs and `daytona:<sandbox-id>` for Daytona; Orchard retains
+nothing, so it has none. Unqualified handles
 are rejected. Listing, destroying and attaching are Provider operations, routed by the
 Provider a handle or RunLock names, so a new backend needs no CLI change.
 
@@ -374,17 +384,18 @@ desktop session are required; the Provider checks both framework and agent privi
 before Task execution. A Windows Task image is rebuilt when the framework changes, and a
 direct `vm_image` disk is framed like any other.
 
-Elevation is never part of an image. On every system the Provider sets it at every sandbox
-start, before Task code runs, so one prepared image serves a Task with and without
-`[agent].sudo`, its solver and its verifier alike, and a Sandbox continued from a snapshot
-gets what its own request asks for. On Linux and macOS the root guestd grants the agent's
-account elevation, or revokes every way up through sudo and the groups that make
+Elevation is never part of an image. On every system the Provider sets it as every sandbox
+the agent works in starts, before Task code runs, so one prepared image serves a Task with
+and without `[agent].sudo`, its solver and its verifier alike, and a Sandbox continued from
+a snapshot gets what its own request asks for. On Linux and macOS the root guestd grants the
+agent's account elevation, or revokes every way up through sudo and the groups that make
 administrators; how is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#agent-elevation-on-linux-and-macos).
 Nothing can keep a root account from elevating, so a Task whose `[agent].user` is root
 must declare `[agent].sudo = true`. Grants, and their absence, are verified and recorded: a
-Linux or macOS sandbox is refused when its guest service is not root, when a requested
-grant does not work, or when an agent that did not request one can still use sudo.
+Linux or macOS sandbox the agent works in is refused when its guest service is not root,
+when a requested grant does not work, or when an agent that did not request one can still
+use sudo.
 
 ALE does not pre-create artifacts or repair their ownership: image/setup/agent code owns
 their type and existence.

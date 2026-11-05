@@ -576,8 +576,8 @@ async def _prepare_macos_image(
 ) -> tuple[PreparedTaskImage, bool]:
     """Run ``environment/build.sh`` as root in a VM of the framed base and keep its disk.
 
-    The result is a local image on the worker that already carries the framework, so
-    the Provider boots it without framing it again.
+    The result is a local image on the worker; a sandbox frames it for the Task's account
+    when it first uses it.
     """
     folder = _task_folder(task)
     if folder.build_script(OperatingSystem.MACOS) is None or task.image_source_digest is None:

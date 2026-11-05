@@ -106,7 +106,7 @@ reasoning_effort = "high"
 ```
 
 Agent Judge uses the configured exact CLI version, an invocation-specific native home,
-and the framework's elevated identity (root on Linux, Administrator on Windows).
+and the framework's elevated identity (root on Linux and macOS, Administrator on Windows).
 Tasks may call either Judge repeatedly, interleave ordinary checks, or inspect files
 after a Judge runs. Agent Judge can modify the live workspace; already collected solver
 artifacts and trajectory are not overwritten by those modifications.

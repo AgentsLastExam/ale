@@ -173,7 +173,7 @@ async def test_readiness_starts_the_driver_in_the_signed_in_session_then_probes_
     assert kwargs["run_as"] == "evaluator"
 
 
-async def test_readiness_retries_starting_desktop(monkeypatch):
+async def test_readiness_probes_again_until_the_desktop_captures(monkeypatch):
     monkeypatch.setattr(orchard_desktop, "_RETRY_INTERVAL", 0)
     client = Guest((75, "", "not ready", False), (0, "ready\n", "", False))
     await wait(client)

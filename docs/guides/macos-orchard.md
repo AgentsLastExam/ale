@@ -84,10 +84,10 @@ The image needs:
 `[agent].sudo` is applied at every boot, as on Linux: a last sudoers rule gives the account
 passwordless sudo, or with `false` denies it every command, and ALE also takes it out of the
 `admin` group. `admin` keeps passwordless sudo for ALE itself, so a Task that runs as
-`admin` must declare `sudo = true`; for a Task without it, create and sign in another account in
-`build.sh`: add it with `sysadminctl` and its home at `$ALE_HOME`, set `autoLoginUser` in
-`/Library/Preferences/com.apple.loginwindow` and its password in `/etc/kcpassword`, and
-mark the account's Setup Assistant panes seen.
+`admin` must declare `sudo = true`; for a Task without it, create and sign in another
+account in `build.sh`: add it with `sysadminctl` and its home at `$ALE_HOME`, set
+`autoLoginUser` in `/Library/Preferences/com.apple.loginwindow` and its password in
+`/etc/kcpassword`, and mark the account's Setup Assistant panes seen.
 
 Tag resolution needs the Docker CLI with Buildx (no Docker daemon); use `docker login` for
 private registries. Digest-pinned references need neither, and Tart pulls the image itself.
@@ -99,17 +99,15 @@ shipped Harness supports macOS. The npm-installed CLIs need Node/npm at the
 [required runtime version](../specs/autonomous-harness.md#shipped-integrations) in the
 image, and Hermes and OpenHands CLI need Git, which the ALE bases provide on Linux and
 Windows. The `computer-use` Harness needs an Anthropic-compatible Gateway and a model
-endpoint that accepts its computer tool schema. ALE appends the dialect route to
-`gateway.base_url`: use the origin without a trailing `/v1` for an OpenAI-compatible endpoint.
+endpoint that accepts its computer tool schema.
 
 `tests/fixtures/tasks/macos-desktop-smoke` exercises the desktop path: its oracle takes a
 Driver screenshot, clicks, types and saves in TextEdit, and its verifier checks the file.
 The click matters: a window in front does not hold the keyboard until its document is
-clicked.
-`tests/fixtures/tasks/macos-unprivileged` builds an administrator with passwordless sudo
-on the base, with its home and a file in it at `ALE_HOME`, and signs it in; with
-`sudo = false`, its oracle finds the account out of the `admin` group, without sudo, and
-the file its build left.
+clicked. `tests/fixtures/tasks/macos-unprivileged` builds an administrator with passwordless
+sudo on the base, with its home and a file in it at `ALE_HOME`, and signs it in; with
+`sudo = false`, its oracle finds the account out of the `admin` group, without sudo, and the
+file its build left.
 
 ## Run and validate
 
@@ -119,8 +117,9 @@ uv run ale prepare /absolute/path/to/task
 uv run ale run /absolute/path/to/task --agent oracle
 ```
 
-`prepare` resolves tags and records image identity; the oracle run frames the image if
-needed, creates a VM and exercises setup, output collection and verification.
+`prepare` resolves tags, records image identity and, for a Task with `vm_base`, builds its
+image; the oracle run frames the image if needed, creates a VM and exercises setup, output
+collection and verification.
 
 For Provider conformance tests, set `ALE_TEST_ORCHARD=1`, `ALE_ORCHARD_TEST_IMAGE` to a
 disposable image reference and `ALE_ORCHARD_TEST_USER` to the account it signs in, other

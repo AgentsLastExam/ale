@@ -34,13 +34,13 @@ my-task/
 ```
 
 Required files are `task.toml`, `instruction.md`, and the tests and solution entries for the
-Task OS: `tests/test.sh` and `solution/solve.sh` on Linux and macOS, `test.ps1` and `solve.ps1`
-on Windows. `[environment]` decides what `environment/` builds. A container Task builds
-`environment/Dockerfile` or uses `docker_image`. A Linux VM Task sets `vm = true` to build
-`environment/Dockerfile`, or uses `vm_image`. A Windows Task builds `environment/build.ps1` on
-`vm_base`, or uses `vm_image` alone; a macOS Task does the same with `environment/build.sh`.
-Every image build has `environment/` as its context,
-`setup/` excluded. A Linux image named directly wins over a build definition.
+Task OS: `tests/test.sh` and `solution/solve.sh` on Linux and macOS, `test.ps1` and
+`solve.ps1` on Windows. `[environment]` decides what `environment/` builds. A container Task
+builds `environment/Dockerfile` or uses `docker_image`. A Linux VM Task sets `vm = true` to
+build `environment/Dockerfile`, or uses `vm_image`. A Windows Task builds
+`environment/build.ps1` on `vm_base`, or uses `vm_image` alone; a macOS Task does the same
+with `environment/build.sh`. Every image build has `environment/` as its context, `setup/`
+excluded. A Linux image named directly wins over a build definition.
 
 ## task.toml
 
@@ -118,10 +118,11 @@ env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
 ```
 
 `vm = true` is needed only for a Linux VM built from a Dockerfile: an `os` other than Linux,
-`vm_image` and `vm_base` already mean a VM. `vm_image` and `vm_base` are mutually exclusive; `vm_base`
-requires Windows with `environment/build.ps1` or macOS with `environment/build.sh`. `[agent].workdir` is below the agent's home when
-relative, so a Task need not spell its home per OS. It must be a directory when the agent
-starts; stages keep their fixed directories.
+`vm_image` and `vm_base` already mean a VM. `vm_image` and `vm_base` are mutually exclusive;
+`vm_base` requires Windows with `environment/build.ps1` or macOS with
+`environment/build.sh`. `[agent].workdir` is below the agent's home when relative, so a Task
+need not spell its home per OS. It must be a directory when the agent starts; stages keep
+their fixed directories.
 
 Harbor's other fields fall into two groups. Nothing in ALE replaces multi-step Tasks (`steps`,
 `multi_step_reward_strategy`), compose sidecars (`docker-compose.yaml`, which `ale lint` refuses,
@@ -184,21 +185,24 @@ says otherwise, as in Harbor. Separate verification runs in an independent sandb
 `[verifier.environment]` resources, or the solver's without sudo when that table is absent.
 Its image is the first of `[verifier.environment].docker_image` or `vm_image`,
 `tests/Dockerfile` (a VM with `[verifier.environment].vm = true`), and the solver image.
-`tests/Dockerfile` requires separate verification. A Windows verifier reuses the solver image
-or names a `vm_image`. The Verification APIs and records are defined only in
+`tests/Dockerfile` requires separate verification. A Windows or macOS verifier reuses the
+solver image or names a `vm_image`. The Verification APIs and records are defined only in
 [Verification](verification.md).
 
 ### Resources and network
 
 `[environment]` selects container or VM behavior; Tasks never name a Provider.
-`[agent].network_mode` applies to the evaluated agent and the oracle: `no-network` reaches only
-the Gateway, `allowlist` also the declared hosts, `public` everything. An `allowed_hosts`
-entry `pypi.org` is that host alone, `*.pypi.org` that host and every name below it at any
-depth, which every Provider can enforce, and an address or CIDR range a client connecting to
-that address, never a name that resolves into it. Entries reaching the Host itself (loopback, link-local, and ranges
-holding them) fail, because allowed traffic leaves from the Host. An allowlist carries TLS and
-needs a client that honors the proxy variables, so raw TCP to an allowed address stays blocked.
-Setup and verification network is framework-controlled; its enforcement is specified in
+`[agent].network_mode` applies to the evaluated agent and the oracle: `no-network` reaches
+only the Gateway, `allowlist` also the declared hosts, `public` everything. A macOS Task
+must declare `public`: the Orchard Provider can enforce neither of the others and refuses
+them before any Sandbox exists ([macOS guide](../guides/macos-orchard.md)). An
+`allowed_hosts` entry `pypi.org` is that host alone, `*.pypi.org` that host and every name
+below it at any depth, which every Provider that offers `allowlist` can enforce, and an
+address or CIDR range a client connecting to that address, never a name that resolves into
+it. Entries reaching the Host itself (loopback, link-local, and ranges holding them) fail,
+because allowed traffic leaves from the Host. An allowlist carries TLS and needs a client
+that honors the proxy variables, so raw TCP to an allowed address stays blocked. Setup and
+verification network is framework-controlled; its enforcement is specified in
 [Security](security.md). The quality standard owns resource feasibility and network-policy
 selection. `ale lint` requires `[metadata].network_justification` for `public`.
 
@@ -231,8 +235,8 @@ Sandbox by accident. An empty value counts as unset, as in a shell. `run`, `vali
 called, and fail naming each Task's missing variables; `[solution].env` is resolved only for
 the oracle. As in Harbor, `${...}` inside other text is not a reference and stays as written.
 Values travel in each command's environment through the guest service, never in an image, a
-Sandbox's configuration or a Host command line, so container and VM, Linux and Windows
-receive them the same way.
+Sandbox's configuration or a Host command line, so container and VM, Linux, Windows and
+macOS receive them the same way.
 
 A variable is a credential when its name, or the name it refers to, contains `KEY`, `SECRET`,
 `TOKEN` (not `TOKENS`), `PASSWORD`, `CREDENTIAL` or `AUTH`. `ale lint` fails a credential
@@ -251,8 +255,9 @@ those keys reach a model only through the Gateway
 ## environment/
 
 The image is the reproducible initial computer state supplied to the agent. Start from the ALE
-GUI base matching the Task OS and sandbox, then add every stable dependency, service, file,
-permission, and piece of initial state required by the Task. The Linux bases are:
+GUI base matching the Task OS and sandbox (macOS has none: name a Tart image, as below),
+then add every stable dependency, service, file, permission, and piece of initial state
+required by the Task. The Linux bases are:
 
 - container: `ghcr.io/agentslastexam/container-ubuntu22-base` (Ubuntu 22.04);
 - VM: `ghcr.io/agentslastexam/vm-ubuntu24-base` (Ubuntu 24.04).
@@ -318,7 +323,8 @@ os = "macos"
 vm_base = "ghcr.io/cirruslabs/macos-tahoe-base:latest"
 ```
 
-`ale prepare TASK` boots the base with ALE's framework installed, copies `environment/`,
+`ale prepare TASK` boots the base with ALE's framework installed for `admin`, the account
+ALE controls the VM through, which the base must therefore sign in, copies `environment/`,
 less `setup/`, into it and runs `bash build.sh` as root with that directory as cwd and
 `ALE_HOME` set to the agent home, as for `build.ps1`, then removes the directory and keeps
 the VM's disk as a local image on the Mac. The same rules as for `build.ps1` apply: finish
@@ -346,8 +352,8 @@ explicitly set required ownership, write and execute permissions instead of rely
 
 `instruction.md` is the evaluated-agent instruction, used verbatim. Its input and output paths
 refer to the declared initial environment and artifacts. Use literal sandbox paths:
-`/home/user/...` on Linux and `C:\Users\user\...` on Windows. ALE does not add or rewrite a
-workspace prefix.
+`/home/user/...` on Linux, `/Users/user/...` on macOS and `C:\Users\user\...` on Windows.
+ALE does not add or rewrite a workspace prefix.
 
 ## Skills and MCP servers
 
@@ -385,8 +391,8 @@ that run; the RunLock records what the run used. See
 ## tests/
 
 `tests/test.sh` (or Windows `tests/test.ps1`) evaluates the final outcome and writes its
-`reward` to `/logs/verifier/reward.json` (Windows `C:\logs\verifier\reward.json`; macOS, whose
-root volume is read-only, `/opt/ale/logs/verifier/reward.json`). Verifier
+`reward` to `/logs/verifier/reward.json` (Windows `C:\logs\verifier\reward.json`; macOS,
+whose root volume is read-only, `/opt/ale/logs/verifier/reward.json`). Verifier
 implementation conventionally lives in `tests/verify.py`. ALE uploads the whole directory to
 its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
 directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal
@@ -400,7 +406,7 @@ It is available to the tests and their child processes, including during `valida
 ALE does not install Python into the image's environment or replace the solver's default
 interpreter.
 
-The Linux entry is:
+The Linux and macOS entry is:
 
 ```bash
 #!/usr/bin/env bash

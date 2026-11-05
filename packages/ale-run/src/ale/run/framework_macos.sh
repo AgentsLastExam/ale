@@ -3,9 +3,10 @@
 #
 # usage: framework-macos DISK USER CONTROL IDENTITY < payload.tar
 #
-# DISK is the disk.img of an ale-frame-* Tart VM owned by the calling user, USER the Task's
-# account, CONTROL the account the Provider logs in as, and IDENTITY the framework identity
-# recorded in /opt/ale/framework. The payload holds the framework's python/ tree,
+# DISK is the disk.img of an ale-frame-* Tart VM owned by the calling user, USER the account
+# the VM signs in to its desktop (the Task's, or CONTROL's for a build.sh VM), CONTROL the
+# account the Provider logs in as, and IDENTITY the framework identity recorded in
+# /opt/ale/framework. The payload holds the framework's python/ tree,
 # driver.tar.gz and guestd/*.py. On success it prints the account's home and uid as JSON.
 #
 # The disk is the image's own, so nothing on it is trusted: no path is followed through a
@@ -110,33 +111,33 @@ for name in "$user" "$control"; do
     need "private/var/db/dslocal/nodes/Default/users/$name.plist"
 done
 [ -f "$mnt/private/var/db/dslocal/nodes/Default/users/$user.plist" ] ||
-    fail "the agent account '$user' does not exist in this image; name an existing account" \
-        "with [agent].user in task.toml"
+    fail "the account '$user' does not exist in this image; create it in the image or" \
+        "name an existing account with [agent].user in task.toml"
 [ -f "$mnt/private/var/db/dslocal/nodes/Default/users/$control.plist" ] ||
     fail "the image has no '$control' account, which ALE logs in to the VM as"
 uid=$(account "$user" uid) && gid=$(account "$user" gid) && home=$(account "$user" home) ||
-    fail "the agent account '$user' has no uid, group or home"
-case "$uid" in "" | *[!0-9]* | 0) fail "the agent account '$user' must not be root" ;; esac
-case "$gid" in "" | *[!0-9]*) fail "the agent account '$user' has no primary group" ;; esac
+    fail "the account '$user' has no uid, group or home"
+case "$uid" in "" | *[!0-9]* | 0) fail "the account '$user' must not be root" ;; esac
+case "$gid" in "" | *[!0-9]*) fail "the account '$user' has no primary group" ;; esac
 case "$home" in
-    *[\"\\]*) fail "the agent account '$user' has an unusable home path" ;;
+    *[\"\\]*) fail "the account '$user' has an unusable home path" ;;
     /*) ;;
-    *) fail "the agent account '$user' has no absolute home" ;;
+    *) fail "the account '$user' has no absolute home" ;;
 esac
 need "${home#/}"
-[ -d "$mnt$home" ] || fail "the agent account '$user' has no home directory"
+[ -d "$mnt$home" ] || fail "the account '$user' has no home directory"
 
-# ALE drives the desktop of the Task's account, so the image must sign it in at boot.
+# ALE drives the desktop of this account, so the image must sign it in at boot.
 need Library/Preferences/com.apple.loginwindow.plist
 [ "$(plutil -extract autoLoginUser raw "$mnt/Library/Preferences/com.apple.loginwindow.plist" \
     2>/dev/null)" = "$user" ] ||
-    fail "the image does not sign '$user' in automatically; enable automatic login for the" \
-        "Task's account"
+    fail "the image does not sign '$user' in automatically; enable automatic login for it"
 need private/etc/kcpassword
 [ -f "$mnt/private/etc/kcpassword" ] ||
     fail "automatic login for '$user' has no stored password (/etc/kcpassword)"
 
-# The framework: guestd on a Python of its own, readable by every account, writable by root.
+# The framework: guestd, for root alone, on a Python of its own that every account may run
+# and only root may change.
 need opt/ale
 [ -d "$mnt/opt" ] || mkdir -m 0755 "$mnt/opt"
 rm -rf "$mnt/opt/ale"
@@ -173,7 +174,8 @@ for name in TCC.db TCC.db-journal TCC.db-wal TCC.db-shm; do
 done
 values=
 for service in kTCCServiceAccessibility kTCCServiceScreenCapture; do
-    values="$values${values:+, }('$service', 'com.trycua.driver', 0, 2, 4, 1, X'$blob', 0, 'UNUSED', 0)"
+    row="'$service', 'com.trycua.driver', 0, 2, 4, 1, X'$blob', 0, 'UNUSED', 0"
+    values="$values${values:+, }($row)"
 done
 sqlite3 "$staging/TCC.db" "PRAGMA journal_mode=DELETE; INSERT OR REPLACE INTO access
     (service, client, client_type, auth_value, auth_reason, auth_version, csreq,
@@ -197,7 +199,8 @@ approvals="$mnt/$replayd/ScreenCaptureApprovals.plist"
 now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 cat > "$staging/approval.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>com.trycua.driver</key><dict>
 <key>kScreenCaptureAlertableUsageCount</key><integer>0</integer>
 <key>kScreenCaptureApprovalLastAlerted</key><date>$now</date>
@@ -215,7 +218,8 @@ else
     cp "$staging/approval.plist" "$staging/approvals.plist"
 fi
 "$buddy" -c "Print :com.trycua.driver:kScreenCaptureApprovalLastAlerted" \
-    "$staging/approvals.plist" >/dev/null 2>&1 || fail "could not record the Driver's capture approval"
+    "$staging/approvals.plist" >/dev/null 2>&1 ||
+    fail "could not record the Driver's capture approval"
 cat "$staging/approvals.plist" > "$approvals"
 chown "$uid:$gid" "$approvals"
 chmod 0600 "$approvals"

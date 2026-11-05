@@ -11,8 +11,9 @@ Constraints that shape this file:
 * **One request at a time per connection.** Ordering is a feature: a trace has to be
   reconstructible, and interleaved streams are not worth the confusion.
 
-Two transports, one implementation: ``--stdio`` for containers (a piped exec session)
-and ``--tcp`` for virtual machines (reached through a forwarded port).
+Two transports, one implementation: ``--stdio`` for a piped exec session (a container's,
+Daytona's over SSH, a macOS VM's over Orchard) and ``--tcp`` for a QEMU VM (reached
+through a forwarded port).
 """
 
 from __future__ import annotations

@@ -1179,8 +1179,9 @@ def _gateway_host() -> str:
 
     Every sandbox is in a different network namespace from this process, so loopback is
     never an address one of them can dial: a container on an isolated bridge reaches the
-    host at its gateway address, and a virtual machine reaches it through the runner
-    holding it. Binding to all interfaces is what makes the deny-all topology usable.
+    host at its gateway address, a QEMU VM through the runner holding it, and a macOS VM
+    at the Mac's address on Tart's NAT network. Binding to all interfaces is what makes the
+    deny-all topology usable.
 
     This used to bind loopback for anything that was not Docker, which was true when the
     VM backend ran qemu on the host with slirp — the guest's own NAT delivered to the

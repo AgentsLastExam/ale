@@ -1,4 +1,4 @@
-"""The agent's elevation, set at every Linux and macOS sandbox start, and its proof.
+"""The agent's elevation, set as every Linux and macOS agent sandbox starts, and its proof.
 
 Elevation is not part of a prepared image, so one image serves a Task with and without
 ``[agent].sudo``, its solver and its verifier, and a Sandbox continued from a snapshot of

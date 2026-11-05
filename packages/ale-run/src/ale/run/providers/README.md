@@ -7,7 +7,7 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 | `docker.py` | local Docker container | immutable OCI image identity |
 | `qemu.py` | QEMU/KVM guest runner | materialized qcow2 identity |
 | `daytona.py` | Daytona cloud container | immutable OCI image identity, pushed by digest |
-| `orchard.py` | macOS VM on Orchard/Tart | digest-pinned external OCI image |
+| `orchard.py` | macOS VM on Orchard/Tart | digest-pinned OCI image, or a local image `build.sh` built |
 
 `daytona_api.py` is its REST client and `daytona_image.py` adapts and publishes images.
 
@@ -39,6 +39,7 @@ serves it on.
 | Docker | `docker stop`, then `docker commit` to `ale-snapshot:<sandbox id>`. The image keeps the container's command and labels, with `ale.retention=snapshot`, `ale.prepared` naming the prepared image, and no GPU label. A container boots from its image ID; `docker rmi` destroys it and fails while a container still uses it |
 | QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay is then rebased on its own base and converted into a standalone zstd-compressed qcow2 in `~/.cache/ale/qemu-snapshots/<sandbox id>/`, beside `snapshot.json` with its episode, role, OS, prepared image and disk digest. Standalone, it outlives the image cache. Compression made a 23 GB Windows disk 15 GB and exported it in 71 s rather than 82 s. A VM boots from it through a fresh overlay. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so `accepts` refuses them |
+| Orchard | None: Orchard keeps no VM past its episode, so `accepts` refuses retention and snapshots |
 
 ## Agent elevation on Linux and macOS
 
@@ -62,7 +63,8 @@ guestd answers in an agent's VM. The script runs on the framework's Python:
   macOS's `/etc/sudoers` ends by including `sudoers.d`, so the appended rule comes last
   there too.
 - An account that is uid 0 cannot be revoked, so `[agent].user` naming one without
-  `[agent].sudo = true` is a `TaskDefinitionError`.
+  `[agent].sudo = true` is a `TaskDefinitionError`. On macOS the agent account is never
+  root: the image must sign it in to a desktop, so Orchard refuses it either way.
 
 `verify_identities` then checks `sudo -n true` as the agent, so a grant that does not work
 (an image with no sudo and no package manager to install it) is refused with that reason,
@@ -154,11 +156,11 @@ it clones the image with Tart and has `framework_macos.sh` change the clone's di
 refuses to frame when the installed copy differs from its own. The framer attaches the disk
 without mounting it, mounts only its Data volume, hidden from the Finder and without device
 files or set-uid programs, follows no link on it and runs none of its programs. It checks
-that the Task's account exists with a home and is signed in automatically (`autoLoginUser`
-and `/etc/kcpassword`), then installs:
+that the account it frames for, the Task's or `admin` for a `build.sh` VM, exists with a
+home and is signed in automatically (`autoLoginUser` and `/etc/kcpassword`), then installs:
 
 - guestd and a standalone Python under `/opt/ale` (the Python readable by every account,
-  for the agent's desktop tool);
+  for the agent's desktop tool and the Harnesses' helper scripts);
 - Cua Driver in `/Applications`, with Accessibility and Screen Recording rows in the
   system TCC database carrying the app's designated requirement, as System Settings
   writes them, and the account's replayd approval to capture without the system window
@@ -187,11 +189,13 @@ sudo for ALE, which runs as root through it, so a Task running as `admin` must d
 `sudo = true`. A separate verifier VM runs no agent, so it gets neither the desktop nor the
 elevation and its checks, and a `build.sh` VM is kept exactly as the build left it.
 
-Preparation resolves OCI tags through registry manifest metadata without downloading
-VM disks or checking the worker cache, and framing clones the digest-pinned reference.
-Provisioning checks the framed image and CPU/memory allocation the controller reports; this trusts Orchard rather than independently measuring the disk. Both stages
-check the local controller and an eligible ARM64 Tart worker. Provisioning (1800 s,
-with queueing and pulls) and guest readiness (300 s) have separate deadlines.
+Preparing an OCI reference resolves its tag through registry manifest metadata without
+downloading VM disks or checking the worker cache, and checks the installed framer, the
+local controller and an eligible ARM64 Tart worker; a local image `build.sh` built is only
+looked up on the worker. Framing clones either. Provisioning checks the framed image and
+the CPU and memory the controller reports, and measures the root disk from the guest.
+Provisioning (1800 s, with queueing and pulls) and guest readiness (300 s) have separate
+deadlines.
 
 Orchard credentials travel through verified TLS, never command arguments or Run records.
 SIP is unchanged. `orchard_desktop.py` verifies actual capture as the Task account in every
@@ -200,7 +204,7 @@ read-back uses logical points, following the Driver's coordinate contract.
 
 Commands and file reads use separate authenticated WebSocket exec channels. File reads
 are bounded, screenshot transfers are integrity-checked, and command output is
-acknowledged after Host consumption to avoid overrunning the relay's output queue.
+acknowledged after Host consumption to avoid overrunning Orchard's exec output queue.
 
 Only explicit `network.mode: open` is supported. Restricted networking needs integration
 and validation across Orchard/Tart versions and worker network configurations. GPU,

@@ -1,7 +1,7 @@
 """Opt-in Orchard qualification against the shared Sandbox contract.
 
 Run on a Mac whose local Orchard ``scripts/setup_macos.py`` keeps running, with
-ALE_TEST_ORCHARD=1, ALE_ORCHARD_TEST_IMAGE (digest-pinned OCI reference) and
+ALE_TEST_ORCHARD=1, ALE_ORCHARD_TEST_IMAGE (a disposable image's OCI reference) and
 ALE_ORCHARD_TEST_USER, the account the image signs in automatically, other than ``admin``
 so that the sudo=false cases apply. Every macOS sandbox has that account's desktop, so the
 desktop capture and input checks always run. Each test creates and destroys its own VM;

@@ -24,8 +24,9 @@ from ale.run.harnesses._npm import (
 _ARCHITECTURES = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
-# Run by the Sandbox's own Python, which both bases provide, so download, verification
-# and replacement behave alike on Linux and Windows. A matching file is reused; anything
+# Run by the agent's Python (``agent_python``): the image's own on Linux and Windows, whose
+# bases provide one, and the framework's on macOS, so download, verification and
+# replacement behave alike on every system. A matching file is reused; anything
 # else, a link included, is replaced only by bytes whose digest matched. From an archive,
 # only the named member is read, so no other entry can land anywhere.
 _INSTALL = r"""

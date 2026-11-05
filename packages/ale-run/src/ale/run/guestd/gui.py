@@ -53,8 +53,9 @@ def probe_macos_desktop(agent_user: str, driver_path: str, socket_path: str) -> 
     """Capture through the same client as agent tools, as the actual task account.
 
     A socket's owner is a prerequisite, not an attestation of the server process's
-    identity. The framework starts its authorized Driver in this login session at login.
-    This probe neither changes TCC grants nor starts a service in another session.
+    identity. The Provider starts the authorized Driver in this login session as each
+    sandbox boots. This probe neither changes TCC grants nor starts a service in another
+    session.
     """
     import pwd
 
@@ -98,12 +99,14 @@ def _binary() -> str:
 def has_desktop() -> bool:
     """Whether this sandbox is configured to show a desktop, decided before anything starts.
 
-    A virtual machine has one when its systemd enables a display manager. A container has
+    A Linux virtual machine has one when its systemd enables a display manager. A container has
     one when its image sets ``DISPLAY`` or ``WAYLAND_DISPLAY``: that is how a desktop image
     tells its processes where to draw, while an image that ships X only as a tool, such as
     Xvfb for a headless browser, does not. Windows always draws one, and it is ALE's to
     drive once the framework has installed Cua Driver, as in every Task image; the bare
-    base, booted only to build a Task image, has none to wait for.
+    base, booted only to build a Task image, has none to wait for. On macOS the Provider
+    declares one by naming the Driver's socket (``ALE_CUA_DRIVER_SOCKET``) in every sandbox
+    the agent works in; a verifier or ``build.sh`` VM has none.
     """
     if os.name == "nt":
         return os.path.isfile(_WINDOWS_DRIVER)
@@ -201,7 +204,7 @@ def _invoke(tool: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
 def _as_daemon_owner(socket: str | None) -> dict[str, Any]:
     """Run the client as the account that owns the daemon's socket, usually the agent's.
 
-    Cua Driver answers only its own account, and guestd runs as root on Linux.
+    Cua Driver answers only its own account, and guestd runs as root on Linux and macOS.
     """
     if os.name == "nt" or not socket or os.geteuid() != 0:
         return {}
@@ -238,7 +241,8 @@ def _start_server() -> bool:
 
     The image only has to run a desktop: the engine installed Cua Driver, and guestd
     starts it as the agent account with the environment of that account's session, so
-    capture and input reach the screen the agent sees. Windows starts it with the session.
+    capture and input reach the screen the agent sees. Windows starts it with the session,
+    and on macOS the Orchard Provider starts it as each sandbox boots.
     """
     global _server
     if os.name == "nt" or sys.platform == "darwin" or os.environ.get("ALE_CUA_DRIVER_SOCKET"):

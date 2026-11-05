@@ -39,7 +39,8 @@ from .settings import HermesSettings
 DEFAULT_CLI_VERSION = "0.22.5"
 #: The v0.22.5 tag of NousResearch/hermes-agent.
 COMMIT = "bf0203a794a07aac3ff764972ab9087baa4e4f4e"
-#: The official installer of that commit, for Linux and for Windows.
+#: The official installers of that commit: ``install.sh`` for Linux and macOS,
+#: ``install.ps1`` for Windows.
 _INSTALLERS = f"https://raw.githubusercontent.com/NousResearch/hermes-agent/{COMMIT}/scripts"
 #: ``HERMES_HOME``; the installer must place the checkout inside it, or the first run
 #: installs the whole dependency environment again into the home it finds.
