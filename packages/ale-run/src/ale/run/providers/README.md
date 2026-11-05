@@ -1,16 +1,17 @@
 # Providers
 
-Providers turn prepared Task images into Sandboxes. ALE ships three backends:
+Providers turn prepared Task images into Sandboxes. ALE ships the following backends:
 
 | Module | Backend | Prepared input |
 |---|---|---|
 | `docker.py` | local Docker container | immutable OCI image identity |
 | `qemu.py` | QEMU/KVM guest runner | materialized qcow2 identity |
 | `daytona.py` | Daytona cloud container | immutable OCI image identity, pushed by digest |
+| `orchard.py` | macOS VM on Orchard/Tart | digest-pinned OCI image, or a local image `build.sh` built |
 
 `daytona_api.py` is its REST client and `daytona_image.py` adapts and publishes images.
 
-All three implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
+They implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
 preflight, image verification, lifecycle, command/file transport, egress changes,
 observed identity, resource allocation and optional retention. Harness and episode
 protocol code must use those contracts rather than backend-specific methods.
@@ -29,6 +30,7 @@ serves it on.
 | Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone |
 | QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
 | Daytona | `guestd/tunnel.py` listens at 7412 on the sandbox's loopback |
+| Orchard | A relay the Provider starts as root at boot listens at `127.0.0.1:7412` in the VM and connects to the Gateway's port at the Mac, the VM's default IPv4 route; it lives until the VM is deleted |
 
 ## Snapshots
 
@@ -37,14 +39,16 @@ serves it on.
 | Docker | `docker stop`, then `docker commit` to `ale-snapshot:<sandbox id>`. The image keeps the container's command and labels, with `ale.retention=snapshot`, `ale.prepared` naming the prepared image, and no GPU label. A container boots from its image ID; `docker rmi` destroys it and fails while a container still uses it |
 | QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay is then rebased on its own base and converted into a standalone zstd-compressed qcow2 in `~/.cache/ale/qemu-snapshots/<sandbox id>/`, beside `snapshot.json` with its episode, role, OS, prepared image and disk digest. Standalone, it outlives the image cache. Compression made a 23 GB Windows disk 15 GB and exported it in 71 s rather than 82 s. A VM boots from it through a fresh overlay. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so `accepts` refuses them |
+| Orchard | None: Orchard keeps no VM past its episode, so `accepts` refuses retention and snapshots |
 
-## Agent elevation on Linux
+## Agent elevation on Linux and macOS
 
-The framework layer installs `sudo` with the image's package manager when the image lacks
-it, and grants nothing. Every Linux Provider calls `privileges.set_elevation` through the
-root guestd, then `privileges.verify_identities`, before any Task code runs: Docker once
-`docker exec` has started guestd, QEMU once the booted guest answers, Daytona before it
-starts the image's own command. The script runs on the framework's Python:
+The Linux framework layer installs `sudo` with the image's package manager when the image
+lacks it, and grants nothing. Every Linux and macOS Provider calls
+`privileges.set_elevation` through the root guestd, then `privileges.verify_identities`,
+before any Task code runs: Docker once `docker exec` has started guestd, QEMU once the
+booted guest answers, Daytona before it starts the image's own command, Orchard once
+guestd answers in an agent's VM. The script runs on the framework's Python:
 
 - It replaces the last two lines of `/etc/sudoers`, a marker comment and one rule:
   `<user> ALL=(ALL:ALL) NOPASSWD: ALL` to grant, `<user> ALL=(ALL:ALL) !ALL` to revoke.
@@ -52,11 +56,15 @@ starts the image's own command. The script runs on the framework's Python:
   rules, drop-ins and groups say, including for processes the image started before it,
   such as Docker's container command and a VM's desktop session. A snapshot carries the
   rule its Sandbox had, and the next start replaces it.
-- Revoking also takes the account out of `sudo`, `wheel` and `admin` in `/etc/group` and
-  `/etc/gshadow`, the groups distributions make administrators, which polkit and others
-  trust without asking sudo.
+- Revoking also takes the account out of `sudo`, `wheel` and `admin`, the groups that make
+  administrators, which other programs trust without asking sudo: on Linux in `/etc/group`
+  and `/etc/gshadow`, for polkit and others; on macOS with `dseditgroup`, since Directory
+  Services keeps its groups and `admin` members approve system changes with their password.
+  macOS's `/etc/sudoers` ends by including `sudoers.d`, so the appended rule comes last
+  there too.
 - An account that is uid 0 cannot be revoked, so `[agent].user` naming one without
-  `[agent].sudo = true` is a `TaskDefinitionError`.
+  `[agent].sudo = true` is a `TaskDefinitionError`. On macOS the agent account is never
+  root: the image must sign it in to a desktop, so Orchard refuses it either way.
 
 `verify_identities` then checks `sudo -n true` as the agent, so a grant that does not work
 (an image with no sudo and no package manager to install it) is refused with that reason,
@@ -132,3 +140,80 @@ disk boots from, written into the SYSTEM hive with hivex, plus files copied into
   runs agent commands with the desktop's limited token unless it is set.
 - A Task image build boots a framed copy of its base, so its `run.ps1` runs beside the
   same guestd as every sandbox, and the saved image already carries the framework.
+
+## Orchard
+
+Every macOS VM is a fresh Tart VM on the local Orchard controller and worker that
+`scripts/setup_macos.py` runs; the Provider reads their address, credentials and Tart
+from its state directory, so macOS needs no run settings. Setup and cleanup are in the
+[macOS guide](../../../../../../docs/guides/macos-orchard.md).
+
+A Tart disk is APFS, which only macOS reads, so `orchard_framing.py` frames an image on
+the Mac, once per image, framework and account, the way the QEMU Provider frames a qcow2:
+it clones the image with Tart and has `framework_macos.sh` change the clone's disk offline.
+`scripts/setup_macos.py` installs that script root-owned as
+`/usr/local/libexec/ale/framework-macos` with a sudoers rule for it alone, and the Provider
+refuses to frame when the installed copy differs from its own. The framer attaches the disk
+without mounting it, mounts only its Data volume, hidden from the Finder and without device
+files or set-uid programs, follows no link on it and runs none of its programs. It checks
+that the account it frames for, the Task's or `admin` for a `build.sh` VM, exists with a
+home and is signed in automatically (`autoLoginUser` and `/etc/kcpassword`), then installs:
+
+- guestd and a standalone Python under `/opt/ale` (the Python readable by every account,
+  for the agent's desktop tool and the Harnesses' helper scripts);
+- Cua Driver in `/Applications`, with Accessibility and Screen Recording rows in the
+  system TCC database carrying the app's designated requirement, as System Settings
+  writes them, and the account's replayd approval to capture without the system window
+  picker, with the dates replayd checks and a reminder date far ahead;
+- Remote Login and passwordless sudo for `admin`, the account Orchard logs in as.
+
+The clone is then booted once, without the agent or the Driver, until the account is
+signed in and `sfltool dumpbtm` shows its LaunchAgents registered, plus 30 seconds: macOS
+posts a never-booted disk's background-item notice a few seconds after it registers the
+items and reports neither the notice nor having none. Notification Center shows a notice
+nobody dismissed again at every login, so the account's delivered notifications are then
+cleared from its `usernoted` database, as the account, and `usernoted` is killed before it
+can write them back at shutdown. The guest then shuts itself down, as a `build.sh` VM's
+does before its disk is kept: Orchard stops a VM with `tart stop --timeout 5`, which powers
+macOS off when its signed-in desktop does not shut down at once and loses what is still in
+memory. The stopped VM becomes the local Tart image `ale-framed-<identity>`; every Sandbox
+clones it, which on APFS copies no data.
+
+In each Sandbox the agent works in, the Provider starts the Driver in the account's login
+session (`launchctl asuser`, then `open` so LaunchServices runs it under the identity the
+grants name) and waits until it captures. guestd sends desktop pointer actions with
+`delivery_mode: foreground`, because the Driver otherwise refuses to move the real pointer
+over a background app's window. Elevation for `[agent].sudo` is set at every boot, as on
+Linux ([Agent elevation](#agent-elevation-on-linux-and-macos)). `admin` keeps passwordless
+sudo for ALE, which runs as root through it, so a Task running as `admin` must declare
+`sudo = true`. A separate verifier VM runs no agent, so it gets neither the desktop nor the
+elevation and its checks, and a `build.sh` VM is kept exactly as the build left it.
+
+Preparing an OCI reference resolves its tag through registry manifest metadata without
+downloading VM disks or checking the worker cache, and checks the installed framer, the
+local controller and an eligible ARM64 Tart worker; a local image `build.sh` built is only
+looked up on the worker. Framing clones either. Provisioning checks the framed image and
+the CPU and memory the controller reports, and measures the root disk from the guest.
+Provisioning (1800 s, with queueing and pulls) and guest readiness (300 s) have separate
+deadlines.
+
+Orchard credentials travel through verified TLS, never command arguments or Run records.
+SIP is unchanged. `orchard_desktop.py` verifies actual capture as the Task account in every
+agent Sandbox before the solver starts. Desktop input uses native screenshot pixels; cursor
+read-back uses logical points, following the Driver's coordinate contract.
+
+Commands and file reads use separate authenticated WebSocket exec channels. File reads
+are bounded, screenshot transfers are integrity-checked, and command output is
+acknowledged after Host consumption to avoid overrunning Orchard's exec output queue.
+
+Only explicit `network.mode: open` is supported. Restricted networking needs integration
+and validation across Orchard/Tart versions and worker network configurations. GPU,
+retention, snapshot and reset requests are rejected. Orchard credentials remain on the
+Host; Orchard/Tart and the selected image are trusted infrastructure.
+
+Cleanup checks the VM name and UID, waits for worker stop acknowledgement, then deletes
+it. Ambiguous creation requires operator reconciliation rather than adopting a same-name
+VM. Deletion is not conditional, so the controller must not replace names during cleanup.
+Worker disk garbage collection is asynchronous. Cancellation, command timeout or lost
+command transport tears down the VM; uncollected evidence can be lost. Cleanup errors
+are recorded separately from execution failures.

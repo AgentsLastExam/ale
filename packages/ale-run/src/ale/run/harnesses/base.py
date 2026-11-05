@@ -116,8 +116,8 @@ class CliHarness(AutonomousHarness):
 
     The prompt reaches the CLI as a file, through stdin or a native prompt-file option,
     so its bytes never pass through argv, an environment variable or shell quoting. The
-    CLI starts from a non-login shell on Linux and Windows alike, so profile scripts do
-    not change the measured program's environment.
+    CLI starts from a non-login shell on every system (``sh`` on Linux and macOS, Git Bash
+    on Windows), so profile scripts do not change the measured program's environment.
     """
 
     package: ClassVar[str]
@@ -130,7 +130,7 @@ class CliHarness(AutonomousHarness):
     settings_type: ClassVar[type[BaseModel]]
     settings: BaseModel
 
-    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS, OperatingSystem.MACOS)
     resume_support = ResumeSupport.NATIVE
 
     def __init__(

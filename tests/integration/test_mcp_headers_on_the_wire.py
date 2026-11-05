@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 from ale.core.harness import EffectiveAgentResources, HarnessSession, ResolvedMcpServer
-from ale.core.sandbox import Identity, SandboxRequest
-from ale.core.taskspec import NetworkPolicy, Resources, StreamableHttpMcpServer
+from ale.core.sandbox import Identity
+from ale.core.taskspec import OperatingSystem, StreamableHttpMcpServer
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CliHarness
@@ -32,19 +32,26 @@ from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
 from ale.run.harnesses.zcode import ZCodeHarness
-from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
 from tests.integration.scripted_model import ScriptedModel
-from tests.support import CONTAINER_BASE, prepare_reference
+from tests.support import cli_os, cli_sandbox
 
-pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_cli_install]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.needs_cli_install,
+    pytest.mark.needs_orchard if cli_os() is OperatingSystem.MACOS else pytest.mark.needs_docker,
+]
 
 HEADER = "Bearer sk-wire-proof"
 PORT = 18765
-LOG = "/home/user/mcp-headers.txt"
+#: Beside the server, in the agent's home.
+LOG = "mcp-headers.txt"
 SERVER = f"""\
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), {LOG!r})
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -63,7 +70,7 @@ class Handler(BaseHTTPRequestHandler):
         self._empty(200)
 
     def do_POST(self):
-        with open({LOG!r}, "a") as log:
+        with open(LOG, "a") as log:
             log.write(str(self.headers.get("Authorization")) + "\\n")
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if "id" not in body:
@@ -168,45 +175,34 @@ async def test_cli_sends_a_remote_server_s_headers(tmp_path: Path, name: str) ->
     gateway_session = gateway.open_session(
         GatewaySession(episode_id=f"wire-{name}", model=model_name), recording.transport
     )
-    sandbox = None
     try:
-        provider = DockerProvider()
-        sandbox = await provider.create(
-            SandboxRequest(
+        async with cli_sandbox(f"wire-{name}", gateway.base_url, tmp_path) as (sandbox, home):
+            await sandbox.open_egress()
+            await harness.install(sandbox)
+            session = HarnessSession(
                 episode_id=f"wire-{name}",
-                prepared_image=await prepare_reference(provider, CONTAINER_BASE),
-                resources=Resources(cpus=2, memory_mb=4096),
-                network=NetworkPolicy(),
-                gateway_url=gateway.base_url,
+                gateway_url=sandbox.gateway_url or gateway.base_url,
+                token=gateway_session.token,
+                model=model_name,
+                sandbox_id=sandbox.sandbox_id,
+                home=home,
+                os=cli_os(),
             )
-        )
-        await sandbox.open_egress()
-        await harness.install(sandbox)
-        session = HarnessSession(
-            episode_id=f"wire-{name}",
-            gateway_url=sandbox.gateway_url or gateway.base_url,
-            token=gateway_session.token,
-            model=model_name,
-            sandbox_id=sandbox.sandbox_id,
-            home="/home/user",
-        )
-        resources = _resources()
-        harness.validate_resources(resources)
-        await harness.install_resources(sandbox, session, resources)
-        await sandbox.close_egress()
-        await sandbox.write_file("/home/user/wire.py", SERVER.encode(), identity=Identity.AGENT)
-        await sandbox.exec(
-            ["sh", "-c", "nohup python3 /home/user/wire.py >/dev/null 2>&1 &"],
-            identity=Identity.AGENT,
-        )
-        # A CLI connects once, at start, so the server is up before one launches.
-        ready = await sandbox.exec(["sh", "-c", WAIT_FOR_SERVER], identity=Identity.AGENT)
-        assert ready.ok, ready.stderr
-        await harness.launch("Reply at once.", sandbox, session, timeout_sec=300)
-        seen = await sandbox.exec(["cat", LOG], identity=Identity.AGENT)
+            resources = _resources()
+            harness.validate_resources(resources)
+            await harness.install_resources(sandbox, session, resources)
+            await sandbox.close_egress()
+            await sandbox.write_file(f"{home}/wire.py", SERVER.encode(), identity=Identity.AGENT)
+            await sandbox.exec(
+                ["sh", "-c", f"nohup python3 {home}/wire.py >/dev/null 2>&1 &"],
+                identity=Identity.AGENT,
+            )
+            # A CLI connects once, at start, so the server is up before one launches.
+            ready = await sandbox.exec(["sh", "-c", WAIT_FOR_SERVER], identity=Identity.AGENT)
+            assert ready.ok, ready.stderr
+            await harness.launch("Reply at once.", sandbox, session, timeout_sec=300)
+            seen = await sandbox.exec(["cat", f"{home}/{LOG}"], identity=Identity.AGENT)
     finally:
-        if sandbox is not None:
-            await sandbox.destroy()
         gateway.close_session(gateway_session)
         await gateway.stop()
         await model.stop()

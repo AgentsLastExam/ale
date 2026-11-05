@@ -1,6 +1,6 @@
 """The upload policy on a Windows VM, where it is an ACL reset rather than modes.
 
-Linux backends are held to it by the shared Provider conformance suite.
+Linux and macOS backends are held to it by the shared Provider conformance suite.
 """
 
 from __future__ import annotations

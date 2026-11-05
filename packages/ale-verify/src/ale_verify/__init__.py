@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
@@ -52,8 +53,15 @@ __all__ = [
     "write",
 ]
 
-#: Where a verifier leaves its result: Harbor's verifier directory.
-_VERIFIER_DIR = Path("C:/logs/verifier" if os.name == "nt" else "/logs/verifier")
+#: Where a verifier leaves its result: Harbor's verifier directory. macOS seals its root
+#: volume, so the directory sits below the framework's own root there.
+_VERIFIER_DIR = Path(
+    "C:/logs/verifier"
+    if sys.platform == "win32"
+    else "/opt/ale/logs/verifier"
+    if sys.platform == "darwin"
+    else "/logs/verifier"
+)
 
 
 def judge_route(kind: str, config: Mapping[str, str]) -> tuple[str, str]:
@@ -129,7 +137,7 @@ def write(result: dict[str, Any]) -> None:
     """Atomically save a result. The engine accepts it only after normal exit.
 
     ``verification.json`` receives the complete result and ``reward.json`` its ``reward``,
-    both with ``reward`` rounded, in the verifier directory Harbor also uses.
+    both with ``reward`` rounded, in the platform's framework-owned verifier directory.
     """
     # Round-tripping also rejects non-JSON Python objects and non-finite values.
     _json_types(result)

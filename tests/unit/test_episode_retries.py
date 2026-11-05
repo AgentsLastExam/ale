@@ -204,7 +204,7 @@ async def test_failed_retry_destroys_even_sanitized_keep_sandboxes() -> None:
     )
     provider = SimpleNamespace(name="docker", create=AsyncMock(return_value=sandbox))
     lease = _Lease(
-        SimpleNamespace(get=lambda _: provider),  # type: ignore[arg-type]
+        SimpleNamespace(get=lambda *_: provider),  # type: ignore[arg-type]
         SandboxRetentionConfig(solver="keep", verifier="keep"),
     )
     acquired = await lease.acquire(request)
@@ -273,7 +273,7 @@ async def test_runtime_cleans_sandboxes_for_late_failure_and_cancellation(
     episode = run_episode(
         task,
         SimpleNamespace(run=protocol_run),  # type: ignore[arg-type]
-        SimpleNamespace(get=lambda _: provider),  # type: ignore[arg-type]
+        SimpleNamespace(get=lambda *_: provider),  # type: ignore[arg-type]
         run_dir=tmp_path / "runs",
         episode_id="episode",
         sandbox_retention=SandboxRetentionConfig(solver="keep"),

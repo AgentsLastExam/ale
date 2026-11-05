@@ -15,9 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from ale.core.errors import AleError, ProviderStartError, TaskDefinitionError
+from ale.core.errors import (
+    AleError,
+    ProviderCapabilityError,
+    ProviderStartError,
+    TaskDefinitionError,
+)
 from ale.core.ids import content_hash
-from ale.core.sandbox import ImageRef, PreparedTaskImage, SandboxRequest
+from ale.core.sandbox import ImageRef, PreparedTaskImage, Provider, SandboxRequest
 from ale.core.task import Task, TaskFolder
 from ale.core.taskspec import (
     ImageKind,
@@ -32,11 +37,14 @@ from ale.run.framework import (
     MATERIALIZER_IMAGE,
     framed_disk,
     framework_identity,
+    macos_framework_identity,
     windows_framework_identity,
     with_framework,
 )
 from ale.run.images import resolve_loaded_image
 from ale.run.providers import ProviderRegistry
+from ale.run.providers.orchard import OrchardProvider, OrchardSandbox
+from ale.run.providers.orchard_client import CONTROL_ACCOUNT
 from ale.run.providers.qemu import RUNNER_IMAGE, QemuProvider
 from ale.run.sources import cache_root
 from ale.run.tasksets.manifest import SETUP_DIR
@@ -53,6 +61,7 @@ __all__ = [
 
 VM_OUTPUT_CONTRACT = "ale-vm-qcow2/v1"
 WINDOWS_BUILD_CONTRACT = "ale-windows-powershell/v1"
+MACOS_BUILD_CONTRACT = "ale-macos-bash/v1"
 
 
 @dataclass(frozen=True)
@@ -126,14 +135,20 @@ async def prepare_task_image_result(
     task: Task, providers: ProviderRegistry
 ) -> ImagePreparationResult:
     spec = task.spec.image
-    provider = providers.get(spec.kind)
+    provider = providers.get(spec.kind, task.spec.os)
     folder = _task_folder(task)
     if spec.base_ref is not None:
         base = await _stage(
             "base-resolution",
             provider.prepare_image(ImageRef(kind=spec.kind, reference=spec.base_ref)),
         )
-        candidate, reused = await _stage("windows-build", _prepare_windows_image(task, base))
+        step = "macos-build" if task.spec.os is OperatingSystem.MACOS else "windows-build"
+        candidate, reused = await _stage(
+            step,
+            _prepare_macos_image(task, base, provider)
+            if task.spec.os is OperatingSystem.MACOS
+            else _prepare_windows_image(task, base),
+        )
         image = await _stage("artifact-check", provider.prepare_image(candidate))
         return _result(
             task,
@@ -141,7 +156,7 @@ async def prepare_task_image_result(
             image,
             ImagePreparationStep("base-resolution", "executed", base.prepared_identity),
             ImagePreparationStep(
-                "windows-build",
+                step,
                 "reused" if reused else "executed",
                 image.prepared_identity,
                 image.runtime_ref,
@@ -169,7 +184,8 @@ async def prepare_task_image_result(
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
             )
-        else:
+        elif task.spec.os is not OperatingSystem.MACOS:
+            # The Orchard Provider frames a macOS image the first time it boots it.
             image, reused = await _stage(
                 "framework-layer",
                 framed_disk(image, operating_system=task.spec.os, user=spec.user),
@@ -244,7 +260,7 @@ async def prepare_verifier_image_result(
             ),
         )
 
-    provider = providers.get(verify.image.kind)
+    provider = providers.get(verify.image.kind, task.spec.os)
     if verify.image.ref is not None:
         image = await _stage(
             "reference-resolution",
@@ -265,7 +281,7 @@ async def prepare_verifier_image_result(
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
             )
-        else:
+        elif task.spec.os is not OperatingSystem.MACOS:
             image, reused = await _stage(
                 "framework-layer",
                 framed_disk(image, operating_system=task.spec.os, user=verify.image.user),
@@ -490,13 +506,13 @@ async def _prepare_windows_image(
     task: Task, base: PreparedTaskImage
 ) -> tuple[PreparedTaskImage, bool]:
     folder = _task_folder(task)
-    if folder.build_script is None or task.image_source_digest is None:
+    if folder.build_script(OperatingSystem.WINDOWS) is None or task.image_source_digest is None:
         raise TaskDefinitionError("a Windows image build requires environment/build.ps1")
     context = folder.environment_dir
-    for entry in _windows_context_entries(context):
+    for entry in _vm_context_entries(context):
         if entry.is_symlink():
             raise TaskDefinitionError(f"Windows image inputs cannot be symlinks: {entry}")
-    context_identity = _windows_context_identity(context)
+    context_identity = _vm_context_identity(context)
     runner_identity = await _docker_image_identity(RUNNER_IMAGE)
     user = task.spec.image.user
     builder_identity = content_hash(
@@ -526,7 +542,7 @@ async def _prepare_windows_image(
                 with tempfile.TemporaryDirectory(prefix=f".{disk.stem}-", dir=root) as temporary:
                     output = Path(temporary) / "disk.qcow2"
                     staged = Path(temporary) / "context"
-                    _stage_windows_context(context, staged)
+                    _stage_vm_context(context, staged)
                     await _build_windows_image(
                         base,
                         staged,
@@ -536,7 +552,7 @@ async def _prepare_windows_image(
                         user=user,
                         timeout_sec=task.spec.image.build_timeout_sec,
                     )
-                    if _windows_context_identity(context) != context_identity:
+                    if _vm_context_identity(context) != context_identity:
                         raise TaskDefinitionError("Windows image inputs changed during build")
                     if not await _valid_qcow2(output):
                         raise ProviderStartError("Windows build produced no valid qcow2")
@@ -555,27 +571,148 @@ async def _prepare_windows_image(
     ), reused
 
 
-def _windows_context_entries(context: Path) -> list[Path]:
-    """The Windows build context: ``environment/`` less ``setup/``, as on Linux."""
+async def _prepare_macos_image(
+    task: Task, base: PreparedTaskImage, provider: Provider
+) -> tuple[PreparedTaskImage, bool]:
+    """Run ``environment/build.sh`` as root in a VM of the framed base and keep its disk.
+
+    The result is a local image on the worker; a sandbox frames it for the Task's account
+    when it first uses it.
+    """
+    folder = _task_folder(task)
+    if folder.build_script(OperatingSystem.MACOS) is None or task.image_source_digest is None:
+        raise TaskDefinitionError("a macOS image build requires environment/build.sh")
+    if not isinstance(provider, OrchardProvider):
+        raise ProviderStartError("macOS image builds run on the local Orchard")
+    context = folder.environment_dir
+    for entry in _vm_context_entries(context):
+        if entry.is_symlink():
+            raise TaskDefinitionError(f"macOS image inputs cannot be symlinks: {entry}")
+    context_identity = _vm_context_identity(context)
+    user = task.spec.image.user
+    # build.sh runs as root, in a VM of the base framed for the account ALE controls it
+    # through, so it may create the Task's account; a sandbox frames the result for that.
+    builder_identity = content_hash(
+        {
+            "contract": MACOS_BUILD_CONTRACT,
+            "framework": macos_framework_identity(user=CONTROL_ACCOUNT),
+            "user": user,
+        }
+    )
+    resources = Resources(cpus=2, memory_mb=4096, storage_mb=task.spec.resources.storage_mb)
+    identity = content_hash(
+        {
+            "base": base.prepared_identity,
+            "context": context_identity,
+            "builder": builder_identity,
+            "resources": resources.model_dump(mode="json"),
+        }
+    )
+    image = PreparedTaskImage(
+        kind=ImageKind.VM,
+        source="solver-local",
+        input_identity=identity,
+        image_source_identity=task.image_source_digest,
+        runtime_ref="ale-built-" + identity.removeprefix("sha256:")[:32],
+        prepared_identity=identity,
+        base_materials=(base.prepared_identity,),
+        builder_identity=builder_identity,
+    )
+    root = cache_root() / "macos-builds"
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / f"{image.runtime_ref}.lock").open("a+") as lock:
+        await _acquire_lock(lock)
+        try:
+            try:
+                return await provider.prepare_image(image), True
+            except ProviderCapabilityError:
+                pass
+            with tempfile.TemporaryDirectory(prefix=f".{image.runtime_ref}-", dir=root) as staged:
+                _stage_vm_context(context, Path(staged) / "context")
+                sandbox = await provider.create_builder(
+                    SandboxRequest(
+                        episode_id=f"image-{image.runtime_ref}",
+                        os=OperatingSystem.MACOS,
+                        prepared_image=base,
+                        resources=resources,
+                        network=NetworkPolicy(mode=NetworkMode.OPEN),
+                        sudo=True,
+                        user=CONTROL_ACCOUNT,
+                    )
+                )
+                try:
+                    await _build_macos_image(
+                        sandbox,
+                        Path(staged) / "context",
+                        user=user,
+                        timeout_sec=task.spec.image.build_timeout_sec,
+                    )
+                    if _vm_context_identity(context) != context_identity:
+                        raise TaskDefinitionError("macOS image inputs changed during build")
+                    await sandbox.save_image(image)
+                finally:
+                    await asyncio.shield(sandbox.destroy())
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+    return image, False
+
+
+async def _build_macos_image(
+    sandbox: OrchardSandbox, context: Path, *, user: str, timeout_sec: float
+) -> None:
+    """Run ``build.sh`` with ``ALE_HOME`` set to the home of the Task's account, as on Windows.
+
+    That is the home the base gives the account, or ``/Users/<user>`` for an account the
+    build creates, which must give it that home.
+    """
+    home = await sandbox.account_home(user) or f"/Users/{user}"
+    target = "/opt/ale/environment"
+    await sandbox.upload_dir(str(context), target)
+    result = await sandbox.exec(
+        ["bash", "build.sh"],
+        cwd=target,
+        env={"ALE_HOME": home},
+        timeout_sec=timeout_sec,
+    )
+    if not result.ok:
+        raise TaskDefinitionError(
+            f"environment/build.sh failed (exit={result.exit_code}, timeout={result.timed_out}): "
+            f"{result.stderr or result.stdout}"
+        )
+    built = await sandbox.account_home(user)
+    if built is None:
+        raise TaskDefinitionError(f"the image environment/build.sh built has no account {user!r}")
+    if built != home:
+        raise TaskDefinitionError(
+            f"environment/build.sh gave the account {user!r} the home {built}, "
+            f"not ALE_HOME ({home})"
+        )
+    result = await sandbox.exec(["rm", "-rf", target], timeout_sec=60)
+    if not result.ok:
+        raise ProviderStartError(f"could not remove image build inputs: {result.stderr}")
+
+
+def _vm_context_entries(context: Path) -> list[Path]:
+    """A VM build's context: ``environment/`` less ``setup/``, as for a Dockerfile."""
     return [
         entry for entry in context.rglob("*") if entry.relative_to(context).parts[0] != SETUP_DIR
     ]
 
 
-def _windows_context_identity(context: Path) -> str:
+def _vm_context_identity(context: Path) -> str:
     return content_hash(
         {
             "files": tree_digest(context, exclude=(SETUP_DIR,)),
             "directories": sorted(
                 str(entry.relative_to(context))
-                for entry in _windows_context_entries(context)
+                for entry in _vm_context_entries(context)
                 if entry.is_dir()
             ),
         }
     )
 
 
-def _stage_windows_context(context: Path, staged: Path) -> None:
+def _stage_vm_context(context: Path, staged: Path) -> None:
     """Link the build context into ``staged``, copying where a link cannot be made."""
 
     def link(source: str, target: str) -> None:

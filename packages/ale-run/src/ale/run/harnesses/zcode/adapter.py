@@ -18,6 +18,7 @@ from ale.core.trajectory import AtifTrajectory
 from ale.run.harnesses._npm import (
     agent_home,
     agent_path,
+    agent_python,
     bash_command,
     is_windows,
     npm_env,
@@ -44,7 +45,7 @@ DEFAULT_CLI_VERSION = "0.17.0"
 RELEASE = "3.16.3"
 #: The official Linux installer, pinned by the sha512 its release's `latest.yml` publishes.
 #: The CLI is plain JavaScript, byte-identical in every platform's installer, so this one
-#: payload serves Linux and Windows alike.
+#: payload serves every system.
 INSTALLER_URL = (
     f"https://cdn-zcode.z.ai/zcode/electron/releases/{RELEASE}/linux-x64/"
     f"ZCode-{RELEASE}-linux-x64.deb"
@@ -80,9 +81,10 @@ _OVERRIDES = (
     "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 )
 
-# Run by the Sandbox's own Python on Linux and Windows alike. Matching files are reused;
-# otherwise the installer is downloaded, accepted only by its pinned sha512, and only the
-# pinned members of its data archive are written, each accepted only by its own sha256.
+# Run by the agent's Python (``agent_python``, on macOS the framework's) on every system.
+# Matching files are reused; otherwise the installer is downloaded, accepted only by its
+# pinned sha512, and only the pinned members of its data archive are written, each
+# accepted only by its own sha256.
 _INSTALL = r"""
 import hashlib, json, os, sys, tarfile, tempfile, urllib.request
 
@@ -193,7 +195,7 @@ class ZCodeHarness(CliHarness):
             "files": {member: list(entry) for member, entry in FILES.items()},
         }
         result = await sandbox.exec(
-            ["python" if is_windows(home) else "python3", "-c", _INSTALL, json.dumps(spec)],
+            [agent_python(sandbox.request.os), "-c", _INSTALL, json.dumps(spec)],
             timeout_sec=1200,
             identity=Identity.AGENT,
         )
@@ -355,7 +357,7 @@ class ZCodeHarness(CliHarness):
         )
         result = await sandbox.exec(
             [
-                "python" if is_windows(session.home) else "python3",
+                agent_python(session.os),
                 "-c",
                 script,
                 str(agent_path(session.home) / trajectory.DB),

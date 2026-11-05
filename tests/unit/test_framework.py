@@ -35,7 +35,7 @@ pytestmark = pytest.mark.unit
 def pythons(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Stand-ins for the framework's Python builds, so no test downloads one."""
     root = tmp_path / "pythons"
-    for platform in ("linux", "windows"):
+    for platform in ("linux", "windows", "macos"):
         (root / platform / "python").mkdir(parents=True)
     monkeypatch.setattr(framework, "_python", lambda platform: root / platform / "python")
     return root
@@ -485,6 +485,26 @@ def test_the_framework_python_is_downloaded_once_and_verified(
         framework._python("windows")
 
 
+def test_the_macos_payload_carries_the_shared_python_tree_and_the_whole_driver(
+    monkeypatch: pytest.MonkeyPatch, pythons: Path
+) -> None:
+    tree = pythons / "macos" / "python"
+    (tree / "bin").mkdir()
+    (tree / "bin" / "python3.12").write_bytes(b"mach-o")
+    (tree / "bin" / "python3").symlink_to("python3.12")
+    monkeypatch.setattr(framework, "macos_driver_archive", lambda: b"signed app")
+    with tarfile.open(fileobj=io.BytesIO(framework.macos_framework_payload())) as bundle:
+        members = {member.name: member for member in bundle.getmembers()}
+        assert members["python/bin/python3"].issym()
+        assert members["python/bin/python3"].linkname == "python3.12"
+        assert bundle.extractfile("driver.tar.gz").read() == b"signed app"
+    assert {f"guestd/{name}" for name in guestd.FILES} <= set(members)
+    # The macOS Python is the release every other system pins, built for Apple Silicon.
+    asset, _ = framework._PYTHON["macos"]
+    assert asset.startswith(f"cpython-3.12.15+{framework.PYTHON_RELEASE}-aarch64-apple-darwin")
+    assert framework.MACOS_PYTHON == "/opt/ale/python/bin/python3" == guestd.PYTHON["macos"]
+
+
 @pytest.mark.asyncio
 async def test_a_windows_disk_is_framed_by_the_installer_inside_the_builder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pythons: Path
@@ -565,6 +585,7 @@ def test_the_windows_identity_follows_everything_it_installs(
 def test_a_desktop_is_decided_by_the_images_own_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(gui.sys, "platform", "linux")
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     manager = tmp_path / "display-manager.service"

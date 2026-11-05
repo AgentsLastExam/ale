@@ -7,7 +7,8 @@ scoring registry, automatic aggregation, callback, or required order of tool cal
 ## Result
 
 The verifier writes Harbor's reward file, `/logs/verifier/reward.json`
-(`C:\logs\verifier\reward.json` on Windows): a flat JSON object whose values are numbers.
+(`C:\logs\verifier\reward.json` on Windows; on macOS, whose root volume is read-only,
+`/opt/ale/logs/verifier/reward.json`): a flat JSON object whose values are numbers.
 Its `reward` must be a finite number from 0 through 1; booleans and numeric strings are not
 numbers. ALE interprets only `reward` and never averages or treats other values as rewards.
 Beside it, `verification.json` may hold the complete result: any JSON object, nested values
@@ -105,7 +106,7 @@ reasoning_effort = "high"
 ```
 
 Agent Judge uses the configured exact CLI version, an invocation-specific native home,
-and the framework's elevated identity (root on Linux, Administrator on Windows).
+and the framework's elevated identity (root on Linux and macOS, Administrator on Windows).
 Tasks may call either Judge repeatedly, interleave ordinary checks, or inspect files
 after a Judge runs. Agent Judge can modify the live workspace; already collected solver
 artifacts and trajectory are not overwritten by those modifications.

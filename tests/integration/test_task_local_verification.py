@@ -76,7 +76,7 @@ class _Registry:
     def __init__(self) -> None:
         self.providers = {kind: _Provider(kind) for kind in ImageKind}
 
-    def get(self, kind: ImageKind) -> _Provider:
+    def get(self, kind: ImageKind, operating_system: object = None) -> _Provider:
         return self.providers[kind]
 
 

@@ -19,7 +19,8 @@ Gateway provider is `moonshot`, Moonshot's own API. Kimi requires every model to
 Print mode accepts the prompt only as an argument. The script reads the recorded
 `prompt.md` into that one argument, keeping its trailing newlines, and on Windows turns
 Git Bash path conversion off for the call. The prompt is then bounded by 128 KiB per
-argument on Linux and about 32,000 characters for the whole Windows command line; a
+argument on Linux, 1 MiB for the whole command line and environment on macOS, and about
+32,000 characters for the whole Windows command line; a
 longer one fails at launch instead of being truncated. Kimi chooses the session ID
 and reports it in its final `session.resume_hint` line; a resume passes it to
 `--session`. A failed turn prints nothing on stdout and exits 1 with the cause on stderr.

@@ -127,7 +127,9 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
     if not (folder.root / INSTRUCTION).is_file():
         findings.append(Finding(folder.root, f"no {INSTRUCTION}"))
 
-    builds_image = folder.dockerfile is not None or folder.build_script is not None
+    builds_image = (
+        folder.dockerfile is not None or folder.build_script(operating_system) is not None
+    )
     if not builds_image and _has_files(folder.environment_dir / "assets"):
         findings.append(
             Finding(
@@ -155,11 +157,10 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
 
     setup = folder.stage_entry(Stage.SETUP, operating_system)
     if setup and _FIXED_SETUP.search(setup.read_text(encoding="utf-8", errors="replace")):
-        image_build = (
-            "environment/build.ps1"
-            if operating_system is OperatingSystem.WINDOWS
-            else "the image's Dockerfile"
-        )
+        image_build = {
+            OperatingSystem.WINDOWS: "environment/build.ps1",
+            OperatingSystem.MACOS: "environment/build.sh",
+        }.get(operating_system, "the image's Dockerfile")
         findings.append(
             Finding(
                 setup,

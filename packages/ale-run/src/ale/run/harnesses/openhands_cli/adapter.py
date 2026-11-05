@@ -63,9 +63,13 @@ class OpenHandsCliHarness(CliHarness):
             f"{_RELEASE}/openhands-linux-arm64",
             "67c5cfb94e5fd4c4120eb0360b0f23337da31f64a70e8496bcf008e4caeea6af",
         ),
+        (OperatingSystem.MACOS, "aarch64"): ReleaseAsset(
+            f"{_RELEASE}/openhands-macos-arm64",
+            "fa238330a452f2f1e933affb7edffda43c01f1ebd84194ecc564c5a6a306317f",
+        ),
     }
     # Upstream ships no Windows build; it supports Windows only through WSL.
-    supported_os = (OperatingSystem.LINUX,)
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.MACOS)
     settings_type = OpenHandsCliSettings
     settings: OpenHandsCliSettings
     logs = (LOG_ROOT, trajectory.CONVERSATIONS, trajectory.MCP_CONFIG)

@@ -136,9 +136,14 @@ def _layout(operating_system: OperatingSystem) -> _StageLayout:
 
 
 def _verifier_dir(operating_system: OperatingSystem) -> PurePath:
-    """Where verification writes ``reward.json``: Harbor's verifier directory."""
+    """Where verification writes ``reward.json``: Harbor's verifier directory.
+
+    macOS seals its root volume, so the directory sits below the framework's own root there.
+    """
     if operating_system is OperatingSystem.WINDOWS:
         return PureWindowsPath("C:/logs/verifier")
+    if operating_system is OperatingSystem.MACOS:
+        return PurePosixPath("/opt/ale/logs/verifier")
     return PurePosixPath("/logs/verifier")
 
 
@@ -146,18 +151,18 @@ def _verifier_dir(operating_system: OperatingSystem) -> PurePath:
 #: path, or a link at it, as its own account or with sudo, so a link or file where a
 #: directory belongs is removed rather than followed, the parent becomes root's and only
 #: root may change it, and the directory is made anew, readable by root alone.
-_LINUX_VERIFIER_RESET = """set -eu
+_POSIX_VERIFIER_RESET = """set -eu
 parent="$1" verifier="$2"
 if [ -L "$parent" ] || { [ -e "$parent" ] && [ ! -d "$parent" ]; }; then rm -f -- "$parent"; fi
 mkdir -p -- "$parent"
-chown 0:0 -- "$parent"
-chmod go-w -- "$parent"
+chown -- 0:0 "$parent"
+chmod -- go-w "$parent"
 rm -rf -- "$verifier"
 mkdir -m 0700 -- "$verifier"
 """
 
 #: Removes the verifier directory unless its parent is a link, which is the agent's own.
-_LINUX_VERIFIER_REMOVE = """set -eu
+_POSIX_VERIFIER_REMOVE = """set -eu
 if [ -d "$1" ] && [ ! -L "$1" ]; then rm -rf -- "$2"; fi
 """
 
@@ -231,7 +236,7 @@ if (Test-Directory (Get-Entry $parent)) { Remove-Entry $verifier }
 def _verifier_dir_command(operating_system: OperatingSystem, *, remove: bool) -> list[str]:
     directory = _verifier_dir(operating_system)
     if operating_system is not OperatingSystem.WINDOWS:
-        script = _LINUX_VERIFIER_REMOVE if remove else _LINUX_VERIFIER_RESET
+        script = _POSIX_VERIFIER_REMOVE if remove else _POSIX_VERIFIER_RESET
         return ["sh", "-c", script, "sh", str(directory.parent), str(directory)]
     return _powershell(
         f"$parent = {_powershell_literal(str(directory.parent))}; "
@@ -599,11 +604,14 @@ class EpisodeProtocol:
                     target,
                     identity=Identity.AGENT,
                 )
-                if ctx.spec.os is OperatingSystem.LINUX and server.command.startswith("{mcp}/"):
+                if ctx.spec.os in (
+                    OperatingSystem.LINUX,
+                    OperatingSystem.MACOS,
+                ) and server.command.startswith("{mcp}/"):
                     # The declared command, rather than a Host mode, requests execution.
                     executable = server.command.replace("{mcp}", target)
                     result = await sandbox.exec(
-                        ["chmod", "u+x", "--", executable], identity=Identity.AGENT
+                        ["chmod", "--", "u+x", executable], identity=Identity.AGENT
                     )
                     if not result.ok:
                         raise TaskError(f"could not prepare MCP command: {executable}")

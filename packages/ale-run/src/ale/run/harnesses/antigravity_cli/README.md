@@ -14,7 +14,8 @@ used: its backend cannot be redirected to the Gateway.
 
 `agy` is not on npm. Its `release_assets` pin Google's 1.4.7 release by URL and
 SHA-256: a `tar.gz` holding the single executable `antigravity` on Linux (x86_64 and
-aarch64), whose member is pinned too, and a bare `.exe` on Windows (x86_64 and aarch64).
+aarch64) and macOS (arm64), whose member is pinned too, and a bare `.exe` on Windows
+(x86_64 and aarch64).
 Google's updater manifest names only the latest build, which is why the URL is pinned.
 `AGY_CLI_DISABLE_AUTO_UPDATE=true` stops the background updater; `1` does not.
 
@@ -29,12 +30,12 @@ title, which the Gateway answers with the run's model. Its `search_web` tool is 
 Google Search grounding call, which the Gateway allows only when the Task's network is
 open; otherwise the refusal reaches the agent as that tool's error.
 
-agy reads a headless prompt from stdin only as a stream-json message, so the command
-first has the Sandbox's Python wrap `prompt.md` into `.ale-harness/request.jsonl`, one
-`{"event": "user", "message": {"content": ...}}` line, and feeds that to agy. agy chooses
-the conversation ID and reports it in its `init` and `result` events; a resume passes it
-to `--conversation`. A failed turn ends with a `result` whose `status` is not `SUCCESS`,
-exits non-zero, and writes an `AGY_ERROR:` JSON line to stderr.
+agy reads a headless prompt from stdin only as a stream-json message, so the command first
+has the Sandbox's Python (on macOS the framework's) wrap `prompt.md` into
+`.ale-harness/request.jsonl`, one `{"event": "user", "message": {"content": ...}}` line, and
+feeds that to agy. agy chooses the conversation ID and reports it in its `init` and `result`
+events; a resume passes it to `--conversation`. A failed turn ends with a `result` whose
+`status` is not `SUCCESS`, exits non-zero, and writes an `AGY_ERROR:` JSON line to stderr.
 
 Skills go to `~/.gemini/antigravity-cli/skills/<name>/` and MCP servers to
 `~/.gemini/config/mcp_config.json` (`command`/`args`/`env`/`cwd`, or `serverUrl`). agy

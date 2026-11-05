@@ -29,7 +29,7 @@ class LogMirror:
     place, so the final sync, after the agent stopped, compares each file's guest digest
     with its Host copy once and copies a rewritten file again. One check per file and run
     keeps the cost linear in the size of the logs. The rule needs no file identity, so
-    Linux and Windows guests behave alike.
+    every guest OS behaves alike.
     """
 
     def __init__(

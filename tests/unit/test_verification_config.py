@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -115,3 +121,77 @@ def test_sandbox_retention_is_run_owned_and_defaults_to_destroy() -> None:
     assert configured.sandbox_retention.solver == "keep"
     with pytest.raises(ValidationError):
         RunConfig.model_validate({"sandbox_retention": {"solver": "sometimes"}})
+
+
+@pytest.mark.parametrize(
+    ("platform", "operating_system", "directory"),
+    [
+        ("linux", "linux", "/logs/verifier"),
+        ("win32", "windows", "C:/logs/verifier"),
+        ("darwin", "macos", "/opt/ale/logs/verifier"),
+    ],
+)
+def test_engine_and_verifier_write_to_the_same_platform_directory(
+    platform, operating_system, directory
+):
+    from ale.core.taskspec import OperatingSystem
+    from ale.run.protocol.episode_protocol import _verifier_dir, _verifier_dir_command
+
+    # Reload only the verifier package in an isolated child; do not change the
+    # test runner's platform or write any framework directory on the Host.
+    code = """
+import importlib,json,sys
+import ale_verify
+sys.platform=sys.argv[1]
+importlib.reload(ale_verify)
+written=[]
+ale_verify.atomic_json=lambda path, data: written.append(path.as_posix())
+ale_verify.write({'reward':0.5})
+print(json.dumps(written))
+"""
+    written = json.loads(subprocess.check_output([sys.executable, "-I", "-c", code, platform]))
+    system = OperatingSystem(operating_system)
+    assert _verifier_dir(system).as_posix() == directory
+    assert written == [f"{directory}/verification.json", f"{directory}/reward.json"]
+    if system is not OperatingSystem.WINDOWS:
+        for remove in (False, True):
+            assert _verifier_dir_command(system, remove=remove)[-2:] == [
+                directory.rsplit("/", 1)[0],
+                directory,
+            ]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX verifier directory commands")
+@pytest.mark.parametrize("entry", ["stale", "parent-link", "verifier-link"])
+def test_posix_verifier_reset_and_remove_on_native_tools(tmp_path: Path, entry: str) -> None:
+    from ale.run.protocol.episode_protocol import _POSIX_VERIFIER_REMOVE, _POSIX_VERIFIER_RESET
+
+    parent, verifier = tmp_path / "logs", tmp_path / "logs/verifier"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_text("unchanged")
+    if entry == "parent-link":
+        parent.symlink_to(outside, target_is_directory=True)
+    else:
+        parent.mkdir(mode=0o777)
+        if entry == "verifier-link":
+            verifier.symlink_to(outside, target_is_directory=True)
+        else:
+            verifier.mkdir(mode=0o777)
+            (verifier / "reward.json").write_text('{"reward":1}')
+
+    # Exercise native BSD/GNU utilities without sudo or Host framework paths.
+    # Only the ownership target changes to the test runner's own account.
+    reset = _POSIX_VERIFIER_RESET.replace("chown -- 0:0", f"chown -- {os.getuid()}:{os.getgid()}")
+    subprocess.run(["sh", "-c", reset, "sh", str(parent), str(verifier)], check=True)
+    assert not parent.is_symlink() and not verifier.is_symlink()
+    assert parent.stat().st_uid == os.getuid() and parent.stat().st_mode & 0o022 == 0
+    assert verifier.stat().st_uid == os.getuid() and verifier.stat().st_mode & 0o777 == 0o700
+    assert not list(verifier.iterdir())
+    subprocess.run(
+        ["sh", "-c", _POSIX_VERIFIER_REMOVE, "sh", str(parent), str(verifier)], check=True
+    )
+    assert not verifier.exists()
+    assert list(outside.iterdir()) == [sentinel]
+    assert sentinel.read_text() == "unchanged"

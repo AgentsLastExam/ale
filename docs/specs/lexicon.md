@@ -13,7 +13,7 @@ Normative. Every term below has exactly one meaning.
 | **Environment** | The Task's definition of the machine the agent starts on: `[environment]` and `environment/`. | never a Sandbox or the episode protocol |
 | **Task source digest** | A digest of the Task folder's canonical paths, bytes, executable bits, and symlink targets, pruning only the [asset roots](task-assets.md) and generated state. | not a hash of `task.toml` alone or of asset bytes |
 | **TaskSpec** | The frozen, serializable specification of one Task: its validated `task.toml` and its instruction. | not the folder on disk |
-| **Task operating system** | `linux` (default) or explicit `windows`; it selects path and stage-entry semantics and must match the prepared image. | not a Provider name inferred from an image tag |
+| **Task operating system** | `linux` (default), or explicit `windows` or `macos`; it selects path and stage-entry semantics and must match the prepared image. | not a Provider name inferred from an image tag |
 | **Task** | One self-contained Task folder bound to its TaskSpec and standard behavior. | not a collection or loader |
 | **Task collection** | A directory or source that contains several independent Task folders for selection. | not a Task and not an execution contract |
 | **Image declaration** | A solver's or dedicated verifier's sandbox kind (container or vm, from `vm`, `vm_image`, `vm_base` and the OS) and either an image used directly (`docker_image`, `vm_image`) or a build definition in its fixed directory. | not a Provider selection or build flag |

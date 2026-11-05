@@ -31,6 +31,12 @@ agent's session, which replaces the logon tasks only a running Windows could reg
 (``framework_windows.py`` installs them). A Windows Task image is built from a framed copy
 of its base, so the framework is already there when the Task's own image script runs.
 There too elevation is not part of the image; the Host grants it per boot.
+
+A macOS disk is APFS, which only macOS reads, so the Orchard Provider frames a copy of it
+offline on the Mac itself with ``framework_macos.sh``. The pieces are guestd, the
+framework's Python and Cua Driver with the privacy grants macOS otherwise takes only
+through its settings. The Provider starts the Driver in the agent's session, which the
+image signs in at boot, and sets elevation at every start, as on Linux.
 """
 
 from __future__ import annotations
@@ -64,6 +70,11 @@ from ale.run.sources import cache_root
 __all__ = [
     "CUA_DRIVER_VERSION",
     "LABEL",
+    "MACOS_DRIVER",
+    "MACOS_DRIVER_APP",
+    "MACOS_DRIVER_SOCKET",
+    "MACOS_FRAMER",
+    "MACOS_PYTHON",
     "MARKER",
     "MATERIALIZER_IMAGE",
     "WINDOWS_MARKER",
@@ -71,12 +82,15 @@ __all__ = [
     "framed_disk",
     "framework_identity",
     "framework_on_disk",
+    "macos_framework_identity",
+    "macos_framework_payload",
     "windows_framework_identity",
     "with_framework",
 ]
 
 LABEL = "ale.framework"
-#: Where a prepared Linux image records the framework identity it carries.
+#: Where a prepared Linux image, or a framed macOS disk, records the framework identity it
+#: carries.
 MARKER = "/opt/ale/framework"
 #: The same for a Windows disk, as libguestfs names ``C:\ProgramData\ALE\framework``.
 WINDOWS_MARKER = "/ProgramData/ALE/framework"
@@ -96,6 +110,10 @@ _PYTHON = {
         "cpython-3.12.15+20261013-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
         "7a2aef48e5ee569e310b29b32681debbc5d888e92790d85331a47736c6b06aad",
     ),
+    "macos": (
+        "cpython-3.12.15+20261013-aarch64-apple-darwin-install_only_stripped.tar.gz",
+        "9866e11cf2ae9caa1e671383786f248859a52dd8bfb702fb4c0dc2c65f1d36de",
+    ),
 }
 #: Release asset and its published SHA-256, per guest platform.
 _CUA_DRIVER = {
@@ -107,10 +125,22 @@ _CUA_DRIVER = {
         f"cua-driver-rs-{CUA_DRIVER_VERSION}-windows-x86_64-binary.zip",
         "5edaa74d0afa1b55a9668dbc4f32736507bd2bd4d75b18ca1dc8881bb12402b5",
     ),
+    "macos": (
+        f"cua-driver-rs-{CUA_DRIVER_VERSION}-darwin-arm64.tar.gz",
+        "5f71191c082ca07c9dfc13b7c9a6eec60a82818c245a93534cc0eb7911471d72",
+    ),
 }
 _CUA_DRIVER_BINARY = {"linux": "cua-driver", "windows": "cua-driver.exe"}
 #: Run inside the VM builder to install the Windows framework into a disk.
 _WINDOWS_INSTALLER = Path(__file__).with_name("framework_windows.py")
+#: Where the macOS framework puts its Python, readable by every account so the agent's
+#: desktop tool and Harness helpers can run it, and writable by root alone.
+MACOS_PYTHON = guestd.PYTHON["macos"]
+MACOS_DRIVER_APP = "/Applications/CuaDriver.app"
+MACOS_DRIVER = f"{MACOS_DRIVER_APP}/Contents/MacOS/cua-driver"
+MACOS_DRIVER_SOCKET = "/tmp/ale-cua-driver.sock"
+#: Run as root on the Mac to install the macOS framework into a stopped VM's disk.
+MACOS_FRAMER = Path(__file__).with_name("framework_macos.sh")
 
 #: How a prepared VM disk starts the guest service at boot.
 _GUEST_UNIT = f"""\
@@ -199,6 +229,38 @@ def windows_framework_identity(*, user: str) -> str:
             "user": user,
         }
     )
+
+
+def macos_framework_identity(*, user: str) -> str:
+    """Everything the macOS framework is installed from, so a change to any of it reframes.
+
+    Elevation is not part of it: as on Linux and Windows, the Provider sets it per boot.
+    """
+    return content_hash(
+        {
+            "guestd": _guestd_digests(),
+            "cua_driver": _CUA_DRIVER["macos"][1],
+            "python": _PYTHON["macos"][1],
+            "framer": hashlib.sha256(MACOS_FRAMER.read_bytes()).hexdigest(),
+            "user": user,
+        }
+    )
+
+
+def macos_framework_payload() -> bytes:
+    """The tar stream ``framework_macos.sh`` installs: the Python, the Driver and guestd."""
+    members = {
+        "driver.tar.gz": macos_driver_archive(),
+        **{f"guestd/{name}": (guestd.SOURCE / name).read_bytes() for name in guestd.FILES},
+    }
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as bundle:
+        bundle.add(_python("macos"), arcname="python")
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            bundle.addfile(info, io.BytesIO(data))
+    return stream.getvalue()
 
 
 def _guestd_digests() -> dict[str, str]:
@@ -542,6 +604,24 @@ def _fetched(
             raise
         partial.rename(root)
     return root
+
+
+def macos_driver_archive() -> bytes:
+    """The macOS release as published: its signed app bundle must stay whole."""
+    asset, sha256 = _CUA_DRIVER["macos"]
+
+    def keep(payload: bytes, into: Path) -> None:
+        (into / asset).write_bytes(payload)
+
+    files = _fetched(
+        cache_root() / "cua-driver" / CUA_DRIVER_VERSION / "macos",
+        "https://github.com/trycua/cua/releases/download/"
+        f"cua-driver-rs-v{CUA_DRIVER_VERSION}/{asset}",
+        sha256,
+        keep,
+        what="Cua Driver",
+    )
+    return (files / asset).read_bytes()
 
 
 def _archive_files(asset: str, payload: bytes) -> Iterator[tuple[str, bytes]]:

@@ -63,6 +63,7 @@ class ImageKind(StrEnum):
 class OperatingSystem(StrEnum):
     LINUX = "linux"
     WINDOWS = "windows"
+    MACOS = "macos"
 
 
 def _task_path(path: str, operating_system: OperatingSystem) -> PurePosixPath | PureWindowsPath:
@@ -658,8 +659,8 @@ class EnvironmentTable(BaseModel):
     @property
     def kind(self) -> ImageKind:
         """A VM when anything here says so; only a Linux VM built from a Dockerfile sets ``vm``."""
-        windows = self.os is OperatingSystem.WINDOWS
-        vm = self.vm or windows or self.vm_image is not None or self.vm_base is not None
+        linux = self.os is OperatingSystem.LINUX
+        vm = self.vm or not linux or self.vm_image is not None or self.vm_base is not None
         return ImageKind.VM if vm else ImageKind.CONTAINER
 
     # --- validation ---
@@ -813,13 +814,13 @@ class TaskConfig(BaseModel):
     @model_validator(mode="after")
     def _consistent(self) -> Self:
         environment, verifier = self.environment, self.verifier
-        windows = environment.os is OperatingSystem.WINDOWS
+        linux = environment.os is OperatingSystem.LINUX
         if environment.docker_image is not None and environment.kind is ImageKind.VM:
             raise ValueError("[environment].docker_image is a container image; a VM has vm_image")
         if environment.vm_image is not None and environment.vm_base is not None:
             raise ValueError("vm_image and vm_base are mutually exclusive")
-        if environment.vm_base is not None and not windows:
-            raise ValueError("[environment].vm_base requires os 'windows'")
+        if environment.vm_base is not None and linux:
+            raise ValueError("[environment].vm_base requires os 'windows' or 'macos'")
         names = [server.name for server in environment.mcp_servers]
         if len(names) != len(set(names)):
             raise ValueError("[[environment.mcp_servers]] names must be unique")
@@ -831,7 +832,7 @@ class TaskConfig(BaseModel):
                 raise ValueError(
                     "[verifier.environment].docker_image is a container image; a VM has vm_image"
                 )
-            if windows:
-                raise ValueError("a Windows verifier runs in a VM")
+            if environment.os is not OperatingSystem.LINUX:
+                raise ValueError("only a Linux verifier runs in a container")
         _validate_artifact_paths(self.artifacts, environment.os)
         return self

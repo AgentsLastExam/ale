@@ -1023,6 +1023,7 @@ async def _prepare_images(
         key = content_hash(
             {
                 "role": "solver",
+                "os": task.spec.os,
                 "kind": spec.kind,
                 "local": task.image_source_digest,
                 "ref": spec.ref,
@@ -1030,8 +1031,8 @@ async def _prepare_images(
                 "user": spec.user,
             }
         )
-        windows_build = spec.base_ref is not None
-        image = None if windows_build else by_source.get(key)
+        base_build = spec.base_ref is not None
+        image = None if base_build else by_source.get(key)
         if image is None:
             prepared = await prepare_task_image_result(task, providers)
             image = prepared.image
@@ -1056,6 +1057,7 @@ async def _prepare_images(
         verifier_key = content_hash(
             {
                 "role": "verifier",
+                "os": task.spec.os,
                 "kind": verify.image.kind,
                 "local": task.verifier_image_source_digest,
                 "ref": verify.image.ref,
@@ -1177,8 +1179,9 @@ def _gateway_host() -> str:
 
     Every sandbox is in a different network namespace from this process, so loopback is
     never an address one of them can dial: a container on an isolated bridge reaches the
-    host at its gateway address, and a virtual machine reaches it through the runner
-    holding it. Binding to all interfaces is what makes the deny-all topology usable.
+    host at its gateway address, a QEMU VM through the runner holding it, and a macOS VM
+    at the Mac's address on Tart's NAT network. Binding to all interfaces is what makes the
+    deny-all topology usable.
 
     This used to bind loopback for anything that was not Docker, which was true when the
     VM backend ran qemu on the host with slirp — the guest's own NAT delivered to the

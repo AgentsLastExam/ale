@@ -140,7 +140,7 @@ class ComputerUseHarness(StepwisePolicy):
     """Claude, driving a desktop one observation at a time."""
 
     name = "computer-use"
-    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS, OperatingSystem.MACOS)
 
     def __init__(self, model: str = "claude-opus-4-8", max_tokens: int = 2048) -> None:
         self.model = model

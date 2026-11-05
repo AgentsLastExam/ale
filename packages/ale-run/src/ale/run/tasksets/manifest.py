@@ -45,6 +45,9 @@ ENVIRONMENT_DIR = "environment"
 #: Below ``environment/``: never part of an image build context.
 SETUP_DIR = "setup"
 WINDOWS_BUILD = "build.ps1"
+MACOS_BUILD = "build.sh"
+#: The script a Windows or macOS Task builds its image with, on ``[environment].vm_base``.
+BUILD_SCRIPTS = {OperatingSystem.WINDOWS: WINDOWS_BUILD, OperatingSystem.MACOS: MACOS_BUILD}
 _SOURCE_EXCLUDES = (*ASSET_ROOTS, ".ale-cache")
 
 
@@ -85,9 +88,9 @@ class TaskFolder:
     def dockerfile(self) -> Path | None:
         return _file(self.environment_dir / "Dockerfile")
 
-    @property
-    def build_script(self) -> Path | None:
-        return _file(self.environment_dir / WINDOWS_BUILD)
+    def build_script(self, operating_system: OperatingSystem) -> Path | None:
+        name = BUILD_SCRIPTS.get(operating_system)
+        return _file(self.environment_dir / name) if name else None
 
     @property
     def verifier_dockerfile(self) -> Path | None:
@@ -206,7 +209,8 @@ class ManifestTask(Task):
     async def score(self, ctx: EpisodeContext) -> Rewards:
         if ctx.verified_rewards is None:
             raise TaskDefinitionError(
-                "verification produced no rewards; tests must write /logs/verifier/reward.json"
+                "verification produced no rewards; tests must write reward.json "
+                "in the platform verifier directory"
             )
         return {str(key): float(value) for key, value in ctx.verified_rewards.items()}
 
@@ -318,12 +322,14 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
     """The solver image: one named directly wins over a build definition, as in Harbor.
 
     ``[environment]`` decides what ``environment/`` builds: a Dockerfile for a container or
-    a Linux VM, ``build.ps1`` for Windows.
+    a Linux VM, ``build.ps1`` for Windows and ``build.sh`` for macOS, each on ``vm_base``.
     """
     environment, user = config.environment, config.agent.user
     timeout = environment.build_timeout_sec
-    windows = environment.os is OperatingSystem.WINDOWS
-    if not windows and folder.build_script is not None:
+    script = BUILD_SCRIPTS.get(environment.os)
+    if environment.os is not OperatingSystem.WINDOWS and _file(
+        folder.environment_dir / WINDOWS_BUILD
+    ):
         raise TaskDefinitionError("environment/build.ps1 requires os 'windows'")
     if environment.kind is ImageKind.CONTAINER:
         ref = environment.docker_image
@@ -333,18 +339,20 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
             )
         return ImageSpec(kind=ImageKind.CONTAINER, ref=ref, user=user, build_timeout_sec=timeout)
 
-    if windows:
+    if script is not None:
+        label = "Windows" if environment.os is OperatingSystem.WINDOWS else "macOS"
+        built = folder.build_script(environment.os)
         if folder.dockerfile is not None:
             raise TaskDefinitionError(
-                "a Windows Task builds environment/build.ps1, not a Dockerfile"
+                f"a {label} Task builds environment/{script}, not a Dockerfile"
             )
-        if folder.build_script is not None and environment.vm_base is None:
-            raise TaskDefinitionError("environment/build.ps1 requires [environment].vm_base")
-        if environment.vm_base is not None and folder.build_script is None:
-            raise TaskDefinitionError("[environment].vm_base requires environment/build.ps1")
+        if built is not None and environment.vm_base is None:
+            raise TaskDefinitionError(f"environment/{script} requires [environment].vm_base")
+        if environment.vm_base is not None and built is None:
+            raise TaskDefinitionError(f"[environment].vm_base requires environment/{script}")
         if environment.vm_base is None and environment.vm_image is None:
             raise TaskDefinitionError(
-                "a Windows Task requires environment/build.ps1 or [environment].vm_image"
+                f"a {label} Task requires environment/{script} or [environment].vm_image"
             )
         return ImageSpec(
             kind=ImageKind.VM,
@@ -371,8 +379,11 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
         if dockerfile is not None:
             raise TaskDefinitionError("tests/Dockerfile requires separate verification")
         return VerifySpec()
-    if dockerfile is not None and config.environment.os is OperatingSystem.WINDOWS:
-        raise TaskDefinitionError("a Windows verifier reuses the solver image or names a vm_image")
+    if dockerfile is not None and config.environment.os is not OperatingSystem.LINUX:
+        raise TaskDefinitionError(
+            "only a Linux verifier builds tests/Dockerfile; reuse the solver image or name a "
+            "vm_image"
+        )
 
     environment = verifier.environment
     # Without a verifier environment, a separate verifier gets the solver's resources.

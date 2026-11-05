@@ -9,8 +9,9 @@ import stat
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -45,8 +46,14 @@ def exchange(address: tuple[str, int], *lines: dict[str, object]) -> list[dict[s
         stream = client.makefile("rb")
         replies = []
         for line in lines:
-            client.sendall(json.dumps(line).encode() + b"\n")
-            raw = stream.readline()
+            try:
+                client.sendall(json.dumps(line).encode() + b"\n")
+                raw = stream.readline()
+            except (ConnectionResetError, BrokenPipeError):
+                # A request sent after refusal can race with the server closing TCP.
+                if not replies or replies[-1].get("error", {}).get("code") != "unauthorized":
+                    raise
+                break
             if not raw:
                 break
             replies.append(json.loads(raw))
@@ -68,6 +75,25 @@ def test_an_unauthenticated_operation_is_refused_and_the_connection_closed() -> 
     assert replies[0]["error"]["code"] == "unauthorized"  # type: ignore[index]
 
 
+@pytest.mark.parametrize("refused", [True, False])
+@pytest.mark.parametrize("disconnect", [ConnectionResetError, BrokenPipeError])
+def test_exchange_accepts_disconnect_only_after_explicit_refusal(
+    monkeypatch: pytest.MonkeyPatch, refused: bool, disconnect: type[OSError]
+) -> None:
+    reply = {"ok": False, "error": {"code": "unauthorized"}} if refused else {"ok": True}
+    client = MagicMock()
+    reader = client.makefile.return_value
+    reader.readline.side_effect = [json.dumps(reply).encode(), disconnect()]
+    if disconnect is BrokenPipeError:
+        client.sendall.side_effect = [None, disconnect()]
+    monkeypatch.setattr(socket, "create_connection", lambda *args, **kwargs: nullcontext(client))
+    if refused:
+        assert exchange(("127.0.0.1", 1), auth(OTHER), HEALTH) == [reply]
+    else:
+        with pytest.raises(disconnect):
+            exchange(("127.0.0.1", 1), auth(TOKEN), HEALTH)
+
+
 def test_the_first_token_claims_the_guest_and_only_it_is_accepted_later() -> None:
     with guest() as address:
         claimed = exchange(address, auth(TOKEN), HEALTH)
@@ -75,6 +101,7 @@ def test_the_first_token_claims_the_guest_and_only_it_is_accepted_later() -> Non
         returning = exchange(address, auth(TOKEN), HEALTH)
     assert [reply["ok"] for reply in claimed] == [True, True]
     assert len(intruder) == 1 and intruder[0]["ok"] is False
+    assert intruder[0]["error"]["code"] == "unauthorized"
     assert [reply["ok"] for reply in returning] == [True, True]
 
 

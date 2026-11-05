@@ -56,7 +56,8 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 - `packages/ale-run/AGENTS.md` — runtime ownership and the episode path
 - `packages/ale-run/src/ale/run/harnesses/AGENTS.md` — native agent adapters
 - `packages/ale-run/src/ale/run/gateway/AGENTS.md` — model transport and credentials
-- `packages/ale-run/src/ale/run/providers/AGENTS.md` — Docker and QEMU backends
+- `packages/ale-run/src/ale/run/providers/AGENTS.md` — Docker, QEMU, Daytona and Orchard
+  backends
 - `packages/ale-verify/AGENTS.md` — sandbox-local public verification API
 - `tests/AGENTS.md` — test taxonomy and infrastructure markers
 - `docs/AGENTS.md` — specifications and guides
@@ -72,8 +73,9 @@ just lint
 ```
 
 Also run `just test-harnesses` after changing a Harness, a Gateway dialect or a CLI pin,
-and `just test-vm` after changing VM or Windows behavior.
+and `just test-vm` after changing VM or Windows behavior. After changing macOS behavior, run
+the Orchard suites the [macOS guide](docs/guides/macos-orchard.md) names on a Mac.
 
-Mark infrastructure tests with `needs_docker`, `needs_kvm`, `needs_gui`, `needs_llm`,
-`needs_cli_install` or the appropriate Hugging Face marker so they can be selected
-deliberately.
+Mark infrastructure tests with `needs_docker`, `needs_kvm`, `needs_orchard`, `needs_gui`,
+`needs_llm`, `needs_cli_install` or the appropriate Hugging Face marker so they can be
+selected deliberately.

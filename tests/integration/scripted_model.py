@@ -192,14 +192,37 @@ class ScriptedModel:
         if not body.get("stream"):
             return web.json_response(response)
         pending = {**response, "status": "in_progress", "output": []}
+        # As OpenAI streams it, a call's arguments arrive in their own events, not with the
+        # item that opens it.
+        opened = {**item, "status": "in_progress", "arguments": ""} if tool else item
         events: list[tuple[str | None, Any]] = [
             ("response.created", {"type": "response.created", "response": pending}),
             (
                 "response.output_item.added",
-                {"type": "response.output_item.added", "output_index": 0, "item": item},
+                {"type": "response.output_item.added", "output_index": 0, "item": opened},
             ),
         ]
-        if not tool:
+        if tool:
+            arguments = {"item_id": item["id"], "output_index": 0}
+            events += [
+                (
+                    "response.function_call_arguments.delta",
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        **arguments,
+                        "delta": item["arguments"],
+                    },
+                ),
+                (
+                    "response.function_call_arguments.done",
+                    {
+                        "type": "response.function_call_arguments.done",
+                        **arguments,
+                        "arguments": item["arguments"],
+                    },
+                ),
+            ]
+        else:
             events.append(
                 (
                     "response.output_text.delta",

@@ -39,7 +39,8 @@ lets it destroy every Sandbox it created.
 
 ### Provision
 
-The prepared image kind selects the matching configured Provider. The Provider admits
+The prepared image kind and the Task OS select the Provider: the configured one for a
+container or a Linux or Windows VM, the local Orchard for a macOS VM. The Provider admits
 the requested resources, creates the sandbox, and returns the image and resource
 allocation it actually started. Those observations, rather than the request alone, enter
 RunLock.
@@ -49,15 +50,15 @@ verification provisions a `solver` sandbox first and a `verifier` sandbox only a
 solver evidence capture.
 
 The image declares the agent account and home. ALE does not add a Task path prefix or
-pre-create declared artifacts. Framework staging uses `/opt/ale` on Linux and
-`C:\ProgramData\ALE` on Windows.
+pre-create declared artifacts. Framework staging uses `/opt/ale` on Linux and macOS
+and `C:\ProgramData\ALE` on Windows.
 
 ### Setup
 
 If `environment/setup/` exists, ALE uploads the complete directory to `setup` under the
-staging root, opens egress, and executes `setup.sh` on Linux or `setup.ps1` on Windows with
-that directory as cwd, so its files are available by ordinary relative paths. Setup is
-optional and runs once.
+staging root, opens egress, and executes `setup.sh` on Linux and macOS or `setup.ps1` on
+Windows with that directory as cwd, so its files are available by ordinary relative paths.
+Setup is optional and runs once.
 
 ### Agent or oracle
 
@@ -116,17 +117,17 @@ verification first releases or retains the solver according to run policy, provi
 fresh verifier sandbox, restores captured artifacts to their original absolute paths,
 and uploads the same `tests/`. It never reruns setup or copies the solver filesystem.
 
-Verification runs as framework-controlled Task code with open egress and elevated
-privileges (root on Linux, Administrator on Windows), in both shared and separate modes.
-Task code may explicitly drop privileges when executing a submitted program.
-ALE stages `ale_verify`, the instruction, optional solver trajectory, and run-level Judge
-configuration, then executes the OS entry from the verification staging directory. Linux uses
-`/opt/ale/tests/test.sh`; Windows uses `C:\ProgramData\ALE\tests\test.ps1`.
-ALE selects Python 3.12+ (`python3`, then `python3.12` on Linux; `python.exe` on Windows;
-then the framework's own) and provides its command as `ALE_VERIFY_PYTHON`. Both placements
-leave the same [result](verification.md#result) in `/logs/verifier` (`C:\logs\verifier`),
-which ALE empties and gives to the framework alone before every attempt. The solver
-interpreter is unchanged.
+Verification runs as framework-controlled Task code with open egress and elevated privileges
+(root on Linux and macOS, Administrator on Windows), in both shared and separate modes. Task
+code may explicitly drop privileges when executing a submitted program. ALE stages
+`ale_verify`, the instruction, optional solver trajectory, and run-level Judge
+configuration, then executes the OS entry from the verification staging directory. Linux and
+macOS use `/opt/ale/tests/test.sh`; Windows uses `C:\ProgramData\ALE\tests\test.ps1`. ALE
+selects Python 3.12+ (`python3`, then `python3.12` on Linux and macOS; `python.exe` on
+Windows; then the framework's own) and provides its command as `ALE_VERIFY_PYTHON`. Both
+placements leave the same [result](verification.md#result) in `/logs/verifier`
+(`C:\logs\verifier`, macOS `/opt/ale/logs/verifier`), which ALE empties and gives to the
+framework alone before every attempt. The solver interpreter is unchanged.
 
 ### Teardown and retention
 

@@ -23,7 +23,7 @@ from ale.core.sandbox import (
     ResourceAllocation,
     SandboxRequest,
 )
-from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, Resources
+from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from ale.run import guestd
 from ale.run.guestd import tunnel as guest_tunnel
 from ale.run.providers import RETAINING_PROVIDERS, ProviderRegistry, daytona_image, provider_named
@@ -84,10 +84,10 @@ def test_daytona_allocates_whole_gib_and_the_provider_refuses_to_round() -> None
 
 
 def test_the_registry_builds_the_configured_container_provider() -> None:
-    docker = ProviderRegistry(RunConfig()).get(ImageKind.CONTAINER)
+    docker = ProviderRegistry(RunConfig()).get(ImageKind.CONTAINER, OperatingSystem.LINUX)
     assert docker.name == "docker"
     config = RunConfig.model_validate({"container": {"provider": "daytona"}})
-    chosen = ProviderRegistry(config).get(ImageKind.CONTAINER)
+    chosen = ProviderRegistry(config).get(ImageKind.CONTAINER, OperatingSystem.LINUX)
     assert chosen.name == "daytona"
     assert provider_named("daytona").name == "daytona"
     assert "daytona" in RETAINING_PROVIDERS

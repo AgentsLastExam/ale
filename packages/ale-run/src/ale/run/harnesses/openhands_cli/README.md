@@ -2,8 +2,8 @@
 
 Runs `openhands --headless --json --override-with-envs --resume <id> --file <prompt>`.
 1.16.0 is the CLI's final release: upstream has marked it unmaintained in favor of a
-browser application. It ships as single-file PyInstaller binaries for Linux only, and
-upstream supports Windows only through WSL, so this Harness is Linux-only.
+browser application. It ships as single-file PyInstaller binaries for Linux and macOS,
+and upstream supports Windows only through WSL, so this Harness runs on Linux and macOS.
 
 The model comes from `LLM_MODEL`, `LLM_BASE_URL` and `LLM_API_KEY`, which make the CLI build
 its default agent around the episode Gateway; nothing else about the agent is

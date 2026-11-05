@@ -2,8 +2,8 @@
 
 The second backend exists to prove the sandbox contract is real. If a task, a harness
 and a verdict all behave the same against a container and against a VM, then what they
-depend on is the contract rather than Docker — and the future OS roadmap (Windows,
-macOS guests) becomes "swap the guest image" rather than "write another framework".
+depend on is the contract rather than Docker. It also runs Windows guests; macOS guests
+run on the Orchard Provider, since only a Mac may host them.
 
 Three choices are worth stating, because each has a plausible alternative:
 
@@ -799,7 +799,9 @@ class QemuProvider(Provider):
             if request.os is OperatingSystem.WINDOWS:
                 await self._verify_windows_privileges(client, agent_user, request.sudo)
             else:
-                await set_elevation(client, agent_user, sudo=request.sudo)
+                await set_elevation(
+                    client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
+                )
                 await verify_identities(client, agent_user, sudo=request.sudo)
             file_client = await _connect(host_port, guest_token)
             clients.append(file_client)

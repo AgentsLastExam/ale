@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -43,7 +44,8 @@ def saved(verifier):
 
 
 def test_verifier_directory_is_harbors():
-    assert str(ale_verify._VERIFIER_DIR) == "/logs/verifier"
+    harbors = "/opt/ale/logs/verifier" if sys.platform == "darwin" else "/logs/verifier"
+    assert str(ale_verify._VERIFIER_DIR) == harbors
 
 
 def test_plain_nested_result_and_repeated_write(verify_env):

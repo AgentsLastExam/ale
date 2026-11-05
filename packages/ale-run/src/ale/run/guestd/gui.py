@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -44,6 +45,47 @@ class ActionFailed(GuiUnavailable):
     """Cua Driver ran the tool and reported that it failed."""
 
 
+class DesktopIdentityError(GuiUnavailable):
+    """The configured desktop does not belong to the task account."""
+
+
+def probe_macos_desktop(agent_user: str, driver_path: str, socket_path: str) -> None:
+    """Capture through the same client as agent tools, as the actual task account.
+
+    A socket's owner is a prerequisite, not an attestation of the server process's
+    identity. The Provider starts the authorized Driver in this login session as each
+    sandbox boots. This probe neither changes TCC grants nor starts a service in another
+    session.
+    """
+    import pwd
+
+    if sys.platform != "darwin":
+        raise DesktopIdentityError("the desktop probe requires macOS")
+    try:
+        uid = pwd.getpwnam(agent_user).pw_uid
+    except KeyError as exc:
+        raise DesktopIdentityError("the task account does not exist") from exc
+    if uid == 0 or os.geteuid() != uid:
+        raise DesktopIdentityError("the desktop probe must execute as the non-root task account")
+    if _binary() != driver_path or _socket() != socket_path:
+        raise DesktopIdentityError("agent and framework desktop configuration differ")
+    try:
+        console_uid = os.stat("/dev/console").st_uid
+        if console_uid == 0:
+            raise GuiUnavailable("the task account has no logged-in desktop yet")
+        if console_uid != uid:
+            raise DesktopIdentityError("the console desktop belongs to a different task account")
+        socket_info = os.lstat(socket_path)
+        if not stat.S_ISSOCK(socket_info.st_mode):
+            raise DesktopIdentityError("the configured Driver path must be a Unix socket")
+        if socket_info.st_uid != uid:
+            raise DesktopIdentityError("the Driver socket owner differs from the task account")
+    except OSError as exc:
+        raise GuiUnavailable(f"the desktop console or socket is not accessible: {exc}") from exc
+    if not capture_screen().startswith(b"\x89PNG\r\n\x1a\n"):
+        raise GuiUnavailable("the Driver did not return a PNG desktop capture")
+
+
 def _binary() -> str:
     configured = os.environ.get("ALE_CUA_DRIVER")
     if not configured and os.name == "nt" and os.path.isfile(_WINDOWS_DRIVER):
@@ -57,15 +99,27 @@ def _binary() -> str:
 def has_desktop() -> bool:
     """Whether this sandbox is configured to show a desktop, decided before anything starts.
 
-    A virtual machine has one when its systemd enables a display manager. A container has
+    A Linux virtual machine has one when its systemd enables a display manager. A container has
     one when its image sets ``DISPLAY`` or ``WAYLAND_DISPLAY``: that is how a desktop image
     tells its processes where to draw, while an image that ships X only as a tool, such as
     Xvfb for a headless browser, does not. Windows always draws one, and it is ALE's to
     drive once the framework has installed Cua Driver, as in every Task image; the bare
-    base, booted only to build a Task image, has none to wait for.
+    base, booted only to build a Task image, has none to wait for. On macOS the Provider
+    declares one by naming the Driver's socket (``ALE_CUA_DRIVER_SOCKET``) in every sandbox
+    the agent works in; a verifier or ``build.sh`` VM has none.
     """
     if os.name == "nt":
         return os.path.isfile(_WINDOWS_DRIVER)
+    if sys.platform == "darwin":
+        # The Provider starts the framework's Driver in the agent's login session, which the
+        # image signs in at boot. Declaring it does not attest capture; readiness probes it.
+        if not os.environ.get("ALE_CUA_DRIVER_SOCKET"):
+            return False
+        try:
+            _binary()
+        except GuiUnavailable:
+            return False
+        return True
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) or os.path.lexists(
         _DISPLAY_MANAGER
     )
@@ -150,7 +204,7 @@ def _invoke(tool: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
 def _as_daemon_owner(socket: str | None) -> dict[str, Any]:
     """Run the client as the account that owns the daemon's socket, usually the agent's.
 
-    Cua Driver answers only its own account, and guestd runs as root on Linux.
+    Cua Driver answers only its own account, and guestd runs as root on Linux and macOS.
     """
     if os.name == "nt" or not socket or os.geteuid() != 0:
         return {}
@@ -187,10 +241,11 @@ def _start_server() -> bool:
 
     The image only has to run a desktop: the engine installed Cua Driver, and guestd
     starts it as the agent account with the environment of that account's session, so
-    capture and input reach the screen the agent sees. Windows starts it with the session.
+    capture and input reach the screen the agent sees. Windows starts it with the session,
+    and on macOS the Orchard Provider starts it as each sandbox boots.
     """
     global _server
-    if os.name == "nt" or os.environ.get("ALE_CUA_DRIVER_SOCKET"):
+    if os.name == "nt" or sys.platform == "darwin" or os.environ.get("ALE_CUA_DRIVER_SOCKET"):
         return False
     if _server is not None and _server.poll() is None:
         return False
@@ -358,7 +413,18 @@ def screen_size() -> tuple[int, int]:
 
 
 def _to_pixels(coordinate: list[int] | tuple[int, int]) -> tuple[int, int]:
-    width, height = screen_size()
+    if sys.platform == "darwin":
+        # macOS desktop input takes the display's native pixels, which the Driver converts
+        # to points itself; get_screen_size and get_cursor_position return points, and
+        # its scale_factor can under-report Retina. The screenshot it returns may be
+        # scaled down, so the native size is its original one when it gives that.
+        payload = _call("get_desktop_state")
+        width = payload.get("screenshot_original_width", payload.get("screenshot_width"))
+        height = payload.get("screenshot_original_height", payload.get("screenshot_height"))
+        if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
+            raise GuiUnavailable("cua-driver omitted valid desktop screenshot dimensions")
+    else:
+        width, height = screen_size()
     x, y = coordinate
     return round(x * width / COORDINATE_SPACE), round(y * height / COORDINATE_SPACE)
 
@@ -387,9 +453,23 @@ def capture_screen() -> bytes:
 
 def _point(action: dict[str, Any], key: str = "coordinate") -> tuple[int, int]:
     coordinate = action.get(key)
+    if coordinate is None and key == "coordinate":
+        coordinate = cursor_position()
     if not isinstance(coordinate, (list, tuple)) or len(coordinate) != 2:
         raise GuiUnavailable(f"desktop action requires a two-value {key}")
     return _to_pixels(coordinate)
+
+
+def _pointer(arguments: dict[str, Any]) -> dict[str, Any]:
+    """A desktop pointer action, which on macOS must say that nobody else uses this screen.
+
+    There Cua Driver otherwise refuses to move the real pointer over a background app's
+    window, since that would take the pointer from a person at the Mac.
+    """
+    arguments["scope"] = "desktop"
+    if sys.platform == "darwin":
+        arguments["delivery_mode"] = "foreground"
+    return arguments
 
 
 def dispatch_actions(actions: list[dict[str, Any]]) -> int:
@@ -400,44 +480,47 @@ def dispatch_actions(actions: list[dict[str, Any]]) -> int:
             x, y = _point(action)
             _call(
                 "click",
-                {
-                    "x": x,
-                    "y": y,
-                    "scope": "desktop",
-                    "button": "right" if kind == "right_click" else action.get("button", "left"),
-                    "count": 2 if kind == "double_click" else int(action.get("clicks") or 1),
-                },
+                _pointer(
+                    {
+                        "x": x,
+                        "y": y,
+                        "button": "right"
+                        if kind == "right_click"
+                        else action.get("button", "left"),
+                        "count": 2 if kind == "double_click" else int(action.get("clicks") or 1),
+                    }
+                ),
             )
         elif kind == "move":
             x, y = _point(action)
-            _call("move_cursor", {"x": x, "y": y, "scope": "desktop"})
+            _call("move_cursor", _pointer({"x": x, "y": y}))
         elif kind == "drag":
             end_x, end_y = _point(action, "to")
-            start = action.get("coordinate")
-            start_x, start_y = _to_pixels(start) if start else cursor_position()
+            start_x, start_y = _to_pixels(action.get("coordinate") or cursor_position())
             _call(
                 "drag",
-                {
-                    "from_x": start_x,
-                    "from_y": start_y,
-                    "to_x": end_x,
-                    "to_y": end_y,
-                    "scope": "desktop",
-                    "button": action.get("button", "left"),
-                },
+                _pointer(
+                    {
+                        "from_x": start_x,
+                        "from_y": start_y,
+                        "to_x": end_x,
+                        "to_y": end_y,
+                        "button": action.get("button", "left"),
+                    }
+                ),
             )
         elif kind == "scroll":
-            coordinate = action.get("coordinate")
-            x, y = _to_pixels(coordinate) if coordinate else cursor_position()
+            x, y = _point(action)
             _call(
                 "scroll",
-                {
-                    "x": x,
-                    "y": y,
-                    "direction": action.get("direction", "down"),
-                    "amount": max(1, min(50, int(action.get("amount") or 3))),
-                    "scope": "desktop",
-                },
+                _pointer(
+                    {
+                        "x": x,
+                        "y": y,
+                        "direction": action.get("direction", "down"),
+                        "amount": max(1, min(50, int(action.get("amount") or 3))),
+                    }
+                ),
             )
         elif kind == "type":
             _call("type_text", {"text": action.get("text") or "", "scope": "desktop"})
@@ -448,7 +531,8 @@ def dispatch_actions(actions: list[dict[str, Any]]) -> int:
             elif keys:
                 _call("press_key", {"key": keys[0], "scope": "desktop"})
         elif kind == "wait":
-            time.sleep((action.get("duration_ms") or 500) / 1000)
+            duration = action.get("duration_ms")
+            time.sleep((500 if duration is None else duration) / 1000)
         elif kind in {"mouse_down", "mouse_up", "key_down", "key_up"}:
             raise GuiUnavailable(f"cua-driver does not expose the stateful action {kind}")
         else:

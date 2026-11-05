@@ -9,6 +9,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from ale.core.errors import AgentError
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import OperatingSystem
+from ale.run.framework import MACOS_PYTHON
 
 
 async def agent_home(sandbox: Sandbox) -> str:
@@ -22,6 +23,18 @@ async def agent_home(sandbox: Sandbox) -> str:
         return result.stdout.strip()
     result = await sandbox.exec(["sh", "-c", 'printf %s "$HOME"'], identity=Identity.AGENT)
     return result.stdout.strip() or "/home/user"
+
+
+def agent_python(operating_system: OperatingSystem) -> str:
+    """The Python the agent runs ALE's helper scripts on.
+
+    The system's, except on macOS, which ships none recent enough, where every account may
+    run the framework's.
+    """
+    return {
+        OperatingSystem.WINDOWS: "python",
+        OperatingSystem.MACOS: MACOS_PYTHON,
+    }.get(operating_system, "python3")
 
 
 def agent_path(home: str) -> PurePosixPath:
@@ -50,7 +63,7 @@ def npm_command(home: str, *args: str) -> list[str]:
 async def npm_env(sandbox: Sandbox, home: str) -> dict[str, str]:
     """The agent's own npm prefix ahead of the Sandbox's inherited search path.
 
-    Inherited on both systems, so a tool the image put on its ``PATH`` stays reachable.
+    Inherited on every system, so a tool the image put on its ``PATH`` stays reachable.
     """
     home = str(agent_path(home))
     prefix = f"{home}/.local"

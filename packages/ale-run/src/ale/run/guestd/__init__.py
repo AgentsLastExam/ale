@@ -11,14 +11,17 @@ from pathlib import Path
 #: The files a sandbox's guest service consists of, and where the engine reads them.
 SOURCE = Path(__file__).resolve().parent
 FILES = ("main.py", "protocol.py", "gui.py", "windows.py", "service.py", "tunnel.py")
-#: The port a VM's guest service listens on, forwarded to an ephemeral Host port.
+#: The port a QEMU VM's guest service listens on, forwarded to an ephemeral Host port.
 PORT = 7411
-#: The Host's address on a VM's network. It is the only address a VM's firewall lets reach the
-#: guest service.
+#: The Host's address on a QEMU VM's network. It is the only address a QEMU VM's firewall
+#: lets reach the guest service.
 HOST_ADDRESS = "172.30.0.1"
 #: The framework's own Python, which guestd runs on, per guest operating system. Only the
 #: framework's identity can run it: root on Linux, the system and Administrators on Windows.
+#: On macOS every account may, because the agent's desktop tool and Harness helpers run on
+#: it there.
 PYTHON = {
     "linux": "/opt/ale/python/bin/python3",
     "windows": r"C:\ProgramData\ALE\python\python.exe",
+    "macos": "/opt/ale/python/bin/python3",
 }
