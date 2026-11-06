@@ -29,7 +29,9 @@ Hermes keeps sessions in SQLite and chooses a new session's ID itself, which the
 invocation's `result` event reports; `--resume` continues that exact session. After every
 invocation `hermes sessions export` writes every session of the episode home to
 `.hermes-ale/exports/<session id>/<time>.jsonl`. The parser reads the newest export, and
-the invocation's stream-json supplies failures and any turn the export lacks. The export
+the invocation's stream-json supplies failures and any turn the export lacks. A tool's
+image is not in the export: Hermes keeps it in `.hermes-ale/cache/images`, and the result
+names it as `MEDIA:<path>`, which the parser records as the result's image. The export
 holds every stored row with its `active` and `compacted` flags, and the parser keeps the
 rows Hermes' transcript keeps. A row removed by a rewind, or superseded by a newer copy,
 has neither flag. An in-place compaction keeps the turns it summarized as `compacted`

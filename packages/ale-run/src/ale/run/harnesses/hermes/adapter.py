@@ -63,7 +63,7 @@ class HermesHarness(CliHarness):
     default_version = DEFAULT_CLI_VERSION
     settings_type = HermesSettings
     settings: HermesSettings
-    logs = (LOG_ROOT, trajectory.EXPORTS, trajectory.CONFIG)
+    logs = (LOG_ROOT, trajectory.EXPORTS, trajectory.CONFIG, trajectory.IMAGES)
 
     def __init__(
         self,

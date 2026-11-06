@@ -321,6 +321,35 @@ def test_one_deferred_call_is_the_call_it_made(tmp_path: Path) -> None:
     assert not trajectory.extra
 
 
+def test_an_image_a_result_names_is_the_results_image(tmp_path: Path) -> None:
+    cached = tmp_path / ".hermes-ale/cache/images/img_1.png"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"\x89PNG shot")
+    # As Hermes wraps it: the tool's output as JSON, the path ending at a quote.
+    named = json.dumps(
+        {"result": "Screenshot captured\nMEDIA:/home/agent/.hermes-ale/cache/images/img_1.png"}
+    )
+    trajectory = parse(
+        tmp_path,
+        ["Look."],
+        {
+            "id": SESSION_ID,
+            "messages": [
+                user("Look."),
+                agent("", call("c1", "mcp__desk__screenshot", {})),
+                # The reference repeats where Hermes says the image is attached.
+                tool("c1", f"{named}\n{named}"),
+            ],
+        },
+    )
+
+    (result,) = trajectory.steps[1].observation.results  # type: ignore[union-attr]
+    text, image = result.content  # type: ignore[misc]
+    assert text.text.startswith('{"result": "Screenshot captured')
+    assert image.source.media_type == "image/png"
+    assert (tmp_path / image.source.path).read_bytes() == b"\x89PNG shot"
+
+
 def test_nested_delegations_embed_in_their_spawners(tmp_path: Path) -> None:
     trajectory = parse(
         tmp_path,
