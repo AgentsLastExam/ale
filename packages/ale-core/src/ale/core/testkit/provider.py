@@ -27,6 +27,7 @@ from ale.core.sandbox import (
     DesktopResolution,
     Identity,
     ImageRef,
+    PreparedTaskImage,
     Provider,
     Sandbox,
     SandboxRequest,
@@ -136,10 +137,10 @@ class ProviderConformance:
     """Assertions every :class:`~ale.core.sandbox.Provider` must satisfy."""
 
     provider: Provider
-    image: ImageRef
-    """The image every assertion runs on; a backend's suite names a pinned release."""
+    image: ImageRef | PreparedTaskImage
+    """The image every assertion runs on: a pinned release, or one the backend's suite built."""
 
-    gui_image: ImageRef | None = None
+    gui_image: ImageRef | PreparedTaskImage | None = None
     """An image that starts a desktop, if this backend has one to test with.
 
     A desktop is a property of the *image*, not of the backend: a provider that can host
@@ -156,7 +157,7 @@ class ProviderConformance:
 
     async def request(self, **overrides: object) -> SandboxRequest:
         image = overrides.pop("image", self.image)
-        assert isinstance(image, ImageRef)
+        assert isinstance(image, ImageRef | PreparedTaskImage)
         base: dict[str, object] = {
             "episode_id": f"conformance-{uuid.uuid4().hex[:8]}",
             "prepared_image": await self.provider.prepare_image(image),
