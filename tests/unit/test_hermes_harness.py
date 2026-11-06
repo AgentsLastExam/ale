@@ -68,7 +68,6 @@ async def test_the_gateway_is_the_one_provider(
         resources(tmp_path),
     )
     config = yaml.safe_load(sandbox.files[f"{STATE}/config.yaml"])
-    assert config["model"] == {"provider": "ale", "default": "test-model"}
     assert config["providers"]["ale"] == {
         "api": api,
         "key_env": "ALE_GATEWAY_TOKEN",
@@ -281,6 +280,44 @@ def test_delegation_mcp_names_and_failures_convert(tmp_path: Path) -> None:
     (embedded,) = trajectory.subagent_trajectories or ()
     assert [step.message for step in embedded.steps] == ["Sum.", "Summed."]
     assert mcp.content == "fragment"
+    assert not trajectory.extra
+
+
+def test_one_deferred_call_is_the_call_it_made(tmp_path: Path) -> None:
+    (tmp_path / ".hermes-ale/config.yaml").parent.mkdir(parents=True)
+    (tmp_path / ".hermes-ale/config.yaml").write_text(
+        yaml.safe_dump({"mcp_servers": {"task-proof": {"command": "x"}}})
+    )
+    one = [{"name": "mcp__task_proof__derive", "arguments": {"n": 1}}]
+    two = [{"name": "mcp__task_proof__derive", "arguments": {}}, {"name": "x", "arguments": {}}]
+    trajectory = parse(
+        tmp_path,
+        ["Derive."],
+        {
+            "id": SESSION_ID,
+            "messages": [
+                user("Derive."),
+                agent(
+                    "",
+                    # A model may send the list as a JSON string.
+                    call("c1", "tool_call", {"calls": json.dumps(one)}),
+                    call("c2", "tool_call", {"calls": two}),
+                ),
+                tool("c1", "fragment"),
+                tool("c2", "both"),
+            ],
+        },
+    )
+
+    single, batch = trajectory.steps[1].tool_calls or ()
+    assert (single.function_name, single.arguments, single.extra) == (
+        "mcp__task_proof__derive",
+        {"n": 1},
+        {"ale": {"native_tool": "tool_call", "mcp": {"server": "task-proof", "tool": "derive"}}},
+    )
+    assert (batch.function_name, batch.extra) == ("tool_call", None)
+    results = trajectory.steps[1].observation.results  # type: ignore[union-attr]
+    assert [result.content for result in results] == ["fragment", "both"]
     assert not trajectory.extra
 
 

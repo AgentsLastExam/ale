@@ -47,4 +47,7 @@ or the single `goal`) and no other child of that parent starts with the same goa
 Every other delegated session under the episode's conversation is left unconverted with an
 `unlinked_subagent` issue; branched, reset and tool sessions are not subagents. MCP tools
 are `mcp__<server>__<tool>` with other characters replaced by `_`; the declared server
-name is restored from `config.yaml`. The settings are `max_turns` and `reasoning_effort`.
+name is restored from `config.yaml`. Hermes defers them: `tool_describe` loads one and
+`tool_call` calls it. A `tool_call` of one tool is recorded as the call it made, noting the
+wrapper; one of several stays the wrapper. The settings are `max_turns` and
+`reasoning_effort`.
