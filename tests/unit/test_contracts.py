@@ -386,6 +386,12 @@ def test_network_and_agent_resource_contracts_remain_strict() -> None:
         NetworkPolicy(mode=NetworkMode.BLOCK, allowed_hosts=("example.com",))
     assert SkillSource(path="/skills/reviewer").path == "/skills/reviewer"
     assert McpSource(builtin="cua-desktop").builtin == "cua-desktop"
+    assert McpSource(builtin="cua-desktop", screenshot_max_dimension=768).screenshot_max_dimension
+    for other in ({"builtin": "search"}, {"path": "/mcp/search.toml"}):
+        with pytest.raises(ValidationError, match="cua-desktop only"):
+            McpSource.model_validate({**other, "screenshot_max_dimension": 768})
+    with pytest.raises(ValidationError):
+        McpSource(builtin="cua-desktop", screenshot_max_dimension=0)
     with pytest.raises(ValidationError):
         ToolProvision.model_validate({"mcp_servers": [{"builtin": "cua-desktop"}]})
 

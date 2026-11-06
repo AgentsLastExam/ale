@@ -263,7 +263,9 @@ deduplicated resources, not host search paths.
 
 - Skills are installed only into the native episode-local discovery directory.
 - MCP descriptors are translated into one strict native config.
-- `cua-desktop` is an ordinary opt-in Run-level built-in MCP server.
+- `cua-desktop` is an ordinary opt-in Run-level built-in MCP server. Its
+  `screenshot_max_dimension` caps the longest side of the screenshots it returns; input
+  coordinates stay relative to the screen, so the cap changes only what the agent sees.
 - A harness with no MCP implementation rejects any MCP declaration.
 - Remote MCP authentication is not copied from the host.
 

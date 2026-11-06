@@ -227,7 +227,9 @@ def _resolve_mcp_source(
             raise AgentResourceError(f"unknown built-in MCP server: {source.builtin}")
         from ale.run.tools import resolved_cua_desktop
 
-        resolved = resolved_cua_desktop(operating_system)
+        resolved = resolved_cua_desktop(
+            operating_system, screenshot_max_dimension=source.screenshot_max_dimension
+        )
         return resolved.model_copy(
             update={
                 "source_layers": (origin,),

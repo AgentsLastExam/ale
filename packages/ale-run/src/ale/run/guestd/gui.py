@@ -441,8 +441,15 @@ def cursor_position() -> tuple[int, int]:
         raise GuiUnavailable("cua-driver did not report a cursor position") from exc
 
 
-def capture_screen() -> bytes:
-    for part in _result("get_desktop_state").get("content") or []:
+def capture_screen(max_dimension: int | None = None) -> bytes:
+    """A PNG of the whole screen, scaled down to ``max_dimension`` on its longest side.
+
+    The Driver maps later desktop coordinates read off a scaled capture back to the screen,
+    but only within the MCP connection that took it; each call here opens its own, so input
+    keeps the screen's own coordinates.
+    """
+    arguments = {"max_image_dimension": max_dimension} if max_dimension else None
+    for part in _result("get_desktop_state", arguments).get("content") or []:
         if isinstance(part, dict) and part.get("type") == "image":
             try:
                 return base64.b64decode(str(part.get("data")), validate=True)

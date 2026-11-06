@@ -233,13 +233,20 @@ class McpSource(BaseModel):
 
     path: str | None = Field(default=None, min_length=1)
     builtin: str | None = Field(default=None, min_length=1)
+    #: The longest side, in pixels, of a screenshot the built-in ``cua-desktop`` returns;
+    #: unset, it returns the screen as Cua Driver captures it.
+    screenshot_max_dimension: int | None = Field(default=None, ge=1)
     origin: Literal["preset", "run", "cli"] | None = Field(default=None, exclude=True)
     declared: str | None = Field(default=None, exclude=True)
+
+    # --- validation ---
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> Self:
         if (self.path is None) == (self.builtin is None):
             raise ValueError("an MCP source requires exactly one of path or builtin")
+        if self.screenshot_max_dimension is not None and self.builtin != "cua-desktop":
+            raise ValueError("screenshot_max_dimension applies to the built-in cua-desktop only")
         return self
 
 

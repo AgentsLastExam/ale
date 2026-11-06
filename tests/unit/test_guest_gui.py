@@ -33,9 +33,11 @@ def test_cua_driver_is_the_only_gui_backend(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(gui.subprocess, "run", run)
 
     assert gui.capture_screen() == b"png"
+    assert gui.capture_screen(640) == b"png"
     assert gui.dispatch_actions([{"type": "click", "coordinate": [500, 500]}]) == 1
     assert calls == [
         ("get_desktop_state", {}),
+        ("get_desktop_state", {"max_image_dimension": 640}),
         ("get_screen_size", {}),
         ("click", {"x": 100, "y": 50, "scope": "desktop", "button": "left", "count": 1}),
     ]

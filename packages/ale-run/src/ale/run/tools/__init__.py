@@ -10,6 +10,7 @@ from ale.core.harness import ResolvedMcpServer
 from ale.core.sandbox import Identity, Sandbox
 from ale.core.taskspec import OperatingSystem, StdioMcpServer
 from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
+from ale.run.tools.cua_desktop_mcp import SCREENSHOT_MAX_DIMENSION
 
 __all__ = ["CUA_DESKTOP_NAME", "resolved_cua_desktop", "stage_cua_desktop"]
 
@@ -22,6 +23,8 @@ _SOURCES = (
 
 def resolved_cua_desktop(
     operating_system: OperatingSystem = OperatingSystem.LINUX,
+    *,
+    screenshot_max_dimension: int | None = None,
 ) -> ResolvedMcpServer:
     """Return the built-in through the same canonical contract as external servers."""
     command = {
@@ -29,14 +32,17 @@ def resolved_cua_desktop(
         # macOS has no Python 3.12 of its own; the framework's is readable by every account.
         OperatingSystem.MACOS: MACOS_PYTHON,
     }.get(operating_system, "python3")
-    # On macOS the Provider starts the Driver, so the server is told where it is rather
-    # than starting its own; the values are not secret, and a CLI that filters its MCP
-    # children's environment still passes what their configuration names.
+    # The server's settings travel in its environment: the values are not secret, and a CLI
+    # that filters its MCP children's environment still passes what their configuration
+    # names. On macOS the Provider starts the Driver, so the server is told where it is
+    # rather than starting its own.
     environment = (
         {"ALE_CUA_DRIVER": MACOS_DRIVER, "ALE_CUA_DRIVER_SOCKET": MACOS_DRIVER_SOCKET}
         if operating_system is OperatingSystem.MACOS
         else {}
     )
+    if screenshot_max_dimension is not None:
+        environment[SCREENSHOT_MAX_DIMENSION] = str(screenshot_max_dimension)
     hasher = hashlib.sha256()
     hasher.update(command.encode() + b"\0")
     hasher.update(json.dumps(environment, sort_keys=True).encode() + b"\0")

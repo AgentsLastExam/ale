@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import importlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,8 @@ gui = _load_gui()
 PROTOCOL_VERSION = "2024-11-05"
 SERVER = {"name": "cua-desktop", "version": "0.3.0"}
 JSON_SCHEMA = "http://json-schema.org/draft-07/schema#"
+#: The variable that caps the longest side of a screenshot, in pixels, when the Run sets one.
+SCREENSHOT_MAX_DIMENSION = "ALE_CUA_SCREENSHOT_MAX_DIMENSION"
 
 
 def _coordinate(description: str) -> dict[str, Any]:
@@ -501,7 +504,8 @@ def _call(name: str, arguments: Any) -> dict[str, Any]:
             parent = save_path[:last_sep]
             if not Path(parent).is_dir():
                 return _error(f'Error: parent directory "{parent}" does not exist on the VM.')
-        png = gui.capture_screen()
+        cap = os.environ.get(SCREENSHOT_MAX_DIMENSION)
+        png = gui.capture_screen(int(cap) if cap else None)
         encoded = base64.b64encode(png).decode("ascii")
         if save_path is not None:
             Path(save_path).write_bytes(png)
