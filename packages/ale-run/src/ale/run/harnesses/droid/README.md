@@ -8,11 +8,15 @@ writes `settings.json` with one BYOK custom model, the episode Gateway, and `mcp
 Skills go to `.droid-ale/.factory/skills`.
 
 The Gateway dialect selects the BYOK provider: `anthropic`, `openai` (Responses) or
-`generic-chat-completion-api`. The API key is the `${ALE_GATEWAY_TOKEN}` reference, which
-Droid resolves from the environment per request. No Factory account is involved:
-`droid exec` skips Factory sign-in for BYOK models. Droid still tries to reach Factory's
-API and telemetry hosts, which a sealed Sandbox refuses; a Task that opens egress lets
-those requests, session sync included, leave the Sandbox.
+`generic-chat-completion-api`. The `no_image_support` setting is the model's
+`noImageSupport`. Unset, Droid gives an `anthropic` or `openai` model images whatever its
+name, and for a generic Chat Completions model replaces every image, an MCP screenshot
+included, with a note that the model does not take images. The settings are
+`max_output_tokens`, `disabled_tools` and `no_image_support`. The API key is the
+`${ALE_GATEWAY_TOKEN}` reference, which Droid resolves from the environment per request.
+No Factory account is involved: `droid exec` skips Factory sign-in for BYOK models. Droid
+still tries to reach Factory's API and telemetry hosts, which a sealed Sandbox refuses; a
+Task that opens egress lets those requests, session sync included, leave the Sandbox.
 
 `--session-id` resumes the session with that ID or starts a new one under it, so ALE
 chooses the ID of every new session. The session is

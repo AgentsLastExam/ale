@@ -16,8 +16,12 @@ guest runs it. On macOS `install.sh` takes its Darwin path; the image must provi
 `config.yaml` makes the episode Gateway the one custom provider, with Hermes' transport for
 the Gateway dialect and the key as the `ALE_GATEWAY_TOKEN` variable, and turns off update
 checks, the model catalog, shared telemetry, logins adopted from other agents and
-installs during the run. Hermes still probes several model-information paths at start;
-the Gateway answers them 404 and Hermes continues.
+installs during the run. The `supports_vision` setting is `model.supports_vision`.
+Unset, Hermes looks the model up on models.dev, which it does for a custom provider only
+through a catalog provider ALE does not name, so it takes the model to be text-only: a
+tool's image, such as an MCP screenshot, then reaches the model only as a `MEDIA:` file
+path. Hermes still probes several model-information paths at start; the Gateway answers
+them 404 and Hermes continues.
 
 Each turn runs in a background `hermes gateway run` that the first chat starts and that
 outlives it with that chat's environment, Gateway token included, so every invocation first
@@ -51,5 +55,5 @@ Every other delegated session under the episode's conversation is left unconvert
 are `mcp__<server>__<tool>` with other characters replaced by `_`; the declared server
 name is restored from `config.yaml`. Hermes defers them: `tool_describe` loads one and
 `tool_call` calls it. A `tool_call` of one tool is recorded as the call it made, noting the
-wrapper; one of several stays the wrapper. The settings are `max_turns` and
-`reasoning_effort`.
+wrapper; one of several stays the wrapper. The settings are `max_turns`,
+`reasoning_effort` and `supports_vision`.

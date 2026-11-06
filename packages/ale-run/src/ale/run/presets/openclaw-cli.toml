@@ -13,6 +13,7 @@ tool_profile = "coding"
 tools_allow = []
 tools_deny = []
 model_params = {}
+input = ["text", "image"]
 
 [gateway]
 provider = "openai"

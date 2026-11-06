@@ -407,6 +407,8 @@ def test_harnesses_reject_unsupported_gateway_dialects(preset: str, dialect: str
         lambda: GrokBuildHarness(settings={"max_truns": 2}),
         lambda: CodexCliHarness(settings={"reasoning": "high"}),
         lambda: OpenClawCliHarness(settings={"provider_name": "openai"}),
+        lambda: OpenClawCliHarness(settings={"input": ["text", "video"]}),
+        lambda: OpenClawCliHarness(settings={"input": ["text", "text"]}),
     ],
 )
 def test_unknown_harness_settings_fail(factory) -> None:
@@ -588,6 +590,23 @@ async def test_openclaw_declares_explicit_reasoning_support(tmp_path: Path) -> N
 
     rendered = json.loads(sandbox.files["/home/agent/.openclaw-ale/openclaw.json"])
     assert rendered["models"]["providers"]["openai"]["models"][0]["reasoning"] is True
+
+
+async def test_openclaw_leaves_the_models_input_to_openclaw_unless_set() -> None:
+    unset, declared = FakeSandbox(), FakeSandbox()
+    await OpenClawCliHarness().install_resources(unset, session(), EffectiveAgentResources())  # type: ignore[arg-type]
+    await OpenClawCliHarness(settings={"input": ["text", "image"]}).install_resources(
+        declared,  # type: ignore[arg-type]
+        session(),
+        EffectiveAgentResources(),
+    )
+
+    def model(sandbox: FakeSandbox) -> dict[str, object]:
+        rendered = json.loads(sandbox.files["/home/agent/.openclaw-ale/openclaw.json"])
+        return rendered["models"]["providers"]["openai"]["models"][0]
+
+    assert "input" not in model(unset)
+    assert model(declared)["input"] == ["text", "image"]
 
 
 async def test_openclaw_runs_without_its_respawning_launcher() -> None:

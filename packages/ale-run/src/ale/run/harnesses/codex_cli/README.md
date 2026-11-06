@@ -3,6 +3,11 @@
 Runs `codex exec --json`, or `codex exec resume <thread id>`, with `-` reading the prompt
 from stdin. The rollout lives in `.codex-ale/sessions/**/rollout-<time>-<thread id>.jsonl`.
 
+Codex looks the model up by name in its bundled catalog and takes a model it does not list
+to accept text and images. Only `model_catalog_json`, a whole catalog that replaces the
+bundled one with full model descriptions, instructions included, changes that, so ALE
+offers no setting for it.
+
 The parser follows the rollout. Its user messages include context Codex injects, so a
 turn begins only at the exact prompt ALE recorded for it. The model's MCP calls take
 their real server name and failure from the matching stdout event, matched on server,

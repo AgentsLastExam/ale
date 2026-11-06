@@ -24,6 +24,7 @@ selects it by catalog family and effort, so the adapter maps it: `gemini-4-argon
 `gemini-3.8-flash`, `gemini-3.7-flash` and `gemini-3.6-flash` take `low`, `medium` or
 `high`; `gemini-3.1-pro-preview` is the family `gemini-3.1-pro` and takes `low` or
 `high`. Any other model, or an effort the family does not offer, fails before launch.
+What a model takes, images included, comes from that catalog.
 `effort` is the only public setting; `default` omits `--effort`, so agy uses the
 family's own default. agy also asks `gemini-3.1-flash-lite-preview` for a conversation
 title, which the Gateway answers with the run's model. Its `search_web` tool is a separate

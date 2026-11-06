@@ -8,6 +8,7 @@ mcp_servers = []
 [agent.settings]
 max_turns = "default"
 reasoning_effort = "default"
+supports_vision = true
 
 [gateway]
 provider = "openai"

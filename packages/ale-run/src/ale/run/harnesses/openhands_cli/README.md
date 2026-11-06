@@ -10,7 +10,11 @@ its default agent around the episode Gateway; nothing else about the agent is
 configurable without replacing that definition, so the Harness has no settings. The SDK
 chooses the wire API from the model name: the GPT-5 family goes over OpenAI Responses, any
 other OpenAI-routed model over Chat Completions, so the Harness rejects a Gateway dialect
-the SDK would not use for the run's model. `OPENHANDS_PERSISTENCE_DIR` is `.openhands-ale`,
+the SDK would not use for the run's model. Whether the model takes images comes from
+LiteLLM's bundled model map, 1.83.14's, which lists neither `claude-sonnet-5` nor
+`claude-opus-4-8`: for a model it does not list, the SDK drops every image without a note.
+Only the agent definition, which ALE does not replace, can declare vision, and only to
+turn it off. `OPENHANDS_PERSISTENCE_DIR` is `.openhands-ale`,
 holding `mcp.json` and the conversations; Skills go to `~/.openhands/skills`, where the CLI
 looks. The SDK clones OpenHands' public skills from a moving branch at every start, so an
 empty local repository stands in its cache and none load.

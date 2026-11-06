@@ -9,6 +9,7 @@ mcp_servers = []
 reasoning_effort = "default"
 max_output_tokens = "default"
 max_requests_per_turn = "default"
+input_modalities = ["text", "image"]
 
 [gateway]
 provider = "anthropic"

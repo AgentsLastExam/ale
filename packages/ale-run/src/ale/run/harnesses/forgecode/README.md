@@ -30,5 +30,7 @@ conversation ID in the task's result. MCP tools are `mcp_<server>_tool_<tool>`, 
 sanitized; the parser restores the server's declared name from `.forge-ale/.mcp.json`,
 while the tool keeps forge's sanitized name. Forge cannot set a stdio MCP server's working
 directory, so ALE rejects a server that declares one. On Windows, forge's shell tool runs
-`cmd.exe`. The settings are `reasoning_effort`, `max_output_tokens` and
-`max_requests_per_turn`.
+`cmd.exe`. The settings are `reasoning_effort`, `max_output_tokens`,
+`max_requests_per_turn` and `input_modalities`, the listed model's. Unset, forge takes the
+model to be text-only, which only keeps its `read` tool from reading images and PDFs: MCP
+images and attached files reach the model either way.

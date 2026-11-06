@@ -89,6 +89,9 @@ def test_only_the_pinned_build_and_known_dialects_are_accepted() -> None:
         {"disallowed_tools": [""]},
         {"workflow_mode": "on"},
         {"toolsearch_mode": "remote"},
+        {"input_format": {}},
+        {"input_format": {"supports_text": False}},
+        {"input_format": {"supports_image": "yes"}},
     ],
 )
 def test_settings_are_strict(settings: dict[str, object]) -> None:
@@ -120,6 +123,11 @@ async def test_configuration_routes_the_model_through_the_gateway(
     assert rule["config"]["access"] == {"type": "api-key", "apiKey": "token"}
     assert rule["config"]["personalModelIds"] == ["test-model"]
     assert provider["defaultModelSelection"] == {"providerId": "ale", "modelId": "test-model"}
+    # What the model takes is left to ZCode's catalog.
+    assert provider["modelConfigRules"] == {
+        "providerModelRules": [],
+        "manualProviderModelRules": [],
+    }
     assert ["chmod", "600", PROVIDER] in sandbox.commands
     assert json.loads(sandbox.files[CONFIG]) == {
         "features": {"mcp": True},
@@ -138,6 +146,27 @@ async def test_configuration_routes_the_model_through_the_gateway(
     assert sandbox.uploads == [
         (str(effective.skills[0].path), "/home/agent/.zcode/skills/resource-proof")
     ]
+
+
+async def test_input_format_is_laid_over_the_catalogs_for_the_model() -> None:
+    sandbox = FakeSandbox()
+    harness = ZCodeHarness(
+        settings={"input_format": {"supports_image": True, "supports_pdf": False}}
+    )
+    await harness.install_resources(sandbox, session(), EffectiveAgentResources())  # type: ignore[arg-type]
+    rules = json.loads(sandbox.files[PROVIDER])["config"]["modelConfigRules"]
+    assert rules == {
+        "providerModelRules": [
+            {
+                "providerId": "ale",
+                "modelId": "test-model",
+                "config": {
+                    "properties": {"inputFormat": {"supportsImage": True, "supportsPdf": False}}
+                },
+            }
+        ],
+        "manualProviderModelRules": [],
+    }
 
 
 async def test_without_mcp_servers_the_run_configuration_keeps_native_defaults() -> None:

@@ -1,7 +1,10 @@
 # Kimi Code
 
 Pinned to the npm package `@moonshot-ai/kimi-code@2.3.2`. Its public settings are
-`max_context_size`, `capabilities`, `thinking_effort` and `max_steps_per_turn`.
+`max_context_size`, `capabilities`, `thinking_effort` and `max_steps_per_turn`. Kimi
+also detects `image_in` from a few model names, and `capabilities` can only add to that.
+It gates Kimi's `ReadMediaFile` tool and attached images, not an MCP tool's image, which
+Kimi sends whatever the model.
 
 Runs Kimi Code's print mode, `kimi --prompt --output-format stream-json`, with
 `KIMI_CODE_HOME=.kimi-ale` and `--skills-dir .kimi-ale/skills`, so neither the

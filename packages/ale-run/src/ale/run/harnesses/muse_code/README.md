@@ -16,6 +16,9 @@ stay in the episode on every system. `settings.json` turns telemetry off and hol
 MCP servers; Skills go to `.config/muse/skills`. Muse ignores unknown settings keys, so
 the generated file is checked by the Docker integration run, not by a validator.
 
+Muse decides from the provider, not the model, whether to send images, and always sends
+them to Meta's; it has no setting for it.
+
 Muse speaks only Meta's own Responses API (namespace tools, dotted tool names), so the
 Gateway dialect is `openai-responses` and the Gateway provider is `meta`. The episode token is
 `META_API_KEY`. Muse sends that bearer only to Meta's endpoint unless `settings.json`

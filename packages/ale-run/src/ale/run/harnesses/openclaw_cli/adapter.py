@@ -72,9 +72,10 @@ class OpenClawCliHarness(CliHarness):
         provider_model: dict[str, Any] = {
             "id": session.model,
             "name": session.model,
-            "input": ["text", "image"],
             "agentRuntime": {"id": "openclaw"},
         }
+        if self.settings.input != "default":
+            provider_model["input"] = list(self.settings.input)
         if self.settings.thinking != "default":
             provider_model["reasoning"] = self.settings.thinking != "off"
         tools: dict[str, Any] = {

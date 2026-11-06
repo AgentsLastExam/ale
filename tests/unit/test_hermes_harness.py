@@ -9,7 +9,7 @@ from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
 from ale.core.config import load_run_config
 from ale.core.errors import AgentError, ConfigError, HarnessLimitError
-from ale.core.harness import TrajectoryParseContext
+from ale.core.harness import EffectiveAgentResources, TrajectoryParseContext
 from ale.core.taskspec import OperatingSystem
 from ale.core.trajectory import AtifTrajectory
 from ale.run.cli.tasks import PRESET_DIR, _harness
@@ -36,7 +36,13 @@ def test_preset_pins_the_official_commit() -> None:
 
 @pytest.mark.parametrize(
     "settings",
-    [{"max_turn": 3}, {"max_turns": 0}, {"max_turns": "unlimited"}, {"reasoning_effort": "ultra"}],
+    [
+        {"max_turn": 3},
+        {"max_turns": 0},
+        {"max_turns": "unlimited"},
+        {"reasoning_effort": "ultra"},
+        {"supports_vision": "yes"},
+    ],
 )
 def test_settings_are_strict(settings: dict[str, object]) -> None:
     with pytest.raises(ConfigError):
@@ -68,6 +74,7 @@ async def test_the_gateway_is_the_one_provider(
         resources(tmp_path),
     )
     config = yaml.safe_load(sandbox.files[f"{STATE}/config.yaml"])
+    assert config["model"] == {"provider": "ale", "default": "test-model"}
     assert config["providers"]["ale"] == {
         "api": api,
         "key_env": "ALE_GATEWAY_TOKEN",
@@ -86,6 +93,20 @@ async def test_the_gateway_is_the_one_provider(
     }
     assert sandbox.uploads == [(str(tmp_path / "resource-proof"), f"{STATE}/skills/resource-proof")]
     assert b"token\n" not in sandbox.files[f"{STATE}/config.yaml"]
+
+
+@pytest.mark.parametrize("supports_vision", [True, False])
+async def test_supports_vision_declares_whether_the_model_takes_images(
+    supports_vision: bool,
+) -> None:
+    sandbox = FakeSandbox()
+    await HermesHarness(settings={"supports_vision": supports_vision}).install_resources(
+        sandbox,  # type: ignore[arg-type]
+        session(),
+        EffectiveAgentResources(),
+    )
+    config = yaml.safe_load(sandbox.files[f"{STATE}/config.yaml"])
+    assert config["model"]["supports_vision"] is supports_vision
 
 
 @pytest.mark.parametrize("native_session_id", [None, SESSION_ID])
