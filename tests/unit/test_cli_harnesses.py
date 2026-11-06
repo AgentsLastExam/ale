@@ -880,7 +880,14 @@ def test_codex_parser_uses_complete_native_function_call_evidence(tmp_path: Path
                         "payload": {
                             "type": "function_call_output",
                             "call_id": "call-mcp",
-                            "output": "native fallback",
+                            "output": [
+                                {"type": "input_text", "text": "Wall time: 0.1 seconds\nOutput:"},
+                                {"type": "input_text", "text": "xyz"},
+                                {
+                                    "type": "input_image",
+                                    "image_url": "data:image/png;base64,iVBORw0KGgo=",
+                                },
+                            ],
                         },
                     }
                 ),
@@ -982,7 +989,10 @@ def test_codex_parser_uses_complete_native_function_call_evidence(tmp_path: Path
         "tool": "derive_fragment",
     }
     assert trajectory.steps[1].observation.results[0].content == "Plan updated"
-    assert trajectory.steps[2].observation.results[0].content[0].text == "xyz"
+    # The rollout's result, with the image stdout serializes into text.
+    mcp_result = trajectory.steps[2].observation.results[0].content
+    assert [part.type for part in mcp_result] == ["text", "text", "image"]
+    assert mcp_result[1].text == "xyz"
     assert '"status": "completed"' in trajectory.steps[3].observation.results[0].content
     assert '"tools": []' in trajectory.steps[4].observation.results[0].content
     assert trajectory.steps[5].observation.results[0].content == "Success"
