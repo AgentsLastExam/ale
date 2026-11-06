@@ -51,6 +51,7 @@ Each Provider starts a desktop at the request's `desktop_resolution` and then ch
 | Docker | `--env VNC_RESOLUTION=WIDTHxHEIGHT`, which replaces the image's own value; the container base's Xvnc starts at that size (`-geometry`). The name is the one VNC desktop images share, but the image's X server need not be VNC: Xvfb starts at it with `-screen 0 ${VNC_RESOLUTION}x24`. A desktop of another size is refused with that advice, since only the image can change it |
 | Daytona | The same variable, in the environment the Provider starts the image's command with and runs guestd in |
 | QEMU | Every guest gets QEMU's standard VGA (`VGA=std`), whose EDID names the size as the display's preferred mode (`-global VGA.xres=… -global VGA.yres=…`). OVMF sets that mode at boot, Linux's `bochs` driver and GNOME start at it, and Windows' Microsoft Basic Display Adapter keeps the mode the firmware set; it ignores the size virtio-vga, the runner's own default, announces. The display has 64 MB of video memory, since Linux's driver keeps two frames of the screen. OVMF sets no mode above 3200x1800 and falls back to 1280x800, which is why `DesktopResolution` stops there |
+| Orchard | Tart keeps a VM's display size in the VM's configuration, which a clone copies and Orchard cannot set, so each resolution boots its own clone of the framed image, `ale-framed-<key>-<WIDTHxHEIGHT>`, made on first use with `tart set --display WIDTHxHEIGHTpt` and deleted when the image is framed again. The size is in points, Tart's default for macOS: a 1024x768 desktop is 2048x1536 pixels, and Cua Driver returns its captures scaled down (1366x1025 for 1024x768). macOS keeps a display narrower than 1024 points at 1024x768, which is why `DesktopResolution` starts there |
 
 ## Agent elevation on Linux and macOS
 
@@ -184,11 +185,14 @@ posts a never-booted disk's background-item notice a few seconds after it regist
 items and reports neither the notice nor having none. Notification Center shows a notice
 nobody dismissed again at every login, so the account's delivered notifications are then
 cleared from its `usernoted` database, as the account, and `usernoted` is killed before it
-can write them back at shutdown. The guest then shuts itself down, as a `build.sh` VM's
+can write them back at shutdown. `/Library/Preferences/com.apple.windowserver.displays.plist`
+is deleted too: macOS restores the display mode saved there on any display of the same
+identity, whatever size Tart gives it, so every Sandbox would keep the first login's
+[resolution](#desktop-resolution). The guest then shuts itself down, as a `build.sh` VM's
 does before its disk is kept: Orchard stops a VM with `tart stop --timeout 5`, which powers
 macOS off when its signed-in desktop does not shut down at once and loses what is still in
-memory. The stopped VM becomes the local Tart image `ale-framed-<identity>`; every Sandbox
-clones it, which on APFS copies no data.
+memory. The stopped VM becomes the local Tart image `ale-framed-<key>`; every Sandbox boots
+a clone of it, which on APFS copies no data.
 
 In each Sandbox the agent works in, the Provider starts the Driver in the account's login
 session (`launchctl asuser`, then `open` so LaunchServices runs it under the identity the

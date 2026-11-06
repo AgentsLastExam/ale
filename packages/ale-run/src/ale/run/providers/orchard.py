@@ -22,6 +22,7 @@ from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, Prov
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     Capabilities,
+    DesktopResolution,
     ExecOutputSink,
     ExecResult,
     Identity,
@@ -40,6 +41,7 @@ from ale.core.sandbox import (
 from ale.core.taskspec import NetworkMode, OperatingSystem
 from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
 from ale.run.images import resolve_registry_reference
+from ale.run.providers.desktop import require_resolution
 from ale.run.providers.orchard_client import (
     CONTROL_ACCOUNT,
     LocalOrchard,
@@ -52,7 +54,7 @@ from ale.run.providers.orchard_client import (
     vm_spec,
 )
 from ale.run.providers.orchard_desktop import await_desktop
-from ale.run.providers.orchard_framing import frame_image
+from ale.run.providers.orchard_framing import at_resolution, frame_image
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.transport import GuestClient
 
@@ -514,6 +516,7 @@ class OrchardProvider(Provider):
         image = await self.prepare_image(request.prepared_image)
         local = self._local()
         framed = await frame_image(local, image, user=request.user)
+        boot = await at_resolution(local, framed, request.desktop_resolution)
         client = local.client()
         owned: OwnedVM | None = None
         guest: GuestClient | None = None
@@ -523,7 +526,7 @@ class OrchardProvider(Provider):
             await client.start()
             spec = vm_spec(
                 "ale-" + uuid.uuid4().hex,
-                framed.name,
+                boot,
                 cpus=request.resources.cpus,
                 memory_mb=request.resources.memory_mb,
                 storage_mb=request.resources.storage_mb,
@@ -599,6 +602,7 @@ class OrchardProvider(Provider):
                 storage = total // (1024 * 1024)
                 if request.resources.storage_mb and storage < request.resources.storage_mb:
                     raise ProviderCapabilityError("VM root disk is smaller than requested storage")
+                desktop: DesktopResolution | None = None
                 if agent:
                     await await_desktop(
                         guest,
@@ -606,6 +610,7 @@ class OrchardProvider(Provider):
                         agent_uid=framed.agent_uid,
                         timeout_sec=deadline - loop.time(),
                     )
+                    desktop = await require_resolution(guest, request.desktop_resolution)
             return OrchardSandbox(
                 request=request,
                 local=local,
@@ -628,6 +633,7 @@ class OrchardProvider(Provider):
                     sudo=request.sudo,
                     network_mode=request.network.mode,
                     provider=self.name,
+                    desktop_resolution=desktop,
                 ),
             )
         except BaseException as provision_error:

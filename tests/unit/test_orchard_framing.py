@@ -9,7 +9,7 @@ import subprocess
 import pytest
 
 from ale.core.errors import ProviderStartError
-from ale.core.sandbox import ImageKind, PreparedTaskImage
+from ale.core.sandbox import DesktopResolution, ImageKind, PreparedTaskImage
 from ale.run.framework import MACOS_FRAMER
 from ale.run.providers import orchard_client, orchard_framing
 from ale.run.providers.orchard_client import LocalOrchard, OrchardExecResult, OwnedVM
@@ -90,7 +90,7 @@ class Controller:
             return OrchardExecResult(0, console.encode() + b"\n", b"")
         if argv[:2] == ["/bin/sh", "-c"]:
             return OrchardExecResult(0, LABEL.encode() + b"\n", b"")
-        if orchard_framing._DISMISS_NOTICES in argv:
+        if orchard_framing._DISMISS_NOTICES in argv or argv[2:] == orchard_framing._FORGET_DISPLAYS:
             return OrchardExecResult(0, b"", b"")
         assert argv == ["sudo", "-n", "/usr/bin/sfltool", "dumpbtm"]
         dump = self.dumps.pop(0) if len(self.dumps) > 1 else self.dumps[0]
@@ -159,8 +159,10 @@ async def test_an_image_is_framed_offline_booted_once_and_then_reused():
     (vm,) = controller.created
     assert vm["image"] == clone[2]
     assert local.saved == [(vm["name"], framed.name)]
+    # The display mode the first login saved is forgotten, so each VM starts at its own.
+    assert controller.execs[-1] == ["sudo", "-n", *orchard_framing._FORGET_DISPLAYS]
     # What the first login delivered to Notification Center is dismissed, as the account.
-    assert controller.execs[-1] == [
+    assert controller.execs[-2] == [
         "sudo",
         "-n",
         "-u",
@@ -177,6 +179,53 @@ async def test_an_image_is_framed_offline_booted_once_and_then_reused():
 
     again = await orchard_framing.frame_image(local, IMAGE, user="admin")
     assert again == framed and len(controller.created) == 1 and len(local.tarts) == 2
+
+
+async def test_each_resolution_boots_its_own_clone_of_the_framed_image():
+    local = Local(Controller())
+    framed = await orchard_framing.frame_image(local, IMAGE, user="admin")
+    local.tarts.clear()
+
+    name = await orchard_framing.at_resolution(local, framed, DesktopResolution())
+    assert name == f"{framed.name}-1024x768"
+    clone, display, rename = local.tarts
+    assert clone[:2] == ("clone", framed.name) and clone[2].startswith("ale-frame-")
+    assert display == ("set", clone[2], "--display", "1024x768pt")
+    assert rename == ("rename", clone[2], name)
+
+    local.images.add(name)
+    assert await orchard_framing.at_resolution(local, framed, DesktopResolution()) == name
+    assert len(local.tarts) == 3
+    other = await orchard_framing.at_resolution(local, framed, DesktopResolution(width=1366))
+    assert other == f"{framed.name}-1366x768"
+
+
+async def test_framing_again_deletes_the_clones_of_the_earlier_framing():
+    local = Local(Controller())
+    framed = await orchard_framing.frame_image(local, IMAGE, user="admin")
+    local.images = {f"{framed.name}-1024x768", f"{framed.name}-1366x768", "ale-framed-other-1"}
+    local.tarts.clear()
+    again = await orchard_framing.frame_image(local, IMAGE, user="admin")
+    assert again.name == framed.name
+    assert local.tarts[:2] == [
+        ("delete", f"{framed.name}-1024x768"),
+        ("delete", f"{framed.name}-1366x768"),
+    ]
+
+
+async def test_a_clone_whose_display_cannot_be_set_is_deleted():
+    class Refusing(Local):
+        async def tart(self, *args, timeout_sec=600):
+            self.tarts.append(args)
+            if args[0] == "set":
+                raise ProviderStartError("tart set failed")
+            return ""
+
+    local = Refusing(Controller())
+    framed = orchard_framing.FramedImage("ale-framed-x", "sha256:" + "0" * 64, "/Users/a", 501)
+    with pytest.raises(ProviderStartError, match="tart set failed"):
+        await orchard_framing.at_resolution(local, framed, DesktopResolution())
+    assert local.tarts[-1] == ("delete", local.tarts[0][2])
 
 
 async def test_each_account_has_its_framed_image():
