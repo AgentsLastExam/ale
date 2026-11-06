@@ -21,12 +21,15 @@ holds the episode token, readable by the agent account alone and never mirrored.
 Gateway dialect selects ZCode's `anthropic-messages`, `openai-chat-completions` or
 `openai-responses` API. The preset speaks `anthropic` to the `zai` provider, Z.ai's own
 Anthropic endpoint, so it uses the Z.ai key and never the Anthropic one. MCP servers go to
-`.zcode/cli/config.json` with `features.mcp` on; Skills to `.zcode/skills`. ZCode looks up
-whether a model takes images in its own catalog of model names and sends no image to a
-model the catalog does not list as taking them, `claude-sonnet-4-5` among them.
-`input_format`, such as `{ supports_image = true }`, is laid over the catalog's
-`inputFormat` for the run's model by a rule in the personal provider file. ZCode sends
-telemetry only when OTLP variables are set, and the command unsets them.
+`.zcode/cli/config.json` with `features.mcp` on; Skills to `.zcode/skills`. ZCode inlines
+an MCP tool's image only up to 200 KiB of base64: it saves a larger one, such as a
+full-size `cua-desktop` screenshot, under `.zcode/cli/artifacts` and gives the model the
+path, which its `Read` tool then shows the model as an image. ZCode looks up whether a
+model takes images in its own catalog of model names and sends no image to a model the
+catalog does not list as taking them, `claude-sonnet-4-5` among them. `input_format`,
+such as `{ supports_image = true }`, is laid over the catalog's `inputFormat` for the run's
+model by a rule in the personal provider file. ZCode sends telemetry only when OTLP
+variables are set, and the command unsets them.
 
 ZCode chooses the session ID and reports it in its final `result`; a resume passes it to
 `--resume`. The conversation is in ZCode's SQLite store, `.zcode/cli/db/db.sqlite`, whose

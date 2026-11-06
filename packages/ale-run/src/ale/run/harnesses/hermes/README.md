@@ -20,8 +20,10 @@ installs during the run. The `supports_vision` setting is `model.supports_vision
 Unset, Hermes looks the model up on models.dev, which it does for a custom provider only
 through a catalog provider ALE does not name, so it takes the model to be text-only: a
 tool's image, such as an MCP screenshot, then reaches the model only as a `MEDIA:` file
-path. Hermes still probes several model-information paths at start; the Gateway answers
-them 404 and Hermes continues.
+path. Over Chat Completions Hermes sends a tool's image in the tool message, which
+OpenAI's API refuses, taking images in user messages only; Hermes then retries with a text
+summary. Hermes still probes several model-information paths at start; the Gateway
+answers them 404 and Hermes continues.
 
 Each turn runs in a background `hermes gateway run` that the first chat starts and that
 outlives it with that chat's environment, Gateway token included, so every invocation first

@@ -17,5 +17,10 @@ Harness.
 - Provider-specific config and log formats stay in the provider Harness. Share only
   mechanics that are already identical across several adapters.
 
+Every CLI Harness names, in `CLIS` in `tests/integration/cli_desktop.py`, the calls a model
+makes to take a `cua-desktop` screenshot through it; `just test` fails without them.
+`just test-harnesses` then checks, in every Gateway dialect the CLI accepts, that the
+screenshot reaches the model and that the trajectory records it.
+
 Run the Harness unit tests, conformance tests and the matching real Sandbox integration.
 Any CLI-version or model-discovery behavior also requires its marked live acceptance.

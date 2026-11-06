@@ -15,7 +15,9 @@ to the user-level `.kimi-ale/mcp.json`. The workspace is not marked trusted, so 
 project-level `.kimi-code/mcp.json` stays disabled.
 
 Each Gateway dialect selects Kimi's own provider for it: `kimi` for Chat Completions, the
-default, `anthropic` for Messages and `openai_responses` for Responses. The preset's
+default, `anthropic` for Messages and `openai_responses` for Responses. The `kimi` provider
+sends a tool's image, such as a `cua-desktop` screenshot, in the tool message, which
+OpenAI's Chat Completions API refuses: it takes images in user messages only. The preset's
 Gateway provider is `moonshot`, Moonshot's own API. Kimi requires every model to declare `max_context_size`; non-default
 `thinking_effort` values require the `thinking` or `always_thinking` capability.
 
