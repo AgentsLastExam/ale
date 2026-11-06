@@ -672,6 +672,33 @@ def test_grok_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
     assert trajectory.steps[1].observation.results[0].content == '{"fragment":"xyz"}'
 
 
+def test_grok_parser_names_only_sessions_it_did_not_convert(tmp_path: Path) -> None:
+    """Grok's search index, prompt history and command logs are not sessions."""
+    sessions = ".grok-ale/sessions/%2Fhome%2Fuser"
+    prompt = {
+        "type": "user",
+        "content": [{"type": "text", "text": "<user_query>\nUse the task MCP.\n</user_query>"}],
+        "prompt_index": 0,
+    }
+    for name in ("session", "other"):
+        native_path(tmp_path, f"{sessions}/{name}/chat_history.jsonl").write_text(
+            json.dumps(prompt) + "\n" + json.dumps({"type": "assistant", "content": name}) + "\n"
+        )
+    for name in ("session/terminal/call-1.log", "session/events.jsonl", "prompt_history.jsonl"):
+        native_path(tmp_path, f"{sessions}/{name}").write_text("{}\n")
+    native_path(tmp_path, ".grok-ale/sessions/session_search.sqlite").write_bytes(b"SQLite")
+
+    trajectory = GrokBuildHarness().parse_trajectory(context(tmp_path, "grok"))
+
+    assert trajectory.extra["ale"]["parse_issues"] == [
+        {
+            "reason": "unconverted_native_sessions",
+            "count": 1,
+            "sources": [f"{sessions}/other/chat_history.jsonl"],
+        }
+    ]
+
+
 def test_codex_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
     native_path(tmp_path, STDOUT_PATH).write_text(
         "\n".join(
@@ -1007,7 +1034,7 @@ def test_codex_function_output_images_become_atif_images(tmp_path: Path) -> None
     assert "remote.png" in content[2].text
 
 
-def test_codex_children_stay_raw_evidence_without_the_root_rollout(tmp_path: Path) -> None:
+def test_codex_children_are_unconverted_without_the_root_rollout(tmp_path: Path) -> None:
     native_path(tmp_path, STDOUT_PATH).write_text(
         "\n".join(
             [
@@ -1057,7 +1084,7 @@ def test_codex_children_stay_raw_evidence_without_the_root_rollout(tmp_path: Pat
     assert trajectory.extra["ale"]["parse_issues"] == [
         {"reason": "native_session_unavailable", "session_id": "session"},
         {
-            "reason": "unconverted_native_files",
+            "reason": "unconverted_native_sessions",
             "count": 1,
             "sources": [".codex-ale/sessions/rollout-child.jsonl"],
         },
@@ -1314,7 +1341,7 @@ def test_a_child_no_spawn_result_names_stays_reported(
     assert [item.session_id for item in trajectory.subagent_trajectories] == ["child"]
     assert trajectory.extra["ale"]["parse_issues"] == [
         {"reason": "unlinked_subagent", "source": orphan},
-        {"reason": "unconverted_native_files", "count": 1, "sources": [orphan]},
+        {"reason": "unconverted_native_sessions", "count": 1, "sources": [orphan]},
         *untraced,
     ]
 
@@ -1330,7 +1357,7 @@ def test_a_child_claimed_twice_is_converted_once(
         shutil.copy(rollout, tmp_path / duplicate)
         expected = [
             {"reason": "unlinked_subagent", "source": duplicate},
-            {"reason": "unconverted_native_files", "count": 1, "sources": [duplicate]},
+            {"reason": "unconverted_native_sessions", "count": 1, "sources": [duplicate]},
         ]
     else:
         index = tmp_path / OPENCLAW_SESSIONS / "sessions.json"
@@ -1850,11 +1877,11 @@ def test_openclaw_reports_other_transcripts_but_not_what_it_keeps_beside_them(
     unconverted = [
         issue
         for issue in trajectory.extra["ale"]["parse_issues"]
-        if issue["reason"] == "unconverted_native_files"
+        if issue["reason"] == "unconverted_native_sessions"
     ]
     assert unconverted == [
         {
-            "reason": "unconverted_native_files",
+            "reason": "unconverted_native_sessions",
             "count": 1,
             "sources": [f"{sessions}/subagent.jsonl"],
         }

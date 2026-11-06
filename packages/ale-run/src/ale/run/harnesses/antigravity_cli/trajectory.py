@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -29,7 +28,6 @@ from ale.run.harnesses.base import (
     Invocation,
     NativeResult,
     invocations,
-    mirrored_files,
     native_events,
     requested_session_id,
     stdout_events,
@@ -50,7 +48,6 @@ _MESSAGE = re.compile(
     r"(?=\n\[Message\] |\n</SYSTEM_MESSAGE>|\Z)",
     re.DOTALL,
 )
-_TRUNCATED = re.compile(r"\n<truncated \d+ bytes>\n")
 #: Bookkeeping records that are neither conversation nor tool output.
 _INTERNAL = frozenset({"CHECKPOINT", "CONVERSATION_HISTORY", "EPHEMERAL_MESSAGE"})
 _IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
@@ -73,33 +70,30 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
     turns, issues = stdout_events(recorded)
     stream = [event for turn in turns for event in turn]
     expected = requested_session_id(context, recorded) or _result(stream).session_id
-    used: set[Path] = set()
     records: list[dict[str, Any]] = []
     transcript = context.logs_dir / BRAIN / str(expected) / TRANSCRIPT if expected else None
     if transcript is not None and transcript.is_file():
         records = _records(context, transcript, issues)
-        used.add(transcript)
     else:
         issues.append({"reason": "native_session_unavailable", "session_id": expected})
-    conversation = _Conversation(context, issues, used)
+    conversation = _Conversation(context, issues)
     builder = TrajectoryBuilder(
         trajectory_id=context.trajectory_id,
         session_id=expected,
         agent=_agent(context),
     )
     subagents = conversation.walk(builder, expected, records, recorded=recorded, turns=turns)
-    if records:
-        # A conversation no spawn record links to its spawning call stays raw evidence.
-        for path in sorted((context.logs_dir / BRAIN).glob(f"*/{TRANSCRIPT}")):
-            if path.parents[2].name not in conversation.visited:
-                conversation.unlinked(path)
-    files = [
+    unvisited = [
         path
-        for root in (BRAIN, CONVERSATIONS)
-        for path in mirrored_files(context, root)
-        if path not in used
+        for path in sorted((context.logs_dir / BRAIN).glob(f"*/{TRANSCRIPT}"))
+        if path.parents[2].name not in conversation.visited
     ]
-    issues.extend(unconverted(context, files))
+    if records:
+        # A conversation no spawn record links to its spawning call is left unconverted.
+        for path in unvisited:
+            conversation.unlinked(path)
+    else:
+        issues.extend(unconverted(context, unvisited))
     if not any(step.source == "agent" for step in builder.steps) and context.final_message:
         builder.add(source="agent", message=context.final_message)
     builder.extra = _parse_extra(context, records, issues)
@@ -109,12 +103,9 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
 class _Conversation:
     """Converts conversations; a subagent is embedded where its parent spawned it."""
 
-    def __init__(
-        self, context: TrajectoryParseContext, issues: list[dict[str, Any]], used: set[Path]
-    ) -> None:
+    def __init__(self, context: TrajectoryParseContext, issues: list[dict[str, Any]]) -> None:
         self.context = context
         self.issues = issues
-        self.used = used
         self.visited: set[str] = set()
         self.reported: set[Path] = set()
 
@@ -204,8 +195,6 @@ class _Conversation:
                 if message := _result(events).final_message:
                     builder.add(source="agent", message=message)
                 _failure(builder, events)
-        if session_id and records:
-            self.used.update(_covered(self.context, session_id, records, self.used))
         return embedded
 
     def _result(
@@ -241,14 +230,12 @@ class _Conversation:
                 # Written after the record, as when a background task ends: the result keeps
                 # what the model received, and the tool's final output is kept beside it.
                 ale["final_output"] = text
-                self.used.add(output)
         children: list[AtifTrajectory] = []
         refs: list[AtifSubagentTrajectoryRef] = []
         for child_id, spawn in spawned.get(step_index, ()) if isinstance(step_index, int) else ():
             child = self._subagent(parent_id, child_id, spawn, session_id)
             if child is None:
                 continue
-            self.used.add(spawn)
             children.append(child)
             refs.append(
                 AtifSubagentTrajectoryRef(trajectory_id=child.trajectory_id, session_id=child_id)
@@ -267,7 +254,7 @@ class _Conversation:
     def _subagent(
         self, parent_id: str, child_id: str, spawn: Path, parent_session: str | None
     ) -> AtifTrajectory | None:
-        """The conversation a spawn record names, once; ``None`` leaves it raw evidence."""
+        """The conversation a spawn record names, once; ``None`` leaves it unconverted."""
         if child_id in self.visited:
             return None
         transcript = self.context.logs_dir / BRAIN / child_id / TRANSCRIPT
@@ -285,11 +272,10 @@ class _Conversation:
             self.visited.discard(child_id)
             self.unlinked(transcript)
             return None
-        self.used.add(transcript)
         return builder.build(subagent_trajectories=nested or None)
 
     def unlinked(self, path: Path) -> None:
-        """Report a child that stays raw evidence, once."""
+        """Report a child left unconverted, once."""
         if path in self.reported:
             return
         self.reported.add(path)
@@ -337,7 +323,6 @@ class _Conversation:
                     {"reason": "media_unavailable", "step_index": record.get("step_index")}
                 )
                 continue
-            self.used.add(path)
             blob = self.context.blobs.put(path.read_bytes(), media_type=media_type)
             images.append(
                 AtifContentPart(
@@ -415,194 +400,8 @@ def _records(
     return [latest[key] for key in sorted(latest, key=lambda key: key[0])]
 
 
-def _covered(
-    context: TrajectoryParseContext, session_id: str, records: list[dict[str, Any]], used: set[Path]
-) -> set[Path]:
-    """A conversation's other files whose whole content the converted records already hold.
-
-    agy keeps copies beside its full transcript: an abridged transcript, both split into
-    chunks, each tool's output, the messages delivered to it, its background task logs and
-    the subagent definitions it wrote. A copy is consumed only when every byte of it is
-    accounted for, so a task's later output or a truncated record stays raw evidence.
-    """
-    folder = context.logs_dir / BRAIN / session_id
-    generated = folder / ".system_generated"
-    covered: set[Path] = set()
-    contents = [_plain(_text(record.get("content"))) for record in records]
-    everything = "\n".join(contents)
-    delivered = "\n".join(
-        _plain(_text(record.get("content")))
-        for record in records
-        if _type(record) in {"SYSTEM_MESSAGE", "USER_INPUT"}
-    )
-    full = _lines(generated / "logs" / "transcript_full.jsonl")
-    abridged_path = generated / "logs" / "transcript.jsonl"
-    abridged = _lines(abridged_path)
-    if abridged_path.is_file() and _derivable(abridged, full):
-        covered.add(abridged_path)
-        covered.update(_chunks(generated / "logs" / "chunks" / "transcript", abridged))
-    covered.update(_chunks(generated / "logs" / "chunks" / "transcript_full", full))
-    steps = generated / "steps"
-    for path in sorted(steps.glob("*/*")) if steps.is_dir() else ():
-        step = path.parent.name
-        if path.name == "output.txt":
-            text = _plain(_read(path))
-            if any(
-                text in content
-                for record, content in zip(records, contents, strict=True)
-                if str(record.get("step_index")) == step
-            ):
-                covered.add(path)
-        elif match := re.fullmatch(r"media_(\d+)(\.\w+)", path.name):
-            # The same bytes as the logs/media copy the result's image was read from.
-            twin = generated / "logs" / "media" / f"step_{step}_media_{match[1]}{match[2]}"
-            if twin in used and twin.read_bytes() == path.read_bytes():
-                covered.add(path)
-    messages = generated / "messages"
-    for path in sorted(messages.glob("*.json")) if messages.is_dir() else ():
-        value = _load(path)
-        if path.name == "read.json":
-            # Read receipts: which of the messages beside it were delivered, nothing more.
-            if isinstance(value, dict) and all(
-                (messages / f"{key}.json").is_file() for key in value
-            ):
-                covered.add(path)
-        elif (
-            isinstance(value, dict)
-            and isinstance(value.get("content"), str)
-            and f"content={_plain(value['content'])}" in delivered
-        ):
-            covered.add(path)
-    tasks = generated / "tasks"
-    for path in sorted(tasks.glob("*.log")) if tasks.is_dir() else ():
-        if _plain(_read(path)) in everything:
-            covered.add(path)
-    database = context.logs_dir / CONVERSATIONS / f"{session_id}.db"
-    steps_held = _database_steps(database)
-    if steps_held is not None and steps_held <= len(
-        {record.get("step_index") for record in records}
-    ):
-        # Its steps table holds the same step records; everything else in it is agy's
-        # internal state or the model request the Gateway records. More steps than the
-        # transcript means a turn the transcript lost, so it then stays raw evidence.
-        covered.add(database)
-        shared = database.with_name(database.name + "-shm")
-        log = database.with_name(database.name + "-wal")
-        covered.update(path for path in (shared,) if path.is_file())
-        covered.update(path for path in (log,) if path.is_file() and not path.stat().st_size)
-    definitions = {
-        str(call["args"].get("Name")): call["args"]
-        for record in records
-        for call in record.get("tool_calls") or ()
-        if isinstance(call, dict)
-        and call.get("name") == "define_subagent"
-        and isinstance(call.get("args"), dict)
-    }
-    for path in sorted((folder / ".agents" / "agents").glob("*/agent.md")):
-        args = definitions.get(path.parent.name)
-        text = _plain(_read(path))
-        if args is not None and all(
-            _plain(str(args.get(field) or "")) in text for field in ("Description", "SystemPrompt")
-        ):
-            covered.add(path)
-    return covered
-
-
-def _database_steps(path: Path) -> int | None:
-    """How many steps a conversation database holds, read without writing beside it."""
-    if not path.is_file():
-        return None
-    try:
-        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro&immutable=1", uri=True)
-        try:
-            (count,) = connection.execute("select count(*) from steps").fetchone()
-        finally:
-            connection.close()
-    except sqlite3.Error:
-        return None
-    return count if isinstance(count, int) else None
-
-
-def _derivable(abridged: list[str], full: list[str]) -> bool:
-    """Whether every abridged record is a full record with arguments as JSON text, or cut."""
-    complete: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
-    for line in full:
-        if (record := _json(line)) is not None:
-            complete.setdefault(_key(record), []).append(record)
-    for line in abridged:
-        record = _json(line)
-        if record is None or not any(
-            _abridges(record, candidate) for candidate in complete.get(_key(record), ())
-        ):
-            return False
-    return True
-
-
-def _abridges(short: dict[str, Any], full: dict[str, Any]) -> bool:
-    cut = set(short.get("truncated_fields") or ())
-    for name in set(short) | set(full):
-        value, original = short.get(name), full.get(name)
-        if name == "truncated_fields" or value == original:
-            continue
-        if name == "tool_calls":
-            if not _same_calls(value, original):
-                return False
-        elif name in cut and isinstance(value, str) and isinstance(original, str):
-            head, *rest = _TRUNCATED.split(value)
-            if not (original.startswith(head) and original.endswith(rest[-1] if rest else head)):
-                return False
-        else:
-            return False
-    return True
-
-
-def _same_calls(short: Any, full: Any) -> bool:
-    if not isinstance(short, list) or not isinstance(full, list) or len(short) != len(full):
-        return False
-    for call, original in zip(short, full, strict=True):
-        if not isinstance(call, dict) or not isinstance(original, dict):
-            return False
-        args, expected = call.get("args") or {}, original.get("args") or {}
-        if call.get("name") != original.get("name") or set(args) != set(expected):
-            return False
-        for name, value in args.items():
-            decoded = _json_value(value) if isinstance(value, str) else value
-            if decoded != expected[name] and value != expected[name]:
-                return False
-    return True
-
-
-def _chunks(folder: Path, lines: list[str]) -> set[Path]:
-    """Chunk files every line of which is a line of the transcript they split."""
-    whole = set(lines)
-    return {
-        path
-        for path in (sorted(folder.glob("*.jsonl")) if folder.is_dir() else ())
-        if set(_lines(path)) <= whole
-    }
-
-
-def _key(record: dict[str, Any]) -> tuple[Any, ...]:
-    return (record.get("step_index"), _type(record), str(record.get("source") or ""))
-
-
-def _lines(path: Path) -> list[str]:
-    return [line for line in _read(path).splitlines() if line.strip()] if path.is_file() else []
-
-
 def _read(path: Path) -> str:
     return path.read_bytes().decode("utf-8", "replace")
-
-
-def _load(path: Path) -> Any:
-    return _json_value(_read(path))
-
-
-def _json_value(text: str) -> Any:
-    try:
-        return json.loads(text)
-    except ValueError:
-        return None
 
 
 def _plain(text: str) -> str:

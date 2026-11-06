@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -551,14 +550,21 @@ def _subagent_issues(context: TrajectoryParseContext) -> tuple[list[str], list[d
     return unlinked, issues
 
 
-def test_a_conversation_no_spawn_record_links_stays_raw_evidence(tmp_path: Path) -> None:
+def test_a_conversation_no_spawn_record_links_is_unlinked(tmp_path: Path) -> None:
     context = _spawning(tmp_path)
     (context.logs_dir / SPAWN_RECORD).unlink()
 
-    unlinked, issues = _subagent_issues(context)
+    unlinked, _ = _subagent_issues(context)
     assert unlinked == [CHILD_TRANSCRIPT]
-    (files,) = [issue for issue in issues if issue["reason"] == "unconverted_native_files"]
-    assert CHILD_TRANSCRIPT in files["sources"]
+
+
+def test_without_the_root_transcript_every_conversation_is_unconverted(tmp_path: Path) -> None:
+    context = _spawning(tmp_path)
+    (_generated(context.logs_dir, ROOT) / "logs/transcript_full.jsonl").unlink()
+
+    issues = AntigravityCliHarness().parse_trajectory(context).extra["ale"]["parse_issues"]  # type: ignore[index]
+    (unconverted,) = [issue for issue in issues if issue["reason"] == "unconverted_native_sessions"]
+    assert unconverted["sources"] == [CHILD_TRANSCRIPT]
 
 
 def test_a_spawn_record_whose_step_has_no_result_links_nothing(tmp_path: Path) -> None:
@@ -584,10 +590,8 @@ def test_a_spawn_record_naming_a_missing_conversation_is_unlinked(tmp_path: Path
     context = _spawning(tmp_path)
     shutil.rmtree(context.logs_dir / BRAIN / CHILD)
 
-    unlinked, issues = _subagent_issues(context)
+    unlinked, _ = _subagent_issues(context)
     assert unlinked == [SPAWN_RECORD]
-    (files,) = [issue for issue in issues if issue["reason"] == "unconverted_native_files"]
-    assert files["sources"] == [SPAWN_RECORD]
 
 
 DEFINITION = {"Name": "tester", "Description": "Tests.", "SystemPrompt": "Test things."}
@@ -618,109 +622,15 @@ def test_a_step_output_its_record_lacks_is_kept_on_the_result(tmp_path: Path) ->
     assert trajectory.extra is None
 
 
-def _database(path: Path, steps: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
-    connection.execute("create table steps (idx integer primary key, step_payload blob)")
-    connection.executemany("insert into steps values (?, x'00')", [(i,) for i in range(steps)])
-    connection.commit()
-    connection.close()
-
-
-@pytest.mark.parametrize(("steps", "consumed"), [(6, True), (7, False)])
-def test_a_conversation_database_is_consumed_unless_it_holds_more_steps(
-    tmp_path: Path, steps: int, consumed: bool
-) -> None:
-    """The records cover steps 0-5; a seventh is a turn the transcript lost."""
-    context = _session(tmp_path)
-    database = context.logs_dir / f".gemini/antigravity-cli/conversations/{ROOT}.db"
-    _database(database, steps)
-    database.with_name(database.name + "-shm").write_bytes(b"\0" * 8)
-    snapshot = sorted((path, path.stat().st_mtime_ns) for path in database.parent.iterdir())
-
-    extra = AntigravityCliHarness().parse_trajectory(context).extra
-    assert sorted((path, path.stat().st_mtime_ns) for path in database.parent.iterdir()) == snapshot
-    if consumed:
-        assert extra is None
-    else:
-        (issue,) = extra["ale"]["parse_issues"]  # type: ignore[index]
-        assert database.relative_to(context.logs_dir).as_posix() in issue["sources"]
-
-
-#: The abridged transcript: arguments as JSON text, and a long field cut in the middle.
-ABRIDGED = [
-    RECORDS[0],
-    {
-        **RECORDS[1],
-        "tool_calls": [
-            {"name": "schedule", "args": {"DurationSeconds": "300"}},
-            {"name": "define_subagent", "args": {k: json.dumps(v) for k, v in DEFINITION.items()}},
-        ],
-    },
-    {
-        **RECORDS[2],
-        "content": "Timer running\n<truncated 8 bytes>\nbackground.",
-        "truncated_fields": ["content"],
-    },
-    *RECORDS[3:],
-]
-OTHER = {**RECORDS[5], "content": "Not this."}
-
-
-#: Each copy agy keeps, relative to its conversation: content the records hold, then
-#: content of its own (``None`` where such content is the late output kept on a result).
-COPIES = [
-    (
-        ".system_generated/logs/transcript.jsonl",
-        _jsonl(ABRIDGED),
-        _jsonl([*ABRIDGED[:5], OTHER]),
-    ),
-    (
-        ".system_generated/logs/chunks/transcript/00000000.jsonl",
-        _jsonl(ABRIDGED[1:3]),
-        _jsonl([OTHER]),
-    ),
-    (
-        ".system_generated/logs/chunks/transcript_full/00000000.jsonl",
-        _jsonl(RECORDS[3:]),
-        _jsonl([OTHER]),
-    ),
-    (".system_generated/steps/3/output.txt", "Defined tester.\n", None),
-    (
-        ".system_generated/messages/m1.json",
-        '{"content": "Notice."}',
-        '{"content": "Never sent."}',
-    ),
-    (".system_generated/messages/read.json", '{"m1": true}', '{"m2": true}'),
-    (".system_generated/tasks/task-1.log", "Timer running in the background.", "Timer fired."),
-    (".agents/agents/tester/agent.md", "Tests.\n\nTest things.\n", "Tests.\n\nOther.\n"),
-]
-
-
-@pytest.mark.parametrize(
-    ("relative", "covered", "uncovered"), COPIES, ids=[copy[0] for copy in COPIES]
-)
-def test_a_copy_is_consumed_only_while_the_records_hold_its_content(
-    tmp_path: Path, relative: str, covered: str, uncovered: str | None
-) -> None:
-    """agy keeps copies beside each full transcript; one with content of its own stays."""
+def test_files_beside_a_converted_conversation_are_not_named(tmp_path: Path) -> None:
+    """agy's copies, task logs and database are not sessions, whatever they hold."""
     context = _session(tmp_path)
     generated = _generated(context.logs_dir, ROOT)
-    # The abridged transcript and a delivered message with its read receipt, as agy leaves them.
-    _write(generated / "logs/transcript.jsonl", _jsonl(ABRIDGED))
-    _write(generated / "messages/m1.json", '{"content": "Notice."}')
-    _write(generated / "messages/read.json", '{"m1": true}')
-    path = context.logs_dir / BRAIN / ROOT / relative
-    harness = AntigravityCliHarness()
+    _write(generated / "logs/transcript.jsonl", _jsonl([{**RECORDS[5], "content": "Not this."}]))
+    _write(generated / "tasks/task-1.log", "Timer fired.")
+    _write(context.logs_dir / f".gemini/antigravity-cli/conversations/{ROOT}.db", "steps")
 
-    _write(path, covered)
-    assert harness.parse_trajectory(context).extra is None
-    if uncovered is None:
-        return
-    _write(path, uncovered)
-    (issue,) = harness.parse_trajectory(context).extra["ale"]["parse_issues"]  # type: ignore[index]
-    assert issue["reason"] == "unconverted_native_files"
-    assert path.relative_to(context.logs_dir).as_posix() in issue["sources"]
+    assert AntigravityCliHarness().parse_trajectory(context).extra is None
 
 
 def test_parser_keeps_retries_and_the_stdout_failure(tmp_path: Path) -> None:

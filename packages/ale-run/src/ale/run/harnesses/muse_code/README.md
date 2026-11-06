@@ -35,6 +35,6 @@ stored in the parent's `subagent/<child id>/`. It becomes an embedded trajectory
 that call has a result; any other session there is reported as an `unlinked_subagent`.
 Reminder agents, on unless `reminders = false`, are the exception: Muse runs them itself,
 with no call of the model to link, and stores their sessions in the same place. The parent names each one in a `memory_reminder_child_session_linked` run event,
-so the parser leaves those sessions as raw evidence named in `unconverted_native_files`
+so the parser leaves those sessions unconverted, named in `unconverted_native_sessions`
 without reporting them as unlinked. The step ceiling fails the run with "did not reach a
 terminal state"; ALE reports it as the `max_model_steps` Harness limit.

@@ -26,5 +26,5 @@ the task, and when the task ends the SDK records the child's model calls under
 among them, with events during the call, is the one the call spawned. Task IDs restart in
 every process, so the time window keeps a later task's metrics from claiming an earlier
 child. A child without that link, such as one stopped before its metrics were written,
-stays raw evidence. With one MCP server its tools keep their
+is left unconverted. With one MCP server its tools keep their
 names; with several, each is `<server>_<tool>`, resolved from `.openhands-ale/mcp.json`.

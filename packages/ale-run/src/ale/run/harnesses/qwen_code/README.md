@@ -32,8 +32,8 @@ end of the turn.
 
 A subagent writes `subagents/<session id>/agent-<type>-<call id>.jsonl` beside a
 `.meta.json` naming the session, the parent agent and the spawning call. It becomes an
-embedded trajectory when that call has a result. Other transcripts stay raw evidence
-named in `parse_issues`.
+embedded trajectory when that call has a result. Other transcripts are left unconverted
+and named in `parse_issues`.
 
 The turn ceiling exits 53 with no `result` on stdout; ALE reports it as the
 `max_session_turns` Harness limit.

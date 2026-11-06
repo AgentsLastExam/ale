@@ -99,7 +99,6 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
                         }
                     )
                     continue
-                consumed.add(meta)
                 covered.add(parent)
                 agent_id = child_path.stem.removeprefix("agent-")
                 sidechains.extend(
@@ -117,7 +116,8 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
             ] + sidechains
     else:
         issues.append({"reason": "native_session_unavailable", "session_id": expected})
-    issues.extend(unconverted(context, set(files) - consumed))
+    sessions = {path for path in files if path.suffix == ".jsonl"}
+    issues.extend(unconverted(context, sessions - consumed))
     return _parse_events(context, events, issues, instruction=None)
 
 

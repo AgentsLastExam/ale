@@ -101,14 +101,14 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
             consumed.add(matches[0])
     else:
         issues.append({"reason": "native_session_unavailable", "session_id": expected})
-    # Without the root rollout no spawn can be found, so every child stays raw evidence.
+    # Without the root rollout no spawn can be found, so every child is left unconverted.
     threads = {
         path: native_events(context, path) for path in files if rollout and path not in consumed
     }
     traces = mirrored_files(context, TRACES)
-    scripted = _script_calls(context, expected, traces, issues, consumed) if rollout else {}
+    scripted = _script_calls(context, expected, traces, issues) if rollout else {}
     subagents, spawned = _subagents(context, expected, rollout, threads, scripted, issues, consumed)
-    issues.extend(unconverted(context, (set(files) | set(traces)) - consumed))
+    issues.extend(unconverted(context, set(files) - consumed))
     builder = TrajectoryBuilder(
         trajectory_id=context.trajectory_id, session_id=expected, agent=_agent(context)
     )
@@ -189,7 +189,7 @@ def _subagents(
 
     A child names its parent in its first record, and the call that spawned it names the
     child in its own result: ``spawn_agent``'s, or what a code-mode script printed of it.
-    A child that no spawn result names stays raw evidence with a parse issue.
+    A child that no spawn result names is left unconverted with a parse issue.
     """
     children = {
         path: events
@@ -206,7 +206,7 @@ def _subagents(
             if not child_id or child_id not in result:
                 continue
             if any(item.session_id == child_id for item in embedded):
-                # A second rollout claiming the same thread stays raw evidence.
+                # A second rollout claiming the same thread is left unconverted.
                 continue
             del children[path]
             consumed.add(path)
@@ -551,7 +551,6 @@ def _script_calls(
     thread_id: str | None,
     traces: list[Path],
     issues: list[dict[str, Any]],
-    consumed: set[Path],
 ) -> dict[str, _ScriptSteps]:
     """The calls code-mode scripts made, for every thread the trace of ``thread_id`` covers.
 
@@ -569,7 +568,6 @@ def _script_calls(
             or not bundle.name.endswith(f"-{thread_id}")
         ):
             continue
-        consumed.update(path for path in traces if bundle in path.parents)
         events, trace_issues = native_events(context, log)
         issues.extend(trace_issues)
         cells: dict[tuple[str, str], str] = {}
@@ -625,7 +623,7 @@ def _scripts(
 
 
 def _unplaced(scripts: _ScriptSteps, thread_id: str | None, issues: list[dict[str, Any]]) -> None:
-    """Script calls that followed no model call the rollout kept stay raw evidence."""
+    """Report script calls that followed no model call the rollout kept."""
     if count := sum(len(calls) for calls in scripts.values()):
         issues.append({"reason": "unplaced_script_calls", "session_id": thread_id, "count": count})
 

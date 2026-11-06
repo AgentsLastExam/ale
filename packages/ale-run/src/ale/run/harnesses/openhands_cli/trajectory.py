@@ -29,6 +29,7 @@ from ale.run.harnesses.base import (
     json_lines,
     requested_session_id,
     stdout_events,
+    unconverted,
 )
 
 #: ``OPENHANDS_PERSISTENCE_DIR``.
@@ -81,15 +82,16 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
     events = _conversation(context, root, issues) if expected and root.is_dir() else []
     if not events:
         issues.append({"reason": "native_session_unavailable", "session_id": expected})
-    other = sorted(
-        path.relative_to(context.logs_dir).as_posix()
-        for path in (context.logs_dir / CONVERSATIONS).glob("*")
-        if path.is_dir() and path.name != expected
-    )
-    if other:
-        issues.append(
-            {"reason": "unconverted_native_files", "count": len(other), "sources": other[:10]}
+    issues.extend(
+        unconverted(
+            context,
+            (
+                path
+                for path in (context.logs_dir / CONVERSATIONS).glob("*")
+                if path.is_dir() and path.name != expected
+            ),
         )
+    )
     builder = TrajectoryBuilder(
         trajectory_id=context.trajectory_id,
         session_id=expected,

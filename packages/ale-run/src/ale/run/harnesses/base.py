@@ -473,15 +473,15 @@ def mirrored_files(context: TrajectoryParseContext, root: str) -> list[Path]:
     return sorted(path for path in base.rglob("*") if path.is_file()) if base.is_dir() else []
 
 
-def unconverted(context: TrajectoryParseContext, paths: Iterable[Path]) -> list[dict[str, Any]]:
-    """Name mirrored session files a parser did not use; they stay as raw evidence."""
-    paths = sorted(paths)
-    if not paths:
+def unconverted(context: TrajectoryParseContext, sessions: Iterable[Path]) -> list[dict[str, Any]]:
+    """Name the mirrored native sessions a parser found but did not convert."""
+    sessions = sorted(sessions)
+    if not sessions:
         return []
     return [
         {
-            "reason": "unconverted_native_files",
-            "count": len(paths),
-            "sources": [path.relative_to(context.logs_dir).as_posix() for path in paths[:10]],
+            "reason": "unconverted_native_sessions",
+            "count": len(sessions),
+            "sources": [path.relative_to(context.logs_dir).as_posix() for path in sessions[:10]],
         }
     ]

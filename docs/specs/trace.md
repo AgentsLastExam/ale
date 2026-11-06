@@ -230,8 +230,9 @@ token_data = "none"
 ```
 
 - `native_logs="minimal"` deletes the mirrored Harness logs under `logs/<harness>/` after
-  a complete final conversion with no parse issues; `debug` keeps them. Nothing is
-  deleted while the agent runs.
+  a complete final conversion, whatever parse issues it reports; `debug` keeps them.
+  Parse issues describe the trajectory, not which evidence to keep, so a run whose native
+  logs matter asks for `debug`. Nothing is deleted while the agent runs.
 - Conversion failure or interruption always retains available native evidence.
 - `transport_payloads="debug"` may retain provider payload evidence under
   `logs/gateway/`; `digests` is the default.
