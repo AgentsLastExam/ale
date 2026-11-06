@@ -9,11 +9,12 @@ from typer.testing import CliRunner
 
 from ale.core.config import RunConfig, SandboxRetentionConfig
 from ale.core.errors import ProviderCapabilityError
-from ale.core.sandbox import ImageKind, PreparedTaskImage, SandboxRequest
+from ale.core.sandbox import DesktopResolution, ImageKind, PreparedTaskImage, SandboxRequest
 from ale.core.taskspec import NetworkPolicy, OperatingSystem, Resources
 from ale.run.cli.main import _destroy_retained_sandbox, _list_retained_sandboxes, app
 from ale.run.episode import _Lease
 from ale.run.providers import ProviderRegistry
+from ale.run.providers.desktop import require_resolution
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.qemu import QemuProvider
 
@@ -105,6 +106,33 @@ async def test_one_lease_routes_each_request_and_attributes_its_provider() -> No
     assert [request.image_kind for request in container.requests] == [ImageKind.CONTAINER]
     assert [request.image_kind for request in vm.requests] == [ImageKind.VM]
     assert {outcome.provider for outcome in lease.outcomes} == {"docker", "qemu"}
+
+
+@pytest.mark.asyncio
+async def test_every_leased_sandbox_takes_the_runs_desktop_resolution() -> None:
+    provider = _Provider("docker")
+    registry = SimpleNamespace(get=lambda kind, _: provider)
+    resolution = DesktopResolution(width=1366, height=768)
+    lease = _Lease(registry, SandboxRetentionConfig(), resolution)  # type: ignore[arg-type]
+
+    await lease.acquire(_request(ImageKind.CONTAINER))
+    await lease.acquire(_request(ImageKind.CONTAINER, role="verifier"))
+
+    assert [request.desktop_resolution for request in provider.requests] == [resolution] * 2
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_of_another_size_is_refused() -> None:
+    class Client:
+        async def screen_size(self) -> tuple[int, int]:
+            return 1280, 800
+
+    wanted = DesktopResolution(width=1280, height=800)
+    assert await require_resolution(Client(), wanted) == wanted  # type: ignore[arg-type]
+    with pytest.raises(ProviderCapabilityError, match="1280x800, not the requested 1024x768"):
+        await require_resolution(Client(), DesktopResolution())  # type: ignore[arg-type]
+    with pytest.raises(ProviderCapabilityError, match=r"Xvfb :1 -screen 0 \$\{VNC_RESOLUTION\}x24"):
+        await require_resolution(Client(), DesktopResolution(), container=True)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSy
 __all__ = [
     "SANDBOX_GATEWAY_PORT",
     "Capabilities",
+    "DesktopResolution",
     "ExecOutputSink",
     "ExecResult",
     "GpuAllocation",
@@ -226,6 +227,37 @@ class Identity(StrEnum):
     validation meets the same limits a real run will."""
 
 
+class DesktopResolution(BaseModel):
+    """The size of a Sandbox's desktop in logical pixels, written ``WIDTHxHEIGHT``.
+
+    Logical pixels are what windows are laid out in: points on macOS, whose Retina desktop
+    draws each one with two pixels each way, and plain pixels elsewhere. The same value
+    therefore fits the same amount of a program's window on every operating system. The
+    bounds are what every Provider starts: macOS draws no desktop narrower than 1024 points,
+    and Windows' firmware none larger than 3200x1800.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    width: int = Field(default=1024, ge=1024, le=3200, strict=True)
+    height: int = Field(default=768, ge=480, le=1800, strict=True)
+
+    def __str__(self) -> str:
+        return f"{self.width}x{self.height}"
+
+    # --- validation ---
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_text(cls, value: object) -> object:
+        if isinstance(value, (dict, DesktopResolution)):
+            return value
+        width, separator, height = str(value).strip().partition("x")
+        if not (separator and width.isdigit() and height.isdigit()):
+            raise ValueError(f"{value!r} is not WIDTHxHEIGHT, such as 1024x768")
+        return {"width": int(width), "height": int(height)}
+
+
 class SandboxRequest(BaseModel):
     """What the engine asks a provider for."""
 
@@ -255,6 +287,8 @@ class SandboxRequest(BaseModel):
     """Whether the agent user may elevate. Declared by the task, recorded in provenance."""
     user: str = Field(default="user", pattern=r"^[a-z_][a-z0-9_-]{0,31}$")
     """The agent account, named by the Task's ``[agent].user``."""
+    desktop_resolution: DesktopResolution = DesktopResolution()
+    """The size of the desktop, when the image has one; a Run setting, never the image's."""
 
     @property
     def image_kind(self) -> ImageKind:
@@ -308,6 +342,9 @@ class ResourceAllocation(BaseModel):
     sudo: bool
     network_mode: NetworkMode
     provider: str = Field(min_length=1)
+    desktop_resolution: DesktopResolution | None = None
+    """The desktop's size as the guest reported it when the Provider started and checked the
+    desktop; None for a sandbox whose desktop it did not start."""
 
 
 class RetainedSandbox(BaseModel):

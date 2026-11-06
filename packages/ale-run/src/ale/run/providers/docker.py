@@ -26,6 +26,7 @@ from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     Capabilities,
+    DesktopResolution,
     ExecOutputSink,
     ExecResult,
     GpuAllocation,
@@ -49,6 +50,7 @@ from ale.run import ale_image, guestd
 from ale.run.framework import with_framework
 from ale.run.gpu import GpuLease, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
+from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, StdioTransport
@@ -511,6 +513,7 @@ class DockerProvider(Provider):
             argv += ["--network", network]
         for key, value in request.env.items():
             argv += ["-e", f"{key}={value}"]
+        argv += ["-e", f"{CONTAINER_VARIABLE}={request.desktop_resolution}"]
         if request.gateway_url or request.proxy_url:
             host_ip = await self._bridge_host_ip(network)
             argv += ["--add-host", f"{HOST_ALIAS}:{host_ip}"]
@@ -591,8 +594,12 @@ class DockerProvider(Provider):
             observed_gpu = await self._container_gpus(client) if selected else ()
             if selected:
                 _verify_docker_gpu(selected, observed_gpu)
+            desktop: DesktopResolution | None = None
             if has_desktop:
                 await self._await_desktop(client)
+                desktop = await require_resolution(
+                    client, request.desktop_resolution, container=True
+                )
             file_client = await self._connect(container, agent_user)
             clients.append(file_client)
         except BaseException:
@@ -634,6 +641,7 @@ class DockerProvider(Provider):
                 sudo=request.sudo,
                 network_mode=request.network.mode,
                 provider=self.name,
+                desktop_resolution=desktop,
             ),
             resource_lease=lease,
             agent_user=agent_user,

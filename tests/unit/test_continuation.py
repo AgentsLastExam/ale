@@ -13,9 +13,10 @@ from tests.unit.test_runtime_contracts import DIGEST, make_lock
 from ale.core.config import RunConfig, SandboxRetentionConfig
 from ale.core.errors import ConfigError, ProviderCapabilityError, TaskDefinitionError
 from ale.core.harness import NativeContinuation
-from ale.core.lock import ResourceProvenance, ResumedFrom
+from ale.core.lock import ResourceProvenance, ResumedFrom, RunLock
 from ale.core.result import ResultRecord, SandboxOutcome
 from ale.core.sandbox import (
+    DesktopResolution,
     ExecResult,
     PreparedTaskImage,
     RetainedSandbox,
@@ -610,6 +611,36 @@ def test_an_episode_that_cannot_be_continued_here_is_refused(
     other = SimpleNamespace(name="codex-cli", version=lambda: "2.1.170")
     with pytest.raises((TaskDefinitionError, ConfigError)):
         _continuation(episode, [task], RunConfig(), other)  # type: ignore[arg-type]
+
+
+def test_a_kept_desktop_continues_only_at_the_resolution_it_has(tmp_path: Path) -> None:
+    episode, task = _source(tmp_path)
+    lock = RunLock.model_validate_json((episode / "lock.json").read_text())
+    assert lock.resources is not None
+    kept = DesktopResolution(width=1366, height=768)
+    effective = lock.resources.effective.model_copy(update={"desktop_resolution": kept})
+    resources = lock.resources.model_copy(update={"effective": effective})
+    (episode / "lock.json").write_text(
+        lock.model_copy(update={"resources": resources}).model_dump_json()
+    )
+    harness = SimpleNamespace(name="claude-code", version=lambda: "2.1.170")
+    with pytest.raises(TaskDefinitionError, match="desktop resolution"):
+        _continuation(episode, [task], RunConfig(), harness)  # type: ignore[arg-type]
+    settings = RunConfig(desktop_resolution=kept)
+    assert _continuation(episode, [task], settings, harness).attach is not None  # type: ignore[arg-type]
+    # A Sandbox booted from a snapshot starts its desktop at this Run's resolution.
+    snapshot = SandboxOutcome(
+        roles=("solver", "verifier"),
+        requested="snapshot",
+        outcome="snapshotted",
+        provider="docker",
+        handle="docker:snapshot:kept",
+    )
+    record = ResultRecord.model_validate_json((episode / "result.json").read_text())
+    (episode / "result.json").write_text(
+        record.model_copy(update={"sandboxes": (snapshot,)}).model_dump_json()
+    )
+    assert _continuation(episode, [task], RunConfig(), harness).attach is None  # type: ignore[arg-type]
 
 
 def test_only_one_episode_of_one_task_continues(tmp_path: Path) -> None:

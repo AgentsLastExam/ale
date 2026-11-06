@@ -436,6 +436,11 @@ class GuestClient:
         data, _ = await self.call("screenshot", timeout_sec=60)
         return base64.b64decode(data["png_b64"])
 
+    async def screen_size(self) -> tuple[int, int]:
+        """The desktop's width and height as Cua Driver reports them: points on macOS."""
+        data, _ = await self.call("screen_size", timeout_sec=60)
+        return int(data["width"]), int(data["height"])
+
     async def inject_input(self, actions: Sequence[dict[str, Any]]) -> int:
         actions = list(actions)
         # Keep the transport allowance in addition to intentional guest-side waits.

@@ -40,7 +40,14 @@ from ale.core.ids import task_component
 from ale.core.lock import AssetProvenance, LimitTermination, RunLock
 from ale.core.result import FailureInfo as ResultFailureInfo
 from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
-from ale.core.sandbox import Identity, RetainedSandbox, Sandbox, SandboxRequest, SandboxRole
+from ale.core.sandbox import (
+    DesktopResolution,
+    Identity,
+    RetainedSandbox,
+    Sandbox,
+    SandboxRequest,
+    SandboxRole,
+)
 from ale.core.task import ResolvedVariables, Task
 from ale.core.taskspec import NetworkMode, OperatingSystem, VerificationMode
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
@@ -158,9 +165,15 @@ class _Lease:
     tracks them rather than assuming one.
     """
 
-    def __init__(self, providers: ProviderRegistry, retention: SandboxRetentionConfig) -> None:
+    def __init__(
+        self,
+        providers: ProviderRegistry,
+        retention: SandboxRetentionConfig,
+        desktop_resolution: DesktopResolution = DesktopResolution(),
+    ) -> None:
         self.providers = providers
         self.retention = retention
+        self.desktop_resolution = desktop_resolution
         self.live: list[_LeaseEntry] = []
         self.outcomes: list[SandboxOutcome] = []
         self.retained: list[tuple[_LeaseEntry, SandboxOutcome]] = []
@@ -168,7 +181,7 @@ class _Lease:
     async def acquire(self, request: SandboxRequest) -> Sandbox:
         roles, policy = self._policy(request)
         provider = self.providers.get(request.image_kind, request.os)
-        sandbox = await provider.create(request.model_copy(update={"retention": policy}))
+        sandbox = await provider.create(self._configured(request, policy))
         self.live.append(_LeaseEntry(sandbox, provider.name, roles, policy))
         return sandbox
 
@@ -177,9 +190,20 @@ class _Lease:
     ) -> Sandbox:
         """Take over a retained Sandbox: this episode's retention decides its fate."""
         roles, policy = self._policy(request)
-        sandbox = await attach(request.model_copy(update={"retention": policy}))
+        sandbox = await attach(self._configured(request, policy))
         self.live.append(_LeaseEntry(sandbox, sandbox.allocation.provider, roles, policy))
         return sandbox
+
+    def _configured(
+        self, request: SandboxRequest, policy: Literal["destroy", "keep", "snapshot"]
+    ) -> SandboxRequest:
+        """The request with what the Run decides for every Sandbox it leases."""
+        return request.model_copy(
+            update={
+                "retention": policy,
+                "desktop_resolution": self.desktop_resolution,
+            }
+        )
 
     def _policy(
         self, request: SandboxRequest
@@ -553,6 +577,7 @@ async def run_episode(
     logging_policy: LoggingPolicy | None = None,
     verification_config: VerificationConfig | None = None,
     sandbox_retention: SandboxRetentionConfig | None = None,
+    desktop_resolution: DesktopResolution = DesktopResolution(),
     destroy_failed_sandboxes: bool = False,
     authentication: Literal["api-key", "subscription"] = "api-key",
     profile_slot_id: str | None = None,
@@ -628,7 +653,7 @@ async def run_episode(
     sink = _Artifacts(
         episode_dir, enabled=collect_artifacts or separate, retained=collect_artifacts
     )
-    lease = _Lease(providers, sandbox_retention or SandboxRetentionConfig())
+    lease = _Lease(providers, sandbox_retention or SandboxRetentionConfig(), desktop_resolution)
     started_at = datetime.now(UTC)
     started = time.monotonic()
     ctx = EpisodeContext(

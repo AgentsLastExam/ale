@@ -41,6 +41,16 @@ serves it on.
 | Daytona | None: snapshots count against an organization quota shared with other tools, so `accepts` refuses them |
 | Orchard | None: Orchard keeps no VM past its episode, so `accepts` refuses retention and snapshots |
 
+## Desktop resolution
+
+Each Provider starts a desktop at the request's `desktop_resolution` and then checks it with
+`desktop.require_resolution`, which reads Cua Driver's `get_screen_size`.
+
+| Provider | How the desktop is started at the requested size |
+|---|---|
+| Docker | `--env VNC_RESOLUTION=WIDTHxHEIGHT`, which replaces the image's own value; the container base's Xvnc starts at that size (`-geometry`). The name is the one VNC desktop images share, but the image's X server need not be VNC: Xvfb starts at it with `-screen 0 ${VNC_RESOLUTION}x24`. A desktop of another size is refused with that advice, since only the image can change it |
+| Daytona | The same variable, in the environment the Provider starts the image's command with and runs guestd in |
+
 ## Agent elevation on Linux and macOS
 
 The Linux framework layer installs `sudo` with the image's package manager when the image

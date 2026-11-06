@@ -358,6 +358,7 @@ async def _run_one(
                 logging_policy=settings.logging,
                 verification_config=settings.verification,
                 sandbox_retention=settings.sandbox_retention,
+                desktop_resolution=settings.desktop_resolution,
                 destroy_failed_sandboxes=settings.episode_retries > 0,
                 authentication=authentication.mode,
                 profile_slot_id=authentication.profile_slot_id,
@@ -622,6 +623,7 @@ async def _reverify(
                     gateway_url=gateway_url,
                     verification_config=settings.verification,
                     sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
+                    desktop_resolution=settings.desktop_resolution,
                     destroy_failed_sandboxes=True,
                     authentication=source_lock.agent.authentication.effective,
                     profile_slot_id=source_lock.agent.authentication.profile_slot_id,
@@ -722,8 +724,8 @@ def _continuation(
         )
     kept = retained.outcome == "retained"
     # The native session is read by the same program, and the Sandbox is the Task's image
-    # as the earlier agent left it. A running Sandbox also keeps its resources and its
-    # role; one booted from a snapshot takes this Task's.
+    # as the earlier agent left it. A running Sandbox also keeps its resources, its role
+    # and its desktop's resolution; one booted from a snapshot takes this Task's and Run's.
     recorded_and_current: dict[str, tuple[object, object]] = {
         "harness": (result.continuation.harness, harness.name),
         "CLI version": (lock.agent.version, harness.version()),
@@ -743,6 +745,9 @@ def _continuation(
                 task.spec.verify.environment_mode is VerificationMode.SHARED,
             ),
         }
+        desktop = lock.resources.effective.desktop_resolution if lock.resources else None
+        if desktop is not None:
+            recorded_and_current["desktop resolution"] = (desktop, settings.desktop_resolution)
     for name, (recorded, current) in recorded_and_current.items():
         if recorded != current:
             raise TaskDefinitionError(
@@ -905,6 +910,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                             gateway_url=gateway_url,
                             verification_config=settings.verification,
                             sandbox_retention=settings.sandbox_retention,
+                            desktop_resolution=settings.desktop_resolution,
                             destroy_failed_sandboxes=settings.episode_retries > 0,
                         )
 
