@@ -1,6 +1,6 @@
 [agent]
 name = "antigravity-cli"
-model = "gemini-4-argon"
+model = "gemini-3.8-flash"
 version = "1.4.7"
 skills = []
 mcp_servers = []

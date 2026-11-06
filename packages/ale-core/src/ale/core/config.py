@@ -129,7 +129,7 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = "claude-code"
-    model: str = "claude-opus-4-8"
+    model: str = "claude-sonnet-5"
     authentication: Literal["auto", "api-key", "subscription"] = "auto"
     version: str | None = Field(
         default=None, description="Pin the agent build; None uses the harness default version"

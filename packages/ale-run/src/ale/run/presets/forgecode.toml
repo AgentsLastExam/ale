@@ -1,6 +1,6 @@
 [agent]
 name = "forgecode"
-model = "claude-opus-4-8"
+model = "claude-sonnet-5"
 version = "2.14.0"
 skills = []
 mcp_servers = []

@@ -1,5 +1,6 @@
 [agent]
 name = "claude-code"
+model = "claude-sonnet-5"
 authentication = "auto"
 version = "2.1.227"
 skills = []
