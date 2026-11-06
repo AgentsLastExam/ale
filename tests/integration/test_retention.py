@@ -135,6 +135,7 @@ def context(root: Path, policy: LoggingPolicy, run: AgentRun | None):
         trajectory_id="trajectory",
         run_dir=root,
         session=SimpleNamespace(model="model", token="episode-token"),
+        secrets=("episode-token",),
         agent_version="1",
         spec=SimpleNamespace(instruction="instruction"),
         agent_run=run,
