@@ -488,7 +488,7 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
         assert subagent.extra == {"ale": {"incomplete": True, "incomplete_reason": "interrupted"}}
 
 
-def test_unlinked_subagents_stay_raw_evidence(tmp_path: Path) -> None:
+def test_unlinked_subagents_are_reported(tmp_path: Path) -> None:
     logs = qwen_logs(tmp_path)
     (logs / f"{CHILD}.meta.json").write_text(child_meta("child-1", "call-missing"))
 
@@ -498,7 +498,7 @@ def test_unlinked_subagents_stay_raw_evidence(tmp_path: Path) -> None:
     issues = trajectory.extra["ale"]["parse_issues"]  # type: ignore[index]
     assert {"reason": "unlinked_subagent", "source": f"{CHILD}.jsonl"} in issues
     assert any(
-        issue["reason"] == "unconverted_native_files" and f"{CHILD}.jsonl" in issue["sources"]
+        issue["reason"] == "unconverted_native_sessions" and f"{CHILD}.jsonl" in issue["sources"]
         for issue in issues
     )
 

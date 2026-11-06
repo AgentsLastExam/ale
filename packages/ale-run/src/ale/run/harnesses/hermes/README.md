@@ -44,7 +44,7 @@ A session records its origin, never the call that caused it: a `delegate_task` c
 subagent trajectory, embedded in its spawner's, when its first message is the goal of
 exactly one task the parent's calls name (from `tasks`, possibly sent as a JSON string,
 or the single `goal`) and no other child of that parent starts with the same goal.
-Every other delegated session under the episode's conversation stays raw evidence with an
+Every other delegated session under the episode's conversation is left unconverted with an
 `unlinked_subagent` issue; branched, reset and tool sessions are not subagents. MCP tools
 are `mcp__<server>__<tool>` with other characters replaced by `_`; the declared server
 name is restored from `config.yaml`. The settings are `max_turns` and `reasoning_effort`.

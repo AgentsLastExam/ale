@@ -75,7 +75,13 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         issues.append({"reason": "native_session_unavailable", "session_id": expected})
     issues.extend(
         unconverted(
-            context, (path for path in files if len(sessions) != 1 or path.parent != sessions[0])
+            context,
+            (
+                path
+                for path in files
+                if path.name == "chat_history.jsonl"
+                and (len(sessions) != 1 or path.parent != sessions[0])
+            ),
         )
     )
     results = {

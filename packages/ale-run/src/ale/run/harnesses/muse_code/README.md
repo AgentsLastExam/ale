@@ -1,14 +1,14 @@
 # Muse Code
 
-Pinned to Muse Code `1.4.13-R6996.1`, Meta's release binaries for Linux x86_64 and aarch64,
-Windows x86_64 and macOS arm64. Its public settings are `reasoning_effort`,
+Pinned to Muse Code `1.4.13-R6996.1`, Meta's release binaries for Linux and Windows, each
+x86_64 and aarch64, and macOS arm64. Its public settings are `reasoning_effort`,
 `max_model_steps`, `reminders` and `web_tools`.
 
 Runs Meta's Muse Code headless: `muse exec --json --prompt-file`, with `--yolo`, so
 neither Muse's approval nor its own sandbox stands between the agent and the ALE
 Sandbox, and `--no-foreign-personal-context`, so other agents' personal Skills stay out.
 The program is Meta's single-file release binary for the Sandbox's OS and architecture,
-pinned by SHA-256 from the release manifest; upstream ships no Windows ARM build.
+pinned by SHA-256 from the release manifest.
 
 Muse keeps settings under `XDG_CONFIG_HOME` and sessions under `XDG_DATA_HOME`. The
 command names their defaults, `.config` and `.local/share` in the agent home, so both
@@ -35,6 +35,6 @@ stored in the parent's `subagent/<child id>/`. It becomes an embedded trajectory
 that call has a result; any other session there is reported as an `unlinked_subagent`.
 Reminder agents, on unless `reminders = false`, are the exception: Muse runs them itself,
 with no call of the model to link, and stores their sessions in the same place. The parent names each one in a `memory_reminder_child_session_linked` run event,
-so the parser leaves those sessions as raw evidence named in `unconverted_native_files`
+so the parser leaves those sessions unconverted, named in `unconverted_native_sessions`
 without reporting them as unlinked. The step ceiling fails the run with "did not reach a
 terminal state"; ALE reports it as the `max_model_steps` Harness limit.

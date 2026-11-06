@@ -52,8 +52,6 @@ class Case:
     dialect: str
     tool_pattern: str
     model: str = "scripted-model"
-    #: Parse issues the CLI's evidence always raises, by reason.
-    expected_issues: frozenset[str] = frozenset()
 
 
 DIALECTS = ("anthropic", "openai-chat-completions", "openai-responses")
@@ -63,13 +61,8 @@ CASES: dict[str, Case] = {
     "codex-cli-openai-responses": Case(
         CodexCliHarness, "openai-responses", r"^(shell|exec_command)$"
     ),
-    # Grok keeps its prompt history, search index and a log beside the sessions it mirrors;
-    # the parser leaves them as raw evidence.
     "grok-build-openai-responses": Case(
-        GrokBuildHarness,
-        "openai-responses",
-        r"^run_terminal_command$",
-        expected_issues=frozenset({"unconverted_native_files"}),
+        GrokBuildHarness, "openai-responses", r"^run_terminal_command$"
     ),
     "openclaw-cli-openai-responses": Case(OpenClawCliHarness, "openai-responses", r"^exec$"),
     **{
@@ -208,8 +201,7 @@ async def test_cli_runs_a_scripted_episode_through_the_gateway(tmp_path: Path, n
         assert proof.stdout.strip() == "scripted"
         trajectory = await mirrored_trajectory(tmp_path, episode, prompts[0], native_id)
 
-    issues = (trajectory.extra or {}).get("ale", {}).get("parse_issues") or ()
-    assert {issue["reason"] for issue in issues} <= case.expected_issues
+    assert not (trajectory.extra or {}).get("ale", {}).get("parse_issues")
     users = [step.message for step in trajectory.steps if step.source == "user"]
     assert users == list(prompts)
     calls = [call for step in trajectory.steps for call in step.tool_calls or ()]

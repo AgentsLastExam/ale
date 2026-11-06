@@ -421,7 +421,7 @@ def test_parser_follows_the_native_session_and_embeds_its_subagent(tmp_path: Pat
     assert trajectory.final_metrics.total_prompt_tokens == 5
 
 
-def test_unlinked_subagents_and_missing_media_stay_raw_evidence(tmp_path: Path) -> None:
+def test_unlinked_subagents_and_missing_media_are_reported(tmp_path: Path) -> None:
     logs = kimi_logs(tmp_path)
     wire = logs / SESSION_DIR / "agents/main/wire.jsonl"
     wire.write_text(
@@ -438,7 +438,7 @@ def test_unlinked_subagents_and_missing_media_stay_raw_evidence(tmp_path: Path) 
     child = f"{SESSION_DIR}/agents/child-1/wire.jsonl"
     assert {"reason": "unlinked_subagent", "source": child} in issues
     assert any(
-        issue["reason"] == "unconverted_native_files" and child in issue["sources"]
+        issue["reason"] == "unconverted_native_sessions" and child in issue["sources"]
         for issue in issues
     )
     assert any(issue["reason"] == "missing_blob" for issue in issues)

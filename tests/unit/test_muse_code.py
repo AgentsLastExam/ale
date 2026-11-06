@@ -51,6 +51,7 @@ def test_release_binaries_are_pinned_for_every_system() -> None:
         (OperatingSystem.LINUX, "x86_64"),
         (OperatingSystem.LINUX, "aarch64"),
         (OperatingSystem.WINDOWS, "x86_64"),
+        (OperatingSystem.WINDOWS, "aarch64"),
         (OperatingSystem.MACOS, "aarch64"),
     }
     assert all(
@@ -482,7 +483,7 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
         assert subagent.extra == {"ale": {"incomplete": True, "incomplete_reason": "interrupted"}}
 
 
-def test_a_subagent_without_its_start_attestation_stays_raw_evidence(tmp_path: Path) -> None:
+def test_a_subagent_without_its_start_attestation_is_unconverted(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
     write_spawn(logs, working_session(), attested=False)
 
@@ -491,13 +492,13 @@ def test_a_subagent_without_its_start_attestation_stays_raw_evidence(tmp_path: P
     assert trajectory.subagent_trajectories is None
     assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "unlinked_subagent", "source": CHILD_LOG},
-        {"reason": "unconverted_native_files", "count": 1, "sources": [CHILD_LOG]},
+        {"reason": "unconverted_native_sessions", "count": 1, "sources": [CHILD_LOG]},
     ]
     results = trajectory.steps[1].observation.results  # type: ignore[union-attr]
     assert [result.subagent_trajectory_ref for result in results] == [None, None]
 
 
-def test_reminder_agents_stay_raw_evidence_without_being_unlinked(tmp_path: Path) -> None:
+def test_reminder_agents_are_unconverted_without_being_unlinked(tmp_path: Path) -> None:
     # Muse runs its reminder agents on its own, with no call of the model to start them, and
     # keeps their logs below the session as it does a subagent's.
     logs = tmp_path / "logs"
@@ -515,7 +516,7 @@ def test_reminder_agents_stay_raw_evidence_without_being_unlinked(tmp_path: Path
 
     assert trajectory.subagent_trajectories is None
     assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
-        {"reason": "unconverted_native_files", "count": 1, "sources": [reminder]}
+        {"reason": "unconverted_native_sessions", "count": 1, "sources": [reminder]}
     ]
 
 

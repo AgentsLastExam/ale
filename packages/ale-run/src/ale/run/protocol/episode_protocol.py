@@ -1049,7 +1049,6 @@ class EpisodeProtocol:
         if (
             ctx.agent_run is not None
             and not ale.get("incomplete")
-            and not ale.get("parse_issues")
             and ctx.logging_policy.native_logs == "minimal"
         ):
             shutil.rmtree(ctx.run_dir / "logs" / self.harness.name, ignore_errors=True)

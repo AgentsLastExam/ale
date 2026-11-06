@@ -29,8 +29,8 @@ A session is `.kimi-ale/sessions/<work directory bucket>/<session id>/`. The par
 follows `agents/main/wire.jsonl` in native order. A subagent becomes an embedded
 trajectory when the caller's wire holds a `subagent.spawned` record naming the calling
 tool call, that call has a result, and the subagent's own `agents/<id>/wire.jsonl` is
-present. Images larger than 4 KiB are read from `agents/<id>/blobs`. Any other wire stays
-raw evidence and is named in `parse_issues`.
+present. Images larger than 4 KiB are read from `agents/<id>/blobs`. Any other wire is
+left unconverted and named in `parse_issues`.
 
 The Grep tool needs ripgrep. The bases do not provide it and Kimi downloads it on first
 use, which fails once egress is sealed; the agent can still search through Bash.

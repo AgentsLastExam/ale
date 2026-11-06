@@ -180,7 +180,7 @@ async def test_polling_only_copies_logs_and_retries_after_a_timeout(tmp_path, mo
         ),
     ],
 )
-def test_minimal_retention_keeps_native_sessions_outside_parser_coverage(
+def test_minimal_retention_names_an_unconverted_session_and_drops_the_logs(
     tmp_path, harness, native_file, root_event
 ):
     ctx = _context(tmp_path)
@@ -207,12 +207,13 @@ def test_minimal_retention_keeps_native_sessions_outside_parser_coverage(
     assert "unconverted child evidence" not in json.dumps(trajectory)
     assert trajectory["extra"]["ale"]["parse_issues"] == [
         {
-            "reason": "unconverted_native_files",
+            "reason": "unconverted_native_sessions",
             "count": 1,
             "sources": [child.relative_to(logs).as_posix()],
         }
     ]
-    assert child.read_text() == '{"message":"unconverted child evidence"}\n'
+    # Parse issues describe the trajectory; they do not keep the native logs.
+    assert not logs.exists()
 
 
 @pytest.mark.asyncio

@@ -59,20 +59,7 @@ as RUNNING; the tool's final output arrives only later, in `steps/<n>/output.txt
 that file holds output the record lacks, it is kept on the step's result as
 `extra.ale.final_output`, and the result's content stays what the model received.
 
-agy keeps copies beside each transcript: an abridged `transcript.jsonl` with arguments
-as JSON text and long fields cut, both split under `logs/chunks/`, each tool's
-`steps/<n>/output.txt` and images, the `messages/` delivered to the conversation with
-their `read.json`, background `tasks/*.log`, and `.agents/agents/<name>/agent.md` for a
-`define_subagent` call. Each is consumed only when the converted records hold all of its
-content.
-
-`conversations/<id>.db` is consumed with its conversation while its `steps` table holds no
-more steps than the transcript. That table repeats the step records with agy's internal
-state: nanosecond timestamps, request and call IDs, encrypted thought signatures, UI
-`render_info`, permissions and task details. `gen_metadata` holds each generation's usage,
-latency and model, and in its last row the full model request (system prompt, tool
-declarations, message history), which the Gateway's transport trace records.
-`executor_metadata` and `trajectory_metadata_blob` hold agy's feature flags, permission
-rules and project; `parent_references` and `battle_mode_infos` are empty. A database
-with more steps than the transcript holds a turn the transcript lost and stays raw
-evidence.
+agy also keeps an abridged `transcript.jsonl`, chunked copies of both transcripts, the
+`messages/` delivered to a conversation, background `tasks/*.log`, the
+`.agents/agents/<name>/agent.md` a `define_subagent` call wrote, and
+`conversations/<id>.db`. The parser reads none of them.

@@ -236,10 +236,11 @@ regardless of retention policy, and continues to artifact capture and verificati
 A CLI trajectory is the native session's conversation in native order. Stdout adds only
 what the session lacks, such as terminal results and failures, at the point it occurred.
 When the session is unavailable, each turn is rebuilt from its recorded prompt and its
-own stdout, and a `parse_issues` entry says so; nothing is invented. Mirrored session
-files the parser does not use are named in `parse_issues` and so survive minimal
-retention. ALE converts once, after the final log copy, and then adds transport links,
-exact token enrichment, and retention.
+own stdout, and a `parse_issues` entry says so; nothing is invented. A mirrored native
+session the parser found but did not convert is named in `parse_issues`, since the
+trajectory lacks that conversation; the program's other files are not named. Parse issues
+do not decide retention (see [Trace](trace.md)). ALE converts once, after the final log
+copy, and then adds transport links, exact token enrichment, and retention.
 
 A spawned child session becomes a subagent trajectory (see [Trace](trace.md)) only when
 the native evidence identifies the call that spawned it. Otherwise it stays raw evidence

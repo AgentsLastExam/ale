@@ -413,5 +413,5 @@ def test_a_failure_only_the_stream_reports_ends_its_turn(tmp_path: Path) -> None
         ("system", "terminated"),
     ]
     (issue,) = trajectory.extra["ale"]["parse_issues"]  # type: ignore[index]
-    assert issue["reason"] == "unconverted_native_files"
+    assert issue["reason"] == "unconverted_native_sessions"
     assert issue["sources"] == [f".droid-ale/.factory/sessions/-home-agent/{other}.jsonl"]

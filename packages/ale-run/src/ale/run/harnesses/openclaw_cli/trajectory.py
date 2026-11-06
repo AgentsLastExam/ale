@@ -103,7 +103,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         for path in files
         if _is_transcript(PurePosixPath(path.relative_to(context.logs_dir).as_posix()))
     }
-    # Without the root transcript no spawn can be found, so every child stays raw evidence.
+    # Without the root transcript no spawn can be found, so every child is left unconverted.
     index = _session_index(context, issues) if events else {}
     subagents, spawned = _subagents(context, expected, events, index, transcripts, issues, consumed)
     issues.extend(unconverted(context, transcripts - consumed))
@@ -177,7 +177,7 @@ def _subagents(
 
     The session index names each child's transcript and the session key that spawned it,
     and the ``sessions_spawn`` result names the key of the child it started. A child that
-    no spawn result names stays raw evidence with a parse issue.
+    no spawn result names is left unconverted with a parse issue.
     """
     parents = {key for key, entry in index.items() if entry.session_id == session_id}
     # Only a mirrored transcript is read, whatever session ID the index claims.

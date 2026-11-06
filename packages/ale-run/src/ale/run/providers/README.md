@@ -138,7 +138,7 @@ disk boots from, written into the SYSTEM hive with hivex, plus files copied into
   own hidden console, restarting either that exits.
 - The service reads the Host's `ale-sudo` SMBIOS serial and passes it to guestd, which
   runs agent commands with the desktop's limited token unless it is set.
-- A Task image build boots a framed copy of its base, so its `run.ps1` runs beside the
+- A Task image build boots a framed copy of its base, so its `build.ps1` runs beside the
   same guestd as every sandbox, and the saved image already carries the framework.
 
 ## Orchard

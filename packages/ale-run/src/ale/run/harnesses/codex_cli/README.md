@@ -31,8 +31,9 @@ being parsed. A thread that ran `exec` with no trace is reported as
 
 The trace also keeps every model request and response in full, which the parser never
 reads, so it grows with the square of the turn count; with `native_logs = "minimal"`
-ALE deletes it after a clean parse. Tracing adds an `x-codex-inference-call-id` header to
-each model request, which the Gateway forwards and leaves out of the request digest.
+ALE deletes it after a complete conversion. Tracing adds an `x-codex-inference-call-id`
+header to each model request, which the Gateway forwards and leaves out of the request
+digest.
 
 A spawned thread's rollout names its parent in `session_meta.parent_thread_id`. Its
 spawning call is the parent's call whose result names the thread ID: `spawn_agent`, or a

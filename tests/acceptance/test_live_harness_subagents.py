@@ -59,7 +59,7 @@ def test_real_subagent_work_lands_in_its_own_trajectory(tmp_path: Path, harness:
     assert not [
         issue
         for issue in issues
-        if issue["reason"] in {"unlinked_subagent", "unconverted_native_files"}
+        if issue["reason"] in {"unlinked_subagent", "unconverted_native_sessions"}
     ], issues
     assert subagents
     # Each is referenced from the call that spawned it; ATIF validation already

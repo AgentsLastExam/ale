@@ -106,7 +106,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
     transcripts = [path for path in files if path.name == SESSION_LOG]
     if len(logs) == 1:
         # A reminder agent Muse runs on its own has no spawning call to link, but its
-        # session names it, so it stays raw evidence without being reported as unlinked.
+        # session names it, so it is left unconverted without being reported as unlinked.
         children = logs[0].parent / "subagent"
         issues.extend(
             {
