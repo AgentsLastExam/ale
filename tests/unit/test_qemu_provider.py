@@ -35,6 +35,7 @@ from ale.core.taskspec import (
     OperatingSystem,
     Resources,
 )
+from ale.run.gpu import parse_nvidia_smi
 from ale.run.providers.qemu import (
     EPISODE_LABEL,
     GATEWAY_CHAIN,
@@ -51,7 +52,7 @@ from ale.run.providers.qemu import (
     _index_vfio_gpus,
     _inspect_vfio_gpu,
     _port_of,
-    _verify_qemu_gpu_count,
+    _verify_qemu_gpus,
     _VfioGpu,
 )
 
@@ -996,9 +997,17 @@ class TestVfioGpu:
                 )
             )
 
-    def test_guest_must_observe_the_requested_count(self) -> None:
+    def test_guest_must_observe_the_requested_count_and_models(self) -> None:
+        (h100,) = parse_nvidia_smi(
+            "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, NVIDIA H100 80GB HBM3, "
+            "00000000:65:00.0, 580.1\n"
+        )
         with pytest.raises(ProviderCapabilityError, match="count mismatch"):
-            _verify_qemu_gpu_count(1, ())
+            _verify_qemu_gpus(Resources(gpus=1), ())
+        assert _verify_qemu_gpus(Resources(gpus=1), (h100,)) == (h100,)
+        assert _verify_qemu_gpus(Resources(gpus=1, gpu_types=("H100",)), (h100,)) == (h100,)
+        with pytest.raises(ProviderCapabilityError, match=r"gave NVIDIA H100 80GB HBM3"):
+            _verify_qemu_gpus(Resources(gpus=1, gpu_types=("RTX-PRO-6000",)), (h100,))
 
 
 class _ExecClient:

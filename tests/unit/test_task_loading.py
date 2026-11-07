@@ -131,6 +131,22 @@ def test_a_verifier_environment_falls_back_to_the_solver_s_size(tmp_path: Path) 
     assert (resources.cpus, resources.memory_mb, resources.storage_mb) == (3, 2048, 1024)
 
 
+def test_gpu_types_are_harbor_s_and_absent_accepts_every_model(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    edit(task, {"environment": {"gpus": 1}, "verifier": {"environment_mode": "separate"}})
+    spec = load_tasks(task)[0].spec
+    assert spec.resources.gpu_types == ()
+    edit(task, {"environment": {"gpu_types": ["RTX-PRO-6000", "L40S"]}})
+    spec = load_tasks(task)[0].spec
+    assert spec.resources.gpu_types == ("RTX-PRO-6000", "L40S")
+    # A separate verifier without its own table is sized as the solver, as in Harbor.
+    assert spec.verify.resources is not None
+    assert spec.verify.resources.as_resources().gpu_types == ("RTX-PRO-6000", "L40S")
+    edit(task, {"verifier": {"environment": {"gpus": 2, "gpu_types": ["H100"]}}})
+    verifier = load_tasks(task)[0].spec.verify.resources
+    assert verifier is not None and (verifier.gpus, verifier.gpu_types) == (2, ("H100",))
+
+
 def test_load_errors_name_the_key(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     edit(task, {"environment": {"healthcheck": {"command": "true"}}})

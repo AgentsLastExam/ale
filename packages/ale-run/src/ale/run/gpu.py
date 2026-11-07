@@ -1,4 +1,4 @@
-"""Exclusive physical NVIDIA GPU leases."""
+"""Physical NVIDIA GPUs: the models a Task accepts, and exclusive leases."""
 
 from __future__ import annotations
 
@@ -19,6 +19,16 @@ _UUID = re.compile(
     re.IGNORECASE,
 )
 _BDF = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$", re.IGNORECASE)
+_WORD = re.compile(r"[a-z0-9]+")
+#: Harbor's names whose words are not the model's, by the model they stand for: GKE
+#: accelerator labels, which Harbor takes on GKE and Daytona, and its ``h100-mega``.
+_ALIASES = {
+    "nvidia-tesla-t4": "T4",
+    "nvidia-tesla-a100": "A100 40GB",
+    "h100-mega": "H100 80GB",
+    "nvidia-h100-mega-80gb": "H100 80GB",
+    "nvidia-h200-141gb": "H200",
+}
 
 
 def normalize_nvidia_uuid(value: str) -> str:
@@ -58,6 +68,22 @@ def parse_nvidia_smi(output: str) -> tuple[GpuDevice, ...]:
     if not devices:
         raise ProviderCapabilityError("nvidia-smi reported no physical GPUs")
     return tuple(devices)
+
+
+def accepts_model(gpu_types: tuple[str, ...], model: str) -> bool:
+    """Whether a Task accepting ``gpu_types`` accepts the GPU nvidia-smi names ``model``.
+
+    The rule is the Task authoring spec's: a name accepts a model whose words include all of
+    its own, in order; no names accept every model.
+    """
+    words = _WORD.findall(model.lower())
+    for gpu_type in gpu_types:
+        name = gpu_type.strip().lower()
+        remaining = iter(words)
+        wanted = _WORD.findall(_ALIASES.get(name, name).lower())
+        if wanted and all(word in remaining for word in wanted):
+            return True
+    return not gpu_types
 
 
 class GpuLease:

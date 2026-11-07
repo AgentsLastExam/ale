@@ -59,10 +59,10 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, OperatingSystem
+from ale.core.taskspec import NetworkMode, OperatingSystem, Resources
 from ale.run import ale_image, guestd
 from ale.run.framework import framed_disk
-from ale.run.gpu import GpuLease, normalize_pci_bdf, parse_nvidia_smi
+from ale.run.gpu import GpuLease, accepts_model, normalize_pci_bdf, parse_nvidia_smi
 from ale.run.images import (
     resolve_local_vm_fixture,
     resolve_prepared_vm_image,
@@ -169,12 +169,23 @@ def _index_vfio_gpus(candidates: tuple[_VfioGpu, ...]) -> dict[str, _VfioGpu]:
     return by_group
 
 
-def _verify_qemu_gpu_count(
-    requested: int, observed: tuple[GpuDevice, ...]
+def _verify_qemu_gpus(
+    requested: Resources, observed: tuple[GpuDevice, ...]
 ) -> tuple[GpuDevice, ...]:
-    if len(observed) != requested:
+    """The guest's GPUs, as many as requested and each of a model the Task accepts.
+
+    A device bound to ``vfio-pci`` has no Host driver to name its model, so the guest's
+    ``nvidia-smi`` names it once the guest boots.
+    """
+    if len(observed) != requested.gpus:
         raise ProviderCapabilityError(
-            f"QEMU GPU count mismatch: requested {requested}, observed {len(observed)}"
+            f"QEMU GPU count mismatch: requested {requested.gpus}, observed {len(observed)}"
+        )
+    gpu_types = requested.gpu_types
+    foreign = [device.model for device in observed if not accepts_model(gpu_types, device.model)]
+    if foreign:
+        raise ProviderCapabilityError(
+            f"the QEMU GPU pool gave {', '.join(foreign)}, none of gpu_types {list(gpu_types)}"
         )
     return observed
 
@@ -795,7 +806,7 @@ class QemuProvider(Provider):
             )
             observed_gpu = await self._guest_gpus(client) if selected else ()
             if selected:
-                _verify_qemu_gpu_count(request.resources.gpus, observed_gpu)
+                _verify_qemu_gpus(request.resources, observed_gpu)
             desktop: DesktopResolution | None = None
             if has_desktop:
                 # The guest decided from its own configuration that it shows a desktop. Its

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from ale.core.errors import ProviderCapabilityError
-from ale.run.gpu import GpuLease, normalize_nvidia_uuid, normalize_pci_bdf
+from ale.run.gpu import GpuLease, accepts_model, normalize_nvidia_uuid, normalize_pci_bdf
 
 pytestmark = pytest.mark.unit
 
@@ -24,6 +24,46 @@ def _try_lease(lock_dir: str, output: multiprocessing.Queue[bool]) -> None:
 def _acquire_and_exit(lock_dir: str, output: multiprocessing.Queue[bool]) -> None:
     GpuLease.acquire(("GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",), 1, Path(lock_dir))
     output.put(True)
+
+
+@pytest.mark.parametrize(
+    ("gpu_type", "model"),
+    [
+        ("H100", "NVIDIA H100 80GB HBM3"),
+        ("h100", "NVIDIA H100 NVL"),
+        ("nvidia-h100-80gb", "NVIDIA H100 80GB HBM3"),
+        ("RTX-PRO-6000", "NVIDIA RTX PRO 6000 Blackwell Server Edition"),
+        ("RTX-4090", "NVIDIA GeForce RTX 4090"),
+        ("L40S", "NVIDIA L40S"),
+        ("a100-80gb", "NVIDIA A100-SXM4-80GB"),
+        # Harbor's names whose words are not the model's.
+        ("nvidia-tesla-t4", "Tesla T4"),
+        ("nvidia-tesla-a100", "NVIDIA A100-PCIE-40GB"),
+        ("h100-mega", "NVIDIA H100 80GB HBM3"),
+        ("nvidia-h200-141gb", "NVIDIA H200"),
+    ],
+)
+def test_a_gpu_type_accepts_the_model_nvidia_smi_names(gpu_type: str, model: str) -> None:
+    assert accepts_model((gpu_type,), model)
+    assert accepts_model(("T4", gpu_type), model)
+
+
+@pytest.mark.parametrize(
+    ("gpu_type", "model"),
+    [
+        ("H100", "NVIDIA H200"),
+        ("A10", "NVIDIA A100-SXM4-80GB"),
+        ("L4", "NVIDIA L40S"),
+        ("a100-40gb", "NVIDIA A100-SXM4-80GB"),
+        ("nvidia-h100-80gb", "NVIDIA H100 NVL"),
+    ],
+)
+def test_a_gpu_type_accepts_no_other_model(gpu_type: str, model: str) -> None:
+    assert not accepts_model((gpu_type,), model)
+
+
+def test_naming_no_gpu_type_accepts_every_model() -> None:
+    assert accepts_model((), "NVIDIA H100 80GB HBM3")
 
 
 def test_gpu_identities_are_canonical() -> None:

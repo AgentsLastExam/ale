@@ -252,12 +252,6 @@ class DaytonaProviderConfig(BaseModel):
     """Daytona deletes a sandbox this long after creation, so a crashed run cannot leak one."""
     retained_lifetime_hours: int = Field(default=72, ge=1, le=720, strict=True)
     """The same limit for sandboxes kept with ``sandbox_retention``."""
-    gpu_types: tuple[Annotated[str, Field(min_length=1)], ...] = ("H100",)
-    """GPU models a sandbox that requests GPUs may get, in order of preference.
-
-    Tasks ask for a count only. Daytona pins a sandbox to the first model with capacity, so
-    one model keeps results comparable; empty lets Daytona choose any.
-    """
 
 
 class ContainerProviderConfig(BaseModel):

@@ -210,6 +210,13 @@ def test_task_config_rejects_unknown_keys() -> None:
         ),
         ({"environment": {"cpus": 1.5}}, "valid integer"),
         ({"environment": {"skills_dir": "skills"}}, "skills_dir must be an absolute path"),
+        ({"environment": {"gpu_types": ["H100"]}}, r"\[environment\]\.gpu_types requires gpus"),
+        (
+            {"verifier": {"environment": {"gpu_types": ["H100"]}}},
+            r"\[verifier\.environment\]\.gpu_types requires gpus",
+        ),
+        ({"environment": {"gpus": 1, "gpu_types": []}}, "at least 1 item"),
+        ({"environment": {"gpus": 1, "gpu_types": [" - "]}}, "should match pattern"),
         ({"environment": {"vm": "yes"}}, "valid boolean"),
         ({"agent": {"sudo": "yes"}}, "valid boolean"),
         (

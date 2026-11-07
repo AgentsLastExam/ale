@@ -6,8 +6,10 @@ import json
 import pytest
 
 from ale.core.errors import ProviderCapabilityError
+from ale.core.taskspec import Resources
 from ale.run.providers.docker import (
     DockerProvider,
+    _eligible_gpus,
     _gpu_run_args,
     _managed_gpu_ids,
     _parse_host_nvidia_smi,
@@ -19,6 +21,7 @@ from ale.run.providers.docker import (
 pytestmark = pytest.mark.unit
 
 UUID = "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+OTHER = "GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
 
 def test_nvidia_smi_rows_are_strict_and_normalized() -> None:
@@ -35,6 +38,24 @@ def test_host_nvidia_smi_rows_are_indexed() -> None:
         f"2, {UUID.upper()}, NVIDIA RTX 6000, 00000000:65:00.0, 570.1\n"
     )
     assert devices[2].id == UUID
+
+
+def test_only_configured_gpus_of_a_model_the_task_accepts_are_leased() -> None:
+    host = _parse_host_nvidia_smi(
+        f"0, {UUID}, NVIDIA H100 80GB HBM3, 00000000:01:00.0, 580.1\n"
+        f"1, {OTHER}, NVIDIA RTX PRO 6000 Blackwell Server Edition, 00000000:02:00.0, 580.1\n"
+    )
+    assert _eligible_gpus(host, (), Resources(gpus=1)) == (UUID, OTHER)
+    rtx = Resources(gpus=1, gpu_types=("L40S", "RTX-PRO-6000"))
+    assert _eligible_gpus(host, (), rtx) == (OTHER,)
+    with pytest.raises(ProviderCapabilityError, match=r"Docker may use 1 NVIDIA H100 80GB HBM3$"):
+        _eligible_gpus(host, (0,), rtx)
+    # Too few without gpu_types is the lease's to refuse, as it is when GPUs are busy.
+    assert _eligible_gpus(host, (), Resources(gpus=3)) == (UUID, OTHER)
+    with pytest.raises(ProviderCapabilityError, match="needs 2 GPUs of gpu_types"):
+        _eligible_gpus(host, (), rtx.model_copy(update={"gpus": 2}))
+    with pytest.raises(ProviderCapabilityError, match="not discovered: 7"):
+        _eligible_gpus(host, (7,), rtx)
 
 
 def test_docker_receives_only_selected_uuids() -> None:

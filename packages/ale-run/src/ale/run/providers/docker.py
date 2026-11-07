@@ -17,6 +17,7 @@ import contextlib
 import json
 import shutil
 import uuid
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -45,10 +46,10 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, OperatingSystem
+from ale.core.taskspec import NetworkMode, OperatingSystem, Resources
 from ale.run import ale_image, guestd
 from ale.run.framework import with_framework
-from ale.run.gpu import GpuLease, parse_nvidia_smi
+from ale.run.gpu import GpuLease, accepts_model, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.privileges import set_elevation, verify_identities
@@ -165,6 +166,32 @@ def _parse_host_nvidia_smi(output: str) -> dict[int, GpuDevice]:
     if not devices:
         raise ProviderCapabilityError("nvidia-smi reported no physical GPUs")
     return devices
+
+
+def _eligible_gpus(
+    host_devices: dict[int, GpuDevice], configured: tuple[int, ...], resources: Resources
+) -> tuple[str, ...]:
+    """The UUIDs of the host GPUs the Task accepts, among the configured indices or, when
+    none are configured, among all of them."""
+    indices = configured or tuple(sorted(host_devices))
+    unknown = sorted(set(indices) - set(host_devices))
+    if unknown:
+        raise ProviderCapabilityError(
+            "configured Docker GPU indices were not discovered: "
+            + ", ".join(str(index) for index in unknown)
+        )
+    eligible = tuple(
+        host_devices[index].id
+        for index in indices
+        if accepts_model(resources.gpu_types, host_devices[index].model)
+    )
+    if resources.gpu_types and len(eligible) < resources.gpus:
+        usable = Counter(host_devices[index].model for index in indices)
+        raise ProviderCapabilityError(
+            f"the Task needs {resources.gpus} GPUs of gpu_types {list(resources.gpu_types)}; "
+            "Docker may use " + ", ".join(f"{count} {model}" for model, count in usable.items())
+        )
+    return eligible
 
 
 def _gpu_run_args(uuids: tuple[str, ...]) -> list[str]:
@@ -480,15 +507,7 @@ class DockerProvider(Provider):
         selected: tuple[str, ...] = ()
         candidates: tuple[str, ...] = ()
         if request.resources.gpus:
-            host_devices = await self._host_gpus()
-            configured = self.gpus or tuple(sorted(host_devices))
-            unknown = sorted(set(configured) - set(host_devices))
-            if unknown:
-                raise ProviderCapabilityError(
-                    "configured Docker GPU indices were not discovered: "
-                    + ", ".join(str(index) for index in unknown)
-                )
-            candidates = tuple(host_devices[index].id for index in configured)
+            candidates = _eligible_gpus(await self._host_gpus(), self.gpus, request.resources)
         if request.snapshot is not None:
             resolved_image = await self._snapshot_image(request.snapshot, request)
         else:

@@ -78,6 +78,7 @@ cpus = 1                                    # whole CPUs; default 1
 memory_mb = 4096                            # default 4096
 storage_mb = 8192                           # writable storage; default the Provider's
 gpus = 0                                    # GPU count, not indices; default 0
+# gpu_types = ["RTX-PRO-6000", "L40S"]      # models any of which will do; default any
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # see Variables
 skills_dir = "/skills"                      # absolute; the Task's Skills in the image
 
@@ -111,6 +112,7 @@ cpus = 1                                    # default [environment].cpus
 memory_mb = 4096                            # default [environment].memory_mb
 storage_mb = 8192                           # default the Provider's
 gpus = 0                                    # default 0
+# gpu_types = ["H100"]                      # default any
 env = {}                                    # replaces [environment].env
 
 [solution]
@@ -126,9 +128,9 @@ their fixed directories.
 
 Harbor's other fields fall into two groups. Nothing in ALE replaces multi-step Tasks (`steps`,
 `multi_step_reward_strategy`), compose sidecars (`docker-compose.yaml`, which `ale lint` refuses,
-an artifact's `service`, `[[verifier.collect]]`), or GPU type and TPU selection (`gpu_types`,
-`tpu`). ALE's design covers the rest. `environment/setup/` can wait for a service, so there is no
-`healthcheck`. Stages run in fixed directories under the framework's identity, so there is no
+an artifact's `service`, `[[verifier.collect]]`), or TPU selection (`tpu`). ALE's design
+covers the rest. `environment/setup/` can wait for a service, so there is no `healthcheck`.
+Stages run in fixed directories under the framework's identity, so there is no
 `[environment].workdir` or `[verifier].user`. `[agent].network_mode` is the one network setting.
 ALE keeps its copies in an inventory of its own, so an artifact has no `destination`. An origin
 belongs in `[metadata]`, so there is no `source`.
@@ -148,6 +150,8 @@ These values differ from Harbor's:
   and an empty value counts as unset; see [Variables](#variables).
 - A `skills_dir` that does not exist fails the Episode.
 - `tests/Dockerfile` without separate verification fails, where Harbor ignores it.
+- `gpu_types` holds at least one name and requires `gpus`, and every Provider honors it,
+  where Harbor's Docker environment ignores it; see [GPUs](#gpus).
 - `allowed_hosts` refuses entries that reach the Host; see [Resources and network](#resources-and-network).
 - The verifier writes `reward.json` only, with `reward` between 0 and 1; see [tests/](#tests).
 
@@ -209,6 +213,25 @@ selection. `ale lint` requires `[metadata].network_justification` for `public`.
 `[environment]` resources are the whole Sandbox's allocation. The image's own processes, such
 as the GUI base images' desktop, share it with the agent and every program the agent starts,
 so a GUI Task leaves an agent CLI room above the desktop.
+
+### GPUs
+
+`gpus` is a count of whole NVIDIA GPUs. `gpu_types` lists the models the Task accepts, by
+Harbor's names such as `H100`, `L40S` or `RTX-PRO-6000`; any one of them will do. Without
+it, every model is accepted, as in Harbor. A Task that runs only on some models names them:
+one rendering with RTX cameras, for instance, needs GPUs with RT cores, which an H100 lacks.
+
+A name accepts a GPU whose model, as `nvidia-smi` reports it, contains all of the name's
+words in order, ignoring case and punctuation: `RTX-PRO-6000` accepts
+`NVIDIA RTX PRO 6000 Blackwell Server Edition` and `A100-80GB` accepts
+`NVIDIA A100-SXM4-80GB`, while `A10` does not accept an A100. Harbor's names for GKE
+accelerators, such as `nvidia-tesla-t4` and `h100-mega`, stand for the model they name.
+
+Every Provider gives the Sandbox only accepted models, or refuses it before any Task code
+runs: a Task that names models would fail on others, and that failure would be scored as
+the agent's. The RunLock records the requested names beside the models observed in the
+Sandbox. How each Provider chooses is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-models).
 
 ### Variables
 

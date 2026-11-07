@@ -36,7 +36,6 @@ provider = "daytona"
 target = "us"                # Daytona region
 lifetime_hours = 24          # Daytona deletes a sandbox this long after creation
 retained_lifetime_hours = 72 # the same, for sandboxes kept with sandbox_retention
-gpu_types = ["H100"]         # GPU models in order of preference; [] lets Daytona choose
 ```
 
 ```bash
@@ -47,11 +46,12 @@ uv run ale run TASK --agent claude-code --set container.provider=daytona
 
 ## GPU Tasks
 
-A Task that sets `[environment].gpus` gets that many GPUs of the first model in `gpu_types`
-with capacity, in Daytona's GPU region, which Daytona chooses itself. The organization
-needs GPU quota there; Daytona's usage report lists it per region, with the CPU, memory
-and disk each GPU may come with. A sandbox takes up to 8 GPUs, and only NVIDIA models can
-be recorded, so `MI355X` cannot be used.
+A Task that sets `[environment].gpus` gets that many GPUs in Daytona's GPU region, which
+Daytona chooses itself, of a model its `gpu_types` accepts; how those names become Daytona's
+GPU types is in the
+[Providers README](../../packages/ale-run/src/ale/run/providers/README.md#gpu-models). The
+organization needs GPU quota there; Daytona's usage report lists it per region, with the
+CPU, memory and disk each GPU may come with. A sandbox takes up to 8 GPUs.
 
 GPU sandboxes are billed per GPU while they exist, and a kept one runs until
 `retained_lifetime_hours`. The first GPU episode of an image also waits for Daytona to pull

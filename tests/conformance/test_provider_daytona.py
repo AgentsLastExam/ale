@@ -253,14 +253,16 @@ print(json.dumps(vendors))
     reason="set ALE_TEST_DAYTONA_GPU=1 to run the suite on Daytona GPU sandboxes",
 )
 class TestDaytonaGpuProvider(TestDaytonaProvider):
-    """Every assertion again on sandboxes with a GPU, which Daytona runs in its GPU region,
+    """Every assertion again on sandboxes with an H100, which Daytona runs in its GPU region,
     on other machines than the rest: the seal, the tunnel and the desktop must hold there too.
     """
 
     async def request(self, **overrides: object) -> SandboxRequest:
         resources = overrides.get("resources", Resources(cpus=1, memory_mb=1024))
         assert isinstance(resources, Resources)
-        overrides["resources"] = resources.model_copy(update={"gpus": max(resources.gpus, 1)})
+        overrides["resources"] = resources.model_copy(
+            update={"gpus": max(resources.gpus, 1), "gpu_types": resources.gpu_types or ("H100",)}
+        )
         return await super().request(**overrides)
 
     @pytest.mark.asyncio
