@@ -20,7 +20,7 @@ from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_prove
 from ale.run.providers.docker import DockerProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import edit_task_config, prepare_reference, provider_registry
+from tests.support import CONTAINER_BASE, edit_task_config, prepare_reference, provider_registry
 
 pytestmark = [
     pytest.mark.needs_docker,
@@ -32,16 +32,23 @@ pytestmark = [
 ]
 
 
+def _gpu_image_reference() -> str:
+    image = os.environ.get("ALE_TEST_DOCKER_GPU_IMAGE")
+    tag = os.environ.get("ALE_TEST_DOCKER_GPU_TAG")
+    if image is None and tag is None:
+        return CONTAINER_BASE
+    return f"{image or CONTAINER_BASE.rsplit(':', 1)[0]}:{tag or 'latest'}"
+
+
+def _linker_cache_names(listing: str) -> set[str]:
+    return {line.split()[0] for line in listing.splitlines() if " => " in line}
+
+
 @pytest.mark.asyncio
 async def test_live_docker_gpu_operation_and_exclusive_lease() -> None:
     index = int(os.environ.get("ALE_TEST_DOCKER_GPU_INDEX", "0"))
     provider = DockerProvider(gpus=(index,))
-    default_image = "ghcr.io/agentslastexam/container-ubuntu22-base"
-    reference = (
-        f"{os.environ.get('ALE_TEST_DOCKER_GPU_IMAGE', default_image)}:"
-        f"{os.environ.get('ALE_TEST_DOCKER_GPU_TAG', 'latest')}"
-    )
-    prepared = await prepare_reference(provider, reference)
+    prepared = await prepare_reference(provider, _gpu_image_reference())
     request = SandboxRequest(
         episode_id="live-docker-gpu",
         prepared_image=prepared,
@@ -59,6 +66,58 @@ async def test_live_docker_gpu_operation_and_exclusive_lease() -> None:
         contender = DockerProvider(gpus=(index,))
         with pytest.raises(ProviderCapabilityError, match=r"available|candidates"):
             await contender.create(request.model_copy(update={"episode_id": "gpu-contender"}))
+    finally:
+        await sandbox.destroy()
+
+
+@pytest.mark.asyncio
+async def test_live_docker_gpu_sandbox_has_rendering_drivers() -> None:
+    host = subprocess.run(["/sbin/ldconfig", "-p"], check=True, capture_output=True, text=True)
+    if "libEGL_nvidia.so.0" not in _linker_cache_names(host.stdout):
+        pytest.skip("the Host driver has no graphics libraries")
+    index = int(os.environ.get("ALE_TEST_DOCKER_GPU_INDEX", "0"))
+    provider = DockerProvider(gpus=(index,))
+    prepared = await prepare_reference(provider, _gpu_image_reference())
+    sandbox = await provider.create(
+        SandboxRequest(
+            episode_id="live-docker-gpu-graphics",
+            prepared_image=prepared,
+            resources=Resources(gpus=1),
+            network=NetworkPolicy(),
+        )
+    )
+    try:
+        listing = await sandbox.exec(["/sbin/ldconfig", "-p"])
+        assert listing.ok, listing.stderr
+        names = _linker_cache_names(listing.stdout)
+        # On a runtime-hook Host these appear only with the graphics capability; a CDI Host
+        # has them whatever is requested.
+        for soname in ("libcuda.so.1", "libEGL_nvidia.so.0", "libGLX_nvidia.so.0"):
+            assert soname in names, f"{soname} is not in the GPU sandbox's linker cache"
+        assert any(name.startswith("libnvidia-rtcore.so") for name in names)
+    finally:
+        await sandbox.destroy()
+
+
+@pytest.mark.asyncio
+async def test_live_docker_gpu_two_devices_in_one_sandbox() -> None:
+    indices = _gpu_indices()
+    if len(indices) < 2:
+        pytest.skip("two physical NVIDIA GPUs are required")
+    provider = DockerProvider(gpus=indices[:2])
+    prepared = await prepare_reference(provider, _gpu_image_reference())
+    sandbox = await provider.create(
+        SandboxRequest(
+            episode_id="live-docker-two-gpus",
+            prepared_image=prepared,
+            resources=Resources(gpus=2),
+            network=NetworkPolicy(),
+        )
+    )
+    try:
+        allocation = sandbox.allocation.gpu
+        assert allocation is not None
+        assert len(allocation.observed_devices) == 2
     finally:
         await sandbox.destroy()
 

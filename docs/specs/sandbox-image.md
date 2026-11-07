@@ -368,10 +368,18 @@ nothing, so it has none. Unqualified handles
 are rejected. Listing, destroying and attaching are Provider operations, routed by the
 Provider a handle or RunLock names, so a new backend needs no CLI change.
 
-GPU workload libraries such as CUDA, PyTorch, and simulators remain Task Dockerfile
-responsibility. Tasks request a count only; Provider configuration selects eligible
-devices (host indices, or models on Daytona) and ALE records actual UUIDs. QEMU GPU
-passthrough remains a Provider capability, not a Task image declaration.
+GPU workload libraries such as CUDA, PyTorch, and simulators, and the Vulkan ICD and GLVND
+EGL vendor files a renderer loads, remain Task Dockerfile responsibility: not every
+injection path mounts those files. Tasks request a count only; Provider configuration
+selects eligible devices (host indices, or models on Daytona) and ALE records actual UUIDs.
+QEMU GPU passthrough remains a Provider capability, not a Task image declaration.
+
+On every Provider a GPU sandbox gets the Host's whole NVIDIA driver, as far as the driver
+has each part (CUDA, Vulkan, EGL, the video codecs), registered with the sandbox's linker,
+so a Task finds the same driver whichever backend runs it. The Provider, not the image,
+decides which Host driver files enter the sandbox, because an image would otherwise choose
+what of the Host reaches it. How each Provider does it is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-driver-capabilities).
 
 ## Permissions
 

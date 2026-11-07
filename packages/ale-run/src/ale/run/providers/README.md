@@ -82,6 +82,47 @@ guestd answers in an agent's VM. The script runs on the framework's Python:
 (an image with no sudo and no package manager to install it) is refused with that reason,
 as is a way up the revocation missed.
 
+## GPU driver capabilities
+
+A Docker GPU sandbox is started with `--gpus` and the argument `"device=<uuid>,<uuid>"`,
+double quotes included: Docker reads the value as one CSV record, and the quotes keep the
+list of UUIDs in one field (in a shell, `--gpus '"device=<uuid>,<uuid>"'`). It also gets
+`NVIDIA_DRIVER_CAPABILITIES=all`. Docker serves the request on one of two NVIDIA paths, and
+only one of them reads that variable. Measured with Docker 29.7.2, NVIDIA Container Toolkit
+1.20.0 and driver 580.178.04 on an RTX 4090, with NVIDIA OVRTX 0.6 (a Vulkan path tracer) as
+the renderer:
+
+| Path | What enters the sandbox |
+|---|---|
+| CDI (Container Device Interface): Docker 29.7.2 tries it first when the Host has an NVIDIA CDI spec | The selected GPUs' own device nodes plus every library and shared device node the spec lists (`/dev/nvidia-modeset`, the video codec libraries and the Vulkan ICD manifest included), whatever the variable says: `compute,utility` and `all` give the same set |
+| NVIDIA runtime hook: older Docker, a Host without a CDI spec, or `--gpus driver=nvidia.runtime-hook,...` | Only the libraries of the requested capabilities. With `compute,utility` there is no `libGLX_nvidia`, `libEGL_nvidia` or `libnvidia-rtcore`, and OVRTX fails at `vkCreateInstance` with `VK_ERROR_INCOMPATIBLE_DRIVER`; with `graphics` added it renders |
+
+A Host whose Docker default runtime is `nvidia-container-runtime` was not measured.
+
+The hook mounts no Vulkan ICD or GLVND EGL vendor file. An image that renders ships them at
+the paths the NVIDIA CDI spec uses, `/etc/vulkan/icd.d/nvidia_icd.json` and
+`/usr/share/glvnd/egl_vendor.d/10_nvidia.json`. A CDI spec mounts the Host's own manifests at
+the Host's paths, which replace these where the paths match, as on the measured Host and on
+Daytona; a driver installed from Ubuntu's packages keeps its Vulkan ICD in
+`/usr/share/vulkan/icd.d`, and the sandbox then has both. The hook also mounts
+no `/usr/share/nvidia/nvoptix.bin`: OVRTX then logs that it cannot load the OptiX denoiser
+weights, skips denoising, and its image differs from the CDI path's.
+
+`all` is requested rather than `graphics` alone because the CDI path injects every driver
+file whatever is requested, and anything less would leave a sandbox on the hook path short
+of what the same Task gets there. On the hook path `display` adds `/dev/nvidia-modeset`,
+`video` the codec libraries (NVENC, NVDEC) and `ngx` the DLSS library.
+
+Daytona mounts its Host's whole driver into a GPU sandbox, as the CDI path does, and
+ignores `NVIDIA_DRIVER_CAPABILITIES`: `compute,utility`, `compute,utility,graphics` and no
+value gave the same files on an H100 with driver 580.178.04. It registers none of them with
+the linker, though. Before the Provider runs `ldconfig`, the linker cache holds no NVIDIA
+library and `libEGL_nvidia.so.0` and `libGLX_nvidia.so.0`, the names the EGL vendor file
+and the Vulkan ICD load, do not exist: neither loads for the agent, and `vkCreateInstance`
+fails with `VK_ERROR_INCOMPATIBLE_DRIVER`, as on Docker's hook path without `graphics`.
+Afterwards EGL initializes the GPU and Vulkan lists the H100. The other sonames,
+`libcuda.so.1` among them, exist either way, which is why CUDA worked without it.
+
 ## Daytona
 
 Daytona's sandboxes are built for a different trust model than ALE's, so `daytona.py`
@@ -97,7 +138,9 @@ live organization (daemon 0.225.2). Operating it is in
 | Its daemon listens inside the sandbox (2280, 22220, 22222, 33333, and any other port PID 1 opens) and runs commands for anyone, as root | `iptables` owner rules reject every non-root user, IPv4 and IPv6; a probe as the agent must fail on every local address, or the sandbox is destroyed |
 | Accepts no connection from the sandbox outward; its SSH gateway refuses `-R` | guestd runs over two SSH exec sessions, one for commands and one for file reads. A third carries `guestd/tunnel.py`, which delivers the Gateway on the sandbox's loopback; the sandbox names an index into the Host's list, never an address |
 | Switches `networkBlockAll` and a domain allowlist at runtime (Tier 3 or 4 only), asynchronously | `block` uses `networkBlockAll`. `allowlist` uses `domainAllowList` with the hosts as declared, which Daytona matches as ALE does. `accepts` refuses addresses, ports and more than 100 hosts. Every switch waits for a TLS handshake with a public host the Task did not declare to behave as the setting says |
+| On a GPU runner, accepts connections under `networkBlockAll` that it passes nothing on, and names a proxy of its own in every process's environment (see below) | guestd starts without the runner's proxy variables, unless the image or Task sets them. The accepted connections are left as they are, as under the allowlist on every runner: the conformance suite counts the network as reached only when a TLS handshake with a public host completes |
 | Serves GPUs from its own region, in several models, optionally as spot capacity it may reclaim | Asks for `gpu_types` in order of preference and never spot. The GPUs are read with `nvidia-smi` as the agent and recorded; another count or model, or a GPU the agent cannot open, destroys the sandbox |
+| Mounts the Host driver's libraries without registering them with the linker (see [GPU driver capabilities](#gpu-driver-capabilities)) | Runs `ldconfig` as root before it reads the GPUs, as Docker's NVIDIA paths do with their linker-cache hook; a sandbox where it fails is destroyed |
 | Rate-limits creates | A create answered 429 made nothing and is retried, honoring `Retry-After`, for up to five minutes. No other failed create is repeated, since it may have made a sandbox |
 | Creates a sandbox even when the caller is cancelled mid-request | Every way out of a start deletes what Daytona made; a create whose reply was lost is found by its unique name |
 | Organizations are shared between tools | Labels live under `ale.run.*`, and listing and destroying act only on those. Every sandbox has a lifetime (`ttlMinutes`), so one a crashed run leaves behind is deleted by Daytona |
@@ -110,6 +153,19 @@ request to that name's own host, so sending an allowed name to another address r
 the allowed host; other ports of unlisted addresses are unreachable. The proxy accepts every
 TCP connection to port 443 before it decides, which is why egress is checked with a TLS
 handshake rather than a connect.
+
+A GPU runner enforces the same settings differently, as measured on H100 sandboxes. Under
+`networkBlockAll` a CPU runner refuses every connection, while a GPU runner accepts TCP
+connections to ports 80, 443 and 53 of any address and passes nothing on them: a TLS
+handshake ends at once, an HTTP request gets no answer, and no name resolves. Every process
+in a GPU sandbox also starts with `HTTP_PROXY`, `HTTPS_PROXY` and their lower-case forms set
+to `http://172.20.0.1:18080`, and `NO_PROXY` to loopback. That proxy applies the sandbox's
+settings too: under `networkBlockAll` it answers every request with 403, under the
+allowlist it forwards only to allowed hosts, on any port. Direct connections otherwise
+behave as on a CPU runner, so the agent needs neither the proxy nor its variables. Under
+`networkBlockAll` an agent on a GPU runner therefore sees a connection to the Internet open
+and then fail where a CPU runner refuses it at once; under the allowlist every runner does
+that for a host the list leaves out.
 
 ## QEMU
 

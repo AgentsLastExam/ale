@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 
 import pytest
@@ -39,10 +40,17 @@ def test_host_nvidia_smi_rows_are_indexed() -> None:
 def test_docker_receives_only_selected_uuids() -> None:
     assert _gpu_run_args((UUID,)) == [
         "--gpus",
-        f"device={UUID}",
+        f'"device={UUID}"',
         "--env",
-        "NVIDIA_DRIVER_CAPABILITIES=compute,utility",
+        "NVIDIA_DRIVER_CAPABILITIES=all",
     ]
+
+
+def test_a_device_list_reaches_docker_as_one_field() -> None:
+    other = "GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    value = _gpu_run_args((UUID, other))[1]
+    # Docker parses the flag value as one CSV record (docker/cli opts/gpus.go).
+    assert next(csv.reader([value])) == [f"device={UUID},{other}"]
 
 
 def test_container_must_observe_exact_selected_uuids() -> None:

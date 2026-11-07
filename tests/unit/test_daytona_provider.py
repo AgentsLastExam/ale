@@ -34,10 +34,12 @@ from ale.run.providers.daytona import (
     _domain_allowlist,
     _egress_probe,
     _guest_environment,
+    _guestd_command,
     _image_unavailable,
     _observed_allocation,
     _observed_gpus,
     _parse_ssh,
+    _register_driver_libraries,
     _same_model,
     _sandbox_name,
     _seal_daemon,
@@ -235,6 +237,25 @@ async def test_the_agent_gets_daytonas_allowlist_and_no_proxy_variables() -> Non
     assert api.sent[-1] == {"networkBlockAll": True}
 
 
+def test_guestd_starts_without_the_runners_proxy_variables() -> None:
+    """A GPU runner names its own proxy in every process's environment; a CPU runner none."""
+    words = shlex.split(_guestd_command("user", {"PATH": "/usr/bin", "HTTPS_PROXY": "http://p"}))
+    assert words[:2] == ["exec", "env"]
+    removed = {words[i + 1] for i, word in enumerate(words) if word == "-u"}
+    assert removed == {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    }
+    # env applies assignments after removals, so the image's or Task's own value survives.
+    first_assignment = next(i for i, word in enumerate(words) if "=" in word)
+    assert max(i for i, word in enumerate(words) if word == "-u") < first_assignment
+    assert "HTTPS_PROXY=http://p" in words and "ALE_AGENT_USER=user" in words
+
+
 async def test_a_setting_daytona_did_not_store_stops_the_phase() -> None:
     api = NetworkApi(stores={"networkBlockAll": True, "domainAllowList": None})
     sandbox, _ = network_sandbox(api, allowlist("example.com"))
@@ -414,6 +435,26 @@ async def test_gpus_other_than_requested_stop_the_sandbox() -> None:
         await _observed_gpus(GpuClient("", code=9), gpu_request(), SANDBOX, ())  # type: ignore[arg-type]
     with pytest.raises(ProviderStartError, match="gave 0 GPUs"):
         _observed_allocation(gpu_request(), {"cpu": 2, "memory": 8, "disk": 512})
+
+
+class LinkerClient:
+    """Answers ``ldconfig`` with the given exit code and records who ran it."""
+
+    def __init__(self, code: int = 0) -> None:
+        self.code = code
+        self.calls: list[tuple[list[str], str | None]] = []
+
+    async def exec(self, argv: list[str], *, run_as: str | None = None, **_: Any):
+        self.calls.append((argv, run_as))
+        return self.code, "", "" if self.code == 0 else "ldconfig: Permission denied", False
+
+
+async def test_the_driver_libraries_daytona_mounts_are_registered_by_root() -> None:
+    client = LinkerClient()
+    await _register_driver_libraries(client)  # type: ignore[arg-type]
+    assert client.calls == [(["/sbin/ldconfig"], None)]
+    with pytest.raises(ProviderCapabilityError, match="linker: ldconfig: Permission denied"):
+        await _register_driver_libraries(LinkerClient(code=1))  # type: ignore[arg-type]
 
 
 def test_daytona_gpu_type_names_match_what_nvidia_smi_reports() -> None:
