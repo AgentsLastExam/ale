@@ -4,8 +4,8 @@ Run on a Mac whose local Orchard ``scripts/setup_macos.py`` keeps running, with
 ALE_TEST_ORCHARD=1. The suite builds its image on that Mac once, as ``ale prepare`` would,
 from ``tests/fixtures/tasks/macos-unprivileged``: it signs in ``tester``, an account other
 than ``admin``, so the sudo=false cases apply. Every macOS sandbox has that account's
-desktop, so the desktop capture and input checks always run. Each test creates and destroys
-its own VM; none adopts an existing VM.
+desktop, so the desktop capture and input checks always run. The tests that only observe a
+VM share one; every other test creates and destroys its own, and none adopts an existing VM.
 """
 
 from __future__ import annotations

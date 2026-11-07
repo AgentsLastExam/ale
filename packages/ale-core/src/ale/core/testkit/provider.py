@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 import pytest
+import pytest_asyncio
 
 from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import (
@@ -133,8 +134,38 @@ async def _reach(
     return {target: states[target] == "open" for target in targets}
 
 
+class _SharedSandboxes:
+    """The default Sandbox of each image, which the tests that only observe one share.
+
+    A Sandbox costs a second as a container and most of a minute as a VM. So a test whose
+    subject is fixed when its Sandbox is created, or that destroys it, makes its own, and the
+    rest look at one, each at paths of its own, changing nothing another reads.
+    """
+
+    def __init__(self) -> None:
+        self._sandboxes: dict[ImageRef | PreparedTaskImage, tuple[SandboxRequest, Sandbox]] = {}
+
+    async def get(
+        self, suite: ProviderConformance, image: ImageRef | PreparedTaskImage | None = None
+    ) -> tuple[SandboxRequest, Sandbox]:
+        image = suite.image if image is None else image
+        if image not in self._sandboxes:
+            request = await suite.request(image=image)
+            self._sandboxes[image] = (request, await suite.provider.create(request))
+        return self._sandboxes[image]
+
+    async def destroy(self) -> None:
+        for _, sandbox in self._sandboxes.values():
+            await sandbox.destroy()
+
+
 class ProviderConformance:
-    """Assertions every :class:`~ale.core.sandbox.Provider` must satisfy."""
+    """Assertions every :class:`~ale.core.sandbox.Provider` must satisfy.
+
+    The tests that only observe a default Sandbox share one per class through
+    ``shared_sandboxes``, and run on the class's event loop, which that Sandbox's
+    connections belong to.
+    """
 
     provider: Provider
     image: ImageRef | PreparedTaskImage
@@ -166,6 +197,16 @@ class ProviderConformance:
         }
         return SandboxRequest(**(base | overrides))  # type: ignore[arg-type]
 
+    @pytest_asyncio.fixture(scope="class", loop_scope="class")
+    @classmethod
+    async def shared_sandboxes(cls) -> AsyncIterator[_SharedSandboxes]:
+        """The Sandboxes this class's observing tests share, destroyed once it is done."""
+        shared = _SharedSandboxes()
+        try:
+            yield shared
+        finally:
+            await shared.destroy()
+
     @pytest.mark.asyncio
     async def test_preflight_is_explicit(self) -> None:
         """A provider either works here or says why, before anything is provisioned."""
@@ -177,80 +218,85 @@ class ProviderConformance:
         assert caps.network_modes, "a provider must declare at least one network mode"
         assert caps.operating_systems
 
-    @pytest.mark.asyncio
-    async def test_exec_reports_exit_codes_and_streams(self) -> None:
-        async with await self.provider.create(await self.request()) as sandbox:
-            result = await sandbox.exec(["echo", "conformance"])
-            assert result.ok
-            assert "conformance" in result.stdout
+    @pytest.mark.asyncio(loop_scope="class")
+    async def test_exec_reports_exit_codes_and_streams(
+        self, shared_sandboxes: _SharedSandboxes
+    ) -> None:
+        _, sandbox = await shared_sandboxes.get(self)
+        result = await sandbox.exec(["echo", "conformance"])
+        assert result.ok
+        assert "conformance" in result.stdout
 
-            failure = await sandbox.exec(["sh", "-c", "exit 3"])
-            assert failure.exit_code == 3
+        failure = await sandbox.exec(["sh", "-c", "exit 3"])
+        assert failure.exit_code == 3
 
-    @pytest.mark.asyncio
-    async def test_file_round_trip(self) -> None:
-        async with await self.provider.create(await self.request()) as sandbox:
-            # The agent's home, since a system's temporary directory may be a link
-            # (macOS's /tmp), which file operations refuse to pass through.
-            path = PurePosixPath(sandbox.agent_home) / "conformance.bin"
-            payload = b"\x00binary\xffdata"
-            await sandbox.write_file(path, payload)
-            assert await sandbox.read_file(path) == payload
+    @pytest.mark.asyncio(loop_scope="class")
+    async def test_file_round_trip(self, shared_sandboxes: _SharedSandboxes) -> None:
+        _, sandbox = await shared_sandboxes.get(self)
+        # The agent's home, since a system's temporary directory may be a link
+        # (macOS's /tmp), which file operations refuse to pass through.
+        path = PurePosixPath(sandbox.agent_home) / "conformance.bin"
+        payload = b"\x00binary\xffdata"
+        await sandbox.write_file(path, payload)
+        assert await sandbox.read_file(path) == payload
 
-    @pytest.mark.asyncio
-    async def test_file_reads_progress_while_a_command_is_running(self) -> None:
-        async with await self.provider.create(await self.request()) as sandbox:
-            directory = str(PurePosixPath(sandbox.agent_home) / "concurrent-read")
-            ready = asyncio.Event()
+    @pytest.mark.asyncio(loop_scope="class")
+    async def test_file_reads_progress_while_a_command_is_running(
+        self, shared_sandboxes: _SharedSandboxes
+    ) -> None:
+        _, sandbox = await shared_sandboxes.get(self)
+        directory = str(PurePosixPath(sandbox.agent_home) / "concurrent-read")
+        ready = asyncio.Event()
 
-            async def output(stream: str, data: bytes) -> None:
-                if stream == "stdout" and b"ready" in data:
-                    ready.set()
+        async def output(stream: str, data: bytes) -> None:
+            if stream == "stdout" and b"ready" in data:
+                ready.set()
 
-            command = asyncio.create_task(
-                sandbox.exec(
-                    [
-                        "python3",
-                        "-c",
-                        "import sys, time; from pathlib import Path; d = Path(sys.argv[1]); "
-                        "d.mkdir(); (d / 'session.jsonl').write_bytes(b'first\\nsecond\\n'); "
-                        "(d / 'link').symlink_to('/etc/hostname'); "
-                        "print('ready', flush=True); time.sleep(5)",
-                        directory,
-                    ],
-                    timeout_sec=15,
-                    output_sink=output,
-                )
+        command = asyncio.create_task(
+            sandbox.exec(
+                [
+                    "python3",
+                    "-c",
+                    "import sys, time; from pathlib import Path; d = Path(sys.argv[1]); "
+                    "d.mkdir(); (d / 'session.jsonl').write_bytes(b'first\\nsecond\\n'); "
+                    "(d / 'link').symlink_to('/etc/hostname'); "
+                    "print('ready', flush=True); time.sleep(5)",
+                    directory,
+                ],
+                timeout_sec=15,
+                output_sink=output,
             )
-            try:
-                await asyncio.wait_for(ready.wait(), timeout=10)
-                files = await asyncio.wait_for(sandbox.list_files(directory), timeout=2)
-                assert len(files) == 1 and files[0].size == 13
-                data = await asyncio.wait_for(
-                    sandbox.read_file(files[0].path, offset=6, length=7), timeout=2
-                )
-                assert data == b"second\n"
-                expected = hashlib.sha256(b"first\n").hexdigest()
-                assert await sandbox.file_digest(files[0].path, length=6) == f"sha256:{expected}"
-                assert await sandbox.list_files(files[0].path) == files
-                assert not command.done()
-            finally:
-                assert (await command).ok
-
-    @pytest.mark.asyncio
-    async def test_ready_sandbox_reports_observed_image_and_resources(self) -> None:
-        request = await self.request()
-        async with await self.provider.create(request) as sandbox:
-            assert sandbox.resolved_image.kind is request.prepared_image.kind
-            assert sandbox.resolved_image.prepared_identity == (
-                request.prepared_image.prepared_identity
+        )
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=10)
+            files = await asyncio.wait_for(sandbox.list_files(directory), timeout=2)
+            assert len(files) == 1 and files[0].size == 13
+            data = await asyncio.wait_for(
+                sandbox.read_file(files[0].path, offset=6, length=7), timeout=2
             )
-            assert sandbox.resolved_image.observed_identity.startswith("sha256:")
-            assert sandbox.resolved_image.observed_ref
-            assert sandbox.allocation.cpus == request.resources.cpus
-            assert sandbox.allocation.memory_mb == request.resources.memory_mb
-            assert sandbox.allocation.network_mode is request.network.mode
-            assert sandbox.allocation.provider == self.provider.name
+            assert data == b"second\n"
+            expected = hashlib.sha256(b"first\n").hexdigest()
+            assert await sandbox.file_digest(files[0].path, length=6) == f"sha256:{expected}"
+            assert await sandbox.list_files(files[0].path) == files
+            assert not command.done()
+        finally:
+            assert (await command).ok
+
+    @pytest.mark.asyncio(loop_scope="class")
+    async def test_ready_sandbox_reports_observed_image_and_resources(
+        self, shared_sandboxes: _SharedSandboxes
+    ) -> None:
+        request, sandbox = await shared_sandboxes.get(self)
+        assert sandbox.resolved_image.kind is request.prepared_image.kind
+        assert sandbox.resolved_image.prepared_identity == (
+            request.prepared_image.prepared_identity
+        )
+        assert sandbox.resolved_image.observed_identity.startswith("sha256:")
+        assert sandbox.resolved_image.observed_ref
+        assert sandbox.allocation.cpus == request.resources.cpus
+        assert sandbox.allocation.memory_mb == request.resources.memory_mb
+        assert sandbox.allocation.network_mode is request.network.mode
+        assert sandbox.allocation.provider == self.provider.name
 
     @pytest.mark.asyncio
     async def test_storage_and_sudo_are_enforced_or_rejected(self) -> None:
@@ -286,33 +332,36 @@ class ProviderConformance:
                 assert sandbox.allocation.sudo is sudo
                 assert await _elevates(sandbox) is sudo
 
-    @pytest.mark.asyncio
-    async def test_the_agent_and_the_framework_are_different_accounts(self) -> None:
+    @pytest.mark.asyncio(loop_scope="class")
+    async def test_the_agent_and_the_framework_are_different_accounts(
+        self, shared_sandboxes: _SharedSandboxes
+    ) -> None:
         """Agent work runs as the Task's account; framework work runs as root.
 
         The agent cannot elevate, read the guest service that drives it, or change system
         configuration: any of these would let it alter the conditions it is measured under.
         """
-        request = await self.request()
-        async with await self.provider.create(request) as sandbox:
-            agent = await sandbox.exec(
-                ["sh", "-c", 'id -un; printf %s "$HOME"'], identity=Identity.AGENT
-            )
-            assert agent.ok, agent.stderr
-            assert agent.stdout.split("\n", 1) == [request.user, sandbox.agent_home]
-            assert sandbox.agent_user == request.user
-            framework = await sandbox.exec(["id", "-u"])
-            assert framework.stdout.strip() == "0"
-            probe = (
-                "command -v sudo >/dev/null && sudo -n true 2>/dev/null && echo elevated; "
-                "cat /opt/ale/guestd/main.py >/dev/null 2>&1 && echo read-guestd; "
-                "touch /etc/ale-conformance 2>/dev/null && echo wrote-etc; true"
-            )
-            escaped = await sandbox.exec(["sh", "-c", probe], identity=Identity.AGENT)
-            assert escaped.ok and escaped.stdout.split() == [], escaped.stdout
+        request, sandbox = await shared_sandboxes.get(self)
+        agent = await sandbox.exec(
+            ["sh", "-c", 'id -un; printf %s "$HOME"'], identity=Identity.AGENT
+        )
+        assert agent.ok, agent.stderr
+        assert agent.stdout.split("\n", 1) == [request.user, sandbox.agent_home]
+        assert sandbox.agent_user == request.user
+        framework = await sandbox.exec(["id", "-u"])
+        assert framework.stdout.strip() == "0"
+        probe = (
+            "command -v sudo >/dev/null && sudo -n true 2>/dev/null && echo elevated; "
+            "cat /opt/ale/guestd/main.py >/dev/null 2>&1 && echo read-guestd; "
+            "touch /etc/ale-conformance 2>/dev/null && echo wrote-etc; true"
+        )
+        escaped = await sandbox.exec(["sh", "-c", probe], identity=Identity.AGENT)
+        assert escaped.ok and escaped.stdout.split() == [], escaped.stdout
 
-    @pytest.mark.asyncio
-    async def test_a_sandbox_carries_the_engines_framework(self) -> None:
+    @pytest.mark.asyncio(loop_scope="class")
+    async def test_a_sandbox_carries_the_engines_framework(
+        self, shared_sandboxes: _SharedSandboxes
+    ) -> None:
         """Any image a Provider accepts runs the guest service of the engine driving it.
 
         An image handed straight to a Provider may carry an older guest service or none;
@@ -320,12 +369,14 @@ class ProviderConformance:
         """
         if self.framework is None:
             pytest.skip("this backend's suite names no framework identity")
-        async with await self.provider.create(await self.request()) as sandbox:
-            recorded = await sandbox.read_file("/opt/ale/framework")
-            assert recorded.decode().strip() == self.framework
+        _, sandbox = await shared_sandboxes.get(self)
+        recorded = await sandbox.read_file("/opt/ale/framework")
+        assert recorded.decode().strip() == self.framework
 
-    @pytest.mark.asyncio
-    async def test_uploads_ignore_host_modes_and_belong_to_their_identity(self) -> None:
+    @pytest.mark.asyncio(loop_scope="class")
+    async def test_uploads_ignore_host_modes_and_belong_to_their_identity(
+        self, shared_sandboxes: _SharedSandboxes
+    ) -> None:
         """The same tree lands the same way on every backend.
 
         Host modes never travel (a Task fetched from object storage has none to give),
@@ -339,23 +390,23 @@ class ProviderConformance:
             (source / ".hidden").write_text("hidden")
             (source / "test.sh").write_text("printf stage-ok")
             (source / "link").symlink_to("assets/data.txt")
-            async with await self.provider.create(await self.request()) as sandbox:
-                target = "/tmp/ale-conformance-upload"
-                for identity, mode in [(Identity.AGENT, 0o777), (Identity.FRAMEWORK, 0o600)]:
-                    for path in source.rglob("*"):
-                        if not path.is_symlink():
-                            path.chmod(0o700 if path.is_dir() else mode)
-                    await sandbox.upload_dir(str(source), target, identity=identity)
-                    owner = sandbox.agent_user if identity is Identity.AGENT else "root"
-                    modes = await sandbox.exec(["python3", "-c", _UPLOAD_MODES, target, owner])
-                    assert modes.ok, modes.stderr
-                    stage = await sandbox.exec(["sh", f"{target}/test.sh"], identity=identity)
-                    assert stage.stdout == "stage-ok", stage.stderr
-                    edit = await sandbox.exec(
-                        ["sh", "-c", f"echo edit > {target}/assets/data.txt"],
-                        identity=Identity.AGENT,
-                    )
-                    assert edit.ok == (identity is Identity.AGENT), edit.stderr
+            _, sandbox = await shared_sandboxes.get(self)
+            target = "/tmp/ale-conformance-upload"
+            for identity, mode in [(Identity.AGENT, 0o777), (Identity.FRAMEWORK, 0o600)]:
+                for path in source.rglob("*"):
+                    if not path.is_symlink():
+                        path.chmod(0o700 if path.is_dir() else mode)
+                await sandbox.upload_dir(str(source), target, identity=identity)
+                owner = sandbox.agent_user if identity is Identity.AGENT else "root"
+                modes = await sandbox.exec(["python3", "-c", _UPLOAD_MODES, target, owner])
+                assert modes.ok, modes.stderr
+                stage = await sandbox.exec(["sh", f"{target}/test.sh"], identity=identity)
+                assert stage.stdout == "stage-ok", stage.stderr
+                edit = await sandbox.exec(
+                    ["sh", "-c", f"echo edit > {target}/assets/data.txt"],
+                    identity=Identity.AGENT,
+                )
+                assert edit.ok == (identity is Identity.AGENT), edit.stderr
 
     @pytest.mark.asyncio
     async def test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else(self) -> None:
@@ -520,8 +571,10 @@ class ProviderConformance:
         finally:
             await sandbox.destroy()
 
-    @pytest.mark.asyncio
-    async def test_a_declared_desktop_can_actually_be_used(self) -> None:
+    @pytest.mark.asyncio(loop_scope="class")
+    async def test_a_declared_desktop_can_actually_be_used(
+        self, shared_sandboxes: _SharedSandboxes
+    ) -> None:
         """A provider claiming a desktop is held to it.
 
         Declaring the capability and not supplying it is the failure mode this suite
@@ -534,14 +587,13 @@ class ProviderConformance:
         if not (self.provider.capabilities().gui and self.gui_image):
             pytest.skip("no desktop image configured for this backend")
 
-        request = await self.request(image=self.gui_image)
-        async with await self.provider.create(request) as sandbox:
-            png = await sandbox.screenshot()
-            assert png.startswith(b"\x89PNG"), "a desktop was declared but produced no image"
-            assert len(png) > 1000, "a capture this small is an empty screen, not a desktop"
-            # Unset, every backend starts a desktop at one shared default size.
-            assert sandbox.allocation.desktop_resolution == DesktopResolution()
-            assert _shows(png, DesktopResolution(), request.os), _png_size(png)
+        request, sandbox = await shared_sandboxes.get(self, self.gui_image)
+        png = await sandbox.screenshot()
+        assert png.startswith(b"\x89PNG"), "a desktop was declared but produced no image"
+        assert len(png) > 1000, "a capture this small is an empty screen, not a desktop"
+        # Unset, every backend starts a desktop at one shared default size.
+        assert sandbox.allocation.desktop_resolution == DesktopResolution()
+        assert _shows(png, DesktopResolution(), request.os), _png_size(png)
 
     @pytest.mark.asyncio
     async def test_a_desktop_takes_the_runs_resolution(self) -> None:
@@ -560,16 +612,17 @@ class ProviderConformance:
             png = await sandbox.screenshot()
             assert _shows(png, resolution, request.os), _png_size(png)
 
-    @pytest.mark.asyncio
-    async def test_a_declared_desktop_accepts_input(self) -> None:
+    @pytest.mark.asyncio(loop_scope="class")
+    async def test_a_declared_desktop_accepts_input(
+        self, shared_sandboxes: _SharedSandboxes
+    ) -> None:
         """The other half of a desktop: an agent can act on it, not only look at it."""
         if not (self.provider.capabilities().gui and self.gui_image):
             pytest.skip("no desktop image configured for this backend")
 
-        request = await self.request(image=self.gui_image)
-        async with await self.provider.create(request) as sandbox:
-            applied = await sandbox.inject_input([{"type": "move", "coordinate": [500, 500]}])
-            assert applied == 1, "the desktop accepted no input"
+        _, sandbox = await shared_sandboxes.get(self, self.gui_image)
+        applied = await sandbox.inject_input([{"type": "move", "coordinate": [500, 500]}])
+        assert applied == 1, "the desktop accepted no input"
 
     @pytest.mark.asyncio
     async def test_a_missing_desktop_is_reported_not_faked(self) -> None:
