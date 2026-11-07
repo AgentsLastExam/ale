@@ -49,8 +49,8 @@ def unprivileged() -> tuple[PreparedTaskImage, str]:
 class TestOrchardProvider(ProviderConformance):
     """Shared file, identity, lifecycle, resource and desktop guarantees.
 
-    Orchard rejects sealed networks and retention at admission. Those two inherited
-    cases check that rejection explicitly; all other shared assertions run unchanged.
+    Orchard rejects sealed networks and retention at admission. The inherited cases that
+    ask for them check that rejection explicitly; all other shared assertions run unchanged.
     """
 
     @pytest.fixture(autouse=True)
@@ -85,6 +85,14 @@ class TestOrchardProvider(ProviderConformance):
 
     @pytest.mark.asyncio
     async def test_a_retained_sandbox_can_be_listed_and_destroyed(self) -> None:
+        request = await self.request(retention="keep")
+        with pytest.raises(ProviderCapabilityError):
+            await self.provider.create(request)
+
+    @pytest.mark.asyncio
+    async def test_a_reattached_sandbox_reaches_a_later_gateway_at_the_same_address(
+        self,
+    ) -> None:
         request = await self.request(retention="keep")
         with pytest.raises(ProviderCapabilityError):
             await self.provider.create(request)
