@@ -161,6 +161,8 @@ class Resources(BaseModel):
     memory_mb: int = Field(default=4096, ge=1)
     storage_mb: int | None = Field(default=None, ge=1)
     gpus: int = Field(default=0, ge=0)
+    gpu_types: tuple[str, ...] = ()
+    """GPU models the Task accepts, any one of them; empty accepts every model."""
     sudo: bool = False
 
 
@@ -311,6 +313,7 @@ class VerifierResources(BaseModel):
     memory_mb: int = Field(ge=1)
     storage_mb: int | None = Field(ge=1)
     gpus: int = Field(ge=0)
+    gpu_types: tuple[str, ...] = ()
 
     def as_resources(self) -> Resources:
         return Resources(
@@ -318,6 +321,7 @@ class VerifierResources(BaseModel):
             memory_mb=self.memory_mb,
             storage_mb=self.storage_mb,
             gpus=self.gpus,
+            gpu_types=self.gpu_types,
             sudo=False,
         )
 
@@ -531,7 +535,6 @@ _HARBOR_ENVIRONMENT_ONLY = frozenset(
     {
         "allow_internet",
         "allowed_hosts",
-        "gpu_types",
         "healthcheck",
         "memory",
         "network_mode",
@@ -540,6 +543,9 @@ _HARBOR_ENVIRONMENT_ONLY = frozenset(
         "workdir",
     }
 )
+
+#: A ``gpu_types`` entry: a GPU model as Harbor names it, such as ``H100`` or ``RTX-PRO-6000``.
+_GpuType = Annotated[str, Field(pattern=r"[A-Za-z0-9]")]
 
 #: Harbor ``task.toml`` keys that ALE does not implement, by table. They fail with a
 #: message saying so rather than as unknown keys, because a Harbor author expects them.
@@ -659,6 +665,8 @@ class EnvironmentTable(BaseModel):
     memory_mb: int = Field(default=4096, ge=1, strict=True)
     storage_mb: int | None = Field(default=None, ge=1, strict=True)
     gpus: int = Field(default=0, ge=0, strict=True)
+    gpu_types: tuple[_GpuType, ...] | None = Field(default=None, min_length=1)
+    """GPU models any of which will do; ``None`` accepts every model, as in Harbor."""
     env: TaskEnv = Field(default_factory=dict)
     skills_dir: str | None = Field(default=None, min_length=1)
     mcp_servers: tuple[McpServerTable, ...] = ()
@@ -728,6 +736,7 @@ class VerifierEnvironmentTable(BaseModel):
     memory_mb: int | None = Field(default=None, ge=1, strict=True)
     storage_mb: int | None = Field(default=None, ge=1, strict=True)
     gpus: int = Field(default=0, ge=0, strict=True)
+    gpu_types: tuple[_GpuType, ...] | None = Field(default=None, min_length=1)
     env: TaskEnv = Field(default_factory=dict)
 
     @property
@@ -834,6 +843,12 @@ class TaskConfig(BaseModel):
         skills_dir = environment.skills_dir
         if skills_dir is not None and not _task_path(skills_dir, environment.os).is_absolute():
             raise ValueError("[environment].skills_dir must be an absolute path")
+        for table, sized in (
+            ("environment", environment),
+            ("verifier.environment", verifier.environment),
+        ):
+            if sized is not None and sized.gpu_types is not None and not sized.gpus:
+                raise ValueError(f"[{table}].gpu_types requires gpus")
         if verifier.environment is not None and verifier.environment.docker_image is not None:
             if verifier.environment.kind is ImageKind.VM:
                 raise ValueError(

@@ -528,6 +528,16 @@ class ProviderConformance:
             await sandbox.destroy()
 
     @pytest.mark.asyncio
+    async def test_never_gives_a_gpu_model_the_task_does_not_accept(self) -> None:
+        resources = Resources(gpus=1, gpu_types=("ALE-NO-SUCH-GPU",))
+        try:
+            sandbox = await self.provider.create(await self.request(resources=resources))
+        except ProviderCapabilityError:
+            return
+        await sandbox.destroy()
+        pytest.fail(f"a Sandbox accepting only {resources.gpu_types} got {sandbox.allocation.gpu}")
+
+    @pytest.mark.asyncio
     async def test_a_declared_desktop_can_actually_be_used(self) -> None:
         """A provider claiming a desktop is held to it.
 

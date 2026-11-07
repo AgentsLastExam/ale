@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from ale.core.config import DaytonaProviderConfig, RunConfig
+from ale.core.config import RunConfig
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -40,7 +40,6 @@ from ale.run.providers.daytona import (
     _observed_gpus,
     _parse_ssh,
     _register_driver_libraries,
-    _same_model,
     _sandbox_name,
     _seal_daemon,
     _SshHost,
@@ -400,23 +399,32 @@ class GpuClient:
         return self.code, self.output, "" if self.code == 0 else "permission denied", False
 
 
-def gpu_request(gpus: int = 1) -> SandboxRequest:
-    return request(resources=Resources(cpus=2, memory_mb=8192, gpus=gpus))
+def gpu_request(gpus: int = 1, gpu_types: tuple[str, ...] = ("H100",)) -> SandboxRequest:
+    return request(resources=Resources(cpus=2, memory_mb=8192, gpus=gpus, gpu_types=gpu_types))
 
 
-def test_a_gpu_request_names_the_configured_models_and_is_never_spot() -> None:
+def test_a_gpu_request_names_the_task_s_models_daytona_offers_and_is_never_spot() -> None:
     published = PublishedImage(f"registry/ale-task@{DIGEST}", DIGEST, "framed", DIGEST)
-    body = DaytonaProvider()._body(gpu_request(2), published, "s", None)
+    provider = DaytonaProvider()
+    body = provider._body(gpu_request(2), published, "s", None)
     assert (body["gpu"], body["gpuType"], body["spot"]) == (2, ["H100"], False)
+    # Harbor's names, in the Task's order; a model Daytona does not offer is left out.
+    named = gpu_request(gpu_types=("L40S", "rtx-pro-6000", "nvidia-h100-80gb", "H100"))
+    provider.accepts(named)
+    assert provider._body(named, published, "s", None)["gpuType"] == ["RTX-PRO-6000", "H100"]
 
-    anything = DaytonaProvider(DaytonaProviderConfig(gpu_types=()))
-    assert "gpuType" not in anything._body(gpu_request(), published, "s", None)
-    assert "gpu" not in DaytonaProvider()._body(request(), published, "s", None)
+    assert "gpuType" not in provider._body(gpu_request(gpu_types=()), published, "s", None)
+    assert "gpu" not in provider._body(request(), published, "s", None)
+
+
+def test_a_task_naming_only_models_daytona_does_not_offer_is_refused() -> None:
+    with pytest.raises(ProviderCapabilityError, match=r"\['A100', 'MI355X'\] is a Daytona GPU"):
+        DaytonaProvider().accepts(gpu_request(gpu_types=("A100", "MI355X")))
 
 
 async def test_the_lock_records_the_gpus_as_the_agent_sees_them() -> None:
     client = GpuClient(H100)
-    allocation = await _observed_gpus(client, gpu_request(), SANDBOX, ("H100",))  # type: ignore[arg-type]
+    allocation = await _observed_gpus(client, gpu_request(), SANDBOX)  # type: ignore[arg-type]
     assert client.run_as == ["user"]
     assert allocation.requested_count == 1
     (device,) = allocation.observed_devices
@@ -427,12 +435,18 @@ async def test_the_lock_records_the_gpus_as_the_agent_sees_them() -> None:
 
 
 async def test_gpus_other_than_requested_stop_the_sandbox() -> None:
+    h100: Any = GpuClient(H100)
     with pytest.raises(ProviderStartError, match="attached 1 GPUs, not the 2"):
-        await _observed_gpus(GpuClient(H100), gpu_request(2), SANDBOX, ("H100",))  # type: ignore[arg-type]
-    with pytest.raises(ProviderStartError, match="gpu_types"):
-        await _observed_gpus(GpuClient(H100), gpu_request(), SANDBOX, ("RTX-4090",))  # type: ignore[arg-type]
+        await _observed_gpus(h100, gpu_request(2), SANDBOX)
+    with pytest.raises(ProviderStartError, match=r"none of gpu_types \['RTX-4090'\]"):
+        await _observed_gpus(h100, gpu_request(gpu_types=("RTX-4090",)), SANDBOX)
+    # The Task's names decide, as on every Provider: Harbor's GKE label for the H100 too.
+    for gpu_types in ((), ("nvidia-h100-80gb",), ("A100", "H100")):
+        allocation = await _observed_gpus(h100, gpu_request(gpu_types=gpu_types), SANDBOX)
+        assert allocation.observed_devices[0].model == "NVIDIA H100 80GB HBM3"
+    unusable: Any = GpuClient("", code=9)
     with pytest.raises(ProviderCapabilityError, match="agent cannot use"):
-        await _observed_gpus(GpuClient("", code=9), gpu_request(), SANDBOX, ())  # type: ignore[arg-type]
+        await _observed_gpus(unusable, gpu_request(), SANDBOX)
     with pytest.raises(ProviderStartError, match="gave 0 GPUs"):
         _observed_allocation(gpu_request(), {"cpu": 2, "memory": 8, "disk": 512})
 
@@ -455,13 +469,6 @@ async def test_the_driver_libraries_daytona_mounts_are_registered_by_root() -> N
     assert client.calls == [(["/sbin/ldconfig"], None)]
     with pytest.raises(ProviderCapabilityError, match="linker: ldconfig: Permission denied"):
         await _register_driver_libraries(LinkerClient(code=1))  # type: ignore[arg-type]
-
-
-def test_daytona_gpu_type_names_match_what_nvidia_smi_reports() -> None:
-    assert _same_model("H100", "NVIDIA H100 80GB HBM3")
-    assert _same_model("RTX-4090", "NVIDIA GeForce RTX 4090")
-    assert _same_model("RTX-PRO-6000", "NVIDIA RTX PRO 6000 Blackwell Server Edition")
-    assert not _same_model("H100", "NVIDIA H200")
 
 
 # --- the image -------------------------------------------------------------------

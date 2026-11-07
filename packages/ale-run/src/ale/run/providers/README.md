@@ -41,6 +41,19 @@ serves it on.
 | Daytona | None: snapshots count against an organization quota shared with other tools, so `accepts` refuses them |
 | Orchard | None: Orchard keeps no VM past its episode, so `accepts` refuses retention and snapshots |
 
+## GPU models
+
+A Task's `gpu_types` decides which GPU models a Sandbox may get
+([GPUs](../../../../../../docs/specs/task-authoring.md#gpus)). Every Provider checks the
+models it got with `ale.run.gpu.accepts_model`, which applies that rule.
+
+| Provider | How it gives only the models the Task accepts |
+|---|---|
+| Docker | Reads the Host's GPUs with `nvidia-smi` and leases only those among `container.gpus`, or among all when it is unset, of an accepted model. Too few refuses the Sandbox before it starts, and the container must then show exactly the leased UUIDs |
+| QEMU | A device bound to `vfio-pci` has no Host driver to name its model, so the guest's `nvidia-smi` is read once it boots; a model the Task does not accept destroys the Sandbox before any Task code runs. The pool is leased without regard to model, so a pool of several models can refuse a Task while an accepted GPU is free |
+| Daytona | Maps the names to Daytona's GPU types as Harbor does: `h100` and `nvidia-h100-80gb` to `H100`, `h200` and `nvidia-h200-141gb` to `H200`, `rtx-pro-6000` and `nvidia-rtx-pro-6000` to `RTX-PRO-6000`, `rtx-4090` and `rtx-5090` to themselves, ignoring case. It asks for them in the Task's order, which Daytona tries in turn, and leaves out names with no type; a Task left with none is refused before anything is created. The models attached are then checked against the Task's own names, as on every Provider. `MI355X` is never asked for, as `nvidia-smi` cannot see it to record it. A Task naming no model sends no type, so Daytona chooses |
+| Orchard | Refuses every GPU request |
+
 ## Desktop resolution
 
 Each Provider starts a desktop at the request's `desktop_resolution` and then checks it with
@@ -139,7 +152,7 @@ live organization (daemon 0.225.2). Operating it is in
 | Accepts no connection from the sandbox outward; its SSH gateway refuses `-R` | guestd runs over two SSH exec sessions, one for commands and one for file reads. A third carries `guestd/tunnel.py`, which delivers the Gateway on the sandbox's loopback; the sandbox names an index into the Host's list, never an address |
 | Switches `networkBlockAll` and a domain allowlist at runtime (Tier 3 or 4 only), asynchronously | `block` uses `networkBlockAll`. `allowlist` uses `domainAllowList` with the hosts as declared, which Daytona matches as ALE does. `accepts` refuses addresses, ports and more than 100 hosts. Every switch waits for a TLS handshake with a public host the Task did not declare to behave as the setting says |
 | On a GPU runner, accepts connections under `networkBlockAll` that it passes nothing on, and names a proxy of its own in every process's environment (see below) | guestd starts without the runner's proxy variables, unless the image or Task sets them. The accepted connections are left as they are, as under the allowlist on every runner: the conformance suite counts the network as reached only when a TLS handshake with a public host completes |
-| Serves GPUs from its own region, in several models, optionally as spot capacity it may reclaim | Asks for `gpu_types` in order of preference and never spot. The GPUs are read with `nvidia-smi` as the agent and recorded; another count or model, or a GPU the agent cannot open, destroys the sandbox |
+| Serves GPUs from its own region, in several models, optionally as spot capacity it may reclaim | Asks for those of the Task's models Daytona offers ([GPU models](#gpu-models)) and never spot. The GPUs are read with `nvidia-smi` as the agent and recorded; another count or model, or a GPU the agent cannot open, destroys the sandbox |
 | Mounts the Host driver's libraries without registering them with the linker (see [GPU driver capabilities](#gpu-driver-capabilities)) | Runs `ldconfig` as root before it reads the GPUs, as Docker's NVIDIA paths do with their linker-cache hook; a sandbox where it fails is destroyed |
 | Rate-limits creates | A create answered 429 made nothing and is retried, honoring `Retry-After`, for up to five minutes. No other failed create is repeated, since it may have made a sandbox |
 | Creates a sandbox even when the caller is cancelled mid-request | Every way out of a start deletes what Daytona made; a create whose reply was lost is found by its unique name |

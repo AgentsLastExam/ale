@@ -150,7 +150,10 @@ async def test_a_gpu_task_runs_on_the_gpu_its_lock_records(
     tmp_path: Path, write_repo: Callable[..., Path]
 ) -> None:
     task_root = write_repo(tmp_path / "repo")
-    edit_task_config(task_root, {"environment": {"cpus": 2, "memory_mb": 8192, "gpus": 1}})
+    edit_task_config(
+        task_root,
+        {"environment": {"cpus": 2, "memory_mb": 8192, "gpus": 1, "gpu_types": ["H100"]}},
+    )
     oracle = task_root / "solution" / "solve.sh"
     oracle.write_text(
         oracle.read_text()
@@ -161,6 +164,7 @@ async def test_a_gpu_task_runs_on_the_gpu_its_lock_records(
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"reward": 1.0}
     assert result.lock is not None and result.lock.resources is not None
+    assert result.lock.resources.requested.gpu_types == ("H100",)
     gpu = result.lock.resources.effective.gpu
     assert gpu is not None and gpu.requested_count == 1
     (device,) = gpu.observed_devices

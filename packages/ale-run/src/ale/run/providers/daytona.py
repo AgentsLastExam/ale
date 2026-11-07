@@ -21,10 +21,11 @@ works within that:
 * **Image command.** Daytona starts its own daemon in place of the image's entrypoint and
   command, so the Provider starts those itself, as the image's user and with its
   environment and working directory, and waits for the desktop when the image has one.
-* **GPUs.** A request for GPUs names the configured models; Daytona places the sandbox in
-  its GPU region. Daytona mounts the Host driver's libraries without registering them with
-  the linker, so the Provider runs ``ldconfig``. The RunLock records the GPUs as the agent
-  sees them, and a sandbox whose GPUs differ from the request is destroyed.
+* **GPUs.** A request for GPUs names the Task's models that Daytona offers; Daytona places
+  the sandbox in its GPU region. Daytona mounts the Host driver's libraries without
+  registering them with the linker, so the Provider runs ``ldconfig``. The RunLock records
+  the GPUs as the agent sees them, and a sandbox whose GPUs differ from the request is
+  destroyed.
 """
 
 from __future__ import annotations
@@ -68,7 +69,7 @@ from ale.core.sandbox import (
 from ale.core.taskspec import NetworkMode, OperatingSystem, host_allowed
 from ale.run import guestd
 from ale.run.framework import MARKER, framework_identity, with_framework
-from ale.run.gpu import parse_nvidia_smi
+from ale.run.gpu import accepts_model, parse_nvidia_smi
 from ale.run.guestd.tunnel import Mux
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
 from ale.run.providers.daytona_api import DaytonaApi, DaytonaError
@@ -125,6 +126,18 @@ _DNS_NAME = re.compile(
 )
 #: What the RunLock records of each GPU, read as the Docker Provider reads it.
 _NVIDIA_QUERY = "uuid,name,pci.bus_id,driver_version"
+#: Daytona's GPU types by the ``gpu_types`` names that select them, as Harbor maps them. Not
+#: ``MI355X``, which ``nvidia-smi`` cannot see, so the RunLock could not record it.
+_GPU_TYPES = {
+    "h100": "H100",
+    "nvidia-h100-80gb": "H100",
+    "h200": "H200",
+    "nvidia-h200-141gb": "H200",
+    "rtx-pro-6000": "RTX-PRO-6000",
+    "nvidia-rtx-pro-6000": "RTX-PRO-6000",
+    "rtx-4090": "RTX-4090",
+    "rtx-5090": "RTX-5090",
+}
 
 #: Run as root in the sandbox. Rejects every non-root user's connections to the ports on
 #: which Daytona's daemon (PID 1) listens, plus the known ones, over IPv4 and IPv6.
@@ -629,6 +642,12 @@ class DaytonaProvider(Provider):
                 _egress_probe(request.network.allowed_hosts)
             except ProviderCapabilityError as exc:
                 problems.append(str(exc))
+        gpu_types = request.resources.gpu_types
+        if request.resources.gpus and gpu_types and not _daytona_gpu_types(gpu_types):
+            usable = ", ".join(sorted(set(_GPU_TYPES.values())))
+            problems.append(
+                f"none of gpu_types {list(gpu_types)} is a Daytona GPU ALE can use ({usable})"
+            )
         if problems:
             raise ProviderCapabilityError("; ".join(problems))
 
@@ -701,7 +720,7 @@ class DaytonaProvider(Provider):
             await _seal_daemon(client, request.user)
             if request.resources.gpus:
                 await _register_driver_libraries(client)
-                gpus = await _observed_gpus(client, request, data, self.config.gpu_types)
+                gpus = await _observed_gpus(client, request, data)
                 allocation = allocation.model_copy(update={"gpu": gpus})
             if listeners:
                 tunnel = _Tunnel(ssh, listeners=listeners, targets=targets)
@@ -808,8 +827,8 @@ class DaytonaProvider(Provider):
             # sandbox can be terminated without notice in the middle of an episode.
             body["gpu"] = resources.gpus
             body["spot"] = False
-            if self.config.gpu_types:
-                body["gpuType"] = list(self.config.gpu_types)
+            if gpu_types := _daytona_gpu_types(resources.gpu_types):
+                body["gpuType"] = list(gpu_types)
         return body
 
     # --- retained sandboxes ----------------------------------------------------
@@ -1055,17 +1074,21 @@ async def _register_driver_libraries(client: GuestClient) -> None:
         )
 
 
+def _daytona_gpu_types(gpu_types: tuple[str, ...]) -> tuple[str, ...]:
+    """Daytona's types for the models a Task accepts, in the Task's order, which Daytona
+    tries in turn. Names Daytona offers no type for are left out; none leaves the choice
+    to Daytona."""
+    named = (_GPU_TYPES.get(name.strip().lower()) for name in gpu_types)
+    return tuple(dict.fromkeys(kind for kind in named if kind is not None))
+
+
 async def _observed_gpus(
-    client: GuestClient,
-    request: SandboxRequest,
-    data: dict[str, Any],
-    gpu_types: tuple[str, ...],
+    client: GuestClient, request: SandboxRequest, data: dict[str, Any]
 ) -> GpuAllocation:
     """The GPUs as the agent sees them, which is what the RunLock records.
 
-    Read as the agent, so a GPU the agent cannot open stops the sandbox here rather than in
-    the middle of its task. Daytona's GPU types are NVIDIA's except MI355X, which
-    ``nvidia-smi`` cannot see and so cannot be recorded.
+    Read as the agent, so a GPU the agent cannot open, or one ``nvidia-smi`` cannot see,
+    stops the sandbox here rather than in the middle of its task.
     """
     code, stdout, stderr, _ = await client.exec(
         ["nvidia-smi", f"--query-gpu={_NVIDIA_QUERY}", "--format=csv,noheader,nounits"],
@@ -1082,14 +1105,11 @@ async def _observed_gpus(
         raise ProviderStartError(
             f"Daytona attached {len(devices)} GPUs, not the {wanted} requested"
         )
-    foreign = [
-        device.model
-        for device in devices
-        if gpu_types and not any(_same_model(kind, device.model) for kind in gpu_types)
-    ]
+    gpu_types = request.resources.gpu_types
+    foreign = [device.model for device in devices if not accepts_model(gpu_types, device.model)]
     if foreign:
         raise ProviderStartError(
-            f"Daytona attached {', '.join(foreign)}, which gpu_types {list(gpu_types)} excludes"
+            f"Daytona attached {', '.join(foreign)}, none of gpu_types {list(gpu_types)}"
         )
     # Daytona holds the GPUs for the sandbox's life, so the sandbox is the lease.
     version = data.get("daemonVersion")
@@ -1100,16 +1120,6 @@ async def _observed_gpus(
         observed_devices=devices,
         runtime_identity=f"daytona-daemon/{version}" if version else None,
     )
-
-
-def _same_model(kind: str, model: str) -> bool:
-    """Whether Daytona's type name (``RTX-PRO-6000``) names the model nvidia-smi reports
-    (``NVIDIA RTX PRO 6000 Blackwell Server Edition``)."""
-
-    def squeeze(text: str) -> str:
-        return re.sub(r"[^a-z0-9]", "", text.lower())
-
-    return squeeze(kind) in squeeze(model)
 
 
 async def _seal_daemon(client: GuestClient, agent_user: str) -> None:
