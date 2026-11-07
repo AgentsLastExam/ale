@@ -40,13 +40,16 @@ events; a resume passes it to `--conversation`. A failed turn ends with a `resul
 Skills go to `~/.gemini/antigravity-cli/skills/<name>/` and MCP servers to
 `~/.gemini/config/mcp_config.json` (`command`/`args`/`env`/`cwd`, or `serverUrl`). agy
 offers lazy MCP tools through its `call_mcp_tool` wrapper, which the parser records as
-the `mcp__<server>__<tool>` call it made.
+the `mcp__<server>__<tool>` call it made. agy inlines only a small MCP image (a desktop
+screenshot capped at 64 px, about 6 KB, but not one at 128 px, about 18 KB): it saves a
+larger one to the step's `media_<n>` file and gives the model the path, which `read_file`
+then shows the model as an image. The parser records that file as the result's image.
 
 A conversation is `~/.gemini/antigravity-cli/brain/<id>/` plus `conversations/<id>.db`.
 The parser follows `.system_generated/logs/transcript_full.jsonl`: a `PLANNER_RESPONSE`
 is a model turn with its tool calls, and the records after it are their results in call
 order, since they carry no call ID; stdout's `step_update` events name each result's tool
-and must agree. Images a tool returned are read from the conversation's `logs/media`.
+and must agree. Images agy inlined are read from the conversation's `logs/media`.
 
 A subagent is linked by `.system_generated/subagents/<child>.json` in its parent's
 directory: its `spawnStepIndex` is the step of the `invoke_subagent` result, which then
