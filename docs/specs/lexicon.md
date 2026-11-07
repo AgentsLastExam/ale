@@ -39,6 +39,7 @@ Normative. Every term below has exactly one meaning.
 | **MCP Server** | A validated stdio or Streamable HTTP server definition made available to an agent. | not a vendor-native config file |
 | **Effective Agent Resources** | The Task's Skill directory and MCP servers with the deduplicated preset-, Run-, and CLI-declared ones, which replace a Task's of the same name. | never ambient configuration |
 | **CUA Desktop MCP** (`cua-desktop`) | ALE's built-in screen-control MCP server selected at Run level. | not selected by a Task or automatically injected by an image |
+| **Desktop resolution** | The size, in logical pixels (points on macOS), that every Sandbox's desktop starts at, set by the Run's `desktop_resolution` and checked by the Provider; [Desktop resolution](sandbox-image.md#desktop-resolution). | never part of a prepared image or its identity, nor the size of the screenshots an agent's tools return |
 | **Native Continuation** | One Harness's exact native agent session, by its native ID; it resumes wherever that session's files are, including a later episode's adopted retained solver or one booted from its snapshot. | not Run resume, transcript replay, or a copy of the session |
 | **Limit Termination** | The recorded layer, limit, configured value, and cause that stopped an Episode. | not an untyped process exit |
 | **GuestServer** (`ale-guestd`) | The in-sandbox service through which execution, file transfer, and observation flow. | never Provider-specific |

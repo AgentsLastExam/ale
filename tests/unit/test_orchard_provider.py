@@ -16,6 +16,7 @@ import pytest
 
 from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
+    DesktopResolution,
     Identity,
     ImageKind,
     ImageRef,
@@ -115,6 +116,10 @@ class FakeGuest:
         self.health_override = {}
         self.uploads = []
         self.calls = []
+        self.screen = (1024, 768)
+
+    async def screen_size(self):
+        return self.screen
 
     async def health(self):
         return {
@@ -176,7 +181,11 @@ def backend(monkeypatch):
     async def desktop(client, *, agent_user, agent_uid, timeout_sec):
         api.desktops.append((agent_user, agent_uid))
 
+    async def at_resolution(local, framed, resolution):
+        return f"{framed.name}-{resolution}"
+
     monkeypatch.setattr(orchard, "frame_image", frame)
+    monkeypatch.setattr(orchard, "at_resolution", at_resolution)
     monkeypatch.setattr(orchard, "await_desktop", desktop)
     monkeypatch.setattr(orchard, "check_framer", lambda: None)
     monkeypatch.setattr(orchard, "GuestClient", lambda transport, **kwargs: guest)
@@ -201,7 +210,7 @@ async def test_fresh_owned_vm_and_idempotent_teardown(backend):
     sandbox = await provider.create(await request(provider))
     assert sandbox.state == SandboxState.READY
     assert "labels" not in api.created[0]
-    assert api.created[0]["image"] == FRAMED.name
+    assert api.created[0]["image"] == f"{FRAMED.name}-1024x768"
     assert api.frames == [(sandbox.request.prepared_image, "user")]
     assert sandbox.resolved_image.prepared_identity == "sha256:" + "a" * 64
     assert sandbox.resolved_image.observed_identity == FRAMED.identity
@@ -1155,11 +1164,30 @@ async def test_an_agent_waits_for_its_desktop(backend, monkeypatch, role, probed
         return await connect_guest(name, argv, deadline=deadline)
 
     monkeypatch.setattr(api, "connect_guest", connect)
-    sandbox = await provider.create(await request(provider, sudo=True, role=role))
+    guest.screen = (1366, 768)
+    wanted = DesktopResolution(width=1366, height=768)
+    sandbox = await provider.create(
+        await request(provider, sudo=True, role=role, desktop_resolution=wanted)
+    )
     assert api.desktops == ([("user", 501)] if probed else [])
     driver = f"ALE_CUA_DRIVER={orchard.MACOS_DRIVER}"
     assert all((driver in argv) is probed for argv in argvs)
+    # Every VM boots the framed image's clone for the Run's resolution; the agent's
+    # desktop is checked to have it, and the image the RunLock records stays the same.
+    assert api.created[-1]["image"] == f"{FRAMED.name}-1366x768"
+    assert sandbox.allocation.desktop_resolution == (wanted if probed else None)
+    assert sandbox.resolved_image.observed_ref == FRAMED.name
     await sandbox.destroy()
+
+
+async def test_a_desktop_of_another_size_deletes_its_vm(backend):
+    provider, api, guest = backend
+    guest.sudo = True
+    guest.screen = (1024, 768)
+    wanted = DesktopResolution(width=1366, height=768)
+    with pytest.raises(ProviderCapabilityError, match="1024x768, not the requested 1366x768"):
+        await provider.create(await request(provider, sudo=True, desktop_resolution=wanted))
+    assert api.deleted == [api.created[-1]["name"]]
 
 
 async def test_framing_requires_the_installed_framer(monkeypatch, tmp_path):

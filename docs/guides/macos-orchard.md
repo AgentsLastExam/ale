@@ -121,11 +121,11 @@ uv run ale run /absolute/path/to/task --agent oracle
 image; the oracle run frames the image if needed, creates a VM and exercises setup, output
 collection and verification.
 
-For Provider conformance tests, set `ALE_TEST_ORCHARD=1`, `ALE_ORCHARD_TEST_IMAGE` to a
-disposable image reference and `ALE_ORCHARD_TEST_USER` to the account it signs in, other
-than `admin`, then run `uv run pytest tests/conformance/test_provider_orchard.py`. The
-suite creates fresh VMs and checks cleanup. The CLI Harness integration tests run in
-macOS VMs as well ([Tests](../../tests/README.md)).
+For Provider conformance tests, run
+`ALE_TEST_ORCHARD=1 uv run pytest tests/conformance/test_provider_orchard.py`. The suite
+builds `macos-unprivileged` on this Mac the first time, so its sudo=false cases run as an
+account other than `admin`, then creates fresh VMs of it and checks cleanup. The CLI
+Harness integration tests run in macOS VMs as well ([Tests](../../tests/README.md)).
 
 ## Clean up
 

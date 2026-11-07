@@ -34,6 +34,7 @@ from ale.core.lock import (
 )
 from ale.core.sandbox import (
     Capabilities,
+    DesktopResolution,
     ImageRef,
     PreparedTaskImage,
     ResolvedImage,
@@ -276,6 +277,17 @@ class TestConfigLayering:
         for invalid in (0, -1, float("inf"), "never"):
             with pytest.raises(ValueError):
                 RunConfig(timeouts={"agent": invalid})
+
+    def test_the_desktop_resolution_is_one_validated_run_setting(self) -> None:
+        assert RunConfig().desktop_resolution == DesktopResolution(width=1024, height=768)
+        config = load_run_config(overrides=["desktop_resolution=1366x768"])
+        assert (config.desktop_resolution.width, config.desktop_resolution.height) == (1366, 768)
+        assert str(config.desktop_resolution) == "1366x768"
+        # It changes what the agent sees, so an episode at another size is not reused.
+        assert config.reuse_hash != RunConfig().reuse_hash
+        for invalid in ("1366", "1366*768", "x768", "1366x", "1366x768x2", "800x600", "3840x2160"):
+            with pytest.raises(ConfigError):
+                load_run_config(overrides=[f"desktop_resolution={invalid}"])
 
     def test_gateway_ceilings_are_explicitly_unlimited_by_default(self) -> None:
         limits = RunConfig().gateway.limits

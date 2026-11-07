@@ -75,6 +75,7 @@ from ale.run.providers.daytona_image import (
     PublishedImage,
     image_config,
 )
+from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
@@ -690,9 +691,16 @@ class DaytonaProvider(Provider):
             if listeners:
                 tunnel = _Tunnel(ssh, listeners=listeners, targets=targets)
                 await tunnel.start()
-            await _start_image_command(client, config)
+            await _start_image_command(client, config, request)
             if has_desktop:
                 await _await_desktop(client)
+                allocation = allocation.model_copy(
+                    update={
+                        "desktop_resolution": await require_resolution(
+                            client, request.desktop_resolution, container=True
+                        )
+                    }
+                )
             file_client = await _connect(ssh, request.user, environment)
         except BaseException:
             await asyncio.shield(
@@ -943,13 +951,20 @@ def _guest_environment(
     config: ImageConfig, request: SandboxRequest, local_gateway: str | None
 ) -> dict[str, str]:
     return {
-        **config.env,
+        **_image_environment(config, request),
         **request.env,
         **({"ALE_GATEWAY_URL": local_gateway} if local_gateway else {}),
     }
 
 
-async def _start_image_command(client: GuestClient, config: ImageConfig) -> None:
+def _image_environment(config: ImageConfig, request: SandboxRequest) -> dict[str, str]:
+    """The image's ``ENV`` with the Run's desktop resolution, as Docker's ``--env`` sets it."""
+    return {**config.env, CONTAINER_VARIABLE: str(request.desktop_resolution)}
+
+
+async def _start_image_command(
+    client: GuestClient, config: ImageConfig, request: SandboxRequest
+) -> None:
     """Run the image's entrypoint and command, which Daytona replaces with its daemon.
 
     Detached, as a container's main process is: it outlives this call, and the Provider
@@ -961,7 +976,7 @@ async def _start_image_command(client: GuestClient, config: ImageConfig) -> None
         "argv": list(config.argv),
         "user": config.user,
         "workdir": config.workdir,
-        "env": config.env,
+        "env": _image_environment(config, request),
         "log": f"{GUESTD_DIR.parent}/image-command.log",
     }
     code, _, stderr, _ = await client.exec(

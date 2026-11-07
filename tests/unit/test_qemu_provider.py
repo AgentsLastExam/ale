@@ -162,7 +162,35 @@ async def test_windows_admin_boot_is_explicit_and_uses_the_resolved_runner(
     )
     assert commands[0][-1] == runner
     assert "VM_NET_IP=172.30.0.2" in commands[0]
-    assert ("ARGUMENTS=-smbios type=1,serial=ale-sudo" in commands[0]) is marker
+    arguments = next(item for item in commands[0] if item.startswith("ARGUMENTS="))
+    assert ("-smbios type=1,serial=ale-sudo" in arguments) is marker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operating_system", ["linux", "windows"])
+async def test_the_display_announces_the_requested_resolution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, operating_system: str
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        commands.append(argv)
+        return 0, "true\n", ""
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.asyncio.sleep", no_sleep)
+    await QemuProvider()._boot(
+        request(os=operating_system, desktop_resolution="1366x768"),
+        tmp_path,
+        tmp_path / "base.qcow2",
+        7411,
+    )
+    assert "VGA=std" in commands[0]
+    arguments = next(item for item in commands[0] if item.startswith("ARGUMENTS="))
+    assert "-global VGA.xres=1366 -global VGA.yres=768" in arguments
 
 
 @pytest.mark.asyncio

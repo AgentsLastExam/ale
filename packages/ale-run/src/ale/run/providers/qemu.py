@@ -40,6 +40,7 @@ from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     Capabilities,
+    DesktopResolution,
     ExecOutputSink,
     ExecResult,
     GpuAllocation,
@@ -67,6 +68,7 @@ from ale.run.images import (
     resolve_prepared_vm_image,
     resolve_vm_image,
 )
+from ale.run.providers.desktop import require_resolution
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, TcpTransport
@@ -101,6 +103,9 @@ GUEST_IMAGE = os.environ.get(
     "ALE_QEMU_GUEST_IMAGE", "ghcr.io/agentslastexam/ale-guest-ubuntu-desktop:24.04"
 )
 RUNNER_BASE = "/images/base.qcow2"
+#: Video memory of the guest's display: Linux's driver keeps two frames of the screen, and
+#: two 3200x1800 frames at 32 bits per pixel need 46 MB.
+VGA_MEMORY_MB = 64
 
 #: The interface inside the runner that the guest is attached to. Every packet the guest
 #: sends arrives on it, which is what makes one rule enough to confine it.
@@ -791,11 +796,13 @@ class QemuProvider(Provider):
             observed_gpu = await self._guest_gpus(client) if selected else ()
             if selected:
                 _verify_qemu_gpu_count(request.resources.gpus, observed_gpu)
+            desktop: DesktopResolution | None = None
             if has_desktop:
                 # The guest decided from its own configuration that it shows a desktop. Its
                 # display manager and session start after the guest service is already
                 # answering, so "the sandbox replied" is not "the sandbox has a screen".
                 await self._await_desktop(client)
+                desktop = await require_resolution(client, request.desktop_resolution)
             if request.os is OperatingSystem.WINDOWS:
                 await self._verify_windows_privileges(client, agent_user, request.sudo)
             else:
@@ -843,6 +850,7 @@ class QemuProvider(Provider):
                 sudo=request.sudo,
                 network_mode=request.network.mode,
                 provider=self.name,
+                desktop_resolution=desktop,
             ),
             resource_lease=lease,
             agent_user=agent_user,
@@ -940,8 +948,18 @@ class QemuProvider(Provider):
             # faster without them.
             "--env", f"HV={'Y' if request.os is OperatingSystem.WINDOWS else 'N'}",
         ]  # fmt: skip
+        # The desktop starts at the display's preferred mode, which QEMU's standard VGA
+        # announces in its EDID: the firmware sets it at boot and Windows' basic display
+        # driver keeps it, where virtio-vga's would be ignored.
+        resolution = request.desktop_resolution
+        arguments = [
+            f"-global VGA.xres={resolution.width}",
+            f"-global VGA.yres={resolution.height}",
+            f"-global VGA.vgamem_mb={VGA_MEMORY_MB}",
+        ]
         if request.os is OperatingSystem.WINDOWS and request.sudo:
-            argv += ["--env", "ARGUMENTS=-smbios type=1,serial=ale-sudo"]
+            arguments.append("-smbios type=1,serial=ale-sudo")
+        argv += ["--env", "VGA=std", "--env", f"ARGUMENTS={' '.join(arguments)}"]
         if gpus:
             argv += ["--label", f"{GPU_LABEL}={','.join(gpu.bdf for gpu in gpus)}"]
             argv += ["--device=/dev/vfio/vfio", "--ulimit", "memlock=-1:-1"]

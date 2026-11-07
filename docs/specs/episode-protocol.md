@@ -167,10 +167,11 @@ earlier episode whose solver was kept or snapshotted, in that Sandbox or one boo
 the snapshot, and in that native session, for follow-up turns on one workspace. The
 earlier episode must have retained its solver and recorded a `continuation`. The run uses
 the same Harness at the same CLI version, and the Task the same prepared solver image. A
-kept solver also needs the same resources and verification mode, because a running
-Sandbox keeps its allocation and role; one booted from a snapshot takes the Task's. The
-model, settings, instruction and verification may differ; the RunLock records this
-episode's own and names the earlier one in `resumed_from`. The agent finds this run's
+kept solver also needs the same resources, verification mode and desktop resolution,
+because a running Sandbox keeps its allocation, role and desktop; one booted from a
+snapshot takes the Task's and the Run's. The model, settings, instruction and verification
+may differ; the RunLock records this episode's own and names the earlier one in
+`resumed_from`. The agent finds this run's
 Gateway at the address it was given, since every Sandbox reaches its Gateway at the same
 one.
 

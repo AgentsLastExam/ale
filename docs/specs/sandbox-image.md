@@ -12,7 +12,8 @@ A Linux Task may build from any x86-64 image with glibc that has:
 - the agent account the Task names with `[agent].user`, with a home;
 - for a container, a long-lived command that ALE does not replace;
 - for a VM, a bootable systemd system (the VM base provides one);
-- for GUI work, a running desktop session, such as an X server with a window manager.
+- for GUI work, a running desktop session, such as an X server with a window manager,
+  that starts at the [desktop resolution](#desktop-resolution) it is given.
 
 Everything ALE itself needs it adds when it prepares the image, as one more layer on top
 of the Task's own build or the image it names (the framework layer):
@@ -96,6 +97,18 @@ may create. Every macOS sandbox the agent works in shows that account's desktop.
 Elevation for `[agent].sudo` is granted or taken away at each boot, as on Linux
 ([Permissions](#permissions)). What else the image must allow is in the
 [Orchard Provider](../../packages/ale-run/src/ale/run/providers/README.md#orchard).
+
+## Desktop resolution
+
+The Run's `desktop_resolution` (`WIDTHxHEIGHT` from 1024x480 to 3200x1800, 1024x768 unless
+set) is the size of every Sandbox's desktop in logical pixels, which are points on macOS, so
+one value fits as much of a window on every system. It is never part of a prepared image, so
+one prepared image serves every resolution: each Provider applies it as a Sandbox starts,
+refuses a desktop that reports another size, and records it with the allocation in the
+RunLock. A container's desktop is its image's own X server, so the image must start it at
+the size `VNC_RESOLUTION` names, a name VNC desktop images share that asks for no VNC; a VM's
+desktop starts at its display's preferred mode. How each Provider sets them is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#desktop-resolution).
 
 ## ALE base images
 
@@ -323,7 +336,8 @@ Given a conforming image, the Docker Provider:
 
 - starts the exact prepared content without replacing its command, adding the framework
   layer first to an image that was not prepared with it;
-- uses the Task's agent account and waits for the desktop when the image has one;
+- uses the Task's agent account and, when the image has a desktop, starts it at the Run's
+  [resolution](#desktop-resolution) and waits for it;
 - applies CPU, memory, writable storage, network, sudo, and GPU requests or rejects them;
 - injects only selected NVIDIA devices through the configured runtime/CDI path;
 - observes the resulting image and resource allocation;
@@ -422,6 +436,7 @@ Task content (the engine).
 | Destroy is idempotent; retained sandboxes can be listed and destroyed through their Provider | Provider | `test_destroy_is_idempotent`, `test_a_retained_sandbox_can_be_listed_and_destroyed` |
 | A snapshot holds the disk, any number of Sandboxes boot from it, and it is listed and destroyed through its Provider; a Provider without snapshots refuses them before provisioning | Provider | `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | A declared desktop can be captured and driven | Provider and image | `test_a_declared_desktop_can_actually_be_used`, `test_a_declared_desktop_accepts_input` |
+| A desktop has the Run's resolution, whatever the image would use, and the RunLock records it | Provider in `create`: set at every start, then checked | `test_a_declared_desktop_can_actually_be_used`, `test_a_desktop_takes_the_runs_resolution` |
 | No platform service inside the sandbox gives the agent more than its account | Provider check in `create` | `test_the_agent_cannot_reach_the_platform_daemon` |
 
 `open_egress` and `close_egress` are abstract: a default that did nothing would let a new

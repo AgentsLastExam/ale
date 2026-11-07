@@ -386,6 +386,7 @@ async def test_reverification_retries_only_with_fresh_verifiers(
         calls += 1
         assert protocol.source_run_dir == source.run_dir
         assert kwargs["destroy_failed_sandboxes"]
+        assert str(kwargs["desktop_resolution"]) == "1366x768"
         return write_result(
             kwargs["run_dir"] / kwargs["episode_id"],
             Status.ENV_ERROR if calls == 1 else Status.COMPLETED,
@@ -409,7 +410,7 @@ async def test_reverification_retries_only_with_fresh_verifiers(
     code = await task_cli._reverify(
         str(task_path),
         source.run_dir,
-        RunConfig(episode_retries=1),
+        RunConfig(episode_retries=1, desktop_resolution="1366x768"),  # type: ignore[arg-type]
         tmp_path / "runs",
     )
     assert calls == (2 if mode == "separate" else 1)
@@ -440,6 +441,7 @@ async def test_validation_projects_only_final_episode_attempts(
             )
 
     async def execute(_task, protocol, _providers, **kwargs):  # type: ignore[no-untyped-def]
+        assert str(kwargs["desktop_resolution"]) == "1366x768"
         name = "oracle" if protocol.agent_enabled else "untouched"
         counts[name] += 1
         failed = name == "oracle" and counts[name] == 1
@@ -462,7 +464,7 @@ async def test_validation_projects_only_final_episode_attempts(
     assert (
         await task_cli._validate(
             str(task_path),
-            RunConfig(episode_retries=1),
+            RunConfig(episode_retries=1, desktop_resolution="1366x768"),  # type: ignore[arg-type]
             tmp_path / "runs",
         )
         == 0
@@ -494,6 +496,7 @@ async def test_run_retries_each_episode_independently_and_resumes_only_final_suc
     async def execute(_task, _protocol, _providers, **kwargs):  # type: ignore[no-untyped-def]
         episode_id = kwargs["episode_id"]
         assert kwargs["destroy_failed_sandboxes"]
+        assert str(kwargs["desktop_resolution"]) == "1366x768"
         calls[episode_id] += 1
         status = (
             Status.ENV_ERROR if len(calls) == 1 and calls[episode_id] == 1 else Status.COMPLETED
@@ -502,7 +505,12 @@ async def test_run_retries_each_episode_independently_and_resumes_only_final_suc
 
     monkeypatch.setattr(task_cli, "_prepare_images", prepare)
     monkeypatch.setattr(task_cli, "run_episode", execute)
-    settings = RunConfig(episodes=2, episode_retries=2, agent={"name": "nop"})
+    settings = RunConfig(
+        episodes=2,
+        episode_retries=2,
+        agent={"name": "nop"},  # type: ignore[arg-type]
+        desktop_resolution="1366x768",  # type: ignore[arg-type]
+    )
     runs = tmp_path / "runs"
     assert await task_cli._run_one(str(task_path), settings, runs, "run") == 0
     assert "retry 1/2" in capsys.readouterr().out

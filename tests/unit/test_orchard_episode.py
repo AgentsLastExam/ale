@@ -396,6 +396,8 @@ def episode_fixture(
     monkeypatch.setattr(orchard, "frame_image", _framed)
     monkeypatch.setattr(orchard, "check_framer", lambda: None)
     monkeypatch.setattr(orchard, "await_desktop", _desktop)
+    monkeypatch.setattr(orchard, "at_resolution", _at_resolution)
+    monkeypatch.setattr(orchard, "require_resolution", _require_resolution)
     return task, registry, controller
 
 
@@ -410,6 +412,14 @@ async def _framed(local, image, *, user) -> FramedImage:
 
 async def _desktop(client, *, agent_user, agent_uid, timeout_sec) -> None:
     pass
+
+
+async def _at_resolution(local, framed, resolution) -> str:
+    return f"{framed.name}-{resolution}"
+
+
+async def _require_resolution(client, requested):
+    return requested
 
 
 @pytest.mark.asyncio

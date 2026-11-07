@@ -7,8 +7,8 @@ and records the privacy grants Cua Driver needs as System Settings would. The cl
 then booted once, without the agent or the Driver, so macOS finishes the image's first
 login; the background-item notice it posts then, which Notification Center shows again at
 every login until someone dismisses it, is dismissed before the disk is kept. The stopped
-VM is kept as a local Tart image, and every later VM clones it, which on APFS copies no
-data.
+VM is kept as a local Tart image, and every later VM boots a clone of it at its desktop
+resolution, which on APFS copies no data.
 """
 
 from __future__ import annotations
@@ -19,12 +19,13 @@ import fcntl
 import json
 import re
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ale.core.errors import ProviderStartError
 from ale.core.ids import content_hash
-from ale.core.sandbox import PreparedTaskImage
+from ale.core.sandbox import DesktopResolution, PreparedTaskImage
 from ale.run.framework import macos_framework_identity, macos_framework_payload
 from ale.run.providers.orchard_client import (
     PULL_TIMEOUT_SEC,
@@ -38,7 +39,7 @@ from ale.run.providers.orchard_client import (
 )
 from ale.run.sources import cache_root
 
-__all__ = ["FramedImage", "frame_image"]
+__all__ = ["FramedImage", "at_resolution", "frame_image"]
 
 #: The first login of a framed disk, from boot until its notices have been posted.
 _SETTLE_TIMEOUT_SEC = 600
@@ -53,6 +54,10 @@ _DISMISS_NOTICES = (
     '"DELETE FROM record; DELETE FROM delivered; DELETE FROM displayed;"; '
     "/usr/bin/pkill -9 -x usernoted || true"
 )
+#: Run as root: forget the display mode the first login saved. macOS restores it on a display
+#: of the same identity whatever size Tart gives that display, so a VM would otherwise keep
+#: the first login's size rather than start at its own.
+_FORGET_DISPLAYS = ["/bin/rm", "-f", "/Library/Preferences/com.apple.windowserver.displays.plist"]
 #: The labels of the LaunchAgents every account's session loads.
 _AGENT_LABELS = (
     'for plist in /Library/LaunchAgents/*.plist; do [ -f "$plist" ] || continue; '
@@ -75,7 +80,7 @@ def _identity(image: PreparedTaskImage, *, user: str) -> str:
         {
             "image": image.prepared_identity,
             "framework": macos_framework_identity(user=user),
-            "first_login": [_DISMISS_NOTICES, _AGENT_LABELS],
+            "first_login": [_DISMISS_NOTICES, _AGENT_LABELS, _FORGET_DISPLAYS],
         }
     )
 
@@ -93,9 +98,51 @@ async def frame_image(local: LocalOrchard, image: PreparedTaskImage, *, user: st
     """
     identity = _identity(image, user=user)
     key = identity.removeprefix("sha256:")[:32]
-    root = _records()
-    record = root / f"{key}.json"
-    with (root / f"{key}.lock").open("a") as lock:
+    record = _records() / f"{key}.json"
+    async with _exclusive(f"{key}.lock"):
+        images = await local.local_images()
+        if record.is_file():
+            framed = FramedImage(**json.loads(record.read_text()))
+            if framed.name in images:
+                return framed
+        name = f"ale-framed-{key}"
+        # Clones of an earlier framing of this image would boot instead of the new one.
+        for stale in sorted(image for image in images if image.startswith(f"{name}-")):
+            await local.tart("delete", stale)
+        framed = await _frame(local, image, name, identity, user=user)
+        record.write_text(json.dumps(asdict(framed)))
+        return framed
+
+
+async def at_resolution(
+    local: LocalOrchard, framed: FramedImage, resolution: DesktopResolution
+) -> str:
+    """The local image that boots ``framed`` with its desktop at ``resolution``.
+
+    Tart keeps a VM's display size in the VM's configuration, which a clone copies and
+    Orchard cannot set, so each resolution boots its own clone of the framed image, made on
+    first use. Tart takes the size in points, as the Run gives it.
+    """
+    name = f"{framed.name}-{resolution}"
+    async with _exclusive(f"{name}.lock"):
+        if name in await local.local_images():
+            return name
+        work = f"ale-frame-{uuid.uuid4().hex}"
+        try:
+            await local.tart("clone", framed.name, work)
+            await local.tart("set", work, "--display", f"{resolution}pt")
+            await local.tart("rename", work, name)
+        except BaseException:
+            with contextlib.suppress(ProviderStartError):
+                await asyncio.shield(local.tart("delete", work))
+            raise
+        return name
+
+
+@contextlib.asynccontextmanager
+async def _exclusive(lock_name: str) -> AsyncIterator[None]:
+    """Hold this Host's lock ``lock_name``, so one process makes each local image."""
+    with (_records() / lock_name).open("a") as lock:
         while True:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -103,13 +150,7 @@ async def frame_image(local: LocalOrchard, image: PreparedTaskImage, *, user: st
             except BlockingIOError:
                 await asyncio.sleep(0.5)
         try:
-            if record.is_file():
-                framed = FramedImage(**json.loads(record.read_text()))
-                if framed.name in await local.local_images():
-                    return framed
-            framed = await _frame(local, image, f"ale-framed-{key}", identity, user=user)
-            record.write_text(json.dumps(asdict(framed)))
-            return framed
+            yield
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -200,6 +241,10 @@ async def _settled(
     if dismissed.exit_code:
         detail = dismissed.stderr.decode(errors="replace").strip()
         raise ProviderStartError(f"could not dismiss the first login's notices: {detail}")
+    forgotten = await client.exec(name, ["sudo", "-n", *_FORGET_DISPLAYS], deadline=deadline)
+    if forgotten.exit_code:
+        detail = forgotten.stderr.decode(errors="replace").strip()
+        raise ProviderStartError(f"could not forget the first login's display mode: {detail}")
 
 
 def pending_notices(dump: str, uid: int, labels: set[str]) -> bool:

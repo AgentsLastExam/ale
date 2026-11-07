@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import struct
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
@@ -23,13 +24,15 @@ import pytest
 from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
+    DesktopResolution,
     Identity,
     ImageRef,
+    PreparedTaskImage,
     Provider,
     Sandbox,
     SandboxRequest,
 )
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
 
 __all__ = ["ProviderConformance"]
 
@@ -51,6 +54,27 @@ for target in sys.argv[1:]:
     except Exception:
         print(target, "closed")
 """
+
+
+def _png_size(png: bytes) -> tuple[int, int]:
+    """A PNG's width and height, from its header."""
+    width, height = struct.unpack(">II", png[16:24])
+    return width, height
+
+
+def _shows(png: bytes, resolution: DesktopResolution, operating_system: OperatingSystem) -> bool:
+    """Whether a screenshot is of a desktop at ``resolution``.
+
+    A capture is the desktop's size, except on macOS: there the Retina desktop has two
+    pixels per point each way and Cua Driver scales its captures down, so only the shape
+    can be checked, and the size is what the Provider checked and recorded.
+    """
+    width, height = _png_size(png)
+    if operating_system is not OperatingSystem.MACOS:
+        return (width, height) == (resolution.width, resolution.height)
+    return abs(width * resolution.height - height * resolution.width) <= max(
+        resolution.width, resolution.height
+    )
 
 
 async def _elevates(sandbox: Sandbox) -> bool:
@@ -113,10 +137,10 @@ class ProviderConformance:
     """Assertions every :class:`~ale.core.sandbox.Provider` must satisfy."""
 
     provider: Provider
-    image: ImageRef
-    """The image every assertion runs on; a backend's suite names a pinned release."""
+    image: ImageRef | PreparedTaskImage
+    """The image every assertion runs on: a pinned release, or one the backend's suite built."""
 
-    gui_image: ImageRef | None = None
+    gui_image: ImageRef | PreparedTaskImage | None = None
     """An image that starts a desktop, if this backend has one to test with.
 
     A desktop is a property of the *image*, not of the backend: a provider that can host
@@ -133,7 +157,7 @@ class ProviderConformance:
 
     async def request(self, **overrides: object) -> SandboxRequest:
         image = overrides.pop("image", self.image)
-        assert isinstance(image, ImageRef)
+        assert isinstance(image, ImageRef | PreparedTaskImage)
         base: dict[str, object] = {
             "episode_id": f"conformance-{uuid.uuid4().hex[:8]}",
             "prepared_image": await self.provider.prepare_image(image),
@@ -166,7 +190,9 @@ class ProviderConformance:
     @pytest.mark.asyncio
     async def test_file_round_trip(self) -> None:
         async with await self.provider.create(await self.request()) as sandbox:
-            path = PurePosixPath("/tmp/conformance.bin")
+            # The agent's home, since a system's temporary directory may be a link
+            # (macOS's /tmp), which file operations refuse to pass through.
+            path = PurePosixPath(sandbox.agent_home) / "conformance.bin"
             payload = b"\x00binary\xffdata"
             await sandbox.write_file(path, payload)
             assert await sandbox.read_file(path) == payload
@@ -174,6 +200,7 @@ class ProviderConformance:
     @pytest.mark.asyncio
     async def test_file_reads_progress_while_a_command_is_running(self) -> None:
         async with await self.provider.create(await self.request()) as sandbox:
+            directory = str(PurePosixPath(sandbox.agent_home) / "concurrent-read")
             ready = asyncio.Event()
 
             async def output(stream: str, data: bytes) -> None:
@@ -185,12 +212,11 @@ class ProviderConformance:
                     [
                         "python3",
                         "-c",
-                        "from pathlib import Path; import time; "
-                        "Path('/tmp/concurrent-read').mkdir(); "
-                        "Path('/tmp/concurrent-read/session.jsonl')"
-                        ".write_bytes(b'first\\nsecond\\n'); "
-                        "Path('/tmp/concurrent-read/link').symlink_to('/etc/hostname'); "
+                        "import sys, time; from pathlib import Path; d = Path(sys.argv[1]); "
+                        "d.mkdir(); (d / 'session.jsonl').write_bytes(b'first\\nsecond\\n'); "
+                        "(d / 'link').symlink_to('/etc/hostname'); "
                         "print('ready', flush=True); time.sleep(5)",
+                        directory,
                     ],
                     timeout_sec=15,
                     output_sink=output,
@@ -198,9 +224,7 @@ class ProviderConformance:
             )
             try:
                 await asyncio.wait_for(ready.wait(), timeout=10)
-                files = await asyncio.wait_for(
-                    sandbox.list_files("/tmp/concurrent-read"), timeout=2
-                )
+                files = await asyncio.wait_for(sandbox.list_files(directory), timeout=2)
                 assert len(files) == 1 and files[0].size == 13
                 data = await asyncio.wait_for(
                     sandbox.read_file(files[0].path, offset=6, length=7), timeout=2
@@ -427,7 +451,8 @@ class ProviderConformance:
     async def test_a_snapshot_boots_new_sandboxes_with_its_files(self) -> None:
         """A snapshot keeps the disk, and every Sandbox booted from it starts from that disk.
 
-        Each gets the elevation its own request asks for, whatever the snapshot's had.
+        Each gets the elevation and desktop resolution its own request asks for, whatever
+        the snapshot's had.
         """
         if not self.provider.capabilities().snapshot:
             with pytest.raises(ProviderCapabilityError):
@@ -445,7 +470,13 @@ class ProviderConformance:
             listed = {record["handle"] for record in await self.provider.list_retained()}
             assert retained.handle in listed
             requests = [
-                await self.request(snapshot=retained.handle, sudo=sudo) for sudo in (True, False)
+                await self.request(
+                    snapshot=retained.handle, sudo=sudo, desktop_resolution=resolution
+                )
+                for sudo, resolution in (
+                    (True, DesktopResolution()),
+                    (False, DesktopResolution(width=1366, height=768)),
+                )
             ]
             booted = await asyncio.gather(
                 *(self.provider.create(item) for item in requests), return_exceptions=True
@@ -457,6 +488,7 @@ class ProviderConformance:
                         raise fork
                     assert await fork.read_file(kept) == b"kept"
                     assert await _elevates(fork) is request.sudo
+                    assert fork.allocation.desktop_resolution in (None, request.desktop_resolution)
             finally:
                 for fork in forks:
                     await fork.destroy()
@@ -507,6 +539,26 @@ class ProviderConformance:
             png = await sandbox.screenshot()
             assert png.startswith(b"\x89PNG"), "a desktop was declared but produced no image"
             assert len(png) > 1000, "a capture this small is an empty screen, not a desktop"
+            # Unset, every backend starts a desktop at one shared default size.
+            assert sandbox.allocation.desktop_resolution == DesktopResolution()
+            assert _shows(png, DesktopResolution(), request.os), _png_size(png)
+
+    @pytest.mark.asyncio
+    async def test_a_desktop_takes_the_runs_resolution(self) -> None:
+        """The Run, not the image, decides how large the desktop is.
+
+        The same prepared image serves every resolution, so one the image ignored would
+        leave the agent another screen than the one its RunLock records.
+        """
+        if not (self.provider.capabilities().gui and self.gui_image):
+            pytest.skip("no desktop image configured for this backend")
+
+        resolution = DesktopResolution(width=1366, height=768)
+        request = await self.request(image=self.gui_image, desktop_resolution=resolution)
+        async with await self.provider.create(request) as sandbox:
+            assert sandbox.allocation.desktop_resolution == resolution
+            png = await sandbox.screenshot()
+            assert _shows(png, resolution, request.os), _png_size(png)
 
     @pytest.mark.asyncio
     async def test_a_declared_desktop_accepts_input(self) -> None:
@@ -534,6 +586,7 @@ class ProviderConformance:
 
         sandbox = await self.provider.create(await self.request())  # the headless image
         try:
+            assert sandbox.allocation.desktop_resolution is None
             with pytest.raises(Exception):  # noqa: B017 — providers raise their own types
                 await sandbox.screenshot()
         finally:

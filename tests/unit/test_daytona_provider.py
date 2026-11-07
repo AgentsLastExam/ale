@@ -33,6 +33,7 @@ from ale.run.providers.daytona import (
     DaytonaSandbox,
     _domain_allowlist,
     _egress_probe,
+    _guest_environment,
     _image_unavailable,
     _observed_allocation,
     _observed_gpus,
@@ -41,11 +42,17 @@ from ale.run.providers.daytona import (
     _sandbox_name,
     _seal_daemon,
     _SshHost,
+    _start_image_command,
     _Tunnel,
     _tunnel_plan,
 )
 from ale.run.providers.daytona_api import DaytonaError
-from ale.run.providers.daytona_image import ImagePublisher, PublishedImage, image_config
+from ale.run.providers.daytona_image import (
+    ImageConfig,
+    ImagePublisher,
+    PublishedImage,
+    image_config,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -233,6 +240,25 @@ async def test_a_setting_daytona_did_not_store_stops_the_phase() -> None:
     sandbox, _ = network_sandbox(api, allowlist("example.com"))
     with pytest.raises(ProviderStartError, match="Daytona stored"):
         await sandbox.close_egress()
+
+
+async def test_the_image_command_and_guestd_see_the_runs_desktop_resolution() -> None:
+    config = ImageConfig(
+        argv=("supervisord",), env={"VNC_RESOLUTION": "1024x768", "A": "1"}, user="", workdir=""
+    )
+    wanted = request(desktop_resolution="1366x768")
+    started: list[list[str]] = []
+
+    class Client:
+        async def exec(self, argv, **_kwargs):  # type: ignore[no-untyped-def]
+            started.append(argv)
+            return 0, "", "", False
+
+    await _start_image_command(Client(), config, wanted)  # type: ignore[arg-type]
+    spec = json.loads(started[0][-1])
+    assert spec["argv"] == ["supervisord"]
+    assert spec["env"] == {"VNC_RESOLUTION": "1366x768", "A": "1"}
+    assert _guest_environment(config, wanted, None)["VNC_RESOLUTION"] == "1366x768"
 
 
 def test_what_daytona_gave_is_what_the_lock_records() -> None:

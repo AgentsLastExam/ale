@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 
 from ale.core.errors import ConfigError
 from ale.core.ids import content_hash
+from ale.core.sandbox import DesktopResolution
 from ale.core.taskspec import McpSource, SkillSource
 
 __all__ = [
@@ -311,6 +312,14 @@ class RunConfig(BaseModel):
     verification: VerificationConfig = VerificationConfig()
     timeouts: RunTimeouts = RunTimeouts()
     sandbox_retention: SandboxRetentionConfig = SandboxRetentionConfig()
+    desktop_resolution: DesktopResolution = Field(
+        default=DesktopResolution(),
+        description=(
+            "The size every Sandbox's desktop is started at, whatever its image would use. "
+            "It decides what fits on the screen an agent sees, so it is a Run setting and "
+            "one prepared image serves every size."
+        ),
+    )
     logging: LoggingPolicy = LoggingPolicy()
     episodes: int = Field(default=1, ge=1)
     episode_retries: int = Field(default=0, ge=0, strict=True)
