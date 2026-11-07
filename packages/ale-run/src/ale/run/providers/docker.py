@@ -168,15 +168,14 @@ def _parse_host_nvidia_smi(output: str) -> dict[int, GpuDevice]:
 def _gpu_run_args(uuids: tuple[str, ...]) -> list[str]:
     # Docker reads --gpus as one CSV record, so an unquoted comma would make the second
     # UUID a count field; the quotes keep the whole device list in one field.
-    # The NVIDIA runtime hook mounts only the driver libraries of the requested
-    # capabilities; graphics adds the Vulkan and EGL drivers an offscreen renderer loads.
-    # A Host on the CDI path injects its whole spec whatever is requested. display and
-    # video are not requested.
+    # The NVIDIA runtime hook mounts only the driver files of the requested capabilities.
+    # A Host on the CDI path injects the whole driver whatever is requested, so all gives
+    # a sandbox on the hook path the same driver.
     return [
         "--gpus",
         f'"device={",".join(uuids)}"',
         "--env",
-        "NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics",
+        "NVIDIA_DRIVER_CAPABILITIES=all",
     ]
 
 

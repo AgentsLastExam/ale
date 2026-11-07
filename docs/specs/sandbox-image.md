@@ -337,11 +337,9 @@ QEMU GPU passthrough remains a Provider capability, not a Task image declaration
 
 For a Docker GPU sandbox the Provider, not the image, sets the NVIDIA driver capabilities
 (`NVIDIA_DRIVER_CAPABILITIES`), because on the NVIDIA runtime-hook path they decide which
-Host driver libraries enter the sandbox. It requests compute, utility and graphics, so a
-Task that renders offscreen through Vulkan or EGL finds its driver on every path. A Host
-on the CDI path ignores the request and injects whatever its CDI spec lists, display and
-video files included; a Task may rely on CUDA, Vulkan and EGL, not on those. What each
-path mounts is in
+Host driver files enter the sandbox. It requests all of them, so a Task finds the same
+driver on that path as on the CDI path, which ignores the request and injects the whole
+driver. What each path mounts is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-driver-capabilities).
 
 ## Permissions
