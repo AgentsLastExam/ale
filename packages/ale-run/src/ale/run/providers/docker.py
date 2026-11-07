@@ -919,9 +919,9 @@ class DockerProvider(Provider):
         if not handles:
             return found
         code, raw, stderr = await _docker("inspect", *handles, timeout=30)
-        if code != 0:
+        if code != 0 and not _only_vanished(stderr):
             raise ProviderStartError(f"could not inspect ALE sandboxes: {stderr.strip()}")
-        records = json.loads(raw)
+        records = json.loads(raw) if raw.strip() else []
         for record in records:
             labels = record.get("Config", {}).get("Labels", {}) or {}
             gpu = tuple(filter(None, labels.get(GPU_LABEL, "").split(",")))
@@ -959,6 +959,8 @@ class DockerProvider(Provider):
                 labels, identity = await _snapshot_record(handle)
             except ProviderCapabilityError:
                 continue  # tagged by hand, not by ALE
+            except ProviderStartError:
+                continue  # destroyed by another run since it was listed
             found.append(
                 {
                     "provider": "docker",
@@ -1081,6 +1083,16 @@ def _snapshot_reference(handle: str) -> str:
     if not handle.startswith(SNAPSHOT_PREFIX):
         raise ProviderCapabilityError(f"{handle!r} is not a Docker snapshot handle")
     return f"{SNAPSHOT_REPOSITORY}:{handle.removeprefix(SNAPSHOT_PREFIX)}"
+
+
+def _only_vanished(stderr: str) -> bool:
+    """Whether ``docker inspect`` failed only for objects that no longer exist.
+
+    Another run can destroy a retained sandbox between listing and inspecting it; the
+    sandboxes it still found are on stdout.
+    """
+    errors = [line for line in stderr.splitlines() if line.strip()]
+    return bool(errors) and all("no such object" in line.lower() for line in errors)
 
 
 async def _snapshot_record(handle: str) -> tuple[dict[str, str], str]:
