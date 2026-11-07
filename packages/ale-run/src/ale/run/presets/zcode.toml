@@ -9,6 +9,7 @@ mcp_servers = []
 disallowed_tools = []
 workflow_mode = "default"
 toolsearch_mode = "default"
+input_format = "default"
 
 [gateway]
 provider = "zai"

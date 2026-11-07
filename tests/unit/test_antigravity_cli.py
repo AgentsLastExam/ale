@@ -515,6 +515,31 @@ def _spawning(tmp_path: Path) -> TrajectoryParseContext:
     return context
 
 
+def test_an_image_agy_saved_instead_of_inlining_is_the_results_image(tmp_path: Path) -> None:
+    saved = f"file:///home/agent/{BRAIN}/{ROOT}/.system_generated/steps/2/media_0.png"
+    snap = {"ServerName": "desk", "ToolName": "screenshot", "Arguments": {}}
+    context = _logs(
+        tmp_path,
+        [("Look.", _turn("Done.", _tool_event(2, "call_mcp_tool")))],
+        {
+            ROOT: [
+                _user(0, "Look."),
+                _planner(1, "", ("call_mcp_tool", snap)),
+                _result(2, f"Screenshot captured\n[Resource offloaded to {saved}]"),
+                _planner(3, "Done."),
+            ]
+        },
+    )
+    _write(_generated(context.logs_dir, ROOT) / "steps/2/media_0.png", PNG)
+    trajectory = AntigravityCliHarness().parse_trajectory(context)
+
+    (result,) = trajectory.steps[1].observation.results  # type: ignore[union-attr]
+    text, image = result.content  # type: ignore[misc]
+    assert text.text.startswith("Screenshot captured")
+    assert (tmp_path / "blobs" / image.source.path).read_bytes() == PNG  # type: ignore[union-attr]
+    assert trajectory.extra is None
+
+
 def test_parser_embeds_a_subagent_where_it_was_spawned(tmp_path: Path) -> None:
     trajectory = AntigravityCliHarness().parse_trajectory(_spawning(tmp_path))
 

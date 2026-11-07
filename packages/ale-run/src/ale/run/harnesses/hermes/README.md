@@ -16,8 +16,14 @@ guest runs it. On macOS `install.sh` takes its Darwin path; the image must provi
 `config.yaml` makes the episode Gateway the one custom provider, with Hermes' transport for
 the Gateway dialect and the key as the `ALE_GATEWAY_TOKEN` variable, and turns off update
 checks, the model catalog, shared telemetry, logins adopted from other agents and
-installs during the run. Hermes still probes several model-information paths at start;
-the Gateway answers them 404 and Hermes continues.
+installs during the run. The `supports_vision` setting is `model.supports_vision`.
+Unset, Hermes looks the model up on models.dev, which it does for a custom provider only
+through a catalog provider ALE does not name, so it takes the model to be text-only: a
+tool's image, such as an MCP screenshot, then reaches the model only as a `MEDIA:` file
+path. Over Chat Completions Hermes sends a tool's image in the tool message, which
+OpenAI's API refuses, taking images in user messages only; Hermes then retries with a text
+summary. Hermes still probes several model-information paths at start; the Gateway
+answers them 404 and Hermes continues.
 
 Each turn runs in a background `hermes gateway run` that the first chat starts and that
 outlives it with that chat's environment, Gateway token included, so every invocation first
@@ -29,7 +35,9 @@ Hermes keeps sessions in SQLite and chooses a new session's ID itself, which the
 invocation's `result` event reports; `--resume` continues that exact session. After every
 invocation `hermes sessions export` writes every session of the episode home to
 `.hermes-ale/exports/<session id>/<time>.jsonl`. The parser reads the newest export, and
-the invocation's stream-json supplies failures and any turn the export lacks. The export
+the invocation's stream-json supplies failures and any turn the export lacks. A tool's
+image is not in the export: Hermes keeps it in `.hermes-ale/cache/images`, and the result
+names it as `MEDIA:<path>`, which the parser records as the result's image. The export
 holds every stored row with its `active` and `compacted` flags, and the parser keeps the
 rows Hermes' transcript keeps. A row removed by a rewind, or superseded by a newer copy,
 has neither flag. An in-place compaction keeps the turns it summarized as `compacted`
@@ -47,4 +55,7 @@ or the single `goal`) and no other child of that parent starts with the same goa
 Every other delegated session under the episode's conversation is left unconverted with an
 `unlinked_subagent` issue; branched, reset and tool sessions are not subagents. MCP tools
 are `mcp__<server>__<tool>` with other characters replaced by `_`; the declared server
-name is restored from `config.yaml`. The settings are `max_turns` and `reasoning_effort`.
+name is restored from `config.yaml`. Hermes defers them: `tool_describe` loads one and
+`tool_call` calls it. A `tool_call` of one tool is recorded as the call it made, noting the
+wrapper; one of several stays the wrapper. The settings are `max_turns`,
+`reasoning_effort` and `supports_vision`.

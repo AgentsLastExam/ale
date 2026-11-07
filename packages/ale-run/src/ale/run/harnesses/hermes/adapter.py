@@ -63,7 +63,7 @@ class HermesHarness(CliHarness):
     default_version = DEFAULT_CLI_VERSION
     settings_type = HermesSettings
     settings: HermesSettings
-    logs = (LOG_ROOT, trajectory.EXPORTS, trajectory.CONFIG)
+    logs = (LOG_ROOT, trajectory.EXPORTS, trajectory.CONFIG, trajectory.IMAGES)
 
     def __init__(
         self,
@@ -174,10 +174,13 @@ class HermesHarness(CliHarness):
             servers[resolved.name] = native
 
         transport, suffix = _TRANSPORTS[self.gateway_dialect]
+        model: dict[str, Any] = {"provider": "ale", "default": session.model}
+        if self.settings.supports_vision != "default":
+            model["supports_vision"] = self.settings.supports_vision
         config: dict[str, Any] = {
             # The schema version the pinned installer seeds, so no migration runs.
             "_config_version": 51,
-            "model": {"provider": "ale", "default": session.model},
+            "model": model,
             "providers": {
                 "ale": {
                     "api": session.gateway_url + suffix,

@@ -1,6 +1,6 @@
 [agent]
 name = "openhands-cli"
-model = "claude-opus-4-8"
+model = "claude-sonnet-5"
 version = "1.16.0"
 skills = []
 mcp_servers = []

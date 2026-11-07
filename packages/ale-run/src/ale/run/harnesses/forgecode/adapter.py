@@ -178,8 +178,10 @@ class ForgecodeHarness(CliHarness):
             f"name = {_toml(session.model)}",
             "tools_supported = true",
             "supports_parallel_tool_calls = true",
-            'input_modalities = ["text", "image"]',
         ]
+        if self.settings.input_modalities != "default":
+            rendered = ", ".join(_toml(value) for value in self.settings.input_modalities)
+            lines.append(f"input_modalities = [{rendered}]")
         if self.settings.reasoning_effort != "default":
             lines.append(
                 f"supports_reasoning = {_toml_bool(self.settings.reasoning_effort != 'none')}"

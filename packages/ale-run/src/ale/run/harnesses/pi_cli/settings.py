@@ -18,6 +18,8 @@ class PiCliSettings(BaseModel):
     context_window: PositiveInt | Literal["default"] = "default"
     max_output_tokens: PositiveInt | Literal["default"] = "default"
     disabled_tools: tuple[str, ...] = ()
+    #: The model's ``input``: what it takes besides text.
+    input: tuple[Literal["text", "image"], ...] | Literal["default"] = "default"
 
     # --- validation ---
 
@@ -27,3 +29,12 @@ class PiCliSettings(BaseModel):
         if any(not value.strip() or "," in value for value in values):
             raise ValueError("tool names must be non-empty and contain no comma")
         return values
+
+    @field_validator("input")
+    @classmethod
+    def _input(
+        cls, value: tuple[str, ...] | Literal["default"]
+    ) -> tuple[str, ...] | Literal["default"]:
+        if value != "default" and (not value or len(set(value)) != len(value)):
+            raise ValueError("input must name each modality once")
+        return value

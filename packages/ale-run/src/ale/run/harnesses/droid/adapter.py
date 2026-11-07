@@ -126,6 +126,8 @@ class DroidHarness(CliHarness):
             "apiKey": "${ALE_GATEWAY_TOKEN}",
             "provider": provider,
         }
+        if self.settings.no_image_support != "default":
+            model["noImageSupport"] = self.settings.no_image_support
         if isinstance(self.settings.max_output_tokens, int):
             model["maxOutputTokens"] = self.settings.max_output_tokens
         await _write_json(

@@ -51,6 +51,14 @@ _MESSAGE = re.compile(
 #: Bookkeeping records that are neither conversation nor tool output.
 _INTERNAL = frozenset({"CHECKPOINT", "CONVERSATION_HISTORY", "EPHEMERAL_MESSAGE"})
 _IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+#: A result's resource that agy saved to a file of the step instead of inlining it.
+_OFFLOADED = re.compile(r"\[Resource offloaded to (file://[^\]\s]+)\]")
+_SUFFIX_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 
 
 def is_session_file(path: PurePosixPath, session_id: str) -> bool:
@@ -314,6 +322,7 @@ class _Conversation:
     def _content(self, record: dict[str, Any]) -> str | list[AtifContentPart]:
         text = _text(record.get("content"))
         images: list[AtifContentPart] = []
+        shown: set[bytes] = set()
         for item in record.get("media") or ():
             if not isinstance(item, dict):
                 continue
@@ -322,6 +331,19 @@ class _Conversation:
                 self.issues.append(
                     {"reason": "media_unavailable", "step_index": record.get("step_index")}
                 )
+                continue
+            shown.add(path.read_bytes())
+            blob = self.context.blobs.put(path.read_bytes(), media_type=media_type)
+            images.append(
+                AtifContentPart(
+                    type="image", source=AtifImageSource(media_type=media_type, path=blob.path)
+                )
+            )
+        # An image agy saved instead of inlining is still the result: the model got its path.
+        for uri in _OFFLOADED.findall(text):
+            path = self._mirrored(uri)
+            media_type = _SUFFIX_TYPES.get(path.suffix.lower()) if path else None
+            if path is None or media_type is None or path.read_bytes() in shown:
                 continue
             blob = self.context.blobs.put(path.read_bytes(), media_type=media_type)
             images.append(

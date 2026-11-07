@@ -9,7 +9,7 @@ from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
 from ale.core.config import load_run_config
 from ale.core.errors import AgentError, ConfigError, HarnessLimitError
-from ale.core.harness import TrajectoryParseContext
+from ale.core.harness import EffectiveAgentResources, TrajectoryParseContext
 from ale.core.taskspec import OperatingSystem
 from ale.core.trajectory import AtifTrajectory
 from ale.run.cli.tasks import PRESET_DIR, _harness
@@ -36,7 +36,13 @@ def test_preset_pins_the_official_commit() -> None:
 
 @pytest.mark.parametrize(
     "settings",
-    [{"max_turn": 3}, {"max_turns": 0}, {"max_turns": "unlimited"}, {"reasoning_effort": "ultra"}],
+    [
+        {"max_turn": 3},
+        {"max_turns": 0},
+        {"max_turns": "unlimited"},
+        {"reasoning_effort": "ultra"},
+        {"supports_vision": "yes"},
+    ],
 )
 def test_settings_are_strict(settings: dict[str, object]) -> None:
     with pytest.raises(ConfigError):
@@ -87,6 +93,20 @@ async def test_the_gateway_is_the_one_provider(
     }
     assert sandbox.uploads == [(str(tmp_path / "resource-proof"), f"{STATE}/skills/resource-proof")]
     assert b"token\n" not in sandbox.files[f"{STATE}/config.yaml"]
+
+
+@pytest.mark.parametrize("supports_vision", [True, False])
+async def test_supports_vision_declares_whether_the_model_takes_images(
+    supports_vision: bool,
+) -> None:
+    sandbox = FakeSandbox()
+    await HermesHarness(settings={"supports_vision": supports_vision}).install_resources(
+        sandbox,  # type: ignore[arg-type]
+        session(),
+        EffectiveAgentResources(),
+    )
+    config = yaml.safe_load(sandbox.files[f"{STATE}/config.yaml"])
+    assert config["model"]["supports_vision"] is supports_vision
 
 
 @pytest.mark.parametrize("native_session_id", [None, SESSION_ID])
@@ -282,6 +302,73 @@ def test_delegation_mcp_names_and_failures_convert(tmp_path: Path) -> None:
     assert [step.message for step in embedded.steps] == ["Sum.", "Summed."]
     assert mcp.content == "fragment"
     assert not trajectory.extra
+
+
+def test_one_deferred_call_is_the_call_it_made(tmp_path: Path) -> None:
+    (tmp_path / ".hermes-ale/config.yaml").parent.mkdir(parents=True)
+    (tmp_path / ".hermes-ale/config.yaml").write_text(
+        yaml.safe_dump({"mcp_servers": {"task-proof": {"command": "x"}}})
+    )
+    one = [{"name": "mcp__task_proof__derive", "arguments": {"n": 1}}]
+    two = [{"name": "mcp__task_proof__derive", "arguments": {}}, {"name": "x", "arguments": {}}]
+    trajectory = parse(
+        tmp_path,
+        ["Derive."],
+        {
+            "id": SESSION_ID,
+            "messages": [
+                user("Derive."),
+                agent(
+                    "",
+                    # A model may send the list as a JSON string.
+                    call("c1", "tool_call", {"calls": json.dumps(one)}),
+                    call("c2", "tool_call", {"calls": two}),
+                ),
+                tool("c1", "fragment"),
+                tool("c2", "both"),
+            ],
+        },
+    )
+
+    single, batch = trajectory.steps[1].tool_calls or ()
+    assert (single.function_name, single.arguments, single.extra) == (
+        "mcp__task_proof__derive",
+        {"n": 1},
+        {"ale": {"native_tool": "tool_call", "mcp": {"server": "task-proof", "tool": "derive"}}},
+    )
+    assert (batch.function_name, batch.extra) == ("tool_call", None)
+    results = trajectory.steps[1].observation.results  # type: ignore[union-attr]
+    assert [result.content for result in results] == ["fragment", "both"]
+    assert not trajectory.extra
+
+
+def test_an_image_a_result_names_is_the_results_image(tmp_path: Path) -> None:
+    cached = tmp_path / ".hermes-ale/cache/images/img_1.png"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"\x89PNG shot")
+    # As Hermes wraps it: the tool's output as JSON, the path ending at a quote.
+    named = json.dumps(
+        {"result": "Screenshot captured\nMEDIA:/home/agent/.hermes-ale/cache/images/img_1.png"}
+    )
+    trajectory = parse(
+        tmp_path,
+        ["Look."],
+        {
+            "id": SESSION_ID,
+            "messages": [
+                user("Look."),
+                agent("", call("c1", "mcp__desk__screenshot", {})),
+                # The reference repeats where Hermes says the image is attached.
+                tool("c1", f"{named}\n{named}"),
+            ],
+        },
+    )
+
+    (result,) = trajectory.steps[1].observation.results  # type: ignore[union-attr]
+    text, image = result.content  # type: ignore[misc]
+    assert text.text.startswith('{"result": "Screenshot captured')
+    assert image.source.media_type == "image/png"
+    assert (tmp_path / image.source.path).read_bytes() == b"\x89PNG shot"
 
 
 def test_nested_delegations_embed_in_their_spawners(tmp_path: Path) -> None:

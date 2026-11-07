@@ -10,6 +10,7 @@ thinking = "default"
 context_window = "default"
 max_output_tokens = "default"
 disabled_tools = []
+input = ["text", "image"]
 
 [gateway]
 provider = "openai"

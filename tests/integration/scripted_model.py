@@ -1,12 +1,20 @@
 """A scripted model upstream, so a real agent CLI can run through the real Gateway unbilled.
 
-It speaks the three Gateway dialects, streamed or not. Each reply is decided from the
-request alone: after a tool result it answers with ``FINAL``. Otherwise, when the agent's
-first user message contains a ``delegations`` marker and the request offers that rule's
-tool, it calls the tool with the rule's arguments, so a CLI can be made to spawn
-subagents; when the request offers a tool matching ``tool_pattern`` it calls that tool,
-filling the first command-like string argument with ``command``; otherwise it answers
-with ``FINAL``. Every request is kept in ``requests`` for assertions.
+It speaks the four Gateway dialects, streamed or not. Each reply is decided from the
+request alone. With a ``script``, a request whose conversation holds n tool results makes
+the call ``script[n]`` if it offers that tool, and otherwise, as past the script's end,
+answers with ``FINAL``; so a CLI that reaches a tool through others, or sends a result's
+image in a message of its own, still follows the script. A step may instead make its call
+from the text of the last tool result, such as a file that result names. Without a
+script, it answers with
+``FINAL`` after a tool result. Otherwise, when the agent's first user message contains a
+``delegations`` marker and the request offers that rule's tool, it calls the tool with the
+rule's arguments, so a CLI can be made to spawn subagents; when the request offers a tool
+matching ``tool_pattern`` it calls that tool, filling the first command-like string
+argument with ``command``; otherwise it answers with ``FINAL``. A tool the Responses API
+groups in a namespace is named ``<namespace>.<tool>``; a call names it so with
+``dotted_namespaces``, as Meta's API does, and otherwise in OpenAI's separate
+``namespace`` field. Every request is kept in ``requests`` for assertions.
 """
 
 from __future__ import annotations
@@ -14,12 +22,17 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from aiohttp import web
 
 FINAL = "Scripted run finished."
+#: One call of a tool: its name and its arguments.
+Call = tuple[str, dict[str, Any]]
+#: A call, or what makes one from the text of the last tool result; ``None`` makes none.
+Step = Call | Callable[[str], Call | None]
 SHELL_TOOLS = r"^(bash|shell|execute|terminal|run_command|exec_command|shell_command)$"
 _COMMAND_KEYS = ("command", "cmd", "script")
 
@@ -30,6 +43,10 @@ class ScriptedModel:
     command: str = "echo scripted > scripted-proof.txt && cat scripted-proof.txt"
     #: ``(marker, tool pattern, arguments)``, tried in order before ``tool_pattern``.
     delegations: tuple[tuple[str, str, dict[str, Any]], ...] = ()
+    #: Calls made in order, each once the conversation holds as many tool results as precede it.
+    script: tuple[Step, ...] = ()
+    #: Whether a call names a namespaced tool ``<namespace>.<tool>``, as Meta's API does.
+    dotted_namespaces: bool = False
     requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     _runner: web.AppRunner | None = None
 
@@ -38,6 +55,7 @@ class ScriptedModel:
         app.router.add_post("/v1/chat/completions", self._chat)
         app.router.add_post("/v1/responses", self._responses)
         app.router.add_post("/v1/messages", self._messages)
+        app.router.add_post("/v1beta/models/{target}", self._gemini)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         site = web.TCPSite(self._runner, "127.0.0.1", 0)
@@ -52,25 +70,28 @@ class ScriptedModel:
     # --- the script ---
 
     def _tool(
-        self, tools: list[Any], after_result: bool, task: str
-    ) -> tuple[str, dict[str, Any]] | None:
+        self, tools: list[Any], results: list[str], after_result: bool, task: str
+    ) -> Call | None:
+        offered = _offered(tools)
+        if self.script:
+            if len(results) < len(self.script):
+                step = self.script[len(results)]
+                call = step(results[-1] if results else "") if callable(step) else step
+                if call is not None and call[0] in offered:
+                    return call
+            return None
         if after_result:
             return None
         for marker, tool_pattern, arguments in self.delegations:
             if marker in task:
-                name = self._offered(tools, tool_pattern)
-                if name is not None:
-                    return name[0], arguments
-        return self._offered(tools, self.tool_pattern)
+                call = self._matching(offered, tool_pattern)
+                if call is not None:
+                    return call[0], arguments
+        return self._matching(offered, self.tool_pattern)
 
-    def _offered(self, tools: list[Any], tool_pattern: str) -> tuple[str, dict[str, Any]] | None:
+    def _matching(self, offered: dict[str, dict[str, Any]], tool_pattern: str) -> Call | None:
         pattern = re.compile(tool_pattern, re.IGNORECASE)
-        for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
-            name = str(function.get("name") or "")
-            schema = function.get("parameters") or function.get("input_schema") or {}
+        for name, schema in offered.items():
             if pattern.search(name):
                 return name, self._arguments(schema)
         return None
@@ -106,6 +127,7 @@ class ScriptedModel:
         messages = body.get("messages") or []
         tool = self._tool(
             body.get("tools") or [],
+            tool_results("openai-chat-completions", body),
             bool(messages) and messages[-1].get("role") == "tool",
             _first_user(messages),
         )
@@ -156,14 +178,23 @@ class ScriptedModel:
         body = await self._read(request)
         items = body.get("input") if isinstance(body.get("input"), list) else []
         after = bool(items) and items[-1].get("type") == "function_call_output"
-        tool = self._tool(body.get("tools") or [], after, _first_user(items))
+        tool = self._tool(
+            body.get("tools") or [],
+            tool_results("openai-responses", body),
+            after,
+            _first_user(items),
+        )
         if tool:
+            namespace, _, name = (
+                ("", "", tool[0]) if self.dotted_namespaces else tool[0].rpartition(".")
+            )
             item: dict[str, Any] = {
                 "id": f"fc_{uuid.uuid4().hex[:12]}",
                 "type": "function_call",
                 "status": "completed",
                 "call_id": f"call_{uuid.uuid4().hex[:12]}",
-                "name": tool[0],
+                **({"namespace": namespace} if namespace else {}),
+                "name": name,
                 "arguments": json.dumps(tool[1]),
             }
         else:
@@ -255,11 +286,16 @@ class ScriptedModel:
     async def _messages(self, request: web.Request) -> web.StreamResponse:
         body = await self._read(request)
         messages = body.get("messages") or []
-        content = messages[-1].get("content") if messages else None
-        after = isinstance(content, list) and any(
-            isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+        last = messages[-1].get("content") if messages else None
+        tool = self._tool(
+            body.get("tools") or [],
+            tool_results("anthropic", body),
+            isinstance(last, list)
+            and any(
+                isinstance(block, dict) and block.get("type") == "tool_result" for block in last
+            ),
+            _first_user(messages),
         )
-        tool = self._tool(body.get("tools") or [], after, _first_user(messages))
         block: dict[str, Any] = (
             {
                 "type": "tool_use",
@@ -320,6 +356,112 @@ class ScriptedModel:
                 ("message_stop", {"type": "message_stop"}),
             ],
         )
+
+    # --- Gemini ---
+
+    async def _gemini(self, request: web.Request) -> web.StreamResponse:
+        body = await self._read(request)
+        contents = body.get("contents") or []
+        task = next(
+            (
+                "".join(str(part.get("text") or "") for part in content.get("parts") or ())
+                for content in contents
+                if content.get("role") == "user"
+            ),
+            "",
+        )
+        tool = self._tool(
+            body.get("tools") or [],
+            tool_results("gemini", body),
+            bool(contents)
+            and any("functionResponse" in part for part in contents[-1].get("parts") or ()),
+            task,
+        )
+        part = (
+            # Gemini 3 signs each call it makes, and a client returns the signature with it.
+            {"functionCall": {"name": tool[0], "args": tool[1]}, "thoughtSignature": "c2ln"}
+            if tool
+            else {"text": FINAL}
+        )
+        chunk = {
+            "candidates": [
+                {"content": {"role": "model", "parts": [part]}, "finishReason": "STOP", "index": 0}
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 11,
+                "candidatesTokenCount": 7,
+                "totalTokenCount": 18,
+            },
+            "modelVersion": request.match_info["target"].partition(":")[0],
+        }
+        if not request.match_info["target"].endswith(":streamGenerateContent"):
+            return web.json_response(chunk)
+        return await _sse(request, [(None, chunk)])
+
+
+def tool_results(dialect: str, body: dict[str, Any]) -> list[str]:
+    """The text of each tool result in a request's conversation, in order."""
+    if dialect == "openai-chat-completions":
+        return [
+            _text(message.get("content"))
+            for message in body.get("messages") or ()
+            if isinstance(message, dict) and message.get("role") == "tool"
+        ]
+    if dialect == "openai-responses":
+        items = body.get("input") if isinstance(body.get("input"), list) else []
+        return [
+            _text(item.get("output"))
+            for item in items
+            if isinstance(item, dict) and item.get("type") == "function_call_output"
+        ]
+    if dialect == "anthropic":
+        return [
+            _text(block.get("content"))
+            for message in body.get("messages") or ()
+            if isinstance(message, dict) and isinstance(message.get("content"), list)
+            for block in message["content"]
+            if isinstance(block, dict) and block.get("type") == "tool_result"
+        ]
+    return [
+        json.dumps(part["functionResponse"].get("response") or {})
+        for content in body.get("contents") or ()
+        if isinstance(content, dict)
+        for part in content.get("parts") or ()
+        if isinstance(part, dict) and isinstance(part.get("functionResponse"), dict)
+    ]
+
+
+def _text(content: Any) -> str:
+    """A message's or tool result's text, whether a string or a list of parts."""
+    if isinstance(content, str):
+        return content
+    return "".join(
+        str(part.get("text") or "")
+        for part in content or ()
+        if isinstance(part, dict) and isinstance(part.get("text"), str)
+    )
+
+
+def _offered(tools: list[Any]) -> dict[str, dict[str, Any]]:
+    """The parameter schema of each tool a request offers, by the name a call gives."""
+    offered: dict[str, dict[str, Any]] = {}
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        for declaration in tool.get("functionDeclarations") or ():
+            if isinstance(declaration, dict) and declaration.get("name"):
+                schema = declaration.get("parameters") or declaration.get("parametersJsonSchema")
+                offered[str(declaration["name"])] = schema or {}
+        if tool.get("type") == "namespace":
+            for inner in tool.get("tools") or ():
+                schema = inner.get("parameters") or {}
+                offered[f"{tool.get('name')}.{inner.get('name')}"] = schema
+            continue
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        if function.get("name"):
+            schema = function.get("parameters") or function.get("input_schema") or {}
+            offered[str(function["name"])] = schema
+    return offered
 
 
 async def _sse(request: web.Request, events: list[tuple[str | None, Any]]) -> web.StreamResponse:

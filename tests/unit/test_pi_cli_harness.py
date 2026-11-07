@@ -42,6 +42,9 @@ def test_preset_is_complete_and_follows_the_gateway_dialect() -> None:
         {"max_output_tokens": -1},
         {"max_output_tokens": True},
         {"disabled_tools": [" "]},
+        {"input": ["text", "pdf"]},
+        {"input": ["text", "text"]},
+        {"input": []},
     ],
 )
 def test_settings_are_strict(settings: dict[str, object]) -> None:
@@ -68,7 +71,12 @@ async def test_the_gateway_is_the_only_provider_and_holds_a_token_reference(
     sandbox = FakeSandbox()
     harness = PiCliHarness(
         gateway_dialect=dialect,
-        settings={"thinking": "high", "context_window": 400000, "max_output_tokens": 32000},
+        settings={
+            "thinking": "high",
+            "context_window": 400000,
+            "max_output_tokens": 32000,
+            "input": ["text", "image"],
+        },
     )
     await harness.install_resources(sandbox, session(), resources(tmp_path))  # type: ignore[arg-type]
 
@@ -95,11 +103,11 @@ async def test_the_gateway_is_the_only_provider_and_holds_a_token_reference(
     assert all(b'"token"' not in data for data in sandbox.files.values())
 
 
-async def test_defaults_leave_model_limits_and_thinking_to_pi() -> None:
+async def test_defaults_leave_model_limits_thinking_and_input_to_pi() -> None:
     sandbox = FakeSandbox()
     await PiCliHarness().install_resources(sandbox, session(), EffectiveAgentResources())  # type: ignore[arg-type]
     (model,) = json.loads(sandbox.files[f"{AGENT_DIR}/models.json"])["providers"]["ale"]["models"]
-    assert model == {"id": "test-model", "input": ["text", "image"]}
+    assert model == {"id": "test-model"}
     off = FakeSandbox()
     await PiCliHarness(settings={"thinking": "off"}).install_resources(
         off,  # type: ignore[arg-type]

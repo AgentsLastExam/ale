@@ -16,6 +16,9 @@ stay in the episode on every system. `settings.json` turns telemetry off and hol
 MCP servers; Skills go to `.config/muse/skills`. Muse ignores unknown settings keys, so
 the generated file is checked by the Docker integration run, not by a validator.
 
+Muse decides from the provider, not the model, whether to send images, and always sends
+them to Meta's; it has no setting for it.
+
 Muse speaks only Meta's own Responses API (namespace tools, dotted tool names), so the
 Gateway dialect is `openai-responses` and the Gateway provider is `meta`. The episode token is
 `META_API_KEY`. Muse sends that bearer only to Meta's endpoint unless `settings.json`
@@ -26,9 +29,11 @@ not enough, so the Gateway URL is set there. Before each run Muse fetches
 A launch passes a new UUID to `--session-id`, and a resume passes the same ID again. The
 session is `.local/share/muse/sessions/<year>/<month>/<day>/<session id>/session.jsonl`.
 The parser unwraps retained frames, drops repeated records, and follows the `run` events
-in native order: one agent step per model response, with its usage. A tool's failure is a
-`task` failure linked by `tool:<call id>`. A run Muse starts itself has no prompt; what it
-delivers, such as a subagent's result, is a system step.
+in native order: one agent step per model response, with its usage. A call names an MCP
+tool `mcp__<server>__<tool>`, each part sanitized; the parser takes the server and tool as
+declared from the session's catalog of its MCP tools. A tool's failure is a `task` failure
+linked by `tool:<call id>`. A run Muse starts itself has no prompt; what it delivers, such
+as a subagent's result, is a system step.
 
 A subagent's start is attested with the call that dispatched it and its child session,
 stored in the parent's `subagent/<child id>/`. It becomes an embedded trajectory when

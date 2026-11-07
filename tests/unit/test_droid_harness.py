@@ -60,6 +60,8 @@ def test_preset_is_complete_and_follows_the_gateway_dialect() -> None:
         {"max_output_tokens": "unlimited"},
         {"disabled_tools": [""]},
         {"disabled_tools": ["Read,Edit"]},
+        {"no_image_support": "no"},
+        {"no_image_support": 0},
     ],
 )
 def test_settings_are_strict(settings: dict[str, object]) -> None:
@@ -84,7 +86,10 @@ async def test_one_custom_model_is_the_gateway_and_holds_only_a_token_reference(
     tmp_path: Path, dialect: str, provider: str, base_url: str
 ) -> None:
     sandbox = FakeSandbox()
-    harness = DroidHarness(gateway_dialect=dialect, settings={"max_output_tokens": 64000})
+    harness = DroidHarness(
+        gateway_dialect=dialect,
+        settings={"max_output_tokens": 64000, "no_image_support": False},
+    )
     await harness.install_resources(sandbox, session(), resources(tmp_path))  # type: ignore[arg-type]
 
     settings = json.loads(sandbox.files[f"{STATE}/settings.json"])
@@ -97,6 +102,7 @@ async def test_one_custom_model_is_the_gateway_and_holds_only_a_token_reference(
                 "displayName": "ALE Gateway",
                 "maxOutputTokens": 64000,
                 "model": "test-model",
+                "noImageSupport": False,
                 "provider": provider,
             }
         ],
@@ -104,11 +110,14 @@ async def test_one_custom_model_is_the_gateway_and_holds_only_a_token_reference(
     assert all(b'token"' not in data and b': "token' not in data for data in sandbox.files.values())
 
 
-async def test_default_output_ceiling_is_left_to_droid(tmp_path: Path) -> None:
+async def test_default_output_ceiling_and_image_support_are_left_to_droid(
+    tmp_path: Path,
+) -> None:
     sandbox = FakeSandbox()
     await DroidHarness().install_resources(sandbox, session(), EffectiveAgentResources())  # type: ignore[arg-type]
     settings = json.loads(sandbox.files[f"{STATE}/settings.json"])
     assert "maxOutputTokens" not in settings["customModels"][0]
+    assert "noImageSupport" not in settings["customModels"][0]
     assert json.loads(sandbox.files[f"{STATE}/mcp.json"]) == {"mcpServers": {}}
 
 
@@ -389,6 +398,28 @@ def test_notices_and_failed_turns_become_system_steps_and_mcp_is_named(tmp_path:
     assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "unknown_native_event_types", "types": ["compaction_v9"]}
     ]
+
+
+def test_a_message_droid_writes_as_the_user_is_a_notice(tmp_path: Path) -> None:
+    warning = "Error: Your custom model appears to be a Claude model."
+    record(tmp_path, "Go.")
+    write_session(
+        tmp_path,
+        SESSION_ID,
+        message("user", {"type": "text", "text": warning}, visibility="both", id="warning"),
+        message("user", {"type": "text", "text": "<system-reminder>"}, visibility="llm_only"),
+        message("user", {"type": "text", "text": "Go."}),
+        message("assistant", {"type": "text", "text": "Done."}),
+        {"type": "agent_turn_outcome", "reason": "completed"},
+    )
+    trajectory = DroidHarness().parse_trajectory(recorded_context(tmp_path, session_id=SESSION_ID))
+
+    assert [(step.source, step.message) for step in trajectory.steps] == [
+        ("system", warning),
+        ("user", "Go."),
+        ("agent", "Done."),
+    ]
+    assert not trajectory.extra
 
 
 def test_a_failure_only_the_stream_reports_ends_its_turn(tmp_path: Path) -> None:

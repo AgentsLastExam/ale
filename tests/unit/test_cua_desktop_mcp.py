@@ -18,12 +18,14 @@ REFERENCE_TOOLS_SHA256 = "f8547ee34d5780ce05490d605a10aa5331cadb4b452161f8ef2f6f
 class FakeGui:
     def __init__(self) -> None:
         self.actions: list[dict[str, object]] = []
+        self.captures: list[int | None] = []
 
     def dispatch_actions(self, actions):  # type: ignore[no-untyped-def]
         self.actions.extend(actions)
         return len(actions)
 
-    def capture_screen(self) -> bytes:
+    def capture_screen(self, max_dimension: int | None = None) -> bytes:
+        self.captures.append(max_dimension)
         return b"\x89PNG\r\n\x1a\nimage"
 
     def cursor_position(self) -> tuple[int, int]:
@@ -93,6 +95,16 @@ def test_screen_results_and_optional_save_path(
         "content": [{"type": "text", "text": "Screen size: 1920x1080"}],
         "structuredContent": {"width": 1920, "height": 1080},
     }
+
+
+def test_a_screenshot_is_capped_as_the_run_configures(monkeypatch: pytest.MonkeyPatch) -> None:
+    gui = FakeGui()
+    monkeypatch.setattr(cua_desktop_mcp, "gui", gui)
+    monkeypatch.delenv(cua_desktop_mcp.SCREENSHOT_MAX_DIMENSION, raising=False)
+    cua_desktop_mcp._call("screenshot", {})
+    monkeypatch.setenv(cua_desktop_mcp.SCREENSHOT_MAX_DIMENSION, "768")
+    cua_desktop_mcp._call("screenshot", {})
+    assert gui.captures == [None, 768]
 
 
 def test_schema_validation_rejects_unknown_or_malformed_arguments() -> None:

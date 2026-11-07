@@ -355,6 +355,27 @@ def test_builtin_cua_desktop_is_opt_in_and_deduplicates(operating_system: Operat
         )
 
 
+def test_a_run_caps_cua_desktop_screenshots_through_its_environment() -> None:
+    def resolved(*caps: int | None) -> StdioMcpServer:
+        resources = resolve_agent_resources(
+            task=ToolProvision(),
+            agent_mcp_servers=tuple(
+                McpSource(builtin="cua-desktop", screenshot_max_dimension=cap, origin="run")
+                for cap in caps
+            ),
+            task_source=source(),
+        )
+        server = resources.mcp_servers[0].server
+        assert isinstance(server, StdioMcpServer)
+        return server
+
+    assert "ALE_CUA_SCREENSHOT_MAX_DIMENSION" not in resolved(None).environment
+    assert resolved(768).environment["ALE_CUA_SCREENSHOT_MAX_DIMENSION"] == "768"
+    # Two layers that ask for different screenshots are two different servers.
+    with pytest.raises(AgentResourceConflictError):
+        resolved(768, 1024)
+
+
 def test_an_operator_server_replaces_a_task_server_of_the_same_name(tmp_path: Path) -> None:
     descriptor = mcp(
         tmp_path / "search.toml",

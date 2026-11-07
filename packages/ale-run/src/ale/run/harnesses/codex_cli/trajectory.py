@@ -506,7 +506,9 @@ def _native_call(
     extra = None
     if namespace.startswith("mcp__"):
         # The namespace carries a sanitized server name; stdout carries the real one and
-        # the structured result, so the two are matched on server, tool and arguments.
+        # whether the call failed, so the two are matched on server, tool and arguments.
+        # The result stays the rollout's, what the model received: stdout serializes it
+        # into one text block, cut short when long, as a screenshot is.
         server = namespace.removeprefix("mcp__")
         match = next(
             (
@@ -524,7 +526,8 @@ def _native_call(
             used_mcp.add(index)
             server = str(item.get("server") or server)
             error = item.get("error")
-            value = item.get("result") if item.get("result") is not None else error
+            if value is None:
+                value = item.get("result") if item.get("result") is not None else error
         function_name = f"mcp__{server}__{name}"
         extra = {"ale": {"mcp": {"server": server, "tool": name}}}
     else:

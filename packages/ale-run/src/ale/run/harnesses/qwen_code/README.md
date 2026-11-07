@@ -2,6 +2,10 @@
 
 Pinned to the npm package `@qwen-code/qwen-code@0.26.1`. Its public settings are
 `max_session_turns`, `reasoning_effort`, `context_window_size` and `modalities`.
+`modalities` replaces what Qwen detects from the model's name, from a bundled snapshot of
+models.dev and its own patterns, which take a name they do not know to be text-only; a
+modality the list leaves out is off, so listing only `image` turns off the PDFs Qwen
+detects for a Claude model.
 
 Runs Qwen Code headless, `qwen --output-format stream-json --approval-mode yolo`, with
 the prompt on stdin. `QWEN_HOME` and `QWEN_RUNTIME_DIR` are both `.qwen-ale`. The model

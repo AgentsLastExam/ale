@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 
@@ -14,6 +14,8 @@ class DroidSettings(BaseModel):
 
     max_output_tokens: PositiveInt | Literal["default"] = "default"
     disabled_tools: tuple[str, ...] = ()
+    #: The custom model's ``noImageSupport``: whether Droid withholds images from the model.
+    no_image_support: StrictBool | Literal["default"] = "default"
 
     # --- validation ---
 

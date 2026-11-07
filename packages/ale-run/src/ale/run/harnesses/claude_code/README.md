@@ -5,6 +5,9 @@ own `CLAUDE_CONFIG_DIR` at `.claude-config`, so the native session lives in
 `.claude-config/projects/<project>/<session id>.jsonl`, with subagent sessions below
 `<session id>/subagents/`.
 
+Claude Code sends the model every image, an MCP tool's included: it has no notion of a
+model without image input, and no setting for one.
+
 The parser follows the native session, which holds the prompts, and places the
 stream-only `result` events after the record that preceded them. A subagent session
 `agent-<id>.jsonl` names the call that spawned it in the `toolUseId` of the

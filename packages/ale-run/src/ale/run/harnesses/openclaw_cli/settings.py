@@ -23,6 +23,9 @@ class OpenClawCliSettings(BaseModel):
     tools_allow: tuple[str, ...] = ()
     tools_deny: tuple[str, ...] = ()
     model_params: dict[str, Any] = Field(default_factory=dict)
+    #: The model's ``input``. OpenClaw's schema also takes ``video`` and ``audio``, but it
+    #: sends a model only text and images.
+    input: tuple[Literal["text", "image"], ...] | Literal["default"] = "default"
 
     # --- validation ---
 
@@ -39,6 +42,15 @@ class OpenClawCliSettings(BaseModel):
         if any(not value.strip() for value in values):
             raise ValueError("tool names must be non-empty")
         return values
+
+    @field_validator("input")
+    @classmethod
+    def _input(
+        cls, value: tuple[str, ...] | Literal["default"]
+    ) -> tuple[str, ...] | Literal["default"]:
+        if value != "default" and (not value or len(set(value)) != len(value)):
+            raise ValueError("input must name each modality once")
+        return value
 
     @model_validator(mode="after")
     def _allow_list_needs_full_profile(self) -> OpenClawCliSettings:

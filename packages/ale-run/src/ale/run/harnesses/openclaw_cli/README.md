@@ -11,6 +11,10 @@ session that spawned it. A child's first user message is the task as OpenClaw de
 it. Any other transcript there is named in `parse_issues`; the session index, runtime
 traces, locks and cached prompts beside them are not.
 
+The model's `input` is the `input` setting. Unset, OpenClaw takes the model to be
+text-only, even one its catalog lists as taking images, and drops every image, an MCP
+screenshot included.
+
 The CLI starts in `[agent].workdir` when a Task sets one, but its tools resolve paths against
 its own workspace, `.openclaw-ale/workspace`, where its Skills live.
 

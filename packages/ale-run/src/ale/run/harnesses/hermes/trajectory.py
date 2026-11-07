@@ -14,7 +14,9 @@ import yaml
 from ale.core.harness import TrajectoryParseContext
 from ale.core.trajectory import (
     AtifAgent,
+    AtifContentPart,
     AtifFinalMetrics,
+    AtifImageSource,
     AtifObservation,
     AtifObservationResult,
     AtifSubagentTrajectoryRef,
@@ -37,6 +39,19 @@ STATE = ".hermes-ale"
 EXPORTS = f"{STATE}/exports"
 #: The configuration, which names each MCP server as declared.
 CONFIG = f"{STATE}/config.yaml"
+#: Images Hermes kept from tool results; a result names each as ``MEDIA:<path>``.
+IMAGES = f"{STATE}/cache/images"
+#: Hermes' wrapper for calling deferred tools, MCP tools among them.
+DEFERRED_CALL = "tool_call"
+
+_MEDIA = re.compile(rf"MEDIA:\S*?/{re.escape(IMAGES)}/([\w.-]+)")
+_IMAGE_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
 
 
 def is_session_file(path: PurePosixPath, session_id: str) -> bool:
@@ -82,7 +97,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         recorded[turns:], streams[turns:], failures[turns:], strict=True
     ):
         builder.add(source="user", message=item.prompt)
-        _stream_steps(builder, stream, sessions.servers)
+        _stream_steps(builder, stream, sessions.servers, context)
         if failure:
             builder.add(source="system", message=failure)
     if not recorded and not builder.steps:
@@ -212,14 +227,7 @@ class _Sessions:
                 calls: list[AtifToolCall] = []
                 observed: list[AtifObservationResult] = []
                 for call_id, name, arguments in _calls(message):
-                    calls.append(
-                        AtifToolCall(
-                            tool_call_id=call_id,
-                            function_name=name,
-                            arguments=arguments,
-                            extra=_mcp_extra(name, self.servers),
-                        )
-                    )
+                    calls.append(_call(call_id, name, arguments, self.servers))
                     if call_id not in results:
                         continue
                     refs = [
@@ -234,7 +242,7 @@ class _Sessions:
                     observed.append(
                         AtifObservationResult(
                             source_call_id=call_id,
-                            content=_text(results[call_id].get("content")),
+                            content=_content(results[call_id].get("content"), self.context),
                             subagent_trajectory_ref=refs or None,
                         )
                     )
@@ -377,6 +385,34 @@ def _calls(message: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
     return calls
 
 
+def _call(
+    call_id: str, name: str, arguments: dict[str, Any], servers: dict[str, str]
+) -> AtifToolCall:
+    """A native call; a ``tool_call`` of one deferred tool becomes the call it made."""
+    made = arguments.get("calls") if name == DEFERRED_CALL else None
+    if isinstance(made, str):
+        try:
+            made = json.loads(made)
+        except json.JSONDecodeError:
+            made = None
+    extra: dict[str, Any] = {}
+    if isinstance(made, list) and len(made) == 1 and isinstance(made[0], dict):
+        inner = made[0]
+        if isinstance(inner.get("name"), str):
+            name, arguments = inner["name"], _arguments(inner.get("arguments"))
+            extra["native_tool"] = DEFERRED_CALL
+    server, separator, tool = name.removeprefix("mcp__").partition("__")
+    if name.startswith("mcp__") and separator and server and tool:
+        # Each part with Hermes' replacement of other characters; the server as declared.
+        extra["mcp"] = {"server": servers.get(server, server), "tool": tool}
+    return AtifToolCall(
+        tool_call_id=call_id,
+        function_name=name,
+        arguments=arguments,
+        extra={"ale": extra} if extra else None,
+    )
+
+
 def _goals(arguments: dict[str, Any]) -> list[str]:
     """The goal of each task a ``delegate_task`` call spawns, as Hermes reads them: the
     ``tasks`` list, which a model may send as a JSON string, else the single ``goal``."""
@@ -429,7 +465,10 @@ def _number(value: Any) -> float:
 
 
 def _stream_steps(
-    builder: TrajectoryBuilder, stream: list[dict[str, Any]], servers: dict[str, str]
+    builder: TrajectoryBuilder,
+    stream: list[dict[str, Any]],
+    servers: dict[str, str],
+    context: TrajectoryParseContext,
 ) -> None:
     """One invocation's stream-json: each tool use with its result, then its text."""
     results = {
@@ -451,20 +490,13 @@ def _stream_steps(
             builder.add(
                 source="agent",
                 message="",
-                tool_calls=[
-                    AtifToolCall(
-                        tool_call_id=call_id,
-                        function_name=name,
-                        arguments=_arguments(event.get("input")),
-                        extra=_mcp_extra(name, servers),
-                    )
-                ],
+                tool_calls=[_call(call_id, name, _arguments(event.get("input")), servers)],
                 observation=(
                     AtifObservation(
                         results=[
                             AtifObservationResult(
                                 source_call_id=call_id,
-                                content=_text(result.get("output")),
+                                content=_content(result.get("output"), context),
                                 extra={"ale": {"is_error": True}}
                                 if result.get("is_error")
                                 else None,
@@ -495,6 +527,23 @@ def _failure(result: dict[str, Any]) -> str | None:
     return None
 
 
+def _content(value: Any, context: TrajectoryParseContext) -> str | list[AtifContentPart]:
+    """A tool result's text, then each image it names that ALE mirrored."""
+    text = _text(value)
+    images = []
+    for name in dict.fromkeys(_MEDIA.findall(text)):
+        path = context.logs_dir / IMAGES / name
+        media_type = _IMAGE_TYPES.get(path.suffix.lower())
+        if media_type and path.is_file():
+            blob = context.blobs.put(path.read_bytes(), media_type=media_type)
+            images.append(
+                AtifContentPart(
+                    type="image", source=AtifImageSource(media_type=media_type, path=blob.path)
+                )
+            )
+    return [AtifContentPart(type="text", text=text), *images] if images else text
+
+
 def _text(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -518,16 +567,6 @@ def _arguments(value: Any) -> dict[str, Any]:
             return {"raw": value}
         return decoded if isinstance(decoded, dict) else {"value": decoded}
     return {} if value is None else {"value": value}
-
-
-def _mcp_extra(name: str, servers: dict[str, str]) -> dict[str, Any] | None:
-    """``mcp__<server>__<tool>``, each part with Hermes' replacement of other characters."""
-    if not name.startswith("mcp__"):
-        return None
-    server, separator, tool = name[5:].partition("__")
-    if not separator or not server or not tool:
-        return None
-    return {"ale": {"mcp": {"server": servers.get(server, server), "tool": tool}}}
 
 
 def _sanitized(name: str) -> str:

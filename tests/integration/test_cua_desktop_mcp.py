@@ -46,12 +46,13 @@ async def desktop():  # type: ignore[no-untyped-def]
         await sandbox.destroy()
 
 
-async def speak(sandbox, server_path: str, requests: list[dict]) -> list[dict]:  # type: ignore[no-untyped-def]
+async def speak(sandbox, server_path: str, requests: list[dict], env: str = "") -> list[dict]:  # type: ignore[no-untyped-def]
     """Send a batch of MCP requests to the staged server and collect the replies.
 
-    Launched from the same staged path that an MCP client receives.
+    Launched from the same staged path that an MCP client receives, with ``env``'s
+    ``NAME=value`` assignments in its environment.
     """
-    argv = ["python3", server_path]
+    argv = [env, "python3", server_path]
 
     # Written as a file rather than echoed through the shell: the protocol is
     # line-delimited, and every shell way of producing a newline is one more thing that
@@ -136,6 +137,45 @@ async def test_a_screenshot_comes_back_as_a_real_image(desktop) -> None:  # type
     # Checked as bytes rather than by length: an error page rendered to a PNG would still
     # be thousands of bytes, and a base64 string of anything is still a base64 string.
     assert png.startswith(b"\x89PNG\r\n\x1a\n"), png[:16]
+
+
+@pytest.mark.asyncio
+async def test_a_capped_screenshot_is_smaller_and_leaves_input_on_the_screen(desktop) -> None:  # type: ignore[no-untyped-def]
+    """The Run's cap shrinks the image the agent sees, never where its clicks land."""
+    root = await stage_cua_desktop(desktop, WORK_DIR)
+
+    def call(request_id: int, name: str, arguments: dict) -> dict:  # type: ignore[type-arg]
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        }
+
+    replies = await speak(
+        desktop,
+        f"{root}/cua_desktop_mcp.py",
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+            call(2, "get_screen_size", {}),
+            call(3, "screenshot", {}),
+            call(4, "mouse_move", {"coordinate": [500, 500]}),
+            call(5, "cursor_position", {}),
+        ],
+        env="ALE_CUA_SCREENSHOT_MAX_DIMENSION=512",
+    )
+
+    size = replies[1]["result"]["structuredContent"]
+    image = next(block for block in replies[2]["result"]["content"] if block["type"] == "image")
+    png = base64.b64decode(image["data"])
+    # The PNG's IHDR chunk, right after its signature, holds the width and height.
+    width, height = int.from_bytes(png[16:20], "big"), int.from_bytes(png[20:24], "big")
+    assert max(width, height) == 512 < max(size["width"], size["height"])
+    assert abs(width / height - size["width"] / size["height"]) < 0.01
+    where = replies[4]["result"]["content"][0]["text"]
+    x, y = (int(value) for value in re.findall(r"-?\d+", where))
+    assert abs(x - 500) <= 2
+    assert abs(y - 500) <= 2
 
 
 @pytest.mark.asyncio

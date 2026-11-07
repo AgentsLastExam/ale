@@ -368,9 +368,22 @@ def test_parser_follows_the_session_log(tmp_path: Path) -> None:
     write_turns(logs, RUN_ID, ("Use the tools.", "FIRST-DONE"), ("second", "SECOND-DONE"))
     calls = [
         {"call_id": "call-1", "name": "bash", "args": "{}"},
-        {"call_id": "call-2", "name": "mcp__proof__echo", "args": "{}"},
+        {"call_id": "call-2", "name": "mcp__task_proof__echo", "args": "{}"},
         {"call_id": "call-3", "name": "read_file", "args": "{}"},
     ]
+    # A call names its MCP tool sanitized; Muse's catalog keeps the server as declared.
+    catalog = {
+        "payload_type": "runtime.mcp_tool_identity_catalog",
+        "payload": {
+            "entries": [
+                {
+                    "canonical_id": "mcp__task_proof__echo",
+                    "raw_tool_name": "echo",
+                    "server_name": "task-proof",
+                }
+            ]
+        },
+    }
     results = [
         {"tool_call_id": "call-1", "text": "ok"},
         {"tool_call_id": "call-2", "text": "echo:proof"},
@@ -382,6 +395,7 @@ def test_parser_follows_the_session_log(tmp_path: Path) -> None:
     write_jsonl(
         logs / RUN_LOG,
         [
+            catalog,
             run("started", prompt="Use the tools."),
             # Muse records a response's usage before its tool calls but after its text.
             run("model_completed", usage={"input_tokens": 10}),
@@ -412,7 +426,7 @@ def test_parser_follows_the_session_log(tmp_path: Path) -> None:
     (acting,) = [step for step in trajectory.steps if step.tool_calls]
     assert [(call.function_name, call.extra) for call in acting.tool_calls or ()] == [
         ("bash", None),
-        ("mcp__proof__echo", {"ale": {"mcp": {"server": "proof", "tool": "echo"}}}),
+        ("mcp__task_proof__echo", {"ale": {"mcp": {"server": "task-proof", "tool": "echo"}}}),
         ("read_file", None),
     ]
     shell, echo, image = acting.observation.results  # type: ignore[union-attr]

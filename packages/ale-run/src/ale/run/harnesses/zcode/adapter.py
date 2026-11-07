@@ -38,7 +38,7 @@ from ale.run.harnesses.base import (
 from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
-from .settings import ZCodeSettings
+from .settings import InputFormat, ZCodeSettings
 
 #: The CLI version inside ZCode's desktop release 3.16.3, its only official distribution.
 DEFAULT_CLI_VERSION = "0.17.0"
@@ -273,12 +273,23 @@ class ZCodeHarness(CliHarness):
                 "personalModelIds": [session.model],
             },
         }
+        rules: list[dict[str, Any]] = []
+        if isinstance(self.settings.input_format, InputFormat):
+            # A partial rule, which ZCode lays over what its catalog says of the model.
+            properties = {"inputFormat": self.settings.input_format.native}
+            rules.append(
+                {
+                    "providerId": "ale",
+                    "modelId": session.model,
+                    "config": {"properties": properties},
+                }
+            )
         personal = {
             "schemaVersion": 1,
             "config": {
                 "providerOrder": ["ale"],
                 "providerConfigRules": {"providerRules": [provider]},
-                "modelConfigRules": {"providerModelRules": [], "manualProviderModelRules": []},
+                "modelConfigRules": {"providerModelRules": rules, "manualProviderModelRules": []},
                 "defaultModelSelection": {"providerId": "ale", "modelId": session.model},
             },
         }

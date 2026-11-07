@@ -165,6 +165,7 @@ class _Conversation:
         """Add one session's conversation to ``builder``; return its embedded subagents."""
         self.reminders.update(_reminders(directory, records))
         embedded, refs = self._children(builder.trajectory_id, directory, records)
+        tools = _mcp_tools(records)
         steps: list[_Step] = []
         responses: dict[str, _Step] = {}
         owner: dict[str, _Step] = {}
@@ -214,7 +215,7 @@ class _Conversation:
                 elif kind == "assistant_tool_calls_committed":
                     for raw in event.get("tool_calls") or ():
                         if isinstance(raw, dict):
-                            call = _call(raw)
+                            call = _call(raw, tools)
                             step.calls.append(call)
                             owner[call.tool_call_id] = step
                 elif isinstance(event.get("text"), str):
@@ -402,24 +403,45 @@ def _emit(builder: TrajectoryBuilder, step: _Step) -> None:
     )
 
 
-def _call(raw: dict[str, Any]) -> AtifToolCall:
+def _call(raw: dict[str, Any], tools: dict[str, dict[str, str]]) -> AtifToolCall:
     name = str(raw.get("name") or "")
     try:
         arguments = json.loads(raw["args"]) if isinstance(raw.get("args"), str) else raw.get("args")
     except ValueError:
         arguments = {"raw": raw.get("args")}
     server, separator, tool = name.removeprefix("mcp__").partition("__")
-    extra = (
-        {"ale": {"mcp": {"server": server, "tool": tool}}}
+    mcp = dict(tools.get(name) or {}) or (
+        {"server": server, "tool": tool}
         if name.startswith("mcp__") and separator and server and tool
         else None
     )
+    extra = {"ale": {"mcp": mcp}} if mcp else None
     return AtifToolCall(
         tool_call_id=str(raw.get("call_id") or raw.get("id") or ""),
         function_name=name,
         arguments=arguments if isinstance(arguments, dict) else {"value": arguments},
         extra=extra,
     )
+
+
+def _mcp_tools(records: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+    """Each MCP tool's name in calls, mapped to its server as declared and its own name.
+
+    A call names ``mcp__<server>__<tool>`` with each part sanitized; Muse records the
+    originals in its catalog of the session's MCP tools.
+    """
+    tools: dict[str, dict[str, str]] = {}
+    for record in records:
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        if record.get("payload_type") != "runtime.mcp_tool_identity_catalog":
+            continue
+        for entry in payload.get("entries") or ():
+            if not isinstance(entry, dict):
+                continue
+            names = [entry.get(key) for key in ("canonical_id", "server_name", "raw_tool_name")]
+            if all(isinstance(name, str) and name for name in names):
+                tools[names[0]] = {"server": names[1], "tool": names[2]}
+    return tools
 
 
 def _reminders(directory: Path, records: list[dict[str, Any]]) -> set[Path]:

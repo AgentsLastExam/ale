@@ -1,6 +1,6 @@
 [agent]
 name = "openclaw-cli"
-model = "gpt-5-mini"
+model = "gpt-5.6-luna"
 version = "2026.7.1"
 skills = []
 mcp_servers = []
@@ -13,6 +13,7 @@ tool_profile = "coding"
 tools_allow = []
 tools_deny = []
 model_params = {}
+input = ["text", "image"]
 
 [gateway]
 provider = "openai"

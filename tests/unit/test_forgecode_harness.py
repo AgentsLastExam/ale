@@ -64,6 +64,9 @@ def test_preset_pins_release_binaries_for_both_systems() -> None:
         {"max_output_tokens": 0},
         {"max_requests_per_turn": -1},
         {"max_requests_per_turn": "unlimited"},
+        {"input_modalities": ["text", "pdf"]},
+        {"input_modalities": ["image", "image"]},
+        {"input_modalities": []},
     ],
 )
 def test_settings_are_strict(settings: dict[str, object]) -> None:
@@ -114,6 +117,7 @@ async def test_one_listed_model_on_forges_compatible_provider(
             "reasoning_effort": "high",
             "max_output_tokens": 32000,
             "max_requests_per_turn": 40,
+            "input_modalities": ["text", "image"],
         },
     )
     await harness.install_resources(sandbox, session(), resources(tmp_path))  # type: ignore[arg-type]
@@ -127,6 +131,7 @@ async def test_one_listed_model_on_forges_compatible_provider(
     assert (native["id"], native["url"], native["response_type"]) == (provider, url, response_type)
     (model,) = native["models"]
     assert model["id"] == "test-model" and model["supports_reasoning"] is True
+    assert model["input_modalities"] == ["text", "image"]
     credentials = json.loads(sandbox.files[f"{STATE}/.credentials.json"])
     assert credentials == [
         {
@@ -138,12 +143,13 @@ async def test_one_listed_model_on_forges_compatible_provider(
     assert ["chmod", "600", f"{STATE}/.credentials.json"] in sandbox.commands
 
 
-async def test_defaults_leave_reasoning_and_limits_to_forge() -> None:
+async def test_defaults_leave_reasoning_limits_and_input_to_forge() -> None:
     sandbox = FakeSandbox()
     await ForgecodeHarness().install_resources(sandbox, session(), EffectiveAgentResources())  # type: ignore[arg-type]
     config = tomllib.loads(sandbox.files[f"{STATE}/.forge.toml"].decode())
     assert {"reasoning", "max_tokens", "max_requests_per_turn"}.isdisjoint(config)
-    assert "supports_reasoning" not in config["providers"][0]["models"][0]
+    model = config["providers"][0]["models"][0]
+    assert {"supports_reasoning", "input_modalities"}.isdisjoint(model)
 
 
 async def test_skills_and_mcp_servers_are_native_config(tmp_path: Path) -> None:

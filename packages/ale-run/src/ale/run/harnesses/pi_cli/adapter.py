@@ -107,7 +107,9 @@ class PiCliHarness(CliHarness):
         await _write_json(sandbox, agent_dir / "mcp.json", {"mcpServers": servers})
 
         api, suffix = _APIS[self.gateway_dialect]
-        model: dict[str, Any] = {"id": session.model, "input": ["text", "image"]}
+        model: dict[str, Any] = {"id": session.model}
+        if self.settings.input != "default":
+            model["input"] = list(self.settings.input)
         if self.settings.thinking not in {"default", "off"}:
             model["reasoning"] = True
         if isinstance(self.settings.context_window, int):
