@@ -87,10 +87,10 @@ as is a way up the revocation missed.
 A Docker GPU sandbox is started with `--gpus` and the argument `"device=<uuid>,<uuid>"`,
 double quotes included: Docker reads the value as one CSV record, and the quotes keep the
 list of UUIDs in one field (in a shell, `--gpus '"device=<uuid>,<uuid>"'`). It also gets
-`NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics`. Docker serves the request on one of
-two NVIDIA paths, and only one of them reads that variable. Measured with Docker 29.7.2,
-NVIDIA Container Toolkit 1.20.0 and driver 580.178.04 on an RTX 4090, with NVIDIA OVRTX 0.6
-(a Vulkan path tracer) as the renderer:
+`NVIDIA_DRIVER_CAPABILITIES=all`. Docker serves the request on one of two NVIDIA paths, and
+only one of them reads that variable. Measured with Docker 29.7.2, NVIDIA Container Toolkit
+1.20.0 and driver 580.178.04 on an RTX 4090, with NVIDIA OVRTX 0.6 (a Vulkan path tracer) as
+the renderer:
 
 | Path | What enters the sandbox |
 |---|---|
@@ -106,9 +106,10 @@ them, so either path ends with exactly one NVIDIA manifest of each kind. The hoo
 no `/usr/share/nvidia/nvoptix.bin`: OVRTX then logs that it cannot load the OptiX denoiser
 weights, skips denoising, and its image differs from the CDI path's.
 
-`display` is not requested: on the hook path it adds `/dev/nvidia-modeset`, and offscreen
-rendering does not need it. `video` is not requested: no Task has needed the codecs. `ngx`
-(DLSS) is not requested: OVRTX's output was the same with and without it.
+`all` is requested rather than `graphics` alone because the CDI path injects every driver
+file whatever is requested, and anything less would leave a sandbox on the hook path short
+of what the same Task gets there. On the hook path `display` adds `/dev/nvidia-modeset`,
+`video` the codec libraries (NVENC, NVDEC) and `ngx` the DLSS library.
 
 ## Daytona
 
