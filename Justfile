@@ -53,8 +53,10 @@ test:
     @uv run pytest -m unit
 
 # Everything that needs a real sandbox except the slow parts: VMs and agent CLI installs.
+# Four workers, each running whole test files.
 test-int:
-    @uv run pytest -m "(conformance or integration) and not needs_kvm and not needs_cli_install"
+    @uv run pytest -n 4 --dist loadfile \
+        -m "(conformance or integration) and not needs_kvm and not needs_cli_install"
 
 # Every pinned agent CLI, really installed and driven through the Gateway.
 test-harnesses:

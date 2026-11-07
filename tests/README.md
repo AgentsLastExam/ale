@@ -15,6 +15,12 @@ just test-vm          # VM Sandboxes on KVM (needs_kvm)
 just lint             # formatting, lint and import boundaries
 ```
 
+`just test-int` and CI's container backend run four test files at a time
+(`pytest -n 4 --dist loadfile`), so an integration test neither relies on what another file
+leaves behind nor assumes it is the only run on the host. Every Docker sandbox whose network
+is not `open` gets a network of its own, and Docker's default address pools hold about 31; a
+host that runs several suites at once configures smaller `default-address-pools`.
+
 Run `just test-harnesses` after changing a Harness, a Gateway dialect or a CLI pin, and
 `just test-vm` after changing VM or Windows behavior. CI's backend jobs run all three. After
 changing macOS behavior, run the Orchard suites on a Mac
