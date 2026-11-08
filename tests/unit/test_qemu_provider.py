@@ -96,6 +96,16 @@ class TestPreflight:
             assert "guest image" in str(error)
 
 
+def test_overlays_and_snapshots_live_in_the_ale_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The operator places VM storage, on a fast disk say, with ``ALE_CACHE_DIR`` alone."""
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "cache"))
+    provider = QemuProvider()
+    assert provider.overlay_dir == tmp_path / "cache" / "qemu"
+    assert provider.snapshot_dir == tmp_path / "cache" / "qemu-snapshots"
+
+
 def test_cancelled_boot_removes_the_started_runner(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
