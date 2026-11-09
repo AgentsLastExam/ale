@@ -9,6 +9,7 @@ dependencies = ["ale-core", "ale-run", "ale-verify"]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.6",
     "jsonschema>=4.23",
     "ruff>=0.8",
     "import-linter>=2.1",

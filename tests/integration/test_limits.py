@@ -31,6 +31,7 @@ from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.protocol import episode_protocol
 from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
+from ale.run.task_images import prepare_task_image, prepare_verifier_image
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import edit_task_config, provider_registry
 
@@ -50,6 +51,17 @@ async def run_one(task_root: Path, run_dir: Path, harness: object):  # type: ign
     )
 
 
+async def build_images(task_root: Path) -> None:
+    """Build the Task's images first, so a test's clock covers the episode alone.
+
+    With a cold cache, or another run holding the build lock, the build would spend the grace.
+    """
+    task = load_tasks(task_root)[0]
+    providers = provider_registry(DockerProvider())
+    await prepare_task_image(task, providers)
+    await prepare_verifier_image(task, providers)
+
+
 def set_timeout(task_root: Path, phase: str, seconds: int) -> None:
     table = "agent" if phase == "agent" else "verifier"
     edit_task_config(task_root, {table: {"timeout_sec": seconds}})
@@ -67,6 +79,7 @@ async def test_a_hanging_setup_times_out(
     )
     monkeypatch.setattr(episode_protocol, "SETUP_TIMEOUT_SEC", 5)
 
+    await build_images(task_root)
     started = time.monotonic()
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
     elapsed = time.monotonic() - started
@@ -85,6 +98,7 @@ async def test_a_hanging_agent_times_out_and_keeps_its_trace(
     (task_root / "solution" / "solve.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
     set_timeout(task_root, "agent", 5)
 
+    await build_images(task_root)
     started = time.monotonic()
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
     elapsed = time.monotonic() - started
@@ -182,6 +196,7 @@ async def test_runtime_agent_timeout_destroys_descendants_and_does_not_retry(
             sandbox_retention=SandboxRetentionConfig(solver="keep"),
         )
 
+    await build_images(task_root)
     started = time.monotonic()
     result = await run_episode_with_retries(execute, retries=3)
     assert calls == 1
@@ -212,6 +227,7 @@ async def test_a_hanging_verifier_times_out(
     (task_root / "tests" / "test.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
     set_timeout(task_root, "verify", 5)
 
+    await build_images(task_root)
     started = time.monotonic()
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
 

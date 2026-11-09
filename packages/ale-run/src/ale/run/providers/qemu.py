@@ -683,7 +683,7 @@ class QemuProvider(Provider):
         # Host-side, and named for what it holds. It was `work_dir`, which is a retired
         # name: the workspace is the agent's home *inside* a sandbox, and reusing the word
         # for a directory on this machine is the collision the lexicon exists to prevent.
-        self.overlay_dir = overlay_dir or Path.home() / ".cache/ale/qemu"
+        self.overlay_dir = overlay_dir or cache_root() / "qemu"
         self.snapshot_dir = snapshot_dir or self.overlay_dir.parent / "qemu-snapshots"
         self.image_cache_dir = image_cache_dir
         self.gpu_devices = gpu_devices

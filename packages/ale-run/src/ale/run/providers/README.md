@@ -37,7 +37,7 @@ serves it on.
 | Provider | How a snapshot is saved, booted and destroyed |
 |---|---|
 | Docker | `docker stop`, then `docker commit` to `ale-snapshot:<sandbox id>`. The image keeps the container's command and labels, with `ale.retention=snapshot`, `ale.prepared` naming the prepared image, and no GPU label. A container boots from its image ID; `docker rmi` destroys it and fails while a container still uses it |
-| QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay is then rebased on its own base and converted into a standalone zstd-compressed qcow2 in `~/.cache/ale/qemu-snapshots/<sandbox id>/`, beside `snapshot.json` with its episode, role, OS, prepared image and disk digest. Standalone, it outlives the image cache. Compression made a 23 GB Windows disk 15 GB and exported it in 71 s rather than 82 s. A VM boots from it through a fresh overlay. Destroying it fails while a runner mounts it |
+| QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay is then rebased on its own base and converted into a standalone zstd-compressed qcow2 in `qemu-snapshots/<sandbox id>/` in the ALE cache, beside `snapshot.json` with its episode, role, OS, prepared image and disk digest. Standalone, it outlives the image cache. Compression made a 23 GB Windows disk 15 GB and exported it in 71 s rather than 82 s. A VM boots from it through a fresh overlay. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so `accepts` refuses them |
 | Orchard | None: Orchard keeps no VM past its episode, so `accepts` refuses retention and snapshots |
 
@@ -195,6 +195,13 @@ Measured on a KVM host:
   the 2.3 GB Linux VM base, 23 GB for the 14 GB Windows base.
 - The resolved image keeps the request's prepared identity and observes the copy that
   boots, which the RunLock records.
+
+A VM boots from a qcow2 overlay on that disk, in `qemu/<sandbox id>/`; the disks, overlays
+and snapshots all live in the ALE cache (`ALE_CACHE_DIR`, `~/.cache/ale` by default). The
+runner opens them with `cache=none,aio=native`, which bypasses the page cache, and ZFS then
+bypasses its own cache as well, so the ALE cache belongs on local SSD. From a ZFS pool of
+5400 rpm disks a Linux guest took 115–133 s to come up with its desktop rather than 20 s,
+and a Windows guest 250–310 s rather than 52 s.
 
 Linux is framed by `virt-customize` in about 30–40 s. Its setup script runs inside
 libguestfs's appliance VM, because it calls the disk's own programs.

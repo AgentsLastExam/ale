@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from ale.core.errors import ProviderCapabilityError
+from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.taskspec import Resources
 from ale.run.providers.docker import (
     DockerProvider,
@@ -147,6 +147,48 @@ async def test_retained_listing_includes_stale_state_and_cleanup_command(
             "cleanup_command": "ale sandbox destroy docker:ale-episode-solver",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_another_run_destroys_mid_listing_is_left_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kept = {
+        "Name": "/ale-kept",
+        "Image": "sha256:image",
+        "Config": {"Labels": {"ale.managed": "true", "ale.retention": "keep"}},
+        "State": {"Running": True},
+    }
+
+    async def docker(*args: str, **kwargs: object) -> tuple[int, str, str]:
+        if args[:3] == ("ps", "-a", "-q"):
+            return 0, "kept\ngone\n", ""
+        if args[0] == "images":
+            return 0, "removed\n", ""
+        if args[:2] == ("image", "inspect"):
+            return 1, "[]", "error: no such image: ale-snapshot:removed"
+        assert args == ("inspect", "kept", "gone")
+        return 1, json.dumps([kept]), "error: no such object: gone"
+
+    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    listed = await DockerProvider().list_retained()
+    assert [record["handle"] for record in listed] == ["docker:ale-kept"]
+
+
+@pytest.mark.asyncio
+async def test_an_inspection_that_fails_otherwise_still_fails_the_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def docker(*args: str, **kwargs: object) -> tuple[int, str, str]:
+        if args[:3] == ("ps", "-a", "-q"):
+            return 0, "kept\n", ""
+        if args[0] == "images":
+            return 0, "", ""
+        return 1, "", "Cannot connect to the Docker daemon"
+
+    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    with pytest.raises(ProviderStartError, match="could not inspect ALE sandboxes"):
+        await DockerProvider().list_retained()
 
 
 @pytest.mark.asyncio

@@ -140,6 +140,7 @@ async def test_setup_never_enters_the_container_build_context(
     assert await prepare_task_image(load_tasks(task_path)[0], registry) == first
 
 
+@pytest.mark.needs_kvm
 @pytest.mark.asyncio
 async def test_local_vm_materialization_reuse_and_late_layer_invalidation(
     tmp_path: Path,
