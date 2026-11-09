@@ -17,7 +17,7 @@ from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers import ProviderRegistry
 from ale.run.task_images import prepare_task_image_result
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import VM_BASE
+from tests.support import VM_BASE, VM_RESOURCES
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_kvm]
 
@@ -59,7 +59,7 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     def task_with_ref(name: str, disk: Path) -> Path:
         return write_repo(
             tmp_path / name,
-            config={"environment": {"vm_image": str(disk)}},
+            config={"environment": {"vm_image": str(disk), **VM_RESOURCES}},
             dockerfile=None,
         )
 

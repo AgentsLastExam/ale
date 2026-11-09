@@ -28,7 +28,7 @@ from ale.run.providers import ProviderRegistry
 from ale.run.providers.qemu import QemuProvider
 from ale.run.secrets import resolve_task_variables
 from ale.run.tasksets.manifest import ManifestTask, load_task_folder
-from tests.support import CONTAINER_BASE, VM_BASE, provider_registry, write_task
+from tests.support import CONTAINER_BASE, VM_BASE, VM_RESOURCES, provider_registry, write_task
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -82,7 +82,7 @@ def _task(root: Path, kind: str, verifier: dict[str, Any]) -> ManifestTask:
         "solution": {"env": {"SOLUTION_ONLY": "solution"}},
     }
     if kind == "vm":
-        config |= {"environment": {"env": ENVIRONMENT, "cpus": 2, "vm": True}}
+        config |= {"environment": {"env": ENVIRONMENT, **VM_RESOURCES, "vm": True}}
     if windows:
         config |= {
             "environment": {
