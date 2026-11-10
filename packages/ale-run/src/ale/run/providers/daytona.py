@@ -1297,7 +1297,15 @@ def _observed_allocation(request: SandboxRequest, data: dict[str, Any]) -> Resou
 
 
 def _sandbox_name(sandbox_id: str) -> str:
-    return ("ale-" + re.sub(r"[^a-z0-9-]+", "-", sandbox_id.lower())).strip("-")[:60]
+    """The sandbox id as a Daytona name of at most 60 characters, unique as the id is.
+
+    The id ends in its random part, so a longer name drops its middle: the start names the
+    Task and the end tells this sandbox from every other.
+    """
+    name = "ale-" + re.sub(r"[^a-z0-9-]+", "-", sandbox_id.lower()).strip("-")
+    if len(name) <= 60:
+        return name
+    return f"{name[:29].rstrip('-')}-{name[-29:].lstrip('-')}"
 
 
 def _parse_ssh(command: str) -> tuple[str, str, str]:

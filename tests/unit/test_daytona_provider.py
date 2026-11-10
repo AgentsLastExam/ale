@@ -303,6 +303,18 @@ def test_names_and_failure_classification() -> None:
     assert not _image_unavailable("cpu exceeds the limit")
 
 
+def test_every_sandbox_of_a_long_named_task_gets_its_own_name() -> None:
+    episode = (
+        "grounded-intelligence-initiative.robotic_arm_environment_twin_from_real_photo"
+        "-oracle-fcda5c5a"
+    )
+    first = _sandbox_name(f"{episode}-1a2b3c")
+    second = _sandbox_name(f"{episode}-4d5e6f")
+    assert first == "ale-grounded-intelligence-ini-photo-oracle-fcda5c5a-1a2b3c"
+    assert second != first
+    assert len(first) <= 60 and len(second) <= 60
+
+
 # --- SSH -------------------------------------------------------------------------
 
 
