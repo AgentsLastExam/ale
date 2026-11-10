@@ -91,6 +91,7 @@ from ale.run.recording import (
     CommandRecorder,
     Redactor,
     atomic_write_json,
+    copy_trajectory,
     execution_logging,
     redact_files,
 )
@@ -1426,9 +1427,7 @@ class ReverificationProtocol(EpisodeProtocol):
         ctx.resource_allocation = self.solver.allocation
         ctx.sandbox_identity = self.sandbox_identity
         ctx.home = self.solver.agent_home
-        trajectory = self.source_run_dir / "trajectory.json"
-        if trajectory.is_file():
-            shutil.copy2(trajectory, ctx.run_dir / "trajectory.json")
+        copy_trajectory(self.source_run_dir, ctx.run_dir)
 
         if ctx.spec.verify.environment_mode is VerificationMode.SHARED:
             try:

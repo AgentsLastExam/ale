@@ -10,9 +10,10 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import threading
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
 from typing import Any, Literal
 
@@ -41,6 +42,7 @@ __all__ = [
     "JsonlWriter",
     "Redactor",
     "atomic_write_json",
+    "copy_trajectory",
     "execution_logging",
     "install_execution_handler",
     "redact_files",
@@ -168,21 +170,8 @@ class BlobStore:
         media_class = media_class_for(media_type)
         extension = _safe_extension(media_type)
         name = f"sha256-{digest}" + (f".{extension}" if extension else "")
-        relative = Path("blobs") / media_class.value / name
-        target = self.episode_dir / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            temporary: Path | None = None
-            try:
-                with NamedTemporaryFile(
-                    dir=target.parent, prefix=f".{target.name}.", suffix=".tmp", delete=False
-                ) as stream:
-                    temporary = Path(stream.name)
-                    stream.write(data)
-                os.replace(temporary, target)
-            finally:
-                if temporary is not None:
-                    temporary.unlink(missing_ok=True)
+        relative = PurePosixPath("blobs", media_class.value, name)
+        self._publish(relative, data)
         return BlobRef(
             path=relative.as_posix(),
             media_type=media_type,
@@ -205,6 +194,41 @@ class BlobStore:
         path = self.episode_dir / "blobs" / ".partial" / f"{execution_id}.{stream}.partial"
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
+
+    def _publish(self, relative: PurePosixPath, data: bytes) -> None:
+        target = self.episode_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            return
+        temporary: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                dir=target.parent, prefix=f".{target.name}.", suffix=".tmp", delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                stream.write(data)
+            os.replace(temporary, target)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+
+def copy_trajectory(source: Path, destination: Path) -> None:
+    """Copy one episode's trajectory into another with every blob it references.
+
+    The blobs are published first, as new ones are, so the copy never points at a payload
+    that is missing or torn. A path that leaves ``blobs/`` is not a blob ALE wrote: a tool
+    call's arguments may hold any ``path``.
+    """
+    trajectory = source / "trajectory.json"
+    if not trajectory.is_file():
+        return
+    blobs = BlobStore(destination)
+    for reference in _blob_references(json.loads(trajectory.read_bytes())):
+        relative = PurePosixPath(reference["path"])
+        if ".." not in relative.parts:
+            blobs._publish(relative, (source / relative).read_bytes())
+    shutil.copy2(trajectory, destination / "trajectory.json")
 
 
 class Redactor:
