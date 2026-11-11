@@ -25,6 +25,7 @@ from ale.run.assets import (
     push_assets,
 )
 from ale.run.cli.assets import assets_app
+from ale.run.cli.fleet import fleet_app
 from ale.run.cli.tasks import (
     EXIT_BAD_REFERENCE,
     _config,
@@ -45,6 +46,7 @@ app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(assets_app, name="assets")
+app.add_typer(fleet_app, name="fleet")
 vm_image_app = typer.Typer(help="Publish and acquire prebuilt VM disks.", no_args_is_help=True)
 app.add_typer(vm_image_app, name="vm-image")
 sandbox_app = typer.Typer(
