@@ -255,6 +255,23 @@ def macos_framework_identity(*, user: str) -> str:
     )
 
 
+def fleet_framework_identity() -> str:
+    """Every framework this engine installs, as one identity.
+
+    A Sandbox runs the framework of the engine driving it, so a Fleet Node serves a Run only
+    when the two engines would install the same frameworks; the account is a placeholder,
+    since each identity takes it only as a field.
+    """
+    return content_hash(
+        {
+            "linux": framework_identity(user="user", vm=False),
+            "linux-vm": framework_identity(user="user", vm=True),
+            "windows": windows_framework_identity(user="user"),
+            "macos": macos_framework_identity(user="user"),
+        }
+    )
+
+
 def macos_framework_payload() -> bytes:
     """The tar stream ``framework_macos.sh`` installs: the Python, the Driver and guestd."""
     members = {

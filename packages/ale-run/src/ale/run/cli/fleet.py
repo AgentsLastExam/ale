@@ -1,4 +1,4 @@
-"""``ale fleet``: serve the control plane."""
+"""``ale fleet``: serve the control plane, or lend this machine to it as a Node."""
 
 from __future__ import annotations
 
@@ -53,3 +53,91 @@ def serve(
         _run_async(serve_control(ControlPlane(store, token), token, host=host, port=port))
     finally:
         store.close()
+
+
+NODE_PORT = 7471
+
+
+@fleet_app.command("node")
+def node(
+    control_plane: Annotated[str, typer.Option(help="The control plane's URL.")],
+    address: Annotated[
+        str,
+        typer.Option(
+            help="Where every Run's machine reaches this agent, such as http://NAME:7471."
+        ),
+    ],
+    name: Annotated[
+        str | None, typer.Option(help="This Node's name. Default: the host name.")
+    ] = None,
+    host: Annotated[str, typer.Option(help="Address to listen on.")] = "0.0.0.0",
+    port: Annotated[
+        int | None,
+        typer.Option(help="Port to listen on. Default: the port of --address, else 7471."),
+    ] = None,
+    provider: Annotated[
+        list[str] | None,
+        typer.Option(help="A Provider to lend (repeat). Default: every one that works here."),
+    ] = None,
+    label: Annotated[
+        list[str] | None, typer.Option(help="A KEY=VALUE label for operators (repeat).")
+    ] = None,
+    reserve_cpus: Annotated[int, typer.Option(help="CPUs kept for the machine.")] = 1,
+    reserve_memory_mb: Annotated[int, typer.Option(help="Memory kept for the machine.")] = 4096,
+    macos_vm_slots: Annotated[
+        int, typer.Option(help="macOS VMs to run at most, when the machine runs them.")
+    ] = 2,
+) -> None:
+    """Lend this machine's Providers to the Fleet until stopped.
+
+    A stopping agent destroys every Sandbox it holds.
+    """
+    import re
+    import socket
+    from urllib.parse import urlsplit
+
+    from ale.core.errors import AleError
+    from ale.run.cli.main import _run_async
+    from ale.run.fleet.node import NodeAgent, NodeSettings, probe
+    from ale.run.sources import cache_root
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    token = fleet_token()
+    labels = dict(item.partition("=")[::2] for item in label or ())
+    node_name = name or re.sub(r"[^a-z0-9-]+", "-", socket.gethostname().lower()).strip("-")
+    state = cache_root() / "fleet"
+    state.mkdir(parents=True, exist_ok=True)
+    settings = NodeSettings(
+        name=node_name,
+        control_url=control_plane.rstrip("/"),
+        address=address.rstrip("/"),
+        host=host,
+        port=port or urlsplit(address).port or NODE_PORT,
+        providers=tuple(provider or ()),
+        labels=labels,
+        reserve_cpus=reserve_cpus,
+        reserve_memory_mb=reserve_memory_mb,
+        macos_vm_slots=macos_vm_slots,
+        state_dir=state,
+    )
+
+    async def main() -> None:
+        declaration, providers = await probe(settings)
+        for profile in declaration.profiles:
+            typer.echo(
+                f"lending {profile.provider}: {profile.kind} {profile.os}/{profile.arch} "
+                f"network={','.join(sorted(profile.network_modes))}"
+            )
+        agent = NodeAgent(
+            settings,
+            token,
+            declaration=declaration,
+            providers=providers,
+        )
+        await agent.serve()
+
+    try:
+        _run_async(main())
+    except AleError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(4) from error

@@ -18,7 +18,16 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, Resources
+from ale.core.sandbox import (
+    ExecResult,
+    Identity,
+    ImageRef,
+    ResolvedImage,
+    ResourceAllocation,
+    SandboxFile,
+    SandboxRequest,
+)
+from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, Resources, TaskSpec
 
 __all__ = [
     "IDENTIFIER",
@@ -27,11 +36,19 @@ __all__ = [
     "PROTOCOL_VERSION",
     "AcquireRequest",
     "Arch",
+    "CreateSandbox",
+    "ErrorBody",
+    "ExecCall",
+    "ExecDone",
     "GpuPool",
     "Grant",
     "Heartbeat",
     "HeartbeatReply",
     "ImageHolding",
+    "ImageInputs",
+    "ImageState",
+    "LeaseRenewal",
+    "Listing",
     "NodeDeclaration",
     "NodeResources",
     "Placement",
@@ -39,6 +56,7 @@ __all__ = [
     "RefusedRequest",
     "RosterEntry",
     "SandboxDemand",
+    "SandboxDescription",
     "SandboxProfile",
     "SandboxStatus",
     "sign_grant",
@@ -357,3 +375,124 @@ def verify_grant(text: str, token: str, *, node: str, now: float | None = None) 
     if (time.time() if now is None else now) > grant.expires_at:
         raise ValueError("the grant expired before the Sandbox was created")
     return grant
+
+
+# --- the node agent's API ----------------------------------------------------------------
+
+
+class ImageInputs(BaseModel):
+    """What a Node prepares one image from, apart from the build context the Run sends.
+
+    Either one of a Task's images, the ``role`` image of ``task``, which the Node prepares
+    exactly as a local Run would from the Task's build context, or a bare ``reference`` the
+    Node's Provider resolves as it is.
+    """
+
+    model_config = _STRICT
+
+    key: str = Field(pattern=IMAGE_KEY)
+    run_id: str = Field(pattern=IDENTIFIER)
+    """The Run asking. A Node prepares an image once per Run, as a local Run does, so a moved
+    tag or a changed builder reaches it, and reuses it within the Run."""
+    os: OperatingSystem
+    task: TaskSpec | None = None
+    role: Literal["solver", "verifier"] = "solver"
+    reference: ImageRef | None = None
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _one_source(self) -> Self:
+        if (self.task is None) == (self.reference is None):
+            raise ValueError("an image is prepared from a Task or from a reference, not both")
+        return self
+
+
+class ImageState(BaseModel):
+    """What a Node keeps toward one image."""
+
+    model_config = _STRICT
+
+    inputs: bool
+    """Whether it holds the image's build context, which the Run sends otherwise."""
+
+
+class CreateSandbox(BaseModel):
+    """Create the granted Sandbox. Sending it again joins the creation already under way."""
+
+    model_config = _STRICT
+
+    grant: str
+    request: SandboxRequest
+    """As the Run would hand it to a local Provider, with the image this Node prepared for
+    the grant's key. The Gateway and proxy URLs are the Run's own, and the node agent
+    replaces them with its tunnel's."""
+    gateway_target: int | None = Field(default=None, ge=0, le=255)
+    """The index of the request's Gateway on the Run's tunnel."""
+    proxy_target: int | None = Field(default=None, ge=0, le=255)
+    """The index of the request's egress proxy on the Run's tunnel."""
+    lease_sec: float = Field(gt=0, le=3600)
+
+
+class SandboxDescription(BaseModel):
+    """A ready Sandbox, as the Run's Sandbox object needs to describe it."""
+
+    model_config = _STRICT
+
+    sandbox_id: str
+    node: str
+    provider: str
+    resolved_image: ResolvedImage
+    allocation: ResourceAllocation
+    agent_user: str
+    agent_home: str
+    gateway_url: str | None
+    """The Gateway's address inside the Sandbox."""
+    create_sec: float = Field(ge=0)
+    """Seconds the Node's Provider took to create it."""
+
+
+class LeaseRenewal(BaseModel):
+    model_config = _STRICT
+
+    lease_sec: float = Field(gt=0, le=3600)
+
+
+class ExecCall(BaseModel):
+    """The first message on an exec stream; output follows as binary frames."""
+
+    model_config = _STRICT
+
+    argv: tuple[str, ...] = Field(min_length=1)
+    cwd: str | None = None
+    env: dict[str, str] | None = None
+    timeout_sec: float | None = None
+    identity: Identity = Identity.FRAMEWORK
+    stream: bool = False
+    """Send output as it is produced, for a caller that watches it."""
+
+
+class ErrorBody(BaseModel):
+    """An error the node agent's Sandbox raised, named so the Run raises the same kind."""
+
+    model_config = _STRICT
+
+    error: str
+    message: str
+
+
+class ExecDone(BaseModel):
+    model_config = _STRICT
+
+    result: ExecResult | None = None
+    error: ErrorBody | None = None
+
+
+class Listing(BaseModel):
+    model_config = _STRICT
+
+    files: tuple[SandboxFile, ...]
+
+
+#: Binary exec frames start with one byte naming the stream.
+STDOUT, STDERR = 1, 2

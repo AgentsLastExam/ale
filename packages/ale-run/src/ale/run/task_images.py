@@ -513,7 +513,7 @@ async def _prepare_windows_image(
     for entry in _vm_context_entries(context):
         if entry.is_symlink():
             raise TaskDefinitionError(f"Windows image inputs cannot be symlinks: {entry}")
-    context_identity = _vm_context_identity(context)
+    context_identity = await asyncio.to_thread(_vm_context_identity, context)
     runner_identity = await _docker_image_identity(RUNNER_IMAGE)
     user = task.spec.image.user
     builder_identity = content_hash(
@@ -590,7 +590,7 @@ async def _prepare_macos_image(
     for entry in _vm_context_entries(context):
         if entry.is_symlink():
             raise TaskDefinitionError(f"macOS image inputs cannot be symlinks: {entry}")
-    context_identity = _vm_context_identity(context)
+    context_identity = await asyncio.to_thread(_vm_context_identity, context)
     user = task.spec.image.user
     # build.sh runs as root, in a VM of the base framed for the account ALE controls it
     # through, so it may create the Task's account; a sandbox frames the result for that.
@@ -649,7 +649,7 @@ async def _prepare_macos_image(
                         user=user,
                         timeout_sec=task.spec.image.build_timeout_sec,
                     )
-                    if _vm_context_identity(context) != context_identity:
+                    if await asyncio.to_thread(_vm_context_identity, context) != context_identity:
                         raise TaskDefinitionError("macOS image inputs changed during build")
                     await sandbox.save_image(image)
                 finally:
@@ -793,7 +793,7 @@ async def _build_windows_image(
         )
         if not result.ok:
             raise ProviderStartError(f"could not remove image build inputs: {result.stderr}")
-        if changed():
+        if await asyncio.to_thread(changed):
             raise TaskDefinitionError("Windows image inputs changed during build")
         return await sandbox.save_image(layer)
     finally:
