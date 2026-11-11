@@ -40,7 +40,7 @@ serves it on.
 | Provider | How a snapshot is saved, booted and destroyed |
 |---|---|
 | Docker | `docker stop`, then `docker commit` to `ale-snapshot:<sandbox id>`. The image keeps the container's command and labels, with `ale.retention=snapshot`, `ale.prepared` naming the prepared image, and no GPU label. A container boots from its image ID; `docker rmi` destroys it and fails while a container still uses it |
-| QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay is then rebased on its own base and converted into a standalone zstd-compressed qcow2 in `qemu-snapshots/<sandbox id>/` in the ALE cache, beside `snapshot.json` with its episode, role, OS, prepared image and disk digest. Standalone, it outlives the image cache. Compression made a 23 GB Windows disk 15 GB and exported it in 71 s rather than 82 s. A VM boots from it through a fresh overlay. Destroying it fails while a runner mounts it |
+| QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay itself becomes `qemu-snapshots/<sandbox id>/disk.qcow2` in the ALE cache, a [layer](#disk-layers) on the disk it booted from, beside `snapshot.json` with its episode, role, OS and prepared image; nothing is copied. When a guest booted from a snapshot is saved as one, its overlay first takes in that snapshot's clusters (`qemu-img rebase` onto the snapshot's parent, which reads only what the snapshot holds), so a snapshot never sits on another one. A VM boots from it through a fresh overlay, once the disk below it is the one it was taken on. It needs every disk below it, so snapshots are destroyed before `vm-builds` is cleared. Destroying it fails while a runner mounts it |
 | Firecracker | The Provider has the guest's init (PID 1) stop every process and unmount the writable disk, so the disk needs no journal replay, and waits for the runner to exit. The writable disk then becomes one more read-only layer: `firecracker-snapshots/<sandbox id>/` in the ALE cache holds the root disk, any layers under it and a sparse copy of the new one, hard-linked where the filesystem allows, so it outlives the disk cache without copying it, beside `snapshot.json` with its episode, role, OS, prepared image and digest. A microVM boots from it with the layers stacked under a fresh writable disk, eight at most, since Firecracker's devices are few. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so `accepts` refuses them |
 | Orchard | None: Orchard keeps no VM past its episode, so `accepts` refuses retention and snapshots |
@@ -265,11 +265,11 @@ and a Windows guest 250–310 s rather than 52 s.
 
 ### Disk layers
 
-A framed disk and a Windows Task image are each a qcow2 overlay on the disk below it, never
-flattened. Beside each, `<name>.json` records the identity of its parent and the SHA-256 of
-its own file, taken once when it is made (`images.record_layer`); the copy a chain starts
-from records the identity of the disk it was copied from. A layer names its parent by a
-path relative to itself, so the chain stays whole when the ALE cache moves.
+A framed disk, a Windows Task image and a snapshot are each a qcow2 overlay on the disk
+below it, never flattened. Beside each, `<name>.json` records the identity of its parent and
+the SHA-256 of its own file, taken once when it is made (`images.record_layer`); the copy a
+chain starts from records the identity of the disk it was copied from. A layer names its
+parent by a path relative to itself, so the chain stays whole when the ALE cache moves.
 `images.layer_identity` follows a chain with `qemu-img info --backing-chain` and refuses one
 in which a layer sits on another parent than its record names; every prepared disk with a
 backing file is checked that way before it boots.

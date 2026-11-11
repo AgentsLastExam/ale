@@ -331,7 +331,13 @@ def _digest(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _snapshotting(tmp_path: Path, commands: list[tuple[str, ...]]) -> QemuSandbox:
+def _snapshotting(
+    tmp_path: Path,
+    commands: list[tuple[str, ...]],
+    *,
+    sandbox_id: str = "e1-abcdef",
+    booted: ResolvedImage | None = None,
+) -> QemuSandbox:
     class Client:
         async def exec(self, argv: list[str], **_kwargs: object) -> tuple[int, str, str, bool]:
             commands.append(tuple(argv))
@@ -340,57 +346,57 @@ def _snapshotting(tmp_path: Path, commands: list[tuple[str, ...]]) -> QemuSandbo
         async def close(self) -> None:
             pass
 
+    base = tmp_path / "cache/vm-builds/base.qcow2"
+    if not base.exists():
+        write_qcow2(base, data=b"disk")
+    booted = booted or ResolvedImage(
+        kind="vm", prepared_identity=DIGEST, observed_identity=DIGEST, observed_ref=str(base)
+    )
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox._client = Client()  # type: ignore[assignment]
     sandbox._file_client = Client()  # type: ignore[assignment]
-    sandbox.sandbox_id = "e1-abcdef"
+    sandbox.sandbox_id = sandbox_id
     sandbox.request = request(role="shared")
     sandbox.container = "ale-qemu-solver"
-    sandbox.storage = tmp_path / "storage"
-    sandbox.snapshot_dir = tmp_path / "snapshots"
-    sandbox.resolved_image = ResolvedImage(
-        kind="vm",
-        prepared_identity=DIGEST,
-        observed_identity=DIGEST,
-        observed_ref=str(tmp_path / "base.qcow2"),
-    )
+    sandbox.storage = tmp_path / sandbox_id
+    write_qcow2(sandbox.storage / "data.qcow2", backing=booted.observed_ref, data=b"written")
+    sandbox.snapshot_dir = tmp_path / "cache/qemu-snapshots"
+    sandbox.resolved_image = booted
     return sandbox
 
 
-@pytest.mark.asyncio
-async def test_a_snapshot_is_a_standalone_disk_saved_after_a_clean_shutdown(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    commands: list[tuple[str, ...]] = []
+def _snapshot_run(monkeypatch: pytest.MonkeyPatch, commands: list[tuple[str, ...]]) -> FakeQemuImg:
+    qemu_img = FakeQemuImg()
 
     async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
         commands.append(argv)
-        if argv[:2] == ("docker", "wait"):
-            return 0, "0\n", ""
-        if argv[:2] == ("qemu-img", "convert"):
-            Path(argv[-1]).write_bytes(b"disk")
-        return 0, "", ""
+        if argv[0] == "qemu-img":
+            return await qemu_img(*argv)
+        return (0, "0\n", "") if argv[:2] == ("docker", "wait") else (0, "", "")
 
     monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.images._run", qemu_img)
+    return qemu_img
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_is_the_overlay_kept_on_its_prepared_disk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    _snapshot_run(monkeypatch, commands)
     sandbox = _snapshotting(tmp_path, commands)
     retained = await sandbox.snapshot(roles=("solver", "verifier"), reason="kept")
 
-    disk = tmp_path / "snapshots/e1-abcdef/disk.qcow2"
-    overlay = str(sandbox.storage / "data.qcow2")
+    disk = tmp_path / "cache/qemu-snapshots/e1-abcdef/disk.qcow2"
+    # Nothing is copied: a clean shutdown, then the overlay itself is kept.
     assert commands == [
         ("sync",),
         ("systemctl", "poweroff", "--no-block"),
         ("docker", "wait", "ale-qemu-solver"),
-        (
-            "qemu-img",
-            "convert",
-            "-O",
-            "qcow2",
-            *("-c", "-o", "compression_type=zstd", "-m", "16", "-W"),
-            overlay,
-            str(disk),
-        ),
     ]
+    assert FakeQemuImg.backing(disk) == "../../vm-builds/base.qcow2"
+    assert disk.read_bytes().endswith(b"written")
     assert retained.handle == "qemu:snapshot:e1-abcdef"
     assert retained.cleanup_command == "ale sandbox destroy qemu:snapshot:e1-abcdef"
     record = json.loads((disk.parent / "snapshot.json").read_text())
@@ -400,39 +406,76 @@ async def test_a_snapshot_is_a_standalone_disk_saved_after_a_clean_shutdown(
         "role": "shared",
         "os": "linux",
         "prepared_identity": DIGEST,
-        "identity": "sha256:" + hashlib.sha256(b"disk").hexdigest(),
     }
 
-    provider = QemuProvider(overlay_dir=tmp_path / "overlays", snapshot_dir=tmp_path / "snapshots")
-    booted = provider._snapshot_image(retained.handle, request())
-    assert (booted.observed_identity, booted.observed_ref) == (record["identity"], str(disk))
+    provider = QemuProvider(overlay_dir=tmp_path / "overlays", snapshot_dir=sandbox.snapshot_dir)
+    prepared = sandbox.resolved_image
+    booted = await provider._snapshot_image(retained.handle, request(), prepared)
+    assert booted.observed_identity == chain_identity(DIGEST, _digest(disk))
+    assert booted.observed_ref == str(disk.resolve())
     other = request(
         prepared_image=request().prepared_image.model_copy(
             update={"prepared_identity": "sha256:" + "1" * 64}
         )
     )
     with pytest.raises(ProviderCapabilityError, match="prepared solver image"):
-        provider._snapshot_image(retained.handle, other)
+        await provider._snapshot_image(retained.handle, other, prepared)
     with pytest.raises(ProviderCapabilityError, match="holds a linux guest"):
-        provider._snapshot_image(retained.handle, request(os="windows"))
+        await provider._snapshot_image(retained.handle, request(os="windows"), prepared)
     with pytest.raises(ProviderCapabilityError, match="not a QEMU snapshot handle"):
-        provider._snapshot_image("qemu:snapshot:../overlays", request())
+        await provider._snapshot_image("qemu:snapshot:../overlays", request(), prepared)
+    # Only on the very disk it was taken on: not another, nor one made again since.
+    for elsewhere in (
+        prepared.model_copy(update={"observed_ref": str(tmp_path / "other.qcow2")}),
+        prepared.model_copy(update={"observed_identity": "sha256:" + "2" * 64}),
+    ):
+        with pytest.raises(ProviderCapabilityError, match="cannot boot here"):
+            await provider._snapshot_image(retained.handle, request(), elsewhere)
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_of_a_forked_sandbox_sits_on_the_prepared_disk_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    _snapshot_run(monkeypatch, commands)
+    first = _snapshotting(tmp_path, commands)
+    await first.snapshot(roles=("solver",), reason="kept")
+    provider = QemuProvider(overlay_dir=tmp_path / "overlays", snapshot_dir=first.snapshot_dir)
+    booted = await provider._snapshot_image(
+        "qemu:snapshot:e1-abcdef", request(), first.resolved_image
+    )
+    fork = _snapshotting(tmp_path, commands, sandbox_id="e2-123456", booted=booted)
+    commands.clear()
+    await fork.snapshot(roles=("solver",), reason="kept")
+
+    # The earlier snapshot's clusters are taken into the overlay, which then sits on the
+    # prepared disk, so destroying the earlier snapshot never breaks this one.
+    (rebase,) = [command for command in commands if command[:2] == ("qemu-img", "rebase")]
+    assert "-u" not in rebase and rebase[-1] == str(fork.storage / "data.qcow2")
+    assert Path(rebase[rebase.index("-b") + 1]).resolve() == Path(first.resolved_image.observed_ref)
+    disk = tmp_path / "cache/qemu-snapshots/e2-123456/disk.qcow2"
+    assert FakeQemuImg.backing(disk) == "../../vm-builds/base.qcow2"
+    assert json.loads(disk.with_suffix(".json").read_text())["parent"] == DIGEST
 
 
 @pytest.mark.asyncio
 async def test_a_failed_snapshot_leaves_nothing_behind(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
-        if argv[:2] == ("docker", "wait"):
-            return 0, "0\n", ""
-        return (1, "", "no space left") if argv[:2] == ("qemu-img", "convert") else (0, "", "")
+    commands: list[tuple[str, ...]] = []
+    qemu_img = _snapshot_run(monkeypatch, commands)
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
-    sandbox = _snapshotting(tmp_path, [])
+    async def full(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        if argv[1] == "rebase":
+            return 1, "", "no space left"
+        return await qemu_img(*argv)
+
+    monkeypatch.setattr("ale.run.images._run", full)
+    sandbox = _snapshotting(tmp_path, commands)
     with pytest.raises(ProviderStartError, match="no space left"):
         await sandbox.snapshot(roles=("solver",), reason="kept")
-    assert not any((tmp_path / "snapshots").iterdir())
+    assert not any((tmp_path / "cache/qemu-snapshots").iterdir())
 
 
 @pytest.mark.asyncio
@@ -441,9 +484,11 @@ async def test_a_snapshot_is_listed_and_not_destroyed_while_a_vm_runs_on_it(
 ) -> None:
     snapshots = tmp_path / "snapshots"
     (snapshots / "e1-abcdef").mkdir(parents=True)
-    (snapshots / "e1-abcdef/disk.qcow2").write_bytes(b"disk")
+    disk = snapshots / "e1-abcdef/disk.qcow2"
+    disk.write_bytes(b"disk")
+    (snapshots / "e1-abcdef/disk.json").write_text(json.dumps({"identity": DIGEST}))
     (snapshots / "e1-abcdef/snapshot.json").write_text(
-        json.dumps({"managed": True, "episode": "e1", "role": "solver", "identity": DIGEST})
+        json.dumps({"managed": True, "episode": "e1", "role": "solver"})
     )
     (snapshots / "unrelated").mkdir()
     mounts: list[dict[str, str]] = []
@@ -469,7 +514,7 @@ async def test_a_snapshot_is_listed_and_not_destroyed_while_a_vm_runs_on_it(
         }
     ]
     # A runner mounts every layer of its chain at its Host path.
-    layer = str((snapshots / "e1-abcdef/disk.qcow2").resolve())
+    layer = str(disk.resolve())
     mounts.append({"Type": "bind", "Source": layer, "Destination": layer})
     with pytest.raises(ProviderStartError, match="qemu:ale-qemu-fork runs on it"):
         await provider.destroy_retained("qemu:snapshot:e1-abcdef")

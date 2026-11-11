@@ -14,8 +14,8 @@ Three choices are worth stating, because each has a plausible alternative:
   outliving it. It also means the host needs nothing installed but Docker and ``/dev/kvm``.
 * **Overlays, not copies.** Each episode gets a qcow2 whose backing file is the golden
   image, so a pristine guest costs milliseconds and no disk. It is also the primitive a
-  future ``reset()`` would use. A Windows build keeps that overlay as a layer of its own
-  rather than flattening it into a standalone disk.
+  future ``reset()`` would use. A Windows build and a snapshot keep that overlay as a
+  layer of its own rather than flattening it into a standalone disk.
 * **The guest service over a forwarded port.** One codebase, two transports: the same
   ``ale-guestd`` that Docker drives over exec-stdio is reached here over TCP.
 """
@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import os
 import secrets
@@ -67,7 +66,9 @@ from ale.run.gpu import GpuLease, accepts_model, normalize_pci_bdf, parse_nvidia
 from ale.run.images import (
     base_layer,
     chain_mounts,
+    layer_identity,
     layer_parent,
+    read_layer_record,
     record_layer,
     resolve_local_vm_fixture,
     resolve_prepared_vm_image,
@@ -134,7 +135,8 @@ GPU_LABEL = "ale.qemu.gpus"
 STORAGE_LABEL = "ale.qemu.storage"
 HANDLE_PREFIX = "qemu:"
 SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
-#: A snapshot is a directory holding its standalone disk and this record of where it came from.
+#: A snapshot is a directory holding its disk, a layer on the disk its Task's image resolves
+#: to, with that layer's record, and this record of where it came from.
 SNAPSHOT_DISK = "disk.qcow2"
 SNAPSHOT_RECORD = "snapshot.json"
 
@@ -544,11 +546,12 @@ class QemuSandbox(Sandbox):
     async def snapshot(
         self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
     ) -> RetainedSandbox:
-        """Shut the guest down and export its disk, base and overlay, as one standalone qcow2.
+        """Shut the guest down and keep its overlay as a layer on the disk its Task's image
+        resolves to.
 
-        Standalone, so the snapshot outlives the image cache it was booted from. Compressed
-        with zstd, which made a Windows disk a third smaller and wrote it no slower. Its
-        record holds the disk's content identity, taken once here rather than at every boot.
+        The overlay is everything the guest wrote, so nothing is copied. When the guest
+        booted from a snapshot, its overlay first takes in that snapshot's clusters, so a
+        snapshot never sits on another one.
         """
         if self.snapshot_dir is None:
             raise ProviderCapabilityError(f"{self.container} has nowhere to save a snapshot")
@@ -556,16 +559,13 @@ class QemuSandbox(Sandbox):
         target.mkdir(parents=True)
         try:
             await self._power_off()
-            disk = target / SNAPSHOT_DISK
-            await self._export(disk, compressed=True)
-            identity = await asyncio.to_thread(_disk_identity, disk)
+            await self._keep(target / SNAPSHOT_DISK)
             record = {
                 "managed": True,
                 "episode": self.request.episode_id,
                 "role": self.request.role.value,
                 "os": self.request.os.value,
                 "prepared_identity": self.request.prepared_image.prepared_identity,
-                "identity": identity,
             }
             (target / SNAPSHOT_RECORD).write_text(json.dumps(record, indent=2) + "\n")
         except BaseException:
@@ -604,30 +604,27 @@ class QemuSandbox(Sandbox):
                 f"{self.container} did not shut down cleanly: {stderr or output}"
             )
 
-    async def _export(self, destination: Path, *, compressed: bool = False) -> None:
-        """Write the stopped VM's disk, its overlay and every layer below, as one standalone
-        qcow2; the overlay names the disk below it by Host path, so the chain opens here."""
-        overlay = self.storage / "data.qcow2"
-        compression = ("-c", "-o", "compression_type=zstd", "-m", "16", "-W") if compressed else ()
-        code, _, stderr = await _run(
-            "qemu-img",
-            "convert",
-            "-O",
-            "qcow2",
-            *compression,
-            str(overlay),
-            str(destination),
-            timeout=1800,
-        )
-        if code != 0:
-            raise ProviderStartError(f"could not export the VM's disk: {stderr}")
-
     async def _keep(self, destination: Path) -> str:
         """Move the stopped VM's overlay to ``destination`` as a layer on the disk it booted
-        from, and return the layer's identity."""
+        from or, when that is a snapshot, on the snapshot's parent; the layer's identity."""
         overlay = self.storage / "data.qcow2"
         parent = Path(self.resolved_image.observed_ref)
         identity = self.resolved_image.observed_identity
+        if _is_snapshot(parent):
+            record = read_layer_record(parent) or {}
+            below = await layer_parent(parent)
+            if below is None or not isinstance(record.get("parent"), str):
+                raise ProviderStartError(f"{parent} is not a snapshot layer")
+            identity = str(record["parent"])
+            # Safe mode: qemu-img copies in what the snapshot holds and the overlay does
+            # not, and with the new parent in the old chain it reads nothing else.
+            code, _, stderr = await _run(
+                "qemu-img", "rebase", "-F", "qcow2", "-b", str(below), str(overlay),
+                timeout=1800,
+            )  # fmt: skip
+            if code != 0:
+                raise ProviderStartError(f"could not merge {parent} into the overlay: {stderr}")
+            parent = below
         shutil.move(overlay, destination)
         await set_parent(destination, parent)
         return await record_layer(destination, identity)
@@ -774,15 +771,14 @@ class QemuProvider(Provider):
             by_group = _index_vfio_gpus(candidates)
             used = await _managed_gpu_ids()
             by_group = {group: gpu for group, gpu in by_group.items() if gpu.bdf not in used}
-        if request.snapshot is not None:
-            resolved_image = self._snapshot_image(request.snapshot, request)
+        resolved_image = await resolve_prepared_vm_image(request.prepared_image)
+        if build_vm:
+            base = await base_layer(request.prepared_image)
+            resolved_image = resolved_image.model_copy(update={"observed_ref": str(base)})
         else:
-            resolved_image = await resolve_prepared_vm_image(request.prepared_image)
-            if build_vm:
-                base = await base_layer(request.prepared_image)
-                resolved_image = resolved_image.model_copy(update={"observed_ref": str(base)})
-            else:
-                resolved_image = await self._framed(resolved_image, request)
+            resolved_image = await self._framed(resolved_image, request)
+        if request.snapshot is not None:
+            resolved_image = await self._snapshot_image(request.snapshot, request, resolved_image)
         base_image = Path(resolved_image.observed_ref)
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
@@ -1307,7 +1303,9 @@ class QemuProvider(Provider):
                     "handle": handle,
                     "episode": record.get("episode", ""),
                     "role": record.get("role", ""),
-                    "image": record.get("identity", ""),
+                    "image": (read_layer_record(directory / SNAPSHOT_DISK) or {}).get(
+                        "identity", ""
+                    ),
                     "gpus": (),
                     "running": False,
                     "cleanup_command": f"ale sandbox destroy {handle}",
@@ -1335,8 +1333,11 @@ class QemuProvider(Provider):
             raise ProviderCapabilityError(f"{handle!r} is not an ALE snapshot")
         return record
 
-    def _snapshot_image(self, handle: str, request: SandboxRequest) -> ResolvedImage:
-        """The snapshot a VM boots from, which must come from the Task's prepared image."""
+    async def _snapshot_image(
+        self, handle: str, request: SandboxRequest, prepared: ResolvedImage
+    ) -> ResolvedImage:
+        """The snapshot a VM boots from, which must be a layer on the disk the Task's
+        prepared image resolves to here, as that disk was when the snapshot was taken."""
         record = self._snapshot_record(handle)
         if record.get("prepared_identity") != request.prepared_image.prepared_identity:
             raise ProviderCapabilityError(
@@ -1344,13 +1345,15 @@ class QemuProvider(Provider):
             )
         if record.get("os") != request.os.value:
             raise ProviderCapabilityError(f"{handle!r} holds a {record.get('os')} guest")
-        return ResolvedImage(
-            kind=ImageKind.VM,
-            prepared_identity=request.prepared_image.prepared_identity,
-            observed_identity=str(record.get("identity")),
-            observed_ref=str(
-                self.snapshot_dir / handle.removeprefix(SNAPSHOT_PREFIX) / SNAPSHOT_DISK
-            ),
+        disk = self.snapshot_dir / handle.removeprefix(SNAPSHOT_PREFIX) / SNAPSHOT_DISK
+        try:
+            identity = await layer_identity(
+                disk, on=(Path(prepared.observed_ref), prepared.observed_identity)
+            )
+        except ProviderStartError as exc:
+            raise ProviderCapabilityError(f"{handle!r} cannot boot here: {exc}") from exc
+        return prepared.model_copy(
+            update={"observed_identity": identity, "observed_ref": str(disk.resolve())}
         )
 
     async def _destroy_snapshot(self, handle: str) -> None:
@@ -1544,9 +1547,9 @@ def _mounted_layers(record: dict) -> set[str]:
     }
 
 
-def _disk_identity(disk: Path) -> str:
-    with disk.open("rb") as handle:
-        return "sha256:" + hashlib.file_digest(handle, "sha256").hexdigest()
+def _is_snapshot(disk: Path) -> bool:
+    """Whether a disk is the layer of a snapshot ALE saved."""
+    return disk.name == SNAPSHOT_DISK and (disk.parent / SNAPSHOT_RECORD).is_file()
 
 
 async def _discard_free_clusters(disk: Path) -> None:
