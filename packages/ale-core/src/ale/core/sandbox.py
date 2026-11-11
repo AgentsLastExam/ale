@@ -342,6 +342,9 @@ class ResourceAllocation(BaseModel):
     sudo: bool
     network_mode: NetworkMode
     provider: str = Field(min_length=1)
+    runtime: str | None = None
+    """The runtime that ran a container Sandbox, as Docker reports it: ``runc``, or
+    ``io.containerd.kata.v2`` for a Kata microVM. None where the Provider has no choice."""
     desktop_resolution: DesktopResolution | None = None
     """The desktop's size as the guest reported it when the Provider started and checked the
     desktop; None for a sandbox whose desktop it did not start."""

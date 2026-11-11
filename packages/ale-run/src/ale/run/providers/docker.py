@@ -586,13 +586,14 @@ class DockerProvider(Provider):
                     )
                 raise ProviderStartError(f"could not start container: {stderr.strip()}")
 
-            code, started_content, stderr = await _docker(
-                "inspect", "--format", "{{.Image}}", container, timeout=30
+            code, started, stderr = await _docker(
+                "inspect", "--format", "{{.Image}} {{.HostConfig.Runtime}}", container, timeout=30
             )
-            if code != 0 or started_content.strip() != resolved_image.observed_identity:
+            started_content, _, runtime = started.strip().partition(" ")
+            if code != 0 or started_content != resolved_image.observed_identity:
                 raise ProviderStartError(
                     "started container image identity does not match the resolved image: "
-                    f"{stderr.strip() or started_content.strip()}"
+                    f"{stderr.strip() or started_content}"
                 )
 
             runtime_identity = None
@@ -665,6 +666,7 @@ class DockerProvider(Provider):
                 sudo=request.sudo,
                 network_mode=request.network.mode,
                 provider=self.name,
+                runtime=runtime or None,
                 desktop_resolution=desktop,
             ),
             resource_lease=lease,

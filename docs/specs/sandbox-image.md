@@ -340,7 +340,7 @@ Given a conforming image, the Docker Provider:
   [resolution](#desktop-resolution) and waits for it;
 - applies CPU, memory, writable storage, network, sudo, and GPU requests or rejects them;
 - injects only selected NVIDIA devices through the configured runtime/CDI path;
-- observes the resulting image and resource allocation;
+- observes the resulting image, runtime and resource allocation;
 - labels every ALE container with episode, physical role, requested retention, and GPU
   identity;
 - destroys by default, or after framework sanitation returns a retained handle or saves a

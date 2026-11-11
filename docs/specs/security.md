@@ -271,11 +271,11 @@ a Judge failure according to its own scoring policy.
 
 `RunLock` records the explicit Task name, complete
 Task-folder source digest, source and commit when available, exact locally built image
-content, concrete Provider, requested and effective resources, GPU allocation and sandbox
-observations, agent version and integrity, harness family, one optional Task-asset
-repository/path/commit/dirty observation, the name and value source of each Task variable,
-verification topology and image/resources, sandbox lifecycle outcomes, config hash, seed, and
-the engine's own commit.
+content, concrete Provider and container runtime, requested and effective resources, GPU
+allocation and sandbox observations, agent version and integrity, harness family, one
+optional Task-asset repository/path/commit/dirty observation, the name and value source of
+each Task variable, verification topology and image/resources, sandbox lifecycle outcomes,
+config hash, seed, and the engine's own commit.
 
 A reportable result is one that can be published, such as on a leaderboard, because it can
 be reproduced exactly. Its Task must be committed in a git repository with no uncommitted
