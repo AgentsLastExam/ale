@@ -38,6 +38,7 @@ from ale.core.taskspec import (
 )
 from ale.run.framework import MATERIALIZER_IMAGE
 from ale.run.gpu import parse_nvidia_smi
+from ale.run.images import chain_identity
 from ale.run.providers.qemu import (
     EPISODE_LABEL,
     GATEWAY_CHAIN,
@@ -209,7 +210,7 @@ async def test_the_display_announces_the_requested_resolution(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [None, "shutdown", "wait"])
-async def test_windows_image_export_requires_clean_shutdown_and_preserves_the_base(
+async def test_a_windows_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdown(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None
 ) -> None:
     commands: list[tuple[str, ...]] = []
@@ -229,6 +230,9 @@ async def test_windows_image_export_requires_clean_shutdown_and_preserves_the_ba
         if argv[:2] == ("docker", "wait"):
             assert client.closed
             return 0, "137\n" if failure == "wait" else "0\n", ""
+        if argv[:2] == ("docker", "run"):
+            with overlay.open("ab") as discarded:
+                discarded.write(b" discarded")
         return 0, "", ""
 
     client = Client()
@@ -238,28 +242,37 @@ async def test_windows_image_export_requires_clean_shutdown_and_preserves_the_ba
     sandbox.request = request(os="windows")
     sandbox.container = "ale-qemu-build"
     sandbox.storage = tmp_path / "storage"
-    base = tmp_path / "exact-base.qcow2"
+    base = write_qcow2(tmp_path / "vm-builds/base.qcow2", data=b"windows")
+    overlay = write_qcow2(sandbox.storage / "data.qcow2", backing=str(base), data=b"office")
     sandbox.resolved_image = ResolvedImage(
-        kind="vm",
-        prepared_identity=sandbox.request.prepared_image.prepared_identity,
-        observed_identity=sandbox.request.prepared_image.prepared_identity,
-        observed_ref=str(base),
+        kind="vm", prepared_identity=DIGEST, observed_identity=DIGEST, observed_ref=str(base)
     )
-    destination = tmp_path / "built.qcow2"
+    destination = base.parent / "task.qcow2"
     monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
     if failure:
         with pytest.raises(ProviderStartError, match="shut down"):
             await sandbox.save_image(destination)
-        assert not any(command[0] == "qemu-img" for command in commands)
+        assert not any(command[:2] == ("docker", "run") for command in commands)
+        assert overlay.exists() and not destination.exists()
         return
 
-    await sandbox.save_image(destination)
+    identity = await sandbox.save_image(destination)
     assert sandbox._file_client.closed
-    overlay = str(sandbox.storage / "data.qcow2")
-    assert commands == [
-        ("docker", "wait", "ale-qemu-build"),
-        ("qemu-img", "convert", "-O", "qcow2", overlay, str(destination)),
-    ]
+    wait, discard = commands
+    assert wait == ("docker", "wait", "ale-qemu-build")
+    # The VM builder discards free clusters, with the overlay writable and its base not.
+    assert discard[:2] == ("docker", "run") and MATERIALIZER_IMAGE in discard
+    assert discard[-2:] == ("/ale/ntfs_discard.py", str(overlay.resolve()))
+    assert f"type=bind,src={overlay.resolve()},dst={overlay.resolve()}" in discard
+    assert f"type=bind,src={base.resolve()},dst={base.resolve()},readonly" in discard
+    # Not flattened: the overlay itself, naming its base relative to itself.
+    assert not overlay.exists()
+    assert FakeQemuImg.backing(destination) == "base.qcow2"
+    # The layer is hashed as the discard left it.
+    assert destination.read_bytes().endswith(b"office discarded")
+    assert identity == chain_identity(DIGEST, _digest(destination))
+    assert json.loads(destination.with_suffix(".json").read_text())["parent"] == DIGEST
 
 
 @pytest.mark.asyncio
@@ -312,6 +325,10 @@ async def test_a_build_vm_frames_its_own_overlay_on_the_base_copy_before_it_boot
     assert overlay.name == "data.qcow2" and backing == str(base.resolve())
     assert base.read_bytes().endswith(b"windows")
     assert not overlay.parent.exists()
+
+
+def _digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _snapshotting(tmp_path: Path, commands: list[tuple[str, ...]]) -> QemuSandbox:
@@ -1183,3 +1200,24 @@ def test_allowlist_direct_bypass_is_dropped(monkeypatch: pytest.MonkeyPatch) -> 
     assert all("ESTABLISHED" in rule or "--dports" in rule for rule in accepted)
     assert not any("! -d" in rule for rule in rules)
     assert sandbox._sealed is True  # type: ignore[attr-defined]
+
+
+def test_only_whole_clusters_of_ntfs_free_space_are_discarded() -> None:
+    from ale.run.providers.ntfs_discard import Volume, discardable
+
+    kib, mib = 1024, 1024 * 1024
+    bitmap = bytearray(b"\xff" * (64 * mib // (4 * kib) // 8))
+    free = [*range(256, 512), *range(1024, 1032)]  # 1 MiB, and half a 64 KiB cluster
+    for index in free:
+        bitmap[index >> 3] &= ~(1 << (index & 7))
+    volume = Volume(start=mib, length=64 * mib, cluster=4 * kib, bitmap=bytes(bitmap))
+    held = [(0, 8 * mib), (2 * mib + 4 * kib, 64 * kib)]
+    # Only the free megabyte, never a cluster partly in use, and the unaligned range not at all.
+    assert list(discardable(held, [volume], 64 * kib)) == [(2 * mib, mib)]
+    assert list(discardable([(0, mib)], [volume], 64 * kib)) == []  # outside the volume
+    assert list(discardable(held, [], 64 * kib)) == []
+    # qemu-io refuses 2 GiB or more at once, so a long free run comes in pieces.
+    gib = 1024 * mib
+    empty = Volume(start=0, length=5 * gib, cluster=4 * kib, bitmap=bytes(5 * gib // 4096 // 8))
+    pieces = list(discardable([(0, 5 * gib)], [empty], 64 * kib))
+    assert pieces == [(0, gib), (gib, gib), (2 * gib, gib), (3 * gib, gib), (4 * gib, gib)]

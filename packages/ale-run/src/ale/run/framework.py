@@ -30,7 +30,8 @@ On Windows the pieces are guestd, Cua Driver and a boot service that starts both
 agent's session, which replaces the logon tasks only a running Windows could register
 (``framework_windows.py`` installs them). A Windows Task image's build VM boots an overlay
 on its base that is framed first, so the framework is already there when the Task's own
-image script runs. There too elevation is not part of the image; the Host grants it per boot.
+image script runs, and the overlay becomes the Task's layer with the framework in it.
+There too elevation is not part of the image; the Host grants it per boot.
 
 A macOS disk is APFS, which only macOS reads, so the Orchard Provider frames a copy of it
 offline on the Mac itself with ``framework_macos.sh``. The pieces are guestd, the

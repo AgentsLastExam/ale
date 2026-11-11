@@ -14,7 +14,8 @@ Three choices are worth stating, because each has a plausible alternative:
   outliving it. It also means the host needs nothing installed but Docker and ``/dev/kvm``.
 * **Overlays, not copies.** Each episode gets a qcow2 whose backing file is the golden
   image, so a pristine guest costs milliseconds and no disk. It is also the primitive a
-  future ``reset()`` would use.
+  future ``reset()`` would use. A Windows build keeps that overlay as a layer of its own
+  rather than flattening it into a standalone disk.
 * **The guest service over a forwarded port.** One codebase, two transports: the same
   ``ale-guestd`` that Docker drives over exec-stdio is reached here over TCP.
 """
@@ -67,9 +68,11 @@ from ale.run.images import (
     base_layer,
     chain_mounts,
     layer_parent,
+    record_layer,
     resolve_local_vm_fixture,
     resolve_prepared_vm_image,
     resolve_vm_image,
+    set_parent,
 )
 from ale.run.providers.desktop import require_resolution
 from ale.run.providers.privileges import set_elevation, verify_identities
@@ -105,6 +108,8 @@ RUNNER_DISK = "/storage/data.qcow2"
 GUEST_IMAGE = os.environ.get(
     "ALE_QEMU_GUEST_IMAGE", "ghcr.io/agentslastexam/ale-guest-ubuntu-desktop:24.04"
 )
+#: Run in the VM builder to discard a Windows layer's free clusters.
+NTFS_DISCARD = Path(__file__).with_name("ntfs_discard.py")
 #: Video memory of the guest's display: Linux's driver keeps two frames of the screen, and
 #: two 3200x1800 frames at 32 bits per pixel need 46 MB.
 VGA_MEMORY_MB = 64
@@ -523,12 +528,18 @@ class QemuSandbox(Sandbox):
                 raise ProviderStartError(f"could not close egress: {stderr.strip()}")
         self._sealed = True
 
-    async def save_image(self, destination: Path) -> None:
-        """Shut down a Windows build VM and export a standalone disk."""
+    async def save_image(self, destination: Path) -> str:
+        """Shut down a Windows build VM and keep its overlay as a layer at ``destination``.
+
+        The overlay holds the framework and everything the build wrote, on the base the VM
+        booted from; the clusters it holds that are only NTFS free space are discarded
+        first. Returns the layer's identity.
+        """
         if self.request.os is not OperatingSystem.WINDOWS:
             raise ProviderCapabilityError("image scripts require a Windows VM")
         await self._power_off()
-        await self._export(destination)
+        await _discard_free_clusters(self.storage / "data.qcow2")
+        return await self._keep(destination)
 
     async def snapshot(
         self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
@@ -610,6 +621,16 @@ class QemuSandbox(Sandbox):
         )
         if code != 0:
             raise ProviderStartError(f"could not export the VM's disk: {stderr}")
+
+    async def _keep(self, destination: Path) -> str:
+        """Move the stopped VM's overlay to ``destination`` as a layer on the disk it booted
+        from, and return the layer's identity."""
+        overlay = self.storage / "data.qcow2"
+        parent = Path(self.resolved_image.observed_ref)
+        identity = self.resolved_image.observed_identity
+        shutil.move(overlay, destination)
+        await set_parent(destination, parent)
+        return await record_layer(destination, identity)
 
     async def destroy(self) -> None:
         """Idempotent: teardown also runs on failure paths, sometimes twice."""
@@ -734,7 +755,8 @@ class QemuProvider(Provider):
 
     async def create_builder(self, request: SandboxRequest) -> QemuSandbox:
         """A VM to build a Task image in: its overlay sits on an uncompressed copy of the
-        request's base and gets the framework before it boots."""
+        request's base and gets the framework before it boots, so ``save_image`` keeps
+        framework and build in one layer."""
         return await self._create(request, build_vm=True)
 
     async def _create(self, request: SandboxRequest, *, build_vm: bool) -> QemuSandbox:
@@ -1525,6 +1547,27 @@ def _mounted_layers(record: dict) -> set[str]:
 def _disk_identity(disk: Path) -> str:
     with disk.open("rb") as handle:
         return "sha256:" + hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+async def _discard_free_clusters(disk: Path) -> None:
+    """Discard the clusters of a stopped Windows overlay that are only NTFS free space,
+    with ``ntfs_discard.py`` in the VM builder, which reads the guest's own free bitmap."""
+    name = f"ale-discard-{uuid.uuid4().hex[:12]}"
+    argv = [
+        "docker", "run", "--rm", "--name", name, "--device=/dev/kvm", "--network=none",
+        *await chain_mounts(disk, writable=True),
+        "--mount", f"type=bind,src={NTFS_DISCARD},dst=/ale/ntfs_discard.py,readonly",
+        "--entrypoint", "python3", MATERIALIZER_IMAGE,
+        "/ale/ntfs_discard.py", str(disk.resolve()),
+    ]  # fmt: skip
+    try:
+        code, _, stderr = await _run(*argv, timeout=900)
+    except BaseException:
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(_run("docker", "rm", "--force", name, timeout=60))
+        raise
+    if code != 0:
+        raise ProviderStartError(f"could not discard the free clusters of {disk}: {stderr[-2000:]}")
 
 
 def _issue_guest_token(storage: Path) -> str:

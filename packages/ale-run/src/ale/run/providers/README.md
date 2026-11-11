@@ -265,13 +265,14 @@ and a Windows guest 250–310 s rather than 52 s.
 
 ### Disk layers
 
-A framed disk is a qcow2 overlay on the disk below it. Beside it, `<name>.json` records the
-identity of its parent and the SHA-256 of its own file, taken once when it is made
-(`images.record_layer`); the copy a chain starts from records the identity of the disk it
-was copied from. A layer names its parent by a path relative to itself, so the chain stays
-whole when the ALE cache moves. `images.layer_identity` follows a chain with `qemu-img info
---backing-chain` and refuses one in which a layer sits on another parent than its record
-names; every prepared disk with a backing file is checked that way before it boots.
+A framed disk and a Windows Task image are each a qcow2 overlay on the disk below it, never
+flattened. Beside each, `<name>.json` records the identity of its parent and the SHA-256 of
+its own file, taken once when it is made (`images.record_layer`); the copy a chain starts
+from records the identity of the disk it was copied from. A layer names its parent by a
+path relative to itself, so the chain stays whole when the ALE cache moves.
+`images.layer_identity` follows a chain with `qemu-img info --backing-chain` and refuses one
+in which a layer sits on another parent than its record names; every prepared disk with a
+backing file is checked that way before it boots.
 
 The runner and the VM builder are containers, so every layer of a chain is mounted in them
 at its own Host path (`images.chain_mounts`), read-only except the one being written, and
@@ -308,7 +309,13 @@ into `C:\ProgramData\ALE`:
   runs agent commands with the desktop's limited token unless it is set.
 - A Task image build (`QemuProvider.create_builder`) frames its own overlay on the base
   before the VM boots, so its `build.ps1` runs beside the same guestd as every sandbox, and
-  the saved image already carries the framework.
+  `save_image` keeps that overlay, framework and build together, as the Task's layer.
+- Before it is kept, `ntfs_discard.py` in the VM builder discards the overlay's clusters
+  that are only NTFS free space, by the volume's `$Bitmap` (libguestfs `ntfscat-i`), with
+  `qemu-io`. An overlay holds whole 64 KiB clusters, so files a build wrote and deleted stay
+  in it: on Windows base 0.1.2 that was 103 of 749 MiB for a Task that installs nothing and
+  90 of 2,417 MiB for a LibreOffice Task, each discarded in about 5 s. Free space is never
+  zero-filled instead, which would write every free cluster into the overlay.
 
 ## Firecracker
 
