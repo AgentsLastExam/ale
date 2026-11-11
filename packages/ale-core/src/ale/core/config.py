@@ -257,7 +257,7 @@ class DaytonaProviderConfig(BaseModel):
 class ContainerProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["docker", "daytona"] = "docker"
+    provider: Literal["docker", "firecracker", "daytona"] = "docker"
     gpus: tuple[Annotated[int, Field(ge=0, strict=True)], ...] = ()
     daytona: DaytonaProviderConfig = DaytonaProviderConfig()
 

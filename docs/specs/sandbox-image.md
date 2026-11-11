@@ -318,7 +318,8 @@ Any verifier image must satisfy the same guest contract and permit ALE to stage
 Each Sandbox owns two fixed guest connections: one for commands and one for file
 discovery and reads. A long-running command must not block periodic log collection.
 Docker uses two stdio guest sessions, Daytona two over SSH, Orchard two over its exec
-WebSocket; QEMU uses two authenticated connections to the same guest server and port.
+WebSocket; QEMU and Firecracker use two authenticated connections to the same guest server
+and port.
 Providers close both on startup failure, retention, destruction, and image export.
 
 `Sandbox.list_files(path)` returns the regular files at or below an absolute path, sorted,
@@ -352,8 +353,12 @@ episode qcow2 overlay mounted into it. `keep` leaves both alive and discoverable
 standalone qcow2. Provider-qualified QEMU handles prevent the runner from being mistaken
 for a container sandbox.
 
-QEMU enforces Task egress in the runner network namespace, outside both Linux and Windows
-guests. The guest does not need an OS-specific firewall implementation for ALE policy.
+QEMU and Firecracker enforce Task egress in the runner network namespace, outside the
+guest. The guest does not need an OS-specific firewall implementation for ALE policy.
+
+The Firecracker Provider runs a container Task's prepared image as a microVM with its own
+kernel, under the same contract as the Docker Provider; how is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#firecracker).
 
 The Daytona Provider runs Linux container images, with or without GPUs, on Daytona's
 cloud under the same contract; how it meets it there is in
@@ -363,10 +368,10 @@ Daytona's registry, and memory and writable storage must be whole GiB, refused r
 than rounded.
 
 Retained handles are always provider-qualified: `docker:<runtime-id>` for containers,
-`qemu:<runtime-id>` for QEMU VMs and `daytona:<sandbox-id>` for Daytona; Orchard retains
-nothing, so it has none. Unqualified handles
-are rejected. Listing, destroying and attaching are Provider operations, routed by the
-Provider a handle or RunLock names, so a new backend needs no CLI change.
+`qemu:<runtime-id>` for QEMU VMs, `firecracker:<runtime-id>` for Firecracker microVMs and
+`daytona:<sandbox-id>` for Daytona; Orchard retains nothing, so it has none. Unqualified
+handles are rejected. Listing, destroying and attaching are Provider operations, routed by
+the Provider a handle or RunLock names, so a new backend needs no CLI change.
 
 GPU workload libraries such as CUDA, PyTorch, and simulators, and the Vulkan ICD and GLVND
 EGL vendor files a renderer loads, remain Task Dockerfile responsibility: not every

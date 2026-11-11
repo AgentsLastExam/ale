@@ -49,6 +49,21 @@ forbidden_modules =
     typer
     yaml
 
+[importlinter:contract:firecracker-init-stdlib-only]
+name = the microVM init runs in the guest and imports neither engine code nor third-party packages
+type = forbidden
+source_modules =
+    ale.run.providers.firecracker_init
+forbidden_modules =
+    ale.core
+    ale.run.gateway
+    ale.run.guestd
+    ale.run.providers.firecracker
+    aiohttp
+    pydantic
+    typer
+    yaml
+
 [importlinter:contract:harness-provider-decoupling]
 name = harnesses talk to sandboxes through the contract, not through a provider
 type = forbidden
