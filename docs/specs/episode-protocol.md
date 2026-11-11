@@ -157,8 +157,9 @@ retained solver, detaches without destroying it, provisions a fresh verifier San
 artifacts, and runs the current `tests/` there. Before either path uploads `tests/`, ALE
 removes the previously staged verifier files so deleted files cannot survive a revision.
 
-The Harness, setup, and agent phases do not run again. The new episode copies the source trajectory
-for verifier and review use and records its own verification, result, execution trace, and RunLock.
+The Harness, setup, and agent phases do not run again. The new episode copies the source trajectory,
+with the blobs it references, for verifier and review use and records its own verification, result,
+execution trace, and RunLock.
 
 ## Continuation
 

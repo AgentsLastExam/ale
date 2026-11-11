@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from ale.core.blob import BlobRef, InlineText, MediaClass
 from ale.run import recording
-from ale.run.recording import INLINE_TEXT_LIMIT, BlobStore, EpisodeRecording
+from ale.run.recording import INLINE_TEXT_LIMIT, BlobStore, EpisodeRecording, copy_trajectory
 
 pytestmark = pytest.mark.unit
 
@@ -152,3 +152,65 @@ def test_recording_verifies_referenced_blob_bytes(tmp_path: Path) -> None:
     (tmp_path / ref.path).write_bytes(b"changed")
     with pytest.raises(ValueError, match=r"size mismatch|digest mismatch"):
         recording.verify_blob_references()
+
+
+def _trajectory(*steps: dict) -> str:
+    return json.dumps(
+        {"schema_version": "ATIF-v1.8", "agent": {"name": "x", "version": "1"}, "steps": steps}
+    )
+
+
+def test_copied_trajectory_brings_the_blobs_it_references(tmp_path: Path) -> None:
+    source = EpisodeRecording(tmp_path / "source")
+    image = source.blobs.put(b"\x89PNG", media_type="image/png")
+    output = source.blobs.text("x" * (INLINE_TEXT_LIMIT + 1))
+    assert isinstance(output, BlobRef)
+    source.blobs.put(b"unreferenced", media_type="application/octet-stream")
+    source.trajectory_path.write_text(
+        _trajectory(
+            {
+                "step_id": 1,
+                "source": "user",
+                "message": [
+                    {"type": "image", "source": {"media_type": "image/png", "path": image.path}}
+                ],
+                "extra": {"ale": {"attachments": [output.model_dump()]}},
+            }
+        )
+    )
+
+    copy = EpisodeRecording(tmp_path / "copy")
+    copy_trajectory(source.directory, copy.directory)
+
+    assert copy.trajectory_path.read_bytes() == source.trajectory_path.read_bytes()
+    copy.verify_blob_references()
+    blobs = (copy.directory / "blobs").rglob("*")
+    copied = {path.relative_to(copy.directory).as_posix() for path in blobs if path.is_file()}
+    assert copied == {image.path, output.path}
+
+
+def test_copied_trajectory_writes_nothing_outside_the_episode(tmp_path: Path) -> None:
+    source = EpisodeRecording(tmp_path / "run" / "source")
+    (tmp_path / "run" / "outside.txt").write_text("not a blob")
+    source.trajectory_path.write_text(
+        _trajectory(
+            {
+                "step_id": 1,
+                "source": "agent",
+                "message": "",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "read",
+                        "function_name": "read",
+                        "arguments": {"path": "blobs/../../outside.txt"},
+                    }
+                ],
+            }
+        )
+    )
+
+    copy_trajectory(
+        source.directory, EpisodeRecording(tmp_path / "later" / "run" / "copy").directory
+    )
+
+    assert not (tmp_path / "later" / "run" / "outside.txt").exists()

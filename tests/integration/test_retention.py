@@ -18,6 +18,7 @@ from ale.core.sandbox import (
     SandboxRequest,
 )
 from ale.core.taskspec import NetworkPolicy, Resources
+from ale.core.trajectory import AtifContentPart, AtifImageSource, AtifStep, AtifTrajectory
 from ale.core.verdict import Status
 from ale.run.cli.tasks import _reverify
 from ale.run.episode import _Lease, run_episode
@@ -29,7 +30,7 @@ from ale.run.providers.docker import (
     DockerProvider,
     DockerSandbox,
 )
-from ale.run.recording import EpisodeRecording
+from ale.run.recording import BlobStore, EpisodeRecording, atomic_write_json
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import edit_task_config, provider_registry
@@ -204,6 +205,23 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
     assert retained.handle is not None
     assert retained.roles == (("solver", "verifier") if mode == "shared" else ("solver",))
     assert task.prepared_image is not None
+    # The agent's history carries a payload of its own, as a screenshot would.
+    trajectory_path = first.run_dir / "trajectory.json"
+    trajectory = AtifTrajectory.model_validate_json(trajectory_path.read_text())
+    screenshot = BlobStore(first.run_dir).put(b"\x89PNG\r\n\x1a\n", media_type="image/png")
+    shown = AtifStep(
+        step_id=len(trajectory.steps) + 1,
+        source="user",
+        message=[
+            AtifContentPart(
+                type="image",
+                source=AtifImageSource(media_type="image/png", path=screenshot.path),
+            )
+        ],
+    )
+    atomic_write_json(
+        trajectory_path, trajectory.model_copy(update={"steps": [*trajectory.steps, shown]})
+    )
 
     stale.unlink()
     (task_path / "tests/verify.py").write_text(
@@ -226,6 +244,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
         result_path = next((tmp_path / "second").rglob("result.json"))
         result = json.loads(result_path.read_text())
         assert result["rewards"] == {"reward": 1.0}
+        assert (result_path.parent / screenshot.path).read_bytes() == b"\x89PNG\r\n\x1a\n"
         if mode == "separate":
             assert result["sandboxes"][0]["roles"] == ["verifier"]
         assert retained.handle in {
