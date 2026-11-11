@@ -138,7 +138,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - run: uv sync --frozen --all-groups
-      - run: images/build.sh vm-ubuntu24-base ale-vm-materializer ale-qemu-runner
+      # The Firecracker suite runs the container base as a microVM.
+      - run: >-
+          images/build.sh container-ubuntu22-base vm-ubuntu24-base ale-vm-materializer
+          ale-qemu-runner ale-firecracker-runner
       # The QEMU suite needs a prepared disk; preparing the fixture VM Task builds or
       # reuses one in the runner's cache instead of letting the suite skip.
       - run: uv run ale prepare tests/fixtures/tasks/vm-smoke
