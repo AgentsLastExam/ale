@@ -25,7 +25,7 @@ from ale.run.fleet import images as images_module
 from ale.run.fleet import node as node_module
 from ale.run.fleet.control import ControlPlane
 from ale.run.fleet.node import NodeAgent, NodeSettings, probe
-from ale.run.fleet.protocol import ImageInputs, SandboxStatus
+from ale.run.fleet.protocol import ImageInputs, RunPlan, SandboxStatus
 from ale.run.fleet.server import control_app
 from ale.run.fleet.store import Store
 from ale.run.providers import ProviderRegistry
@@ -345,6 +345,31 @@ class TestProvider:
                 await sandbox.destroy()
         finally:
             await registry.close()
+
+    async def test_a_plan_sends_a_tasks_first_sandboxes_to_its_assigned_node(
+        self, fleet: Fleet, client: FleetClient, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        await fleet.add_node("node-a")
+        await fleet.add_node("node-b")
+        item = provider.plan_item(
+            "org/task",
+            image,
+            OperatingSystem.LINUX,
+            NetworkPolicy(mode=NetworkMode.BLOCK),
+            Resources(cpus=1, memory_mb=512),
+            3,
+        )
+        reply = await client.plan(RunPlan(label="r", concurrency=3, items=(item,)))
+        (assignment,) = reply.assignments
+        assert assignment.image == image.prepared_identity
+        (assigned,) = assignment.nodes
+        sandboxes = [await provider.create(request(image, f"planned-{n}")) for n in range(3)]
+        assert {s.allocation.node for s in sandboxes} == {f"{assigned.name}/memory"}
+        # The Run asked no Node to prepare anything before a Sandbox was placed there.
+        other = "node-b" if assigned.name == "node-a" else "node-a"
+        assert fleet.agents[other].images.inventory() == ()
+        for sandbox in sandboxes:
+            await sandbox.destroy()
 
     async def test_a_build_context_changed_since_the_run_started_is_not_sent(
         self, fleet: Fleet, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

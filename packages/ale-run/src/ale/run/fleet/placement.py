@@ -10,6 +10,7 @@ episodes stay on the few Nodes that prepared its image.
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -18,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ale.run.fleet.protocol import NodeDeclaration, SandboxDemand, SandboxProfile
 from ale.run.gpu import accepts_model
 
-__all__ = ["Choice", "Holds", "NodeView", "Weights", "choose", "unservable"]
+__all__ = ["Choice", "Holds", "NodeView", "Weights", "assign", "choose", "unservable"]
 
 
 class Holds(BaseModel):
@@ -237,3 +238,60 @@ def unservable(demand: SandboxDemand, nodes: Iterable[NodeView]) -> str | None:
         + (f" and {resources.gpus} accepted GPUs" if resources.gpus else "")
         + " in all"
     )
+
+
+def _capacity(node: NodeView, demand: SandboxDemand, profile: SandboxProfile) -> int:
+    """How many Sandboxes of ``demand`` the Node holds when it holds nothing else."""
+    total = node.declaration.resources
+    limits = [
+        total.cpus // max(demand.resources.cpus, 1),
+        total.memory_mb // max(demand.resources.memory_mb, 1),
+    ]
+    if profile.macos_vm_slots:
+        limits.append(total.macos_vm_slots // profile.macos_vm_slots)
+    if demand.resources.gpus:
+        accepted = sum(
+            pool.count
+            for pool in total.gpus
+            if accepts_model(demand.resources.gpu_types, pool.model)
+        )
+        limits.append(accepted // demand.resources.gpus)
+    return max(min(limits), 0)
+
+
+def assign(
+    demands: Sequence[tuple[SandboxDemand, int]], nodes: Iterable[NodeView], *, concurrency: int
+) -> dict[str, tuple[str, ...]]:
+    """Which Nodes each image of a Run's plan goes to, from its demand and episode count.
+
+    An image needs as many Nodes as hold the episodes that can run at once, no more:
+    ten Windows Tasks of five episodes on three machines of eight VMs each need one machine
+    per Task, ten copies, where placing each episode wherever is free soon spreads every
+    Task to all three, thirty copies. Nodes that already hold the image come first, then
+    each image's fixed order of Nodes.
+    """
+    live = [node for node in nodes if node.online and not node.draining]
+    episodes: dict[str, int] = {}
+    wanted: dict[str, SandboxDemand] = {}
+    for demand, count in demands:
+        episodes[demand.image] = episodes.get(demand.image, 0) + count
+        wanted.setdefault(demand.image, demand)
+    assignments: dict[str, tuple[str, ...]] = {}
+    for image, demand in wanted.items():
+        matching = [
+            (node, profile)
+            for node in live
+            if (profile := _profile(node.declaration, demand)) is not None
+            and _capacity(node, demand, profile) > 0
+        ]
+        if not matching:
+            continue
+        per_node = max(_capacity(node, demand, profile) for node, profile in matching)
+        running = min(episodes[image], concurrency)
+        replicas = min(len(matching), math.ceil(running / per_node))
+        ordered = sorted(
+            matching,
+            key=lambda pair: (not pair[0].will_hold(image), _rendezvous(image, pair[0].name)),
+        )
+        assignments[image] = tuple(node.name for node, _ in ordered[:replicas])
+    return assignments

@@ -132,3 +132,21 @@ Task's build context the first time a Sandbox there needs the image. Its Gateway
 its own machine; Nodes reach it through the tunnel the Run opens to each, so the Run's
 machine accepts no connection from them. A Node the Run cannot reach is refused back to the
 control plane, and the Run uses it no more.
+
+A Run sends its plan before its first episode and prints the Nodes chosen for each image;
+its first Sandboxes go there, and those Nodes prepare the image. Progress appears on the
+control plane as episodes start and end.
+
+## Watch the Fleet
+
+Open `http://CONTROL:7470/?token=TOKEN` once; the page then remembers the token and
+refreshes itself. From a shell:
+
+```bash
+uv run ale fleet status --control-plane http://CONTROL:7470
+```
+
+`--json` prints the document the page is drawn from, and `ALE_FLEET_URL` saves repeating the
+address. `ale fleet drain NODE` stops new placements on a Node before maintenance, and
+`ale fleet resume NODE` ends that; `ale fleet destroy SANDBOX` and `ale fleet cancel RUN`
+clean up after a Run that cannot.

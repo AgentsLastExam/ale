@@ -39,6 +39,7 @@ from ale.core.verdict import Status, Verdict
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.assets import observe_task_assets
 from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
+from ale.run.fleet.protocol import RunPlan
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits
@@ -67,6 +68,7 @@ from ale.run.provenance import (
     gateway_provenance,
 )
 from ale.run.providers import ProviderRegistry, provider_named
+from ale.run.providers.fleet import FleetClient, FleetProvider
 from ale.run.recording import atomic_write_json
 from ale.run.secrets import host_credentials, provider_credentials, resolve_task_variables
 from ale.run.sources import resolve
@@ -317,6 +319,7 @@ async def _run_one(
     ledger.open_run(run_id, settings.config_hash)
     failures = 0
     total = len(tasks) * settings.episodes
+    fleet = await _plan_on_fleet(tasks, providers, settings, label=run_id)
 
     # Episodes of one task are independent by construction — separate sandbox, separate
     # gateway session, separate run directory — so the only thing bounding them is what
@@ -368,6 +371,8 @@ async def _run_one(
 
         async with gate:
             ledger.mark_running(episode_id)
+            if fleet is not None:
+                await fleet.report_episode(episode_id, task.spec.name, "running")
             result = await run_episode_with_retries(
                 execute,
                 # A continuation changes the kept solver it adopts; another attempt would
@@ -380,6 +385,10 @@ async def _run_one(
                 on_retry=_report_retry,
             )
         ledger.finish_episode(result.episode_id, result.record)
+        if fleet is not None:
+            await fleet.report_episode(
+                episode_id, task.spec.name, _fleet_outcome(result.verdict.status)
+            )
 
         _report(result)
         reportable = _check_reportable(result)
@@ -1183,6 +1192,49 @@ def _validation_outcome(verdict: Verdict) -> object:
     if verdict.failure is not None:
         return f"{verdict.status.value} ({verdict.failure.error_class}: {verdict.failure.message})"
     return verdict.rewards if verdict.rewards is not None else verdict.status.value
+
+
+async def _plan_on_fleet(
+    tasks: list[ManifestTask], providers: ProviderRegistry, settings: RunConfig, *, label: str
+) -> FleetClient | None:
+    """Tell the Fleet what this Run will ask for, when any of its Tasks runs there.
+
+    The plan only places images and shows progress, so a Fleet that cannot take it is
+    reported and the Run goes on.
+    """
+    items = []
+    for task in tasks:
+        provider = providers.get(task.spec.image.kind, task.spec.os)
+        if not isinstance(provider, FleetProvider) or task.prepared_image is None:
+            continue
+        items.append(
+            provider.plan_item(
+                task.spec.name,
+                task.prepared_image,
+                task.spec.os,
+                task.spec.network,
+                task.spec.resources,
+                settings.episodes,
+            )
+        )
+    fleet = providers.fleet
+    if fleet is not None and items:
+        plan = RunPlan(label=label, concurrency=settings.concurrency, items=tuple(items))
+        try:
+            reply = await fleet.plan(plan)
+        except AleError as error:
+            typer.echo(f"fleet: the plan was not accepted: {error}", err=True)
+        else:
+            for assignment in reply.assignments:
+                nodes = ", ".join(node.name for node in assignment.nodes)
+                typer.echo(f"fleet {assignment.image[:19]} -> {nodes}")
+    return fleet
+
+
+def _fleet_outcome(status: Status) -> str:
+    if status is Status.COMPLETED:
+        return "completed"
+    return "infrastructure" if status is Status.ENV_ERROR else "failed"
 
 
 def _gateway_host() -> str:
