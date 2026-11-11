@@ -19,7 +19,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from ale.core.blob import BlobRef, BlobText, InlineText, InlineTextOrBlob, media_class_for
+from ale.core.blob import (
+    BlobRef,
+    BlobText,
+    InlineText,
+    InlineTextOrBlob,
+    MediaClass,
+    media_class_for,
+)
 from ale.core.episode import EventSink
 from ale.core.lock import RunLock
 from ale.core.result import ResultRecord
@@ -67,6 +74,12 @@ _EXTENSIONS = {
     "image/webp": "webp",
     "text/plain": "txt",
 }
+# The layout BlobStore.put writes. Only such a path is a blob reference: a tool call's
+# arguments may hold any ``path``.
+_BLOB_PATH = re.compile(
+    rf"blobs/(?:{'|'.join(item.value for item in MediaClass)})/sha256-[0-9a-f]{{64}}"
+    r"(?:\.[0-9a-z]{1,9})?"
+)
 
 _LOG_CONTEXT: contextvars.ContextVar[tuple[EventSink, str, str | None, str, Redactor] | None] = (
     contextvars.ContextVar("ale_execution_context", default=None)
@@ -217,8 +230,7 @@ def copy_trajectory(source: Path, destination: Path) -> None:
     """Copy one episode's trajectory into another with every blob it references.
 
     The blobs are published first, as new ones are, so the copy never points at a payload
-    that is missing or torn. A path that leaves ``blobs/`` is not a blob ALE wrote: a tool
-    call's arguments may hold any ``path``.
+    that is missing or torn.
     """
     trajectory = source / "trajectory.json"
     if not trajectory.is_file():
@@ -226,8 +238,7 @@ def copy_trajectory(source: Path, destination: Path) -> None:
     blobs = BlobStore(destination)
     for reference in _blob_references(json.loads(trajectory.read_bytes())):
         relative = PurePosixPath(reference["path"])
-        if ".." not in relative.parts:
-            blobs._publish(relative, (source / relative).read_bytes())
+        blobs._publish(relative, (source / relative).read_bytes())
     shutil.copy2(trajectory, destination / "trajectory.json")
 
 
@@ -572,7 +583,7 @@ def _level(value: int) -> Literal["debug", "info", "warning", "error"]:
 def _blob_references(value: Any):
     if isinstance(value, dict):
         path = value.get("path")
-        if isinstance(path, str) and path.startswith("blobs/"):
+        if isinstance(path, str) and _BLOB_PATH.fullmatch(path):
             yield value
         for child in value.values():
             yield from _blob_references(child)
