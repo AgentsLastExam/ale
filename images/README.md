@@ -35,5 +35,8 @@ images/build.sh vm-ubuntu24-base             # one image
 ```
 
 `.github/workflows/images.yml` publishes each version once; its manual `promote` input
-gives an already-published image a version without rebuilding it. The licensed
+gives an already-published image a version without rebuilding it. It pushes with this
+repository's workflow token, so each GHCR package must grant `AgentsLastExam/ale` write
+access in its package settings (Manage Actions access); a package first pushed by hand has
+none, and its pushes fail with `permission_denied: write_package`. The licensed
 Windows disk remains private. Do not add Task content or Provider credentials here.
