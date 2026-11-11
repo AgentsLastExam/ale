@@ -41,7 +41,7 @@ from ale.run.framework import (
     windows_framework_identity,
     with_framework,
 )
-from ale.run.images import resolve_loaded_image
+from ale.run.images import remove_disk, resolve_loaded_image
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.orchard import OrchardProvider, OrchardSandbox
 from ale.run.providers.orchard_client import CONTROL_ACCOUNT
@@ -894,7 +894,7 @@ async def _materialize_vm_with_status(
         try:
             reused = await _valid_qcow2(disk)
             if not reused:
-                disk.unlink(missing_ok=True)
+                await remove_disk(disk)
                 await _materialize(build.runtime_ref, disk)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)

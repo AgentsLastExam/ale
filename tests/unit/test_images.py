@@ -7,13 +7,27 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.support import FakeQemuImg, write_qcow2
 from typer.testing import CliRunner
 
 from ale.core.errors import ProviderStartError
-from ale.core.sandbox import ImageRef
+from ale.core.sandbox import ImageRef, PreparedTaskImage
 from ale.core.taskspec import ImageKind
 from ale.run.cli.main import app
-from ale.run.images import _acquire_lock, _select_repo_digest, publish_vm_image, resolve_vm_image
+from ale.run.images import (
+    _acquire_lock,
+    _select_repo_digest,
+    base_layer,
+    chain_identity,
+    chain_mounts,
+    layer_identity,
+    publish_vm_image,
+    record_layer,
+    remove_disk,
+    resolve_prepared_vm_image,
+    resolve_vm_image,
+    set_parent,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -28,14 +42,16 @@ def test_vm_image_commands_replace_the_legacy_guest_command() -> None:
 async def test_vm_publish_wraps_the_checked_disk_at_the_pull_contract_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    disk = tmp_path / "windows.qcow2"
-    disk.write_bytes(b"qcow2")
+    disk = write_qcow2(tmp_path / "windows.qcow2", data=b"qcow2")
     digest = "sha256:" + "7" * 64
+    qemu_img = FakeQemuImg()
 
     async def valid(path: Path) -> bool:
-        return path == disk
+        return path.is_file()
 
     async def fake_run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
+        if argv[0] == "qemu-img":
+            return await qemu_img(*argv)
         assert argv[:3] == ("docker", "buildx", "build")
         assert "--push" in argv
         assert timeout == 7200
@@ -54,6 +70,10 @@ async def test_vm_publish_wraps_the_checked_disk_at_the_pull_contract_path(
     reference = "ghcr.io/acme/windows:v1"
     assert await publish_vm_image(disk, reference) == f"{reference}@{digest}"
     assert not list(tmp_path.glob(".ale-vm-publish-*"))
+    # A layer would arrive without the disk below it.
+    layer = write_qcow2(tmp_path / "layer.qcow2", backing="windows.qcow2")
+    with pytest.raises(ProviderStartError, match="backing file"):
+        await publish_vm_image(layer, reference)
 
 
 def test_selects_the_digest_for_the_declared_repository() -> None:
@@ -248,3 +268,120 @@ async def test_registry_resolution_reports_safe_actionable_errors(monkeypatch, f
     with pytest.raises(ProviderStartError) as error:
         await images.resolve_registry_reference("registry.example/macos:v1")
     assert "secret" not in str(error.value)
+
+
+def _disk(path: Path, identity: str) -> PreparedTaskImage:
+    return PreparedTaskImage(
+        kind="vm",
+        source="external-ref",
+        input_identity=identity,
+        runtime_ref=str(path),
+        prepared_identity=identity,
+        resolved_reference=path.as_uri(),
+    )
+
+
+def _digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_a_base_is_copied_once_and_a_layer_is_known_by_its_whole_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    qemu = FakeQemuImg()
+    monkeypatch.setattr("ale.run.images._run", qemu)
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "cache"))
+    published = "sha256:" + "b" * 64
+    source = _disk(write_qcow2(tmp_path / "published.qcow2", data=b"windows"), published)
+
+    base = await base_layer(source)
+    assert base.parent == tmp_path / "cache" / "vm-builds"
+    assert await base_layer(source) == base
+    assert [call[1] for call in qemu.calls].count("convert") == 1
+    assert "-c" not in next(call for call in qemu.calls if call[1] == "convert")
+
+    task = write_qcow2(base.parent / "task.qcow2", backing=base.name, data=b"office")
+    identity = await record_layer(task, published)
+    assert identity == chain_identity(published, _digest(task))
+    resolved = await resolve_prepared_vm_image(_disk(task, identity))
+    assert (resolved.observed_identity, resolved.observed_ref) == (identity, str(task))
+    with pytest.raises(ProviderStartError, match="changed"):
+        await resolve_prepared_vm_image(_disk(task, published))
+
+    # Another base at the same path is refused, though ALE recorded it too.
+    base.with_suffix(".json").write_text(
+        json.dumps({"parent": None, "identity": "sha256:" + "c" * 64})
+    )
+    with pytest.raises(ProviderStartError, match="was made on"):
+        await layer_identity(task)
+
+
+@pytest.mark.asyncio
+async def test_a_chain_survives_a_move_and_containers_see_it_at_host_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
+    published = "sha256:" + "b" * 64
+    builds = tmp_path / "cache" / "vm-builds"
+    base = write_qcow2(builds / "base.qcow2", data=b"windows")
+    base.with_suffix(".json").write_text(json.dumps({"parent": None, "identity": published}))
+    task = write_qcow2(builds / "task.qcow2", backing=base.name, data=b"office")
+    task_identity = await record_layer(task, published)
+    snapshot = write_qcow2(tmp_path / "cache/qemu-snapshots/e1/disk.qcow2", backing=str(task))
+    await set_parent(snapshot, task)
+    assert FakeQemuImg.backing(snapshot) == "../../vm-builds/task.qcow2"
+    identity = await record_layer(snapshot, task_identity)
+
+    (tmp_path / "cache").rename(tmp_path / "moved")
+    moved = tmp_path / "moved/qemu-snapshots/e1/disk.qcow2"
+    assert await layer_identity(moved) == identity
+    assert (
+        await layer_identity(moved, on=(tmp_path / "moved/vm-builds/task.qcow2", task_identity))
+        == identity
+    )
+    with pytest.raises(ProviderStartError, match="is not built on"):
+        await layer_identity(moved, on=(tmp_path / "other.qcow2", task_identity))
+    mounts = await chain_mounts(moved, writable=True)
+    layers = [
+        moved,
+        tmp_path / "moved/vm-builds/task.qcow2",
+        tmp_path / "moved/vm-builds/base.qcow2",
+    ]
+    assert mounts == [
+        item
+        for index, layer in enumerate(layers)
+        for item in (
+            "--mount",
+            f"type=bind,src={layer.resolve()},dst={layer.resolve()}"
+            + (",readonly" if index else ""),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_disk_another_cached_disk_builds_on_is_never_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
+    published = "sha256:" + "b" * 64
+    source = _disk(write_qcow2(tmp_path / "published.qcow2", data=b"windows"), published)
+    base = await base_layer(source)
+    # The base copy lost its record, so it would be made again: not while disks sit on it,
+    # whether they name it relative to themselves (a snapshot) or by Host path (an overlay).
+    base.with_suffix(".json").unlink()
+    for child, backing in (
+        (tmp_path / "qemu-snapshots/e1/disk.qcow2", f"../../vm-builds/{base.name}"),
+        (tmp_path / "qemu/e2/data.qcow2", str(base)),
+    ):
+        write_qcow2(child, backing=backing)
+        with pytest.raises(ProviderStartError, match=rf"{child.parent.name}/{child.name}"):
+            await base_layer(source)
+        assert base.read_bytes().endswith(b"windows")
+        child.unlink()
+    assert await base_layer(source) == base
+
+    # Removing a disk takes its record with it.
+    await remove_disk(base)
+    assert not base.exists() and not base.with_suffix(".json").exists()
