@@ -60,7 +60,7 @@ if (-not (Test-Path $python)) {
 & $python -c "import sys; assert sys.version_info >= (3, 12), sys.version"
 
 # The framework (guestd, Cua Driver, the service that starts them) is not part of the base:
-# ALE installs it into a copy of the disk before it boots, and its service locks this
+# ALE installs it into a layer on the disk before it boots, and its service locks this
 # directory down at every boot. These are the directories ALE stages Task files in.
 icacls "$env:ProgramData\ALE" /inheritance:r /grant:r `
     "SYSTEM:(OI)(CI)(F)" "Administrators:(OI)(CI)(F)" | Out-Null

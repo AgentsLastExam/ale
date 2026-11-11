@@ -61,9 +61,12 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem, Resources
 from ale.run import ale_image, guestd
-from ale.run.framework import framed_disk
+from ale.run.framework import MATERIALIZER_IMAGE, frame_disk, framed_disk
 from ale.run.gpu import GpuLease, accepts_model, normalize_pci_bdf, parse_nvidia_smi
 from ale.run.images import (
+    base_layer,
+    chain_mounts,
+    layer_parent,
     resolve_local_vm_fixture,
     resolve_prepared_vm_image,
     resolve_vm_image,
@@ -102,7 +105,6 @@ RUNNER_DISK = "/storage/data.qcow2"
 GUEST_IMAGE = os.environ.get(
     "ALE_QEMU_GUEST_IMAGE", "ghcr.io/agentslastexam/ale-guest-ubuntu-desktop:24.04"
 )
-RUNNER_BASE = "/images/base.qcow2"
 #: Video memory of the guest's display: Linux's driver keeps two frames of the screen, and
 #: two 3200x1800 frames at 32 bits per pixel need 46 MB.
 VGA_MEMORY_MB = 64
@@ -592,22 +594,9 @@ class QemuSandbox(Sandbox):
             )
 
     async def _export(self, destination: Path, *, compressed: bool = False) -> None:
-        """Write the stopped VM's disk as a standalone qcow2."""
-        # The stopped overlay names the runner's mount; point it at the same host disk.
+        """Write the stopped VM's disk, its overlay and every layer below, as one standalone
+        qcow2; the overlay names the disk below it by Host path, so the chain opens here."""
         overlay = self.storage / "data.qcow2"
-        code, _, stderr = await _run(
-            "qemu-img",
-            "rebase",
-            "-u",
-            "-F",
-            "qcow2",
-            "-b",
-            self.resolved_image.observed_ref,
-            str(overlay),
-            timeout=60,
-        )
-        if code != 0:
-            raise ProviderStartError(f"could not resolve the VM's backing disk: {stderr}")
         compression = ("-c", "-o", "compression_type=zstd", "-m", "16", "-W") if compressed else ()
         code, _, stderr = await _run(
             "qemu-img",
@@ -741,6 +730,14 @@ class QemuProvider(Provider):
         return prepared
 
     async def create(self, request: SandboxRequest) -> QemuSandbox:
+        return await self._create(request, build_vm=False)
+
+    async def create_builder(self, request: SandboxRequest) -> QemuSandbox:
+        """A VM to build a Task image in: its overlay sits on an uncompressed copy of the
+        request's base and gets the framework before it boots."""
+        return await self._create(request, build_vm=True)
+
+    async def _create(self, request: SandboxRequest, *, build_vm: bool) -> QemuSandbox:
         self.accepts(request)
         if request.image_kind is not ImageKind.VM:
             raise ProviderCapabilityError("QemuProvider requires a VM image")
@@ -759,18 +756,33 @@ class QemuProvider(Provider):
             resolved_image = self._snapshot_image(request.snapshot, request)
         else:
             resolved_image = await resolve_prepared_vm_image(request.prepared_image)
-            resolved_image = await self._framed(resolved_image, request)
+            if build_vm:
+                base = await base_layer(request.prepared_image)
+                resolved_image = resolved_image.model_copy(update={"observed_ref": str(base)})
+            else:
+                resolved_image = await self._framed(resolved_image, request)
         base_image = Path(resolved_image.observed_ref)
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         storage = self.overlay_dir / sandbox_id
         storage.mkdir(parents=True, exist_ok=True)
         guest_token = _issue_guest_token(storage)
-        await self._make_overlay(
-            storage / "data.qcow2",
-            base_image,
-            request.resources.storage_mb,
-        )
+        try:
+            await self._make_overlay(
+                storage / "data.qcow2",
+                base_image,
+                request.resources.storage_mb,
+            )
+            if build_vm:
+                await frame_disk(
+                    storage / "data.qcow2",
+                    operating_system=request.os,
+                    user=request.user,
+                    builder=MATERIALIZER_IMAGE,
+                )
+        except BaseException:
+            shutil.rmtree(storage, ignore_errors=True)
+            raise
 
         host_port = _free_port()
         if request.resources.gpus:
@@ -885,10 +897,9 @@ class QemuProvider(Provider):
     ) -> None:
         """A copy-on-write clone of the golden image; the golden image is never written.
 
-        The backing path is the one the *runner* will see, not the one on this host, and
-        ``-u`` is what lets it be written without being opened here. Recording the host's
-        path instead is the mistake that costs a boot: qemu inside the container follows
-        it, finds nothing, and refuses the disk.
+        The overlay names its backing disk by Host path, the path the runner mounts every
+        layer of the chain at: the overlay itself sits at another path in there, so a
+        relative name would lead nowhere.
         """
         code, output, stderr = await _run(
             "qemu-img", "info", "--output=json", str(base_image), timeout=60
@@ -912,7 +923,7 @@ class QemuProvider(Provider):
             "qemu-img", "create", "-u",
             "-f", "qcow2",
             "-F", "qcow2",
-            "-b", RUNNER_BASE,
+            "-b", str(base_image.resolve()),
             str(overlay),
             str(virtual_size),
             timeout=60,
@@ -930,10 +941,12 @@ class QemuProvider(Provider):
     ) -> str:
         """Start the runner, which starts the machine.
 
-        The golden image is mounted read-only beside the overlay that backs onto it, so
-        one image serves every concurrent episode and none of them can write to it.
+        Every layer of the disk's chain is mounted read-only beside the overlay that backs
+        onto it, so one image serves every concurrent episode and none of them can write
+        to it.
         """
         name = f"ale-qemu-{uuid.uuid4().hex[:10]}"
+        layers = await chain_mounts(base_image)
         argv = [
             "docker", "run", "--detach", "--name", name,
             "--label", f"{MANAGED_LABEL}=true",
@@ -946,8 +959,7 @@ class QemuProvider(Provider):
             # capability. Enforcement stays outside the guest on every operating system.
             "--cap-add", "NET_ADMIN",
             "--shm-size", "1g",
-            "--mount",
-            f"type=bind,src={base_image.resolve()},dst={RUNNER_BASE},readonly",
+            *layers,
             "--mount", f"type=bind,src={storage.resolve()},dst=/storage",
             "--publish", f"127.0.0.1:{host_port}:{GUEST_PORT}",
             "--env", f"RAM_SIZE={request.resources.memory_mb}M",
@@ -1333,10 +1345,7 @@ class QemuProvider(Provider):
             if code != 0:
                 raise ProviderStartError(f"could not inspect QEMU sandboxes: {stderr.strip()}")
             for record in json.loads(raw):
-                if any(
-                    mount.get("Destination") == RUNNER_BASE and mount.get("Source") == disk
-                    for mount in record.get("Mounts", ())
-                ):
+                if disk in _mounted_layers(record):
                     name = record.get("Name", "").removeprefix("/")
                     raise ProviderStartError(
                         f"could not destroy {handle}: {HANDLE_PREFIX}{name} runs on it"
@@ -1413,12 +1422,9 @@ class QemuProvider(Provider):
         }
         if not storage or storage not in mounted_storage:
             raise ProviderCapabilityError(f"{handle!r} has no valid ALE-owned QEMU overlay")
-        base = {
-            mount.get("Source", "")
-            for mount in record.get("Mounts", ())
-            if mount.get("Destination") == RUNNER_BASE
-        }
-        if base != {str(Path(image.observed_ref).resolve())}:
+        # The disk the runner's overlay sits on, not merely one of the layers it mounts.
+        booted = await layer_parent(Path(storage) / "data.qcow2")
+        if booted is None or booted.resolve() != Path(image.observed_ref).resolve():
             raise ProviderCapabilityError(f"{handle!r} does not run the expected solver image")
         ports = record.get("NetworkSettings", {}).get("Ports", {}).get(f"{GUEST_PORT}/tcp") or []
         try:
@@ -1505,6 +1511,15 @@ def _port_of(url: str | None) -> str:
     host_port, _, _ = rest.partition("/")
     _, _, port = host_port.partition(":")
     return port
+
+
+def _mounted_layers(record: dict) -> set[str]:
+    """The disks a runner's ``docker inspect`` record shows it mounting as layers."""
+    return {
+        str(mount.get("Source"))
+        for mount in record.get("Mounts", ())
+        if mount.get("Type") == "bind" and mount.get("Source") == mount.get("Destination")
+    }
 
 
 def _disk_identity(disk: Path) -> str:

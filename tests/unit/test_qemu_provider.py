@@ -17,8 +17,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from tests.support import FakeQemuImg, write_qcow2
 
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.core.errors import ProviderCapabilityError, ProviderStartError, TaskDefinitionError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     Identity,
@@ -35,6 +36,7 @@ from ale.core.taskspec import (
     OperatingSystem,
     Resources,
 )
+from ale.run.framework import MATERIALIZER_IMAGE
 from ale.run.gpu import parse_nvidia_smi
 from ale.run.providers.qemu import (
     EPISODE_LABEL,
@@ -119,17 +121,13 @@ def test_cancelled_boot_removes_the_started_runner(
         raise asyncio.CancelledError
 
     monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
     monkeypatch.setattr("ale.run.providers.qemu.asyncio.sleep", cancel_sleep)
+    base = write_qcow2(tmp_path / "base.qcow2")
+    task = write_qcow2(tmp_path / "task.qcow2", backing="base.qcow2")
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(
-            QemuProvider()._boot(
-                request(retention="keep"),
-                tmp_path,
-                tmp_path / "base.qcow2",
-                7411,
-            )
-        )
+        asyncio.run(QemuProvider()._boot(request(retention="keep"), tmp_path, task, 7411))
 
     assert commands[-1][:3] == ("docker", "rm", "-f")
     assert commands[-1][3].startswith("ale-qemu-")
@@ -142,6 +140,9 @@ def test_cancelled_boot_removes_the_started_runner(
         f"{STORAGE_LABEL}={tmp_path.resolve()}",
     ):
         assert label in started
+    # Every layer at its Host path, where the chain's relative names resolve, read-only.
+    for layer in (task, base):
+        assert f"type=bind,src={layer},dst={layer},readonly" in started
 
 
 @pytest.mark.asyncio
@@ -166,10 +167,11 @@ async def test_windows_admin_boot_is_explicit_and_uses_the_resolved_runner(
         return None
 
     monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
     monkeypatch.setattr("ale.run.providers.qemu.asyncio.sleep", no_sleep)
     runner = "sha256:" + "a" * 64
     await QemuProvider(runner_image=runner)._boot(
-        request(os=operating_system, sudo=sudo), tmp_path, tmp_path / "base.qcow2", 7411
+        request(os=operating_system, sudo=sudo), tmp_path, write_qcow2(tmp_path / "b.qcow2"), 7411
     )
     assert commands[0][-1] == runner
     assert "VM_NET_IP=172.30.0.2" in commands[0]
@@ -192,11 +194,12 @@ async def test_the_display_announces_the_requested_resolution(
         return None
 
     monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
     monkeypatch.setattr("ale.run.providers.qemu.asyncio.sleep", no_sleep)
     await QemuProvider()._boot(
         request(os=operating_system, desktop_resolution="1366x768"),
         tmp_path,
-        tmp_path / "base.qcow2",
+        write_qcow2(tmp_path / "base.qcow2"),
         7411,
     )
     assert "VGA=std" in commands[0]
@@ -255,9 +258,60 @@ async def test_windows_image_export_requires_clean_shutdown_and_preserves_the_ba
     overlay = str(sandbox.storage / "data.qcow2")
     assert commands == [
         ("docker", "wait", "ale-qemu-build"),
-        ("qemu-img", "rebase", "-u", "-F", "qcow2", "-b", str(base), overlay),
         ("qemu-img", "convert", "-O", "qcow2", overlay, str(destination)),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_a_build_vm_frames_its_own_overlay_on_the_base_copy_before_it_boots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fails: bool
+) -> None:
+    base = write_qcow2(tmp_path / "vm-builds/base.qcow2", data=b"windows")
+    framed: list[tuple[Path, object]] = []
+
+    class Booted(Exception):
+        pass
+
+    async def resolve(image: PreparedTaskImage) -> ResolvedImage:
+        return ResolvedImage(
+            kind="vm", prepared_identity=DIGEST, observed_identity=DIGEST, observed_ref="/x"
+        )
+
+    async def copy(image: PreparedTaskImage) -> Path:
+        return base
+
+    async def frame(disk: Path, *, operating_system: object, user: str, builder: str) -> None:
+        assert builder == MATERIALIZER_IMAGE and user == "user"
+        framed.append((disk, FakeQemuImg.backing(disk)))
+        if fails:
+            raise TaskDefinitionError("the agent account 'user' does not exist")
+
+    async def boot(
+        _provider: QemuProvider, _request: object, _storage: Path, disk: Path, *_: object
+    ) -> str:
+        assert disk == base and framed
+        raise Booted
+
+    async def ready(_provider: QemuProvider) -> None:
+        pass
+
+    monkeypatch.setattr("ale.run.providers.qemu.resolve_prepared_vm_image", resolve)
+    monkeypatch.setattr("ale.run.providers.qemu.base_layer", copy)
+    monkeypatch.setattr("ale.run.providers.qemu.frame_disk", frame)
+    monkeypatch.setattr("ale.run.providers.qemu._run", FakeQemuImg())
+    monkeypatch.setattr(QemuProvider, "_boot", boot)
+    monkeypatch.setattr(QemuProvider, "preflight", ready)
+    with pytest.raises(TaskDefinitionError if fails else Booted):
+        await QemuProvider(overlay_dir=tmp_path / "qemu").create_builder(
+            request(os="windows", user="user")
+        )
+    # The VM's own overlay is framed, on the base copy, which is only read; a VM that
+    # fails to frame or to boot leaves no overlay behind.
+    ((overlay, backing),) = framed
+    assert overlay.name == "data.qcow2" and backing == str(base.resolve())
+    assert base.read_bytes().endswith(b"windows")
+    assert not overlay.parent.exists()
 
 
 def _snapshotting(tmp_path: Path, commands: list[tuple[str, ...]]) -> QemuSandbox:
@@ -310,7 +364,6 @@ async def test_a_snapshot_is_a_standalone_disk_saved_after_a_clean_shutdown(
         ("sync",),
         ("systemctl", "poweroff", "--no-block"),
         ("docker", "wait", "ale-qemu-solver"),
-        ("qemu-img", "rebase", "-u", "-F", "qcow2", "-b", str(tmp_path / "base.qcow2"), overlay),
         (
             "qemu-img",
             "convert",
@@ -398,12 +451,9 @@ async def test_a_snapshot_is_listed_and_not_destroyed_while_a_vm_runs_on_it(
             "cleanup_command": "ale sandbox destroy qemu:snapshot:e1-abcdef",
         }
     ]
-    mounts.append(
-        {
-            "Source": str((snapshots / "e1-abcdef/disk.qcow2").resolve()),
-            "Destination": "/images/base.qcow2",
-        }
-    )
+    # A runner mounts every layer of its chain at its Host path.
+    layer = str((snapshots / "e1-abcdef/disk.qcow2").resolve())
+    mounts.append({"Type": "bind", "Source": layer, "Destination": layer})
     with pytest.raises(ProviderStartError, match="qemu:ale-qemu-fork runs on it"):
         await provider.destroy_retained("qemu:snapshot:e1-abcdef")
     mounts.clear()
@@ -530,8 +580,10 @@ async def test_qemu_retained_solver_can_be_reattached(
     storage = tmp_path / "episode"
     storage.mkdir()
     (storage / "guestd-token").write_text("retained-token\n")
-    base = tmp_path / "base.qcow2"
-    base.touch()
+    below = write_qcow2(tmp_path / "below.qcow2")
+    base = write_qcow2(tmp_path / "base.qcow2", backing="below.qcow2")
+    write_qcow2(storage / "data.qcow2", backing=str(base))
+    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
     record = {
         "Name": "/ale-qemu-test",
         "Config": {
@@ -546,7 +598,7 @@ async def test_qemu_retained_solver_can_be_reattached(
         "State": {"Running": True},
         "Mounts": [
             {"Type": "bind", "Source": str(storage), "Destination": "/storage"},
-            {"Type": "bind", "Source": str(base), "Destination": "/images/base.qcow2"},
+            {"Type": "bind", "Source": str(base), "Destination": str(base)},
         ],
         "NetworkSettings": {"Ports": {"7411/tcp": [{"HostPort": "17411"}]}},
     }
@@ -611,9 +663,11 @@ async def test_qemu_retained_solver_can_be_reattached(
     assert f"iptables -t nat -F {GATEWAY_CHAIN}" in rules[0]
     assert f"--dport {SANDBOX_GATEWAY_PORT} -j DNAT --to-destination 172.17.0.1:8931" in rules[2]
 
-    other = image.model_copy(update={"observed_ref": str(tmp_path / "other.qcow2")})
-    with pytest.raises(ProviderCapabilityError, match="expected solver image"):
-        await QemuProvider().attach_retained("qemu:ale-qemu-test", request(), allocation, other)
+    # Another disk, or a layer below the one the runner's overlay sits on, is refused.
+    for elsewhere in (tmp_path / "other.qcow2", below):
+        other = image.model_copy(update={"observed_ref": str(elsewhere)})
+        with pytest.raises(ProviderCapabilityError, match="expected solver image"):
+            await QemuProvider().attach_retained("qemu:ale-qemu-test", request(), allocation, other)
 
 
 def test_overlay_uses_the_prepared_disks_virtual_size(

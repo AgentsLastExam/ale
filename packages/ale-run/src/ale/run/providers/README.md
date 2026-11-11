@@ -247,10 +247,13 @@ Measured on a KVM host:
   Reading its marker (`/opt/ale/framework`, or `C:\ProgramData\ALE\framework` on Windows)
   with the VM builder's `virt-cat` takes about 3 s, and the answer is recorded next to the
   cache, so each disk pays it once per Host.
-- Any other disk is copied with `qemu-img convert` and framed offline, once per disk,
-  framework identity and builder image. The copy is an uncompressed qcow2: about 4.5 GB for
-  the 2.3 GB Linux VM base, 23 GB for the 14 GB Windows base.
-- The resolved image keeps the request's prepared identity and observes the copy that
+- Any other disk is framed offline into a [layer](#disk-layers) on an uncompressed copy of
+  it, once per disk, framework identity and builder image. The copy (`images.base_layer`)
+  is made once per disk and Host: about 4.5 GB for the 2.3 GB Linux VM base, 17.7 GB for
+  the 10.2 GB Windows base 0.1.2, which took about 30 s. A compressed disk is decompressed
+  on every read: with the zstd-compressed Windows base under a Task layer a guest booted
+  15% slower and read the base's files 4–5 times slower.
+- The resolved image keeps the request's prepared identity and observes the layer that
   boots, which the RunLock records.
 
 A VM boots from a qcow2 overlay on that disk, in `qemu/<sandbox id>/`; the disks, overlays
@@ -260,15 +263,35 @@ bypasses its own cache as well, so the ALE cache belongs on local SSD. From a ZF
 5400 rpm disks a Linux guest took 115–133 s to come up with its desktop rather than 20 s,
 and a Windows guest 250–310 s rather than 52 s.
 
+### Disk layers
+
+A framed disk is a qcow2 overlay on the disk below it. Beside it, `<name>.json` records the
+identity of its parent and the SHA-256 of its own file, taken once when it is made
+(`images.record_layer`); the copy a chain starts from records the identity of the disk it
+was copied from. A layer names its parent by a path relative to itself, so the chain stays
+whole when the ALE cache moves. `images.layer_identity` follows a chain with `qemu-img info
+--backing-chain` and refuses one in which a layer sits on another parent than its record
+names; every prepared disk with a backing file is checked that way before it boots.
+
+The runner and the VM builder are containers, so every layer of a chain is mounted in them
+at its own Host path (`images.chain_mounts`), read-only except the one being written, and
+the relative names resolve there as they do on the Host. A Sandbox's overlay names the top
+layer by its Host path, since the runner keeps the overlay at `/storage`.
+
+A cached disk is made again when it is damaged or its record no longer matches its chain.
+`images.remove_disk` first reads the backing file of every qcow2 in the ALE cache and
+refuses while one sits on the disk, then deletes the disk with its record, so a disk made
+at that path later is never taken for the old one.
+
 Linux is framed by `virt-customize` in about 30–40 s. Its setup script runs inside
 libguestfs's appliance VM, because it calls the disk's own programs.
 
 Windows is framed by `framework_windows.py`, run by the builder's Python, with nothing on
-the disk executed; copy and install take about a minute, and the framed disk boots to a
-ready sandbox in about 25 s. Windows cannot register a logon task offline, so the
-framework is a Windows service instead. It is a registry key under the control set the
-disk boots from, written into the SYSTEM hive with hivex, plus files copied into
-`C:\ProgramData\ALE`:
+the disk executed; the install into an empty overlay takes 14–21 s on base 0.1.2, and the
+framed disk boots to a ready sandbox in about 25 s. Windows cannot register a logon task
+offline, so the framework is a Windows service instead. It is a registry key under the
+control set the disk boots from, written into the SYSTEM hive with hivex, plus files copied
+into `C:\ProgramData\ALE`:
 
 - Checks first, from the hives alone (SAM for the account, SOFTWARE for automatic sign-in
   and UAC): each failure names the one thing the disk lacks. A disk left hibernated by
@@ -283,8 +306,9 @@ disk boots from, written into the SYSTEM hive with hivex, plus files copied into
   own hidden console, restarting either that exits.
 - The service reads the Host's `ale-sudo` SMBIOS serial and passes it to guestd, which
   runs agent commands with the desktop's limited token unless it is set.
-- A Task image build boots a framed copy of its base, so its `build.ps1` runs beside the
-  same guestd as every sandbox, and the saved image already carries the framework.
+- A Task image build (`QemuProvider.create_builder`) frames its own overlay on the base
+  before the VM boots, so its `build.ps1` runs beside the same guestd as every sandbox, and
+  the saved image already carries the framework.
 
 ## Firecracker
 

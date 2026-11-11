@@ -519,6 +519,8 @@ async def _prepare_windows_image(
         {
             "contract": WINDOWS_BUILD_CONTRACT,
             "runner": runner_identity,
+            # Frames the build VM's disk.
+            "vm_builder": await _docker_image_identity(MATERIALIZER_IMAGE),
             "framework": windows_framework_identity(user=user),
         }
     )
@@ -740,7 +742,7 @@ async def _build_windows_image(
     timeout_sec: float,
 ) -> None:
     provider = QemuProvider(overlay_dir=output.parent / "vm", runner_image=runner_identity)
-    sandbox = await provider.create(
+    sandbox = await provider.create_builder(
         SandboxRequest(
             episode_id=f"image-{output.parent.name}",
             os=OperatingSystem.WINDOWS,
