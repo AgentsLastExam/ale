@@ -42,7 +42,8 @@ retained_lifetime_hours = 72 # the same, for sandboxes kept with sandbox_retenti
 uv run ale run TASK --agent claude-code --set container.provider=daytona
 ```
 
-`container.gpus` selects Docker devices and is rejected with Daytona.
+`container.gpus` and `container.runtime` select Docker devices and runtimes and are
+rejected with Daytona.
 
 ## GPU Tasks
 

@@ -46,7 +46,7 @@ class ProviderRegistry:
             else:
                 from ale.run.providers.docker import DockerProvider
 
-                provider = DockerProvider(gpus=config.gpus)
+                provider = DockerProvider(gpus=config.gpus, runtime=config.runtime)
         else:
             from ale.run.providers.qemu import QemuProvider
 

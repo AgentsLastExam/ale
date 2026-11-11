@@ -23,13 +23,21 @@ No route off the host is not the same as no way out: the host's own address on t
 bridge answers on every port a host service binds to all interfaces, such as sshd, a
 database, or another run's Gateway. Both backends therefore admit only the episode's own
 Gateway and proxy ports on that address. Docker applies the rule in the sandbox's network
-namespace from a short-lived helper container holding `NET_ADMIN`, a capability the
-sandbox itself never has, so not even root inside it can lift the rule; provisioning fails
+namespace from a short-lived helper container holding `NET_ADMIN`, a capability a runc
+sandbox never has, so not even root inside it can lift the rule; provisioning fails
 if the rule cannot be applied. QEMU drops forwarded guest traffic in the runner while the
 sandbox is sealed and accepts only replies and the DNATed episode ports. The guest OS has
 no firewall of its own: enforcement lives where the agent cannot reach it, and the
 framework's `open_egress` for setup and verification is not undone by rules inside the
 guest.
+
+A Docker sandbox in a Kata microVM is outside the reach of netfilter rules and of networks
+attached after it boots, so the same helper confines it with tc filters on the frames
+between the VM and its veth: they seal it on the default bridge and admit only the
+episode's ports on the Host's address. Such a sandbox holds `NET_ADMIN` inside its VM, so
+the framework can remove its default route while it is sealed and blocked traffic fails at
+once as on runc; the filters stay outside the VM, where that capability does not reach
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers)).
 
 This is why the address is read from the network rather than assumed: Docker's
 `host-gateway` alias does not work on an internal bridge, and a wrong assumption here
@@ -362,9 +370,10 @@ aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host Gateway; 
 malicious verifier can only spend its episode's Judge session while that episode runs.
 
 **Container escape.** A container sandbox uses Docker's default isolation. A kernel
-exploit reaches the host. Use the VM backend for stronger isolation, and still do not put
-anything on that host you would mind losing. On Daytona, Daytona itself sees everything in
-the sandbox and in the image pushed to its registry.
+exploit reaches the host. Use the VM backend, or Docker's Kata runtime, whose sandboxes each
+have a kernel of their own, for stronger isolation, and still do not put anything on that
+host you would mind losing. On Daytona, Daytona itself sees everything in the sandbox and
+in the image pushed to its registry.
 
 **Traffic analysis, or what is said over an allowlisted tunnel.** Once `CONNECT`
 succeeds the tunnel is opaque by design — the point is to reach a declared host, not to
