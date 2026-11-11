@@ -35,6 +35,7 @@ from ale.run.fleet.protocol import (
     Placement,
     RefusedRequest,
     SandboxStatus,
+    StartReport,
     sign_grant,
 )
 from ale.run.fleet.store import Event, NodeRecord, RunRecord, SandboxRecord, Store
@@ -377,6 +378,14 @@ class ControlPlane:
 
     def _views_except(self, names: tuple[str, ...]) -> list[NodeView]:
         return [view for view in self.views() if view.name not in names]
+
+    def report(self, sandbox_id: str, report: StartReport) -> None:
+        record = self._record(sandbox_id)
+        record.queue_sec = report.queue_sec
+        record.image_sec = report.image_sec
+        if report.create_sec is not None:
+            record.create_sec = report.create_sec
+        self._save(record)
 
     def release(self, sandbox_id: str, *, reason: str = "released by its Run") -> Placement:
         record = self._record(sandbox_id)

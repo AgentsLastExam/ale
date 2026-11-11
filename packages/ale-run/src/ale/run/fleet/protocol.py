@@ -59,6 +59,7 @@ __all__ = [
     "SandboxDescription",
     "SandboxProfile",
     "SandboxStatus",
+    "StartReport",
     "sign_grant",
     "verify_grant",
 ]
@@ -312,6 +313,19 @@ class Placement(BaseModel):
         if self.status is SandboxStatus.PLACED and not (self.node and self.address and self.grant):
             raise ValueError("a placed Sandbox names its Node, address and grant")
         return self
+
+
+class StartReport(BaseModel):
+    """How long a Run's Sandbox took to start, in the segments only the Run observes."""
+
+    model_config = _STRICT
+
+    queue_sec: float = Field(ge=0)
+    """From the request to its placement."""
+    image_sec: float = Field(default=0, ge=0)
+    """Getting the image ready on its Node: preparing it, or checking the one it holds."""
+    create_sec: float | None = Field(default=None, ge=0)
+    """The Node's Provider's own time to create it."""
 
 
 class RefusedRequest(BaseModel):

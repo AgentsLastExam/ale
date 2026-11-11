@@ -428,6 +428,8 @@ class EpisodeProtocol:
             # longer lead to this Sandbox, whatever happens to this episode.
             await _write_agent_episode(sandbox, spec.os, ctx.episode_id)
             ctx.resumed_from = resume.source
+        # The image the Sandbox runs: the request's, or one a Fleet Node prepared for it.
+        ctx.prepared_image = sandbox.request.prepared_image
         ctx.resolved_image = sandbox.resolved_image
         ctx.resource_allocation = sandbox.allocation
         # Derived from the account the image declared, not configured anywhere. A run
@@ -454,6 +456,7 @@ class EpisodeProtocol:
             user=(ctx.spec.verify.image or ctx.spec.image).user,
         )
         sandbox = await ctx.sandboxes.acquire(request)
+        ctx.prepared_verifier_image = sandbox.request.prepared_image
         ctx.verifier_resolved_image = sandbox.resolved_image
         ctx.verifier_resource_allocation = sandbox.allocation
         return sandbox

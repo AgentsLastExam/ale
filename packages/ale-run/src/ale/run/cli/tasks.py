@@ -261,6 +261,7 @@ async def _run_one(
         )
     except AleError as error:
         typer.echo(f"{error}", err=True)
+        await providers.close()
         return EXIT_BAD_REFERENCE
 
     run_id = run_id or uuid.uuid4().hex[:8]
@@ -284,6 +285,7 @@ async def _run_one(
                 )
             except AleError as error:
                 typer.echo(f"{error}", err=True)
+                await providers.close()
                 return EXIT_BAD_REFERENCE
             gateway = Gateway(
                 api_key=api_key,
@@ -471,6 +473,7 @@ async def _run_one(
                 failures += 1
     finally:
         ledger.close()
+        await providers.close()
         if proxy is not None:
             await proxy.stop()
         if gateway is not None:
@@ -650,6 +653,7 @@ async def _reverify(
         typer.echo(f"reverification run: {run_dir}")
         return 0 if failures == 0 else EXIT_SOME_FAILED
     finally:
+        await providers.close()
         if gateway is not None:
             await gateway.stop()
 
@@ -958,6 +962,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
         typer.echo(f"validation run: {run_dir}")
         return 0 if failures == 0 else EXIT_SOME_FAILED
     finally:
+        await providers.close()
         if gateway is not None:
             await gateway.stop()
 

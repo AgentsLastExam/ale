@@ -34,6 +34,7 @@ __all__ = [
     "AgentJudgeConfig",
     "ArtifactPolicy",
     "AssetCollectionConfig",
+    "FleetConfig",
     "GatewayLimits",
     "LLMJudgeConfig",
     "LoggingPolicy",
@@ -254,10 +255,20 @@ class DaytonaProviderConfig(BaseModel):
     """The same limit for sandboxes kept with ``sandbox_retention``."""
 
 
+class FleetConfig(BaseModel):
+    """Where a Run finds its Fleet's control plane. The token is read from the environment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(default="", pattern=r"^(https?://.+)?$")
+    """The control plane, such as ``http://superserver:7470``."""
+    token_env: str = Field(default="ALE_FLEET_TOKEN", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 class ContainerProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["docker", "firecracker", "daytona"] = "docker"
+    provider: Literal["docker", "firecracker", "daytona", "fleet"] = "docker"
     gpus: tuple[Annotated[int, Field(ge=0, strict=True)], ...] = ()
     runtime: Literal["runc", "kata"] = "runc"
     """The runtime Docker starts each sandbox with: ``kata`` runs it in a microVM of its own."""
@@ -284,7 +295,8 @@ class ContainerProviderConfig(BaseModel):
 class VmProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["qemu"] = "qemu"
+    provider: Literal["qemu", "fleet"] = "qemu"
+    """``fleet`` sends macOS VMs to the Fleet too; otherwise they run on the local Orchard."""
 
 
 _SCHEDULING_FIELDS = frozenset({"episodes", "episode_retries", "resume", "concurrency"})
@@ -306,6 +318,7 @@ class RunConfig(BaseModel):
 
     container: ContainerProviderConfig = ContainerProviderConfig()
     vm: VmProviderConfig = VmProviderConfig()
+    fleet: FleetConfig = FleetConfig()
     artifacts: ArtifactPolicy = ArtifactPolicy()
     agent: AgentConfig = AgentConfig()
     gateway: GatewayConfig = GatewayConfig()
@@ -357,6 +370,14 @@ class RunConfig(BaseModel):
     @property
     def authentication_source(self) -> Literal["cli", "run", "preset", "default"]:
         return self._authentication_source
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _fleet_has_a_control_plane(self) -> Self:
+        if "fleet" in (self.container.provider, self.vm.provider) and not self.fleet.url:
+            raise ValueError("provider = fleet needs fleet.url, the control plane's address")
+        return self
 
 
 def parse_override(text: str) -> tuple[list[str], Any]:

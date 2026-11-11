@@ -67,6 +67,9 @@ class SandboxRecord(BaseModel):
     """Its Run released it, so any copy a Node still holds is to be destroyed."""
     lease_expires_at: float | None = None
     create_sec: float | None = None
+    """Its Node's Provider's time from the create request to a ready Sandbox."""
+    queue_sec: float | None = None
+    image_sec: float | None = None
     created_at: float
     seen_at: float
     """When its Run last asked about it; a queued or placed Sandbox nobody asks about lapses."""

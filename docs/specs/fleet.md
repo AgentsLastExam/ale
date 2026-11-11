@@ -165,3 +165,41 @@ Run's own machine; the agent only carries the calls.
   egress proxy; the Node names only an index into the Run's own list of addresses, so it
   cannot make the Run connect anywhere else. The Run opens the connection, since a Run's
   machine accepts none ([Network](#network)).
+
+## FleetProvider
+
+A Run uses the Fleet through one Provider, `fleet`, selected per image kind with
+`container.provider = "fleet"` and `vm.provider = "fleet"` (the second sends macOS VMs to the
+Fleet too) and the control plane's `fleet.url`. To a Run the Fleet is a Provider as Daytona
+is, a remote service that schedules across many machines, so neither the Harness nor the
+episode protocol knows it is there.
+
+- **Images** are prepared on the Nodes, never on the Run's machine. Preparing one of a
+  Task's images for the Fleet names it by its key, over everything that preparation reads:
+  the image's declaration, the Task's storage size, the build context as preparation
+  observes it, and the framework. The first Sandbox on each Node sends that Node the image's inputs and
+  any build context it lacks, and the Node prepares the image, once however many Sandboxes
+  wait for it. A build context that changed since the Run named it is not sent, since the
+  Node would keep it under the old key; the Run fails the Sandbox instead. A Sandbox runs the image its Node prepared; a Run resumes episodes by the key,
+  which every Node shares. Every kind goes this way, so a macOS Task whose `build.sh` builds
+  its image builds it on its Mac Node.
+- **Capabilities** are what the Fleet can carry. Which Node serves a request is placement's
+  decision, and a request no registered Node could serve fails when the control plane
+  receives it, before anything is created. A Task names no architecture, so a container or
+  a Linux or Windows VM asks for an x86-64 Node and a macOS VM for an arm64 one. The Fleet
+  keeps no Sandbox past its episode: `accepts` refuses `keep` and `snapshot`.
+- **Each Sandbox** is acquired under a fresh name, created on its Node with the grant, and
+  driven through the node agent; its lease is renewed while the Run holds it, and destroying
+  it releases it in the ledger and on the Node. A Node that refuses before creating
+  anything, or that the Run cannot connect to at all, is refused back to the control plane,
+  which places the Sandbox elsewhere; an unreachable Node takes none of the Run's Sandboxes
+  again.
+- **Failures keep their kind.** An error the Node's Sandbox raised is raised as the same
+  error, so an episode maps it as it would locally; a Node that cannot be reached, or no
+  longer holds the Sandbox, raises `GuestUnreachableError`, an infrastructure failure the
+  Run's retry policy may run again elsewhere.
+- **The RunLock** records `fleet` as the Provider, the Node and the Node's Provider in the
+  allocation's `node`, and the image as its Node prepared it.
+- **Instrumentation.** The ledger keeps, per Sandbox, its time in the queue, the time its
+  Node took to get the image ready (preparing it, or checking the one it holds), and its
+  Node's Provider's time to a ready Sandbox.

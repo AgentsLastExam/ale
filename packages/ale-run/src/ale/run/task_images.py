@@ -14,7 +14,7 @@ import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import Literal, TextIO
 
 from ale.core.errors import (
     AleError,
@@ -36,6 +36,7 @@ from ale.core.taskspec import (
 from ale.run.content import tree_digest
 from ale.run.framework import (
     MATERIALIZER_IMAGE,
+    fleet_framework_identity,
     framed_disk,
     framework_identity,
     macos_framework_identity,
@@ -44,6 +45,7 @@ from ale.run.framework import (
 )
 from ale.run.images import finished_layer, remove_disk, resolve_loaded_image
 from ale.run.providers import ProviderRegistry
+from ale.run.providers.fleet import FleetProvider
 from ale.run.providers.orchard import OrchardProvider, OrchardSandbox
 from ale.run.providers.orchard_client import CONTROL_ACCOUNT
 from ale.run.providers.qemu import NTFS_DISCARD, RUNNER_IMAGE, QemuProvider
@@ -138,6 +140,8 @@ async def prepare_task_image_result(
     spec = task.spec.image
     provider = providers.get(spec.kind, task.spec.os)
     folder = _task_folder(task)
+    if isinstance(provider, FleetProvider):
+        return _on_fleet(task, "solver", provider)
     if spec.base_ref is not None:
         base = await _stage(
             "base-resolution",
@@ -262,6 +266,8 @@ async def prepare_verifier_image_result(
         )
 
     provider = providers.get(verify.image.kind, task.spec.os)
+    if isinstance(provider, FleetProvider):
+        return _on_fleet(task, "verifier", provider)
     if verify.image.ref is not None:
         image = await _stage(
             "reference-resolution",
@@ -325,6 +331,58 @@ async def prepare_verifier_image_result(
         )
     )
     return _result(task, "verifier", image, *steps)
+
+
+def _on_fleet(
+    task: Task, role: Literal["solver", "verifier"], provider: FleetProvider
+) -> ImagePreparationResult:
+    """One of a Task's images as the Fleet prepares it: on each Node that runs it, from what
+    this names, through this same preparation.
+
+    Its key covers everything that preparation reads here: the image's declaration, the
+    Task's storage, which a Windows build sizes its disk by, the build context as
+    ``_context_identity`` observes it, and the framework.
+    """
+    image = task.spec.image if role == "solver" else task.spec.verify.image
+    assert image is not None
+    folder = _task_folder(task)
+    context: Path | None = None
+    exclude: tuple[str, ...] = ()
+    if image.ref is None:
+        if role == "solver":
+            context, exclude = folder.environment_dir, (SETUP_DIR,)
+        else:
+            context = folder.root / "tests"
+    identity = _context_identity(context, exclude=exclude) if context else None
+    key = content_hash(
+        {
+            "role": role,
+            "os": task.spec.os,
+            "image": image.model_dump(mode="json"),
+            "storage_mb": task.spec.resources.storage_mb,
+            "context": identity,
+            "framework": fleet_framework_identity(),
+        }
+    )
+    prepared = provider.defer(
+        key,
+        kind=image.kind,
+        task=task.spec,
+        role=role,
+        context=context,
+        exclude=exclude,
+        unchanged=(
+            (lambda: _context_identity(context, exclude=exclude) == identity)
+            if context is not None
+            else None
+        ),
+    )
+    return _result(
+        task,
+        role,
+        prepared,
+        ImagePreparationStep("fleet", "deferred", key, "prepared on each Node that runs it"),
+    )
 
 
 def _result(
