@@ -259,6 +259,8 @@ class ContainerProviderConfig(BaseModel):
 
     provider: Literal["docker", "daytona"] = "docker"
     gpus: tuple[Annotated[int, Field(ge=0, strict=True)], ...] = ()
+    runtime: Literal["runc", "kata"] = "runc"
+    """The runtime Docker starts each sandbox with: ``kata`` runs it in a microVM of its own."""
     daytona: DaytonaProviderConfig = DaytonaProviderConfig()
 
     @field_validator("gpus")
@@ -272,6 +274,10 @@ class ContainerProviderConfig(BaseModel):
     def _gpus_are_docker_only(self) -> Self:
         if self.gpus and self.provider != "docker":
             raise ValueError("container.gpus selects Docker devices; it needs provider = docker")
+        if self.runtime != "runc" and self.provider != "docker":
+            raise ValueError(
+                "container.runtime selects Docker's runtime; it needs provider = docker"
+            )
         return self
 
 

@@ -17,11 +17,19 @@ from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, SessionRegistry
 from ale.run.providers.docker import DockerProvider
-from tests.support import CONTAINER_BASE, prepare_reference
+from tests.support import CONTAINER_BASE, prepare_reference, skip_without_kata
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 IMAGE = CONTAINER_BASE
+
+
+@pytest.fixture(params=["runc", pytest.param("kata", marks=pytest.mark.needs_kvm)])
+def provider(request: pytest.FixtureRequest) -> DockerProvider:
+    """Each Docker runtime, since each confines the sandbox its own way."""
+    if request.param == "kata":
+        skip_without_kata()
+    return DockerProvider(runtime=request.param)
 
 
 async def _stub_upstream() -> tuple[web.AppRunner, str]:
@@ -41,13 +49,12 @@ async def _stub_upstream() -> tuple[web.AppRunner, str]:
 
 
 @pytest.mark.asyncio
-async def test_sandbox_reaches_the_gateway_and_nothing_else() -> None:
+async def test_sandbox_reaches_the_gateway_and_nothing_else(provider: DockerProvider) -> None:
     upstream_runner, upstream_url = await _stub_upstream()
     gateway = Gateway(api_key="host-only-credential", upstream=upstream_url, host="0.0.0.0")
     await gateway.start()
     session = gateway.open_session(GatewaySession(episode_id="iso", model="claude-opus-4-8"))
 
-    provider = DockerProvider()
     prepared = await prepare_reference(provider, IMAGE)
     request = SandboxRequest(
         episode_id="iso",
@@ -98,7 +105,7 @@ async def test_sandbox_reaches_the_gateway_and_nothing_else() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sandbox_reaches_https_through_the_episode_proxy() -> None:
+async def test_sandbox_reaches_https_through_the_episode_proxy(provider: DockerProvider) -> None:
     registry = SessionRegistry()
     proxy = EgressProxy(registry, host="0.0.0.0")
     proxy_url = await proxy.start()
@@ -109,7 +116,6 @@ async def test_sandbox_reaches_https_through_the_episode_proxy() -> None:
             allowed_hosts=frozenset({"api.anthropic.com"}),
         )
     )
-    provider = DockerProvider()
     prepared = await prepare_reference(provider, IMAGE)
     request = SandboxRequest(
         episode_id="proxy",

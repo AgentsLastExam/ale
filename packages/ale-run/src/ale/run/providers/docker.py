@@ -8,6 +8,10 @@ Network isolation is topological, not rule-based. Each run gets its own
 that bridge. Deny-all with a single controlled egress therefore falls out of the
 network's shape — there are no firewall rules to survive a daemon restart, and nothing
 inside the sandbox can lift them.
+
+Under the Kata runtime each container is a microVM, which sees no network attached after
+it boots. There the sandbox stays on the default bridge, and tc filters in its network
+namespace, outside the VM, seal it instead.
 """
 
 from __future__ import annotations
@@ -62,7 +66,8 @@ __all__ = [
 ]
 
 GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
-#: Any image with iptables can apply a sandbox's host rules; ALE's QEMU runner is one.
+#: Any image with iptables, and tc for a Kata sandbox, can apply a sandbox's host rules;
+#: ALE's QEMU runner, which needs both for its own guest, is one.
 NETFILTER_IMAGE = ale_image("ale-qemu-runner")
 
 LABEL = "ale.episode"
@@ -86,6 +91,19 @@ HOST_ALIAS = "ale-gateway.internal"
 #: The nat chain, in a sandbox's own network namespace, that sends the fixed Gateway port
 #: to the port the Host serves the Gateway on.
 GATEWAY_CHAIN = "ALE_GATEWAY"
+
+#: The containerd shim that starts each container in a Kata Containers microVM. Docker
+#: runs it by this name from its PATH, so the daemon needs no setting and no restart.
+KATA_RUNTIME = "io.containerd.kata.v2"
+#: The VM's tap and the container's veth in the sandbox's network namespace. Kata passes
+#: every frame between them with tc filters, past the namespace's netfilter, so the
+#: Provider's rules for a Kata sandbox are tc filters placed ahead of Kata's own.
+KATA_TAP = "tap0_kata"
+KATA_VETH = "eth0"
+#: tc preferences: lower runs first, the seal's come next, and Kata's own sit at 49152.
+_KATA_GATEWAY_PREF = 10
+_KATA_PROXY_PREF = 11
+_KATA_HOST_PREF = 12
 
 _NVIDIA_QUERY = "uuid,name,pci.bus_id,driver_version"
 _HOST_NVIDIA_QUERY = f"index,{_NVIDIA_QUERY}"
@@ -212,6 +230,162 @@ def _storage_run_args(storage_mb: int) -> list[str]:
     return ["--storage-opt", f"size={storage_mb}M"]
 
 
+def _kata_memory_mb(memory_mb: int) -> int:
+    """The VM size that leaves a Kata sandbox's processes the memory its Task declared.
+
+    Kata makes the VM exactly the container's memory limit, and its guest kernel and agent
+    take about 96 MiB plus 2.5 % of it (measured with Kata 4.3.1 from 512 MiB to 8 GiB).
+    """
+    return memory_mb + 96 + memory_mb // 40
+
+
+def _kata_filters(
+    host_ip: str,
+    *,
+    gateway_port: str,
+    proxy_port: str,
+    isolated: bool,
+    reattached: bool,
+) -> list[str]:
+    """The tc commands that give a Kata sandbox what ``_wire_host`` gives a runc one.
+
+    They act on frames between the VM and its veth, in the namespace the helper joins,
+    outside the guest: root in the VM cannot lift them. The fixed Gateway port is
+    rewritten to the Host's in both directions. An isolated sandbox reaches no other port
+    of the Host's address and starts sealed. A reattaching run replaces only the Gateway
+    and proxy filters, so the Host stays confined while it does.
+    """
+    tap, veth = KATA_TAP, KATA_VETH
+    commands = [f"test -e /sys/class/net/{tap}", f"test -e /sys/class/net/{veth}"]
+    if reattached:
+        commands += [
+            f"{{ tc filter del dev {device} ingress pref {pref} 2>/dev/null || true; }}"
+            for device in (tap, veth)
+            for pref in (_KATA_GATEWAY_PREF, _KATA_PROXY_PREF)
+        ]
+    elif isolated:
+        commands += [
+            f"tc filter add dev {tap} ingress pref {_KATA_HOST_PREF} protocol ip "
+            f"flower dst_ip {host_ip} action drop",
+            *_kata_seal(host_ip),
+        ]
+    if gateway_port:
+        rewrite = "action pedit ex munge tcp {field} set {port} pipe action csum tcp pipe"
+        commands += [
+            f"tc filter add dev {tap} ingress pref {_KATA_GATEWAY_PREF} protocol ip flower "
+            f"dst_ip {host_ip} ip_proto tcp dst_port {SANDBOX_GATEWAY_PORT} "
+            + rewrite.format(field="dport", port=gateway_port)
+            + f" action mirred egress redirect dev {veth}",
+            f"tc filter add dev {veth} ingress pref {_KATA_GATEWAY_PREF} protocol ip flower "
+            f"src_ip {host_ip} ip_proto tcp src_port {gateway_port} "
+            + rewrite.format(field="sport", port=SANDBOX_GATEWAY_PORT)
+            + f" action mirred egress redirect dev {tap}",
+        ]
+    if proxy_port and isolated:
+        commands.append(
+            f"tc filter add dev {tap} ingress pref {_KATA_PROXY_PREF} protocol ip flower "
+            f"dst_ip {host_ip} ip_proto tcp dst_port {proxy_port} "
+            f"action mirred egress redirect dev {veth}"
+        )
+    return commands
+
+
+def _kata_seal_filters(host_ip: str) -> list[tuple[str, int, str]]:
+    """Device, preference and filter that pass a sealed Kata sandbox only the Host's frames.
+
+    The Host's ARP passes too, so the guest keeps resolving its address; nothing else does,
+    IPv6 included. The Gateway and proxy filters run first and take their own frames.
+    """
+    tap, veth = KATA_TAP, KATA_VETH
+    to_veth, to_tap = (
+        f"action mirred egress redirect dev {veth}",
+        f"action mirred egress redirect dev {tap}",
+    )
+    return [
+        (tap, 20, f"protocol arp flower arp_tip {host_ip} {to_veth}"),
+        (tap, 21, "protocol all matchall action drop"),
+        (veth, 20, f"protocol ip flower src_ip {host_ip} {to_tap}"),
+        (veth, 21, f"protocol arp flower arp_sip {host_ip} {to_tap}"),
+        (veth, 22, "protocol all matchall action drop"),
+    ]
+
+
+def _kata_seal(host_ip: str) -> list[str]:
+    return [
+        f"tc filter add dev {device} ingress pref {pref} {spec}"
+        for device, pref, spec in _kata_seal_filters(host_ip)
+    ]
+
+
+def _kata_unseal(host_ip: str) -> list[str]:
+    """Remove the seal, then check that no drop filter is left: an unsealed sandbox that
+    still had one would fail its framework phase for want of a network it was promised."""
+    filters = _kata_seal_filters(host_ip)
+    return [
+        *(
+            f"{{ tc filter del dev {device} ingress pref {pref} 2>/dev/null || true; }}"
+            for device, pref, _ in filters
+        ),
+        *(
+            f'test -z "$(tc filter show dev {device} ingress pref {pref})"'
+            for device, pref, spec in filters
+            if spec.endswith("action drop")
+        ),
+    ]
+
+
+#: Run as root on the framework's Python in a Kata guest: ``del`` removes its default route,
+#: ``add HOST`` restores it through the Host's address. Both are idempotent.
+_KATA_ROUTE = """
+import socket, struct, sys
+action, gateway = sys.argv[1], sys.argv[2]
+def attribute(kind, data):
+    size = 4 + len(data)
+    return struct.pack("=HH", size, kind) + data + bytes(-size % 4)
+if action == "add":  # RTM_NEWROUTE, create or replace: main table, static, unicast
+    kind, flags = 24, 0x1 | 0x4 | 0x400 | 0x100
+    body = struct.pack("=BBBBBBBBI", socket.AF_INET, 0, 0, 0, 254, 4, 0, 1, 0)
+    body += attribute(5, socket.inet_aton(gateway))
+    body += attribute(4, struct.pack("=i", socket.if_nametoindex("eth0")))
+else:  # RTM_DELROUTE of the main table's default route, any scope
+    kind, flags = 25, 0x1 | 0x4
+    body = struct.pack("=BBBBBBBBI", socket.AF_INET, 0, 0, 0, 254, 0, 255, 0, 0)
+with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0) as link:
+    link.send(struct.pack("=LHHLL", 16 + len(body), kind, flags, 1, 0) + body)
+    reply = link.recv(4096)
+error = struct.unpack("=i", reply[16:20])[0] if struct.unpack("=H", reply[4:6])[0] == 2 else 0
+if error not in (0, -3):  # -ESRCH: there was no default route to delete
+    sys.exit(f"could not {action} the default route: errno {-error}")
+"""
+
+
+async def _kata_route(client: GuestClient, host_ip: str, *, present: bool) -> None:
+    """Remove a sealed Kata guest's default route, or restore it when it is unsealed.
+
+    The tc filters keep a sealed sandbox in; this only makes what they drop fail at once,
+    as it does on runc's internal network, which has no route off the Host. Dropped, a DNS
+    lookup took 112 s to fail and a connection waited for its timeout.
+    """
+    action = "add" if present else "del"
+    code, _, stderr, _ = await client.exec(
+        [guestd.PYTHON["linux"], "-I", "-c", _KATA_ROUTE, action, host_ip], timeout_sec=30
+    )
+    if code != 0:
+        raise ProviderStartError(f"could not {action} the Kata guest's route: {stderr.strip()}")
+
+
+async def _netfilter_helper(container: str, commands: list[str], purpose: str) -> None:
+    """Run commands with NET_ADMIN in the sandbox's network namespace on the Host, where the
+    sandbox has none."""
+    code, _, stderr = await _docker(
+        "run", "--rm", "--network", f"container:{container}", "--cap-add", "NET_ADMIN",
+        "--entrypoint", "sh", NETFILTER_IMAGE, "-c", " && ".join(commands),
+        timeout=300,
+    )  # fmt: skip
+    if code != 0:
+        raise ProviderStartError(f"could not {purpose}: {stderr.strip()}")
+
+
 def _proxy_env(request: SandboxRequest) -> dict[str, str]:
     if not request.proxy_url:
         return {}
@@ -256,6 +430,7 @@ class DockerSandbox(Sandbox):
         resource_lease: GpuLease | None = None,
         agent_user: str,
         agent_home: str,
+        kata_host_ip: str | None = None,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -268,6 +443,9 @@ class DockerSandbox(Sandbox):
         )
         self.container = container
         self.network = network
+        #: The Host's address on the bridge of a sandbox in a Kata microVM, which its tc
+        #: seal admits; None for a runc sandbox, which is sealed by detaching its bridge.
+        self.kata_host_ip = kata_host_ip
         self._client = client
         self._file_client = file_client
         self._sealed = False
@@ -364,9 +542,17 @@ class DockerSandbox(Sandbox):
         The isolated network stays attached throughout, so the gateway is reachable in
         both states and its address never moves — an agent handed one URL at the start of
         an episode must not find it stale halfway through.
+
+        A Kata VM sees no network attached after it boots, so it lives on the bridge and
+        is unsealed by removing the tc filters that confine it instead.
         """
-        if self.network is None:
+        if self.request.network.mode is NetworkMode.OPEN:
             return  # the task declared `open`; it is already on the bridge
+        if self.kata_host_ip is not None:
+            await _netfilter_helper(self.container, _kata_unseal(self.kata_host_ip), "open egress")
+            await _kata_route(self._client, self.kata_host_ip, present=True)
+            self._sealed = False
+            return
         code, _, stderr = await _docker("network", "connect", "bridge", self.container)
         if code != 0 and "already exists" not in stderr:
             raise ProviderStartError(f"could not open egress: {stderr.strip()}")
@@ -374,7 +560,14 @@ class DockerSandbox(Sandbox):
 
     async def close_egress(self) -> None:
         """Detach it again, leaving only the isolated network and the gateway on it."""
-        if self.network is None:
+        if self.request.network.mode is NetworkMode.OPEN:
+            return
+        if self.kata_host_ip is not None:
+            # Replaced rather than added, so sealing twice leaves one set of filters.
+            commands = _kata_unseal(self.kata_host_ip) + _kata_seal(self.kata_host_ip)
+            await _netfilter_helper(self.container, commands, "close egress")
+            await _kata_route(self._client, self.kata_host_ip, present=False)
+            self._sealed = True
             return
         code, _, stderr = await _docker("network", "disconnect", "bridge", self.container)
         if code != 0 and "is not connected" not in stderr:
@@ -464,9 +657,13 @@ class DockerProvider(Provider):
         *,
         gpus: tuple[int, ...] = (),
         gpu_lock_dir: Path | None = None,
+        runtime: Literal["runc", "kata"] = "runc",
     ) -> None:
         self.gpus = gpus
         self.gpu_lock_dir = gpu_lock_dir or cache_root() / "gpu-locks" / self.name
+        #: ``runc`` leaves the runtime to the daemon's default; ``kata`` starts each
+        #: sandbox in a microVM of its own.
+        self.runtime = runtime
         # An image's conformance cannot change while it is pinned to a digest, and the
         # check costs a container start — so a sweep of ten thousand episodes pays for it
         # once rather than ten thousand times.
@@ -503,6 +700,11 @@ class DockerProvider(Provider):
         self.accepts(request)
         if request.image_kind is not ImageKind.CONTAINER:
             raise ProviderCapabilityError("DockerProvider requires a container image")
+        kata = self.runtime == "kata"
+        if kata and request.resources.gpus:
+            raise ProviderCapabilityError(
+                "Docker's GPU injection does not reach a Kata microVM; run GPU Tasks on runc"
+            )
         lease: GpuLease | None = None
         selected: tuple[str, ...] = ()
         candidates: tuple[str, ...] = ()
@@ -522,8 +724,10 @@ class DockerProvider(Provider):
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         container = f"ale-{sandbox_id}"
-        network = await self._ensure_network(sandbox_id, request)
-
+        # A Kata VM takes its networks at boot and sees none attached later, so it stays
+        # on the bridge and is confined by tc filters instead of an internal network.
+        network = None if kata else await self._ensure_network(sandbox_id, request)
+        memory_mb = request.resources.memory_mb
         argv = [
             "run", "-d", "--name", container,
             "--label", f"{LABEL}={request.episode_id}",
@@ -531,8 +735,15 @@ class DockerProvider(Provider):
             "--label", f"{ROLE_LABEL}={request.role.value}",
             "--label", f"{RETENTION_LABEL}={request.retention}",
             "--cpus", str(request.resources.cpus),
-            "--memory", f"{request.resources.memory_mb}m",
+            "--memory", f"{_kata_memory_mb(memory_mb) if kata else memory_mb}m",
         ]  # fmt: skip
+        isolated = request.network.mode is not NetworkMode.OPEN
+        if kata:
+            argv += ["--runtime", KATA_RUNTIME]
+            if isolated:
+                # Only to drop the guest's default route while it is sealed: what seals it
+                # is outside the VM, where the capability does not reach.
+                argv += ["--cap-add", "NET_ADMIN"]
         if network:
             argv += ["--network", network]
         for key, value in request.env.items():
@@ -586,13 +797,14 @@ class DockerProvider(Provider):
                     )
                 raise ProviderStartError(f"could not start container: {stderr.strip()}")
 
-            code, started_content, stderr = await _docker(
-                "inspect", "--format", "{{.Image}}", container, timeout=30
+            code, started, stderr = await _docker(
+                "inspect", "--format", "{{.Image}} {{.HostConfig.Runtime}}", container, timeout=30
             )
-            if code != 0 or started_content.strip() != resolved_image.observed_identity:
+            started_content, _, runtime = started.strip().partition(" ")
+            if code != 0 or started_content != resolved_image.observed_identity:
                 raise ProviderStartError(
                     "started container image identity does not match the resolved image: "
-                    f"{stderr.strip() or started_content.strip()}"
+                    f"{stderr.strip() or started_content}"
                 )
 
             runtime_identity = None
@@ -606,10 +818,16 @@ class DockerProvider(Provider):
                     )
                 runtime_identity = f"docker-engine/{version.strip()}"
 
-            await self._wire_host(container, network, request)
+            kata_host_ip = None
+            if kata:
+                kata_host_ip = await self._wire_kata(container, request)
+            else:
+                await self._wire_host(container, network, request)
             agent_user = request.user
             client = await self._connect(container, agent_user)
             clients.append(client)
+            if kata_host_ip and isolated:
+                await _kata_route(client, kata_host_ip, present=False)
             agent_home, has_desktop = await self._guest_contract(client)
             await set_elevation(
                 client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
@@ -665,11 +883,13 @@ class DockerProvider(Provider):
                 sudo=request.sudo,
                 network_mode=request.network.mode,
                 provider=self.name,
+                runtime=runtime or None,
                 desktop_resolution=desktop,
             ),
             resource_lease=lease,
             agent_user=agent_user,
             agent_home=agent_home,
+            kata_host_ip=kata_host_ip,
         )
 
     async def _host_gpus(self) -> dict[int, GpuDevice]:
@@ -773,15 +993,29 @@ class DockerProvider(Provider):
                 rules.append(f"iptables -w -A OUTPUT -d {host_ip} -j REJECT")
         if not rules:
             return
-        code, _, stderr = await _docker(
-            "run", "--rm", "--network", f"container:{container}", "--cap-add", "NET_ADMIN",
-            "--entrypoint", "sh", NETFILTER_IMAGE, "-c", " && ".join(rules),
-            timeout=300,
-        )  # fmt: skip
-        if code != 0:
-            raise ProviderStartError(
-                f"could not route the sandbox's access to the host: {stderr.strip()}"
-            )
+        await _netfilter_helper(container, rules, "route the sandbox's access to the host")
+
+    async def _wire_kata(
+        self, container: str, request: SandboxRequest, *, reattached: bool = False
+    ) -> str:
+        """What ``_wire_host`` does, for a sandbox in a Kata microVM; returns the Host's
+        address on its bridge.
+
+        The same helper applies tc filters rather than netfilter rules: Kata moves frames
+        between the VM and its veth with tc, so netfilter never sees them. A sandbox that
+        is not ``open`` starts sealed, as an internal network leaves a runc one.
+        """
+        host_ip = await self._bridge_host_ip(None)
+        routed = _sandbox_gateway(request.gateway_url) != request.gateway_url
+        commands = _kata_filters(
+            host_ip,
+            gateway_port=_url_port(request.gateway_url) if routed else "",
+            proxy_port=_url_port(request.proxy_url),
+            isolated=request.network.mode is not NetworkMode.OPEN,
+            reattached=reattached,
+        )
+        await _netfilter_helper(container, commands, "confine the Kata sandbox's network")
+        return host_ip
 
     async def _bridge_host_ip(self, network: str | None) -> str:
         """The host's address on a container's network, the default bridge's for ``None``.
@@ -1054,9 +1288,14 @@ class DockerProvider(Provider):
         )
         if len(networks) > 1:
             raise ProviderCapabilityError(f"{handle!r} has more than one ALE network")
-        await self._wire_host(
-            container, networks[0] if networks else None, request, reattached=True
-        )
+        # The container, not this run's configuration, says how it was isolated.
+        kata_host_ip = None
+        if record.get("HostConfig", {}).get("Runtime") == KATA_RUNTIME:
+            kata_host_ip = await self._wire_kata(container, request, reattached=True)
+        else:
+            await self._wire_host(
+                container, networks[0] if networks else None, request, reattached=True
+            )
         agent_user = request.user
         client = await self._connect(container, agent_user)
         try:
@@ -1076,6 +1315,7 @@ class DockerProvider(Provider):
             allocation=allocation,
             agent_user=agent_user,
             agent_home=agent_home,
+            kata_host_ip=kata_host_ip,
         )
 
 

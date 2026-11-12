@@ -33,6 +33,17 @@ def test_provider_slots_are_strict_and_default_to_builtins() -> None:
         RunConfig.model_validate({"container": {"gpus": [-1]}})
 
 
+def test_the_docker_runtime_is_a_docker_setting() -> None:
+    assert RunConfig().container.runtime == "runc"
+    kata = RunConfig.model_validate({"container": {"runtime": "kata"}})
+    provider = ProviderRegistry(kata).get(ImageKind.CONTAINER, OperatingSystem.LINUX)
+    assert isinstance(provider, DockerProvider) and provider.runtime == "kata"
+    with pytest.raises(ValidationError, match="needs provider = docker"):
+        RunConfig.model_validate({"container": {"provider": "daytona", "runtime": "kata"}})
+    with pytest.raises(ValidationError):
+        RunConfig.model_validate({"container": {"runtime": "runsc"}})
+
+
 def test_provider_registry_is_lazy_and_reuses_each_slot() -> None:
     registry = ProviderRegistry(RunConfig())
     assert registry._instances == {}

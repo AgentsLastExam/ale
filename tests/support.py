@@ -3,12 +3,15 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
 import subprocess
 import tomllib
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from ale.core.config import RunConfig
 from ale.core.sandbox import ImageRef, PreparedTaskImage, Provider, Sandbox, SandboxRequest
@@ -20,6 +23,18 @@ ENGINE_ROOT = Path(__file__).resolve().parents[1]
 #: The current ALE bases, for images a test builds or runs.
 CONTAINER_BASE = ale_image("container-ubuntu22-base")
 VM_BASE = ale_image("vm-ubuntu24-base")
+
+
+def skip_without_kata() -> None:
+    """Skip unless this host starts Kata microVMs: KVM, and Kata's shim on Docker's PATH.
+
+    The shim is looked up on this process's PATH, which holds the same system directories
+    as the daemon's on a host that runs ``ale`` beside its Docker daemon.
+    """
+    if not os.access("/dev/kvm", os.R_OK | os.W_OK):
+        pytest.skip("/dev/kvm is unavailable")
+    if shutil.which("containerd-shim-kata-v2") is None:
+        pytest.skip("Kata Containers is not installed (containerd-shim-kata-v2 not on PATH)")
 
 
 def sibling_checkout(name: str) -> Path:

@@ -4,7 +4,7 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 
 | Module | Backend | Prepared input |
 |---|---|---|
-| `docker.py` | local Docker container | immutable OCI image identity |
+| `docker.py` | local Docker container, or a Kata microVM per container ([Kata](#docker-on-kata-containers)) | immutable OCI image identity |
 | `qemu.py` | QEMU/KVM guest runner | materialized qcow2 identity |
 | `daytona.py` | Daytona cloud container | immutable OCI image identity, pushed by digest |
 | `orchard.py` | macOS VM on Orchard/Tart | digest-pinned OCI image, or a local image `build.sh` built |
@@ -27,7 +27,7 @@ serves it on.
 
 | Provider | Where the fixed port leads |
 |---|---|
-| Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone |
+| Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone. Under Kata the helper rewrites the port with tc filters instead ([Kata](#docker-on-kata-containers)) |
 | QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
 | Daytona | `guestd/tunnel.py` listens at 7412 on the sandbox's loopback |
 | Orchard | A relay the Provider starts as root at boot listens at `127.0.0.1:7412` in the VM and connects to the Gateway's port at the Mac, the VM's default IPv4 route; it lives until the VM is deleted |
@@ -49,7 +49,7 @@ models it got with `ale.run.gpu.accepts_model`, which applies that rule.
 
 | Provider | How it gives only the models the Task accepts |
 |---|---|
-| Docker | Reads the Host's GPUs with `nvidia-smi` and leases only those among `container.gpus`, or among all when it is unset, of an accepted model. Too few refuses the Sandbox before it starts, and the container must then show exactly the leased UUIDs |
+| Docker | Reads the Host's GPUs with `nvidia-smi` and leases only those among `container.gpus`, or among all when it is unset, of an accepted model. Too few refuses the Sandbox before it starts, and the container must then show exactly the leased UUIDs. Under Kata every GPU request is refused: `--gpus` does not reach the microVM |
 | QEMU | A device bound to `vfio-pci` has no Host driver to name its model, so the guest's `nvidia-smi` is read once it boots; a model the Task does not accept destroys the Sandbox before any Task code runs. The pool is leased without regard to model, so a pool of several models can refuse a Task while an accepted GPU is free |
 | Daytona | Maps the names to Daytona's GPU types as Harbor does: `h100` and `nvidia-h100-80gb` to `H100`, `h200` and `nvidia-h200-141gb` to `H200`, `rtx-pro-6000` and `nvidia-rtx-pro-6000` to `RTX-PRO-6000`, `rtx-4090` and `rtx-5090` to themselves, ignoring case. It asks for them in the Task's order, which Daytona tries in turn, and leaves out names with no type; a Task left with none is refused before anything is created. The models attached are then checked against the Task's own names, as on every Provider. `MI355X` is never asked for, as `nvidia-smi` cannot see it to record it. A Task naming no model sends no type, so Daytona chooses |
 | Orchard | Refuses every GPU request |
@@ -135,6 +135,56 @@ and the Vulkan ICD load, do not exist: neither loads for the agent, and `vkCreat
 fails with `VK_ERROR_INCOMPATIBLE_DRIVER`, as on Docker's hook path without `graphics`.
 Afterwards EGL initializes the GPU and Vulkan lists the H100. The other sonames,
 `libcuda.so.1` among them, exist either way, which is why CUDA worked without it.
+
+## Docker on Kata Containers
+
+`container.runtime = "kata"` (`--set container.runtime=kata`) starts every Docker sandbox
+with `--runtime io.containerd.kata.v2`: each container is then a QEMU microVM with a guest
+kernel of its own, so a kernel exploit in the sandbox reaches that kernel and must still
+escape QEMU to reach the Host. The image, guestd over `docker exec`, files, uploads, the
+desktop and snapshots work as on runc, and the allocation records the runtime Docker
+reports. Each row below was measured with Kata 4.3.1
+(its Rust runtime, QEMU, guest kernel 6.18.56) under Docker 29.1.3 and containerd 2.2.2.
+
+A Host enables it without touching the daemon: unpack Kata's `kata-static` release into
+`/opt/kata`, link `/opt/kata/runtime-rs/bin/containerd-shim-kata-v2` into `/usr/local/bin`,
+which is on the daemon's PATH, and load `vhost_vsock`. Docker runs a containerd shim named
+in `--runtime` from its PATH, so `daemon.json` and a restart are not needed. Kata's default
+configuration is used as it ships.
+
+| Kata | What the Provider does |
+|---|---|
+| Moves every frame between the VM's tap (`tap0_kata`) and the container's veth with tc filters, at preference 49152, so netfilter in the sandbox's namespace never sees the guest's traffic: the runc helper's rules would neither route the Gateway nor confine the Host | The same helper puts tc filters ahead of Kata's, in that namespace, outside the VM. Port 7412 to the Host's address is rewritten to the Gateway's port, and replies back (`pedit` and `csum`; 64 MiB each way came through intact). A sandbox that is not `open` reaches no other port of that address, and its proxy port only under `allowlist`. A reattaching run replaces only the Gateway and proxy filters |
+| Hands the VM its networks at boot: `docker network connect` succeeds and the VM never sees the network | No internal network: the sandbox stays on the default bridge, and sealing adds filters that drop every frame but those to and from the Host's address, ARP included, so it reaches neither the Internet nor another container on the bridge. A sandbox that is not `open` starts sealed: the filters are in place before guestd connects, though the image's own command starts before them. Opening egress removes them and checks that no drop filter is left |
+| Docker's embedded DNS server, `127.0.0.11` on a user-defined network, is in the namespace and out of the guest's reach | The default bridge's `resolv.conf` names the Host's upstream servers, which the guest reaches |
+| Makes the VM exactly the container's memory limit; the guest kernel and agent take about 96 MiB plus 2.5 % of it (512 MiB declared left 395 MiB usable, against 504 MiB on runc) | Starts the VM with `memory_mb + 96 + memory_mb / 40` MiB, which leaves the Task's processes at least what runc gives them; the allocation records `memory_mb`. With the base image's desktop running in 512 MiB, one process then held 312–320 MiB against 240–288 MiB on runc: in a VM the kernel's own work for the desktop is not charged to the container |
+| Gives the VM one vCPU more than `--cpus` and applies the quota in the guest's cgroup | Nothing: the quota holds, and `nproc` reports `cpus + 1` rather than the Host's count |
+| Cannot take Docker's `--gpus` | Refuses GPU requests |
+| Drops what a filter drops: tc cannot answer with a rejection, so a sealed guest's DNS lookup took 112 s to fail, and broke sudo's first use when the guest did not yet list its own host name | A sandbox that can be sealed gets `NET_ADMIN`, and the framework removes the guest's default route while it is sealed and restores it when it opens. What runc's internal network refuses then fails at once here too; only a blocked port of the Host's address, which stays on-link, times out. The capability works inside the VM only: root there that re-adds the route makes failures slow again, and still reaches nothing |
+| Runs no seccomp filter in the guest (`disable_guest_seccomp`) | Nothing: the VM is the boundary, and the filters are outside it |
+| Writes Docker's `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` into the container's own files, where runc mounts them | A snapshot keeps them; a Sandbox booted from it gets its own, a moment after it starts |
+| Shares the container's root filesystem with the guest over virtio-fs | Nothing; see the costs below |
+
+What it costs, measured on the `example-task` and `tool-smoke` Tasks of ale-tasks-base
+(the container base with its desktop; 1 CPU, 4096 MB, `block`), five sandboxes of each per
+runtime, one at a time, on a 112-core Host whose load stayed between 26 and 38 from other
+work. Medians, with the range:
+
+| | runc | Kata |
+|---|---|---|
+| `create` until ready, Gateway route and seal included | 8.0 s (7.4–10.1) | 10.1 s (8.7–11.4) |
+| Host memory of an idle sandbox (its cgroup, QEMU and virtiofsd included) | 459 MiB (458–474) | 1119 MiB (1080–1146) |
+| Host memory after writing and reading 1 GiB and reading `/usr` | 627 MiB | 3230 MiB: the guest's page cache is not returned |
+| guestd `exec` of `true`, round trip | 1.5 ms (1.2–2.0) | 9.0 ms (6.5–11.5) |
+| CPU: Python loop; SHA-256 | 2.53 s; 362 MiB/s | 2.06 s; 341 MiB/s |
+| 1 GiB written and `fsync`ed; read back | 1256; 8209 MiB/s | 203; 1724 MiB/s |
+| 4 KiB files created; read; deleted, per second | 18802; 77791; 73307 | 3122; 4198; 7079 |
+| `/usr` read on first touch | 21186 files/s, 428 MiB/s | 2702 files/s, 55 MiB/s |
+| Snapshot (`docker stop`, `docker commit`) | 23.6 s (20.7–24.3) | 27.0 s (25.2–30.1) |
+
+Compute runs at native speed; the root filesystem over virtio-fs, with Kata's default
+`virtio_fs_cache = "auto"`, is 5 to 20 times slower than overlayfs, and file-heavy Tasks
+pay for it most.
 
 ## Daytona
 

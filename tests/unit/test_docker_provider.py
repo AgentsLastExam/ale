@@ -17,8 +17,11 @@ from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.run.providers.docker import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
+    KATA_TAP,
+    KATA_VETH,
     DockerProvider,
     DockerSandbox,
+    _kata_memory_mb,
     _sandbox_gateway,
 )
 
@@ -228,3 +231,119 @@ def test_a_provider_without_snapshots_refuses_them_before_anything_starts() -> N
     with pytest.raises(ProviderCapabilityError, match="does not save or boot snapshots"):
         DaytonaProvider().accepts(request(snapshot="docker:snapshot:e1", network=NetworkPolicy()))
     DockerProvider().accepts(request(retention="snapshot"))
+
+
+def _helper_commands(call: tuple[str, ...]) -> list[str]:
+    assert call[:5] == ("run", "--rm", "--network", "container:ale-e1", "--cap-add")
+    return call[-1].split(" && ")
+
+
+@pytest.mark.asyncio
+async def test_a_kata_sandbox_is_confined_by_tc_filters_outside_its_vm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kata passes frames between the VM and its veth with tc, past netfilter, so the
+    Gateway port is rewritten both ways and an isolated sandbox starts sealed in tc."""
+    calls = _scripted(monkeypatch)
+    proxied = request(network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("a.b",)))
+    proxied = proxied.model_copy(update={"proxy_url": "http://172.18.0.1:9443"})
+    host = await DockerProvider(runtime="kata")._wire_kata("ale-e1", proxied)
+    assert host == "172.18.0.1"
+    (inspect, helper) = calls
+    assert inspect[-3] == "bridge"
+    filters = _helper_commands(helper)
+    tap, veth = KATA_TAP, KATA_VETH
+    assert (
+        f"tc filter add dev {tap} ingress pref 10 protocol ip flower dst_ip {host} ip_proto tcp "
+        f"dst_port {SANDBOX_GATEWAY_PORT} action pedit ex munge tcp dport set 41000 pipe "
+        f"action csum tcp pipe action mirred egress redirect dev {veth}"
+    ) in filters
+    assert (
+        f"tc filter add dev {veth} ingress pref 10 protocol ip flower src_ip {host} ip_proto tcp "
+        f"src_port 41000 action pedit ex munge tcp sport set {SANDBOX_GATEWAY_PORT} pipe "
+        f"action csum tcp pipe action mirred egress redirect dev {tap}"
+    ) in filters
+    assert any("pref 11" in item and "dst_port 9443" in item for item in filters)
+    # The Host's other ports and everything else are dropped, the seal before the Gateway.
+    host_drop = filters.index(
+        f"tc filter add dev {tap} ingress pref 12 protocol ip flower dst_ip {host} action drop"
+    )
+    seal = filters.index(
+        f"tc filter add dev {tap} ingress pref 21 protocol all matchall action drop"
+    )
+    assert host_drop < seal < next(i for i, item in enumerate(filters) if "pref 10" in item)
+    assert f"tc filter add dev {veth} ingress pref 22 protocol all matchall action drop" in filters
+
+
+@pytest.mark.asyncio
+async def test_an_open_kata_sandbox_gets_only_the_gateway_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _scripted(monkeypatch)
+    await DockerProvider(runtime="kata")._wire_kata(
+        "ale-e1", request(network=NetworkPolicy(mode=NetworkMode.OPEN))
+    )
+    filters = _helper_commands(calls[-1])
+    assert [item for item in filters if " add " in item] == [
+        item for item in filters if " add " in item and "pref 10" in item
+    ]
+    assert len([item for item in filters if " add " in item]) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_reattaching_run_replaces_only_the_kata_gateway_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _scripted(monkeypatch)
+    later = request(gateway_url="http://0.0.0.0:42000")
+    await DockerProvider(runtime="kata")._wire_kata("ale-e1", later, reattached=True)
+    filters = _helper_commands(calls[-1])
+    added = [item for item in filters if " add " in item]
+    assert all("pref 10" in item for item in added) and len(added) == 2
+    assert any("dport set 42000" in item for item in added)
+    removed = [item for item in filters if " del " in item]
+    assert {item.split(" pref ")[1].split()[0] for item in removed} == {"10", "11"}
+
+
+@pytest.mark.asyncio
+async def test_a_kata_sandbox_opens_and_seals_egress_with_its_tc_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The filters seal it; the guest's default route goes too, so what they drop fails at
+    once rather than after a timeout, and comes back only once the filters are gone."""
+    calls = _scripted(monkeypatch)
+    order: list[str] = []
+
+    async def guest_exec(argv: list[str], **_: object) -> tuple[int, str, str, bool]:
+        order.append(f"route {argv[-2]}")
+        return 0, "", "", False
+
+    sandbox = _sandbox()
+    sandbox.container = "ale-e1"
+    sandbox.kata_host_ip = "172.17.0.1"
+    sandbox._sealed = False
+    sandbox._client = SimpleNamespace(exec=guest_exec)  # type: ignore[assignment]
+    await sandbox.open_egress()
+    opened = _helper_commands(calls[-1])
+    assert not [item for item in opened if " add " in item]
+    assert opened[-1] == f'test -z "$(tc filter show dev {KATA_VETH} ingress pref 22)"'
+    order.append("helper")
+    await sandbox.close_egress()
+    sealed = _helper_commands(calls[-1])
+    assert sealed[-1].endswith("pref 22 protocol all matchall action drop")
+    assert sandbox._sealed
+    assert order == ["route add", "helper", "route del"]
+    assert not [call for call in calls if call[0] == "network"]
+
+
+@pytest.mark.asyncio
+async def test_kata_refuses_gpus_before_anything_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _scripted(monkeypatch)
+    with pytest.raises(ProviderCapabilityError, match="Kata"):
+        await DockerProvider(runtime="kata").create(request(resources=Resources(gpus=1)))
+    assert calls == []
+
+
+def test_a_kata_vm_holds_the_declared_memory_and_its_guests_own() -> None:
+    assert _kata_memory_mb(512) == 620
+    assert _kata_memory_mb(8192) == 8492
