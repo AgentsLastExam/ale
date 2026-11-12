@@ -23,6 +23,9 @@ ENGINE_ROOT = Path(__file__).resolve().parents[1]
 #: The current ALE bases, for images a test builds or runs.
 CONTAINER_BASE = ale_image("container-ubuntu22-base")
 VM_BASE = ale_image("vm-ubuntu24-base")
+#: What a Linux VM Task asks for. The VM base boots a GNOME desktop, which in a container
+#: Task's 512 MB spends its time paging and can miss a phase deadline.
+VM_RESOURCES: dict[str, Any] = {"cpus": 2, "memory_mb": 4096}
 
 
 def skip_without_kata() -> None:
