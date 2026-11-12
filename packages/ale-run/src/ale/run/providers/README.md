@@ -317,6 +317,45 @@ into `C:\ProgramData\ALE`:
   90 of 2,417 MiB for a LibreOffice Task, each discarded in about 5 s. Free space is never
   zero-filled instead, which would write every free cluster into the overlay.
 
+### Registry disks
+
+`ale vm-image push` publishes a qcow2, and `resolve_vm_image` in `images.py` or
+`ale vm-image pull` acquires one, through the OCI distribution API directly, without the
+Docker CLI or daemon:
+
+- The manifest is an OCI image manifest with `artifactType`
+  `application/vnd.ale.vm-disk.v1` and the empty config. Its layers are the qcow2 file in
+  512 MiB chunks, in order, each compressed alone at zstd level 3 as
+  `application/vnd.ale.vm-disk.chunk.v1+zstd`, with the SHA-256 of the uncompressed chunk
+  in its `ale.vm-disk.chunk.digest` annotation. The manifest's `ale.vm-disk.size` and
+  `ale.vm-disk.chunk-size` annotations give the file and chunk sizes.
+- A pull fetches eight chunks at once and writes each at its offset into
+  `vm-images/<manifest digest hex>/disk.qcow2.partial` in the ALE cache, or into
+  `<destination>.partial` for `ale vm-image pull`, leaving 64 KiB-aligned runs of zeros as
+  holes. It checks the compressed bytes against the layer digest and the decompressed
+  bytes against the annotation, and renames the file once `qemu-img` finds a standalone
+  qcow2. A read that breaks continues with an HTTP range, and a pull run again keeps every
+  chunk whose bytes already match the annotation. A digest-pinned disk already in the cache
+  is used without asking the registry.
+- Credentials are Docker's for the registry host, from a credential helper or `auths` in
+  `$DOCKER_CONFIG/config.json` (`~/.docker` by default); without them the registry is asked
+  anonymously. A registry on `localhost` or a loopback address is reached over plain HTTP,
+  any other over HTTPS only.
+- A push refuses a tag that exists. It compresses every chunk again but uploads only those
+  the repository lacks, so a publish that stopped can be run again. It uploads four chunks
+  at once, each in one request, from temporary files beside the source disk.
+- GHCR documents a 10 GB limit on a layer and ten minutes for an upload (it accepted the
+  14.7 GB single layer of Windows base 0.1.1). From GHCR, 512 MiB and 1 GiB chunks of the
+  10 GB Windows base 0.1.2 pulled equally fast, 790–860 Mbit/s over four or eight
+  connections against 400 Mbit/s over one. Four 512 MiB uploads at once finish inside the
+  ten minutes on an uplink of 30 Mbit/s or more. Every zstd level up to 6 decompresses
+  at about 2.9 GB/s on one core; level 19 would shrink that already compressed qcow2 by only
+  0.5% more and compresses a hundred times slower.
+- Through a registry on the same host, that disk published in 23 s and pulled in 22 s over
+  eight connections, 27 s over four and 79 s over one, where two SHA-256 passes per byte
+  bound a core without SHA instructions. As one gzip layer it took 444 s to publish with
+  BuildKit and 246 s to `docker pull` and `docker cp`, and left 29 GB on disk, not 10 GB.
+
 ## Firecracker
 
 `FirecrackerProvider` runs a container Task's prepared image, the one Docker runs, as a

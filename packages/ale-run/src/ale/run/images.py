@@ -12,21 +12,27 @@ at its Host path.
 from __future__ import annotations
 
 import asyncio
+import errno
 import fcntl
 import hashlib
 import json
 import os
 import re
-import shutil
 import tempfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import BinaryIO, TextIO
+
+import aiohttp
+import zstandard
 
 from ale.core.errors import ProviderStartError
 from ale.core.ids import content_hash
 from ale.core.sandbox import ImageRef, PreparedTaskImage, ResolvedImage
 from ale.core.taskspec import ImageKind
+from ale.run.oci import MANIFEST, Reference, Registry, retrying
 from ale.run.sources import cache_root
 
 __all__ = [
@@ -37,6 +43,7 @@ __all__ = [
     "layer_identity",
     "layer_parent",
     "publish_vm_image",
+    "pull_vm_image",
     "read_layer_record",
     "record_layer",
     "remove_disk",
@@ -50,6 +57,33 @@ __all__ = [
     "resolve_vm_image",
     "set_parent",
 ]
+
+#: A VM disk in a registry is an OCI artifact of this type. Its layers are the standalone
+#: qcow2 file cut into consecutive chunks, each compressed alone with zstd, so no layer
+#: nears a registry's layer limit, a pull reads several chunks at once and resumes chunk
+#: by chunk, and every chunk is written at its offset into the one disk the runtime uses.
+VM_DISK = "application/vnd.ale.vm-disk.v1"
+VM_DISK_CHUNK = "application/vnd.ale.vm-disk.chunk.v1+zstd"
+#: Manifest annotations: the disk file's size, and the size of every chunk but the last.
+_DISK_SIZE = "ale.vm-disk.size"
+_DISK_CHUNK_SIZE = "ale.vm-disk.chunk-size"
+#: Layer annotation: the SHA-256 of the chunk's uncompressed bytes.
+_CHUNK_DIGEST = "ale.vm-disk.chunk.digest"
+_EMPTY_CONFIG = {
+    "mediaType": "application/vnd.oci.empty.v1+json",
+    "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "size": 2,
+}
+#: Chunk size, compression level and parallelism, measured in the providers README.
+CHUNK_SIZE = 512 << 20
+_ZSTD_LEVEL = 3
+TRANSFERS = 8
+#: Fewer uploads than downloads: each must finish within GHCR's ten minutes.
+_UPLOADS = 4
+_BLOCK = 8 << 20
+#: Zero runs this long, the default qcow2 cluster size, are left as holes when pulled.
+_SPARSE = 64 << 10
+_ZEROS = bytes(_SPARSE)
 
 
 def _select_repo_digest(declared: str, repo_digests: list[str]) -> str:
@@ -250,27 +284,13 @@ async def resolve_vm_image(
     *,
     cache_dir: Path | None = None,
 ) -> PreparedTaskImage:
-    """Resolve a standalone local qcow2 or acquire a registry-carried disk."""
+    """Resolve a standalone local qcow2 or acquire a disk published with ``publish_vm_image``."""
     if image.kind is not ImageKind.VM:
         raise ProviderStartError("VM image resolution requires kind=vm")
     declared = image.reference
     if Path(declared).is_absolute():
         disk = Path(declared).resolve()
-        if not await _valid_qcow2(disk):
-            raise ProviderStartError(f"local VM disk is missing or invalid: {disk}")
-        code, output, stderr = await _run("qemu-img", "info", "--output=json", str(disk))
-        if code != 0:
-            raise ProviderStartError(f"could not inspect local VM disk: {stderr.strip()}")
-        try:
-            info = json.loads(output)
-            external_data = info.get("format-specific", {}).get("data", {}).get("data-file")
-            if info.get("format") != "qcow2" or info.get("backing-filename") or external_data:
-                raise ProviderStartError(
-                    "local VM image must be a standalone qcow2 "
-                    "without backing or external data files"
-                )
-        except (ValueError, AttributeError) as exc:
-            raise ProviderStartError(f"invalid local VM disk metadata: {disk}") from exc
+        await _check_standalone_qcow2(disk, "local VM disk")
         identity = await asyncio.to_thread(_local_disk_identity, disk)
         return PreparedTaskImage(
             kind=ImageKind.VM,
@@ -280,42 +300,103 @@ async def resolve_vm_image(
             prepared_identity=identity,
             resolved_reference=disk.as_uri(),
         )
-    code, _, stderr = await _run("docker", "pull", declared, timeout=900)
-    if code != 0:
-        raise ProviderStartError(f"could not pull VM image {declared}: {stderr.strip()}")
-    code, output, stderr = await _run(
-        "docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", declared
-    )
-    if code != 0:
-        raise ProviderStartError(f"could not inspect VM image {declared}: {stderr.strip()}")
-    resolved_reference = output.strip()
-    identity = resolved_reference.partition("@")[2]
-    if not identity.startswith("sha256:"):
-        raise ProviderStartError(f"registry returned no immutable digest for {declared}")
 
+    reference = Reference.parse(declared)
     root = cache_dir or cache_root() / "vm-images"
-    root.mkdir(parents=True, exist_ok=True)
-    entry = root / identity.removeprefix("sha256:")
-    disk = entry / "disk.qcow2"
-    lock_path = root / f"{entry.name}.lock"
-    lock_path.touch(exist_ok=True)
+    if reference.digest is not None:
+        # A cache entry is named by the manifest digest, so a pinned disk needs no registry.
+        disk = root / reference.digest.removeprefix("sha256:") / "disk.qcow2"
+        if await _valid_qcow2(disk):
+            return _registry_disk(reference, reference.digest, disk)
 
-    with lock_path.open("r+") as lock:
-        await _acquire_lock(lock)
-        try:
-            if not await _valid_qcow2(disk):
-                await remove_disk(disk)
-                await _extract_vm_disk(resolved_reference, entry, disk)
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+    async with Registry(reference, connections=TRANSFERS) as registry:
+        manifest = await _read_manifest(registry, reference)
+        entry = root / manifest.digest.removeprefix("sha256:")
+        disk = entry / "disk.qcow2"
+        root.mkdir(parents=True, exist_ok=True)
+        lock_path = root / f"{entry.name}.lock"
+        lock_path.touch(exist_ok=True)
+        with lock_path.open("r+") as lock:
+            await _acquire_lock(lock)
+            try:
+                if not await _valid_qcow2(disk):
+                    await remove_disk(disk)
+                    await _download(registry, manifest, disk)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+    return _registry_disk(reference, manifest.digest, disk)
 
+
+async def pull_vm_image(reference: str, destination: Path) -> str:
+    """Download a published disk straight to ``destination``; return its pinned reference.
+
+    A pull that stops leaves ``<destination>.partial``, which the next pull resumes.
+    """
+    source = Reference.parse(reference)
+    async with Registry(source, connections=TRANSFERS) as registry:
+        manifest = await _read_manifest(registry, source)
+        await _download(registry, manifest, destination.absolute())
+    return source.pinned(manifest.digest)
+
+
+async def publish_vm_image(disk: Path, reference: str) -> str:
+    """Publish a standalone qcow2 as a chunked VM disk under a new tag.
+
+    The disk is cut into ``CHUNK_SIZE`` pieces, each compressed alone and uploaded as one
+    layer, several at once. Chunks the repository already has are not sent again, so a
+    publish that stopped can simply be repeated; a tag that exists is never replaced.
+    """
+    target = Reference.parse(reference)
+    if target.tag is None or target.digest is not None:
+        raise ProviderStartError(f"publish a VM disk under a tag, without a digest: {reference}")
+    source = disk.resolve()
+    await _check_standalone_qcow2(source, "VM disk")
+    fd = os.open(source, os.O_RDONLY)
+    try:
+        before = os.fstat(fd)
+        async with Registry(target, push=True, connections=_UPLOADS) as registry:
+            if await registry.has_manifest(target.tag):
+                raise ProviderStartError(
+                    f"{reference} is already published; a published version never changes"
+                )
+            layers = await _push_chunks(registry, fd, before.st_size, source.parent)
+            config = json.dumps({}).encode()
+            await registry.push_blob(_EMPTY_CONFIG["digest"], len(config), lambda: config)
+            manifest = json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "mediaType": MANIFEST,
+                    "artifactType": VM_DISK,
+                    "config": _EMPTY_CONFIG,
+                    "layers": layers,
+                    "annotations": {
+                        _DISK_SIZE: str(before.st_size),
+                        _DISK_CHUNK_SIZE: str(CHUNK_SIZE),
+                    },
+                },
+                indent=2,
+            ).encode()
+            digest = f"sha256:{hashlib.sha256(manifest).hexdigest()}"
+            if not _same_file(before, os.stat(source)):
+                raise ProviderStartError(f"VM disk changed while publishing it: {source}")
+            stored = await registry.put_manifest(target.tag, manifest, MANIFEST)
+    except OSError as error:
+        raise ProviderStartError(f"could not publish {source}: {error}") from error
+    finally:
+        os.close(fd)
+    if stored and stored != digest:
+        raise ProviderStartError(f"{reference} stored manifest {stored}, expected {digest}")
+    return f"{reference}@{digest}"
+
+
+def _registry_disk(reference: Reference, digest: str, disk: Path) -> PreparedTaskImage:
     return PreparedTaskImage(
         kind=ImageKind.VM,
         source="external-ref",
-        input_identity=identity,
+        input_identity=digest,
         runtime_ref=str(disk.resolve()),
-        prepared_identity=identity,
-        resolved_reference=resolved_reference,
+        prepared_identity=digest,
+        resolved_reference=reference.pinned(digest),
     )
 
 
@@ -323,61 +404,18 @@ def _local_disk_identity(disk: Path) -> str:
     before = disk.stat()
     with disk.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    after = disk.stat()
-    if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
-        after.st_ino,
-        after.st_size,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-    ):
+    if not _same_file(before, disk.stat()):
         raise ProviderStartError(f"VM disk {disk} changed while it was hashed")
     return f"sha256:{digest}"
 
 
-async def publish_vm_image(disk: Path, reference: str) -> str:
-    """Publish a standalone qcow2 as the single layer of the OCI image ``resolve_vm_image``
-    consumes; a disk with a backing file would arrive without it."""
-    source = disk.resolve()
-    if not await _valid_qcow2(source):
-        raise ProviderStartError(f"VM disk is missing or invalid: {source}")
-    if await layer_parent(source) is not None:
-        raise ProviderStartError(
-            f"{source} has a backing file; flatten it with `qemu-img convert` to publish it"
-        )
-    if not reference.strip():
-        raise ProviderStartError("VM image reference must not be blank")
-
-    with tempfile.TemporaryDirectory(prefix=".ale-vm-publish-", dir=source.parent) as temporary:
-        context = Path(temporary)
-        os.link(source, context / "disk.qcow2")
-        (context / "Dockerfile").write_text(
-            "FROM scratch\nCOPY disk.qcow2 /disk.qcow2\n",
-            encoding="utf-8",
-        )
-        metadata_file = context / "metadata.json"
-        code, _, stderr = await _run(
-            "docker",
-            "buildx",
-            "build",
-            "--push",
-            "--provenance=false",
-            "--sbom=false",
-            "--tag",
-            reference,
-            "--metadata-file",
-            str(metadata_file),
-            str(context),
-            timeout=7200,
-        )
-        if code != 0:
-            raise ProviderStartError(f"could not publish VM image {reference}: {stderr.strip()}")
-        try:
-            digest = json.loads(metadata_file.read_text(encoding="utf-8"))["containerimage.digest"]
-        except (KeyError, OSError, json.JSONDecodeError) as exc:
-            raise ProviderStartError(f"Docker returned no digest for {reference}: {exc}") from exc
-    if not isinstance(digest, str) or not digest.startswith("sha256:"):
-        raise ProviderStartError(f"Docker returned an invalid digest for {reference}: {digest}")
-    return f"{reference}@{digest}"
+def _same_file(before: os.stat_result, after: os.stat_result) -> bool:
+    return (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) == (
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
 
 
 async def resolve_prepared_vm_image(image: PreparedTaskImage) -> ResolvedImage:
@@ -602,29 +640,350 @@ async def _valid_qcow2(path: Path) -> bool:
     return code == 0
 
 
-async def _extract_vm_disk(resolved_reference: str, entry: Path, disk: Path) -> None:
-    staging = Path(tempfile.mkdtemp(prefix=f".{entry.name}-", dir=entry.parent))
-    container = ""
+async def _check_standalone_qcow2(disk: Path, label: str) -> None:
+    """A qcow2 whose identity covers the whole disk: no backing or external data file."""
+    if not await _valid_qcow2(disk):
+        raise ProviderStartError(f"{label} is missing or invalid: {disk}")
+    code, output, stderr = await _run("qemu-img", "info", "--output=json", str(disk))
+    if code != 0:
+        raise ProviderStartError(f"could not inspect {label} {disk}: {stderr.strip()}")
     try:
-        code, output, stderr = await _run(
-            "docker", "create", "--entrypoint", "/disk.qcow2", resolved_reference
+        info = json.loads(output)
+        external_data = info.get("format-specific", {}).get("data", {}).get("data-file")
+        standalone = (
+            info.get("format") == "qcow2" and not info.get("backing-filename") and not external_data
         )
-        if code != 0:
-            raise ProviderStartError(
-                f"could not stage VM image {resolved_reference}: {stderr.strip()}"
+    except (ValueError, AttributeError) as exc:
+        raise ProviderStartError(f"invalid {label} metadata: {disk}") from exc
+    if not standalone:
+        raise ProviderStartError(
+            f"{label} must be a standalone qcow2 without backing or external data files: {disk}"
+        )
+
+
+# --- chunked VM disks ---
+
+
+@dataclass(frozen=True)
+class _Chunk:
+    offset: int
+    length: int
+    #: The compressed layer, as the registry stores it.
+    blob: str
+    blob_size: int
+    #: SHA-256 of the chunk's own bytes, which identify it whoever serves or compresses it.
+    digest: str
+
+
+@dataclass(frozen=True)
+class _DiskManifest:
+    digest: str
+    size: int
+    chunks: tuple[_Chunk, ...]
+
+
+async def _read_manifest(registry: Registry, reference: Reference) -> _DiskManifest:
+    data, media_type = await registry.manifest(reference.digest or reference.tag or "latest")
+    digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
+    if reference.digest is not None and digest != reference.digest:
+        raise ProviderStartError(f"{reference} answered with a different manifest ({digest})")
+    try:
+        manifest = json.loads(data)
+    except ValueError:
+        manifest = None
+    kind = manifest.get("artifactType") if isinstance(manifest, dict) else None
+    if not isinstance(manifest, dict) or manifest.get("mediaType") != MANIFEST or kind != VM_DISK:
+        shown = (kind if isinstance(kind, str) else media_type)[:100] or "unknown type"
+        raise ProviderStartError(
+            f"{reference} is not an ALE VM disk ({shown}); "
+            "publish its qcow2 with `ale vm-image push`"
+        )
+    try:
+        annotations = manifest["annotations"]
+        size = int(annotations[_DISK_SIZE])
+        chunk_size = int(annotations[_DISK_CHUNK_SIZE])
+        layers = manifest["layers"]
+        if size <= 0 or chunk_size <= 0 or len(layers) != -(-size // chunk_size):
+            raise ValueError("the chunks do not cover the disk")
+        chunks = []
+        for index, layer in enumerate(layers):
+            if layer["mediaType"] != VM_DISK_CHUNK or int(layer["size"]) < 0:
+                raise ValueError("not a disk chunk")
+            offset = index * chunk_size
+            chunks.append(
+                _Chunk(
+                    offset=offset,
+                    length=min(chunk_size, size - offset),
+                    blob=_sha256(layer["digest"]),
+                    blob_size=int(layer["size"]),
+                    digest=_sha256(layer["annotations"][_CHUNK_DIGEST]),
+                )
             )
-        container = output.strip()
-        candidate = staging / "disk.qcow2"
-        code, _, stderr = await _run(
-            "docker", "cp", f"{container}:/disk.qcow2", str(candidate), timeout=900
-        )
-        if code != 0:
-            raise ProviderStartError(f"could not extract /disk.qcow2: {stderr.strip()}")
-        if not await _valid_qcow2(candidate):
-            raise ProviderStartError(f"invalid qcow2 in {resolved_reference}")
-        entry.mkdir(parents=True, exist_ok=True)
-        os.replace(candidate, disk)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProviderStartError(
+            f"{reference} has a malformed VM disk manifest: {str(exc)[:200]}"
+        ) from None
+    return _DiskManifest(digest=digest, size=size, chunks=tuple(chunks))
+
+
+def _sha256(value: object) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise ValueError(f"not a SHA-256 digest: {value!r}")
+    return value
+
+
+async def _push_chunks(
+    registry: Registry, fd: int, size: int, scratch: Path
+) -> list[dict[str, object]]:
+    loop = asyncio.get_running_loop()
+    slots = asyncio.Semaphore(_UPLOADS)
+    executor = ThreadPoolExecutor(_UPLOADS, thread_name_prefix="ale-vm-push")
+
+    async def push(offset: int) -> dict[str, object]:
+        async with slots:
+            # A chunk is compressed in full before its upload, which must name its digest.
+            with tempfile.TemporaryFile(dir=scratch, prefix=".ale-vm-chunk-") as spool:
+                length = min(CHUNK_SIZE, size - offset)
+                blob, blob_size, digest = await loop.run_in_executor(
+                    executor, _compress_chunk, fd, offset, length, spool
+                )
+                spooled = spool.fileno()
+                await registry.push_blob(blob, blob_size, lambda: _read_file(spooled, blob_size))
+        return {
+            "mediaType": VM_DISK_CHUNK,
+            "digest": blob,
+            "size": blob_size,
+            "annotations": {_CHUNK_DIGEST: digest},
+        }
+
+    try:
+        return await _all([push(offset) for offset in range(0, size, CHUNK_SIZE)])
     finally:
-        if container:
-            await _run("docker", "rm", "-f", container, timeout=60)
-        shutil.rmtree(staging, ignore_errors=True)
+        executor.shutdown(wait=True)
+
+
+def _compress_chunk(fd: int, offset: int, length: int, spool: BinaryIO) -> tuple[str, int, str]:
+    content = hashlib.sha256()
+    output = _HashingWriter(spool)
+    stream = zstandard.ZstdCompressor(level=_ZSTD_LEVEL).stream_writer(
+        output, size=length, closefd=False
+    )
+    position = 0
+    while position < length:
+        data = os.pread(fd, min(_BLOCK, length - position), offset + position)
+        if not data:
+            raise ProviderStartError("VM disk shrank while publishing it")
+        content.update(data)
+        stream.write(data)
+        position += len(data)
+    stream.close()
+    spool.flush()
+    return output.digest(), output.size, f"sha256:{content.hexdigest()}"
+
+
+class _HashingWriter:
+    def __init__(self, target: BinaryIO) -> None:
+        self.size = 0
+        self._target = target
+        self._digest = hashlib.sha256()
+
+    def write(self, data: bytes) -> int:
+        self._target.write(data)
+        self._digest.update(data)
+        self.size += len(data)
+        return len(data)
+
+    def digest(self) -> str:
+        return f"sha256:{self._digest.hexdigest()}"
+
+
+async def _read_file(fd: int, size: int) -> AsyncIterator[bytes]:
+    position = 0
+    while position < size:
+        data = await asyncio.to_thread(os.pread, fd, min(_BLOCK, size - position), position)
+        if not data:
+            raise ProviderStartError("a compressed chunk was truncated before its upload")
+        position += len(data)
+        yield data
+
+
+async def _download(registry: Registry, manifest: _DiskManifest, disk: Path) -> None:
+    """Assemble ``disk``, keeping the chunks an earlier attempt already wrote."""
+    partial = disk.with_name(f"{disk.name}.partial")
+    try:
+        disk.parent.mkdir(parents=True, exist_ok=True)
+        await _write_disk(registry, manifest, partial)
+        await _check_standalone_qcow2(partial, "pulled VM disk")
+        os.replace(partial, disk)
+    except OSError as error:
+        raise ProviderStartError(f"could not write the VM disk {disk}: {error}") from error
+
+
+async def _write_disk(registry: Registry, manifest: _DiskManifest, partial: Path) -> None:
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(TRANSFERS, thread_name_prefix="ale-vm-pull")
+    fd = os.open(partial, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        if os.fstat(fd).st_size == manifest.size:
+            held = await asyncio.gather(
+                *(loop.run_in_executor(executor, _holds, fd, chunk) for chunk in manifest.chunks)
+            )
+        else:
+            os.ftruncate(fd, 0)
+            os.ftruncate(fd, manifest.size)
+            held = [False] * len(manifest.chunks)
+        slots = asyncio.Semaphore(TRANSFERS)
+
+        async def fetch(chunk: _Chunk) -> None:
+            async with slots:
+                await _fetch_chunk(registry, chunk, fd, executor)
+
+        missing = [chunk for chunk, done in zip(manifest.chunks, held, strict=True) if not done]
+        await _all([fetch(chunk) for chunk in missing])
+        await loop.run_in_executor(executor, os.fsync, fd)
+    finally:
+        # No worker may still write once the descriptor number can be reused.
+        executor.shutdown(wait=True)
+        os.close(fd)
+
+
+async def _fetch_chunk(
+    registry: Registry, chunk: _Chunk, fd: int, executor: ThreadPoolExecutor
+) -> None:
+    """Stream one chunk into place, continuing an interrupted read where it stopped."""
+    loop = asyncio.get_running_loop()
+    # Asking a filesystem where data is can wait for it to sync, so not on the event loop.
+    writer = await loop.run_in_executor(executor, _ChunkWriter, fd, chunk)
+
+    async def attempt() -> None:
+        nonlocal writer
+        if writer.received == chunk.blob_size:
+            return  # the connection broke after the last byte
+        async with registry.blob(chunk.blob, writer.received) as response:
+            if writer.received and response.status != 206:
+                # The range was ignored, so start over.
+                writer = await loop.run_in_executor(executor, _ChunkWriter, fd, chunk)
+            async for batch in _batches(response.content):
+                await loop.run_in_executor(executor, writer.feed, batch)
+
+    await retrying(attempt, f"pulling the chunk at {chunk.offset} of {registry.reference}")
+    await loop.run_in_executor(executor, writer.finish)
+
+
+async def _batches(content: aiohttp.StreamReader) -> AsyncIterator[bytes]:
+    pending = bytearray()
+    async for data in content.iter_chunked(1 << 20):
+        pending += data
+        if len(pending) >= _BLOCK:
+            yield bytes(pending)
+            pending.clear()
+    if pending:
+        yield bytes(pending)
+
+
+class _ChunkWriter:
+    """Decompress one chunk into its place in the disk, checking both of its digests."""
+
+    def __init__(self, fd: int, chunk: _Chunk) -> None:
+        self.received = 0
+        self._fd = fd
+        self._chunk = chunk
+        # Zero blocks may stay holes only where nothing was written before.
+        self._sparse = not _has_data(fd, chunk.offset, chunk.length)
+        self._written = 0
+        self._blob = hashlib.sha256()
+        self._content = hashlib.sha256()
+        self._stream = zstandard.ZstdDecompressor().stream_writer(
+            self, write_size=1 << 20, closefd=False
+        )
+
+    def feed(self, data: bytes) -> None:
+        if self.received + len(data) > self._chunk.blob_size:
+            raise ProviderStartError(f"the chunk at {self._chunk.offset} is larger than declared")
+        self.received += len(data)
+        self._blob.update(data)
+        try:
+            self._stream.write(data)
+        except zstandard.ZstdError as error:
+            raise ProviderStartError(
+                f"the chunk at {self._chunk.offset} is not valid zstd: {error}"
+            ) from None
+
+    def write(self, data: bytes) -> int:
+        """Called by the decompressor with each piece of output."""
+        end = self._written + len(data)
+        if end > self._chunk.length:
+            raise ProviderStartError(f"the chunk at {self._chunk.offset} decompresses too long")
+        self._content.update(data)
+        offset = self._chunk.offset + self._written
+        if self._sparse:
+            _write_sparse(self._fd, data, offset)
+        else:
+            _write_all(self._fd, memoryview(data), offset)
+        self._written = end
+        return len(data)
+
+    def finish(self) -> None:
+        self._stream.flush()
+        if (
+            self.received != self._chunk.blob_size
+            or f"sha256:{self._blob.hexdigest()}" != self._chunk.blob
+            or self._written != self._chunk.length
+            or f"sha256:{self._content.hexdigest()}" != self._chunk.digest
+        ):
+            raise ProviderStartError(f"the chunk at {self._chunk.offset} failed verification")
+
+
+def _holds(fd: int, chunk: _Chunk) -> bool:
+    """Whether the disk already holds this chunk, as a pull that stopped may have left it."""
+    if not _has_data(fd, chunk.offset, chunk.length):
+        return False
+    digest = hashlib.sha256()
+    for position in range(chunk.offset, chunk.offset + chunk.length, _BLOCK):
+        digest.update(os.pread(fd, min(_BLOCK, chunk.offset + chunk.length - position), position))
+    return f"sha256:{digest.hexdigest()}" == chunk.digest
+
+
+def _has_data(fd: int, offset: int, length: int) -> bool:
+    """Whether anything was written in the range; true where the filesystem cannot tell."""
+    try:
+        return os.lseek(fd, offset, os.SEEK_DATA) < offset + length
+    except OSError as error:
+        return error.errno != errno.ENXIO
+
+
+def _write_sparse(fd: int, data: bytes, offset: int) -> None:
+    """Write ``data`` at ``offset``, skipping its zero parts of each aligned 64 KiB block."""
+    view = memoryview(data)
+    start: int | None = None
+    index = 0
+    while index < len(data):
+        end = min(len(data), index + _SPARSE - (offset + index) % _SPARSE)
+        if data[index:end] == _ZEROS[: end - index]:
+            if start is not None:
+                _write_all(fd, view[start:index], offset + start)
+                start = None
+        elif start is None:
+            start = index
+        index = end
+    if start is not None:
+        _write_all(fd, view[start:], offset + start)
+
+
+def _write_all(fd: int, data: memoryview, offset: int) -> None:
+    while data:
+        written = os.pwrite(fd, data, offset)
+        data = data[written:]
+        offset += written
+
+
+async def _all[T](operations: list[Coroutine[object, object, T]]) -> list[T]:
+    """Run operations concurrently; if one fails, cancel the rest before raising."""
+    tasks = [asyncio.ensure_future(operation) for operation in operations]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise

@@ -48,7 +48,7 @@ async def test_windows_builtin_desktop_mcp_over_stdio(
 ) -> None:
     image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows qcow2")
+        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
     monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
     provider = QemuProvider(image=image, overlay_dir=tmp_path / "qemu")
     # The base carries no Cua Driver; building a Task image on it installs one.
@@ -131,7 +131,7 @@ async def test_windows_task_image_installs_software_and_reuses_cache(
 ) -> None:
     image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows qcow2")
+        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
     monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
     folder = _write_task(tmp_path / "tasks", OperatingSystem.WINDOWS)
     edit_task_config(folder, {"environment": {"vm_image": None, "vm_base": str(image)}})
@@ -381,7 +381,7 @@ async def test_standard_task_assets_across_operating_systems(
     if operating_system is OperatingSystem.WINDOWS:
         image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
         if not image.is_file():
-            pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows qcow2")
+            pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
         provider = QemuProvider(image=image, overlay_dir=tmp_path / "qemu")
         providers = provider_registry(provider, kind=ImageKind.VM)
     else:
@@ -409,7 +409,7 @@ async def test_standard_task_assets_across_operating_systems(
 async def test_real_llm_reads_and_edits_the_windows_desktop(tmp_path: Path) -> None:
     image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows qcow2")
+        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
 
     task = load_task_folder(_write_windows_gui_task(tmp_path / "tasks"))
     model = MODELS["anthropic"]
