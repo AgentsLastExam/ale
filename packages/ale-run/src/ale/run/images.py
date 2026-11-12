@@ -306,7 +306,7 @@ async def resolve_vm_image(
     if reference.digest is not None:
         # A cache entry is named by the manifest digest, so a pinned disk needs no registry.
         disk = root / reference.digest.removeprefix("sha256:") / "disk.qcow2"
-        if await _valid_qcow2(disk):
+        if await finished_layer(disk) == reference.digest:
             return _registry_disk(reference, reference.digest, disk)
 
     async with Registry(reference, connections=TRANSFERS) as registry:
@@ -319,9 +319,12 @@ async def resolve_vm_image(
         with lock_path.open("r+") as lock:
             await _acquire_lock(lock)
             try:
-                if not await _valid_qcow2(disk):
-                    await remove_disk(disk)
-                    await _download(registry, manifest, disk)
+                if await finished_layer(disk) != manifest.digest:
+                    if not await _valid_qcow2(disk):
+                        await remove_disk(disk)
+                        await _download(registry, manifest, disk)
+                    # ALE keeps the pulled disk, so the layers built on it use it in place.
+                    _write_record(disk, {"parent": None, "identity": manifest.digest})
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
     return _registry_disk(reference, manifest.digest, disk)
@@ -351,6 +354,12 @@ async def publish_vm_image(disk: Path, reference: str) -> str:
         raise ProviderStartError(f"publish a VM disk under a tag, without a digest: {reference}")
     source = disk.resolve()
     await _check_standalone_qcow2(source, "VM disk")
+    if await _compressed_clusters(source):
+        raise ProviderStartError(
+            f"{source} has compressed clusters; publish it uncompressed (qemu-img convert "
+            "without -c): its chunks are compressed for the registry, and a Host builds on "
+            "the pulled disk as it is"
+        )
     fd = os.open(source, os.O_RDONLY)
     try:
         before = os.fstat(fd)
@@ -522,12 +531,15 @@ async def chain_mounts(disk: Path, *, writable: bool = False) -> list[str]:
 
 
 async def base_layer(image: PreparedTaskImage) -> Path:
-    """The disk of ``image`` as the base of a chain: an uncompressed copy, made once per
-    Host and recorded under the image's own identity.
+    """The disk of ``image`` as the base of a chain, recorded under the image's identity.
 
-    ALE makes no layer on the disk itself, which may be compressed or not ALE's to keep.
-    The copy lives in ``vm-builds`` beside the layers made on it.
+    A disk ALE keeps and recorded as a base, such as one it pulled from a registry, is the
+    base as it is. Any other disk may be compressed or not ALE's to keep, so the base is an
+    uncompressed copy of it, made once per Host in ``vm-builds`` beside the layers on it.
     """
+    source = Path(image.runtime_ref)
+    if await finished_layer(source) == image.prepared_identity:
+        return source
     root = cache_root() / "vm-builds"
     root.mkdir(parents=True, exist_ok=True)
     key = content_hash({"base": image.prepared_identity})
@@ -638,6 +650,14 @@ async def _valid_qcow2(path: Path) -> bool:
         return False
     code, _, _ = await _run("qemu-img", "check", "-q", str(path), timeout=300)
     return code == 0
+
+
+async def _compressed_clusters(disk: Path) -> int:
+    _, output, stderr = await _run("qemu-img", "check", "--output=json", str(disk))
+    try:
+        return int(json.loads(output).get("compressed-clusters", 0))
+    except (ValueError, AttributeError, TypeError):
+        raise ProviderStartError(f"could not check {disk}: {stderr.strip()}") from None
 
 
 async def _check_standalone_qcow2(disk: Path, label: str) -> None:

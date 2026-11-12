@@ -1,4 +1,4 @@
-"""Finish a prepared Windows base offline, before compact.sh compresses it.
+"""Finish a prepared Windows base offline, before compact.sh rewrites it.
 
 Run by compact.sh inside ALE's VM builder, next to ``framework_windows.py``, whose disk
 helpers it uses. These steps need Windows not to be running: Tamper Protection keeps

@@ -562,6 +562,43 @@ async def test_vm_disk_resolution_caches_by_manifest_digest(tmp_path: Path, chun
     pinned = ImageRef(kind="vm", reference=first.resolved_reference)
     assert await images.resolve_vm_image(pinned, cache_dir=cache) == first
 
+    # The pulled disk is the base of the layers built on it, not copied.
+    qemu = images._run
+    assert isinstance(qemu, FakeQemuImg)
+    disk = Path(first.runtime_ref)
+    assert await base_layer(first) == disk
+    assert not any(call[1] == "convert" for call in qemu.calls)
+    # A layer sits on it, so it is never replaced, even when it would be pulled again.
+    write_qcow2(tmp_path / "cache" / "vm-builds" / "task.qcow2", backing=str(disk))
+    disk.write_bytes(b"damaged")
+    async with _Registry() as again:
+        again.blobs, again.manifests = registry.blobs, registry.manifests
+        pinned = ImageRef(kind="vm", reference=f"{again.host}/acme/windows@{digest}")
+        with pytest.raises(ProviderStartError, match="is built on it"):
+            await images.resolve_vm_image(pinned, cache_dir=cache)
+    assert disk.read_bytes() == b"damaged"
+
+
+@pytest.mark.asyncio
+async def test_vm_disk_publish_refuses_layers_and_compressed_disks(
+    tmp_path: Path, chunked: int
+) -> None:
+    from ale.run import images
+
+    qemu = images._run
+    assert isinstance(qemu, FakeQemuImg)
+    base = write_qcow2(tmp_path / "base.qcow2", data=b"windows")
+    layer = write_qcow2(tmp_path / "layer.qcow2", backing="base.qcow2")
+    qemu.compressed.add(base)
+    async with _Registry() as registry:
+        reference = f"{registry.host}/acme/windows:1.0.0"
+        # A layer would arrive without the disk below it.
+        with pytest.raises(ProviderStartError, match="standalone qcow2"):
+            await images.publish_vm_image(layer, reference)
+        with pytest.raises(ProviderStartError, match="compressed clusters"):
+            await images.publish_vm_image(base, reference)
+    assert registry.uploads == 0
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("store", ["auths", "helper", "anonymous"])

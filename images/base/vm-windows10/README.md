@@ -28,12 +28,14 @@ stores its contents. The recipe installs no part of ALE's framework, and removes
 earlier recipe installed. Shut the guest down completely (Fast Startup is off) before
 exporting the disk: ALE edits the disk offline and cannot write to one left hibernated.
 
-Back on the Host, finish and compress the prepared disk. `compact.sh` runs `finalize.py`
+Back on the Host, finish and compact the prepared disk. `compact.sh` runs `finalize.py`
 in ALE's VM builder, which edits the disk in place while Windows is off: it disables
 Defender and the Security Center that would warn about it (Tamper Protection keeps them on
 while Windows runs), deletes their data, the last cumulative update's unpacked copy under
-`servicing\LCU` and the page file, and zeroes free space. Then it compresses the disk with
-qcow2's zstd compression:
+`servicing\LCU` and the page file, and zeroes free space. Then it rewrites the disk
+uncompressed and without the zeroed clusters. The registry carries it compressed in chunks,
+and a Host builds Task layers on the disk it pulled, where compressed clusters would slow
+every read:
 
 ```bash
 uv run images/base/vm-windows10/compact.sh input.qcow2 output.qcow2

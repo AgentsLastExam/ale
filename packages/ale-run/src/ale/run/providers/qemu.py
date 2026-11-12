@@ -744,9 +744,9 @@ class QemuProvider(Provider):
         return await self._create(request, build_vm=False)
 
     async def create_builder(self, request: SandboxRequest) -> QemuSandbox:
-        """A VM to build a Task image in: its overlay sits on an uncompressed copy of the
-        request's base and gets the framework before it boots, so ``save_image`` keeps
-        framework and build in one layer."""
+        """A VM to build a Task image in: its overlay sits on the request's base
+        (``images.base_layer``) and gets the framework before it boots, so ``save_image``
+        keeps framework and build in one layer."""
         return await self._create(request, build_vm=True)
 
     async def _create(self, request: SandboxRequest, *, build_vm: bool) -> QemuSandbox:

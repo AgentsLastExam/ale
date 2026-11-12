@@ -265,6 +265,8 @@ class FakeQemuImg:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
+        #: Disks whose clusters ``check --output=json`` reports as compressed.
+        self.compressed: set[Path] = set()
 
     async def __call__(self, *argv: str, **_kwargs: object) -> tuple[int, str, str]:
         self.calls.append(argv)
@@ -273,7 +275,11 @@ class FakeQemuImg:
         command = argv[1]
         try:
             if command == "check":
-                return (0 if self.backing(Path(positional[0])) is not False else 1), "", ""
+                disk = Path(positional[0])
+                if self.backing(disk) is False:
+                    return 1, "", ""
+                report = {"compressed-clusters": 1} if disk in self.compressed else {}
+                return 0, json.dumps(report) if "--output=json" in options else "", ""
             if command == "info":
                 return 0, json.dumps(self._info(Path(positional[0]), options)), ""
             if command == "create":
