@@ -189,28 +189,45 @@ def test_copied_trajectory_brings_the_blobs_it_references(tmp_path: Path) -> Non
     assert copied == {image.path, output.path}
 
 
-def test_copied_trajectory_writes_nothing_outside_the_episode(tmp_path: Path) -> None:
+def test_agent_paths_under_blobs_are_not_blob_references(tmp_path: Path) -> None:
     source = EpisodeRecording(tmp_path / "run" / "source")
+    image = source.blobs.put(b"\x89PNG", media_type="image/png")
     (tmp_path / "run" / "outside.txt").write_text("not a blob")
     source.trajectory_path.write_text(
         _trajectory(
             {
                 "step_id": 1,
+                "source": "user",
+                "message": [
+                    {"type": "image", "source": {"media_type": "image/png", "path": image.path}}
+                ],
+            },
+            {
+                "step_id": 2,
                 "source": "agent",
                 "message": "",
                 "tool_calls": [
                     {
+                        "tool_call_id": "write",
+                        "function_name": "write",
+                        "arguments": {"path": "blobs/notes.txt"},
+                    },
+                    {
                         "tool_call_id": "read",
                         "function_name": "read",
                         "arguments": {"path": "blobs/../../outside.txt"},
-                    }
+                    },
                 ],
-            }
+            },
         )
     )
+    source.verify_blob_references()
 
-    copy_trajectory(
-        source.directory, EpisodeRecording(tmp_path / "later" / "run" / "copy").directory
-    )
-
+    copy = EpisodeRecording(tmp_path / "later" / "run" / "copy")
+    copy_trajectory(source.directory, copy.directory)
+    copy.verify_blob_references()
     assert not (tmp_path / "later" / "run" / "outside.txt").exists()
+
+    (source.directory / image.path).unlink()
+    with pytest.raises(ValueError, match="missing blob reference"):
+        source.verify_blob_references()
