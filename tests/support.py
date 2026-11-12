@@ -244,3 +244,103 @@ async def cli_sandbox(
         yield sandbox, sandbox.agent_home
     finally:
         await sandbox.destroy()
+
+
+def write_qcow2(path: Path, *, backing: str | None = None, data: bytes = b"") -> Path:
+    """A file ``FakeQemuImg`` reads as a qcow2: a header naming ``backing``, then ``data``."""
+    name = (backing or "").encode()
+    header = b"QFI\xfb" + (3).to_bytes(4, "big")
+    header += (32 if name else 0).to_bytes(8, "big") + len(name).to_bytes(4, "big")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(header.ljust(32, b"\0") + name + data)
+    return path
+
+
+class FakeQemuImg:
+    """``qemu-img`` for unit tests, on files ``write_qcow2`` made: ``create``, ``info``
+    (with ``--backing-chain``), ``check``, ``rebase`` and ``convert``. A rebase or convert
+    keeps the file's data, so a test sees what was moved, not merged."""
+
+    VIRTUAL_SIZE = 64 << 30
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    async def __call__(self, *argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        self.calls.append(argv)
+        assert argv[0] == "qemu-img", argv
+        options, positional = self._parse(argv[2:])
+        command = argv[1]
+        try:
+            if command == "check":
+                return (0 if self.backing(Path(positional[0])) is not False else 1), "", ""
+            if command == "info":
+                return 0, json.dumps(self._info(Path(positional[0]), options)), ""
+            if command == "create":
+                write_qcow2(Path(positional[0]), backing=options.get("-b"))
+                return 0, "", ""
+            if command == "rebase":
+                disk = Path(positional[0])
+                write_qcow2(disk, backing=options["-b"], data=self._data(disk))
+                return 0, "", ""
+            if command == "convert":
+                source, target = Path(positional[0]), Path(positional[1])
+                write_qcow2(target, backing=options.get("-B"), data=self._data(source))
+                return 0, "", ""
+        except FileNotFoundError as missing:
+            return 1, "", f"qemu-img: Could not open '{missing.filename}'"
+        raise AssertionError(f"unexpected qemu-img call: {argv}")
+
+    @staticmethod
+    def backing(disk: Path) -> str | bool | None:
+        """The backing name in ``disk``'s header; False when it is no qcow2."""
+        try:
+            raw = disk.read_bytes()
+        except OSError:
+            return False
+        if raw[:4] != b"QFI\xfb":
+            return False
+        offset, size = int.from_bytes(raw[8:16], "big"), int.from_bytes(raw[16:20], "big")
+        return raw[offset : offset + size].decode() if offset else None
+
+    def _info(self, disk: Path, options: dict[str, str]) -> object:
+        chain: list[dict[str, object]] = []
+        current: Path | None = disk
+        while current is not None:
+            backing = self.backing(current)
+            if backing is False:
+                raise FileNotFoundError(2, "No such file", str(current))
+            entry: dict[str, object] = {
+                "filename": str(current),
+                "format": "qcow2",
+                "virtual-size": self.VIRTUAL_SIZE,
+            }
+            parent, current = current.parent, None
+            if isinstance(backing, str):
+                full = Path(backing) if backing.startswith("/") else parent / backing
+                entry |= {"backing-filename": backing, "full-backing-filename": str(full)}
+                current = full
+            chain.append(entry)
+            if "--backing-chain" not in options:
+                break
+        return chain if "--backing-chain" in options else chain[0]
+
+    @staticmethod
+    def _data(disk: Path) -> bytes:
+        raw = disk.read_bytes()
+        offset, size = int.from_bytes(raw[8:16], "big"), int.from_bytes(raw[16:20], "big")
+        return raw[max(32, offset + size) :]
+
+    @staticmethod
+    def _parse(argv: tuple[str, ...]) -> tuple[dict[str, str], list[str]]:
+        options: dict[str, str] = {}
+        positional: list[str] = []
+        arguments = iter(argv)
+        for argument in arguments:
+            if argument in {"-f", "-F", "-b", "-B", "-O", "-o", "-m"}:
+                options[argument] = next(arguments)
+            elif argument.startswith("-"):
+                options[argument] = ""
+            else:
+                positional.append(argument)
+        return options, positional

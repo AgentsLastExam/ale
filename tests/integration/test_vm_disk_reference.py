@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -71,17 +72,28 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     assert framed != bare and first.image.resolved_reference == bare.as_uri()
     identity = framework_identity(user="user", vm=True)
     assert await framework_on_disk(framed, operating_system=linux, builder=builder) == identity
+    # The framework is a layer on a copy of the disk, beside it in the cache.
+    info = json.loads(
+        subprocess.run(
+            ["qemu-img", "info", "-U", "--output=json", str(framed)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    )  # fmt: skip
+    assert Path(info["full-backing-filename"]).parent == framed.parent
 
     second = await prepare_task_image_result(load_tasks(task_path)[0], registry)
     assert _steps(second)["framework-layer"] == "reused"
     assert second.image == first.image
 
-    # A disk that already carries this framework is used as it is, without a copy.
+    # A disk that already carries this framework is used as it is, without a layer. A disk
+    # named by path must be standalone, so the framed one is flattened for the test.
+    standalone = tmp_path / "framed.qcow2"
+    subprocess.run(["qemu-img", "convert", "-O", "qcow2", str(framed), str(standalone)], check=True)
     carried = await prepare_task_image_result(
-        load_tasks(task_with_ref("framed-ref", framed))[0], registry
+        load_tasks(task_with_ref("framed-ref", standalone))[0], registry
     )
     assert _steps(carried)["framework-layer"] == "reused"
-    assert carried.image.runtime_ref == str(framed)
+    assert carried.image.runtime_ref == str(standalone)
 
     task = load_tasks(task_path)[0]
     task.prepared_image = first.image

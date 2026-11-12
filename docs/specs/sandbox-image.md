@@ -36,12 +36,12 @@ of the Task's own build or the image it names (the framework layer):
 - a marker file recording which framework the image carries: `/opt/ale/framework` on
   Linux and macOS, `C:\ProgramData\ALE\framework` on Windows.
 
-A VM disk named by a qcow2 `vm_image` gets the same pieces, installed offline into a copy of
-the disk by the VM builder's libguestfs, so nothing on the disk runs on the Host. On Linux
-its small appliance VM runs the disk's own programs that the setup calls; on Windows the
-install is file and registry edits only. Each copy is made once per disk and framework
-and then used directly, and a disk that already carries this framework, such as one ALE
-prepared, is used as it is.
+A VM disk named by a qcow2 `vm_image` gets the same pieces, installed offline into a layer
+on the disk by the VM builder's libguestfs, so nothing on the disk runs on the Host. On
+Linux its small appliance VM runs the disk's own programs that the setup calls; on Windows
+the install is file and registry edits only. Each layer is made once per disk and
+framework and then used directly, and a disk that already carries this framework is used
+as it is.
 
 An image or disk handed straight to a Provider, rather than prepared from a Task, gets the
 same layer from the Provider when it does not carry this framework, so every sandbox runs
@@ -62,8 +62,9 @@ once its window manager or shell runs.
 A Windows Task builds `environment/build.ps1` on an ALE Windows base. The base signs its agent
 account in to a desktop automatically, with UAC on, and carries none of the framework; the
 Python it installs for all users is for Tasks and agents. ALE installs the framework offline
-into a copy of the base before the build VM boots, so the build talks to the same guestd as
-every later sandbox, and the Task's script cannot replace the framework's pieces:
+into the build VM's disk, a layer on the base, before it boots, so the build talks to the
+same guestd as every later sandbox, and the Task's script cannot replace the framework's
+pieces:
 
 - the current guestd under `C:\ProgramData\ALE\guestd`, Cua Driver at the pinned version
   under `C:\ProgramData\ALE\cua-driver`, and the framework's own Python;
@@ -188,9 +189,19 @@ immutably.
 On Linux and Windows, a `vm_image` or `vm_base` may also be an absolute host path to a
 standalone qcow2; a macOS image is always a Tart OCI reference. Local disks are structurally
 checked and their actual file bytes are SHA-256 hashed at preparation, without contacting a
-registry. Disks with backing or external data files are rejected; convert them to a
-standalone qcow2 so its identity covers the complete disk. The operator must keep prepared
-local disks unchanged while they are in use.
+registry. Disks with backing or external data files are rejected: ALE knows a layer's parent
+only for the layers it makes, so a disk it is handed must hold its whole content. The
+operator must keep prepared local disks unchanged while they are in use.
+
+A Provider may keep a prepared VM disk as a chain of layers, each holding only what changed
+on the one below, rather than flattening it, so a Host stores a base once under all the
+Tasks built on it; the QEMU Provider keeps a Windows Task image and a snapshot that way
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#disk-layers)). A layer's
+identity is the hash of its parent's identity and the SHA-256 of its own bytes, as an OCI
+ChainID is; the bottom disk's is the identity it was resolved under, whatever form a Host
+stores it in. Each layer is hashed once, when it is made, and a chain in which a layer sits
+on another parent than the one it recorded is refused, so the top layer's identity covers
+the whole disk without hashing it whole.
 
 The authored image source digest covers the build context except its asset root ([Task
 assets](task-assets.md)) and `setup/`, so normal Task identity and asset provenance remain
@@ -203,7 +214,7 @@ include the actual image asset bytes. Dirty or unsynchronized assets disable res
 reporting. RunLock schema 2 records declaration, preparation, Provider, and exact observed
 identity; it does not invent a whole-disk content digest. Local Linux VMs record OCI and
 materializer identities; local Windows and macOS VMs record builder identity and resolved
-base materials.
+base materials, and a layered disk's prepared identity is its top layer's.
 
 ## Reverification
 
@@ -241,13 +252,14 @@ compresses the resulting qcow2. Episodes always cold-boot a fresh overlay, over 
 snapshot when they continue one. ALE creates no ready snapshot, warm pool, or environment
 server.
 
-Windows Task preparation boots a temporary VM from a framed copy of the resolved base,
-stages only `environment/` less `setup/`, and executes `build.ps1` there with network access for unattended
-installation. The image script has a one-hour budget for installation, integrity checks and extraction;
-Host-to-VM staging happens before that timer starts.
-ALE removes the build materials, shuts down the VM, and saves its configured qcow2.
-Reuse covers the whole build and is keyed by base, builder, and every file staged;
-there is no per-command cache or new recipe language. Authoring details belong to
+Windows Task preparation boots a temporary VM whose disk is a framed layer on the resolved
+base, stages only `environment/` less `setup/`, and executes `build.ps1` there with network
+access for unattended installation. The image script has a one-hour budget for
+installation, integrity checks and extraction; Host-to-VM staging happens before that timer
+starts.
+ALE removes the build materials, shuts down the VM, and keeps its disk as the Task's layer
+on the base. Reuse covers the whole build and is keyed by base, framework, builder, and every file
+staged; there is no per-command cache or new recipe language. Authoring details belong to
 [Task authoring](task-authoring.md#environment).
 
 A macOS Task image builds the same way on the local Orchard: `build.sh` runs as root in a
@@ -320,7 +332,7 @@ discovery and reads. A long-running command must not block periodic log collecti
 Docker uses two stdio guest sessions, Daytona two over SSH, Orchard two over its exec
 WebSocket; QEMU and Firecracker use two authenticated connections to the same guest server
 and port.
-Providers close both on startup failure, retention, destruction, and image export.
+Providers close both on startup failure, retention, destruction, and image save.
 
 `Sandbox.list_files(path)` returns the regular files at or below an absolute path, sorted,
 with byte sizes; a missing path returns none. `Sandbox.read_file` reads a regular file or
@@ -349,8 +361,8 @@ Given a conforming image, the Docker Provider:
 
 The QEMU Provider applies the same retention contract to its runner container and the
 episode qcow2 overlay mounted into it. `keep` leaves both alive and discoverable;
-`ale sandbox destroy HANDLE` removes both. `snapshot` saves the guest's disk as a
-standalone qcow2. Provider-qualified QEMU handles prevent the runner from being mistaken
+`ale sandbox destroy HANDLE` removes both. `snapshot` keeps the guest's disk as a layer on
+its Task's disk. Provider-qualified QEMU handles prevent the runner from being mistaken
 for a container sandbox.
 
 QEMU and Firecracker enforce Task egress in the runner network namespace, outside the

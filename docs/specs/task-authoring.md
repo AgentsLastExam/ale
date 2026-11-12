@@ -327,9 +327,9 @@ if ($LASTEXITCODE -ne 0) { throw "7zip installation failed: $LASTEXITCODE" }
 Copy-Item .\input.txt "$env:ALE_HOME\input.txt"
 ```
 
-`ale prepare TASK` copies `environment/`, less `setup/`, into a temporary Windows VM, runs
-`build.ps1` with that directory as cwd and `ALE_HOME` set to the agent home, installs ALE's
-current guestd and Cua Driver, then saves the configured qcow2. Scripts may use WinGet,
+`ale prepare TASK` copies `environment/`, less `setup/`, into a temporary Windows VM that
+already runs ALE's current guestd and Cua Driver, runs `build.ps1` with that directory as
+cwd and `ALE_HOME` set to the agent home, then keeps the VM's disk. Scripts may use WinGet,
 Chocolatey, or local unattended installers; pin package versions where supported and check
 native command exit codes. Scripts must finish within `build_timeout_sec`; nonzero exits fail the build. Suppress
 installer reboots; builds requiring a mid-script restart are unsupported. ALE owns shutdown.

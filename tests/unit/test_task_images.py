@@ -131,40 +131,92 @@ def windows_task(write_task_repo) -> Task:  # type: ignore[no-untyped-def]
     return load_tasks(folder)[0]
 
 
+def _windows_builder(  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None = None
+):
+    """The real Windows build, in a builder VM whose sandbox only records what it is told.
+
+    Its ``save_image`` keeps the layer it is given; ``finished_layer`` reads it back."""
+    import ale.run.task_images as images
+    from ale.run.providers.qemu import QemuSandbox
+
+    built: dict[Path, str] = {}
+    seen: SimpleNamespace = SimpleNamespace(
+        requests=[], sandboxes=[], runner="sha256:" + "e" * 64, builder="sha256:" + "f" * 64
+    )
+
+    class Builder:
+        def __init__(self, *, overlay_dir: Path, runner_image: str) -> None:
+            assert runner_image == seen.runner
+
+        async def create_builder(self, request):  # type: ignore[no-untyped-def]
+            seen.requests.append(request)
+            sandbox = AsyncMock(spec=QemuSandbox)
+            sandbox.agent_home = "C:\\Users\\user"
+            seen.sandboxes.append(sandbox)
+
+            async def run(argv, **kwargs):  # type: ignore[no-untyped-def]
+                if "build.ps1" in argv[-1]:
+                    assert (Path(kwargs["cwd"].replace("\\", "/")).name) == "environment"
+                    if failure == "input-change":
+                        environment = seen.task.folder.environment_dir
+                        (environment / "added-during-build").mkdir()
+                    if failure == "script":
+                        return ExecResult(exit_code=1, stderr="installer failed")
+                return ExecResult(exit_code=0)
+
+            async def save(layer: Path) -> str:
+                if failure == "save":
+                    raise ProviderStartError("no space left")
+                layer.write_bytes(b"layer")
+                built[layer] = "sha256:" + content_hash({"build": len(built)})[7:]
+                return built[layer]
+
+            sandbox.exec.side_effect = run
+            sandbox.save_image.side_effect = save
+            return sandbox
+
+    async def identity(reference: str) -> str:
+        return seen.builder if reference == images.MATERIALIZER_IMAGE else seen.runner
+
+    async def finished(layer: Path) -> str | None:
+        return built.get(layer) if layer.is_file() else None
+
+    async def remove(disk: Path) -> None:
+        disk.unlink(missing_ok=True)
+
+    monkeypatch.setattr(images, "cache_root", lambda: tmp_path / "cache")
+    monkeypatch.setattr(images, "_docker_image_identity", identity)
+    monkeypatch.setattr(images, "QemuProvider", Builder)
+    monkeypatch.setattr(images, "finished_layer", finished)
+    monkeypatch.setattr(images, "remove_disk", remove)
+    return seen, built
+
+
 @pytest.mark.asyncio
 async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
     windows_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import ale.run.task_images as images
 
-    builds: list[Path] = []
-    runner = "sha256:" + "e" * 64
-
-    async def runner_identity(reference: str) -> str:
-        return runner
-
-    async def build(base, context, output, resources, runner_identity, *, user, timeout_sec):  # type: ignore[no-untyped-def]
-        assert (context / "build.ps1").is_file() and not (context / "setup").exists()
-        assert resources.cpus == 2 and resources.memory_mb == 4096
-        assert runner_identity == runner
-        assert user == "user"
-        builds.append(output)
-        output.write_bytes(b"valid-disk")
-
-    async def valid(path: Path) -> bool:
-        return path.is_file() and path.read_bytes() == b"valid-disk"
-
-    monkeypatch.setattr(images, "cache_root", lambda: tmp_path / "cache")
-    monkeypatch.setattr(images, "_docker_image_identity", runner_identity)
-    monkeypatch.setattr(images, "_build_windows_image", build)
-    monkeypatch.setattr(images, "_valid_qcow2", valid)
+    seen, built = _windows_builder(monkeypatch, tmp_path)
     registry = _Registry()
     first = await prepare_task_image_result(windows_task, registry)  # type: ignore[arg-type]
     assert registry.get(ImageKind.VM).inputs[0] == ImageRef(
         kind=ImageKind.VM, reference="/images/windows.qcow2"
     )
+    (request,) = seen.requests
+    assert request.os is OperatingSystem.WINDOWS and request.user == "user"
+    assert (request.resources.cpus, request.resources.memory_mb) == (2, 4096)
+    assert request.network.mode is NetworkMode.OPEN
+    # The build VM's disk is kept as the Task's layer, known by its own identity.
+    (layer,) = built
+    seen.sandboxes[0].save_image.assert_awaited_once_with(layer)
+    assert layer.parent == tmp_path / "cache/vm-builds"
+    assert first.image.runtime_ref == str(layer) and first.image.prepared_identity == built[layer]
+    assert first.image.input_identity == "sha256:" + layer.stem
     second = await prepare_task_image_result(windows_task, registry)  # type: ignore[arg-type]
-    assert len(builds) == 1
+    assert len(seen.requests) == 1
     assert [step.name for step in first.steps] == [
         "lint",
         "base-resolution",
@@ -181,23 +233,27 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
     setup.parent.mkdir()
     setup.write_text("Write-Output 'per episode'\n")
     assert await prepare_task_image(windows_task, registry) == first.image  # type: ignore[arg-type]
-    assert len(builds) == 1
+    assert len(seen.requests) == 1
     asset = windows_task.folder.environment_dir / "assets/input.txt"
     asset.parent.mkdir()
     for value in ("first", "changed"):
         asset.write_text(value)
         changed = await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
         assert changed.prepared_identity != first.image.prepared_identity
-    assert len(builds) == 3
+    assert len(seen.requests) == 3
     (windows_task.folder.environment_dir / "empty").mkdir()
     await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
-    assert len(builds) == 4
-    runner = "sha256:" + "f" * 64
+    assert len(seen.requests) == 4
+    # Another runner, or another VM builder to frame the disk and discard, is another build.
+    seen.runner = "sha256:" + "1" * 64
     await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
-    assert len(builds) == 5
+    assert len(seen.requests) == 5
+    seen.builder = "sha256:" + "2" * 64
+    await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
+    assert len(seen.requests) == 6
     base = _prepared(ImageKind.VM, "external-ref")
     await images._prepare_windows_image(windows_task, base)
-    assert len(builds) == 6
+    assert len(seen.requests) == 7
 
     other = load_tasks(windows_task.folder.root)[0]
     other.spec = other.spec.model_copy(
@@ -210,40 +266,24 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
     monkeypatch.setattr("ale.run.cli.tasks.observe_task_assets", lambda task: None)
     results = await _prepare_images([windows_task, other], registry)  # type: ignore[arg-type]
     assert results[0].image.prepared_identity != results[1].image.prepared_identity
-    assert len(builds) == 7  # The unchanged first Task reuses its disk; the larger one builds.
+    assert len(seen.requests) == 8  # The unchanged first Task reuses its layer; the larger builds.
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["script", "input-change", "invalid-disk"])
+@pytest.mark.parametrize("failure", ["script", "input-change", "save"])
 async def test_failed_windows_build_does_not_publish_or_fall_back(
     windows_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    import ale.run.task_images as images
-
-    async def runner_identity(reference: str) -> str:
-        return "sha256:" + "e" * 64
-
-    async def build(base, context, output, resources, runner, *, user, timeout_sec):  # type: ignore[no-untyped-def]
-        output.write_bytes(b"partial")
-        if failure == "script":
-            raise TaskDefinitionError("installer failed")
-        if failure == "input-change":
-            (context / "added-during-build").mkdir()
-
-    async def valid(path: Path) -> bool:
-        return False
-
-    cache = tmp_path / "cache"
-    monkeypatch.setattr(images, "cache_root", lambda: cache)
-    monkeypatch.setattr(images, "_docker_image_identity", runner_identity)
-    monkeypatch.setattr(images, "_build_windows_image", build)
-    monkeypatch.setattr(images, "_valid_qcow2", valid)
+    seen, built = _windows_builder(monkeypatch, tmp_path, failure)
+    seen.task = windows_task
     registry = _Registry()
     with pytest.raises((TaskDefinitionError, ProviderStartError), match="windows-build:"):
         await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
     assert len(registry.get(ImageKind.VM).inputs) == 1
     assert isinstance(registry.get(ImageKind.VM).inputs[0], ImageRef)
-    assert list(cache.rglob("*.qcow2")) == []
+    assert built == {} and list((tmp_path / "cache").rglob("*.qcow2")) == []
+    (sandbox,) = seen.sandboxes
+    sandbox.destroy.assert_awaited_once()
 
 
 @pytest.fixture

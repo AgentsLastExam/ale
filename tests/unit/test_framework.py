@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from tests.support import FakeQemuImg, write_qcow2
 
 from ale.core.errors import ProviderStartError, TaskDefinitionError
 from ale.core.sandbox import PreparedTaskImage
@@ -27,8 +28,17 @@ from ale.run.framework import (
     with_framework,
 )
 from ale.run.guestd import gui
+from ale.run.images import chain_identity
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def qemu_img(monkeypatch: pytest.MonkeyPatch) -> FakeQemuImg:
+    """The chain helpers' ``qemu-img``, on disks ``write_qcow2`` made."""
+    fake = FakeQemuImg()
+    monkeypatch.setattr("ale.run.images._run", fake)
+    return fake
 
 
 @pytest.fixture(autouse=True)
@@ -126,13 +136,16 @@ async def test_a_vm_disk_gets_the_same_pieces_offline(
         return 0, "", ""
 
     monkeypatch.setattr(framework, "_run", run)
-    disk = tmp_path / "disk.qcow2"
+    base = write_qcow2(tmp_path / "base.qcow2")
+    disk = write_qcow2(tmp_path / "disk.qcow2", backing="base.qcow2")
     await frame_disk(disk, operating_system=OperatingSystem.LINUX, user="app", builder="builder:1")
     argv = seen["argv"]
     assert isinstance(argv, tuple)
     assert argv[argv.index("--entrypoint") + 1] == "virt-customize"
-    assert f"type=bind,src={tmp_path},dst=/disk" in argv
-    assert argv[argv.index("--add") + 1] == "/disk/disk.qcow2"
+    # Written into the overlay; the disk below it is only read.
+    assert f"type=bind,src={disk},dst={disk}" in argv
+    assert f"type=bind,src={base},dst={base},readonly" in argv
+    assert argv[argv.index("--add") + 1] == str(disk)
     identity = framework_identity(user="app", vm=True)
     setup = argv[argv.index("--run-command") + 1]
     assert setup == f"/bin/sh /opt/ale/setup.sh app {identity} /tmp/python"
@@ -159,7 +172,7 @@ async def test_a_disk_that_cannot_be_framed_fails_with_the_reason(
     monkeypatch.setattr(framework, "_run", run)
     with pytest.raises(TaskDefinitionError) as failure:
         await frame_disk(
-            tmp_path / "disk.qcow2",
+            write_qcow2(tmp_path / "disk.qcow2"),
             operating_system=OperatingSystem.LINUX,
             user="app",
             builder="b",
@@ -192,7 +205,7 @@ async def test_the_framework_a_disk_carries_is_read_from_its_marker(
         return next(answers)
 
     monkeypatch.setattr(framework, "_run", run)
-    disk = tmp_path / "d.qcow2"
+    disk = write_qcow2(tmp_path / "d.qcow2")
     found = await framework_on_disk(disk, operating_system=operating_system, builder="b")
     assert found == identity
     assert await framework_on_disk(disk, operating_system=operating_system, builder="b") is None
@@ -210,34 +223,29 @@ def _external_disk(path: str, digest: str) -> PreparedTaskImage:
 
 
 @pytest.fixture
-def framing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
-    """``framed_disk`` with the copy, the builder and the disks' markers stubbed out."""
+def framing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, qemu_img: FakeQemuImg
+) -> dict[str, object]:
+    """``framed_disk`` with ``qemu-img``, the builder and the disks' markers stubbed out."""
     monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "cache"))
-    seen: dict[str, object] = {"framed": [], "carried": {}}
+    seen: dict[str, object] = {"framed": [], "carried": {}, "qemu-img": qemu_img}
 
     async def builder_identity() -> str:
         return "sha256:" + "9" * 64
-
-    async def valid(path: Path) -> bool:
-        return path.is_file()
-
-    async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
-        assert argv[:2] == ("qemu-img", "convert")
-        Path(argv[-1]).write_bytes(Path(argv[-2]).read_bytes())
-        return 0, "", ""
 
     async def frame(
         disk: Path, *, operating_system: OperatingSystem, user: str, builder: str
     ) -> None:
         assert builder == MATERIALIZER_IMAGE
         seen["framed"].append((disk, operating_system))  # type: ignore[attr-defined]
+        with disk.open("ab") as written:
+            written.write(b"framework")
 
     async def on_disk(disk: Path, *, operating_system: OperatingSystem, builder: str) -> str | None:
         return seen["carried"].get(disk)  # type: ignore[attr-defined]
 
     monkeypatch.setattr(framework, "_builder_identity", builder_identity)
-    monkeypatch.setattr(framework, "_valid_qcow2", valid)
-    monkeypatch.setattr(framework, "_run", run)
+    monkeypatch.setattr(framework, "_run", qemu_img)
     monkeypatch.setattr(framework, "frame_disk", frame)
     monkeypatch.setattr(framework, "framework_on_disk", on_disk)
     return seen
@@ -247,22 +255,32 @@ def framing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object
 async def test_a_vm_disk_is_framed_once_and_a_framed_disk_is_used_as_it_is(
     tmp_path: Path, framing: dict[str, object]
 ) -> None:
-    source = tmp_path / "input.qcow2"
-    source.write_bytes(b"disk")
+    source = write_qcow2(tmp_path / "input.qcow2", data=b"disk")
     framed: list[tuple[Path, OperatingSystem]] = framing["framed"]  # type: ignore[assignment]
     carried: dict[Path, str | None] = framing["carried"]  # type: ignore[assignment]
+    qemu_img: FakeQemuImg = framing["qemu-img"]  # type: ignore[assignment]
     image = _external_disk(str(source), "sha256:" + "d" * 64)
     linux = {"operating_system": OperatingSystem.LINUX, "user": "user"}
 
     first, reused = await framed_disk(image, **linux)  # type: ignore[arg-type]
     assert not reused and len(framed) == 1
-    assert first.runtime_ref != image.runtime_ref
     assert first.resolved_reference == image.resolved_reference
-    assert first.prepared_identity != image.prepared_identity
+    # Framed into an overlay on an uncompressed copy of the disk, beside it in the cache,
+    # and nothing written into the copy, which every framework's layer shares.
+    layer = Path(first.runtime_ref)
+    (copy,) = [call for call in qemu_img.calls if call[1] == "convert"]
+    assert copy[-2] == str(source) and "-c" not in copy
+    base = layer.parent / str(FakeQemuImg.backing(layer))
+    assert json.loads(base.with_suffix(".json").read_text())["identity"] == image.prepared_identity
+    assert base.read_bytes().endswith(b"disk") and layer.read_bytes().endswith(b"framework")
+    assert first.prepared_identity == chain_identity(
+        image.prepared_identity, "sha256:" + hashlib.sha256(layer.read_bytes()).hexdigest()
+    )
     assert await framed_disk(image, **linux) == (first, True)  # type: ignore[arg-type]
     assert len(framed) == 1
     await framed_disk(image, **{**linux, "user": "other"})  # type: ignore[arg-type]
-    assert len(framed) == 2  # another framework is another copy
+    assert len(framed) == 2  # another framework is another layer, on the same copy
+    assert [call[1] for call in qemu_img.calls].count("convert") == 1
 
     ready = image.model_copy(update={"prepared_identity": "sha256:" + "e" * 64})
     carried[source] = framework_identity(user="user", vm=True)
@@ -276,8 +294,7 @@ async def test_a_vm_disk_is_framed_once_and_a_framed_disk_is_used_as_it_is(
 async def test_a_windows_disk_is_framed_for_its_account(
     tmp_path: Path, framing: dict[str, object]
 ) -> None:
-    source = tmp_path / "windows.qcow2"
-    source.write_bytes(b"disk")
+    source = write_qcow2(tmp_path / "windows.qcow2", data=b"disk")
     framed: list[tuple[Path, OperatingSystem]] = framing["framed"]  # type: ignore[assignment]
     carried: dict[Path, str | None] = framing["carried"]  # type: ignore[assignment]
     image = _external_disk(str(source), "sha256:" + "d" * 64)
@@ -526,18 +543,16 @@ async def test_a_windows_disk_is_framed_by_the_installer_inside_the_builder(
         return 0, "", ""
 
     monkeypatch.setattr(framework, "_run", run)
+    disk = write_qcow2(tmp_path / "disk.qcow2")
     await frame_disk(
-        tmp_path / "disk.qcow2",
-        operating_system=OperatingSystem.WINDOWS,
-        user="user",
-        builder="builder:1",
+        disk, operating_system=OperatingSystem.WINDOWS, user="user", builder="builder:1"
     )
     argv = seen["argv"]
     assert isinstance(argv, tuple)
     assert argv[argv.index("--entrypoint") + 1] == "python3"
     assert "--network=none" in argv  # nothing to download: the pieces are staged
     install = argv[argv.index("builder:1") + 1 :]
-    assert install[:4] == ("/framework/install.py", "/disk/disk.qcow2", "/framework", "/python")
+    assert install[:4] == ("/framework/install.py", str(disk), "/framework", "/python")
     assert f"type=bind,src={pythons / 'windows' / 'python'},dst=/python,readonly" in argv
     assert install[install.index("--user") + 1] == "user"
     assert install[install.index("--identity") + 1] == windows_framework_identity(user="user")
@@ -561,7 +576,7 @@ async def test_a_windows_disk_that_cannot_be_framed_fails_with_the_reason(
     monkeypatch.setattr(framework, "_run", run)
     with pytest.raises(TaskDefinitionError) as failure:
         await frame_disk(
-            tmp_path / "disk.qcow2",
+            write_qcow2(tmp_path / "disk.qcow2"),
             operating_system=OperatingSystem.WINDOWS,
             user="app",
             builder="b",

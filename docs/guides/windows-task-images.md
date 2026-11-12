@@ -23,9 +23,10 @@ The Task's materialized folder contains its build inputs; the build does not dep
 Task, a Host installation or a browser session. HF acquisition happens on the Host before build.
 Check native command exit codes and follow the [Windows build rules](../specs/task-authoring.md#environment).
 
-`ale prepare TASK` boots a temporary base VM, stages `environment/` less `setup/`, executes the script,
-removes build inputs, installs ALE's guestd and Cua Driver, and exports a cached qcow2. Stable
-installation belongs here; only per-episode initialization belongs in `environment/setup/`.
+`ale prepare TASK` boots a temporary VM on the base with ALE's guestd and Cua Driver
+already installed, stages `environment/` less `setup/`, executes the script, removes build
+inputs, and keeps the VM's disk as a cached layer on the base. Stable installation belongs
+here; only per-episode initialization belongs in `environment/setup/`.
 Subsequent runs reuse the image. Base, builder or build input changes invalidate reuse. The
 current Windows upload and input hashing read whole files into Host memory; very large assets
 still require bounded-memory transport and hashing work.

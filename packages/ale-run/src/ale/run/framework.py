@@ -22,14 +22,15 @@ preparation materializes it. A label records what it was built with, which makes
 the same layer twice a no-op.
 
 A VM disk named by reference or handed straight to the QEMU Provider gets the same pieces
-installed into a copy of it offline, inside the VM builder's own small appliance VM, so the
-disk's programs never run on the Host. Both record what they installed in a marker file; a
-disk that already carries this framework is used as it is.
+installed offline into an overlay on it, inside the VM builder's own small appliance VM,
+so the disk's programs never run on the Host. Both record what they installed in a marker
+file; a disk that already carries this framework is used as it is.
 
 On Windows the pieces are guestd, Cua Driver and a boot service that starts both in the
 agent's session, which replaces the logon tasks only a running Windows could register
-(``framework_windows.py`` installs them). A Windows Task image is built from a framed copy
-of its base, so the framework is already there when the Task's own image script runs.
+(``framework_windows.py`` installs them). A Windows Task image's build VM boots an overlay
+on its base that is framed first, so the framework is already there when the Task's own
+image script runs, and the overlay becomes the Task's layer with the framework in it.
 There too elevation is not part of the image; the Host grants it per boot.
 
 A macOS disk is APFS, which only macOS reads, so the Orchard Provider frames a copy of it
@@ -65,6 +66,13 @@ from ale.core.ids import content_hash
 from ale.core.sandbox import PreparedTaskImage
 from ale.core.taskspec import OperatingSystem
 from ale.run import ale_image, guestd
+from ale.run.images import (
+    base_layer,
+    chain_mounts,
+    finished_layer,
+    record_layer,
+    remove_disk,
+)
 from ale.run.sources import cache_root
 
 __all__ = [
@@ -301,9 +309,11 @@ async def framed_disk(
 ) -> tuple[PreparedTaskImage, bool]:
     """A VM disk with the framework installed, and whether it was already there.
 
-    A copy of the disk is framed once per disk, framework and builder, and then used
-    directly. A disk that already carries this exact framework, such as one ALE prepared,
-    is used as it is; that is read from the disk once and then recorded.
+    A disk that already carries this exact framework, such as one ALE prepared, is used as
+    it is; that is read from the disk once and then recorded. Any other disk is framed once
+    per disk, framework and builder into an overlay on its uncompressed copy
+    (``images.base_layer``), so framing writes only what it installs; the framed disk is
+    that overlay, recorded as a layer on the disk.
     """
     identity = (
         windows_framework_identity(user=user)
@@ -321,13 +331,13 @@ async def framed_disk(
     root.mkdir(parents=True, exist_ok=True)
     disk = root / f"{key.removeprefix('sha256:')}.qcow2"
     # Names the input disk when it already carried this framework, so it is checked once.
-    carried = disk.with_suffix(".json")
+    carried = disk.with_suffix(".carried")
     source = Path(image.runtime_ref)
     with disk.with_suffix(".lock").open("a") as lock:
         await _acquire(lock)
         try:
-            if await _valid_qcow2(disk):
-                return _with_disk(image, disk, key), True
+            if (layer := await finished_layer(disk)) is not None:
+                return _with_disk(image, disk, layer), True
             if _carried(carried) == str(source):
                 return image, True
             found = await framework_on_disk(
@@ -336,25 +346,34 @@ async def framed_disk(
             if found == identity:
                 carried.write_text(json.dumps({"disk": str(source)}), encoding="utf-8")
                 return image, True
-            with tempfile.TemporaryDirectory(prefix=f".{disk.stem}-", dir=root) as temporary:
-                output = Path(temporary) / "disk.qcow2"
+            base = await base_layer(image)
+            await remove_disk(disk)
+            partial = disk.with_suffix(".partial")
+            try:
                 code, _, stderr = await _run(
-                    "qemu-img", "convert", "-O", "qcow2", str(source), str(output), timeout=1800
-                )
+                    "qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2",
+                    "-b", os.path.relpath(base, root), str(partial), timeout=60,
+                )  # fmt: skip
                 if code != 0:
-                    raise ProviderStartError(f"could not copy the VM disk: {stderr.strip()}")
+                    raise ProviderStartError(
+                        f"could not create the framing overlay: {stderr.strip()}"
+                    )
                 await frame_disk(
-                    output,
+                    partial,
                     operating_system=operating_system,
                     user=user,
                     builder=MATERIALIZER_IMAGE,
                 )
-                if not await _valid_qcow2(output):
+                if not await _valid_qcow2(partial):
                     raise ProviderStartError("framing produced no valid qcow2")
-                os.replace(output, disk)
+            except BaseException:
+                partial.unlink(missing_ok=True)
+                raise
+            os.replace(partial, disk)
+            layer = await record_layer(disk, image.prepared_identity)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
-    return _with_disk(image, disk, key), False
+    return _with_disk(image, disk, layer), False
 
 
 def _carried(record: Path) -> str | None:
@@ -380,9 +399,9 @@ async def framework_on_disk(
     """
     _, output, _ = await _in_container(
         "--device=/dev/kvm", "--network=none",
-        "--mount", f"type=bind,src={disk.parent.resolve()},dst=/disk,readonly",
+        *await chain_mounts(disk),
         "--entrypoint", "virt-cat", builder,
-        "--format", "qcow2", "--add", f"/disk/{disk.name}",
+        "--format", "qcow2", "--add", str(disk.resolve()),
         WINDOWS_MARKER if operating_system is OperatingSystem.WINDOWS else MARKER,
         timeout=300,
     )  # fmt: skip
@@ -393,10 +412,11 @@ async def framework_on_disk(
 async def frame_disk(
     disk: Path, *, operating_system: OperatingSystem, user: str, builder: str
 ) -> None:
-    """Install the framework into a standalone VM disk, in place, without booting it.
+    """Install the framework into a VM disk, in place, without booting it.
 
-    ``builder`` is the VM builder image. Its libguestfs edits the disk from a small
-    appliance VM of its own, never on the Host.
+    ``disk`` is an overlay, which takes everything the framework writes; the layers below
+    it are only read. ``builder`` is the VM builder image. Its libguestfs edits the
+    disk from a small appliance VM of its own, never on the Host.
     """
     if operating_system is OperatingSystem.WINDOWS:
         await _frame_windows_disk(disk, user=user, builder=builder)
@@ -416,11 +436,11 @@ async def _frame_windows_disk(disk: Path, *, user: str, builder: str) -> None:
         shutil.copy2(_WINDOWS_INSTALLER, context / "install.py")
         code, output, stderr = await _in_container(
             "--device=/dev/kvm", "--network=none",
-            "--mount", f"type=bind,src={disk.parent.resolve()},dst=/disk",
+            *await chain_mounts(disk, writable=True),
             "--mount", f"type=bind,src={context},dst=/framework,readonly",
             "--mount", f"type=bind,src={python},dst=/python,readonly",
             "--entrypoint", "python3", builder,
-            "/framework/install.py", f"/disk/{disk.name}", "/framework", "/python",
+            "/framework/install.py", str(disk.resolve()), "/framework", "/python",
             "--user", user, "--identity", identity, "--runner-address", guestd.HOST_ADDRESS,
             timeout=1800,
         )  # fmt: skip
@@ -441,11 +461,11 @@ async def _frame_linux_disk(disk: Path, *, user: str, builder: str) -> None:
         setup = shlex.join(["/bin/sh", "/opt/ale/setup.sh", user, identity, "/tmp/python"])
         code, output, stderr = await _in_container(
             "--device=/dev/kvm",
-            "--mount", f"type=bind,src={disk.parent.resolve()},dst=/disk",
+            *await chain_mounts(disk, writable=True),
             "--mount", f"type=bind,src={context},dst=/framework,readonly",
             "--mount", f"type=bind,src={python},dst=/python,readonly",
             "--entrypoint", "virt-customize", builder,
-            "--format", "qcow2", "--add", f"/disk/{disk.name}", "--no-logfile",
+            "--format", "qcow2", "--add", str(disk.resolve()), "--no-logfile",
             "--delete", "/opt/ale/guestd",
             "--mkdir", "/opt/ale",
             "--copy-in", "/framework/guestd:/opt/ale",

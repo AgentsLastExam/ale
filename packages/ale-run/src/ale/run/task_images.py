@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import fcntl
+import hashlib
 import json
 import os
 import shutil
 import tarfile
 import tempfile
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -41,11 +42,11 @@ from ale.run.framework import (
     windows_framework_identity,
     with_framework,
 )
-from ale.run.images import resolve_loaded_image
+from ale.run.images import finished_layer, remove_disk, resolve_loaded_image
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.orchard import OrchardProvider, OrchardSandbox
 from ale.run.providers.orchard_client import CONTROL_ACCOUNT
-from ale.run.providers.qemu import RUNNER_IMAGE, QemuProvider
+from ale.run.providers.qemu import NTFS_DISCARD, RUNNER_IMAGE, QemuProvider
 from ale.run.sources import cache_root
 from ale.run.tasksets.manifest import SETUP_DIR
 
@@ -519,11 +520,14 @@ async def _prepare_windows_image(
         {
             "contract": WINDOWS_BUILD_CONTRACT,
             "runner": runner_identity,
+            # Frame the build VM's disk and discard its free clusters.
+            "vm_builder": await _docker_image_identity(MATERIALIZER_IMAGE),
+            "discard": hashlib.sha256(NTFS_DISCARD.read_bytes()).hexdigest(),
             "framework": windows_framework_identity(user=user),
         }
     )
     resources = Resources(cpus=2, memory_mb=4096, storage_mb=task.spec.resources.storage_mb)
-    identity = content_hash(
+    key = content_hash(
         {
             "base": base.prepared_identity,
             "context": context_identity,
@@ -533,38 +537,36 @@ async def _prepare_windows_image(
     )
     root = cache_root() / "vm-builds"
     root.mkdir(parents=True, exist_ok=True)
-    disk = root / f"{identity.removeprefix('sha256:')}.qcow2"
-    with disk.with_suffix(".lock").open("a+") as lock:
+    # The build VM's overlay, kept as a layer on the base: the Task's layer.
+    layer = root / f"{key.removeprefix('sha256:')}.qcow2"
+    with layer.with_suffix(".lock").open("a+") as lock:
         await _acquire_lock(lock)
         try:
-            reused = await _valid_qcow2(disk)
-            if not reused:
-                with tempfile.TemporaryDirectory(prefix=f".{disk.stem}-", dir=root) as temporary:
-                    output = Path(temporary) / "disk.qcow2"
+            identity = await finished_layer(layer)
+            reused = identity is not None
+            if identity is None:
+                await remove_disk(layer)
+                with tempfile.TemporaryDirectory(prefix=f".{layer.stem}-", dir=root) as temporary:
                     staged = Path(temporary) / "context"
                     _stage_vm_context(context, staged)
-                    await _build_windows_image(
+                    identity = await _build_windows_image(
                         base,
                         staged,
-                        output,
+                        layer,
                         resources,
                         runner_identity,
                         user=user,
                         timeout_sec=task.spec.image.build_timeout_sec,
+                        changed=lambda: _vm_context_identity(context) != context_identity,
                     )
-                    if _vm_context_identity(context) != context_identity:
-                        raise TaskDefinitionError("Windows image inputs changed during build")
-                    if not await _valid_qcow2(output):
-                        raise ProviderStartError("Windows build produced no valid qcow2")
-                    os.replace(output, disk)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
     return PreparedTaskImage(
         kind=ImageKind.VM,
         source="solver-local",
-        input_identity=identity,
+        input_identity=key,
         image_source_identity=task.image_source_digest,
-        runtime_ref=str(disk.resolve()),
+        runtime_ref=str(layer.resolve()),
         prepared_identity=identity,
         base_materials=(base.prepared_identity,),
         builder_identity=builder_identity,
@@ -732,17 +734,21 @@ def _stage_vm_context(context: Path, staged: Path) -> None:
 async def _build_windows_image(
     base: PreparedTaskImage,
     context: Path,
-    output: Path,
+    layer: Path,
     resources: Resources,
     runner_identity: str,
     *,
     user: str,
     timeout_sec: float,
-) -> None:
-    provider = QemuProvider(overlay_dir=output.parent / "vm", runner_image=runner_identity)
-    sandbox = await provider.create(
+    changed: Callable[[], bool],
+) -> str:
+    """Run ``build.ps1`` in a VM whose overlay on the base is framed before it boots, and
+    keep that overlay as ``layer``; the layer's identity. ``changed`` says whether the
+    build's inputs changed meanwhile."""
+    provider = QemuProvider(overlay_dir=context.parent / "vm", runner_image=runner_identity)
+    sandbox = await provider.create_builder(
         SandboxRequest(
-            episode_id=f"image-{output.parent.name}",
+            episode_id=f"image-{context.parent.name}",
             os=OperatingSystem.WINDOWS,
             prepared_image=base,
             resources=resources,
@@ -787,7 +793,9 @@ async def _build_windows_image(
         )
         if not result.ok:
             raise ProviderStartError(f"could not remove image build inputs: {result.stderr}")
-        await sandbox.save_image(output)
+        if changed():
+            raise TaskDefinitionError("Windows image inputs changed during build")
+        return await sandbox.save_image(layer)
     finally:
         await asyncio.shield(sandbox.destroy())
 
@@ -894,7 +902,7 @@ async def _materialize_vm_with_status(
         try:
             reused = await _valid_qcow2(disk)
             if not reused:
-                disk.unlink(missing_ok=True)
+                await remove_disk(disk)
                 await _materialize(build.runtime_ref, disk)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
