@@ -118,9 +118,8 @@ desktop starts at its display's preferred mode. How each Provider sets them is i
 - `vm-ubuntu24-base` provides Ubuntu 24.04, systemd, full GNOME/GDM and the `user`
   account for QEMU. It has no firewall of its own: network policy is enforced by the QEMU
   runner outside the guest ([security.md](security.md#1-a-sandbox-has-only-declared-ways-out)).
-- The private Windows 10 BYOL base provides a logged-in desktop, system Python, WinGet,
-  Chocolatey, and the runtimes required by autonomous agents.
-  Its licensed disk is not a public ALE artifact.
+- The Windows 10 base provides a logged-in desktop, system Python, WinGet, Chocolatey, and
+  the runtimes required by autonomous agents.
 
 No base carries guestd or Cua Driver; ALE installs both when it prepares a Task image or
 boots a disk. The bases do not contain domain stacks, benchmark data, databases, robotics
@@ -193,6 +192,17 @@ registry. Disks with backing or external data files are rejected: ALE knows a la
 only for the layers it makes, so a disk it is handed must hold its whole content. The
 operator must keep prepared local disks unchanged while they are in use.
 
+Any other Linux or Windows `vm_image`, or Windows `vm_base`, names a VM disk published to
+an OCI registry with `ale vm-image push`, and its identity is the manifest digest. The
+standalone qcow2 travels as fixed-size chunks, each compressed alone as one layer, because
+a whole disk in one layer approaches registries' documented limits on a layer and an
+upload, and downloads over a single connection, which reaches about half the throughput of
+several. Every chunk is checked against the digest of its uncompressed bytes, and a
+downloaded one also against its layer digest, before the disk is used. The published qcow2
+is itself uncompressed, so the one copy a Host pulls is also the base of the layers built on
+it, read without decompressing. Its format is in the
+[Providers README](../../packages/ale-run/src/ale/run/providers/README.md#registry-disks).
+
 A Provider may keep a prepared VM disk as a chain of layers, each holding only what changed
 on the one below, rather than flattening it, so a Host stores a base once under all the
 Tasks built on it; the QEMU Provider keeps a Windows Task image and a snapshot that way
@@ -245,12 +255,12 @@ initramfs, boot, partition assembly, and the minimal bootable qcow2 template. Re
 keyed by the layered OCI and materializer identities and validated structurally without
 hashing the whole disk.
 
-Windows 10 has no public ISO build path in ALE. The current private BYOL base starts from
-the GCP image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
-recipe installs and pins ALE's cross-platform components, and `compact.sh` validates and
-compresses the resulting qcow2. Episodes always cold-boot a fresh overlay, over a retention
-snapshot when they continue one. ALE creates no ready snapshot, warm pool, or environment
-server.
+Windows 10 has no public ISO build path in ALE. The current base starts from the GCP image
+`agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1` recipe
+installs and pins ALE's cross-platform components, and `compact.sh` validates the
+resulting qcow2 and rewrites it uncompressed. Episodes always cold-boot a fresh overlay,
+over a retention snapshot when they continue one. ALE creates no ready snapshot, warm pool,
+or environment server.
 
 Windows Task preparation boots a temporary VM whose disk is a framed layer on the resolved
 base, stages only `environment/` less `setup/`, and executes `build.ps1` there with network

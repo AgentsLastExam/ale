@@ -102,13 +102,6 @@ RUNNER_IMAGE = os.environ.get("ALE_QEMU_RUNNER", ale_image("ale-qemu-runner"))
 #: Runner-side forwarding and the rewritten gateway URL both target the latter.
 RUNNER_DISK = "/storage/data.qcow2"
 
-#: Where the guest disk is published, and how it travels. A qcow2 is not a container
-#: image, but shipping it as the single layer of one means it moves with the same
-#: registry, the same credentials and the same `docker pull` everyone already has —
-#: no second distribution channel and no extra tool to install.
-GUEST_IMAGE = os.environ.get(
-    "ALE_QEMU_GUEST_IMAGE", "ghcr.io/agentslastexam/ale-guest-ubuntu-desktop:24.04"
-)
 #: Run in the VM builder to discard a Windows layer's free clusters.
 NTFS_DISCARD = Path(__file__).with_name("ntfs_discard.py")
 #: Video memory of the guest's display: Linux's driver keeps two frames of the screen, and
@@ -751,9 +744,9 @@ class QemuProvider(Provider):
         return await self._create(request, build_vm=False)
 
     async def create_builder(self, request: SandboxRequest) -> QemuSandbox:
-        """A VM to build a Task image in: its overlay sits on an uncompressed copy of the
-        request's base and gets the framework before it boots, so ``save_image`` keeps
-        framework and build in one layer."""
+        """A VM to build a Task image in: its overlay sits on the request's base
+        (``images.base_layer``) and gets the framework before it boots, so ``save_image``
+        keeps framework and build in one layer."""
         return await self._create(request, build_vm=True)
 
     async def _create(self, request: SandboxRequest, *, build_vm: bool) -> QemuSandbox:

@@ -247,12 +247,14 @@ Measured on a KVM host:
   Reading its marker (`/opt/ale/framework`, or `C:\ProgramData\ALE\framework` on Windows)
   with the VM builder's `virt-cat` takes about 3 s, and the answer is recorded next to the
   cache, so each disk pays it once per Host.
-- Any other disk is framed offline into a [layer](#disk-layers) on an uncompressed copy of
-  it, once per disk, framework identity and builder image. The copy (`images.base_layer`)
-  is made once per disk and Host: about 4.5 GB for the 2.3 GB Linux VM base, 17.7 GB for
-  the 10.2 GB Windows base 0.1.2, which took about 30 s. A compressed disk is decompressed
-  on every read: with the zstd-compressed Windows base under a Task layer a guest booted
-  15% slower and read the base's files 4–5 times slower.
+- Any other disk is framed offline into a [layer](#disk-layers) on its base
+  (`images.base_layer`), once per disk, framework identity and builder image. A disk
+  pulled from a registry is that base as it is ([registry disks](#registry-disks)). A local
+  disk, which may be compressed and is not ALE's to keep, gets an uncompressed copy once
+  per disk and Host: about 4.5 GB for the 2.3 GB Linux VM base, 17.7 GB for the 10.2 GB
+  Windows base 0.1.2, which took about 30 s. A compressed disk is decompressed on every
+  read: with the zstd-compressed Windows base under a Task layer a guest booted 15% slower
+  and read the base's files 4–5 times slower.
 - The resolved image keeps the request's prepared identity and observes the layer that
   boots, which the RunLock records.
 
@@ -267,12 +269,13 @@ and a Windows guest 250–310 s rather than 52 s.
 
 A framed disk, a Windows Task image and a snapshot are each a qcow2 overlay on the disk
 below it, never flattened. Beside each, `<name>.json` records the identity of its parent and
-the SHA-256 of its own file, taken once when it is made (`images.record_layer`); the copy a
-chain starts from records the identity of the disk it was copied from. A layer names its
-parent by a path relative to itself, so the chain stays whole when the ALE cache moves.
-`images.layer_identity` follows a chain with `qemu-img info --backing-chain` and refuses one
-in which a layer sits on another parent than its record names; every prepared disk with a
-backing file is checked that way before it boots.
+the SHA-256 of its own file, taken once when it is made (`images.record_layer`); the base a
+chain starts from, a pulled disk or the copy of a local one, records the identity the disk
+was resolved under. A layer names its parent by a path relative to itself, so the chain
+stays whole when the ALE cache moves. `images.layer_identity` follows a chain with
+`qemu-img info --backing-chain` and refuses one in which a layer sits on another parent
+than its record names; every prepared disk with a backing file is checked that way before
+it boots.
 
 The runner and the VM builder are containers, so every layer of a chain is mounted in them
 at its own Host path (`images.chain_mounts`), read-only except the one being written, and
@@ -316,6 +319,56 @@ into `C:\ProgramData\ALE`:
   in it: on Windows base 0.1.2 that was 103 of 749 MiB for a Task that installs nothing and
   90 of 2,417 MiB for a LibreOffice Task, each discarded in about 5 s. Free space is never
   zero-filled instead, which would write every free cluster into the overlay.
+
+### Registry disks
+
+`ale vm-image push` publishes a qcow2, and `resolve_vm_image` in `images.py` or
+`ale vm-image pull` acquires one, through the OCI distribution API directly, without the
+Docker CLI or daemon:
+
+- A published disk is a standalone, uncompressed qcow2; `ale vm-image push` refuses
+  compressed clusters (`qemu-img check` counts them). The chunks are compressed on the
+  wire, and a Host keeps the one copy it pulled, which reads at full speed under layers.
+- The manifest is an OCI image manifest with `artifactType`
+  `application/vnd.ale.vm-disk.v1` and the empty config. Its layers are the qcow2 file in
+  512 MiB chunks, in order, each compressed alone at zstd level 3 as
+  `application/vnd.ale.vm-disk.chunk.v1+zstd`, with the SHA-256 of the uncompressed chunk
+  in its `ale.vm-disk.chunk.digest` annotation. The manifest's `ale.vm-disk.size` and
+  `ale.vm-disk.chunk-size` annotations give the file and chunk sizes.
+- A pull fetches eight chunks at once and writes each at its offset into
+  `vm-images/<manifest digest hex>/disk.qcow2.partial` in the ALE cache, or into
+  `<destination>.partial` for `ale vm-image pull`, leaving 64 KiB-aligned runs of zeros as
+  holes. It checks the compressed bytes against the layer digest and the decompressed
+  bytes against the annotation, and renames the file once `qemu-img` finds a standalone
+  qcow2. A read that breaks continues with an HTTP range, and a pull run again keeps every
+  chunk whose bytes already match the annotation. A digest-pinned disk already in the cache
+  is used without asking the registry.
+- The pulled disk is the base of the layers built on it, in place: `disk.json` beside it
+  records it as a base under the manifest digest, and `images.remove_disk` refuses to
+  replace it while a layer sits on it.
+- Credentials are Docker's for the registry host, from a credential helper or `auths` in
+  `$DOCKER_CONFIG/config.json` (`~/.docker` by default); without them the registry is asked
+  anonymously. A registry on `localhost` or a loopback address is reached over plain HTTP,
+  any other over HTTPS only.
+- A push refuses a tag that exists. It compresses every chunk again but uploads only those
+  the repository lacks, so a publish that stopped can be run again. It uploads four chunks
+  at once, each in one request, from temporary files beside the source disk.
+- GHCR documents a 10 GB limit on a layer and ten minutes for an upload (it accepted the
+  14.7 GB single layer of Windows base 0.1.1). From GHCR, 512 MiB and 1 GiB chunks of the
+  10 GB Windows base 0.1.2 pulled equally fast, 790–860 Mbit/s over four or eight
+  connections against 400 Mbit/s over one. Four 512 MiB uploads at once finish inside the
+  ten minutes on an uplink of 30 Mbit/s or more. Every zstd level up to 6 decompresses
+  at about 2.9 GB/s on one core; level 19 would shrink that already compressed qcow2 by only
+  0.5% more and compresses a hundred times slower.
+- Through a registry on the same host, that disk published in 33 s and pulled in 22 s over
+  eight connections, 27 s over four and 79 s over one, where two SHA-256 passes per byte
+  bound a core without SHA instructions. As one gzip layer it took 444 s to publish with
+  BuildKit and 246 s to `docker pull` and `docker cp`, and left 29 GB on disk, not 10 GB.
+- Uncompressed, base 0.1.2 is a 17.7 GB file in 33 chunks: 9.52 GB on the wire, against
+  9.96 GB for its qcow2-compressed form, and pulled in 28 s against 25 s on the same host.
+  After pulling it and building two Windows Tasks, one that installs nothing and one with
+  LibreOffice, the ALE cache held 19.6 GiB; with the compressed base and an uncompressed
+  copy of it beside the pull, it held 29.1 GiB, and the first build took 101 s, not 68 s.
 
 ## Firecracker
 

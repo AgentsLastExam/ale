@@ -314,7 +314,7 @@ A Windows Task declares a base and provides `environment/build.ps1`:
 ```toml
 [environment]
 os = "windows"
-vm_base = "/path/to/windows-base.qcow2"
+vm_base = "ghcr.io/agentslastexam/vm-windows10-base:0.1.3"
 ```
 
 The base includes WinGet and Chocolatey. Put installation and configuration in

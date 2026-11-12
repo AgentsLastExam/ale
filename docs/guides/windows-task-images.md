@@ -8,12 +8,13 @@ prefer MSIX; an existing suitable unattended offline installer can be reused dir
 
 ## Define and build the image
 
-Use an operator-provided ALE Windows base and declare it in `task.toml`:
+Declare the published ALE Windows base in `task.toml`; an absolute path to a local copy of a
+base works too:
 
 ```toml
 [environment]
 os = "windows"
-vm_base = "/absolute/path/to/windows-base.qcow2"
+vm_base = "ghcr.io/agentslastexam/vm-windows10-base:0.1.3"
 ```
 
 Keep software materials under `environment/assets/softwares/editor_1/` and deployment

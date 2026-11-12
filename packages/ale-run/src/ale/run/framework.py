@@ -311,9 +311,9 @@ async def framed_disk(
 
     A disk that already carries this exact framework, such as one ALE prepared, is used as
     it is; that is read from the disk once and then recorded. Any other disk is framed once
-    per disk, framework and builder into an overlay on its uncompressed copy
-    (``images.base_layer``), so framing writes only what it installs; the framed disk is
-    that overlay, recorded as a layer on the disk.
+    per disk, framework and builder into an overlay on its base (``images.base_layer``: a
+    disk ALE pulled as it is, an uncompressed copy of any other), so framing writes only
+    what it installs; the framed disk is that overlay, recorded as a layer on the disk.
     """
     identity = (
         windows_framework_identity(user=user)

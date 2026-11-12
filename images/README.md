@@ -6,7 +6,7 @@ This directory separates Task foundations from the tools that build and run them
 base/
 ├── container-ubuntu22/  Ubuntu desktop container base
 ├── vm-ubuntu24/         Ubuntu OCI source for a bootable VM
-└── vm-windows10/        private Windows seed preparation recipe
+└── vm-windows10/        Windows seed preparation recipe
 builders/
 └── vm-materializer/     converts a VM OCI rootfs to qcow2; frames a Linux qcow2 ref
 runtimes/
@@ -41,5 +41,6 @@ images/build.sh vm-ubuntu24-base             # one image
 gives an already-published image a version without rebuilding it. It pushes with this
 repository's workflow token, so each GHCR package must grant `AgentsLastExam/ale` write
 access in its package settings (Manage Actions access); a package first pushed by hand has
-none, and its pushes fail with `permission_denied: write_package`. The licensed
-Windows disk remains private. Do not add Task content or Provider credentials here.
+none, and its pushes fail with `permission_denied: write_package`. The Windows base's disk
+is not in the repository, so it is published from a Host that has it, with
+`ale vm-image push`. Do not add Task content or Provider credentials here.

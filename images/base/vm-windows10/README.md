@@ -1,9 +1,10 @@
 # Windows 10 base image
 
-ALE's first Windows base is a private BYOL qcow2 derived from the GCP image
-`agenthle-win10-base-0210`. It is a cold-boot seed, not an ISO build and not a public
-redistributable artifact. The repository keeps the repeatable ALE post-processing recipe;
-the licensed Windows bytes remain in private storage.
+ALE's Windows base is a qcow2 derived from the GCP image `agenthle-win10-base-0210`: a
+cold-boot seed, not an ISO build. ALE publishes it as a public image at
+`ghcr.io/agentslastexam/vm-windows10-base`. The repository keeps the repeatable ALE
+post-processing recipe but not the disk, so a new version is published from a Host that has
+the disk, with `ale vm-image push`.
 
 ## Prepare the seed
 
@@ -27,24 +28,28 @@ stores its contents. The recipe installs no part of ALE's framework, and removes
 earlier recipe installed. Shut the guest down completely (Fast Startup is off) before
 exporting the disk: ALE edits the disk offline and cannot write to one left hibernated.
 
-Back on the Host, finish and compress the prepared disk. `compact.sh` runs `finalize.py`
+Back on the Host, finish and compact the prepared disk. `compact.sh` runs `finalize.py`
 in ALE's VM builder, which edits the disk in place while Windows is off: it disables
 Defender and the Security Center that would warn about it (Tamper Protection keeps them on
 while Windows runs), deletes their data, the last cumulative update's unpacked copy under
-`servicing\LCU` and the page file, and zeroes free space. Then it compresses the disk with
-qcow2's zstd compression:
+`servicing\LCU` and the page file, and zeroes free space. Then it rewrites the disk
+uncompressed and without the zeroed clusters. The registry carries it compressed in chunks,
+and a Host builds Task layers on the disk it pulled, where compressed clusters would slow
+every read:
 
 ```bash
 uv run images/base/vm-windows10/compact.sh input.qcow2 output.qcow2
 ```
 
-The resulting disk is packaged through the existing private VM-image distribution path.
 Every episode cold-boots a fresh qcow2 overlay; ALE does not create ready snapshots or a
-warm pool.
+warm pool. Publish the resulting disk under a new version after `docker login ghcr.io`;
+`ale vm-image push` refuses a version that exists, and the
+[Providers README](../../../packages/ale-run/src/ale/run/providers/README.md#registry-disks)
+describes how it travels.
 
 ```bash
-uv run ale vm-image push output.qcow2 ghcr.io/agentslastexam/vm-windows10-base:0.1.2
-uv run ale vm-image pull ghcr.io/agentslastexam/vm-windows10-base:0.1.2 output.qcow2
+uv run ale vm-image push output.qcow2 ghcr.io/agentslastexam/vm-windows10-base:0.1.3
+uv run ale vm-image pull ghcr.io/agentslastexam/vm-windows10-base:0.1.3 output.qcow2
 ```
 
 A GUI base is not qualified by an oracle-only Task. Before publication, run a real visual

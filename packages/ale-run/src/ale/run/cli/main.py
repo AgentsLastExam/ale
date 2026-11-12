@@ -9,7 +9,6 @@ that imports it.
 from __future__ import annotations
 
 import asyncio
-import shutil
 import signal
 from collections.abc import Coroutine, Sequence
 from pathlib import Path
@@ -244,9 +243,9 @@ def lint(
 @vm_image_app.command("push")
 def vm_image_push(
     source: Annotated[Path, typer.Argument(help="Local qcow2 disk")],
-    reference: Annotated[str, typer.Argument(help="Destination OCI image reference")],
-) -> int:
-    """Publish a local qcow2 through an OCI registry."""
+    reference: Annotated[str, typer.Argument(help="Destination OCI reference with a new tag")],
+) -> None:
+    """Publish a local qcow2 to an OCI registry as chunk layers, under a new tag."""
     from ale.run.images import publish_vm_image
 
     typer.echo(f"pushing {source} to {reference}")
@@ -254,38 +253,29 @@ def vm_image_push(
         resolved = _run_async(publish_vm_image(source, reference))
     except AleError as error:
         typer.echo(str(error), err=True)
-        return EXIT_BAD_REFERENCE
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
     typer.echo(f"ok    {resolved}")
-    return 0
 
 
 @vm_image_app.command("pull")
 def vm_image_pull(
-    reference: Annotated[str, typer.Argument(help="Source OCI image reference")],
+    reference: Annotated[str, typer.Argument(help="Published OCI reference, by tag or digest")],
     destination: Annotated[Path, typer.Argument(help="Local qcow2 destination")],
-) -> int:
-    """Acquire a published qcow2 from an OCI registry.
+) -> None:
+    """Download a published qcow2 from an OCI registry straight to its destination.
 
-    The disk is published as the single layer of a container image, so it arrives over the
-    registry everyone is already authenticated to.
+    Chunks are fetched in parallel and checked as they are written; running the same pull
+    again after an interruption keeps the chunks already in place.
     """
-    from ale.core.sandbox import ImageRef
-    from ale.run.images import resolve_vm_image
+    from ale.run.images import pull_vm_image
 
     typer.echo(f"pulling {reference}")
     try:
-        prepared = _run_async(resolve_vm_image(ImageRef(kind="vm", reference=reference)))
+        resolved = _run_async(pull_vm_image(reference, destination))
     except AleError as error:
         typer.echo(str(error), err=True)
-        return EXIT_BAD_REFERENCE
-
-    cached = Path(prepared.runtime_ref)
-    target = destination.resolve()
-    if target != cached:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(cached, target)
-    typer.echo(f"ok    {target}")
-    return 0
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
+    typer.echo(f"ok    {resolved} -> {destination}")
 
 
 @app.command("new-task")

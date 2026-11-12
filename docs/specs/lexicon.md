@@ -19,7 +19,7 @@ Normative. Every term below has exactly one meaning.
 | **Image declaration** | A solver's or dedicated verifier's sandbox kind (container or vm, from `vm`, `vm_image`, `vm_base` and the OS) and either an image used directly (`docker_image`, `vm_image`) or a build definition in its fixed directory. | not a Provider selection or build flag |
 | **Task image** | The final container or VM image prepared from one fixed local build definition or matching-kind image reference. | not a shared Image Tree node |
 | **Prepared Task image** | Immutable kind-aware output consumed by a sandbox request. | not mutable sandbox state |
-| **ALE base image** | A foundational Linux desktop container, Ubuntu VM, or private Windows BYOL image providing the sandbox contract and guest service. | not a domain image or Task-specific dependency bundle |
+| **ALE base image** | A foundational Linux desktop container, Ubuntu VM, or Windows image providing the sandbox contract and guest service. | not a domain image or Task-specific dependency bundle |
 | **VM materializer** | ALE-owned versioned conversion from final Linux VM OCI rootfs to bootable qcow2. | never Task-authored boot or partition code |
 | **Task assets** | Optional ignored files in a Task's [asset roots](task-assets.md), synchronized explicitly with a same-named HF dataset; to the runtime they are ordinary stage files. | not a configuration declaration, central cache tree, content hash, or implicit runtime download |
 | **Setup** | Trusted framework-controlled Task work that creates irreducibly per-episode state after the Task image starts. | not package installation, fixed compilation, or fixed input download |

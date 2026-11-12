@@ -206,7 +206,7 @@ async def _chain(
     if kind == "windows":
         image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
         if not image.is_file():
-            pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the private Windows base qcow2")
+            pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
         monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
         provider = QemuProvider(
             image=image, overlay_dir=tmp_path / "qemu", snapshot_dir=tmp_path / "snapshots"
