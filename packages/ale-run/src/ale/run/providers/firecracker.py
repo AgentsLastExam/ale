@@ -692,10 +692,10 @@ class FirecrackerProvider(Provider):
         problems: list[str] = []
         if shutil.which("docker") is None:
             problems.append("docker is not on PATH; the runner image is what holds Firecracker")
+        # Only Docker's daemon opens /dev/kvm, for the runner container, so the account
+        # running ALE needs no access to it of its own.
         if not Path("/dev/kvm").exists():
             problems.append("/dev/kvm is missing: this host has no hardware virtualisation")
-        elif not os.access("/dev/kvm", os.R_OK | os.W_OK):
-            problems.append("/dev/kvm is present but not writable (add yourself to the kvm group)")
         if not Path("/dev/net/tun").exists():
             problems.append("/dev/net/tun is missing; the microVM's network needs a tap device")
         if problems:

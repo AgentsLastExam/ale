@@ -124,6 +124,17 @@ def sandbox(
     )
 
 
+async def test_kvm_needs_no_access_of_this_accounts_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Docker's daemon opens /dev/kvm for the runner, so an account outside the kvm group
+    runs microVMs."""
+    exists = Path.exists
+    devices = {"/dev/kvm", "/dev/net/tun"}
+    monkeypatch.setattr(Path, "exists", lambda self: str(self) in devices or exists(self))
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("os.access", lambda *_args, **_kwargs: False)
+    await FirecrackerProvider().preflight()
+
+
 def test_capabilities_are_linux_microvms_with_every_network_mode() -> None:
     capabilities = FirecrackerProvider().capabilities()
     assert capabilities.operating_systems == frozenset({OperatingSystem.LINUX})

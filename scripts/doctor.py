@@ -239,17 +239,9 @@ def check_sandbox_backends() -> list[Result]:
                 "enable virtualisation in BIOS; container Tasks still run without it",
             )
         )
-    elif not os.access(kvm, os.R_OK | os.W_OK):
-        results.append(
-            Result(
-                WARN,
-                "kvm",
-                "/dev/kvm not accessible",
-                "sudo usermod -aG kvm $USER && re-login",
-            )
-        )
     else:
-        results.append(Result(OK, "kvm", "/dev/kvm accessible"))
+        # Docker's daemon opens it for the VM containers; this account needs no access.
+        results.append(Result(OK, "kvm", "/dev/kvm present"))
 
     for tool in ("qemu-system-x86_64", "qemu-img"):
         found = shutil.which(tool)
