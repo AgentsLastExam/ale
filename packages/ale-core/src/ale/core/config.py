@@ -257,7 +257,7 @@ class DaytonaProviderConfig(BaseModel):
 class ContainerProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["docker", "daytona"] = "docker"
+    provider: Literal["docker", "firecracker", "daytona"] = "docker"
     gpus: tuple[Annotated[int, Field(ge=0, strict=True)], ...] = ()
     runtime: Literal["runc", "kata"] = "runc"
     """The runtime Docker starts each sandbox with: ``kata`` runs it in a microVM of its own."""

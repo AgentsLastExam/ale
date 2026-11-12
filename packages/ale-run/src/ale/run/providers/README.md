@@ -6,10 +6,12 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 |---|---|---|
 | `docker.py` | local Docker container, or a Kata microVM per container ([Kata](#docker-on-kata-containers)) | immutable OCI image identity |
 | `qemu.py` | QEMU/KVM guest runner | materialized qcow2 identity |
+| `firecracker.py` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
 | `daytona.py` | Daytona cloud container | immutable OCI image identity, pushed by digest |
 | `orchard.py` | macOS VM on Orchard/Tart | digest-pinned OCI image, or a local image `build.sh` built |
 
 `daytona_api.py` is its REST client and `daytona_image.py` adapts and publishes images.
+`firecracker_init.py` is the init every microVM boots; it runs in the guest.
 
 They implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
 preflight, image verification, lifecycle, command/file transport, egress changes,
@@ -29,6 +31,7 @@ serves it on.
 |---|---|
 | Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone. Under Kata the helper rewrites the port with tc filters instead ([Kata](#docker-on-kata-containers)) |
 | QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
+| Firecracker | As QEMU, from the guest's tap device in the runner |
 | Daytona | `guestd/tunnel.py` listens at 7412 on the sandbox's loopback |
 | Orchard | A relay the Provider starts as root at boot listens at `127.0.0.1:7412` in the VM and connects to the Gateway's port at the Mac, the VM's default IPv4 route; it lives until the VM is deleted |
 
@@ -38,6 +41,7 @@ serves it on.
 |---|---|
 | Docker | `docker stop`, then `docker commit` to `ale-snapshot:<sandbox id>`. The image keeps the container's command and labels, with `ale.retention=snapshot`, `ale.prepared` naming the prepared image, and no GPU label. A container boots from its image ID; `docker rmi` destroys it and fails while a container still uses it |
 | QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay is then rebased on its own base and converted into a standalone zstd-compressed qcow2 in `qemu-snapshots/<sandbox id>/` in the ALE cache, beside `snapshot.json` with its episode, role, OS, prepared image and disk digest. Standalone, it outlives the image cache. Compression made a 23 GB Windows disk 15 GB and exported it in 71 s rather than 82 s. A VM boots from it through a fresh overlay. Destroying it fails while a runner mounts it |
+| Firecracker | The Provider has the guest's init (PID 1) stop every process and unmount the writable disk, so the disk needs no journal replay, and waits for the runner to exit. The writable disk then becomes one more read-only layer: `firecracker-snapshots/<sandbox id>/` in the ALE cache holds the root disk, any layers under it and a sparse copy of the new one, hard-linked where the filesystem allows, so it outlives the disk cache without copying it, beside `snapshot.json` with its episode, role, OS, prepared image and digest. A microVM boots from it with the layers stacked under a fresh writable disk, eight at most, since Firecracker's devices are few. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so `accepts` refuses them |
 | Orchard | None: Orchard keeps no VM past its episode, so `accepts` refuses retention and snapshots |
 
@@ -52,6 +56,7 @@ models it got with `ale.run.gpu.accepts_model`, which applies that rule.
 | Docker | Reads the Host's GPUs with `nvidia-smi` and leases only those among `container.gpus`, or among all when it is unset, of an accepted model. Too few refuses the Sandbox before it starts, and the container must then show exactly the leased UUIDs. Under Kata every GPU request is refused: `--gpus` does not reach the microVM |
 | QEMU | A device bound to `vfio-pci` has no Host driver to name its model, so the guest's `nvidia-smi` is read once it boots; a model the Task does not accept destroys the Sandbox before any Task code runs. The pool is leased without regard to model, so a pool of several models can refuse a Task while an accepted GPU is free |
 | Daytona | Maps the names to Daytona's GPU types as Harbor does: `h100` and `nvidia-h100-80gb` to `H100`, `h200` and `nvidia-h200-141gb` to `H200`, `rtx-pro-6000` and `nvidia-rtx-pro-6000` to `RTX-PRO-6000`, `rtx-4090` and `rtx-5090` to themselves, ignoring case. It asks for them in the Task's order, which Daytona tries in turn, and leaves out names with no type; a Task left with none is refused before anything is created. The models attached are then checked against the Task's own names, as on every Provider. `MI355X` is never asked for, as `nvidia-smi` cannot see it to record it. A Task naming no model sends no type, so Daytona chooses |
+| Firecracker | Refuses every GPU request: Firecracker passes no GPU through |
 | Orchard | Refuses every GPU request |
 
 ## Desktop resolution
@@ -63,6 +68,7 @@ Each Provider starts a desktop at the request's `desktop_resolution` and then ch
 |---|---|
 | Docker | `--env VNC_RESOLUTION=WIDTHxHEIGHT`, which replaces the image's own value; the container base's Xvnc starts at that size (`-geometry`). The name is the one VNC desktop images share, but the image's X server need not be VNC: Xvfb starts at it with `-screen 0 ${VNC_RESOLUTION}x24`. A desktop of another size is refused with that advice, since only the image can change it |
 | Daytona | The same variable, in the environment the Provider starts the image's command with and runs guestd in |
+| Firecracker | The same variable, in the environment the guest's init starts the image's command with. A microVM has no display device, so its desktop is the image's own X server, as in a container |
 | QEMU | Every guest gets QEMU's standard VGA (`VGA=std`), whose EDID names the size as the display's preferred mode (`-global VGA.xres=… -global VGA.yres=…`). OVMF sets that mode at boot, Linux's `bochs` driver and GNOME start at it, and Windows' Microsoft Basic Display Adapter keeps the mode the firmware set; it ignores the size virtio-vga, the runner's own default, announces. The display has 64 MB of video memory, since Linux's driver keeps two frames of the screen. OVMF sets no mode above 3200x1800 and falls back to 1280x800, which is why `DesktopResolution` stops there |
 | Orchard | Tart keeps a VM's display size in the VM's configuration, which a clone copies and Orchard cannot set, so each resolution boots its own clone of the framed image, `ale-framed-<key>-<WIDTHxHEIGHT>`, made on first use with `tart set --display WIDTHxHEIGHTpt` and deleted when the image is framed again. The size is in points, Tart's default for macOS: a 1024x768 desktop is 2048x1536 pixels, and Cua Driver returns its captures scaled down (1366x1025 for 1024x768). macOS keeps a display narrower than 1024 points at 1024x768, which is why `DesktopResolution` starts there |
 
@@ -71,9 +77,10 @@ Each Provider starts a desktop at the request's `desktop_resolution` and then ch
 The Linux framework layer installs `sudo` with the image's package manager when the image
 lacks it, and grants nothing. Every Linux and macOS Provider calls
 `privileges.set_elevation` through the root guestd, then `privileges.verify_identities`,
-before any Task code runs: Docker once `docker exec` has started guestd, QEMU once the
-booted guest answers, Daytona before it starts the image's own command, Orchard once
-guestd answers in an agent's VM. The script runs on the framework's Python:
+before any Task code runs: Docker once `docker exec` has started guestd, QEMU and
+Firecracker once the booted guest answers, Daytona before it starts the image's own
+command, Orchard once guestd answers in an agent's VM. The script runs on the framework's
+Python:
 
 - It replaces the last two lines of `/etc/sudoers`, a marker comment and one rule:
   `<user> ALL=(ALL:ALL) NOPASSWD: ALL` to grant, `<user> ALL=(ALL:ALL) !ALL` to revoke.
@@ -278,6 +285,43 @@ disk boots from, written into the SYSTEM hive with hivex, plus files copied into
   runs agent commands with the desktop's limited token unless it is set.
 - A Task image build boots a framed copy of its base, so its `build.ps1` runs beside the
   same guestd as every sandbox, and the saved image already carries the framework.
+
+## Firecracker
+
+`FirecrackerProvider` runs a container Task's prepared image, the one Docker runs, as a
+Firecracker microVM with its own kernel. It is selected with `container.provider =
+"firecracker"`. The Host needs Docker, `/dev/kvm` and `/dev/net/tun`; macOS and Windows
+Hosts have no KVM, so they cannot run it. Measured on a 112-core Linux Host with
+Firecracker 1.17.0, the guest kernel 6.1.155 its CI publishes, and the ALE container base:
+
+- **The disk.** The image gets the framework layer Docker adds, is exported with `docker
+  export`, and `firecracker_init.py` and the image's `ENV`, `USER`, `WORKDIR`,
+  `ENTRYPOINT` and `CMD` are appended. The runner's `mke2fs -d` writes the tar into an
+  ext4 with neither journal nor metadata checksums, as the Host's user, so nothing is
+  extracted on the Host; checksums doubled `mke2fs`'s time. The container base took 72 s
+  (export 37 s, `mke2fs` 31 s) and fills 2.3 GB. The disk is kept in `firecracker-disks/`
+  in the ALE cache under the image, runner and init, and every Sandbox of the image mounts
+  it read-only. It is one flat filesystem, so Tasks on one base share none of it.
+- **The writable disk** is a sparse ext4 the runner makes at start, the Task's
+  `storage_mb` plus 512 MB or 32 GB, seeded with the Sandbox's settings and the runner's
+  resolvers. The init lays it over the root with overlayfs, so a Sandbox costs what it
+  writes: 27 MB once the container base's GNOME session was up.
+- **The init** is PID 1 on the framework's Python. It mounts `/proc`, `/sys`, `/dev`,
+  `/dev/pts`, `/dev/shm` (half the guest's memory, a VM's default, where Docker gives
+  64 MB), `/dev/mqueue` and cgroup2, writes `hostname`, `hosts` and `resolv.conf`, starts
+  guestd as root with its token on a private tmpfs, and runs the image's command as Docker
+  would, with the request's variables. When the command exits, the microVM stops. On
+  SIGINT, which the Provider sends through guestd before a snapshot, it stops every
+  process, unmounts the writable disk and resets the machine, which ends Firecracker.
+- **The network.** The kernel sets the guest's address (`ip=`): `172.30.0.2` on the
+  runner's `tap0`, NATed to the runner's Docker network. Docker publishes guestd's port and
+  the runner forwards it. Sealing adds the QEMU runner's rules on `tap0`.
+- **The kernel** skips the PS/2 keyboard probe (`i8042.*`), which took half its boot;
+  nothing uses the keyboard. It has no `nf_tables`, so an image cannot run Docker or
+  iptables-nft inside, and the machine has no display device or GPU. A Sandbox of the
+  container base answered in 1.6 s and drew its desktop in 5.5 s, where Docker took 0.75 s
+  and 5.0 s.
+- **The command's output** goes to `command.log` on the writable disk, outside the overlay.
 
 ## Orchard
 

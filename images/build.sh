@@ -20,7 +20,7 @@ command -v "$runtime" >/dev/null 2>&1 || {
 
 engine=$(sed -n 's/^version = "\(.*\)"$/\1/p' packages/ale-run/pyproject.toml)
 images=("$@")
-(( ${#images[@]} )) || images=(container-ubuntu22-base vm-ubuntu24-base ale-vm-materializer ale-qemu-runner)
+(( ${#images[@]} )) || images=(container-ubuntu22-base vm-ubuntu24-base ale-vm-materializer ale-qemu-runner ale-firecracker-runner)
 
 for repository in "${images[@]}"; do
     case "$repository" in
@@ -28,6 +28,7 @@ for repository in "${images[@]}"; do
         vm-ubuntu24-base)        dockerfile=images/base/vm-ubuntu24/Dockerfile context=. ;;
         ale-vm-materializer)     dockerfile=images/builders/vm-materializer/Dockerfile context=images/builders/vm-materializer ;;
         ale-qemu-runner)         dockerfile=images/runtimes/qemu-runner/Dockerfile context=images/runtimes/qemu-runner ;;
+        ale-firecracker-runner)  dockerfile=images/runtimes/firecracker-runner/Dockerfile context=images/runtimes/firecracker-runner ;;
         *) echo "ERROR: unknown image: $repository" >&2; exit 1 ;;
     esac
     case "$repository" in

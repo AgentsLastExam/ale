@@ -10,12 +10,15 @@ base/
 builders/
 └── vm-materializer/     converts a VM OCI rootfs to qcow2; frames a Linux qcow2 ref
 runtimes/
-└── qemu-runner/         container that runs a prepared qcow2 with QEMU/KVM
+├── qemu-runner/         container that runs a prepared qcow2 with QEMU/KVM
+└── firecracker-runner/  container that runs a container Task as a Firecracker microVM
 ```
 
 Task repositories extend or reference only entries under `base/`. Linux VM Tasks build an
 OCI rootfs from `vm-ubuntu24`; the materializer converts it to qcow2 and the QEMU runner
 boots it. Windows preparation already produces qcow2, so it goes directly to the runner.
+The Firecracker runner takes a container Task's prepared image instead: it converts the
+image's filesystem into an ext4 disk once and boots it with its own kernel.
 macOS Tasks name a Tart image of their own; the Orchard and Tart that run it come from
 `scripts/setup_macos.py`, not from this directory.
 

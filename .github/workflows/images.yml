@@ -58,6 +58,9 @@ jobs:
           - repository: ale-qemu-runner
             dockerfile: images/runtimes/qemu-runner/Dockerfile
             context: images/runtimes/qemu-runner
+          - repository: ale-firecracker-runner
+            dockerfile: images/runtimes/firecracker-runner/Dockerfile
+            context: images/runtimes/firecracker-runner
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 

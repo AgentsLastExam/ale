@@ -66,6 +66,7 @@ even before `uv sync`.
 |---|---|---|
 | container (default) | Docker Engine (or Podman) reachable | `just doctor` |
 | virtual machine | `/dev/kvm` plus `qemu-system-x86_64`, `qemu-img` | `just doctor` |
+| microVM (`container.provider = "firecracker"`) | Docker, `/dev/kvm` and `/dev/net/tun`; `images/build.sh ale-firecracker-runner` until the runner is published | `just doctor` for KVM; the Provider names anything else missing |
 | macOS VM | an Apple Silicon Mac running the local Orchard of `scripts/setup_macos.py` | `uv run scripts/setup_macos.py --check` |
 
 Machines without KVM can still run every Linux container Task; machines without a

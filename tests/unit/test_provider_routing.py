@@ -181,14 +181,18 @@ async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_hand
         "daytona:z",
         "docker:a",
         "docker:z",
+        "firecracker:a",
+        "firecracker:z",
         "qemu:a",
         "qemu:z",
     ]
     await _destroy_retained_sandbox("docker:ale-docker")
+    await _destroy_retained_sandbox("firecracker:ale-fc")
     await _destroy_retained_sandbox("qemu:ale-qemu")
     await _destroy_retained_sandbox("daytona:abc")
     assert destroyed == [
         ("docker", "docker:ale-docker"),
+        ("firecracker", "firecracker:ale-fc"),
         ("qemu", "qemu:ale-qemu"),
         ("daytona", "daytona:abc"),
     ]

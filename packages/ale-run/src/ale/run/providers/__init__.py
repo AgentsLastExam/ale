@@ -1,4 +1,4 @@
-"""Sandbox providers: local container, virtual machine and cloud container backends.
+"""Sandbox providers: local container, microVM, virtual machine and cloud container backends.
 
 A provider creates and destroys sandboxes, attaches a guest transport, applies the
 network policy, and declares its capabilities. All in-sandbox operations go through
@@ -16,7 +16,7 @@ __all__ = ["RETAINING_PROVIDERS", "ProviderRegistry", "provider_named"]
 
 #: Every Provider that can leave a sandbox behind. A retained sandbox outlives the run
 #: configuration that made it, so listing and destroying consult all of them.
-RETAINING_PROVIDERS = ("docker", "qemu", "daytona")
+RETAINING_PROVIDERS = ("docker", "firecracker", "qemu", "daytona")
 
 
 class ProviderRegistry:
@@ -43,6 +43,10 @@ class ProviderRegistry:
                 from ale.run.providers.daytona import DaytonaProvider
 
                 provider = DaytonaProvider(config.daytona)
+            elif config.provider == "firecracker":
+                from ale.run.providers.firecracker import FirecrackerProvider
+
+                provider = FirecrackerProvider()
             else:
                 from ale.run.providers.docker import DockerProvider
 
@@ -65,6 +69,10 @@ def provider_named(name: str) -> Provider:
         from ale.run.providers.docker import DockerProvider
 
         return DockerProvider()
+    if name == "firecracker":
+        from ale.run.providers.firecracker import FirecrackerProvider
+
+        return FirecrackerProvider()
     if name == "qemu":
         from ale.run.providers.qemu import QemuProvider
 
