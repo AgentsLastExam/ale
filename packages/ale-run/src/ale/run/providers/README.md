@@ -18,7 +18,10 @@ and `orchard/desktop.py` waits for the desktop; `fleet/tunnel.py` carries a Run'
 to its Sandboxes on a Node, both ends of it, and the node agent itself is the `ale-fleet`
 package. Two files run elsewhere and import nothing from the engine:
 `firecracker/guest_init.py` is the init every microVM boots, and `qemu/ntfs_discard.py`
-runs in the VM builder. `desktop.py` and `privileges.py` serve several Providers.
+runs in the VM builder. `desktop.py` and `privileges.py` serve several Providers, and
+`runner.py` holds what QEMU and Firecracker share, as each boots its guest in a runner
+container: the guest service's token and connection, the proxy's variables, and the
+check for a desktop that has drawn nothing yet.
 
 They implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
 preflight, image verification, lifecycle, command/file transport, egress changes,

@@ -55,10 +55,10 @@ from ale.run.providers.qemu.provider import (
     QemuSandbox,
     _index_vfio_gpus,
     _inspect_vfio_gpu,
-    _port_of,
     _verify_qemu_gpus,
     _VfioGpu,
 )
+from ale.run.providers.runner import url_port
 
 pytestmark = pytest.mark.unit
 
@@ -698,7 +698,7 @@ async def test_qemu_retained_solver_can_be_reattached(
         def __init__(self, host: str, port: int, *, token: str) -> None:
             assert (host, port, token) == ("127.0.0.1", 17411, "retained-token")
 
-        async def start(self, *, timeout_sec: float) -> None:
+        async def start(self, *, timeout_sec: float, interval_sec: float) -> None:
             assert timeout_sec > 0
 
     class Client:
@@ -714,8 +714,8 @@ async def test_qemu_retained_solver_can_be_reattached(
         return "user", "/home/user", False
 
     monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
-    monkeypatch.setattr("ale.run.providers.qemu.provider.TcpTransport", Transport)
-    monkeypatch.setattr("ale.run.providers.qemu.provider.GuestClient", Client)
+    monkeypatch.setattr("ale.run.providers.runner.TcpTransport", Transport)
+    monkeypatch.setattr("ale.run.providers.runner.GuestClient", Client)
     monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
     allocation = ResourceAllocation(
         cpus=2,
@@ -808,7 +808,7 @@ class _LeftRunning:
             def __init__(self, *_args: object, **_kwargs: object) -> None:
                 pass
 
-            async def start(self, *, timeout_sec: float) -> None:
+            async def start(self, *, timeout_sec: float, interval_sec: float) -> None:
                 pass
 
         async def contract(
@@ -817,8 +817,8 @@ class _LeftRunning:
             return "user", "/home/user", False
 
         monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
-        monkeypatch.setattr("ale.run.providers.qemu.provider.TcpTransport", Transport)
-        monkeypatch.setattr("ale.run.providers.qemu.provider.GuestClient", lambda _: self.client)
+        monkeypatch.setattr("ale.run.providers.runner.TcpTransport", Transport)
+        monkeypatch.setattr("ale.run.providers.runner.GuestClient", lambda _: self.client)
         monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
         self.allocation = ResourceAllocation(
             cpus=2, memory_mb=2048, sudo=False, network_mode=NetworkMode.BLOCK, provider="qemu"
@@ -1219,7 +1219,7 @@ class TestGatewayPort:
         ],
     )
     def test_ports_are_read_from_the_url(self, url: str | None, expected: str) -> None:
-        assert _port_of(url) == expected
+        assert url_port(url) == expected
 
 
 class TestVfioGpu:

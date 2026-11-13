@@ -34,16 +34,13 @@ import io
 import json
 import math
 import os
-import secrets
 import shutil
-import socket
 import tarfile
 import uuid
-import zlib
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
@@ -73,8 +70,18 @@ from ale.run.images import acquire_lock, resolve_container_image, resolve_prepar
 from ale.run.process import run
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.privileges import set_elevation, verify_identities
+from ale.run.providers.runner import (
+    HOST_IP,
+    connect_guest,
+    free_port,
+    is_blank,
+    issue_guest_token,
+    proxy_env,
+    read_guest_token,
+    url_port,
+)
 from ale.run.sources import cache_root
-from ale.run.transport import GuestClient, TcpTransport
+from ale.run.transport import GuestClient
 
 __all__ = ["FirecrackerProvider", "FirecrackerSandbox"]
 
@@ -84,8 +91,6 @@ RUNNER_IMAGE = os.environ.get("ALE_FIRECRACKER_RUNNER", ale_image("ale-firecrack
 KERNEL = "/opt/ale/vmlinux"
 
 GUEST_PORT = guestd.PORT
-#: The runner's address on the guest's network: the only one a sealed guest may reach.
-HOST_IP = guestd.HOST_ADDRESS
 GUEST_IP = "172.30.0.2"
 GUEST_MAC = "06:00:ac:1e:00:02"
 #: The interface inside the runner that the guest is attached to.
@@ -122,38 +127,18 @@ SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
 SNAPSHOT_RECORD = "snapshot.json"
 SNAPSHOT_ROOTFS = "rootfs.ext4"
 DISK_RECORD = "disk.json"
-GUEST_TOKEN_FILE = "guestd-token"
 
 #: The runner's nat chain that sends the fixed Gateway port to the port the Host serves the
 #: Gateway on; a later run's Gateway replaces its rule.
 GATEWAY_CHAIN = "ALE_GATEWAY"
 
 
+async def _connect(host_port: int, token: str) -> GuestClient:
+    return await connect_guest(host_port, token, timeout_sec=BOOT_TIMEOUT_SEC, interval_sec=0.1)
+
+
 async def _run(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
     return await run(*argv, timeout=timeout)
-
-
-def _port_of(url: str | None) -> str:
-    """The port a URL names, or empty when a run has no such service."""
-    if not url:
-        return ""
-    port = urlsplit(url).port
-    return str(port) if port else ""
-
-
-def _proxy_env(request: SandboxRequest) -> dict[str, str]:
-    if not request.proxy_url:
-        return {}
-    proxy = f"http://{HOST_IP}:{_port_of(request.proxy_url)}"
-    if request.proxy_token:
-        proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}:@", 1)
-    return {
-        "HTTP_PROXY": proxy,
-        "HTTPS_PROXY": proxy,
-        "http_proxy": proxy,
-        "https_proxy": proxy,
-        "NO_PROXY": f"{HOST_IP},localhost,127.0.0.1",
-    }
 
 
 def _sandbox_gateway(url: str | None) -> str | None:
@@ -164,12 +149,6 @@ def _sandbox_gateway(url: str | None) -> str | None:
     if parts.port is None:
         return url
     return parts._replace(netloc=f"{HOST_IP}:{SANDBOX_GATEWAY_PORT}").geturl()
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def _sparse_digest(path: Path) -> str:
@@ -202,52 +181,6 @@ def _sparse_digest(path: Path) -> str:
                 remaining -= len(chunk)
             offset = end
     return f"sha256:{digest.hexdigest()}"
-
-
-def _is_blank(png: bytes) -> bool:
-    """Whether a PNG is one flat colour: a desktop that is up but has drawn nothing yet."""
-    data = bytearray()
-    offset = 8
-    while offset + 8 <= len(png):
-        length = int.from_bytes(png[offset : offset + 4], "big")
-        kind = png[offset + 4 : offset + 8]
-        if kind == b"IDAT":
-            data += png[offset + 8 : offset + 8 + length]
-        elif kind == b"IEND":
-            break
-        offset += 12 + length
-    if not data:
-        return False
-    try:
-        return len(set(zlib.decompress(bytes(data)))) <= 2
-    except zlib.error:
-        return False
-
-
-def _issue_guest_token(storage: Path) -> str:
-    token = secrets.token_urlsafe(32)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    with os.fdopen(os.open(storage / GUEST_TOKEN_FILE, flags, 0o600), "w") as handle:
-        handle.write(token)
-    return token
-
-
-def _read_guest_token(storage: Path) -> str:
-    try:
-        return (storage / GUEST_TOKEN_FILE).read_text().strip()
-    except FileNotFoundError as exc:
-        raise ProviderCapabilityError(f"retained sandbox {storage} has no guest token") from exc
-
-
-async def _connect(host_port: int, token: str) -> GuestClient:
-    transport = TcpTransport("127.0.0.1", host_port, token=token)
-    client = GuestClient(transport)
-    try:
-        await transport.start(timeout_sec=BOOT_TIMEOUT_SEC, interval_sec=0.1)
-    except BaseException:
-        await client.close()
-        raise
-    return client
 
 
 def _vm_config(*, cpus: int, memory_mb: int, hostname: str, layers: int) -> dict[str, object]:
@@ -412,7 +345,7 @@ class FirecrackerSandbox(Sandbox):
             and self._sealed
             and self.request.network.mode is NetworkMode.ALLOWLIST
         ):
-            env = _proxy_env(self.request) | (env or {})
+            env = proxy_env(self.request) | (env or {})
         loop = asyncio.get_running_loop()
         started = loop.time()
         exit_code, stdout, stderr, timed_out = await self._client.exec(
@@ -466,7 +399,7 @@ class FirecrackerSandbox(Sandbox):
             {
                 port
                 for url in (self.request.gateway_url, self.request.proxy_url)
-                if (port := _port_of(url))
+                if (port := url_port(url))
             }
         )
         allowed = (
@@ -710,9 +643,9 @@ class FirecrackerProvider(Provider):
         storage = self.overlay_dir / sandbox_id
         storage.mkdir(parents=True, exist_ok=True)
         try:
-            token = _issue_guest_token(storage)
+            token = issue_guest_token(storage)
             self._write_config(storage, request, container.removeprefix("ale-fc-"), len(layers))
-            host_port = _free_port()
+            host_port = free_port()
             await self._boot(
                 container, request, storage, Path(resolved_image.observed_ref), layers, host_port
             )
@@ -981,7 +914,7 @@ class FirecrackerProvider(Provider):
         if code != 0 or not host_ip:
             raise ProviderStartError(f"could not find the Host from the runner: {stderr.strip()}")
         rules: list[str] = []
-        if gateway_port := _port_of(request.gateway_url):
+        if gateway_port := url_port(request.gateway_url):
             rules += [
                 f"iptables -w -t nat -N {GATEWAY_CHAIN} || iptables -w -t nat -F {GATEWAY_CHAIN}",
                 f"iptables -w -t nat -C PREROUTING -j {GATEWAY_CHAIN} || "
@@ -992,7 +925,7 @@ class FirecrackerProvider(Provider):
                 f"-j MASQUERADE || iptables -w -t nat -A POSTROUTING -p tcp -d {host_ip} "
                 f"--dport {gateway_port} -j MASQUERADE",
             ]
-        if request.network.mode is NetworkMode.ALLOWLIST and (port := _port_of(request.proxy_url)):
+        if request.network.mode is NetworkMode.ALLOWLIST and (port := url_port(request.proxy_url)):
             rules += [
                 f"iptables -w -t nat -A PREROUTING -i {GUEST_TAP} -p tcp -d {HOST_IP} "
                 f"--dport {port} -j DNAT --to-destination {host_ip}:{port}",
@@ -1044,7 +977,7 @@ class FirecrackerProvider(Provider):
         last = "no screenshot was taken"
         while loop.time() < deadline:
             try:
-                if not _is_blank(await client.screenshot()):
+                if not is_blank(await client.screenshot()):
                     return
                 last = "the screen is up but nothing has been drawn on it"
             except Exception as exc:
@@ -1264,7 +1197,7 @@ class FirecrackerProvider(Provider):
             host_port = int(ports[0]["HostPort"])
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise ProviderCapabilityError(f"{handle!r} has no guest service port") from exc
-        token = _read_guest_token(storage)
+        token = read_guest_token(storage)
         attached_request = request.model_copy(update={"role": SandboxRole(role)})
         client = await _connect(host_port, token)
         try:
