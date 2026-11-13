@@ -240,7 +240,7 @@ def _proxy_env(request: SandboxRequest) -> dict[str, str]:
     port = _port_of(request.proxy_url)
     proxy = f"http://{HOST_IP}:{port}"
     if request.proxy_token:
-        proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}:@", 1)
+        proxy = proxy.replace("://", f"://ale:{quote(request.proxy_token, safe='')}@", 1)
     return {
         "HTTP_PROXY": proxy,
         "HTTPS_PROXY": proxy,

@@ -86,8 +86,8 @@ Two host-side services, one token:
 
 Both authenticate the same per-episode token and share one session registry. The Gateway
 reads it wherever the dialect's clients send their key, such as a bearer header or the
-dialect's own key header; standard proxy clients send it through Basic proxy
-authentication.
+dialect's own key header; standard proxy clients send it as the password of Basic proxy
+authentication, since some send no credentials without one.
 
 The Gateway forwards only calls it records and that leave nothing stored with the
 provider:

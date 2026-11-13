@@ -1341,10 +1341,10 @@ def test_allowlist_proxy_is_injected_only_for_sealed_agent_commands() -> None:
     sandbox._sealed = True  # type: ignore[attr-defined]
     asyncio.run(sandbox.exec(["true"], identity=Identity.AGENT))
     assert sandbox._client.env == {  # type: ignore[attr-defined]
-        "HTTP_PROXY": "http://episode-token:@172.30.0.1:9443",
-        "HTTPS_PROXY": "http://episode-token:@172.30.0.1:9443",
-        "http_proxy": "http://episode-token:@172.30.0.1:9443",
-        "https_proxy": "http://episode-token:@172.30.0.1:9443",
+        "HTTP_PROXY": "http://ale:episode-token@172.30.0.1:9443",
+        "HTTPS_PROXY": "http://ale:episode-token@172.30.0.1:9443",
+        "http_proxy": "http://ale:episode-token@172.30.0.1:9443",
+        "https_proxy": "http://ale:episode-token@172.30.0.1:9443",
         "NO_PROXY": "172.30.0.1,localhost,127.0.0.1",
     }
 
