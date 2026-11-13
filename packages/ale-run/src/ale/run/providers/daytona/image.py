@@ -32,7 +32,8 @@ from pathlib import Path
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.ids import content_hash
-from ale.run.images import resolve_loaded_image
+from ale.run.images import acquire_lock, resolve_loaded_image
+from ale.run.process import run
 from ale.run.providers.daytona.api import DaytonaApi
 from ale.run.sources import cache_root
 
@@ -254,12 +255,7 @@ class ImagePublisher:
         local = self._locks.setdefault(key, asyncio.Lock())
         async with local:
             with record.with_suffix(".lock").open("a") as handle:
-                while True:
-                    try:
-                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except BlockingIOError:
-                        await asyncio.sleep(0.1)
+                await acquire_lock(handle)
                 try:
                     yield
                 finally:
@@ -305,25 +301,4 @@ async def _docker(
     stdin: bytes | None = None,
     timeout: float = 300,
 ) -> tuple[int, str, str]:
-    process = await asyncio.create_subprocess_exec(
-        "docker",
-        *argv,
-        stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=environment,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(stdin), timeout)
-    except (TimeoutError, asyncio.CancelledError) as error:
-        if process.returncode is None:
-            process.kill()
-        await process.wait()
-        if isinstance(error, TimeoutError):
-            raise ProviderStartError(f"docker {argv[0]} timed out after {timeout:g}s") from None
-        raise
-    return (
-        process.returncode or 0,
-        stdout.decode("utf-8", "replace"),
-        stderr.decode("utf-8", "replace"),
-    )
+    return await run("docker", *argv, env=environment, stdin=stdin, timeout=timeout)

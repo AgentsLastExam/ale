@@ -69,7 +69,8 @@ from ale.core.sandbox import (
 from ale.core.taskspec import NetworkMode, OperatingSystem
 from ale.run import ale_image, guestd
 from ale.run.framework import with_framework
-from ale.run.images import resolve_container_image, resolve_prepared_container_image
+from ale.run.images import acquire_lock, resolve_container_image, resolve_prepared_container_image
+from ale.run.process import run
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
@@ -129,21 +130,7 @@ GATEWAY_CHAIN = "ALE_GATEWAY"
 
 
 async def _run(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
-    except (TimeoutError, asyncio.CancelledError):
-        if proc.returncode is None:
-            proc.kill()
-        await proc.wait()
-        raise
-    return (
-        proc.returncode or 0,
-        stdout.decode("utf-8", "replace"),
-        stderr.decode("utf-8", "replace"),
-    )
+    return await run(*argv, timeout=timeout)
 
 
 def _port_of(url: str | None) -> str:
@@ -819,12 +806,7 @@ class FirecrackerProvider(Provider):
         directory = self.disk_dir / key
         self.disk_dir.mkdir(parents=True, exist_ok=True)
         with (self.disk_dir / f"{key}.lock").open("a") as lock:
-            while True:
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    await asyncio.sleep(0.5)
+            await acquire_lock(lock)
             try:
                 if not (directory / DISK_RECORD).is_file():
                     await self._convert(framed, directory)

@@ -29,6 +29,7 @@ from ale.core.sandbox import PreparedTaskImage, Provider
 from ale.core.task import Task
 from ale.core.taskspec import ImageKind, OperatingSystem
 from ale.core.verdict import Rewards
+from ale.run.process import run
 from ale.run.providers import ProviderRegistry
 from ale.run.task_images import prepare_task_image_result, prepare_verifier_image_result
 from ale.run.tasksets.manifest import TaskFolder
@@ -90,12 +91,10 @@ def _built(inputs: ImageInputs) -> bool:
 
 async def _size(image: PreparedTaskImage) -> int:
     if image.kind is ImageKind.CONTAINER:
-        process = await asyncio.create_subprocess_exec(
-            "docker", "image", "inspect", "--format", "{{.Size}}", image.runtime_ref,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )  # fmt: skip
-        out, _ = await process.communicate()
-        return int(out.strip() or 0) if process.returncode == 0 else 0
+        code, out, _ = await run(
+            "docker", "image", "inspect", "--format", "{{.Size}}", image.runtime_ref, timeout=30
+        )
+        return int(out.strip() or 0) if code == 0 else 0
     disk = Path(image.runtime_ref)
     # A macOS image is named in Tart's own store, not by a path.
     return disk.stat().st_size if disk.is_file() else 0

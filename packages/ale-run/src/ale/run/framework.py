@@ -67,12 +67,15 @@ from ale.core.sandbox import PreparedTaskImage
 from ale.core.taskspec import OperatingSystem
 from ale.run import ale_image, guestd
 from ale.run.images import (
+    acquire_lock,
     base_layer,
     chain_mounts,
     finished_layer,
     record_layer,
     remove_disk,
+    valid_qcow2,
 )
+from ale.run.process import run
 from ale.run.sources import cache_root
 
 __all__ = [
@@ -310,7 +313,7 @@ async def with_framework(image: str, *, user: str, vm: bool = False) -> str:
     root = cache_root() / "framework"
     root.mkdir(parents=True, exist_ok=True)
     with (root / f"{digest}.lock").open("a") as lock:
-        await _acquire(lock)
+        await acquire_lock(lock)
         try:
             built = await _inspect(tag, missing_ok=True)
             if built and (built.get("Labels") or {}).get(LABEL) == identity:
@@ -351,7 +354,7 @@ async def framed_disk(
     carried = disk.with_suffix(".carried")
     source = Path(image.runtime_ref)
     with disk.with_suffix(".lock").open("a") as lock:
-        await _acquire(lock)
+        await acquire_lock(lock)
         try:
             if (layer := await finished_layer(disk)) is not None:
                 return _with_disk(image, disk, layer), True
@@ -381,7 +384,7 @@ async def framed_disk(
                     user=user,
                     builder=MATERIALIZER_IMAGE,
                 )
-                if not await _valid_qcow2(partial):
+                if not await valid_qcow2(partial):
                     raise ProviderStartError("framing produced no valid qcow2")
             except BaseException:
                 partial.unlink(missing_ok=True)
@@ -701,22 +704,6 @@ async def _builder_identity() -> str:
     return (await _inspect(MATERIALIZER_IMAGE))["Id"]
 
 
-async def _valid_qcow2(path: Path) -> bool:
-    if not path.is_file():
-        return False
-    code, _, _ = await _run("qemu-img", "check", "-q", str(path), timeout=300)
-    return code == 0
-
-
-async def _acquire(handle) -> None:  # type: ignore[no-untyped-def]
-    while True:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
-        except BlockingIOError:
-            await asyncio.sleep(0.1)
-
-
 async def _in_container(*argv: str, timeout: float) -> tuple[int, str, str]:
     """``docker run --rm`` that ends with this call: killing the client alone would leave
     the container running, still writing into files this process has given up."""
@@ -730,20 +717,4 @@ async def _in_container(*argv: str, timeout: float) -> tuple[int, str, str]:
 
 
 async def _run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
-    process = await asyncio.create_subprocess_exec(
-        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
-    except (TimeoutError, asyncio.CancelledError) as error:
-        if process.returncode is None:
-            process.kill()
-        await process.wait()
-        if isinstance(error, TimeoutError):
-            raise ProviderStartError(f"{' '.join(argv[:3])} timed out after {timeout:g}s") from None
-        raise
-    return (
-        process.returncode or 0,
-        stdout.decode("utf-8", "replace"),
-        stderr.decode("utf-8", "replace"),
-    )
+    return await run(*argv, timeout=timeout)

@@ -14,7 +14,7 @@ import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TextIO
+from typing import Literal
 
 from ale.core.errors import (
     AleError,
@@ -43,7 +43,14 @@ from ale.run.framework import (
     windows_framework_identity,
     with_framework,
 )
-from ale.run.images import finished_layer, remove_disk, resolve_loaded_image
+from ale.run.images import (
+    acquire_lock,
+    finished_layer,
+    remove_disk,
+    resolve_loaded_image,
+    valid_qcow2,
+)
+from ale.run.process import run
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.fleet import FleetProvider
 from ale.run.providers.orchard import OrchardProvider, OrchardSandbox
@@ -103,25 +110,7 @@ async def _stage[T](name: str, operation: Awaitable[T]) -> T:
 
 
 async def _run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
-    process = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
-    except (TimeoutError, asyncio.CancelledError) as error:
-        if process.returncode is None:
-            process.kill()
-        await process.wait()
-        if isinstance(error, TimeoutError):
-            raise ProviderStartError(f"{' '.join(argv[:3])} timed out after {timeout:g}s") from None
-        raise
-    return (
-        process.returncode or 0,
-        stdout.decode("utf-8", "replace"),
-        stderr.decode("utf-8", "replace"),
-    )
+    return await run(*argv, timeout=timeout)
 
 
 def _task_folder(task: Task) -> TaskFolder:
@@ -428,7 +417,7 @@ async def _prepare_local(
     root.mkdir(parents=True, exist_ok=True)
     record = root / f"{key.removeprefix('sha256:')}.json"
     with record.with_suffix(".lock").open("a") as lock:
-        await _acquire_lock(lock)
+        await acquire_lock(lock)
         try:
             found = await _recorded(record, source=source, source_digest=source_digest)
             reused = found is not None
@@ -598,7 +587,7 @@ async def _prepare_windows_image(
     # The build VM's overlay, kept as a layer on the base: the Task's layer.
     layer = root / f"{key.removeprefix('sha256:')}.qcow2"
     with layer.with_suffix(".lock").open("a+") as lock:
-        await _acquire_lock(lock)
+        await acquire_lock(lock)
         try:
             identity = await finished_layer(layer)
             reused = identity is not None
@@ -681,7 +670,7 @@ async def _prepare_macos_image(
     root = cache_root() / "macos-builds"
     root.mkdir(parents=True, exist_ok=True)
     with (root / f"{image.runtime_ref}.lock").open("a+") as lock:
-        await _acquire_lock(lock)
+        await acquire_lock(lock)
         try:
             try:
                 return await provider.prepare_image(image), True
@@ -956,9 +945,9 @@ async def _materialize_vm_with_status(
     lock_path.touch(exist_ok=True)
 
     with lock_path.open("r+") as lock:
-        await _acquire_lock(lock)
+        await acquire_lock(lock)
         try:
-            reused = await _valid_qcow2(disk)
+            reused = await valid_qcow2(disk)
             if not reused:
                 await remove_disk(disk)
                 await _materialize(build.runtime_ref, disk)
@@ -1047,29 +1036,13 @@ async def _materialize(runtime_ref: str, disk: Path) -> None:
         if code != 0:
             raise ProviderStartError(f"VM materialization failed: {stderr.strip()}")
         candidate = output_dir / "disk.qcow2"
-        if not await _valid_qcow2(candidate):
+        if not await valid_qcow2(candidate):
             raise ProviderStartError("VM materializer produced no valid qcow2")
         os.replace(candidate, disk)
     finally:
         if container:
             await _run("docker", "rm", "-f", container, timeout=60)
         shutil.rmtree(temporary, ignore_errors=True)
-
-
-async def _valid_qcow2(path: Path) -> bool:
-    if not path.is_file():
-        return False
-    code, _, _ = await _run("qemu-img", "check", "-q", str(path), timeout=300)
-    return code == 0
-
-
-async def _acquire_lock(handle: TextIO) -> None:
-    while True:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
-        except BlockingIOError:
-            await asyncio.sleep(0.05)
 
 
 def _materials(value: object) -> tuple[str, ...]:

@@ -793,7 +793,7 @@ async def test_unchanged_vm_derivation_materializes_once_under_concurrency(
         await asyncio.sleep(0.02)
         disk.write_bytes(b"qcow2")
 
-    monkeypatch.setattr("ale.run.task_images._valid_qcow2", valid)
+    monkeypatch.setattr("ale.run.task_images.valid_qcow2", valid)
     monkeypatch.setattr("ale.run.task_images._materialize", materialize)
     first, second = await asyncio.gather(
         _materialize_vm(_vm_build(), source="solver-local"),
@@ -836,7 +836,7 @@ async def test_vm_materialization_publishes_only_valid_output_and_cleans_tempora
         return path.read_bytes() == b"valid" if path.is_file() else False
 
     monkeypatch.setattr("ale.run.task_images._run", run)
-    monkeypatch.setattr("ale.run.task_images._valid_qcow2", valid)
+    monkeypatch.setattr("ale.run.task_images.valid_qcow2", valid)
     await _materialize("ale-vm:fixture", disk)
     assert disk.read_bytes() == b"valid"
     assert not list(tmp_path.glob(".final-*"))

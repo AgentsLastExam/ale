@@ -33,9 +33,11 @@ from ale.core.ids import content_hash
 from ale.core.sandbox import ImageRef, PreparedTaskImage, ResolvedImage
 from ale.core.taskspec import ImageKind
 from ale.run.oci import MANIFEST, Reference, Registry, retrying
+from ale.run.process import run
 from ale.run.sources import cache_root
 
 __all__ = [
+    "acquire_lock",
     "base_layer",
     "chain_identity",
     "chain_mounts",
@@ -56,6 +58,7 @@ __all__ = [
     "resolve_registry_reference",
     "resolve_vm_image",
     "set_parent",
+    "valid_qcow2",
 ]
 
 #: A VM disk in a registry is an OCI artifact of this type. Its layers are the standalone
@@ -101,31 +104,22 @@ def _select_repo_digest(declared: str, repo_digests: list[str]) -> str:
     raise ProviderStartError(f"docker returned no immutable identity for {declared}")
 
 
-async def _acquire_lock(handle: TextIO) -> None:
+async def acquire_lock(handle: TextIO) -> None:
+    """Wait for an exclusive lock on an open lock file without blocking the event loop.
+
+    Whatever prepares an image or a disk holds one, so one process, and one task of it,
+    makes each; closing the file releases it.
+    """
     while True:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
         except BlockingIOError:
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.1)
 
 
 async def _run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
-    process = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
-    except TimeoutError:
-        process.kill()
-        raise ProviderStartError(f"{' '.join(argv[:2])} timed out after {timeout:g}s") from None
-    return (
-        process.returncode or 0,
-        stdout.decode("utf-8", "replace"),
-        stderr.decode("utf-8", "replace"),
-    )
+    return await run(*argv, timeout=timeout)
 
 
 async def resolve_loaded_image(
@@ -317,10 +311,10 @@ async def resolve_vm_image(
         lock_path = root / f"{entry.name}.lock"
         lock_path.touch(exist_ok=True)
         with lock_path.open("r+") as lock:
-            await _acquire_lock(lock)
+            await acquire_lock(lock)
             try:
                 if await finished_layer(disk) != manifest.digest:
-                    if not await _valid_qcow2(disk):
+                    if not await valid_qcow2(disk):
                         await remove_disk(disk)
                         await _download(registry, manifest, disk)
                     # ALE keeps the pulled disk, so the layers built on it use it in place.
@@ -433,7 +427,7 @@ async def resolve_prepared_vm_image(image: PreparedTaskImage) -> ResolvedImage:
     if image.kind is not ImageKind.VM:
         raise ProviderStartError("QemuProvider requires a prepared VM image")
     disk = Path(image.runtime_ref)
-    if not await _valid_qcow2(disk):
+    if not await valid_qcow2(disk):
         raise ProviderStartError(f"prepared VM disk is missing or invalid: {disk}")
     if await layer_parent(disk) is not None:
         observed = await layer_identity(disk)
@@ -545,7 +539,7 @@ async def base_layer(image: PreparedTaskImage) -> Path:
     key = content_hash({"base": image.prepared_identity})
     disk = root / f"{key.removeprefix('sha256:')}.qcow2"
     with disk.with_suffix(".lock").open("a") as lock:
-        await _acquire_lock(lock)
+        await acquire_lock(lock)
         try:
             if await finished_layer(disk) == image.prepared_identity:
                 return disk
@@ -570,7 +564,7 @@ async def base_layer(image: PreparedTaskImage) -> Path:
 
 async def finished_layer(disk: Path) -> str | None:
     """The identity of a layer ALE finished making at ``disk``, or None when there is none."""
-    if not _record_path(disk).is_file() or not await _valid_qcow2(disk):
+    if not _record_path(disk).is_file() or not await valid_qcow2(disk):
         return None
     try:
         return await layer_identity(disk)
@@ -645,7 +639,8 @@ def _write_record(disk: Path, record: dict[str, object]) -> None:
     os.replace(partial, target)
 
 
-async def _valid_qcow2(path: Path) -> bool:
+async def valid_qcow2(path: Path) -> bool:
+    """Whether ``path`` is a whole qcow2 disk, as ``qemu-img check`` finds it."""
     if not path.is_file():
         return False
     code, _, _ = await _run("qemu-img", "check", "-q", str(path), timeout=300)
@@ -662,7 +657,7 @@ async def _compressed_clusters(disk: Path) -> int:
 
 async def _check_standalone_qcow2(disk: Path, label: str) -> None:
     """A qcow2 whose identity covers the whole disk: no backing or external data file."""
-    if not await _valid_qcow2(disk):
+    if not await valid_qcow2(disk):
         raise ProviderStartError(f"{label} is missing or invalid: {disk}")
     code, output, stderr = await _run("qemu-img", "info", "--output=json", str(disk))
     if code != 0:

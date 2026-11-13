@@ -55,6 +55,7 @@ from ale.run import ale_image, guestd
 from ale.run.framework import with_framework
 from ale.run.gpu import GpuLease, accepts_model, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
+from ale.run.process import run
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
@@ -124,42 +125,7 @@ async def _managed_gpu_ids() -> set[str]:
 
 
 async def _docker(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        "docker",
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        proc.kill()
-        raise ProviderStartError(
-            f"docker {' '.join(argv[:2])} timed out after {timeout:g}s"
-        ) from None
-    return (
-        proc.returncode or 0,
-        stdout.decode("utf-8", "replace"),
-        stderr.decode("utf-8", "replace"),
-    )
-
-
-async def _command(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        proc.kill()
-        raise ProviderStartError(f"{argv[0]} timed out after {timeout:g}s") from None
-    return (
-        proc.returncode or 0,
-        stdout.decode("utf-8", "replace"),
-        stderr.decode("utf-8", "replace"),
-    )
+    return await run("docker", *argv, timeout=timeout)
 
 
 def _parse_nvidia_smi(output: str) -> tuple[GpuDevice, ...]:
@@ -918,7 +884,7 @@ class DockerProvider(Provider):
     async def _host_gpus(self) -> dict[int, GpuDevice]:
         if shutil.which("nvidia-smi") is None:
             raise ProviderCapabilityError("nvidia-smi is not installed on the Docker host")
-        code, stdout, stderr = await _command(
+        code, stdout, stderr = await run(
             "nvidia-smi",
             f"--query-gpu={_HOST_NVIDIA_QUERY}",
             "--format=csv,noheader,nounits",

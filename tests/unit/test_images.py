@@ -21,8 +21,8 @@ from ale.core.sandbox import ImageRef, PreparedTaskImage
 from ale.core.taskspec import ImageKind
 from ale.run.cli.main import app
 from ale.run.images import (
-    _acquire_lock,
     _select_repo_digest,
+    acquire_lock,
     base_layer,
     chain_identity,
     chain_mounts,
@@ -70,7 +70,7 @@ def test_async_lock_wait_does_not_block_the_event_loop(tmp_path: Path) -> None:
     async def exercise() -> None:
         with path.open("r+") as held, path.open("r+") as waiting:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            task = asyncio.create_task(_acquire_lock(waiting))
+            task = asyncio.create_task(acquire_lock(waiting))
             await asyncio.sleep(0.02)
             assert not task.done()
             fcntl.flock(held, fcntl.LOCK_UN)

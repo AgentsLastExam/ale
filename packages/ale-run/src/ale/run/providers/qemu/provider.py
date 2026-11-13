@@ -75,6 +75,7 @@ from ale.run.images import (
     resolve_vm_image,
     set_parent,
 )
+from ale.run.process import run
 from ale.run.providers.desktop import require_resolution
 from ale.run.providers.docker.provider import only_vanished
 from ale.run.providers.privileges import set_elevation, verify_identities
@@ -262,21 +263,7 @@ async def _connect(host_port: int, token: str) -> GuestClient:
 
 
 async def _run(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
-    except (TimeoutError, asyncio.CancelledError):
-        if proc.returncode is None:
-            proc.kill()
-        await proc.wait()
-        raise
-    return (
-        proc.returncode or 0,
-        stdout.decode("utf-8", "replace"),
-        stderr.decode("utf-8", "replace"),
-    )
+    return await run(*argv, timeout=timeout)
 
 
 _WINDOWS_ACL = """
