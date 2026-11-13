@@ -242,6 +242,7 @@ async def test_a_snapshot_continuation_boots_a_new_solver_and_claims_it(tmp_path
     sandbox = SimpleNamespace(
         read_file=read_file,
         write_file=write_file,
+        request=_request(),
         resolved_image=None,
         allocation=None,
         agent_user="user",

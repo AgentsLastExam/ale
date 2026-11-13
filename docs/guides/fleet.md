@@ -105,3 +105,30 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/org.agentslastexam.ale.fl
 After an engine update that changes the framer, stop the Orchard daemon
 (`sudo launchctl bootout system/org.agentslastexam.ale.orchard`) and run setup from a login
 once more, since only then can sudo ask for the password.
+
+## Run on the Fleet
+
+Select the Fleet for the image kinds it should serve, in a run configuration or with
+`--set`:
+
+```toml
+[container]
+provider = "fleet"
+
+[vm]
+provider = "fleet"
+
+[fleet]
+url = "http://CONTROL:7470"
+```
+
+```bash
+uv run ale run TASK --agent claude-code --set container.provider=fleet --set fleet.url=http://CONTROL:7470
+```
+
+The Run prepares no image itself: each Node prepares the images it runs, so the Run's
+machine needs neither Docker nor KVM for the kinds it sends to the Fleet. It sends a Node a
+Task's build context the first time a Sandbox there needs the image. Its Gateway stays on
+its own machine; Nodes reach it through the tunnel the Run opens to each, so the Run's
+machine accepts no connection from them. A Node the Run cannot reach is refused back to the
+control plane, and the Run uses it no more.

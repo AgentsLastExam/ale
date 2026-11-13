@@ -259,8 +259,8 @@ Windows 10 has no public ISO build path in ALE. The current base starts from the
 `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1` recipe
 installs and pins ALE's cross-platform components, and `compact.sh` validates the
 resulting qcow2 and rewrites it uncompressed. Episodes always cold-boot a fresh overlay,
-over a retention snapshot when they continue one. ALE creates no ready snapshot, warm pool,
-or environment server.
+over a retention snapshot when they continue one. ALE creates no ready snapshot or warm pool;
+the [Fleet](fleet.md) places Sandboxes on other machines but starts none before a request.
 
 Windows Task preparation boots a temporary VM whose disk is a framed layer on the resolved
 base, stages only `environment/` less `setup/`, and executes `build.ps1` there with network

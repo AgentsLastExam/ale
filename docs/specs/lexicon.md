@@ -9,6 +9,7 @@ Normative. Every term below has exactly one meaning.
 | **Fleet** | The machines one control plane pools, and the control plane that places Sandboxes on them; [Fleet](fleet.md). | not a warm pool or an environment server: it starts no Sandbox before a request |
 | **Node** | One machine that offers its Sandbox capacity to the Fleet. | not the Host that runs a Run and its Gateway, nor a worker of Orchard |
 | **Node agent** | The process on a Node that registers it, drives its Providers and holds its Sandboxes' leases. | never a scheduler: it creates only what the control plane granted |
+| **FleetProvider** | The Provider through which a Run's Sandboxes run on the Fleet (`fleet`). | not a Node's own Provider, which the node agent drives |
 | **Sandbox profile** | One combination of Provider, kind, operating system and architecture a Node can start, with its capabilities. | not independent lists of systems and architectures |
 | **Model provider** | The vendor whose API the Gateway or a Judge calls, named by `gateway.provider` or a Judge's `provider`. It selects `ALE_<PROVIDER>_API_KEY` and `ALE_<PROVIDER>_BASE_URL`. | never a Sandbox Provider |
 | **Episode protocol** | The administration layer that turns one Task into one Episode: provision, setup, agent, verify, teardown. | not selected or replaced by a Task |

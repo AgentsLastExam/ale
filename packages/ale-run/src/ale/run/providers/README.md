@@ -9,6 +9,7 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 | `firecracker.py` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
 | `daytona.py` | Daytona cloud container | immutable OCI image identity, pushed by digest |
 | `orchard.py` | macOS VM on Orchard/Tart | digest-pinned OCI image, or a local image `build.sh` built |
+| `fleet.py` | a Sandbox of any of these on a Fleet Node ([Fleet](../../../../../../docs/specs/fleet.md)) | what the Node's Provider takes; each Node prepares its own images |
 
 `daytona_api.py` is its REST client and `daytona_image.py` adapts and publishes images.
 `firecracker_init.py` is the init every microVM boots; it runs in the guest.
@@ -34,6 +35,7 @@ serves it on.
 | Firecracker | As QEMU, from the guest's tap device in the runner |
 | Daytona | `guestd/tunnel.py` listens at 7412 on the sandbox's loopback |
 | Orchard | A relay the Provider starts as root at boot listens at `127.0.0.1:7412` in the VM and connects to the Gateway's port at the Mac, the VM's default IPv4 route; it lives until the VM is deleted |
+| Fleet | The Node's Provider's own route, to the port where the node agent listens for the Run; the agent carries each connection over the Run's tunnel to its Gateway |
 
 ## Snapshots
 

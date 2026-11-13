@@ -29,6 +29,7 @@ from ale.run.fleet.protocol import (
     NodeDeclaration,
     RefusedRequest,
     SandboxStatus,
+    StartReport,
 )
 
 __all__ = ["control_app", "serve"]
@@ -187,6 +188,10 @@ class _Api:
         refusal = await _body(request, RefusedRequest)
         return _json(self.control.refused(request.match_info["id"], refusal))
 
+    async def report(self, request: web.Request) -> web.Response:
+        self.control.report(request.match_info["id"], await _body(request, StartReport))
+        return web.Response(status=204)
+
     async def release(self, request: web.Request) -> web.Response:
         return _json(self.control.release(request.match_info["id"]))
 
@@ -223,6 +228,7 @@ def control_app(control: ControlPlane, token: str, *, loopback: bool = False) ->
             web.get("/v1/sandboxes/{id}", api.placement),
             web.post("/v1/sandboxes/{id}/refused", api.refused),
             web.post("/v1/sandboxes/{id}/release", api.release),
+            web.post("/v1/sandboxes/{id}/report", api.report),
             web.post("/v1/sandboxes/{id}/destroy", api.destroy),
             web.post("/v1/runs/{run}/cancel", api.cancel),
             web.get("/v1/events", api.events),

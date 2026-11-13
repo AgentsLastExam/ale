@@ -345,6 +345,8 @@ class ResourceAllocation(BaseModel):
     runtime: str | None = None
     """The runtime that ran a container Sandbox, as Docker reports it: ``runc``, or
     ``io.containerd.kata.v2`` for a Kata microVM. None where the Provider has no choice."""
+    node: str | None = None
+    """For a Sandbox a Fleet ran, the Node and the Node's Provider, as ``<node>/<provider>``."""
     desktop_resolution: DesktopResolution | None = None
     """The desktop's size as the guest reported it when the Provider started and checked the
     desktop; None for a sandbox whose desktop it did not start."""
