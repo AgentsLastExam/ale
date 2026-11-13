@@ -42,7 +42,7 @@ from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
 from ale.run.fleet.protocol import RunPlan
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import Limits
+from ale.run.gateway.session import Limits, SessionRegistry
 from ale.run.harnesses.antigravity_cli import AntigravityCliHarness
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
@@ -269,9 +269,8 @@ async def _run_one(
     run_id = run_id or uuid.uuid4().hex[:8]
     run_dir = runs_dir / run_id
     gateway = None
-    proxy = None
     limits = None
-    gateway_url, proxy_url = "", ""
+    gateway_url = ""
     needs_model = settings.agent.name not in {"oracle", "nop"}
 
     if needs_model:
@@ -302,11 +301,9 @@ async def _run_one(
                 for key, value in settings.gateway.limits.model_dump().items()
             }
         )
-        if any(task.spec.network.allowed_hosts for task in tasks):
-            proxy = EgressProxy(gateway.sessions, host=_gateway_host())
-            proxy_url = await proxy.start()
     elif (gateway := await _judge_gateway(settings)) is not None:
         gateway_url = gateway.base_url
+    proxy, sessions = await _egress_proxy(tasks, gateway)
 
     profile = authentication.profile_slot_id or "none"
     typer.echo(
@@ -349,6 +346,7 @@ async def _run_one(
                 gateway_url=gateway_url,
                 model=settings.agent.model,
                 gateway=gateway,
+                session_registry=sessions,
                 limits=limits,
                 # What the Task and selected Harness declared, and nothing else: the
                 # proxy refuses the rest, so the agent cannot widen its own reach.
@@ -356,7 +354,7 @@ async def _run_one(
                 seed=settings.seed,
                 collect_artifacts=settings.artifacts.collect == "host",
                 provenance=inputs,
-                proxy_url=proxy_url,
+                proxy_url=proxy.url if proxy is not None else "",
                 agent_resources=agent_resources,
                 episode_id=episode_id,
                 phase_callback=lambda phase: ledger.update_phase(episode_id, phase.value),
@@ -868,7 +866,9 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
 
     gateway = await _judge_gateway(settings)
     gateway_url = gateway.base_url if gateway is not None else ""
+    proxy = None
     try:
+        proxy, sessions = await _egress_proxy(tasks, gateway)
         run_id = f"validate-{uuid.uuid4().hex[:8]}"
         run_dir = runs_dir / run_id
         ledger = Ledger(run_dir)
@@ -935,6 +935,8 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                             seed=settings.seed,
                             collect_artifacts=settings.artifacts.collect == "host",
                             allowed_hosts=frozenset(task.spec.network.allowed_hosts),
+                            proxy_url=proxy.url if proxy is not None else "",
+                            session_registry=sessions,
                             provenance=inputs,
                             phase_callback=lambda phase, current=episode_id: ledger.update_phase(
                                 current, phase.value
@@ -993,6 +995,8 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
         return 0 if failures == 0 else EXIT_SOME_FAILED
     finally:
         await providers.close()
+        if proxy is not None:
+            await proxy.stop()
         if gateway is not None:
             await gateway.stop()
 
@@ -1035,6 +1039,23 @@ async def _judge_gateway(settings: RunConfig) -> Gateway | None:
     gateway = Gateway(host=_gateway_host())
     await gateway.start()
     return gateway
+
+
+async def _egress_proxy(
+    tasks: list[ManifestTask], gateway: Gateway | None
+) -> tuple[EgressProxy | None, SessionRegistry | None]:
+    """The egress proxy when a Task declares hosts, and the sessions only it serves.
+
+    The oracle meets the agent's network, allowlist included, so the proxy starts whether
+    or not anything calls a model. With a Gateway it authenticates the Gateway's sessions;
+    without one, the episodes open theirs in a registry of the proxy's own.
+    """
+    if not any(task.spec.network.allowed_hosts for task in tasks):
+        return None, None
+    registry = gateway.sessions if gateway is not None else SessionRegistry()
+    proxy = EgressProxy(registry, host=_gateway_host())
+    await proxy.start()
+    return proxy, None if gateway is not None else registry
 
 
 def _resolve_variables(tasks: list[ManifestTask], settings: RunConfig, *, oracle: bool) -> None:
