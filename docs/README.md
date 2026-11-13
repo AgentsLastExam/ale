@@ -21,6 +21,7 @@ This directory is the maintained description of ALE.
 | Trust boundaries and guarantees | [specs/security.md](specs/security.md) |
 | Develop the engine | [guides/development.md](guides/development.md) |
 | Configure subscription login | [guides/subscription-auth.md](guides/subscription-auth.md) |
+| Run Sandboxes on a Fleet of machines | [guides/fleet.md](guides/fleet.md) |
 | Run episodes on Daytona | [guides/daytona.md](guides/daytona.md) |
 
 Living specifications describe what is true now and, briefly, why; superseded

@@ -123,3 +123,45 @@ macOS VM that is shutting down still counts against its Mac.
   Sandbox is not moved: whether its episode runs again elsewhere is the Run's retry policy.
 - **Restarts.** The ledger is written through on every change, so a restarted control plane
   resumes where it stopped and gives every Node its timeout to check in again.
+
+## Node agent
+
+`ale fleet node` lends a machine's Providers to the Fleet. It drives the very Provider and
+Sandbox objects a local Run would, so every guarantee of the
+[Provider contract](sandbox-image.md#provider-contract) holds on a Node as it does on the
+Run's own machine; the agent only carries the calls.
+
+- **Creation.** The agent creates a Sandbox only on a grant that names this Node and whose
+  demand matches the request's kind, system, network mode and resources, only from the image
+  this Node prepared for the grant's image key, and only when its own count of what it holds
+  has room. A refusal names the Node's reason, and the Run asks the control plane for another
+  Node. Asking again for the same Sandbox joins the creation under way.
+- **The Sandbox API** mirrors the Sandbox contract. A command streams its output while it
+  runs and is cancelled in the Sandbox when its caller goes away. A Run's directory arrives
+  as a tar stream that keeps its links, and the Node's Sandbox uploads it, so upload
+  semantics stay the guest service's.
+- **Leases.** Each Run renews its Sandboxes' leases with the agent. A Sandbox whose lease ran
+  out is destroyed, and a stopping agent destroys every Sandbox it holds, since a restarted
+  agent has a new boot ID and could not drive them. An agent that crashes leaves its
+  Sandboxes to the Provider, as a crashed Run leaves its own.
+- **Images.** The agent prepares every image it serves itself, through the very preparation
+  a local Run uses: it pulls bases from their registries, builds a container Task's image,
+  materializes a Linux VM disk, and builds a Windows Task's layer on its own copy of the base;
+  Orchard pulls a macOS image by its reference. The Run sends only what that needs: the
+  image's inputs (the Task's specification and which of its images, or a bare reference) and,
+  for an image built from the Task folder, its build context, `environment/` without `setup/`
+  or `tests/` for a verifier built from `tests/Dockerfile`. The agent keeps the context and
+  the image it prepared under the image's key and lists them in its heartbeat. Like a local
+  Run, it runs the preparation once per Run, which finds its own caches and so takes seconds
+  for an image it built before; within a Run it checks the image is still there each time
+  it hands it out.
+  Preparing costs a Node what it costs a local Run, about five minutes for a container build
+  or a Windows layer, once per Task and Node, and placement keeps a Task's episodes on the
+  Nodes that hold its image. Sending prepared images instead would cost the Run's uplink once
+  per Node, and for a layered Windows image its 16 GiB base too.
+- **Gateway tunnel.** A Node's Provider points a Sandbox at its Gateway as it would on the
+  Run's own machine: at a port on the Node, where the agent listens for that Run. The agent
+  carries each connection over one WebSocket the Run opened to it, to the Run's Gateway or
+  egress proxy; the Node names only an index into the Run's own list of addresses, so it
+  cannot make the Run connect anywhere else. The Run opens the connection, since a Run's
+  machine accepts none ([Network](#network)).

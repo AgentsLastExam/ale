@@ -350,3 +350,139 @@ class FakeQemuImg:
             else:
                 positional.append(argument)
         return options, positional
+
+
+class MemorySandbox(Sandbox):
+    """A Sandbox held in memory: commands echo their arguments, files live in a dict."""
+
+    def __init__(self, provider: MemoryProvider, request: SandboxRequest) -> None:
+        from ale.core.sandbox import ResolvedImage, ResourceAllocation
+
+        image = request.prepared_image
+        super().__init__(
+            sandbox_id=request.episode_id,
+            request=request,
+            resolved_image=ResolvedImage(
+                kind=image.kind,
+                prepared_identity=image.prepared_identity,
+                observed_identity=image.prepared_identity,
+                observed_ref=image.runtime_ref,
+            ),
+            allocation=ResourceAllocation(
+                cpus=request.resources.cpus,
+                memory_mb=request.resources.memory_mb,
+                sudo=request.sudo,
+                network_mode=request.network.mode,
+                provider=provider.name,
+            ),
+            agent_user=request.user,
+            agent_home=f"/home/{request.user}",
+        )
+        self.provider = provider
+        self.files: dict[str, bytes] = {}
+        self.uploads: dict[str, dict[str, str]] = {}
+        self.egress_open = True
+        self.destroyed = False
+
+    async def exec(self, argv, *, cwd=None, env=None, timeout_sec=None, identity=None,
+                   output_sink=None):  # type: ignore[no-untyped-def]  # fmt: skip
+        import asyncio
+
+        from ale.core.sandbox import ExecResult
+
+        if argv[0] == "sleep":
+            await asyncio.sleep(float(argv[1]))
+        text = " ".join(argv)
+        if output_sink is not None:
+            for word in argv:
+                await output_sink("stdout", f"{word}\n".encode())
+        return ExecResult(exit_code=0, stdout=text, stderr=str(identity))
+
+    async def write_file(self, path, data, *, identity=None):  # type: ignore[no-untyped-def]
+        self.files[str(path)] = data
+
+    async def read_file(self, path, *, offset=0, length=None):  # type: ignore[no-untyped-def]
+        data = self.files[str(path)]
+        return data[offset:] if length is None else data[offset : offset + length]
+
+    async def list_files(self, path):  # type: ignore[no-untyped-def]
+        from ale.core.sandbox import SandboxFile
+
+        return tuple(
+            SandboxFile(path=name, size=len(data))
+            for name, data in sorted(self.files.items())
+            if name.startswith(str(path))
+        )
+
+    async def file_digest(self, path, *, length):  # type: ignore[no-untyped-def]
+        import hashlib
+
+        return "sha256:" + hashlib.sha256(self.files[str(path)][:length]).hexdigest()
+
+    async def open_egress(self) -> None:
+        self.egress_open = True
+
+    async def close_egress(self) -> None:
+        self.egress_open = False
+
+    async def upload_dir(self, source, target, *, identity=None):  # type: ignore[no-untyped-def]
+        root = Path(source)
+        self.uploads[target] = {
+            str(entry.relative_to(root)): (
+                f"-> {os.readlink(entry)}" if entry.is_symlink() else entry.read_text()
+            )
+            for entry in sorted(root.rglob("*"))
+            if entry.is_symlink() or entry.is_file()
+        }
+
+    async def screenshot(self) -> bytes:
+        return b"\x89PNG fake"
+
+    async def destroy(self) -> None:
+        if not self.destroyed:
+            self.destroyed = True
+            self.provider.destroyed.append(self.sandbox_id)
+
+
+class MemoryProvider(Provider):
+    """A Provider of :class:`MemorySandbox`, recording what it was asked for."""
+
+    def __init__(self, name: str = "docker", *, create_delay: float = 0.0) -> None:
+        self.name = name
+        self.create_delay = create_delay
+        self.requests: list[SandboxRequest] = []
+        self.sandboxes: list[MemorySandbox] = []
+        self.destroyed: list[str] = []
+
+    def capabilities(self):  # type: ignore[no-untyped-def]
+        from ale.core.sandbox import Capabilities
+
+        return Capabilities(
+            operating_systems=frozenset({OperatingSystem.LINUX}),
+            gui=True,
+            network_modes=frozenset(NetworkMode),
+        )
+
+    async def preflight(self) -> None:
+        return None
+
+    async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
+        if isinstance(image, PreparedTaskImage):
+            return image
+        return PreparedTaskImage(
+            kind=image.kind,
+            source="external-ref",
+            input_identity="sha256:" + "0" * 64,
+            runtime_ref=image.reference,
+            prepared_identity="sha256:" + "0" * 64,
+            resolved_reference=image.reference,
+        )
+
+    async def create(self, request: SandboxRequest) -> Sandbox:
+        import asyncio
+
+        self.requests.append(request)
+        await asyncio.sleep(self.create_delay)
+        sandbox = MemorySandbox(self, request)
+        self.sandboxes.append(sandbox)
+        return sandbox
