@@ -1,4 +1,4 @@
-"""``ale fleet``: serve the control plane, or lend this machine to it as a Node."""
+"""``ale fleet``: serve the control plane, lend this machine to it as a Node, or operate it."""
 
 from __future__ import annotations
 
@@ -141,3 +141,125 @@ def node(
     except AleError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(4) from error
+
+
+ControlPlane = Annotated[
+    str | None,
+    typer.Option(
+        "--control-plane",
+        help="The control plane's URL. Default: $ALE_FLEET_URL.",
+        show_default=False,
+    ),
+]
+
+
+def _call(control_plane: str | None, method: str, path: str, body: dict | None = None) -> bytes:
+    """One request to the control plane's API, as the page makes it."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = (control_plane or os.environ.get("ALE_FLEET_URL", "")).rstrip("/")
+    if not url:
+        typer.echo("name the control plane with --control-plane or ALE_FLEET_URL", err=True)
+        raise typer.Exit(2)
+    request = urllib.request.Request(
+        f"{url}{path}",
+        method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {fleet_token()}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.read()
+    except urllib.error.HTTPError as error:
+        typer.echo(f"{error.code}: {error.read().decode(errors='replace').strip()}", err=True)
+        raise typer.Exit(1) from None
+    except OSError as error:
+        typer.echo(f"the control plane at {url} is unreachable: {error}", err=True)
+        raise typer.Exit(1) from None
+
+
+@fleet_app.command("status")
+def status(
+    control_plane: ControlPlane = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Print the status document.")] = False,
+) -> None:
+    """What the Fleet holds: Nodes, the queue, Runs and Sandboxes, as the page shows them."""
+    from ale.run.fleet.status import FleetStatus
+
+    body = _call(control_plane, "GET", "/v1/status")
+    if as_json:
+        typer.echo(body.decode())
+        return
+    fleet = FleetStatus.model_validate_json(body)
+    typer.echo("NODES")
+    for node in fleet.nodes:
+        state = "offline" if not node.online else "draining" if node.draining else "online"
+        slots = (
+            f"  macOS {node.used.macos_vm_slots}/{node.total.macos_vm_slots}"
+            if node.total.macos_vm_slots
+            else ""
+        )
+        typer.echo(
+            f"  {node.name:<20} {state:<9} CPUs {node.used.cpus}/{node.total.cpus}  "
+            f"memory {node.used.memory_mb // 1024}/{node.total.memory_mb // 1024} GB{slots}  "
+            f"images {node.images}  {node.disk_free_gb} GB free  {node.address}"
+        )
+        for profile in node.profiles:
+            typer.echo(f"      {profile}")
+    if fleet.queue:
+        typer.echo("QUEUE")
+        for item in fleet.queue:
+            typer.echo(f"  {item.run_id} {item.label}: {item.waiting} waiting")
+            for reason, count in item.reasons.items():
+                typer.echo(f"      {count}: {reason}")
+    if fleet.runs:
+        typer.echo("RUNS")
+        for run in fleet.runs:
+            typer.echo(f"  {run.run_id} {run.label}")
+            for task in run.tasks:
+                typer.echo(
+                    f"      {task.task}: {task.completed} done, {task.running} running, "
+                    f"{task.waiting} waiting, {task.failed} failed, "
+                    f"{task.infrastructure} infrastructure of {task.episodes}"
+                )
+    live = [row for row in fleet.sandboxes if not row.status.final]
+    if live:
+        typer.echo("SANDBOXES")
+        for row in live:
+            lease = f"lease {row.lease_left_sec:.0f}s" if row.lease_left_sec is not None else ""
+            typer.echo(
+                f"  {row.sandbox_id:<40} {row.status:<9} {row.node or '-':<16} "
+                f"{row.run_id} {lease} {row.reason}"
+            )
+
+
+@fleet_app.command("drain")
+def drain(node: str, control_plane: ControlPlane = None) -> None:
+    """Place nothing new on a Node; what it holds runs to its end."""
+    _call(control_plane, "POST", f"/v1/nodes/{node}/drain", {"draining": True})
+    typer.echo(f"{node} is draining")
+
+
+@fleet_app.command("resume")
+def resume(node: str, control_plane: ControlPlane = None) -> None:
+    """Place Sandboxes on a drained Node again."""
+    _call(control_plane, "POST", f"/v1/nodes/{node}/drain", {"draining": False})
+    typer.echo(f"{node} takes Sandboxes again")
+
+
+@fleet_app.command("destroy")
+def destroy(sandbox: str, control_plane: ControlPlane = None) -> None:
+    """Release a Sandbox for its Run; its Node destroys it at its next heartbeat."""
+    _call(control_plane, "POST", f"/v1/sandboxes/{sandbox}/destroy")
+    typer.echo(f"{sandbox} is being destroyed")
+
+
+@fleet_app.command("cancel")
+def cancel(run: str, control_plane: ControlPlane = None) -> None:
+    """Drop every Sandbox a Run still has queued."""
+    import json
+
+    cancelled = json.loads(_call(control_plane, "POST", f"/v1/runs/{run}/cancel"))["cancelled"]
+    typer.echo(f"cancelled {cancelled} queued Sandboxes of {run}")

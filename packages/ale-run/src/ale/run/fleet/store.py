@@ -13,7 +13,14 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from ale.run.fleet.placement import Holds
-from ale.run.fleet.protocol import ImageHolding, NodeDeclaration, SandboxDemand, SandboxStatus
+from ale.run.fleet.protocol import (
+    EpisodeReport,
+    ImageHolding,
+    NodeDeclaration,
+    RunPlan,
+    SandboxDemand,
+    SandboxStatus,
+)
 
 __all__ = ["Event", "NodeRecord", "RunRecord", "SandboxRecord", "Store"]
 
@@ -87,6 +94,10 @@ class RunRecord(BaseModel):
     """When placement last gave this Run a Sandbox; the queue serves the longest-waiting first."""
     unreachable: tuple[str, ...] = ()
     """Nodes this Run could not reach; none of its Sandboxes is placed there again."""
+    plan: RunPlan | None = None
+    assignments: dict[str, tuple[str, ...]] = {}
+    """The Nodes the plan chose for each image."""
+    episodes: dict[str, EpisodeReport] = {}
 
 
 class Event(BaseModel):

@@ -57,13 +57,14 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, OperatingSystem, Resources, TaskSpec
+from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources, TaskSpec
 from ale.run.fleet.protocol import (
     PROTOCOL_VERSION,
     STDOUT,
     AcquireRequest,
     Arch,
     CreateSandbox,
+    EpisodeReport,
     ErrorBody,
     ExecCall,
     ExecDone,
@@ -72,7 +73,10 @@ from ale.run.fleet.protocol import (
     LeaseRenewal,
     Listing,
     Placement,
+    PlanItem,
+    PlanReply,
     RefusedRequest,
+    RunPlan,
     SandboxDemand,
     SandboxDescription,
     SandboxStatus,
@@ -296,6 +300,24 @@ class FleetClient:
             await self._request("POST", f"{self.url}/v1/sandboxes/{sandbox_id}/release")
         except AleError as error:
             _log.warning("could not release %s: %s", sandbox_id, error)
+
+    async def plan(self, plan: RunPlan) -> PlanReply:
+        """Send the Run's plan; the reply names the Nodes chosen for each image."""
+        body = await self._request(
+            "POST", f"{self.url}/v1/runs/{self.run_id}/plan", data=plan.model_dump_json()
+        )
+        return PlanReply.model_validate_json(body)
+
+    async def report_episode(self, episode_id: str, task: str, status: str) -> None:
+        """Tell the control plane where an episode is, for its progress pages."""
+        report = EpisodeReport(task=task, status=status)  # type: ignore[arg-type]
+        with contextlib.suppress(AleError):
+            await self._request(
+                "POST",
+                f"{self.url}/v1/runs/{self.run_id}/episodes/{episode_id}",
+                data=report.model_dump_json(),
+                timeout=30,
+            )
 
     async def report(self, sandbox_id: str, **timings: float) -> None:
         with contextlib.suppress(AleError):
@@ -573,6 +595,19 @@ class FleetProvider(Provider):
             image=image.prepared_identity,
             framework=fleet_framework_identity(),
         )
+
+    def plan_item(
+        self,
+        task: str,
+        image: PreparedTaskImage,
+        operating_system: OperatingSystem,
+        network: NetworkPolicy,
+        resources: Resources,
+        episodes: int,
+    ) -> PlanItem:
+        """One Task's line of the Run's plan."""
+        demand = self._demand(image, operating_system, network.mode, resources)
+        return PlanItem(task=task, demand=demand, episodes=episodes)
 
     async def create(self, request: SandboxRequest) -> Sandbox:
         self.accepts(request)

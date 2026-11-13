@@ -24,19 +24,35 @@ import time
 from collections.abc import Callable
 from typing import NoReturn
 
-from ale.run.fleet.placement import Choice, NodeView, Weights, choose, unservable
+from ale.run.fleet.placement import Choice, NodeView, Weights, assign, choose, unservable
 from ale.run.fleet.protocol import (
     PROTOCOL_VERSION,
     AcquireRequest,
+    AssignedNode,
+    Assignment,
+    EpisodeReport,
     Grant,
     Heartbeat,
     HeartbeatReply,
+    ImageHolding,
     NodeDeclaration,
     Placement,
+    PlanReply,
     RefusedRequest,
+    RunPlan,
     SandboxStatus,
     StartReport,
     sign_grant,
+)
+from ale.run.fleet.status import (
+    Counts,
+    FleetStatus,
+    ImageCopies,
+    NodeStatus,
+    QueueStatus,
+    RunStatus,
+    SandboxRow,
+    TaskProgress,
 )
 from ale.run.fleet.store import Event, NodeRecord, RunRecord, SandboxRecord, Store
 
@@ -225,11 +241,11 @@ class ControlPlane:
     def drain(self, name: str, draining: bool) -> None:
         node = self.nodes.get(name)
         if node is None:
-            raise FleetError(f"no Node named {name}")
+            raise UnknownSandboxError(f"no Node named {name}")
         if node.draining != draining:
             node.draining = draining
             self._store.put_node(node)
-            self._event("node.draining" if draining else "node.resumed", node=name)
+            self._event("admin.drain" if draining else "admin.resume", node=name)
         self.schedule()
 
     def views(self) -> list[NodeView]:
@@ -275,6 +291,47 @@ class ControlPlane:
         run = self.runs.get(record.run_id)
         return (*record.refused, *(run.unreachable if run is not None else ()))
 
+    def _run(self, run_id: str) -> RunRecord:
+        if run_id not in self.runs:
+            run = RunRecord(run_id=run_id, created_at=self._clock())
+            self.runs[run_id] = run
+            self._store.put_run(run)
+        return self.runs[run_id]
+
+    def plan(self, run_id: str, plan: RunPlan) -> PlanReply:
+        """Record a Run's plan and choose the Nodes each of its images goes to."""
+        run = self._run(run_id)
+        run.plan = plan
+        run.assignments = assign(
+            [(item.demand, item.episodes) for item in plan.items],
+            self.views(),
+            concurrency=plan.concurrency,
+        )
+        self._store.put_run(run)
+        episodes = sum(item.episodes for item in plan.items)
+        self._event(
+            "run.planned",
+            detail=f"{run_id} {plan.label}: {episodes} episodes, {len(plan.items)} Tasks",
+        )
+        self.schedule()
+        return PlanReply(
+            assignments=tuple(
+                Assignment(
+                    image=image,
+                    nodes=tuple(
+                        AssignedNode(name=name, address=self.nodes[name].declaration.address)
+                        for name in names
+                    ),
+                )
+                for image, names in sorted(run.assignments.items())
+            )
+        )
+
+    def report_episode(self, run_id: str, episode_id: str, report: EpisodeReport) -> None:
+        run = self._run(run_id)
+        run.episodes = run.episodes | {episode_id: report}
+        self._store.put_run(run)
+
     def acquire(self, request: AcquireRequest) -> Placement:
         now = self._clock()
         record = self.sandboxes.get(request.sandbox_id)
@@ -287,10 +344,7 @@ class ControlPlane:
             ):
                 raise FleetError(f"{request.sandbox_id} was requested with other terms")
             return self.placement(request.sandbox_id)
-        if request.run_id not in self.runs:
-            run = RunRecord(run_id=request.run_id, created_at=now)
-            self.runs[run.run_id] = run
-            self._store.put_run(run)
+        self._run(request.run_id)
         record = SandboxRecord(
             sandbox_id=request.sandbox_id,
             run_id=request.run_id,
@@ -479,6 +533,7 @@ class ControlPlane:
                         record.demand,
                         views.values(),
                         refused=self._avoided(record),
+                        assigned=self.runs[run_id].assignments.get(record.demand.image, ()),
                         prepare_sec=prepare_sec,
                         weights=self.weights,
                     )
@@ -511,4 +566,156 @@ class ControlPlane:
             node=choice.node,
             sandbox=record.sandbox_id,
             detail=f"score {choice.score:.1f}s",
+        )
+
+    # --- what operators see -----------------------------------------------------------
+
+    def status(self) -> FleetStatus:
+        now = self._clock()
+        views = {view.name: view for view in self.views()}
+        nodes = []
+        for name, record in sorted(self.nodes.items()):
+            declaration = record.declaration
+            total = declaration.resources
+            cpus, memory, slots, gpus = views[name].free()
+            gpu_total = sum(pool.count for pool in total.gpus)
+            nodes.append(
+                NodeStatus(
+                    name=name,
+                    address=declaration.address,
+                    online=record.online,
+                    draining=record.draining,
+                    seen_sec_ago=round(now - record.last_seen, 1),
+                    agent_version=declaration.agent_version,
+                    engine_commit=declaration.engine_commit[:12],
+                    platform=f"{declaration.platform.os} {declaration.platform.os_version} "
+                    f"{declaration.platform.arch}",
+                    labels=declaration.labels,
+                    profiles=tuple(
+                        f"{p.provider} {p.kind} {p.os}/{p.arch}" for p in declaration.profiles
+                    ),
+                    total=Counts(
+                        cpus=total.cpus,
+                        memory_mb=total.memory_mb,
+                        macos_vm_slots=total.macos_vm_slots,
+                        gpus=gpu_total,
+                    ),
+                    used=Counts(
+                        cpus=total.cpus - cpus,
+                        memory_mb=total.memory_mb - memory,
+                        macos_vm_slots=total.macos_vm_slots - slots,
+                        gpus=gpu_total - sum(gpus.values()),
+                    ),
+                    sandboxes=len(views[name].holds),
+                    images=len(record.images),
+                    image_bytes=sum(image.bytes for image in record.images),
+                    disk_free_gb=record.disk_free_gb,
+                )
+            )
+        recent = sorted(
+            (
+                r
+                for r in self.sandboxes.values()
+                if not r.status.final or now - (r.ended_at or now) < 3600
+            ),
+            key=lambda r: r.created_at,
+            reverse=True,
+        )[:300]
+        rows = tuple(
+            SandboxRow(
+                sandbox_id=r.sandbox_id,
+                run_id=r.run_id,
+                node=r.node,
+                status=r.status,
+                reason=r.reason,
+                episode_id=r.episode_id,
+                role=r.role,
+                age_sec=round(now - r.created_at, 1),
+                lease_left_sec=round(r.lease_expires_at - now, 1)
+                if r.lease_expires_at is not None and not r.status.final
+                else None,
+                queue_sec=r.queue_sec,
+                image_sec=r.image_sec,
+                create_sec=r.create_sec,
+            )
+            for r in recent
+        )
+        queue: dict[str, dict[str, int]] = {}
+        for r in self.sandboxes.values():
+            if r.status is SandboxStatus.QUEUED:
+                reasons = queue.setdefault(r.run_id, {})
+                reasons[r.reason or "waiting"] = reasons.get(r.reason or "waiting", 0) + 1
+        copies: dict[str, list[ImageHolding]] = {}
+        holders: dict[str, list[str]] = {}
+        for name, record in sorted(self.nodes.items()):
+            for image in record.images:
+                copies.setdefault(image.key, []).append(image)
+                holders.setdefault(image.key, []).append(name)
+        return FleetStatus(
+            nodes=tuple(nodes),
+            queue=tuple(
+                QueueStatus(
+                    run_id=run_id,
+                    label=self._label(run_id),
+                    waiting=sum(reasons.values()),
+                    reasons=reasons,
+                )
+                for run_id, reasons in sorted(queue.items())
+            ),
+            sandboxes=rows,
+            runs=tuple(
+                self._progress(run)
+                for run in sorted(self.runs.values(), key=lambda run: run.created_at, reverse=True)[
+                    :20
+                ]
+            ),
+            images=tuple(
+                ImageCopies(
+                    key=key,
+                    bytes=max(image.bytes for image in held),
+                    prepare_sec=round(sum(image.prepare_sec for image in held) / len(held), 1),
+                    nodes=tuple(holders[key]),
+                )
+                for key, held in sorted(copies.items())
+            ),
+            events=tuple(self.events(50)),
+        )
+
+    def _label(self, run_id: str) -> str:
+        run = self.runs.get(run_id)
+        return run.plan.label if run is not None and run.plan is not None else ""
+
+    def _progress(self, run: RunRecord) -> RunStatus:
+        planned = {item.task: item.episodes for item in run.plan.items} if run.plan else {}
+        counts: dict[str, dict[str, int]] = {task: {} for task in planned}
+        for report in run.episodes.values():
+            tally = counts.setdefault(report.task, {})
+            tally[report.status] = tally.get(report.status, 0) + 1
+        mine = [r for r in self.sandboxes.values() if r.run_id == run.run_id]
+
+        def mean(values: list[float | None]) -> float | None:
+            known = [value for value in values if value is not None]
+            return round(sum(known) / len(known), 1) if known else None
+
+        def progress(task: str, tally: dict[str, int]) -> TaskProgress:
+            episodes = planned.get(task, sum(tally.values()))
+            return TaskProgress(
+                task=task,
+                episodes=episodes,
+                running=tally.get("running", 0),
+                completed=tally.get("completed", 0),
+                failed=tally.get("failed", 0),
+                infrastructure=tally.get("infrastructure", 0),
+                waiting=max(episodes - sum(tally.values()), 0),
+            )
+
+        return RunStatus(
+            run_id=run.run_id,
+            label=run.plan.label if run.plan else "",
+            concurrency=run.plan.concurrency if run.plan else None,
+            tasks=tuple(progress(task, tally) for task, tally in sorted(counts.items())),
+            sandboxes=len(mine),
+            queue_sec=mean([r.queue_sec for r in mine]),
+            image_sec=mean([r.image_sec for r in mine]),
+            create_sec=mean([r.create_sec for r in mine]),
         )

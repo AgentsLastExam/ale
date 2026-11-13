@@ -36,7 +36,10 @@ __all__ = [
     "PROTOCOL_VERSION",
     "AcquireRequest",
     "Arch",
+    "AssignedNode",
+    "Assignment",
     "CreateSandbox",
+    "EpisodeReport",
     "ErrorBody",
     "ExecCall",
     "ExecDone",
@@ -52,9 +55,12 @@ __all__ = [
     "NodeDeclaration",
     "NodeResources",
     "Placement",
+    "PlanItem",
+    "PlanReply",
     "Platform",
     "RefusedRequest",
     "RosterEntry",
+    "RunPlan",
     "SandboxDemand",
     "SandboxDescription",
     "SandboxProfile",
@@ -326,6 +332,59 @@ class StartReport(BaseModel):
     """Getting the image ready on its Node: preparing it, or checking the one it holds."""
     create_sec: float | None = Field(default=None, ge=0)
     """The Node's Provider's own time to create it."""
+
+
+class PlanItem(BaseModel):
+    """One Task of a Run's plan: what its Sandboxes need and how many episodes it runs."""
+
+    model_config = _STRICT
+
+    task: str = Field(min_length=1)
+    demand: SandboxDemand
+    episodes: int = Field(ge=1)
+
+
+class RunPlan(BaseModel):
+    """Everything a Run will ask for, sent before it asks, to place images and show progress."""
+
+    model_config = _STRICT
+
+    label: str = ""
+    """What operators call the Run, such as its ALE run ID."""
+    concurrency: int = Field(ge=1)
+    items: tuple[PlanItem, ...]
+
+
+class AssignedNode(BaseModel):
+    model_config = _STRICT
+
+    name: str
+    address: str
+
+
+class Assignment(BaseModel):
+    """The Nodes a plan's image goes to, by its key; placement counts no preparation there."""
+
+    model_config = _STRICT
+
+    image: str
+    nodes: tuple[AssignedNode, ...]
+
+
+class PlanReply(BaseModel):
+    model_config = _STRICT
+
+    assignments: tuple[Assignment, ...]
+
+
+class EpisodeReport(BaseModel):
+    """Where one of a Run's episodes is, for progress pages."""
+
+    model_config = _STRICT
+
+    task: str = Field(min_length=1)
+    status: Literal["running", "completed", "failed", "infrastructure"]
+    """``infrastructure`` is a failure of the machinery, not of the agent or the Task."""
 
 
 class RefusedRequest(BaseModel):

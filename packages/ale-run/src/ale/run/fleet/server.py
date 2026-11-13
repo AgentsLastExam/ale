@@ -1,7 +1,9 @@
 """The control plane over HTTP: the API Nodes, Runs and operators call.
 
-Every route needs the Fleet token as a bearer token. The Fleet does not encrypt, so its
-ports belong on a private network; the token keeps out anything else on it.
+Every route needs the Fleet token, as a bearer token or, for the page, a cookie set by
+opening ``/?token=TOKEN`` once. The Fleet does not encrypt, so its ports belong on a private
+network; the token keeps out anything else on it. Every change an operator makes is an event
+in the ledger.
 """
 
 from __future__ import annotations
@@ -22,12 +24,15 @@ from pydantic import BaseModel, ValidationError
 
 from ale.run import __version__
 from ale.run.fleet.control import ControlPlane, FleetError, UnknownSandboxError
+from ale.run.fleet.page import render
 from ale.run.fleet.protocol import (
     PROTOCOL_VERSION,
     AcquireRequest,
+    EpisodeReport,
     Heartbeat,
     NodeDeclaration,
     RefusedRequest,
+    RunPlan,
     SandboxStatus,
     StartReport,
 )
@@ -41,6 +46,8 @@ MAX_WAIT_SEC = 30.0
 TICK_SEC = 2.0
 #: How long the control plane waits for a joining node agent to answer at its address.
 JOIN_CHECK_SEC = 10.0
+#: The browser cookie that carries the Fleet token for the page.
+COOKIE = "ale_fleet_token"
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
@@ -78,11 +85,22 @@ class _Api:
         async with self.changed:
             self.changed.notify_all()
 
+    def _valid(self, given: str) -> bool:
+        return hmac.compare_digest(given.encode(), self.token.encode())
+
     @web.middleware
     async def authorize(self, request: web.Request, handler: Handler) -> web.StreamResponse:
         given = request.headers.get("Authorization", "").removeprefix("Bearer ")
-        if not hmac.compare_digest(given.encode(), self.token.encode()):
-            raise web.HTTPUnauthorized(text="a Fleet token is required")
+        if request.path == "/" and "token" in request.query:
+            if not self._valid(request.query["token"]):
+                raise web.HTTPUnauthorized(text="that is not the Fleet token")
+            response = web.HTTPSeeOther("/")
+            response.set_cookie(COOKIE, self.token, httponly=True, samesite="Strict")
+            raise response
+        if not self._valid(given) and not self._valid(request.cookies.get(COOKIE, "")):
+            raise web.HTTPUnauthorized(
+                text="a Fleet token is required; in a browser, open /?token=TOKEN once"
+            )
         try:
             response = await handler(request)
         except UnknownSandboxError as error:
@@ -195,7 +213,37 @@ class _Api:
     async def release(self, request: web.Request) -> web.Response:
         return _json(self.control.release(request.match_info["id"]))
 
+    async def plan(self, request: web.Request) -> web.Response:
+        plan = await _body(request, RunPlan)
+        return _json(self.control.plan(request.match_info["run"], plan))
+
+    async def episode(self, request: web.Request) -> web.Response:
+        report = await _body(request, EpisodeReport)
+        self.control.report_episode(
+            request.match_info["run"], request.match_info["episode"], report
+        )
+        return web.Response(status=204)
+
     # --- operators ------------------------------------------------------------------
+
+    async def status(self, _request: web.Request) -> web.Response:
+        return _json(self.control.status())
+
+    async def page(self, _request: web.Request) -> web.Response:
+        return web.Response(text=render(self.control.status()), content_type="text/html")
+
+    async def act(self, request: web.Request) -> web.Response:
+        """One of the page's operator actions, then back to the page."""
+        kind, target, verb = (request.match_info[key] for key in ("kind", "target", "verb"))
+        if kind == "nodes" and verb in {"drain", "resume"}:
+            self.control.drain(target, verb == "drain")
+        elif kind == "sandboxes" and verb == "destroy":
+            self.control.destroy(target)
+        elif kind == "runs" and verb == "cancel":
+            self.control.cancel_run(target)
+        else:
+            raise web.HTTPNotFound()
+        raise web.HTTPSeeOther("/")
 
     async def info(self, _request: web.Request) -> web.Response:
         return _json({"protocol": PROTOCOL_VERSION, "version": __version__})
@@ -231,7 +279,12 @@ def control_app(control: ControlPlane, token: str, *, loopback: bool = False) ->
             web.post("/v1/sandboxes/{id}/report", api.report),
             web.post("/v1/sandboxes/{id}/destroy", api.destroy),
             web.post("/v1/runs/{run}/cancel", api.cancel),
+            web.post("/v1/runs/{run}/plan", api.plan),
+            web.post("/v1/runs/{run}/episodes/{episode}", api.episode),
             web.get("/v1/events", api.events),
+            web.get("/v1/status", api.status),
+            web.get("/", api.page),
+            web.post("/ui/{kind}/{target}/{verb}", api.act),
         ]
     )
 

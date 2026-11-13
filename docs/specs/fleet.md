@@ -203,3 +203,32 @@ episode protocol knows it is there.
 - **Instrumentation.** The ledger keeps, per Sandbox, its time in the queue, the time its
   Node took to get the image ready (preparing it, or checking the one it holds), and its
   Node's Provider's time to a ready Sandbox.
+
+## Run plan and progress
+
+A Run knows every Task it will run before it asks for a Sandbox, so it sends the control
+plane its **plan**: each Task's demand and episode count, and the Run's concurrency. The
+control plane assigns each image to as few Nodes as can hold the episodes of it that run at
+once, Nodes that hold the image first, then the image's fixed order of Nodes. Placing each
+episode wherever room appears first would soon have every Node prepare every image.
+Placement counts no preparation on an image's assigned Nodes, so its first Sandboxes go
+there and those Nodes prepare it. A Node prepares an image only for a Sandbox placed on it,
+whose reservation covers the build, so preparing never takes resources the ledger has not
+counted. The plan only steers placement: a Run without one is placed by score alone, and one
+the control plane cannot take is reported and the Run goes on.
+
+The Run also reports each episode as it starts and ends, completed, failed or failed by the
+infrastructure, which the control plane counts per Task. Scores, trajectories and logs stay
+in the Run's own output.
+
+## Operating
+
+The control plane serves one status document, `GET /v1/status`, and a page rendered from it
+at `/`; `ale fleet status` prints the same document. Both show Nodes (state, profiles,
+resources used of total including macOS slots, images, free disk, agent version), the queue
+with why each Sandbox waits, each Run's progress and mean start segments, the Sandboxes of
+the last hour, which Nodes prepared each image and how long it took them, and the latest
+events. An operator can drain a Node and
+resume it, destroy a Sandbox, and cancel a Run's queued Sandboxes, from the page or with
+`ale fleet drain`, `resume`, `destroy` and `cancel`; each action is an event in the ledger.
+The page needs the Fleet token once, through `/?token=`, which it keeps in a cookie.
