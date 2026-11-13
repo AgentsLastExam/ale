@@ -495,7 +495,8 @@ def cleanup(root: Path, state: dict) -> None:
         and any(not vm.name.startswith(CACHED_IMAGES) for vm in local_vms.iterdir())
     ):
         raise SetupError(
-            "Private Tart home still contains VMs; collect and delete them before cleanup"
+            "Private Tart home still contains VMs or snapshot images; collect and delete them "
+            "before cleanup"
         )
     controller = state["processes"].get("controller")
     worker = state["processes"].get("worker")

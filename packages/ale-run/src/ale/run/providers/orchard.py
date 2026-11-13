@@ -1,9 +1,10 @@
 """macOS sandboxes on the local Orchard controller and Tart worker.
 
 ``scripts/setup_macos.py`` runs both on this Mac. Every VM ALE creates is a clone of a local
-image that carries the framework (``orchard_framing``); ALE owns only the VMs it creates for
-one episode, and never adopts existing VMs or changes the images it is given. Each sandbox
-the agent works in shows the desktop its image signs the Task's account in to.
+image that carries the framework (``orchard_framing``). ALE owns only the VMs it creates,
+which last one episode unless kept; it never adopts a VM it did not create, nor changes the
+images it is given. Each sandbox the agent works in shows the desktop its image signs the
+Task's account in to.
 """
 
 from __future__ import annotations
@@ -11,14 +12,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import json
 import logging
+import os
 import re
 import uuid
 from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
+from ale.core.ids import content_hash
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     Capabilities,
@@ -32,6 +39,7 @@ from ale.core.sandbox import (
     Provider,
     ResolvedImage,
     ResourceAllocation,
+    RetainedSandbox,
     Sandbox,
     SandboxFile,
     SandboxRequest,
@@ -41,6 +49,7 @@ from ale.core.sandbox import (
 from ale.core.taskspec import NetworkMode, OperatingSystem
 from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
 from ale.run.images import resolve_registry_reference
+from ale.run.providers import orchard_client
 from ale.run.providers.desktop import require_resolution
 from ale.run.providers.orchard_client import (
     CONTROL_ACCOUNT,
@@ -54,7 +63,14 @@ from ale.run.providers.orchard_client import (
     vm_spec,
 )
 from ale.run.providers.orchard_desktop import await_desktop
-from ale.run.providers.orchard_framing import at_resolution, frame_image, framed_record
+from ale.run.providers.orchard_framing import (
+    FORGET_DISPLAYS,
+    FramedImage,
+    at_resolution,
+    frame_image,
+    framed_record,
+    remove_locks,
+)
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.transport import GuestClient
 
@@ -82,8 +98,9 @@ _ACCOUNT_HOME = (
 )
 
 # Runs as root in the VM and forwards the fixed Gateway port on its loopback to the Host's
-# Gateway until the VM is deleted. It forks only once it listens, so a port that cannot be
-# bound fails the command; it prints the bound port and the relay's process ID.
+# Gateway until the VM is deleted or a later episode stops it. It forks only once it listens,
+# so a port that cannot be bound fails the command; it prints the bound port and the relay's
+# process ID.
 _GATEWAY_RELAY = r"""
 import asyncio,os,socket,sys
 host,port,listen=sys.argv[1],int(sys.argv[2]),int(sys.argv[3])
@@ -119,6 +136,20 @@ asyncio.run(main())
 
 #: How a handle names an Orchard VM: ``orchard:<name>:<uid>``.
 HANDLE_PREFIX = "orchard:"
+#: How a handle names a snapshot: ``orchard:snapshot:<id>``.
+SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
+#: The local Tart image that holds a snapshot, before its ID.
+SNAPSHOT_IMAGE = "ale-snapshot-"
+
+# Stops the Gateway relay listening on the fixed port, as a VM a later episode continues in
+# has for the episode that kept it, and waits for the port to free.
+_STOP_GATEWAY_RELAY = f"""
+listening() {{ /usr/sbin/lsof -nP -t -iTCP@127.0.0.1:{SANDBOX_GATEWAY_PORT} -sTCP:LISTEN; }}
+pids=$(listening) || exit 0
+kill $pids
+for _ in 1 2 3 4 5 6 7 8 9 10; do listening >/dev/null || exit 0; sleep 0.5; done
+exit 1
+"""
 
 
 def _owned_vm(handle: str) -> tuple[str, str]:
@@ -126,6 +157,66 @@ def _owned_vm(handle: str) -> tuple[str, str]:
     if not handle.startswith(HANDLE_PREFIX) or not separator or not name.startswith("ale-"):
         raise ProviderCapabilityError(f"{handle!r} is not an Orchard VM handle")
     return name, uid
+
+
+@dataclass(frozen=True)
+class _Retained:
+    """A VM kept running past its episode, or a snapshot of one, as this Mac records it.
+
+    Orchard keeps no labels on a VM, so the record is how ALE knows the VM is retained,
+    and what a later episode boots or drives: the local image, and the account framing
+    found in it.
+    """
+
+    kind: Literal["keep", "snapshot"]
+    handle: str
+    episode_id: str
+    role: str
+    prepared_identity: str
+    """The Task's prepared image, which a later episode must have too."""
+    user: str
+    source: dict[str, object]
+    """The :class:`FramedImage` it boots: the framed image, or the snapshot's image."""
+
+    @property
+    def boots(self) -> FramedImage:
+        return FramedImage(**self.source)  # type: ignore[arg-type]
+
+
+def _retained_dir() -> Path:
+    return orchard_client.STATE_DIR / "retained"
+
+
+def _record_path(handle: str) -> Path:
+    return _retained_dir() / f"{hashlib.sha256(handle.encode()).hexdigest()[:32]}.json"
+
+
+def _load(path: Path) -> _Retained | None:
+    try:
+        return _Retained(**json.loads(path.read_text()))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _record(handle: str) -> _Retained | None:
+    return _load(_record_path(handle))
+
+
+def _records() -> list[_Retained]:
+    paths = sorted(_retained_dir().glob("*.json"))
+    return [record for path in paths if (record := _load(path)) is not None]
+
+
+def _remember(record: _Retained) -> None:
+    path = _record_path(record.handle)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_suffix(".partial")
+    partial.write_text(json.dumps(asdict(record)))
+    os.replace(partial, path)
+
+
+def _forget(handle: str) -> None:
+    _record_path(handle).unlink(missing_ok=True)
 
 
 class OrchardSandbox(Sandbox):
@@ -142,6 +233,7 @@ class OrchardSandbox(Sandbox):
         agent_home: str,
         allocation: ResourceAllocation,
         resolved_image: ResolvedImage,
+        source: FramedImage,
     ) -> None:
         super().__init__(
             sandbox_id=name,
@@ -157,6 +249,7 @@ class OrchardSandbox(Sandbox):
         self._file_client = file_client
         self._uid = uid
         self._owned = OwnedVM(name, uid)
+        self._source = source
         self._destroy_lock = asyncio.Lock()
         self.state = SandboxState.READY
 
@@ -317,6 +410,74 @@ class OrchardSandbox(Sandbox):
         await self._local.shut_down(self._orchard, self._owned)
         await self._local.save(self._owned, image.runtime_ref)
 
+    def _retained(
+        self,
+        kind: Literal["keep", "snapshot"],
+        handle: str,
+        source: FramedImage,
+        roles: tuple[Literal["solver", "verifier"], ...],
+        reason: str,
+    ) -> RetainedSandbox:
+        """Record what ``handle`` keeps, unless a record of it exists: a VM a later episode
+        continued in and keeps again stays recorded as the episode that first kept it."""
+        if _record(handle) is None:
+            _remember(
+                _Retained(
+                    kind=kind,
+                    handle=handle,
+                    episode_id=self.request.episode_id,
+                    role=self.request.role.value,
+                    prepared_identity=self.request.prepared_image.prepared_identity,
+                    user=self.request.user,
+                    source=asdict(source),
+                )
+            )
+        return RetainedSandbox(
+            provider=OrchardProvider.name,
+            handle=handle,
+            episode_id=self.request.episode_id,
+            roles=roles,
+            reason=reason,
+            cleanup_command=f"ale sandbox destroy {handle}",
+        )
+
+    async def retain(
+        self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
+    ) -> RetainedSandbox:
+        """Keep the VM running past its episode, holding its VM slot, for a later episode
+        to continue in; its desktop session and processes stay as they are."""
+        retained = self._retained("keep", self.handle, self._source, roles, reason)
+        await asyncio.gather(
+            self._client.close(), self._file_client.close(), return_exceptions=True
+        )
+        await self._orchard.close()
+        return retained
+
+    async def snapshot(
+        self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
+    ) -> RetainedSandbox:
+        """Shut the VM down from inside and keep its disk as a local image later VMs of the
+        same Task image and account boot from. On APFS the image copies no data.
+
+        The display mode its desktop saved is forgotten first, as framing forgets the first
+        login's, so each VM booted from it starts at its own resolution.
+        """
+        snapshot_id = self._owned.name.removeprefix("ale-")
+        image = f"{SNAPSHOT_IMAGE}{snapshot_id}"
+        forgotten = await self._orchard.exec(self._owned.name, ["sudo", "-n", *FORGET_DISPLAYS])
+        if forgotten.exit_code:
+            detail = forgotten.stderr.decode(errors="replace").strip()
+            raise ProviderStartError(f"could not forget the VM's display mode: {detail}")
+        await self._local.shut_down(self._orchard, self._owned)
+        await self._local.save(self._owned, image)
+        source = FramedImage(
+            name=image,
+            identity=content_hash({"snapshot": snapshot_id, "of": self._source.identity}),
+            agent_home=self._source.agent_home,
+            agent_uid=self._source.agent_uid,
+        )
+        return self._retained("snapshot", f"{SNAPSHOT_PREFIX}{snapshot_id}", source, roles, reason)
+
     async def destroy(self) -> None:
         async with self._destroy_lock:
             if self.state is SandboxState.DESTROYED:
@@ -326,6 +487,7 @@ class OrchardSandbox(Sandbox):
             await self._orchard.start()
             try:
                 await delete_owned(self._orchard, self._owned)
+                _forget(self.handle)
                 self.state = SandboxState.DESTROYED
                 self.release_resources()
             finally:
@@ -355,6 +517,7 @@ class OrchardProvider(Provider):
             # Framing requires the image to sign the Task's account in to a desktop.
             gui=True,
             network_modes=frozenset({NetworkMode.OPEN}),
+            snapshot=True,
         )
 
     async def preflight(self) -> None:
@@ -437,8 +600,6 @@ class OrchardProvider(Provider):
         super().accepts(request)
         if request.resources.gpus:
             raise ProviderCapabilityError("Orchard GPU allocations are not supported")
-        if request.retention != "destroy":
-            raise ProviderCapabilityError("Orchard retention is not supported; use destroy")
         if request.resources.storage_mb and request.resources.storage_mb % 1024:
             raise ProviderCapabilityError("Orchard storage_mb must be a whole GiB")
         if any(
@@ -493,12 +654,20 @@ class OrchardProvider(Provider):
         )
 
     async def _start_gateway_relay(
-        self, guest: GuestClient, host: str, request: SandboxRequest
+        self, guest: GuestClient, host: str, request: SandboxRequest, *, replace: bool = False
     ) -> None:
+        """Relay the fixed Gateway port in the VM to this request's Gateway; ``replace``
+        stops the relay an earlier episode started first."""
         assert request.gateway_url is not None
         port = urlsplit(request.gateway_url).port
         if port is None:
             raise ProviderCapabilityError(f"{request.gateway_url!r} has no explicit port to relay")
+        if replace:
+            code, _, stderr, timed_out = await guest.exec(
+                ["/bin/sh", "-c", _STOP_GATEWAY_RELAY], timeout_sec=15
+            )
+            if code or timed_out:
+                raise ProviderStartError(f"Could not stop the VM's Gateway relay: {stderr}")
         code, _, _, timed_out = await guest.exec(
             [
                 MACOS_PYTHON,
@@ -576,36 +745,62 @@ class OrchardProvider(Provider):
             raise
         return guest, file_guest
 
-    async def reattach(
+    def _boot_source(self, request: SandboxRequest) -> FramedImage | None:
+        """What a VM for ``request`` boots, as this Mac recorded it: the snapshot it names,
+        or the framed copy of its image."""
+        if request.snapshot is None:
+            return framed_record(request.prepared_image, user=request.user)
+        record = _record(request.snapshot)
+        if record is None or record.kind != "snapshot":
+            raise ProviderCapabilityError(f"there is no Orchard snapshot {request.snapshot}")
+        if (record.prepared_identity, record.user) != (
+            request.prepared_image.prepared_identity,
+            request.user,
+        ):
+            raise ProviderCapabilityError(
+                f"{request.snapshot} was taken from another Task image or account"
+            )
+        return record.boots
+
+    async def _drive(
         self,
         handle: str,
         request: SandboxRequest,
         allocation: ResourceAllocation,
         image: ResolvedImage,
+        source: FramedImage | None,
+        *,
+        relay: bool,
     ) -> OrchardSandbox:
-        """A running VM this Mac's Orchard started for ALE, driven again through new guest
-        sessions; the Gateway relay inside it outlives the sessions that started it."""
+        """A running ALE VM booted from ``source``, driven through new guest sessions;
+        ``relay`` points its Gateway relay at this request's Gateway."""
         name, uid = _owned_vm(handle)
-        framed = framed_record(request.prepared_image, user=request.user)
-        if framed is None or framed.identity != image.observed_identity:
-            raise ProviderCapabilityError(f"{handle!r} does not run a framed image recorded here")
+        if source is None or source.identity != image.observed_identity:
+            raise ProviderCapabilityError(f"{handle!r} does not run an image recorded here")
         client = self._local().client()
         try:
             await client.start()
             record = await client.get_vm(name)
             if record is None or record.get("uid") != uid:
                 raise ProviderStartError(f"Orchard VM {name} is gone or was replaced")
-            if not str(record.get("image", "")).startswith(framed.name):
+            if not str(record.get("image", "")).startswith(source.name):
                 raise ProviderCapabilityError(f"{handle!r} does not run the recorded image")
             deadline = asyncio.get_running_loop().time() + 120
             guest, file_guest = await self._open_guests(
                 client,
                 name,
                 request,
-                framed.agent_home,
+                source.agent_home,
                 agent=request.role is not SandboxRole.VERIFIER,
                 deadline=deadline,
             )
+            try:
+                if relay and (host := await self._resolve_gateway_host(guest, request)):
+                    await self._start_gateway_relay(guest, host, request, replace=True)
+            except BaseException:
+                await guest.close()
+                await file_guest.close()
+                raise
         except BaseException:
             await client.close()
             raise
@@ -617,10 +812,115 @@ class OrchardProvider(Provider):
             file_client=file_guest,
             name=name,
             uid=uid,
-            agent_home=framed.agent_home,
+            agent_home=source.agent_home,
             resolved_image=image,
             allocation=allocation,
+            source=source,
         )
+
+    async def reattach(
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+        image: ResolvedImage,
+    ) -> OrchardSandbox:
+        """A running VM this Mac's Orchard started for ALE, driven again through new guest
+        sessions; the Gateway relay inside it outlives the sessions that started it.
+
+        A kept VM is checked against the image its record names: the request of a later
+        episode that continues in one booted from a snapshot names no snapshot.
+        """
+        record = _record(handle)
+        if record is not None and record.kind == "keep":
+            source: FramedImage | None = record.boots
+        else:
+            source = self._boot_source(request)
+        return await self._drive(handle, request, allocation, image, source, relay=False)
+
+    async def attach_retained(
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+        image: ResolvedImage,
+    ) -> OrchardSandbox:
+        """A VM an earlier episode kept, for this episode to continue in, with its Gateway
+        relay pointed at this episode's Gateway."""
+        record = _record(handle)
+        if (
+            record is None
+            or record.kind != "keep"
+            or record.role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
+        ):
+            raise ProviderCapabilityError(f"{handle!r} is not a retained Orchard solver VM")
+        return await self._drive(handle, request, allocation, image, record.boots, relay=True)
+
+    async def list_retained(self) -> list[dict[str, object]]:
+        records = _records()
+        if not records:
+            return []  # touches no Orchard, which a Mac without one does not have
+        local = self._local()
+        images = await local.local_images()
+        client = local.client()
+        found: list[dict[str, object]] = []
+        try:
+            await client.start()
+            for record in records:
+                if record.kind == "keep":
+                    name, uid = _owned_vm(record.handle)
+                    vm = await client.get_vm(name)
+                    present, running = (
+                        vm is not None and vm.get("uid") == uid,
+                        vm is not None and vm.get("status") == "running",
+                    )
+                else:
+                    present, running = record.boots.name in images, False
+                if not present:
+                    _forget(record.handle)  # deleted outside ALE
+                    continue
+                found.append(
+                    {
+                        "provider": self.name,
+                        "handle": record.handle,
+                        "episode": record.episode_id,
+                        "role": record.role,
+                        "image": record.boots.name,
+                        "gpus": (),
+                        "running": running,
+                        "cleanup_command": f"ale sandbox destroy {record.handle}",
+                    }
+                )
+        finally:
+            await client.close()
+        return found
+
+    async def destroy_retained(self, handle: str) -> None:
+        record = _record(handle)
+        if record is None:
+            raise ProviderCapabilityError(f"{handle!r} is not a retained Orchard VM or snapshot")
+        if record.kind == "keep":
+            await self.discard(handle)
+            return
+        image = record.boots.name
+        local = self._local()
+        client = local.client()
+        try:
+            await client.start()
+            vms = await client.list_vms()
+        finally:
+            await client.close()
+        # Driving such a VM again after a crash needs the snapshot's record.
+        if any(str(vm.get("image", "")).startswith(image) for vm in vms):
+            raise ProviderStartError(f"VMs still boot from {handle}; destroy them first")
+        # Its clones at each desktop resolution go first, so a failure leaves the image and
+        # its record to try again from.
+        images = await local.local_images()
+        clones = sorted(name for name in images if name.startswith(f"{image}-"))
+        for name in [*clones, *([image] if image in images else [])]:
+            await local.tart("delete", name)
+        remove_locks(image)
+        _forget(handle)
 
     async def discard(self, handle: str) -> None:
         name, uid = _owned_vm(handle)
@@ -629,10 +929,12 @@ class OrchardProvider(Provider):
             await client.start()
             record = await client.get_vm(name)
             if record is None:
+                _forget(handle)
                 return
             if record.get("uid") != uid:
                 raise ProviderStartError(f"Orchard VM {name} was replaced; not deleting it")
             await delete_owned(client, OwnedVM(name, uid))
+            _forget(handle)
         finally:
             await client.close()
 
@@ -651,7 +953,14 @@ class OrchardProvider(Provider):
         self.accepts(request)
         image = await self.prepare_image(request.prepared_image)
         local = self._local()
-        framed = await frame_image(local, image, user=request.user)
+        if request.snapshot is None:
+            framed = await frame_image(local, image, user=request.user)
+        else:
+            source = self._boot_source(request)
+            assert source is not None
+            if source.name not in await local.local_images():
+                raise ProviderCapabilityError(f"the snapshot {request.snapshot} is gone")
+            framed = source
         boot = await at_resolution(local, framed, request.desktop_resolution)
         client = local.client()
         owned: OwnedVM | None = None
@@ -717,6 +1026,7 @@ class OrchardProvider(Provider):
                 name=owned.name,
                 uid=owned.uid,
                 agent_home=framed.agent_home,
+                source=framed,
                 resolved_image=ResolvedImage(
                     kind=ImageKind.VM,
                     prepared_identity=image.prepared_identity,

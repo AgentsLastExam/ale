@@ -4,8 +4,8 @@ Run on a Mac whose local Orchard ``scripts/setup_macos.py`` keeps running, with
 ALE_TEST_ORCHARD=1. The suite builds its image on that Mac once, as ``ale prepare`` would,
 from ``tests/fixtures/tasks/macos-unprivileged``: it signs in ``tester``, an account other
 than ``admin``, so the sudo=false cases apply. Every macOS sandbox has that account's
-desktop, so the desktop capture and input checks always run. Each test creates and destroys
-its own VM; none adopts an existing VM.
+desktop, so the desktop capture and input checks always run. Each test destroys the VMs and
+snapshots it creates; none adopts a VM it did not create.
 """
 
 from __future__ import annotations
@@ -47,10 +47,10 @@ def unprivileged() -> tuple[PreparedTaskImage, str]:
 
 
 class TestOrchardProvider(ProviderConformance):
-    """Shared file, identity, lifecycle, resource and desktop guarantees.
+    """Shared file, identity, lifecycle, retention, resource and desktop guarantees.
 
-    Orchard rejects sealed networks and retention at admission. The inherited cases that
-    ask for them check that rejection explicitly; all other shared assertions run unchanged.
+    Orchard rejects sealed networks at admission. The inherited case that asks for them
+    checks that rejection explicitly; all other shared assertions run unchanged.
     """
 
     @pytest.fixture(autouse=True)
@@ -80,19 +80,5 @@ class TestOrchardProvider(ProviderConformance):
                 mode=mode, allowed_hosts=("example.com",) if mode is NetworkMode.ALLOWLIST else ()
             )
         )
-        with pytest.raises(ProviderCapabilityError):
-            await self.provider.create(request)
-
-    @pytest.mark.asyncio
-    async def test_a_retained_sandbox_can_be_listed_and_destroyed(self) -> None:
-        request = await self.request(retention="keep")
-        with pytest.raises(ProviderCapabilityError):
-            await self.provider.create(request)
-
-    @pytest.mark.asyncio
-    async def test_a_reattached_sandbox_reaches_a_later_gateway_at_the_same_address(
-        self,
-    ) -> None:
-        request = await self.request(retention="keep")
         with pytest.raises(ProviderCapabilityError):
             await self.provider.create(request)

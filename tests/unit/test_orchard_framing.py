@@ -90,7 +90,7 @@ class Controller:
             return OrchardExecResult(0, console.encode() + b"\n", b"")
         if argv[:2] == ["/bin/sh", "-c"]:
             return OrchardExecResult(0, LABEL.encode() + b"\n", b"")
-        if orchard_framing._DISMISS_NOTICES in argv or argv[2:] == orchard_framing._FORGET_DISPLAYS:
+        if orchard_framing._DISMISS_NOTICES in argv or argv[2:] == orchard_framing.FORGET_DISPLAYS:
             return OrchardExecResult(0, b"", b"")
         assert argv == ["sudo", "-n", "/usr/bin/sfltool", "dumpbtm"]
         dump = self.dumps.pop(0) if len(self.dumps) > 1 else self.dumps[0]
@@ -160,7 +160,7 @@ async def test_an_image_is_framed_offline_booted_once_and_then_reused():
     assert vm["image"] == clone[2]
     assert local.saved == [(vm["name"], framed.name)]
     # The display mode the first login saved is forgotten, so each VM starts at its own.
-    assert controller.execs[-1] == ["sudo", "-n", *orchard_framing._FORGET_DISPLAYS]
+    assert controller.execs[-1] == ["sudo", "-n", *orchard_framing.FORGET_DISPLAYS]
     # What the first login delivered to Notification Center is dismissed, as the account.
     assert controller.execs[-2] == [
         "sudo",

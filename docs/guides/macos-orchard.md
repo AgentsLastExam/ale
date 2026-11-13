@@ -129,9 +129,11 @@ Harness integration tests run in macOS VMs as well ([Tests](../../tests/README.m
 
 ## Clean up
 
-ALE tears down episode VMs. If cleanup fails, inspect the reported VM name and UID in
-Orchard before reconciling it; do not delete a same-name replacement. Uncollected guest
-logs and outputs can be lost when execution is interrupted.
+ALE tears down episode VMs. Kept VMs and snapshots are listed by `ale sandbox list` and
+stay until `ale sandbox destroy <handle>`; until then, `scripts/setup_macos.py --cleanup`
+refuses. If a teardown fails, inspect the reported VM name and UID in Orchard before
+reconciling it; do not delete a same-name replacement. Uncollected guest logs and outputs
+can be lost when execution is interrupted.
 
 To remove the local services, their state, the framed images and the framer:
 

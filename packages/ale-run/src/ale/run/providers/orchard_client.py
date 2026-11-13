@@ -159,6 +159,12 @@ class OrchardClient:
             raise ProviderStartError("Orchard workers response has an invalid shape")
         return result
 
+    async def list_vms(self) -> list[dict[str, object]]:
+        result = await self._request("GET", "/vms")
+        if not isinstance(result, list) or any(not isinstance(vm, dict) for vm in result):
+            raise ProviderStartError("Orchard VMs response has an invalid shape")
+        return result
+
     async def get_vm(self, name: str) -> dict[str, object] | None:
         result = await self._request("GET", "/vms/" + quote(name, safe=""), missing_ok=True)
         if result is not None and not isinstance(result, dict):
