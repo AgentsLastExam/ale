@@ -115,7 +115,8 @@ class EgressProxy:
                         ).decode()
                     except (ValueError, UnicodeDecodeError):
                         return None
-                    token = credentials.partition(":")[0]
+                    # The token is the password: a client may send nothing for an empty one.
+                    token = credentials.partition(":")[2]
                 else:
                     token = authorization.removeprefix("Bearer ").strip()
                 return self.sessions.resolve(token)

@@ -268,9 +268,14 @@ class TestProvider:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr("ale.run.providers.fleet.RECONNECT_SEC", 0.0)
+        # A memory Node prepares an image in no time, so holding it saves nothing and the
+        # tie between the Nodes would follow the image key, which the framework is part of.
+        monkeypatch.setattr(
+            "ale.run.fleet.placement._rendezvous", lambda _image, node: int(node != "node-a")
+        )
         held = await fleet.add_node("node-a")
         await fleet.add_node("node-b")
-        # node-a holds the image, so placement prefers it; then its port closes for good.
+        # The tie goes to node-a, which holds the image; then its port closes for good.
         inputs = ImageInputs(
             key=image.prepared_identity,
             run_id=client.run_id,

@@ -335,6 +335,25 @@ into `C:\ProgramData\ALE`:
   90 of 2,417 MiB for a LibreOffice Task, each discarded in about 5 s. Free space is never
   zero-filled instead, which would write every free cluster into the overlay.
 
+### Allowlist on Windows
+
+Chrome, Edge and PowerShell 5.1's `Invoke-WebRequest` take their proxy from the account's
+settings, not from the proxy variables, and none of them can present the episode token:
+Chrome answers the proxy's 407, which carries no challenge, with
+`ERR_PROXY_AUTH_UNSUPPORTED`. Under `allowlist`, `close_egress` therefore has guestd
+(`guestd/egress.py`) listen on an ephemeral loopback port, add the token to the request
+that opens each tunnel and forward it to the proxy, and set the agent account's WinINet
+proxy for the default connection to that port, bypassed for the Gateway's address and
+loopback. `open_egress` and a power-off give the account its own settings back: guestd runs
+as the agent's account, so the framework's phases would meet the relay, and a snapshot
+outlives it.
+
+Measured on Windows base 0.1.3 with Chrome 157: a browser started before the seal or after
+it reaches the declared host and is refused the rest, its own background hosts included.
+Windows' `curl.exe` honors the variables, but schannel fails its certificate revocation
+check, which goes over plain HTTP the proxy does not carry, unless it runs with
+`--ssl-revoke-best-effort`.
+
 ### Registry disks
 
 `ale vm-image push` publishes a qcow2, and `resolve_vm_image` in `images.py` or

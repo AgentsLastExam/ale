@@ -410,7 +410,7 @@ def _proxy_env(request: SandboxRequest) -> dict[str, str]:
         return {}
     proxy = _reachable(request.proxy_url) or ""
     if request.proxy_token:
-        proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}:@", 1)
+        proxy = proxy.replace("://", f"://ale:{quote(request.proxy_token, safe='')}@", 1)
     return {
         "HTTP_PROXY": proxy,
         "HTTPS_PROXY": proxy,

@@ -26,6 +26,7 @@ from ale.run.providers.docker import (
     DockerProvider,
     DockerSandbox,
     _kata_memory_mb,
+    _proxy_env,
     _sandbox_gateway,
 )
 
@@ -50,6 +51,18 @@ def request(**overrides: object) -> SandboxRequest:
         "gateway_url": "http://0.0.0.0:41000",
     }
     return SandboxRequest(**(base | overrides))  # type: ignore[arg-type]
+
+
+def test_an_allowlist_container_gets_the_proxy_token_as_its_password() -> None:
+    """Python's urllib sends no proxy credentials without a password."""
+    env = _proxy_env(
+        request(
+            network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
+            proxy_url="http://0.0.0.0:9443",
+            proxy_token="episode-token",
+        )
+    )
+    assert env["HTTPS_PROXY"] == f"http://ale:episode-token@{HOST_ALIAS}:9443"
 
 
 def test_every_container_dials_the_gateway_at_the_fixed_port() -> None:

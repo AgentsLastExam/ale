@@ -259,7 +259,7 @@ async def test_a_sealed_allowlist_agent_gets_the_proxy(
     await box.close_egress()
     await box.exec(["true"], identity=Identity.AGENT)
     assert client.env is not None
-    assert client.env["HTTPS_PROXY"] == f"http://t0ken:@{HOST_IP}:9000"
+    assert client.env["HTTPS_PROXY"] == f"http://ale:t0ken@{HOST_IP}:9000"
     await box.exec(["true"])
     assert client.env is None
 
