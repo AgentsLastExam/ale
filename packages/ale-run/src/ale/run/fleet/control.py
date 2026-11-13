@@ -25,11 +25,22 @@ destroys it, and records each snapshot on the one Node that can boot from it.
 from __future__ import annotations
 
 import dataclasses
+import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import NoReturn
 
-from ale.run.fleet.placement import Choice, NodeView, Weights, assign, choose, unservable
+from ale.run.fleet.placement import (
+    Busy,
+    Choice,
+    NodeView,
+    Waiting,
+    Weights,
+    assign,
+    choose,
+    remaining_sec,
+    unservable,
+)
 from ale.run.fleet.protocol import (
     PROTOCOL_VERSION,
     AcquireRequest,
@@ -346,37 +357,109 @@ class ControlPlane:
             self._event("admin.drain" if draining else "admin.resume", node=name)
         self.schedule()
 
-    def views(self) -> list[NodeView]:
-        holds: dict[str, list] = {}
+    def views(
+        self,
+        lifetimes: Mapping[tuple[str, str], Sequence[float]] | None = None,
+        prepare_sec: Mapping[str, float] | None = None,
+    ) -> list[NodeView]:
+        """Every Node as placement sees it now. ``lifetimes`` and ``prepare_sec`` are what
+        :meth:`_lifetimes` and :meth:`_prepare_sec` return, which a scheduling pass hands in
+        so that it measures them once."""
+        lifetimes = self._lifetimes() if lifetimes is None else lifetimes
+        prepare_sec = self._prepare_sec() if prepare_sec is None else prepare_sec
+        images = {
+            name: frozenset(image.key for image in node.images) for name, node in self.nodes.items()
+        }
         startup: dict[str, dict[str, list[float]]] = {}
         for record in self.sandboxes.values():
-            if record.node is None:
-                continue
-            if record.status.holds_resources and record.holds is not None:
-                holds.setdefault(record.node, []).append(record.holds)
-            if record.create_sec is not None and record.provider is not None:
+            if record.node is not None and record.create_sec is not None and record.provider:
                 startup.setdefault(record.node, {}).setdefault(record.provider, []).append(
                     record.create_sec
                 )
+        startup_sec = {
+            node: {provider: sum(v[-20:]) / len(v[-20:]) for provider, v in by_provider.items()}
+            for node, by_provider in startup.items()
+        }
+        now = self._clock()
+        holds: dict[str, list] = {}
+        busy: dict[str, list[Busy]] = {}
+        for record in self.sandboxes.values():
+            if record.node is None or not record.status.holds_resources or record.holds is None:
+                continue
+            holds.setdefault(record.node, []).append(record.holds)
+            image = record.demand.image
+            measured = lifetimes.get((image, record.role), ())
+            if record.status is SandboxStatus.RELEASING:
+                frees = 0.0
+            elif record.status is SandboxStatus.RETAINED:
+                frees = math.inf
+            elif record.ready_at is None:
+                # Not ready yet: its Node may still be preparing the image, then starts it.
+                preparing = (
+                    0.0
+                    if image in images.get(record.node, ())
+                    else prepare_sec.get(image, self.weights.prepare_sec)
+                )
+                starting = startup_sec.get(record.node, {}).get(
+                    record.provider or "", self.weights.startup_sec
+                )
+                since = 0.0 if record.placed_at is None else now - record.placed_at
+                frees = max(starting + preparing - since, 0.0) + remaining_sec(measured, 0.0)
+            else:
+                frees = remaining_sec(measured, now - record.ready_at)
+            busy.setdefault(record.node, []).append(Busy(record.holds, frees))
         return [
             NodeView(
                 declaration=node.declaration,
                 online=node.online,
                 draining=node.draining,
-                images=frozenset(image.key for image in node.images),
+                images=images[name],
                 snapshots=frozenset(
                     snapshot.snapshot_id
                     for snapshot in self.snapshots.values()
                     if snapshot.node == name and not snapshot.released
                 ),
                 holds=tuple(holds.get(name, ())),
-                startup_sec={
-                    provider: sum(values[-20:]) / len(values[-20:])
-                    for provider, values in startup.get(name, {}).items()
-                },
+                busy=tuple(busy.get(name, ())),
+                startup_sec=startup_sec.get(name, {}),
             )
             for name, node in sorted(self.nodes.items())
         ]
+
+    def _lifetimes(self) -> dict[tuple[str, str], list[float]]:
+        """How long recent Sandboxes lived, from ready to gone, by image key and role.
+
+        A separate verifier that reuses the solver's image lives far shorter than the solver,
+        so each role is measured apart. A Sandbox still kept when it ended is left out: how
+        long one is kept says nothing about episodes. One a later Run continued in counts
+        from when it was ready for that Run, as continuing starts its time ready again.
+        """
+        lifetimes: dict[tuple[str, str], list[float]] = {}
+        ended = sorted(
+            (
+                record
+                for record in self.sandboxes.values()
+                if record.status is SandboxStatus.RELEASED
+                and record.ready_at is not None
+                and record.ended_at is not None
+                and not record.roles
+            ),
+            key=lambda record: record.ended_at or 0.0,
+        )
+        for record in ended:
+            assert record.ready_at is not None and record.ended_at is not None
+            lifetimes.setdefault((record.demand.image, record.role), []).append(
+                record.ended_at - record.ready_at
+            )
+        return {key: values[-50:] for key, values in lifetimes.items()}
+
+    def _image_bytes(self) -> dict[str, int]:
+        """How much each image takes on the disk of a Node that holds it."""
+        sizes: dict[str, int] = {}
+        for node in self.nodes.values():
+            for image in node.images:
+                sizes[image.key] = max(sizes.get(image.key, 0), image.bytes)
+        return sizes
 
     # --- Runs -----------------------------------------------------------------------
 
@@ -766,14 +849,19 @@ class ControlPlane:
         )
         if not queued:
             return
-        views = {view.name: view for view in self.views()}
         prepare_sec = self._prepare_sec()
+        lifetimes = self._lifetimes()
+        views = {view.name: view for view in self.views(lifetimes, prepare_sec)}
+        image_bytes = self._image_bytes()
         by_run: dict[str, list[SandboxRecord]] = {}
         for record in queued:
             by_run.setdefault(record.run_id, []).append(record)
         progressed = True
         while progressed:
             progressed = False
+            # The requests that chose to wait for each Node in this round, ahead of later ones;
+            # a placement starts a new round, where each request chooses again.
+            waiting: dict[str, list[Waiting]] = {}
             for run_id in sorted(by_run, key=lambda run: self.runs[run].last_served_at):
                 for record in by_run[run_id]:
                     if record.status is not SandboxStatus.QUEUED:
@@ -784,8 +872,20 @@ class ControlPlane:
                         refused=self._avoided(record),
                         assigned=self.runs[run_id].assignments.get(record.demand.image, ()),
                         prepare_sec=prepare_sec,
+                        image_bytes=image_bytes,
+                        ahead=waiting,
                         weights=self.weights,
                     )
+                    measured = lifetimes.get((record.demand.image, record.role), ())
+                    lifetime = remaining_sec(measured, 0.0)
+                    if choice is not None and choice.wait_sec is not None:
+                        # The lowest score is a full Node: wait for room there. Every pass
+                        # scores it again as capacity changes.
+                        reason = f"waiting for room on {choice.node}"
+                        waiting.setdefault(choice.node, []).append(
+                            (choice.wait_sec, choice.ready_sec + lifetime, choice.holds)
+                        )
+                        choice = None
                     if choice is None:
                         if record.reason != reason:
                             record.reason = reason
@@ -794,7 +894,9 @@ class ControlPlane:
                     self._place(record, choice)
                     view = views[choice.node]
                     views[choice.node] = dataclasses.replace(
-                        view, holds=(*view.holds, choice.holds)
+                        view,
+                        holds=(*view.holds, choice.holds),
+                        busy=(*view.busy, Busy(choice.holds, choice.ready_sec + lifetime)),
                     )
                     progressed = True
                     break

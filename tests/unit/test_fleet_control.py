@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -12,10 +13,11 @@ from aiohttp.test_utils import TestClient, TestServer, unused_port
 
 from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, Resources
 from ale.run.fleet.control import ControlPlane, FleetError, Timing
-from ale.run.fleet.placement import NodeView, choose
+from ale.run.fleet.placement import Busy, Holds, NodeView, choose, remaining_sec
 from ale.run.fleet.protocol import (
     AcquireRequest,
     Arch,
+    GpuPool,
     Grant,
     Heartbeat,
     HeartbeatReply,
@@ -143,9 +145,16 @@ def container(**overrides: object) -> SandboxDemand:
     return demand(**(base | overrides))  # type: ignore[arg-type]
 
 
-def ask(control: ControlPlane, number: int, wanted: SandboxDemand, *, run: str = "run-aaaaaaaa"):
+def ask(
+    control: ControlPlane,
+    number: int,
+    wanted: SandboxDemand,
+    *,
+    run: str = "run-aaaaaaaa",
+    role: str = "",
+):
     return control.acquire(
-        AcquireRequest(sandbox_id=f"sandbox-{number:04d}", run_id=run, demand=wanted)
+        AcquireRequest(sandbox_id=f"sandbox-{number:04d}", run_id=run, demand=wanted, role=role)
     )
 
 
@@ -159,7 +168,13 @@ def control(tmp_path: Path, clock: Clock) -> ControlPlane:
     return ControlPlane(Store(tmp_path / "fleet.db"), TOKEN, clock=clock)
 
 
-def beat(control: ControlPlane, node: str, *entries: tuple[str, str], boot: str = "boot-1"):
+def beat(
+    control: ControlPlane,
+    node: str,
+    *entries: tuple[str, str],
+    boot: str = "boot-1",
+    images: tuple[ImageHolding, ...] = (),
+):
     """A heartbeat listing ``(sandbox_id, state)`` entries, with live leases."""
     roster = tuple(
         RosterEntry(
@@ -170,7 +185,7 @@ def beat(control: ControlPlane, node: str, *entries: tuple[str, str], boot: str 
         )
         for sandbox, state in entries
     )
-    return control.heartbeat(node, Heartbeat(boot_id=boot, roster=roster))
+    return control.heartbeat(node, Heartbeat(boot_id=boot, roster=roster, images=images))
 
 
 class TestPlacement:
@@ -963,3 +978,261 @@ class TestRetention:
         )
         keep_beat(control, "box")
         assert control.snapshots == {} and control.retained() == []
+
+
+HELD = Holds(cpus=2, memory_mb=8192, image=IMAGE)
+#: What a Node that prepared IMAGE in 200 s reports in every heartbeat.
+WARM = (ImageHolding(key=IMAGE, bytes=2_000_000_000, prepare_sec=200.0),)
+H100 = "NVIDIA H100 80GB HBM3"
+
+
+def full(name: str, *frees: float) -> NodeView:
+    """A Node full of two-CPU Sandboxes of IMAGE, one freeing in each of ``frees`` seconds."""
+    return NodeView(
+        declaration=linux(name, cpus=2 * len(frees)),
+        images=frozenset({IMAGE}),
+        holds=(HELD,) * len(frees),
+        busy=tuple(Busy(HELD, seconds) for seconds in frees),
+    )
+
+
+def lived(
+    control: ControlPlane,
+    clock: Clock,
+    node: str,
+    *seconds: float,
+    role: str = "",
+    images: tuple[ImageHolding, ...] = WARM,
+) -> None:
+    """Sandboxes of IMAGE that lived ``seconds`` each on ``node``, one after another."""
+    for lifetime in seconds:
+        # Numbered apart from the Sandboxes the test itself asks for.
+        placed = ask(control, 900 + len(control.sandboxes), container(), role=role)
+        assert placed.node == node
+        beat(control, node, (placed.sandbox_id, "ready"), images=images)
+        clock.now += lifetime
+        control.release(placed.sandbox_id)
+        beat(control, node, images=images)
+
+
+def freeing(control: ControlPlane) -> dict[str, list[float]]:
+    """In how many seconds each Node's Sandboxes are expected to free what they hold."""
+    return {view.name: [busy.frees_in_sec for busy in view.busy] for view in control.views()}
+
+
+class TestWaitOrBuild:
+    def test_a_sandbox_has_left_what_those_that_lived_longer_had(self) -> None:
+        assert remaining_sec([60.0, 120.0, 180.0], 0.0) == 120.0
+        assert remaining_sec([60.0, 120.0, 180.0], 100.0) == 50.0
+        # Older than every one measured, or never measured: no telling when it ends.
+        assert remaining_sec([60.0, 120.0, 180.0], 200.0) == float("inf")
+        assert remaining_sec([], 0.0) == float("inf")
+
+    def test_a_full_holder_that_frees_soon_is_waited_for(self) -> None:
+        nodes = [full("warm", 40.0), NodeView(declaration=linux("cold"))]
+        choice, _ = choose(container(), nodes, prepare_sec={IMAGE: 200.0})
+        assert choice is not None
+        assert (choice.node, choice.wait_sec, choice.ready_sec) == ("warm", 40.0, 70.0)
+
+    def test_a_holder_that_stays_busy_loses_to_building_elsewhere(self) -> None:
+        for frees in (400.0, float("inf")):
+            nodes = [full("warm", frees), NodeView(declaration=linux("cold"))]
+            choice, _ = choose(container(), nodes, prepare_sec={IMAGE: 200.0})
+            assert choice is not None
+            assert (choice.node, choice.wait_sec, choice.ready_sec) == ("cold", None, 230.0)
+
+    def test_only_a_node_holding_or_assigned_the_image_is_waited_for(self) -> None:
+        busy = full("busy", 10.0)
+        cold = dataclasses.replace(busy, images=frozenset(), holds=(), busy=())
+        crowded = dataclasses.replace(
+            busy,
+            images=frozenset(),
+            holds=(HELD.model_copy(update={"image": OTHER_IMAGE}),),
+            busy=(Busy(HELD.model_copy(update={"image": OTHER_IMAGE}), 10.0),),
+        )
+        assert choose(container(), [crowded])[0] is None
+        planned, _ = choose(container(), [crowded], assigned=("busy",))
+        assert planned is not None and planned.wait_sec == 10.0
+        assert choose(container(), [cold])[0] is not None
+
+    def test_a_copy_costs_its_size(self) -> None:
+        nodes = [full("warm", 150.0), NodeView(declaration=linux("cold"))]
+        cheap, _ = choose(container(), nodes, prepare_sec={IMAGE: 100.0})
+        assert cheap is not None and cheap.node == "cold"
+        # warm is ready in 150 + 30 = 180 s and cold in 100 + 30 = 130 s; eight more GB on
+        # cold's disk are worth 80 s, more than those 50 s.
+        costly, _ = choose(
+            container(), nodes, prepare_sec={IMAGE: 100.0}, image_bytes={IMAGE: 8_000_000_000}
+        )
+        assert costly is not None and (costly.node, costly.wait_sec) == ("warm", 150.0)
+
+    def test_requests_waiting_for_a_node_take_its_capacity_in_turn(self) -> None:
+        nodes = [full("warm", 40.0)]
+        first, _ = choose(container(), nodes)
+        assert first is not None and first.wait_sec == 40.0
+        ahead = {"warm": [(40.0, 170.0, HELD)]}
+        second, _ = choose(container(), nodes, ahead=ahead)
+        assert second is not None and second.wait_sec == 170.0
+
+    def test_a_waiting_request_holds_the_gpus_it_waits_for(self) -> None:
+        held = HELD.model_copy(update={"gpus": {H100: 1}})
+        node = NodeView(
+            declaration=linux("gpu").model_copy(
+                update={
+                    "resources": NodeResources(
+                        cpus=16, memory_mb=65536, disk_gb=1000, gpus=(GpuPool(model=H100, count=1),)
+                    ),
+                    "profiles": (DOCKER.model_copy(update={"gpus": True}),),
+                }
+            ),
+            images=frozenset({IMAGE}),
+            holds=(held,),
+            busy=(Busy(held, 40.0),),
+        )
+        wanted = container().model_copy(
+            update={"resources": Resources(cpus=2, memory_mb=8192, gpus=1)}
+        )
+        first, _ = choose(wanted, [node])
+        assert first is not None and (first.wait_sec, first.holds.gpus) == (40.0, {H100: 1})
+        # The first takes the H100 once it frees, and keeps it for its 100 s.
+        ahead = {"gpu": [(40.0, first.ready_sec + 100.0, first.holds)]}
+        second, _ = choose(wanted, [node], ahead=ahead)
+        assert second is not None and second.wait_sec == 170.0
+
+    @pytest.mark.parametrize(
+        ("lifetime", "node"), [(60.0, "cold"), (200.0, None)], ids=["outlived", "expected"]
+    )
+    def test_a_waiting_request_moves_once_its_holder_stays_busy_too_long(
+        self, control: ControlPlane, clock: Clock, lifetime: float, node: str | None
+    ) -> None:
+        """70 s after warm's Sandbox was ready, building on cold is the better bet once that
+        Sandbox outlived every one of its image so far, and not while it has 130 s left."""
+        control.register(linux("warm", cpus=2))
+        lived(control, clock, "warm", lifetime, lifetime, lifetime)
+        control.register(linux("cold", cpus=2))
+        held = ask(control, 1, container())
+        assert held.node == "warm"
+
+        def tick() -> None:
+            beat(control, "warm", (held.sandbox_id, "ready"), images=WARM)
+            control.heartbeat("cold", Heartbeat(boot_id="boot-1"))
+            control.tick()
+
+        tick()
+        waiting = ask(control, 2, container())
+        # Waiting for warm beats 200 s preparing, 30 s starting and 20 s for the copy on cold.
+        assert (waiting.status, waiting.reason) == (
+            SandboxStatus.QUEUED,
+            "waiting for room on warm",
+        )
+        clock.now += 30
+        tick()
+        assert control.placement(waiting.sandbox_id).reason == "waiting for room on warm"
+        clock.now += 40
+        tick()
+        assert control.placement(waiting.sandbox_id).node == node
+
+    def test_a_waiting_request_takes_its_holder_once_it_frees(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        control.register(linux("warm", cpus=2))
+        lived(control, clock, "warm", 60.0, 60.0)
+        control.register(linux("cold", cpus=2))
+        held = ask(control, 1, container())
+        beat(control, "warm", (held.sandbox_id, "ready"), images=WARM)
+        waiting = ask(control, 2, container())
+        assert waiting.status is SandboxStatus.QUEUED
+        clock.now += 50
+        control.release(held.sandbox_id)
+        beat(control, "warm", images=WARM)
+        assert control.placement(waiting.sandbox_id).node == "warm"
+
+    def test_requests_waiting_at_once_count_only_those_ahead_of_them(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        """A placement starts the pass over, and each request then counts only the requests
+        that chose to wait ahead of it in that round."""
+        prepared = (ImageHolding(key=IMAGE, bytes=2_000_000_000, prepare_sec=140.0),)
+        control.register(linux("warm", cpus=4))
+        lived(control, clock, "warm", 100.0, images=prepared)
+        control.register(linux("cold", cpus=8))
+        older = ask(control, 1, container())
+        beat(control, "warm", (older.sandbox_id, "ready"), images=prepared)
+        clock.now += 60
+        newer = ask(control, 2, container())
+        beat(
+            control,
+            "warm",
+            (older.sandbox_id, "ready"),
+            (newer.sandbox_id, "ready"),
+            images=prepared,
+        )
+        assert freeing(control)["warm"] == [40.0, 100.0]
+        # Preparing the image on cold takes 140 + 30 + 20 = 190 s. The large request waits
+        # 100 s for all of warm, and the small one 40 s for half of it, which it holds for
+        # 30 + 100 s: counted ahead of the large one, that would make it wait 170 s.
+        large = ask(control, 3, container(cpus=4))
+        small = ask(control, 4, container())
+        other = ask(control, 5, container(image=OTHER_IMAGE))
+        assert other.node == "cold"
+        for request in (large, small):
+            placement = control.placement(request.sandbox_id)
+            assert (placement.status, placement.reason) == (
+                SandboxStatus.QUEUED,
+                "waiting for room on warm",
+            )
+
+    def test_a_sandbox_not_yet_ready_still_has_its_preparation_and_start_ahead(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        control.register(linux("warm", cpus=2))
+        lived(control, clock, "warm", 100.0)
+        control.register(linux("cold"))
+        assert ask(control, 1, container()).node == "warm"
+        # Too large for warm, so cold prepares the image first, which took warm 200 s.
+        assert ask(control, 2, container(cpus=4)).node == "cold"
+        clock.now += 50
+        # 50 s after placement, warm's 30 s start is over and cold has 200 + 30 - 50 s left of
+        # preparing and starting; each then lives 100 s.
+        assert freeing(control) == {"warm": [100.0], "cold": [280.0]}
+
+    def test_solvers_and_verifiers_are_measured_apart(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        control.register(linux("box"))
+        lived(control, clock, "box", 600.0, role="solver")
+        lived(control, clock, "box", 30.0, role="verifier")
+        ask(control, 1, container(), role="solver")
+        ask(control, 2, container(), role="verifier")
+        beat(control, "box", ("sandbox-0001", "ready"), ("sandbox-0002", "ready"))
+        assert freeing(control) == {"box": [600.0, 30.0]}
+
+    def test_a_continued_sandbox_counts_from_its_continuation(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        """A kept Sandbox measures the lifetime of the Run that continued in it, and one still
+        kept when it ends measures none."""
+        control.register(linux("box"))
+        sandbox_id = kept(control, "box")
+        clock.now += 1000
+        control.adopt(
+            AcquireRequest(sandbox_id=sandbox_id, run_id="run-bbbbbbbb", demand=container())
+        )
+        continued = RosterEntry(
+            sandbox_id=sandbox_id,
+            run_id="run-bbbbbbbb",
+            state="ready",
+            lease_expires_at=clock() + 120,
+        )
+        control.heartbeat("box", Heartbeat(boot_id="boot-1", roster=(continued,)))
+        clock.now += 60
+        control.release(sandbox_id)
+        destroyed = kept(control, "box", 2)
+        clock.now += 1000
+        control.destroy(destroyed)
+        control.heartbeat("box", Heartbeat(boot_id="boot-1"))
+        ended = {control.sandboxes[sandbox].status for sandbox in (sandbox_id, destroyed)}
+        assert ended == {SandboxStatus.RELEASED}
+        fresh = ask(control, 3, container())
+        beat(control, "box", (fresh.sandbox_id, "ready"))
+        assert freeing(control) == {"box": [60.0]}

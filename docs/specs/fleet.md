@@ -71,24 +71,39 @@ the images it serves itself, and Nodes never copy images from one another; an im
 prepares it, and a Node keeps each image it prepared under its key.
 
 1. **Filter.** A Node is a candidate when it is online and not draining, has a profile that
-   matches the demand, has not refused this Sandbox, can be reached by its Run, and has the
-   resources free now: CPUs, memory, macOS VM slots and GPUs of an accepted model. A profile
+   matches the demand, has not refused this Sandbox, and can be reached by its Run. A profile
    matches a snapshot's demand only if its Provider saves snapshots, and a boot from a
    snapshot is served only by the Node that keeps the snapshot. A demand that no registered
    Node could serve even when idle fails at once, as does a boot from a snapshot whose Node
    refused it or cannot be reached by its Run.
-2. **Score.** The estimated time to a ready Sandbox: on a Node that lacks the image, the
-   time preparing it took the Nodes that did (five minutes while none has), plus the Node's
-   measured create time for that Provider. Preparing an image takes minutes where creating a
-   Sandbox takes seconds, so a Task's episodes go to the Nodes that already hold its image;
-   ties go to a fixed per-image order of Nodes (rendezvous hashing), which keeps each image on
-   the same few Nodes.
+2. **Score** each candidate by the estimated time to a ready Sandbox there, and take the
+   lowest; ties go to a fixed per-image order of Nodes (rendezvous hashing), which keeps each
+   image on the same few Nodes.
+   - A Node with the resources free now (CPUs, memory, macOS VM slots and GPUs of an
+     accepted model) scores its measured create time for that Provider.
+   - A free Node that lacks the image first prepares it. Its score adds the time preparing it
+     took the Nodes that did (five minutes while none has), and 10 s per GB of the copy it
+     adds to its disk: one more copy is worth that much waiting, enough to settle close calls
+     but too little to queue behind a long episode.
+   - A full Node that holds the image, or that the Run's plan assigned it, scores the
+     expected wait for room there, plus its create time. Each of its Sandboxes is expected
+     to end after what its image's recent Sandboxes in the same role that lived longer had
+     left, from their measured lifetimes; one that has outlived all of them, a retained one,
+     or one with none measured is not expected to end. One not yet ready first has the rest
+     of its image's preparation and its create time to go. Solvers and verifiers are
+     measured apart, as a separate verifier that reuses the solver's image ends far sooner.
+     The requests already waiting for that Node take its room first. A full Node that lacks
+     the image is never waited for.
+
+   When the lowest score is a full Node, the Sandbox waits for it. Every scheduling pass,
+   which runs as capacity changes and every few seconds, scores it again, so it never waits
+   for a Node it would no longer choose.
 3. **Reserve** the resources in the ledger and sign a **grant**: the Sandbox, its Run, the
    Node and the demand, valid for a few minutes. A Node creates a Sandbox only on a grant
    that names it, so every Sandbox a Node holds is one the ledger reserved, and it admits
    the grant's demand rather than whatever the creating request claims.
-4. **Queue** what fits nowhere. The queue serves Runs in turn, longest-waiting first, so a
-   large Run cannot starve a small one, and a Run's request that fits nowhere does not hold
+4. **Queue** what is not placed now. The queue serves Runs in turn, longest-waiting first, so
+   a large Run cannot starve a small one, and a Run's request that fits nowhere does not hold
    back its later requests that fit elsewhere.
 
 A Sandbox holds its Node's resources from placement until the Node no longer lists it, so a
