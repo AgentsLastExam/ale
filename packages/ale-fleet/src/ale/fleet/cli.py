@@ -1,4 +1,4 @@
-"""``ale fleet``: serve the control plane, lend this machine to it as a Node, or operate it."""
+"""``ale-fleet``: serve the control plane, lend this machine to it as a Node, or operate it."""
 
 from __future__ import annotations
 
@@ -9,7 +9,23 @@ from typing import Annotated
 
 import typer
 
-fleet_app = typer.Typer(help="Pool Sandbox capacity across machines.", no_args_is_help=True)
+from ale.run.secrets import load_env
+
+app = typer.Typer(
+    name="ale-fleet",
+    help="Pool Sandbox capacity across machines.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+@app.callback()
+def root() -> None:
+    """Pool Sandbox capacity across machines."""
+    # As for `ale`: credentials come from the checkout's .env, which a Node needs to prepare
+    # images as a local Run would. A variable already set in the environment wins.
+    load_env()
+
 
 #: Where the control plane listens unless told otherwise.
 CONTROL_PORT = 7470
@@ -30,7 +46,7 @@ def _state_dir() -> Path:
     return Path(base) / "ale" / "fleet"
 
 
-@fleet_app.command("serve")
+@app.command("serve")
 def serve(
     host: Annotated[str, typer.Option(help="Address to listen on.")] = "0.0.0.0",
     port: Annotated[int, typer.Option(help="Port to listen on.")] = CONTROL_PORT,
@@ -40,17 +56,17 @@ def serve(
     ] = None,
 ) -> None:
     """Run the control plane: the ledger, placement and the API Nodes and Runs call."""
-    from ale.run.cli.main import _run_async
-    from ale.run.fleet.control import ControlPlane
-    from ale.run.fleet.server import serve as serve_control
-    from ale.run.fleet.store import Store
+    from ale.fleet.control import ControlPlane
+    from ale.fleet.server import serve as serve_control
+    from ale.fleet.store import Store
+    from ale.run.cli.main import run_async
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     token = fleet_token()
     store = Store(db or _state_dir() / "fleet.db")
     typer.echo(f"fleet control plane on http://{host}:{port}")
     try:
-        _run_async(serve_control(ControlPlane(store, token), token, host=host, port=port))
+        run_async(serve_control(ControlPlane(store, token), token, host=host, port=port))
     finally:
         store.close()
 
@@ -58,7 +74,7 @@ def serve(
 NODE_PORT = 7471
 
 
-@fleet_app.command("node")
+@app.command("node")
 def node(
     control_plane: Annotated[str, typer.Option(help="The control plane's URL.")],
     address: Annotated[
@@ -97,8 +113,8 @@ def node(
     from urllib.parse import urlsplit
 
     from ale.core.errors import AleError
-    from ale.run.cli.main import _run_async
-    from ale.run.fleet.node import NodeAgent, NodeSettings, probe
+    from ale.fleet.node import NodeAgent, NodeSettings, probe
+    from ale.run.cli.main import run_async
     from ale.run.sources import cache_root
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -137,7 +153,7 @@ def node(
         await agent.serve()
 
     try:
-        _run_async(main())
+        run_async(main())
     except AleError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(4) from error
@@ -180,13 +196,13 @@ def _call(control_plane: str | None, method: str, path: str, body: dict | None =
         raise typer.Exit(1) from None
 
 
-@fleet_app.command("status")
+@app.command("status")
 def status(
     control_plane: ControlPlane = None,
     as_json: Annotated[bool, typer.Option("--json", help="Print the status document.")] = False,
 ) -> None:
     """What the Fleet holds: Nodes, the queue, Runs and Sandboxes, as the page shows them."""
-    from ale.run.fleet.status import FleetStatus
+    from ale.fleet.status import FleetStatus
 
     body = _call(control_plane, "GET", "/v1/status")
     if as_json:
@@ -235,31 +251,36 @@ def status(
             )
 
 
-@fleet_app.command("drain")
+@app.command("drain")
 def drain(node: str, control_plane: ControlPlane = None) -> None:
     """Place nothing new on a Node; what it holds runs to its end."""
     _call(control_plane, "POST", f"/v1/nodes/{node}/drain", {"draining": True})
     typer.echo(f"{node} is draining")
 
 
-@fleet_app.command("resume")
+@app.command("resume")
 def resume(node: str, control_plane: ControlPlane = None) -> None:
     """Place Sandboxes on a drained Node again."""
     _call(control_plane, "POST", f"/v1/nodes/{node}/drain", {"draining": False})
     typer.echo(f"{node} takes Sandboxes again")
 
 
-@fleet_app.command("destroy")
+@app.command("destroy")
 def destroy(sandbox: str, control_plane: ControlPlane = None) -> None:
     """Release a Sandbox for its Run; its Node destroys it at its next heartbeat."""
     _call(control_plane, "POST", f"/v1/sandboxes/{sandbox}/destroy")
     typer.echo(f"{sandbox} is being destroyed")
 
 
-@fleet_app.command("cancel")
+@app.command("cancel")
 def cancel(run: str, control_plane: ControlPlane = None) -> None:
     """Drop every Sandbox a Run still has queued."""
     import json
 
     cancelled = json.loads(_call(control_plane, "POST", f"/v1/runs/{run}/cancel"))["cancelled"]
     typer.echo(f"cancelled {cancelled} queued Sandboxes of {run}")
+
+
+def main() -> None:
+    """Console script entry point."""
+    app()

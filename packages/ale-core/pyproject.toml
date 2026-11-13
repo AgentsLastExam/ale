@@ -9,7 +9,7 @@ dependencies = ["pydantic>=2.9"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# `ale` is a PEP 420 namespace package shared with ale-run: there is deliberately no
-# src/ale/__init__.py in either package.
+# `ale` is a PEP 420 namespace package shared with ale-run and ale-fleet: there is
+# deliberately no src/ale/__init__.py in any of them.
 [tool.hatch.build.targets.wheel]
 packages = ["src/ale"]

@@ -23,7 +23,8 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
   `# --- validation ---` marker.
 - Respect `.importlinter`: `ale.core` and `ale_verify` are independent; the Gateway never
   imports a Provider; `guestd` is standard-library only; Harnesses use the Sandbox
-  contract instead of concrete Providers.
+  contract instead of concrete Providers; `ale.run` never imports `ale.fleet`, whose
+  control plane never imports a Provider.
 - Put a responsibility in the narrowest existing owner. Do not add a package, registry,
   interface, flag or compatibility layer until more than one concrete use needs it.
 - This project is in active development. Do not preserve backward compatibility: change
@@ -53,6 +54,7 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 ## Local guides
 
 - `packages/ale-core/AGENTS.md` — public contracts and persisted schemas
+- `packages/ale-fleet/AGENTS.md` — the Fleet's control plane and node agent
 - `packages/ale-run/AGENTS.md` — runtime ownership and the episode path
 - `packages/ale-run/src/ale/run/harnesses/AGENTS.md` — native agent adapters
 - `packages/ale-run/src/ale/run/gateway/AGENTS.md` — model transport and credentials

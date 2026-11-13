@@ -13,8 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from ale.run.fleet.placement import Holds
-from ale.run.fleet.protocol import (
+from ale.core.fleet import (
     AcquireRequest,
     EpisodeReport,
     ImageHolding,
@@ -23,6 +22,7 @@ from ale.run.fleet.protocol import (
     SandboxDemand,
     SandboxStatus,
 )
+from ale.fleet.placement import Holds
 
 __all__ = ["Event", "NodeRecord", "RunRecord", "SandboxRecord", "SnapshotRecord", "Store"]
 

@@ -1,6 +1,6 @@
 """The Fleet against the shared Provider contract: a control plane and a Docker Node.
 
-Both run as their own processes on this machine, as `ale fleet serve` and `ale fleet node`
+Both run as their own processes on this machine, as `ale-fleet serve` and `ale-fleet node`
 would, so every Sandbox the suite creates goes through placement, a grant, the node agent's
 API and the Gateway tunnel before it reaches the Node's Docker Provider.
 """
@@ -39,7 +39,7 @@ TOKEN = secrets.token_urlsafe(16)
 CONTROL_PORT = _free_port()
 NODE_PORT = _free_port()
 CONTROL = f"http://127.0.0.1:{CONTROL_PORT}"
-ALE = str(Path(sys.executable).with_name("ale"))
+ALE_FLEET = str(Path(sys.executable).with_name("ale-fleet"))
 
 
 def _nodes() -> list[dict]:
@@ -57,12 +57,12 @@ def fleet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
     logs = [(root / "control.log").open("wb"), (root / "node.log").open("wb")]
     processes = [
         subprocess.Popen(
-            [ALE, "fleet", "serve", "--host", "127.0.0.1", "--port", str(CONTROL_PORT),
+            [ALE_FLEET, "serve", "--host", "127.0.0.1", "--port", str(CONTROL_PORT),
              "--db", str(root / "fleet.db")],
             env=env, stdout=logs[0], stderr=subprocess.STDOUT,
         ),
         subprocess.Popen(
-            [ALE, "fleet", "node", "--control-plane", CONTROL,
+            [ALE_FLEET, "node", "--control-plane", CONTROL,
              "--address", f"http://127.0.0.1:{NODE_PORT}", "--port", str(NODE_PORT),
              "--name", "conformance", "--provider", "docker"],
             env=env, stdout=logs[1], stderr=subprocess.STDOUT,

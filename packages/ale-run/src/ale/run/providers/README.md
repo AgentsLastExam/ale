@@ -13,6 +13,8 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 
 `daytona_api.py` is its REST client and `daytona_image.py` adapts and publishes images.
 `firecracker_init.py` is the init every microVM boots; it runs in the guest.
+`fleet_tunnel.py` carries a Run's Gateway to its Sandboxes on a Node, both ends of it; the
+node agent itself is the `ale-fleet` package.
 
 They implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
 preflight, image verification, lifecycle, command/file transport, egress changes,

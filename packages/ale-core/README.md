@@ -2,7 +2,7 @@
 
 `ale-core` owns the stable contracts shared by ALE implementations. It contains strict
 models for Tasks, sandboxes, harnesses, traces, results and provenance, plus the abstract
-interfaces implemented by `ale-run`.
+interfaces implemented by `ale-run`, and the protocol `ale-fleet` speaks.
 
 It never imports the orchestrator or verification implementation. A change here is a
 contract change when it alters a public model, persisted record or implementation
@@ -19,6 +19,7 @@ Important modules:
 | `episode.py` | Episode lifecycle contracts and context |
 | `trace.py`, `trajectory.py` | execution evidence and ATIF trajectory |
 | `result.py`, `lock.py` | terminal result and reproducibility provenance |
+| `fleet.py` | the Fleet protocol between Runs, the control plane and node agents |
 
 Run its tests from the repository root with `just test` and verify dependency direction
 with `just lint`.

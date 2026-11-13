@@ -3,7 +3,7 @@ name = "ale-workspace"
 version = "0.0.0"
 description = "ALE engine workspace root (never published)"
 requires-python = ">=3.12"
-dependencies = ["ale-core", "ale-run", "ale-verify"]
+dependencies = ["ale-core", "ale-fleet", "ale-run", "ale-verify"]
 
 [dependency-groups]
 dev = [
@@ -21,6 +21,7 @@ package = false
 
 [tool.uv.sources]
 ale-core = { workspace = true }
+ale-fleet = { workspace = true }
 ale-run = { workspace = true }
 ale-verify = { workspace = true }
 
@@ -32,6 +33,7 @@ line-length = 100
 target-version = "py312"
 src = [
     "packages/ale-core/src",
+    "packages/ale-fleet/src",
     "packages/ale-run/src",
     "packages/ale-verify/src",
     "packages/ale-verify/tests",

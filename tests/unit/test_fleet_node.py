@@ -15,14 +15,7 @@ from aiohttp.test_utils import TestClient, TestServer, unused_port
 from tests.support import MemoryProvider
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
-from ale.core.sandbox import ImageRef, PreparedTaskImage, SandboxRequest
-from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.run.fleet import images as images_module
-from ale.run.fleet import node as node_module
-from ale.run.fleet.control import ControlPlane, Timing
-from ale.run.fleet.images import NodeImages
-from ale.run.fleet.node import NodeAgent, NodeSettings, probe
-from ale.run.fleet.protocol import (
+from ale.core.fleet import (
     AcquireRequest,
     CreateSandbox,
     ExecCall,
@@ -34,11 +27,18 @@ from ale.run.fleet.protocol import (
     sign_grant,
     verify_grant,
 )
-from ale.run.fleet.server import control_app
-from ale.run.fleet.store import Store
-from ale.run.fleet.tunnel import NodeListeners, RunTunnel
+from ale.core.sandbox import ImageRef, PreparedTaskImage, SandboxRequest
+from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from ale.fleet import images as images_module
+from ale.fleet import node as node_module
+from ale.fleet.control import ControlPlane, Timing
+from ale.fleet.images import NodeImages
+from ale.fleet.node import NodeAgent, NodeSettings, probe
+from ale.fleet.server import control_app
+from ale.fleet.store import Store
 from ale.run.framework import fleet_framework_identity
 from ale.run.guestd.tunnel import Mux
+from ale.run.providers.fleet_tunnel import NodeListeners, RunTunnel
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import ImagePreparationResult
 from ale.run.tasksets.manifest import load_task_folder

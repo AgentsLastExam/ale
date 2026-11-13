@@ -24,11 +24,11 @@ from pydantic import BaseModel, ConfigDict
 from ale.core.config import RunConfig
 from ale.core.episode import EpisodeContext
 from ale.core.errors import AleError, ProviderCapabilityError
+from ale.core.fleet import ImageHolding, ImageInputs
 from ale.core.sandbox import PreparedTaskImage, Provider
 from ale.core.task import Task
 from ale.core.taskspec import ImageKind, OperatingSystem
 from ale.core.verdict import Rewards
-from ale.run.fleet.protocol import ImageHolding, ImageInputs
 from ale.run.providers import ProviderRegistry
 from ale.run.task_images import prepare_task_image_result, prepare_verifier_image_result
 from ale.run.tasksets.manifest import TaskFolder

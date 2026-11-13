@@ -3,7 +3,7 @@
 A Fleet pools the Sandbox capacity of several machines behind one control plane; the
 contract is [the Fleet spec](../specs/fleet.md). Every machine involved runs this engine at
 the same framework identity and shares one Fleet token. Put the token in each checkout's
-`.env`, which every `ale` command reads:
+`.env`, which every `ale` and `ale-fleet` command reads:
 
 ```bash
 ALE_FLEET_TOKEN=<a long random string>
@@ -19,7 +19,7 @@ private network.
 On one always-on machine:
 
 ```bash
-uv run ale fleet serve
+uv run ale-fleet serve
 ```
 
 It listens on port 7470 and keeps its ledger in `~/.local/state/ale/fleet/fleet.db`
@@ -30,7 +30,7 @@ It listens on port 7470 and keeps its ledger in `~/.local/state/ale/fleet/fleet.
 On a machine with Docker, and KVM for VMs:
 
 ```bash
-uv run ale fleet node --control-plane http://CONTROL:7470 --address http://NODE:7471
+uv run ale-fleet node --control-plane http://CONTROL:7470 --address http://NODE:7471
 ```
 
 `--address` is where every Run's machine reaches this agent. The control plane connects back
@@ -156,10 +156,10 @@ Open `http://CONTROL:7470/?token=TOKEN` once; the page then remembers the token 
 refreshes itself. From a shell:
 
 ```bash
-uv run ale fleet status --control-plane http://CONTROL:7470
+uv run ale-fleet status --control-plane http://CONTROL:7470
 ```
 
 `--json` prints the document the page is drawn from, and `ALE_FLEET_URL` saves repeating the
-address. `ale fleet drain NODE` stops new placements on a Node before maintenance, and
-`ale fleet resume NODE` ends that; `ale fleet destroy SANDBOX` and `ale fleet cancel RUN`
+address. `ale-fleet drain NODE` stops new placements on a Node before maintenance, and
+`ale-fleet resume NODE` ends that; `ale-fleet destroy SANDBOX` and `ale-fleet cancel RUN`
 clean up after a Run that cannot.

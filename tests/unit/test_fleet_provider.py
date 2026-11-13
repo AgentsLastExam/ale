@@ -22,15 +22,15 @@ from ale.core.errors import (
     ProviderStartError,
     TaskDefinitionError,
 )
+from ale.core.fleet import ImageInputs, RunPlan, SandboxStatus
 from ale.core.sandbox import Identity, ImageRef, PreparedTaskImage, Sandbox, SandboxRequest
 from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.run.fleet import images as images_module
-from ale.run.fleet import node as node_module
-from ale.run.fleet.control import ControlPlane
-from ale.run.fleet.node import NodeAgent, NodeSettings, probe
-from ale.run.fleet.protocol import ImageInputs, RunPlan, SandboxStatus
-from ale.run.fleet.server import control_app
-from ale.run.fleet.store import Store
+from ale.fleet import images as images_module
+from ale.fleet import node as node_module
+from ale.fleet.control import ControlPlane
+from ale.fleet.node import NodeAgent, NodeSettings, probe
+from ale.fleet.server import control_app
+from ale.fleet.store import Store
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.fleet import FleetClient, FleetProvider, FleetSandbox, _Unreachable
 from ale.run.scaffold import scaffold_task

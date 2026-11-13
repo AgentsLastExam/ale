@@ -1,0 +1,28 @@
+[project]
+name = "ale-fleet"
+version = "0.1.1"
+description = "ALE Fleet: the control plane that pools Sandbox capacity across machines, and the node agent that lends a machine to it"
+requires-python = ">=3.12"
+dependencies = [
+    "ale-core",
+    "ale-run",
+    "aiohttp>=3.11",
+    "pydantic>=2.9",
+    "typer>=0.15",
+]
+
+[project.scripts]
+ale-fleet = "ale.fleet.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+ale-core = { workspace = true }
+ale-run = { workspace = true }
+
+# `ale` is a PEP 420 namespace package shared with ale-core and ale-run: there is
+# deliberately no src/ale/__init__.py in any of them.
+[tool.hatch.build.targets.wheel]
+packages = ["src/ale"]

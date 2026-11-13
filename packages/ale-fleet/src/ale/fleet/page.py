@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from html import escape
 
-from ale.run.fleet.status import FleetStatus, NodeStatus
+from ale.fleet.status import FleetStatus, NodeStatus
 
 __all__ = ["render"]
 

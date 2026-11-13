@@ -1,4 +1,4 @@
-"""A Run's plan, the status document, the page and ``ale fleet status``."""
+"""A Run's plan, the status document, the page and ``ale-fleet status``."""
 
 from __future__ import annotations
 
@@ -20,13 +20,7 @@ from tests.unit.test_fleet_control import (
 )
 from typer.testing import CliRunner
 
-from ale.core.taskspec import ImageKind, OperatingSystem, Resources
-from ale.run.cli import fleet as fleet_cli
-from ale.run.cli.main import app
-from ale.run.fleet.control import ControlPlane
-from ale.run.fleet.page import render
-from ale.run.fleet.placement import NodeView, assign
-from ale.run.fleet.protocol import (
+from ale.core.fleet import (
     Arch,
     EpisodeReport,
     GpuPool,
@@ -38,8 +32,13 @@ from ale.run.fleet.protocol import (
     SandboxStatus,
     StartReport,
 )
-from ale.run.fleet.server import COOKIE, control_app
-from ale.run.fleet.store import Store
+from ale.core.taskspec import ImageKind, OperatingSystem, Resources
+from ale.fleet import cli as fleet_cli
+from ale.fleet.control import ControlPlane
+from ale.fleet.page import render
+from ale.fleet.placement import NodeView, assign
+from ale.fleet.server import COOKIE, control_app
+from ale.fleet.store import Store
 
 pytestmark = pytest.mark.unit
 
@@ -217,12 +216,12 @@ class TestCommand:
         monkeypatch.setattr(
             fleet_cli, "_call", lambda *_args, **_kw: control.status().model_dump_json().encode()
         )
-        result = CliRunner().invoke(app, ["fleet", "status", "--control-plane", "http://x"])
+        result = CliRunner().invoke(fleet_cli.app, ["status", "--control-plane", "http://x"])
         assert result.exit_code == 0, result.output
         assert "mac-a" in result.output and "macOS 1/1" in result.output
         assert "1 waiting" in result.output
         assert "org/mac: 0 done, 0 running, 2 waiting" in result.output
-        raw = CliRunner().invoke(app, ["fleet", "status", "--json"])
+        raw = CliRunner().invoke(fleet_cli.app, ["status", "--json"])
         assert json.loads(raw.output)["nodes"][0]["name"] == "mac-a"
 
     def test_container_demands_are_shown_by_profile(self, control: ControlPlane) -> None:

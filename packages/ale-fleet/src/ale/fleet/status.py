@@ -1,4 +1,4 @@
-"""What the control plane shows: one document the web page and ``ale fleet status`` read.
+"""What the control plane shows: one document the web page and ``ale-fleet status`` read.
 
 Both read the same JSON, so whatever an operator can see or do on the page they can from
 the command line, and the other way round.
@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from ale.run.fleet.protocol import SandboxStatus
-from ale.run.fleet.store import Event
+from ale.core.fleet import SandboxStatus
+from ale.fleet.store import Event
 
 __all__ = [
     "Counts",

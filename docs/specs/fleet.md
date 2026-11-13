@@ -12,8 +12,14 @@ service and the network policy stay with the Providers that already enforce them
 Node, so the Fleet adds scheduling without a second implementation of any guarantee. It
 boots nothing before a request: an idle macOS VM would hold half of its Mac.
 
-One control plane serves the Fleet, with its ledger in one SQLite file (`ale fleet serve`).
+One control plane serves the Fleet, with its ledger in one SQLite file (`ale-fleet serve`).
 Every peer authenticates with the one Fleet token, `ALE_FLEET_TOKEN`.
+
+The control plane and the node agent are the `ale-fleet` package, which builds on the engine:
+a node agent lends the engine's Providers and prepares images with the engine's own code. The
+engine never imports it. A Run reaches the Fleet through the FleetProvider, one of its
+Providers, so the Fleet can grow without the engine knowing more than one Provider; all three
+speak the protocol in `ale.core.fleet`.
 
 ## Network
 
@@ -162,7 +168,7 @@ macOS VM that is shutting down still counts against its Mac.
 
 ## Node agent
 
-`ale fleet node` lends a machine's Providers to the Fleet. It drives the very Provider and
+`ale-fleet node` lends a machine's Providers to the Fleet. It drives the very Provider and
 Sandbox objects a local Run would, so every guarantee of the
 [Provider contract](sandbox-image.md#provider-contract) holds on a Node as it does on the
 Run's own machine; the agent only carries the calls.
@@ -283,11 +289,11 @@ in the Run's own output.
 ## Operating
 
 The control plane serves one status document, `GET /v1/status`, and a page rendered from it
-at `/`; `ale fleet status` prints the same document. Both show Nodes (state, profiles,
+at `/`; `ale-fleet status` prints the same document. Both show Nodes (state, profiles,
 resources used of total including macOS slots, images, free disk, agent version), the queue
 with why each Sandbox waits, each Run's progress and mean start segments, the Sandboxes of
 the last hour, which Nodes prepared each image and how long it took them, and the latest
 events. An operator can drain a Node and
 resume it, destroy a Sandbox, and cancel a Run's queued Sandboxes, from the page or with
-`ale fleet drain`, `resume`, `destroy` and `cancel`; each action is an event in the ledger.
+`ale-fleet drain`, `resume`, `destroy` and `cancel`; each action is an event in the ledger.
 The page needs the Fleet token once, through `/?token=`, which it keeps in a cookie.
