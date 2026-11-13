@@ -519,6 +519,21 @@ class Handler:
         width, height = screen_size()
         return ok(req_id, width=width, height=height)
 
+    # --- network ------------------------------------------------------------
+
+    def op_system_proxy(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
+        """Point the agent account's system proxy at ``proxy`` through a loopback relay, or
+        restore the account's own settings when ``proxy`` is null."""
+        if os.name != "nt":
+            raise ProtocolError(ERR_UNSUPPORTED, "guestd sets a system proxy on Windows only")
+        from egress import apply, restore
+
+        proxy = params.get("proxy")
+        if proxy is None:
+            restore()
+            return ok(req_id)
+        return ok(req_id, address=apply(str(proxy), list(params.get("bypass") or [])))
+
 
 def _require(params: dict[str, Any], key: str) -> Any:
     if key not in params:

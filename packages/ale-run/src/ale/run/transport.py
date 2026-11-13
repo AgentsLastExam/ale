@@ -452,6 +452,11 @@ class GuestClient:
         data, _ = await self.call("input", {"actions": actions}, timeout_sec=120 + wait_ms / 1000)
         return int(data.get("applied", 0))
 
+    async def system_proxy(self, proxy: str | None, *, bypass: Sequence[str] = ()) -> None:
+        """Point a Windows agent account's system proxy at ``proxy``, a URL carrying the
+        episode's credentials, bypassed for ``bypass``; ``None`` restores its own settings."""
+        await self.call("system_proxy", {"proxy": proxy, "bypass": list(bypass)}, timeout_sec=60)
+
     async def close(self) -> None:
         await self._transport.close()
 

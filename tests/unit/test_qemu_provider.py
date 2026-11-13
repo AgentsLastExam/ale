@@ -19,7 +19,12 @@ from typing import Any
 import pytest
 from tests.support import FakeQemuImg, write_qcow2
 
-from ale.core.errors import ProviderCapabilityError, ProviderStartError, TaskDefinitionError
+from ale.core.errors import (
+    GuestUnreachableError,
+    ProviderCapabilityError,
+    ProviderStartError,
+    TaskDefinitionError,
+)
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     Identity,
@@ -1297,11 +1302,16 @@ class _ExecClient:
     def __init__(self) -> None:
         self.env: dict[str, str] | None = None
         self.argv: object = None
+        self.calls: list[object] = []
 
     async def exec(self, argv: object, **kwargs: Any) -> tuple[int, str, str, bool]:
         self.argv = argv
         self.env = kwargs.get("env")
+        self.calls.append(argv)
         return 0, "", "", False
+
+    async def system_proxy(self, proxy: str | None, *, bypass: object = ()) -> None:
+        self.calls.append(("system_proxy", proxy, bypass))
 
     async def close(self) -> None:
         pass
@@ -1405,6 +1415,106 @@ def test_allowlist_direct_bypass_is_dropped(monkeypatch: pytest.MonkeyPatch) -> 
     assert all("ESTABLISHED" in rule or "--dports" in rule for rule in accepted)
     assert not any("! -d" in rule for rule in rules)
     assert sandbox._sealed is True  # type: ignore[attr-defined]
+
+
+def _sealing_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+    client: _ExecClient,
+    operating_system: OperatingSystem = OperatingSystem.WINDOWS,
+    mode: NetworkMode = NetworkMode.ALLOWLIST,
+) -> QemuSandbox:
+    """A sandbox whose runner rules and guest calls land, in order, in ``client.calls``."""
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        client.calls.append(argv[-1])
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    sandbox = QemuSandbox.__new__(QemuSandbox)
+    sandbox.request = request(  # type: ignore[attr-defined]
+        os=operating_system,
+        network=NetworkPolicy(
+            mode=mode,
+            allowed_hosts=("example.com",) if mode is NetworkMode.ALLOWLIST else (),
+        ),
+        proxy_url="http://0.0.0.0:9443",
+    )
+    sandbox.container = "runner"  # type: ignore[attr-defined]
+    sandbox.host_ip = "172.17.0.1"  # type: ignore[attr-defined]
+    sandbox._client = client  # type: ignore[attr-defined]
+    sandbox._sealed = False  # type: ignore[attr-defined]
+    return sandbox
+
+
+@pytest.mark.parametrize(
+    ("operating_system", "mode"),
+    [
+        (OperatingSystem.WINDOWS, NetworkMode.ALLOWLIST),
+        (OperatingSystem.LINUX, NetworkMode.ALLOWLIST),
+        (OperatingSystem.WINDOWS, NetworkMode.BLOCK),
+    ],
+)
+def test_a_windows_allowlist_seal_points_the_agents_system_proxy_at_the_episode_proxy(
+    monkeypatch: pytest.MonkeyPatch, operating_system: OperatingSystem, mode: NetworkMode
+) -> None:
+    """A Windows browser takes its proxy from the account's settings, not the variables;
+    the framework's own phases get the account's settings back before the runner opens."""
+    client = _ExecClient()
+    sandbox = _sealing_sandbox(monkeypatch, client, operating_system, mode)
+
+    asyncio.run(sandbox.close_egress())
+    sealed, client.calls = client.calls, []
+    asyncio.run(sandbox.open_egress())
+    lifted = client.calls
+
+    bypass = ["172.30.0.1", "localhost", "127.0.0.1"]
+    if operating_system is OperatingSystem.WINDOWS and mode is NetworkMode.ALLOWLIST:
+        assert all(isinstance(rule, str) for rule in sealed[:-1])
+        assert sealed[-1] == ("system_proxy", "http://ale:episode-token@172.30.0.1:9443", bypass)
+        assert lifted[0] == ("system_proxy", None, bypass)
+        assert all(isinstance(rule, str) for rule in lifted[1:])
+    else:
+        assert all(isinstance(call, str) for call in sealed + lifted)
+
+
+@pytest.mark.parametrize("failure", [GuestUnreachableError("guest session closed"), TimeoutError()])
+def test_a_system_proxy_the_guest_cannot_set_fails_the_seal(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    class Unanswered(_ExecClient):
+        async def system_proxy(self, proxy: str | None, *, bypass: object = ()) -> None:
+            raise failure
+
+    sandbox = _sealing_sandbox(monkeypatch, Unanswered())
+    with pytest.raises(ProviderStartError, match="could not set the agent's system proxy"):
+        asyncio.run(sandbox.close_egress())
+
+
+def test_a_windows_allowlist_guest_gets_its_own_proxy_settings_back_before_power_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A snapshot outlives the relay its system proxy names, even one a failed seal set."""
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        return 0, "0\n", ""
+
+    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    sandbox = QemuSandbox.__new__(QemuSandbox)
+    sandbox.request = request(  # type: ignore[attr-defined]
+        os=OperatingSystem.WINDOWS,
+        network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
+        proxy_url="http://0.0.0.0:9443",
+    )
+    sandbox.container = "runner"  # type: ignore[attr-defined]
+    sandbox.agent_user = "user"  # type: ignore[attr-defined]
+    sandbox._client = client = _ExecClient()  # type: ignore[attr-defined]
+    sandbox._file_client = _ExecClient()  # type: ignore[attr-defined]
+    sandbox._sealed = False  # type: ignore[attr-defined]
+
+    asyncio.run(sandbox._power_off())
+
+    assert client.calls[0] == ("system_proxy", None, ["172.30.0.1", "localhost", "127.0.0.1"])
+    assert client.calls[1] == ["shutdown.exe", "/s", "/t", "1"]
 
 
 def test_only_whole_clusters_of_ntfs_free_space_are_discarded() -> None:

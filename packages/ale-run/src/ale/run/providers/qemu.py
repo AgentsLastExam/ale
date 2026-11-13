@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote, urlsplit
 
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     Capabilities,
@@ -498,8 +498,35 @@ class QemuSandbox(Sandbox):
             *allowed,
         )
 
+    @property
+    def _relays_system_proxy(self) -> bool:
+        """Whether a seal also points the agent's system proxy at the episode proxy.
+
+        Windows programs that take their proxy from the account's settings, a browser above
+        all, ignore the proxy variables and cannot present the episode token, so guestd
+        relays a loopback port to the proxy with the token and names it there.
+        """
+        return (
+            self.request.os is OperatingSystem.WINDOWS
+            and self.request.network.mode is NetworkMode.ALLOWLIST
+            and bool(self.request.proxy_url)
+        )
+
+    async def _system_proxy(self, proxy: str | None) -> None:
+        env = _proxy_env(self.request)
+        try:
+            await self._client.system_proxy(proxy, bypass=env["NO_PROXY"].split(","))
+        except (GuestUnreachableError, TimeoutError) as error:
+            action = "set" if proxy else "restore"
+            raise ProviderStartError(
+                f"could not {action} the agent's system proxy: {error}"
+            ) from error
+
     async def open_egress(self) -> None:
         """Lift the runner firewall for the framework's own phases."""
+        if self._relays_system_proxy:
+            # Windows guestd runs as the agent's account, so its phases would meet the relay.
+            await self._system_proxy(None)
         for rule in (
             *(f"iptables -D FORWARD {match} -j ACCEPT" for match in self._seal_rules()),
             f"iptables -D FORWARD -i {GUEST_BRIDGE} -j DROP",
@@ -527,6 +554,8 @@ class QemuSandbox(Sandbox):
                 # Loud: the alternative is an agent measured with a network it was never
                 # meant to have and a lock file that says otherwise.
                 raise ProviderStartError(f"could not close egress: {stderr.strip()}")
+        if self._relays_system_proxy:
+            await self._system_proxy(_proxy_env(self.request)["HTTPS_PROXY"])
         self._sealed = True
 
     async def save_image(self, destination: Path) -> str:
@@ -582,6 +611,9 @@ class QemuSandbox(Sandbox):
 
     async def _power_off(self) -> None:
         """Shut the guest down cleanly and wait for its runner to exit."""
+        if self._relays_system_proxy:
+            # The relay ends with this boot; the disk keeps the account's own settings.
+            await self._system_proxy(None)
         if self.request.os is OperatingSystem.WINDOWS:
             command = ["shutdown.exe", "/s", "/t", "1"]
         else:
