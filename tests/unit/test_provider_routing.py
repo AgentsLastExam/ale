@@ -204,3 +204,22 @@ async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_hand
     ]
     with pytest.raises(ProviderCapabilityError, match="must start"):
         await _destroy_retained_sandbox("ale-ambiguous")
+
+
+@pytest.mark.asyncio
+async def test_a_machine_without_docker_lists_none_of_its_sandboxes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Mac, say, lists its Orchard VMs; the Docker-based Providers have nothing there."""
+    import asyncio
+    import shutil
+
+    from ale.run.providers import provider_named
+
+    async def no_process(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a machine without Docker ran a process for its listing")
+
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", no_process)
+    for name in ("docker", "qemu", "firecracker"):
+        assert await provider_named(name).list_retained() == []

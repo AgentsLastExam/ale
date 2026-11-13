@@ -1248,6 +1248,8 @@ class QemuProvider(Provider):
                 )
 
     async def list_retained(self) -> list[dict[str, object]]:
+        if shutil.which("docker") is None:
+            return []  # a machine without Docker keeps none of these
         code, output, stderr = await _run(
             "docker",
             "ps",
