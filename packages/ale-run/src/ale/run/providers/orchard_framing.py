@@ -163,9 +163,13 @@ async def _frame(
     *,
     user: str,
 ) -> FramedImage:
-    # A clone of a pinned reference pulls it by digest, so it is the image that was prepared.
+    # A clone of a pinned reference pulls it by digest when Tart's cache lacks it, so it is the
+    # image that was prepared. Deduplicating, that pull starts the disk as an APFS clone of a
+    # cached image sharing at least 1 GB with it, such as the base's earlier version, so the
+    # chunks they share take no new space. A local image is only cloned.
     work = f"ale-frame-{uuid.uuid4().hex}"
-    await local.tart("clone", image.runtime_ref, work, timeout_sec=PULL_TIMEOUT_SEC)
+    pull = ["--deduplicate"] if image.source == "external-ref" else []
+    await local.tart("clone", *pull, image.runtime_ref, work, timeout_sec=PULL_TIMEOUT_SEC)
     try:
         payload = await asyncio.to_thread(macos_framework_payload)
         facts = await local.frame_disk(work, user=user, identity=identity, payload=payload)

@@ -461,10 +461,13 @@ elevation and its checks, and a `build.sh` VM is kept exactly as the build left 
 Preparing an OCI reference resolves its tag through registry manifest metadata without
 downloading VM disks or checking the worker cache, and checks the installed framer, the
 local controller and an eligible ARM64 Tart worker; a local image `build.sh` built is only
-looked up on the worker. Framing clones either. Provisioning checks the framed image and
-the CPU and memory the controller reports, and measures the root disk from the guest.
-Provisioning (1800 s, with queueing and pulls) and guest readiness (300 s) have separate
-deadlines.
+looked up on the worker. Framing clones either. The clone pulls a reference Tart's cache
+lacks with `--deduplicate`, a flag Tart's help hides: the pulled disk starts as an APFS
+clone of a cached image that shares at least 1 GB with it at the same offsets, such as the
+base's earlier version, and the shared chunks take no new space. Provisioning checks the
+framed image and the CPU and memory the controller reports, and measures the root disk
+from the guest. Provisioning (1800 s, with queueing and pulls) and guest readiness (300 s)
+have separate deadlines.
 
 Orchard credentials travel through verified TLS, never command arguments or Run records.
 SIP is unchanged. `orchard_desktop.py` verifies actual capture as the Task account in every

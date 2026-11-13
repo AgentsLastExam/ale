@@ -154,10 +154,11 @@ async def test_an_image_is_framed_offline_booted_once_and_then_reused():
     local = Local(controller)
     framed = await orchard_framing.frame_image(local, IMAGE, user="admin")
     clone, delete = local.tarts[0], local.tarts[-1]
-    assert clone[:2] == ("clone", REF) and clone[2].startswith("ale-frame-")
-    assert local.framed == [(clone[2], "admin", framed.identity)]
+    # A reference Tart's cache lacks is pulled onto the cached image it shares most with.
+    assert clone[:3] == ("clone", "--deduplicate", REF) and clone[3].startswith("ale-frame-")
+    assert local.framed == [(clone[3], "admin", framed.identity)]
     (vm,) = controller.created
-    assert vm["image"] == clone[2]
+    assert vm["image"] == clone[3]
     assert local.saved == [(vm["name"], framed.name)]
     # The display mode the first login saved is forgotten, so each VM starts at its own.
     assert controller.execs[-1] == ["sudo", "-n", *orchard_framing._FORGET_DISPLAYS]
@@ -174,7 +175,7 @@ async def test_an_image_is_framed_offline_booted_once_and_then_reused():
         "/Users/admin",
     ]
     assert controller.deleted == [vm["name"]]
-    assert delete == ("delete", clone[2])
+    assert delete == ("delete", clone[3])
     assert (framed.agent_home, framed.agent_uid) == ("/Users/admin", 501)
 
     again = await orchard_framing.frame_image(local, IMAGE, user="admin")
@@ -228,6 +229,37 @@ async def test_a_clone_whose_display_cannot_be_set_is_deleted():
     assert local.tarts[-1] == ("delete", local.tarts[0][2])
 
 
+async def test_a_local_image_is_cloned_without_a_pull():
+    built = PreparedTaskImage(
+        kind=ImageKind.VM,
+        source="solver-local",
+        input_identity=DIGEST,
+        image_source_identity=DIGEST,
+        runtime_ref="ale-built-" + "b" * 32,
+        prepared_identity=DIGEST,
+        base_materials=(DIGEST,),
+        builder_identity=DIGEST,
+    )
+    local = Local(Controller())
+    await orchard_framing.frame_image(local, built, user="admin")
+    clone = local.tarts[0]
+    assert clone[:2] == ("clone", built.runtime_ref) and clone[2].startswith("ale-frame-")
+
+
+async def test_a_failed_pull_keeps_nothing():
+    class Offline(Local):
+        async def tart(self, *args, timeout_sec=600):
+            self.tarts.append(args)
+            raise ProviderStartError("tart clone failed: registry unreachable")
+
+    local = Offline(Controller())
+    with pytest.raises(ProviderStartError, match="registry unreachable"):
+        await orchard_framing.frame_image(local, IMAGE, user="admin")
+    (clone,) = local.tarts
+    assert clone[:3] == ("clone", "--deduplicate", REF)
+    assert not local.framed and not local.controller.created and not local.saved
+
+
 async def test_each_account_has_its_framed_image():
     local = Local(Controller())
     admin = await orchard_framing.frame_image(local, IMAGE, user="admin")
@@ -258,7 +290,7 @@ async def test_a_failed_framer_deletes_the_clone_and_keeps_nothing():
     with pytest.raises(ProviderStartError, match="no Data volume"):
         await orchard_framing.frame_image(local, IMAGE, user="admin")
     assert not local.controller.created and not local.saved
-    assert local.tarts[-1] == ("delete", local.tarts[0][2])
+    assert local.tarts[-1] == ("delete", local.tarts[0][-1])
     local.frame_error = None
     await orchard_framing.frame_image(local, IMAGE, user="admin")
     assert local.saved
