@@ -39,7 +39,14 @@ from ale.run.providers.orchard_client import (
 )
 from ale.run.sources import cache_root
 
-__all__ = ["FramedImage", "at_resolution", "frame_image", "framed_record"]
+__all__ = [
+    "FORGET_DISPLAYS",
+    "FramedImage",
+    "at_resolution",
+    "frame_image",
+    "framed_record",
+    "remove_locks",
+]
 
 #: The first login of a framed disk, from boot until its notices have been posted.
 _SETTLE_TIMEOUT_SEC = 600
@@ -54,10 +61,10 @@ _DISMISS_NOTICES = (
     '"DELETE FROM record; DELETE FROM delivered; DELETE FROM displayed;"; '
     "/usr/bin/pkill -9 -x usernoted || true"
 )
-#: Run as root: forget the display mode the first login saved. macOS restores it on a display
-#: of the same identity whatever size Tart gives that display, so a VM would otherwise keep
-#: the first login's size rather than start at its own.
-_FORGET_DISPLAYS = ["/bin/rm", "-f", "/Library/Preferences/com.apple.windowserver.displays.plist"]
+#: Run as root before a disk is kept: forget the display mode its desktop saved. macOS
+#: restores it on a display of the same identity whatever size Tart gives that display, so a
+#: VM would otherwise keep that size rather than start at its own.
+FORGET_DISPLAYS = ["/bin/rm", "-f", "/Library/Preferences/com.apple.windowserver.displays.plist"]
 #: The labels of the LaunchAgents every account's session loads.
 _AGENT_LABELS = (
     'for plist in /Library/LaunchAgents/*.plist; do [ -f "$plist" ] || continue; '
@@ -80,7 +87,7 @@ def _identity(image: PreparedTaskImage, *, user: str) -> str:
         {
             "image": image.prepared_identity,
             "framework": macos_framework_identity(user=user),
-            "first_login": [_DISMISS_NOTICES, _AGENT_LABELS, _FORGET_DISPLAYS],
+            "first_login": [_DISMISS_NOTICES, _AGENT_LABELS, FORGET_DISPLAYS],
         }
     )
 
@@ -152,6 +159,13 @@ async def at_resolution(
                 await asyncio.shield(local.tart("delete", work))
             raise
         return name
+
+
+def remove_locks(image: str) -> None:
+    """Remove this Host's locks for the local image ``image`` and its clones at each
+    resolution, once they are deleted."""
+    for lock in [_records() / f"{image}.lock", *_records().glob(f"{image}-*.lock")]:
+        lock.unlink(missing_ok=True)
 
 
 @contextlib.asynccontextmanager
@@ -256,7 +270,7 @@ async def _settled(
     if dismissed.exit_code:
         detail = dismissed.stderr.decode(errors="replace").strip()
         raise ProviderStartError(f"could not dismiss the first login's notices: {detail}")
-    forgotten = await client.exec(name, ["sudo", "-n", *_FORGET_DISPLAYS], deadline=deadline)
+    forgotten = await client.exec(name, ["sudo", "-n", *FORGET_DISPLAYS], deadline=deadline)
     if forgotten.exit_code:
         detail = forgotten.stderr.decode(errors="replace").strip()
         raise ProviderStartError(f"could not forget the first login's display mode: {detail}")

@@ -25,7 +25,7 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.run.providers import orchard, orchard_client, privileges
+from ale.run.providers import orchard, orchard_client, orchard_framing, privileges
 from ale.run.providers.orchard_client import OrchardExecResult
 from ale.run.providers.orchard_framing import FramedImage
 
@@ -237,7 +237,6 @@ async def test_local_image_is_rejected_before_api(backend):
     "change",
     [
         {"network": NetworkPolicy(mode=NetworkMode.BLOCK)},
-        {"retention": "keep"},
         {"resources": Resources(gpus=1)},
         {"os": OperatingSystem.LINUX},
         {"user": "root"},
@@ -647,6 +646,7 @@ async def test_file_contract_and_streamed_upload_with_unprivileged_guestd(
         orchard=api,
         client=GuestClient(command_transport),
         file_client=GuestClient(file_transport),
+        source=FRAMED,
         name="unit-guest-files",
         uid="uid-1",
         agent_home=str(tmp_path),
@@ -1200,3 +1200,281 @@ async def test_framing_requires_the_installed_framer(monkeypatch, tmp_path):
         orchard_client.check_framer()
     framer.write_bytes(orchard_client.MACOS_FRAMER.read_bytes())
     orchard_client.check_framer()
+
+
+class FakeMac(FakeOrchard):
+    """A Mac's local Orchard that runs several VMs, and its local Tart images.
+
+    A VM starts with its image's files and display, as a Tart clone does, and saving a
+    stopped VM keeps them as an image.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.vms = {}
+        self.guests = {}
+        self.images = {FRAMED.name: {}}
+        self.displays = {FRAMED.name: (1024, 768)}
+        self.frames = []
+        self.tarts = []
+        self.events = []
+
+    def client(self):
+        return self
+
+    async def get_vm(self, name):
+        return self.vms.get(name)
+
+    async def list_vms(self):
+        return list(self.vms.values())
+
+    async def create_vm(self, spec):
+        self.created.append(spec)
+        name, image = spec["name"], spec["image"]
+        self.vms[name] = dict(spec) | {
+            "uid": f"uid-{len(self.created)}",
+            "status": "running",
+            "assignedCPU": spec["cpu"],
+            "assignedMemory": spec["memory"],
+        }
+        guest = self.guests[name] = FakeGuest(None)
+        guest.files, guest.screen = dict(self.images[image]), self.displays[image]
+        return self.vms[name]
+
+    async def update_vm(self, name, spec):
+        stopped = [{"type": "running", "state": "false"}]
+        self.vms[name].update(spec, generation=2, observedGeneration=2, conditions=stopped)
+        return self.vms[name]
+
+    async def delete_vm(self, name):
+        self.deleted.append(name)
+        del self.vms[name]
+
+    async def exec(self, name, argv, **kwargs):
+        self.events.append(("exec", name, list(argv)))
+        return OrchardExecResult(0, b"", b"")
+
+    async def connect_guest(self, name, argv, *, deadline=None):
+        return name
+
+    async def local_images(self):
+        return set(self.images)
+
+    async def tart(self, command, *args, **kwargs):
+        self.tarts.append((command, *args))
+        if command == "clone":
+            self.images[args[1]] = dict(self.images[args[0]])
+            self.displays[args[1]] = self.displays[args[0]]
+        elif command == "set":
+            width, height = args[2].removesuffix("pt").split("x")
+            self.displays[args[0]] = (int(width), int(height))
+        elif command == "rename":
+            self.images[args[1]] = self.images.pop(args[0])
+            self.displays[args[1]] = self.displays.pop(args[0])
+        elif command == "delete":
+            del self.images[args[0]], self.displays[args[0]]
+        return ""
+
+    async def shut_down(self, client, owned):
+        self.events.append(("shut_down", owned.name))
+        owned.stopped = True
+
+    async def save(self, owned, name):
+        assert owned.stopped
+        self.events.append(("save", owned.name, name))
+        guest = self.guests[owned.name]
+        self.images[name], self.displays[name] = dict(guest.files), guest.screen
+
+
+@pytest.fixture
+def mac(backend, monkeypatch, tmp_path):
+    """The Provider on a Mac whose local Orchard runs several VMs, records retention and
+    keeps local images, which it clones at each resolution as framing does."""
+    fake = FakeMac()
+
+    async def frame(local, image, *, user):
+        fake.frames.append((image, user))
+        return FRAMED
+
+    monkeypatch.setattr(orchard_client, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(orchard_framing, "cache_root", lambda: tmp_path / "cache")
+    monkeypatch.setattr(orchard, "frame_image", frame)
+    monkeypatch.setattr(orchard, "at_resolution", orchard_framing.at_resolution)
+    monkeypatch.setattr(orchard, "GuestClient", lambda name, **kwargs: fake.guests[name])
+    return orchard.OrchardProvider(fake), fake
+
+
+async def saved_snapshot(provider):
+    """A snapshot of a VM that wrote ``work.txt`` in its account's home."""
+    source = await provider.create(await request(provider, retention="snapshot"))
+    await source.write_file("/Users/user/work.txt", b"saved")
+    saved = await source.snapshot(roles=("solver",), reason="saved")
+    await source.destroy()
+    return source, saved
+
+
+@pytest.mark.asyncio
+async def test_a_kept_vm_is_listed_continued_and_destroyed(mac):
+    provider, fake = mac
+    sandbox = await provider.create(
+        await request(provider, retention="keep", gateway_url="http://127.0.0.1:9001")
+    )
+    retained = await sandbox.retain(roles=("solver",), reason="kept")
+    assert (retained.provider, retained.handle) == ("orchard", sandbox.handle)
+    assert retained.cleanup_command == f"ale sandbox destroy {sandbox.handle}"
+    assert fake.deleted == []
+    listed = await provider.list_retained()
+    assert [(item["handle"], item["running"]) for item in listed] == [(sandbox.handle, True)]
+
+    # A later episode, with its own Gateway, continues in it.
+    later = (await request(provider, gateway_url="http://127.0.0.1:9002")).model_copy(
+        update={"episode_id": "episode-2"}
+    )
+    continued = await provider.attach_retained(
+        sandbox.handle, later, sandbox.allocation, sandbox.resolved_image
+    )
+    guest = fake.guests[sandbox.sandbox_id]
+    stops = [c for c in guest.commands if c[0] == ["/bin/sh", "-c", orchard._STOP_GATEWAY_RELAY]]
+    assert len(stops) == 1
+    assert relays(guest)[-1][1] == "9002"
+    with pytest.raises(ProviderCapabilityError, match="does not run an image recorded here"):
+        other = sandbox.resolved_image.model_copy(
+            update={"observed_identity": "sha256:" + "0" * 64}
+        )
+        await provider.attach_retained(sandbox.handle, later, sandbox.allocation, other)
+    # It keeps the VM again, which stays recorded as the episode that first kept it.
+    again = await continued.retain(roles=("solver",), reason="kept again")
+    assert (again.handle, again.episode_id) == (sandbox.handle, "episode-2")
+    assert [item["episode"] for item in await provider.list_retained()] == ["episode-1"]
+
+    await provider.destroy_retained(sandbox.handle)
+    assert fake.deleted == [sandbox.sandbox_id]
+    assert await provider.list_retained() == []
+    with pytest.raises(ProviderCapabilityError, match="not a retained Orchard solver VM"):
+        await provider.attach_retained(
+            sandbox.handle, later, sandbox.allocation, sandbox.resolved_image
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_kept_verifier_is_not_continued_in(mac):
+    provider, fake = mac
+    verifier = await provider.create(
+        await request(provider, role=SandboxRole.VERIFIER, retention="keep")
+    )
+    retained = await verifier.retain(roles=("verifier",), reason="kept")
+    with pytest.raises(ProviderCapabilityError, match="not a retained Orchard solver VM"):
+        await provider.attach_retained(
+            retained.handle, await request(provider), verifier.allocation, verifier.resolved_image
+        )
+    await provider.destroy_retained(retained.handle)
+    assert fake.deleted == [verifier.sandbox_id]
+
+
+@pytest.mark.asyncio
+async def test_a_vm_deleted_outside_ale_is_no_longer_listed(mac):
+    provider, fake = mac
+    sandbox = await provider.create(await request(provider, retention="keep"))
+    await sandbox.retain(roles=("solver",), reason="kept")
+    del fake.vms[sandbox.sandbox_id]
+    assert await provider.list_retained() == []
+    with pytest.raises(ProviderCapabilityError):
+        await provider.destroy_retained(sandbox.handle)
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_boots_later_vms_with_its_files(mac):
+    provider, fake = mac
+    source, saved = await saved_snapshot(provider)
+    snapshot_id = source.sandbox_id.removeprefix("ale-")
+    image = f"ale-snapshot-{snapshot_id}"
+    assert saved.handle == f"orchard:snapshot:{snapshot_id}"
+    # The display mode the desktop saved is forgotten before the guest shuts down, so each
+    # VM booted from the snapshot starts at its own resolution.
+    assert fake.events[-3:] == [
+        ("exec", source.sandbox_id, ["sudo", "-n", *orchard_framing.FORGET_DISPLAYS]),
+        ("shut_down", source.sandbox_id),
+        ("save", source.sandbox_id, image),
+    ]
+    frames = len(fake.frames)
+
+    wide = DesktopResolution(width=1366, height=768)
+    booted = [
+        await provider.create(await request(provider, snapshot=saved.handle)),
+        await provider.create(
+            await request(provider, snapshot=saved.handle, desktop_resolution=wide)
+        ),
+    ]
+    assert [vm["image"] for vm in fake.created[-2:]] == [f"{image}-1024x768", f"{image}-1366x768"]
+    assert len(fake.frames) == frames  # booting a snapshot frames nothing
+    for each in booted:
+        assert each.resolved_image.observed_ref == image
+        assert await each.read_file("/Users/user/work.txt") == b"saved"
+    # A crashed process's VM booted from it is driven again from the same record.
+    again = await provider.reattach(
+        booted[0].handle, booted[0].request, booted[0].allocation, booted[0].resolved_image
+    )
+    assert await again.read_file("/Users/user/work.txt") == b"saved"
+    await again.destroy()
+    await booted[1].destroy()
+    assert set(fake.deleted) == {source.sandbox_id, *(each.sandbox_id for each in booted)}
+
+    other = await provider.prepare_image(
+        ImageRef(kind=ImageKind.VM, reference=REF.replace("a" * 64, "c" * 64))
+    )
+    with pytest.raises(ProviderCapabilityError, match="another Task image or account"):
+        await provider.create(
+            (await request(provider, snapshot=saved.handle)).model_copy(
+                update={"prepared_image": other}
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_goes_with_its_clones_once_no_vm_boots_from_it(mac, tmp_path):
+    provider, fake = mac
+    source, saved = await saved_snapshot(provider)
+    image = f"ale-snapshot-{source.sandbox_id.removeprefix('ale-')}"
+    wide = DesktopResolution(width=1366, height=768)
+    await (await provider.create(await request(provider, snapshot=saved.handle))).destroy()
+    booted = await provider.create(
+        await request(provider, snapshot=saved.handle, desktop_resolution=wide)
+    )
+    with pytest.raises(ProviderStartError, match="VMs still boot from"):
+        await provider.destroy_retained(saved.handle)
+    assert image in fake.images
+    await booted.destroy()
+
+    listed = await provider.list_retained()
+    assert [(item["handle"], item["image"], item["running"]) for item in listed] == [
+        (saved.handle, image, False)
+    ]
+    fake.tarts.clear()
+    await provider.destroy_retained(saved.handle)
+    # Its clones go first, so a failure leaves the image, and its record, to try again from.
+    assert fake.tarts == [
+        ("delete", f"{image}-1024x768"),
+        ("delete", f"{image}-1366x768"),
+        ("delete", image),
+    ]
+    assert set(fake.images) == {FRAMED.name, f"{FRAMED.name}-1024x768"}
+    locks = tmp_path / "cache" / "macos-frames"
+    assert [lock.name for lock in locks.glob("*.lock")] == [f"{FRAMED.name}-1024x768.lock"]
+    assert await provider.list_retained() == []
+    with pytest.raises(ProviderCapabilityError, match="there is no Orchard snapshot"):
+        await provider.create(await request(provider, snapshot=saved.handle))
+
+
+@pytest.mark.asyncio
+async def test_a_kept_vm_booted_from_a_snapshot_is_driven_again_from_its_record(mac):
+    provider, _fake = mac
+    _source, saved = await saved_snapshot(provider)
+    kept = await provider.create(await request(provider, snapshot=saved.handle, retention="keep"))
+    await kept.retain(roles=("solver",), reason="kept")
+    # A later Run on the Fleet continues in it, by a request that names no snapshot; the
+    # Node then restarts and drives it again.
+    adopted = kept.request.model_copy(update={"snapshot": None, "episode_id": "episode-2"})
+    again = await provider.reattach(kept.handle, adopted, kept.allocation, kept.resolved_image)
+    assert await again.read_file("/Users/user/work.txt") == b"saved"
+    await again.destroy()
+    assert [item["handle"] for item in await provider.list_retained()] == [saved.handle]

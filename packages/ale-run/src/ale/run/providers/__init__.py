@@ -22,7 +22,7 @@ __all__ = ["RETAINING_PROVIDERS", "ProviderRegistry", "provider_named"]
 
 #: Every Provider that can leave a sandbox behind. A retained sandbox outlives the run
 #: configuration that made it, so listing and destroying consult all of them.
-RETAINING_PROVIDERS = ("docker", "firecracker", "qemu", "daytona", "fleet")
+RETAINING_PROVIDERS = ("docker", "firecracker", "qemu", "daytona", "orchard", "fleet")
 
 
 class ProviderRegistry:
@@ -113,6 +113,10 @@ def provider_named(name: str) -> Provider:
         from ale.run.providers.daytona import DaytonaProvider
 
         return DaytonaProvider()
+    if name == "orchard":
+        from ale.run.providers.orchard import OrchardProvider
+
+        return OrchardProvider()
     if name == "fleet":
         from ale.run.providers.fleet import FleetProvider, fleet_client
 
