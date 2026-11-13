@@ -12,6 +12,7 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 | `fleet/` | a Sandbox of any of these on a Fleet Node ([Fleet](../../../../../../docs/specs/fleet.md)) | what the Node's Provider takes; each Node prepares its own images |
 
 Each package keeps its Provider and Sandbox in `provider.py` and exports both. Beside it,
+`docker/kata.py` builds the tc filters and VM size a sandbox in a Kata microVM needs;
 `daytona/api.py` is Daytona's REST client and `daytona/image.py` adapts and publishes
 images; `orchard/client.py` drives Orchard and Tart, `orchard/framing.py` frames images
 and `orchard/desktop.py` waits for the desktop; `fleet/tunnel.py` carries a Run's Gateway

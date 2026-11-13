@@ -17,15 +17,15 @@ from ale.core.sandbox import (
     SandboxRequest,
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from ale.run.providers.docker import kata
 from ale.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
-    KATA_RUNTIME,
-    KATA_TAP,
-    KATA_VETH,
     DockerProvider,
     DockerSandbox,
-    _kata_memory_mb,
+    _bridge_host_ip,
+    _KataConfinement,
+    _RuncConfinement,
     _sandbox_gateway,
 )
 
@@ -79,7 +79,7 @@ async def test_the_fixed_port_is_routed_to_the_gateway_and_an_isolated_sandbox_c
     monkeypatch: pytest.MonkeyPatch, network: str | None
 ) -> None:
     calls = _scripted(monkeypatch)
-    await DockerProvider()._wire_host("ale-e1", network, request())
+    await _RuncConfinement(network).wire("ale-e1", request())
     (inspect, helper) = calls
     assert inspect[-3] == (network or "bridge")
     rules = helper[-1].split(" && ")
@@ -104,7 +104,7 @@ async def test_a_reattaching_run_replaces_the_gateway_route_and_adds_its_port(
 ) -> None:
     calls = _scripted(monkeypatch)
     later = request(gateway_url="http://0.0.0.0:42000")
-    await DockerProvider()._wire_host("ale-e1", "ale-net-e1", later, reattached=True)
+    await _RuncConfinement("ale-net-e1").wire("ale-e1", later, reattached=True)
     rules = calls[-1][-1].split(" && ")
     assert rules[0] == (
         f"{{ iptables -w -t nat -N {GATEWAY_CHAIN} || iptables -w -t nat -F {GATEWAY_CHAIN}; }}"
@@ -120,7 +120,7 @@ async def test_an_open_sandbox_without_a_gateway_needs_no_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _scripted(monkeypatch)
-    await DockerProvider()._wire_host("ale-e1", None, request(gateway_url=None))
+    await _RuncConfinement(None).wire("ale-e1", request(gateway_url=None))
     assert calls == []
 
 
@@ -251,12 +251,13 @@ async def test_a_kata_sandbox_is_confined_by_tc_filters_outside_its_vm(
     calls = _scripted(monkeypatch)
     proxied = request(network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("a.b",)))
     proxied = proxied.model_copy(update={"proxy_url": "http://172.18.0.1:9443"})
-    host = await DockerProvider(runtime="kata")._wire_kata("ale-e1", proxied)
+    host = await _bridge_host_ip(None)
+    await _KataConfinement(host).wire("ale-e1", proxied)
     assert host == "172.18.0.1"
     (inspect, helper) = calls
     assert inspect[-3] == "bridge"
     filters = _helper_commands(helper)
-    tap, veth = KATA_TAP, KATA_VETH
+    tap, veth = kata.TAP, kata.VETH
     assert (
         f"tc filter add dev {tap} ingress pref 10 protocol ip flower dst_ip {host} ip_proto tcp "
         f"dst_port {SANDBOX_GATEWAY_PORT} action pedit ex munge tcp dport set 41000 pipe "
@@ -284,7 +285,7 @@ async def test_an_open_kata_sandbox_gets_only_the_gateway_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _scripted(monkeypatch)
-    await DockerProvider(runtime="kata")._wire_kata(
+    await _KataConfinement("172.18.0.1").wire(
         "ale-e1", request(network=NetworkPolicy(mode=NetworkMode.OPEN))
     )
     filters = _helper_commands(calls[-1])
@@ -300,7 +301,7 @@ async def test_a_reattaching_run_replaces_only_the_kata_gateway_filters(
 ) -> None:
     calls = _scripted(monkeypatch)
     later = request(gateway_url="http://0.0.0.0:42000")
-    await DockerProvider(runtime="kata")._wire_kata("ale-e1", later, reattached=True)
+    await _KataConfinement("172.18.0.1").wire("ale-e1", later, reattached=True)
     filters = _helper_commands(calls[-1])
     added = [item for item in filters if " add " in item]
     assert all("pref 10" in item for item in added) and len(added) == 2
@@ -324,13 +325,13 @@ async def test_a_kata_sandbox_opens_and_seals_egress_with_its_tc_filters(
 
     sandbox = _sandbox()
     sandbox.container = "ale-e1"
-    sandbox.kata_host_ip = "172.17.0.1"
+    sandbox.confinement = _KataConfinement("172.17.0.1")
     sandbox._sealed = False
     sandbox._client = SimpleNamespace(exec=guest_exec)  # type: ignore[assignment]
     await sandbox.open_egress()
     opened = _helper_commands(calls[-1])
     assert not [item for item in opened if " add " in item]
-    assert opened[-1] == f'test -z "$(tc filter show dev {KATA_VETH} ingress pref 22)"'
+    assert opened[-1] == f'test -z "$(tc filter show dev {kata.VETH} ingress pref 22)"'
     order.append("helper")
     await sandbox.close_egress()
     sealed = _helper_commands(calls[-1])
@@ -342,7 +343,7 @@ async def test_a_kata_sandbox_opens_and_seals_egress_with_its_tc_filters(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("mode", "kata", "networks", "drop", "sealed"),
+    ("mode", "in_kata", "networks", "drop", "sealed"),
     [
         (NetworkMode.ALLOWLIST, False, ("ale-net-e1",), False, True),
         (NetworkMode.ALLOWLIST, False, ("ale-net-e1", "bridge"), False, False),
@@ -355,7 +356,7 @@ async def test_a_kata_sandbox_opens_and_seals_egress_with_its_tc_filters(
 async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     monkeypatch: pytest.MonkeyPatch,
     mode: NetworkMode,
-    kata: bool,
+    in_kata: bool,
     networks: tuple[str, ...],
     drop: bool,
     sealed: bool,
@@ -368,7 +369,7 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
         "Image": DIGEST,
         "Config": {"Labels": {"ale.managed": "true", "ale.role": "solver"}},
         "State": {"Running": True},
-        "HostConfig": {"Runtime": KATA_RUNTIME if kata else "runc"},
+        "HostConfig": {"Runtime": kata.RUNTIME if in_kata else "runc"},
         "NetworkSettings": {"Networks": {name: {} for name in networks}},
     }
     dropping = (  # as the helper image's tc (iproute2 6.15) shows it
@@ -423,7 +424,9 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     assert (seen[-1] is not None) is sealed
     read = [call[-1] for call in calls if call[-1].startswith("tc filter show")]
     isolated = mode is not NetworkMode.OPEN
-    assert read == ([f"tc filter show dev {KATA_TAP} ingress pref 21"] if kata and isolated else [])
+    assert read == (
+        [f"tc filter show dev {kata.TAP} ingress pref 21"] if in_kata and isolated else []
+    )
 
 
 @pytest.mark.asyncio
@@ -435,5 +438,5 @@ async def test_kata_refuses_gpus_before_anything_starts(monkeypatch: pytest.Monk
 
 
 def test_a_kata_vm_holds_the_declared_memory_and_its_guests_own() -> None:
-    assert _kata_memory_mb(512) == 620
-    assert _kata_memory_mb(8192) == 8492
+    assert kata.memory_mb(512) == 620
+    assert kata.memory_mb(8192) == 8492
