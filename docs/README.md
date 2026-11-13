@@ -14,6 +14,7 @@ This directory is the maintained description of ALE.
 | Episode protocol: phases of one episode | [specs/episode-protocol.md](specs/episode-protocol.md) |
 | Start the local Orchard and run macOS Tasks | [guides/macos-orchard.md](guides/macos-orchard.md) |
 | Sandbox and image contract | [specs/sandbox-image.md](specs/sandbox-image.md) |
+| Pool Sandbox capacity across machines | [specs/fleet.md](specs/fleet.md) |
 | Verification API and records | [specs/verification.md](specs/verification.md) |
 | Harness integration | [specs/autonomous-harness.md](specs/autonomous-harness.md) |
 | Results, trajectories, and logs | [specs/trace.md](specs/trace.md) |

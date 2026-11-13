@@ -6,6 +6,10 @@ Normative. Every term below has exactly one meaning.
 |---|---|---|
 | **Sandbox** | An isolated execution instance supplied for one episode. | never called an Environment |
 | **Provider** | A backend adapter that turns a SandboxRequest into a Sandbox holding the guarantees in [the Provider contract](sandbox-image.md#provider-contract), or rejects it before creating anything. | not a model vendor or Task-selected setting |
+| **Fleet** | The machines one control plane pools, and the control plane that places Sandboxes on them; [Fleet](fleet.md). | not a warm pool or an environment server: it starts no Sandbox before a request |
+| **Node** | One machine that offers its Sandbox capacity to the Fleet. | not the Host that runs a Run and its Gateway, nor a worker of Orchard |
+| **Node agent** | The process on a Node that registers it, drives its Providers and holds its Sandboxes' leases. | never a scheduler: it creates only what the control plane granted |
+| **Sandbox profile** | One combination of Provider, kind, operating system and architecture a Node can start, with its capabilities. | not independent lists of systems and architectures |
 | **Model provider** | The vendor whose API the Gateway or a Judge calls, named by `gateway.provider` or a Judge's `provider`. It selects `ALE_<PROVIDER>_API_KEY` and `ALE_<PROVIDER>_BASE_URL`. | never a Sandbox Provider |
 | **Episode protocol** | The administration layer that turns one Task into one Episode: provision, setup, agent, verify, teardown. | not selected or replaced by a Task |
 | **Task folder** | The complete self-contained authored source unit: `task.toml`, instruction, environment, tests, solution, and optional agent resources. | not dependent on `domain.yaml`, a repository Kit, sibling Task, or shared domain image |

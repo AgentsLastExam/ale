@@ -71,3 +71,15 @@ source_modules =
     ale.run.harnesses
 forbidden_modules =
     ale.run.providers
+
+[importlinter:contract:fleet-control-plane-decoupling]
+name = the Fleet control plane places data and never imports a Provider
+type = forbidden
+source_modules =
+    ale.run.fleet.control
+    ale.run.fleet.placement
+    ale.run.fleet.protocol
+    ale.run.fleet.server
+    ale.run.fleet.store
+forbidden_modules =
+    ale.run.providers
