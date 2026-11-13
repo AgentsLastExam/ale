@@ -43,10 +43,13 @@ from ale.run.protocol.episode_protocol import (
     _continued_segment,
     _require_agent_episode,
 )
+from ale.run.providers import ProviderRegistry
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
+#: The Run's Providers; these checks never ask one for a Sandbox.
+PROVIDERS = ProviderRegistry(RunConfig())
 
 CONTINUATION = NativeContinuation(harness="claude-code", native_session_id="session")
 AGENT = AtifAgent(name="claude-code", version="2.1.170")
@@ -528,10 +531,15 @@ def _source(tmp_path: Path, **changes: Any) -> tuple[Path, Any]:
     return episode, task
 
 
+def continuation(episode: Path, tasks: list[Any], settings: RunConfig, harness: Any) -> Resume:
+    """What continuing ``episode`` resumes, for a Run with this module's Providers."""
+    return _continuation(episode, tasks, settings, harness, PROVIDERS)
+
+
 def test_the_earlier_episode_names_its_solver_session_and_trajectory(tmp_path: Path) -> None:
     episode, task = _source(tmp_path)
     harness = SimpleNamespace(name="claude-code", version=lambda: "2.1.170")
-    resume = _continuation(episode, [task], RunConfig(), harness)  # type: ignore[arg-type]
+    resume = continuation(episode, [task], RunConfig(), harness)
     assert resume.source == ResumedFrom(
         episode_id="earlier", retention="keep", handle="docker:kept", continuation=CONTINUATION
     )
@@ -552,7 +560,7 @@ def test_a_snapshot_continues_in_a_new_solver_with_this_tasks_resources(tmp_path
         tmp_path, record={"sandboxes": (snapshot,)}, lock={"resources": resources}
     )
     harness = SimpleNamespace(name="claude-code", version=lambda: "2.1.170")
-    resume = _continuation(episode, [task], RunConfig(), harness)  # type: ignore[arg-type]
+    resume = continuation(episode, [task], RunConfig(), harness)
     assert resume.source.retention == "snapshot"
     assert resume.source.handle == "docker:snapshot:kept"
     assert resume.attach is None
@@ -608,10 +616,28 @@ def test_an_episode_that_cannot_be_continued_here_is_refused(
     episode, task = _source(tmp_path, **changes)
     harness = SimpleNamespace(name="claude-code", version=lambda: "2.1.170")
     with pytest.raises(TaskDefinitionError, match=reason):
-        _continuation(episode, [task], RunConfig(), harness)  # type: ignore[arg-type]
+        continuation(episode, [task], RunConfig(), harness)
     other = SimpleNamespace(name="codex-cli", version=lambda: "2.1.170")
     with pytest.raises((TaskDefinitionError, ConfigError)):
-        _continuation(episode, [task], RunConfig(), other)  # type: ignore[arg-type]
+        continuation(episode, [task], RunConfig(), other)
+
+
+def test_the_fleet_checks_a_continued_sandboxs_image_by_its_key(tmp_path: Path) -> None:
+    """A Fleet Run knows an image by its key until a Node prepares it; the control plane
+    checks that key as it hands the kept Sandbox over, so the Node's prepared identity is
+    not compared here."""
+    lock = make_lock()
+    assert lock.resources is not None
+    effective = lock.resources.effective.model_copy(update={"provider": "fleet"})
+    episode, task = _source(
+        tmp_path,
+        lock={
+            "image": lock.image.model_copy(update={"prepared_identity": "sha256:" + "1" * 64}),
+            "resources": lock.resources.model_copy(update={"effective": effective}),
+        },
+    )
+    harness = SimpleNamespace(name="claude-code", version=lambda: "2.1.170")
+    assert continuation(episode, [task], RunConfig(), harness).attach is not None
 
 
 def test_a_kept_desktop_continues_only_at_the_resolution_it_has(tmp_path: Path) -> None:
@@ -626,9 +652,9 @@ def test_a_kept_desktop_continues_only_at_the_resolution_it_has(tmp_path: Path) 
     )
     harness = SimpleNamespace(name="claude-code", version=lambda: "2.1.170")
     with pytest.raises(TaskDefinitionError, match="desktop resolution"):
-        _continuation(episode, [task], RunConfig(), harness)  # type: ignore[arg-type]
+        continuation(episode, [task], RunConfig(), harness)
     settings = RunConfig(desktop_resolution=kept)
-    assert _continuation(episode, [task], settings, harness).attach is not None  # type: ignore[arg-type]
+    assert continuation(episode, [task], settings, harness).attach is not None
     # A Sandbox booted from a snapshot starts its desktop at this Run's resolution.
     snapshot = SandboxOutcome(
         roles=("solver", "verifier"),
@@ -641,13 +667,13 @@ def test_a_kept_desktop_continues_only_at_the_resolution_it_has(tmp_path: Path) 
     (episode / "result.json").write_text(
         record.model_copy(update={"sandboxes": (snapshot,)}).model_dump_json()
     )
-    assert _continuation(episode, [task], RunConfig(), harness).attach is None  # type: ignore[arg-type]
+    assert continuation(episode, [task], RunConfig(), harness).attach is None
 
 
 def test_only_one_episode_of_one_task_continues(tmp_path: Path) -> None:
     episode, task = _source(tmp_path)
     harness = SimpleNamespace(name="claude-code", version=lambda: "2.1.170")
     with pytest.raises(ConfigError, match="one episode of one Task"):
-        _continuation(episode, [task, task], RunConfig(), harness)  # type: ignore[arg-type]
+        continuation(episode, [task, task], RunConfig(), harness)
     with pytest.raises(ConfigError, match="one episode of one Task"):
-        _continuation(episode, [task], RunConfig(episodes=2), harness)  # type: ignore[arg-type]
+        continuation(episode, [task], RunConfig(episodes=2), harness)

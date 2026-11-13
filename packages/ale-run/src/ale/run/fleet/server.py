@@ -32,6 +32,7 @@ from ale.run.fleet.protocol import (
     Heartbeat,
     NodeDeclaration,
     RefusedRequest,
+    Retention,
     RunPlan,
     SandboxStatus,
     StartReport,
@@ -254,6 +255,30 @@ class _Api:
     async def cancel(self, request: web.Request) -> web.Response:
         return _json({"cancelled": self.control.cancel_run(request.match_info["run"])})
 
+    # --- retention ----------------------------------------------------------------
+
+    async def retain(self, request: web.Request) -> web.Response:
+        retention = await _body(request, Retention)
+        self.control.retain(request.match_info["id"], retention)
+        return web.Response(status=204)
+
+    async def snapshot(self, request: web.Request) -> web.Response:
+        retention = await _body(request, Retention)
+        self.control.snapshot(request.match_info["id"], retention)
+        return web.Response(status=204)
+
+    async def adopt(self, request: web.Request) -> web.Response:
+        body = await _body(request, AcquireRequest)
+        if body.sandbox_id != request.match_info["id"]:
+            raise web.HTTPBadRequest(text="the request names another Sandbox")
+        return _json(self.control.adopt(body))
+
+    async def retained(self, _request: web.Request) -> web.Response:
+        return _json([view.model_dump(mode="json") for view in self.control.retained()])
+
+    async def destroy_snapshot(self, request: web.Request) -> web.Response:
+        return _json(self.control.destroy_snapshot(request.match_info["id"]))
+
     async def events(self, request: web.Request) -> web.Response:
         limit = min(int(request.query.get("limit", "200")), 1000)
         return _json([event.model_dump() for event in self.control.events(limit)])
@@ -278,6 +303,11 @@ def control_app(control: ControlPlane, token: str, *, loopback: bool = False) ->
             web.post("/v1/sandboxes/{id}/release", api.release),
             web.post("/v1/sandboxes/{id}/report", api.report),
             web.post("/v1/sandboxes/{id}/destroy", api.destroy),
+            web.post("/v1/sandboxes/{id}/retain", api.retain),
+            web.post("/v1/sandboxes/{id}/snapshot", api.snapshot),
+            web.post("/v1/sandboxes/{id}/adopt", api.adopt),
+            web.get("/v1/retained", api.retained),
+            web.post("/v1/snapshots/{id}/destroy", api.destroy_snapshot),
             web.post("/v1/runs/{run}/cancel", api.cancel),
             web.post("/v1/runs/{run}/plan", api.plan),
             web.post("/v1/runs/{run}/episodes/{episode}", api.episode),

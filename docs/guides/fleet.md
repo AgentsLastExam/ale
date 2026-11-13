@@ -44,11 +44,11 @@ Docker and KVM. Its images, the build contexts Runs send and its upload scratch 
 under `$ALE_CACHE_DIR`, which belongs on local SSD for the same reason as
 [VM overlays](../../packages/ale-run/src/ale/run/providers/README.md#qemu).
 
-Stopping the agent destroys every Sandbox it holds. If the agent crashes instead, start it
-again with the same options: it drives again the Sandboxes whose Runs still hold them and
-destroys the rest, from the journal it keeps in `$ALE_CACHE_DIR/fleet/sandboxes`. A process
-supervisor that restarts it (systemd's `Restart=on-failure`, launchd's `KeepAlive`) does this
-unattended.
+Stopping the agent destroys every Sandbox it holds, apart from retained ones. If the agent
+crashes instead, start it again with the same options: it drives again the Sandboxes whose
+Runs still hold them, keeps the retained ones and the snapshots, and destroys the rest, from
+the journal it keeps in `$ALE_CACHE_DIR/fleet`. A process supervisor that restarts it
+(systemd's `Restart=on-failure`, launchd's `KeepAlive`) does this unattended.
 
 ## Add a Mac Node
 
@@ -140,6 +140,15 @@ control plane, and the Run uses it no more.
 A Run sends its plan before its first episode and prints the Nodes chosen for each image;
 its first Sandboxes go there, and those Nodes prepare the image. Progress appears on the
 control plane as episodes start and end.
+
+`sandbox_retention` works as it does locally. A kept Sandbox stays on its Node and keeps
+its resources reserved there. A snapshot stays on the Node that saved it, and Sandboxes that
+boot from it run there. `--continue-from` continues either one, as long as the Fleet is the
+Provider for its image kind. To list or destroy them, name the control plane:
+
+```bash
+ALE_FLEET_URL=http://CONTROL:7470 uv run ale sandbox list
+```
 
 ## Watch the Fleet
 

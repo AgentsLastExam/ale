@@ -9,12 +9,17 @@ Node's full roster, and every disagreement resolves toward what the Node reports
 * a Sandbox the Node holds that the ledger does not, or that its Run released, is
   destroyed (one the ledger has never heard of after a grace period, in case the ledger
   is the one that is behind);
-* a Sandbox the ledger expects that the Node no longer lists is lost;
+* a Sandbox the ledger expects that the Node no longer lists is lost, and a retained one
+  is gone;
 * a Node that stops sending heartbeats loses every Sandbox it had, and one that comes back
   after its machine restarted (a new boot ID) has none.
 
 Leases are the Node's: a Run renews them with the Node directly, and the Node destroys
 a Sandbox whose lease ran out, whether or not the control plane is up.
+
+A retained Sandbox and a snapshot outlive their Run, so the ledger owns them: it keeps a
+retained Sandbox's resources reserved until a later Run continues in it or an operator
+destroys it, and records each snapshot on the one Node that can boot from it.
 """
 
 from __future__ import annotations
@@ -39,8 +44,12 @@ from ale.run.fleet.protocol import (
     Placement,
     PlanReply,
     RefusedRequest,
+    RetainedView,
+    Retention,
     RunPlan,
+    SandboxDemand,
     SandboxStatus,
+    SnapshotHolding,
     StartReport,
     sign_grant,
 )
@@ -54,7 +63,14 @@ from ale.run.fleet.status import (
     SandboxRow,
     TaskProgress,
 )
-from ale.run.fleet.store import Event, NodeRecord, RunRecord, SandboxRecord, Store
+from ale.run.fleet.store import (
+    Event,
+    NodeRecord,
+    RunRecord,
+    SandboxRecord,
+    SnapshotRecord,
+    Store,
+)
 
 __all__ = ["ControlPlane", "FleetError", "Timing", "UnknownSandboxError"]
 
@@ -102,6 +118,7 @@ class ControlPlane:
             record.sandbox_id: record for record in store.sandboxes(since=now - timing.history_sec)
         }
         self.runs = {record.run_id: record for record in store.runs()}
+        self.snapshots = {record.snapshot_id: record for record in store.snapshots()}
         self._orphans: dict[tuple[str, str], float] = {}
         # No Node or Run has spoken to this process yet: give each its timeout to check in
         # before its Sandboxes count as lost or lapse.
@@ -144,7 +161,11 @@ class ControlPlane:
         previous = self.nodes.get(declaration.name)
         if previous is not None and previous.declaration.boot_id != declaration.boot_id:
             for record in self._on_node(declaration.name):
-                if record.status.holds_resources or record.status is SandboxStatus.LOST:
+                if record.roles and not record.status.final:
+                    # A kept Sandbox does not survive its machine; its snapshots do.
+                    record.released = True
+                    self._end_on_node(record, "its Node's machine restarted")
+                elif record.status.holds_resources or record.status is SandboxStatus.LOST:
                     self._end_on_node(record, "the Node restarted")
             self._event("node.restarted", node=declaration.name)
         elif previous is None:
@@ -205,15 +226,29 @@ class ControlPlane:
                 continue
             if record.status is SandboxStatus.LOST:
                 self._event("sandbox.restored", node=name, sandbox=entry.sandbox_id)
+            record.seen_at = now
+            if entry.run_id != record.run_id or (record.roles and not entry.roles):
+                # Its Node handed the retained Sandbox to a later Run: the roster names that
+                # Run, or no longer names the roles it was kept for.
+                self._continued(record, entry.run_id)
             record.lease_expires_at = entry.lease_expires_at
             if entry.create_sec is not None:
                 record.create_sec = entry.create_sec
-            if entry.state == "ready":
+            if entry.state == "retained":
+                record.lease_expires_at = None
+                record.roles = record.roles or entry.roles
+                if record.status is not SandboxStatus.RETAINED:
+                    record.status = SandboxStatus.RETAINED
+                    record.reason = "kept after its episode"
+            elif entry.state == "ready":
                 if record.ready_at is None:
                     record.ready_at = now
-                record.status, record.reason = SandboxStatus.READY, ""
+                record.status, record.reason, record.roles = SandboxStatus.READY, "", ()
             elif entry.state == "creating":
-                record.status, record.reason = SandboxStatus.STARTING, ""
+                if record.status is SandboxStatus.RETAINED:
+                    record.lease_expires_at = None  # kept still, as its Node hands it over
+                else:
+                    record.status, record.reason = SandboxStatus.STARTING, ""
             else:
                 # A Node destroys a Sandbox only when told to or when its lease ran out.
                 record.released = True
@@ -236,10 +271,70 @@ class ControlPlane:
                 # while the Node was away, as a restarted node agent does.
                 record.released = True
                 self._end_on_node(record, "its lease ran out")
+            elif record.roles and record.status in {SandboxStatus.RETAINED, SandboxStatus.LOST}:
+                # A retained Sandbox has no lease, and its Node keeps it until told: one
+                # the Node no longer has is gone.
+                record.released = True
+                self._end_on_node(record, "its Node no longer has it")
             elif record.status.holds_resources:
                 self._end_on_node(record, "the Node no longer lists it")
+        destroy_snapshots = self._reconcile_snapshots(name, beat.snapshots)
         self.schedule()
-        return HeartbeatReply(registered=True, destroy=tuple(destroy), draining=node.draining)
+        return HeartbeatReply(
+            registered=True,
+            destroy=tuple(destroy),
+            destroy_snapshots=destroy_snapshots,
+            draining=node.draining,
+        )
+
+    def _continued(self, record: SandboxRecord, run_id: str) -> None:
+        """Its Node handed a retained Sandbox to Run ``run_id``: the Sandbox is that Run's,
+        for the episode it asked for, and its time ready starts again with that episode."""
+        self._run(run_id)
+        pending, record.continuation = record.continuation, None
+        if pending is not None and pending.run_id == run_id:
+            record.demand, record.episode_id = pending.demand, pending.episode_id
+            record.role = pending.role
+        record.run_id = run_id
+        record.roles, record.ready_at = (), None
+        self._event(
+            "sandbox.continued",
+            node=record.node or "",
+            sandbox=record.sandbox_id,
+            detail=f"by {run_id}",
+        )
+
+    def _reconcile_snapshots(
+        self, name: str, holdings: tuple[SnapshotHolding, ...]
+    ) -> tuple[str, ...]:
+        """Agree with the snapshots a Node reports; those an operator destroyed go."""
+        destroy: list[str] = []
+        listed = {holding.snapshot_id for holding in holdings}
+        for holding in holdings:
+            record = self.snapshots.get(holding.snapshot_id)
+            if record is None:
+                # Taken while the ledger was not told, as when its Run crashed meanwhile.
+                record = SnapshotRecord(
+                    snapshot_id=holding.snapshot_id,
+                    node=name,
+                    provider=holding.provider,
+                    demand=holding.demand,
+                    episode_id=holding.episode_id,
+                    roles=holding.roles,
+                    reason="reported by its Node",
+                    created_at=holding.created_at,
+                )
+                self.snapshots[record.snapshot_id] = record
+                self._store.put_snapshot(record)
+                self._event("snapshot.saved", node=name, sandbox=record.snapshot_id)
+            if record.released:
+                destroy.append(holding.snapshot_id)
+        for record in [r for r in self.snapshots.values() if r.node == name]:
+            if record.snapshot_id not in listed:
+                del self.snapshots[record.snapshot_id]
+                self._store.delete_snapshot(record.snapshot_id)
+                self._event("snapshot.gone", node=name, sandbox=record.snapshot_id)
+        return tuple(destroy)
 
     def drain(self, name: str, draining: bool) -> None:
         node = self.nodes.get(name)
@@ -269,6 +364,11 @@ class ControlPlane:
                 online=node.online,
                 draining=node.draining,
                 images=frozenset(image.key for image in node.images),
+                snapshots=frozenset(
+                    snapshot.snapshot_id
+                    for snapshot in self.snapshots.values()
+                    if snapshot.node == name and not snapshot.released
+                ),
                 holds=tuple(holds.get(name, ())),
                 startup_sec={
                     provider: sum(values[-20:]) / len(values[-20:])
@@ -358,8 +458,7 @@ class ControlPlane:
             seen_at=now,
         )
         self.sandboxes[record.sandbox_id] = record
-        remaining = self._views_except(self._avoided(record))
-        if (reason := unservable(request.demand, remaining)) is not None:
+        if (reason := self._hopeless(record)) is not None:
             self._set(record, SandboxStatus.FAILED, reason)
             self._event("sandbox.failed", sandbox=record.sandbox_id, detail=reason)
         else:
@@ -381,16 +480,7 @@ class ControlPlane:
         }
         grant = None
         if placed and node is not None and not record.released:
-            grant = sign_grant(
-                Grant(
-                    sandbox_id=record.sandbox_id,
-                    run_id=record.run_id,
-                    node=node.declaration.name,
-                    demand=record.demand,
-                    expires_at=self._clock() + self.timing.grant_sec,
-                ),
-                self._token,
-            )
+            grant = self._grant(record.sandbox_id, record.run_id, node, record.demand)
         return Placement(
             sandbox_id=record.sandbox_id,
             status=record.status,
@@ -398,6 +488,19 @@ class ControlPlane:
             node=record.node,
             address=node.declaration.address if node is not None else None,
             grant=grant,
+        )
+
+    def _grant(self, sandbox_id: str, run_id: str, node: NodeRecord, demand: SandboxDemand) -> str:
+        """A signed grant for ``run_id`` to create, or take over, the Sandbox on ``node``."""
+        return sign_grant(
+            Grant(
+                sandbox_id=sandbox_id,
+                run_id=run_id,
+                node=node.declaration.name,
+                demand=demand,
+                expires_at=self._clock() + self.timing.grant_sec,
+            ),
+            self._token,
         )
 
     def refused(self, sandbox_id: str, refusal: RefusedRequest) -> Placement:
@@ -427,14 +530,17 @@ class ControlPlane:
             record.placed_at = None
             why = "its Run cannot reach" if refusal.unreachable else "refused it:"
             self._set(record, SandboxStatus.QUEUED, f"{refusal.node} {why} {refusal.reason}")
-            remaining = self._views_except(self._avoided(record))
-            if (reason := unservable(record.demand, remaining)) is not None:
+            if (reason := self._hopeless(record)) is not None:
                 self._set(record, SandboxStatus.FAILED, reason)
             self.schedule()
         return self.placement(sandbox_id)
 
-    def _views_except(self, names: tuple[str, ...]) -> list[NodeView]:
-        return [view for view in self.views() if view.name not in names]
+    def _hopeless(self, record: SandboxRecord) -> str | None:
+        """Why no Node the Sandbox may go to could ever serve it, or None when one could."""
+        avoided = self._avoided(record)
+        if (reason := self._unbootable(record.demand, avoided)) is not None:
+            return reason
+        return unservable(record.demand, [v for v in self.views() if v.name not in avoided])
 
     def report(self, sandbox_id: str, report: StartReport) -> None:
         record = self._record(sandbox_id)
@@ -448,7 +554,10 @@ class ControlPlane:
         record = self._record(sandbox_id)
         if not record.released and not record.status.final:
             record.released = True
-            if record.status.holds_resources:
+            # A retained Sandbox whose Node is away is still there: the Node destroys it
+            # when it returns.
+            kept = record.status is SandboxStatus.LOST and bool(record.roles)
+            if record.status.holds_resources or kept:
                 self._set(record, SandboxStatus.RELEASING, reason)
             else:
                 self._set(record, SandboxStatus.RELEASED, reason)
@@ -459,6 +568,141 @@ class ControlPlane:
         """An operator's forced release: the Node destroys it at its next heartbeat."""
         self._event("admin.destroy", sandbox=sandbox_id)
         return self.release(sandbox_id, reason="destroyed by an operator")
+
+    # --- retention --------------------------------------------------------------------
+
+    def _unbootable(self, demand: SandboxDemand, avoided: tuple[str, ...]) -> str | None:
+        """Why a demand cannot boot from the snapshot it names, if it names one, when it may
+        not go to the ``avoided`` Nodes."""
+        if demand.snapshot is None:
+            return None
+        snapshot = self.snapshots.get(demand.snapshot)
+        if snapshot is None or snapshot.released:
+            return f"there is no snapshot {demand.snapshot}"
+        if snapshot.demand.image != demand.image or snapshot.demand.kind is not demand.kind:
+            return f"snapshot {demand.snapshot} was taken from another image"
+        if snapshot.node in avoided:
+            return (
+                f"snapshot {demand.snapshot} is on {snapshot.node}, which refused this Sandbox "
+                "or its Run cannot reach"
+            )
+        return None
+
+    def retain(self, sandbox_id: str, retention: Retention) -> None:
+        """Its Node kept the Sandbox after its episode: it holds its resources until a later
+        Run continues in it or an operator destroys it."""
+        record = self._record(sandbox_id)
+        if record.status is SandboxStatus.RETAINED:
+            return
+        # Its Node kept it already; the ledger may not have heard it was ready yet.
+        if record.released or not (
+            record.status.holds_resources or record.status is SandboxStatus.LOST
+        ):
+            raise FleetError(f"{sandbox_id} is {record.status}, not a Sandbox to keep")
+        record.roles = retention.roles
+        record.lease_expires_at = None
+        self._set(record, SandboxStatus.RETAINED, retention.reason)
+        self._event("sandbox.retained", node=record.node or "", sandbox=sandbox_id)
+
+    def snapshot(self, sandbox_id: str, retention: Retention) -> None:
+        """Its Node saved the Sandbox's snapshot, which outlives it on that Node."""
+        record = self._record(sandbox_id)
+        if sandbox_id in self.snapshots:
+            return
+        if record.node is None or record.provider is None:
+            raise FleetError(f"{sandbox_id} was never placed on a Node")
+        snapshot = SnapshotRecord(
+            snapshot_id=sandbox_id,
+            node=record.node,
+            provider=record.provider,
+            demand=record.demand,
+            episode_id=record.episode_id,
+            roles=retention.roles,
+            reason=retention.reason,
+            created_at=self._clock(),
+        )
+        self.snapshots[sandbox_id] = snapshot
+        self._store.put_snapshot(snapshot)
+        self._event("snapshot.saved", node=record.node, sandbox=sandbox_id)
+
+    def adopt(self, request: AcquireRequest) -> Placement:
+        """A grant for a later Run to continue in a retained Sandbox.
+
+        Its Node decides: it hands the Sandbox to one Run, whose lease and retention then
+        govern it. The ledger keeps the Sandbox as it was, with the Run's request pending,
+        until the Node's roster shows the Run has it.
+        """
+        record = self._record(request.sandbox_id)
+        node = self.nodes.get(record.node or "")
+        if record.status is not SandboxStatus.RETAINED or record.released or node is None:
+            raise FleetError(f"{request.sandbox_id} is {record.status}, not a retained Sandbox")
+        if not node.online:
+            raise FleetError(f"{request.sandbox_id} is on {node.declaration.name}, now offline")
+        kept, asked = record.demand, request.demand
+        if (kept.kind, kept.os, kept.image, kept.resources, kept.network_mode) != (
+            asked.kind,
+            asked.os,
+            asked.image,
+            asked.resources,
+            asked.network_mode,
+        ):
+            raise FleetError(f"{request.sandbox_id} was kept with another image or resources")
+        self._run(request.run_id)
+        record.continuation = request
+        self._save(record)
+        return Placement(
+            sandbox_id=record.sandbox_id,
+            status=record.status,
+            reason=record.reason,
+            node=record.node,
+            address=node.declaration.address,
+            grant=self._grant(record.sandbox_id, request.run_id, node, asked),
+        )
+
+    def retained(self) -> list[RetainedView]:
+        """Every kept Sandbox and snapshot, those being destroyed included, for operators."""
+        kept = [
+            RetainedView(
+                kind="sandbox",
+                sandbox_id=record.sandbox_id,
+                status=record.status,
+                node=record.node or "",
+                provider=record.provider or "",
+                episode_id=record.episode_id,
+                roles=record.roles,
+                reason=record.reason,
+                created_at=record.created_at,
+            )
+            for record in self.sandboxes.values()
+            if record.roles and not record.status.final
+        ]
+        snapshots = [self._snapshot_view(record) for record in self.snapshots.values()]
+        return sorted([*kept, *snapshots], key=lambda view: view.sandbox_id)
+
+    @staticmethod
+    def _snapshot_view(record: SnapshotRecord) -> RetainedView:
+        return RetainedView(
+            kind="snapshot",
+            sandbox_id=record.snapshot_id,
+            status=SandboxStatus.RELEASING if record.released else SandboxStatus.RETAINED,
+            node=record.node,
+            provider=record.provider,
+            episode_id=record.episode_id,
+            roles=record.roles,
+            reason=record.reason,
+            created_at=record.created_at,
+        )
+
+    def destroy_snapshot(self, snapshot_id: str) -> RetainedView:
+        """An operator destroys a snapshot: its Node deletes it at its next heartbeat."""
+        record = self.snapshots.get(snapshot_id)
+        if record is None:
+            raise UnknownSandboxError(f"no snapshot {snapshot_id}")
+        if not record.released:
+            record.released = True
+            self._store.put_snapshot(record)
+            self._event("admin.destroy", node=record.node, sandbox=snapshot_id)
+        return self._snapshot_view(record)
 
     def cancel_run(self, run_id: str) -> int:
         """Drop every Sandbox a Run still has queued."""
@@ -502,7 +746,9 @@ class ControlPlane:
             elif record.status is SandboxStatus.PLACED and idle and not record.released:
                 record.released = True
                 self._set(record, SandboxStatus.RELEASING, "its Run stopped asking for it")
-            if (record.status.final or record.status is SandboxStatus.LOST) and now - (
+            # A retained Sandbox whose Node is away is still kept there, however long ago.
+            lost = record.status is SandboxStatus.LOST and not record.roles
+            if (record.status.final or lost) and now - (
                 record.ended_at or record.seen_at
             ) > self.timing.history_sec:
                 del self.sandboxes[record.sandbox_id]

@@ -442,6 +442,33 @@ class MemorySandbox(Sandbox):
     def handle(self) -> str:
         return f"memory:{self.sandbox_id}"
 
+    async def retain(self, *, roles, reason):  # type: ignore[no-untyped-def]
+        from ale.core.sandbox import RetainedSandbox
+
+        self.provider.kept[self.handle] = self
+        return RetainedSandbox(
+            provider=self.provider.name,
+            handle=self.handle,
+            episode_id=self.request.episode_id,
+            roles=roles,
+            reason=reason,
+            cleanup_command=f"ale sandbox destroy {self.handle}",
+        )
+
+    async def snapshot(self, *, roles, reason):  # type: ignore[no-untyped-def]
+        from ale.core.sandbox import RetainedSandbox
+
+        handle = f"memory:snapshot:{self.sandbox_id}"
+        self.provider.snapshots[handle] = dict(self.files)
+        return RetainedSandbox(
+            provider=self.provider.name,
+            handle=handle,
+            episode_id=self.request.episode_id,
+            roles=roles,
+            reason=reason,
+            cleanup_command=f"ale sandbox destroy {handle}",
+        )
+
     async def destroy(self) -> None:
         if not self.destroyed:
             self.destroyed = True
@@ -451,14 +478,23 @@ class MemorySandbox(Sandbox):
 class MemoryProvider(Provider):
     """A Provider of :class:`MemorySandbox`, recording what it was asked for."""
 
-    def __init__(self, name: str = "docker", *, create_delay: float = 0.0) -> None:
+    def __init__(
+        self, name: str = "docker", *, create_delay: float = 0.0, saves_snapshots: bool = False
+    ) -> None:
         self.name = name
         self.create_delay = create_delay
+        self.saves_snapshots = saves_snapshots
         self.requests: list[SandboxRequest] = []
         self.sandboxes: list[MemorySandbox] = []
         self.destroyed: list[str] = []
         self.reattached: list[str] = []
         self.discarded: list[str] = []
+        #: Retained Sandboxes and snapshots (their files), by handle.
+        self.kept: dict[str, MemorySandbox] = {}
+        self.snapshots: dict[str, dict[str, bytes]] = {}
+        self.attached: list[str] = []
+        #: How long handing a retained Sandbox to a later episode takes.
+        self.attach_delay = 0.0
 
     def capabilities(self):  # type: ignore[no-untyped-def]
         from ale.core.sandbox import Capabilities
@@ -467,10 +503,40 @@ class MemoryProvider(Provider):
             operating_systems=frozenset({OperatingSystem.LINUX}),
             gui=True,
             network_modes=frozenset(NetworkMode),
+            snapshot=self.saves_snapshots,
         )
 
     async def preflight(self) -> None:
         return None
+
+    async def list_retained(self) -> list[dict[str, object]]:
+        return [{"handle": handle} for handle in [*self.kept, *self.snapshots]]
+
+    async def destroy_retained(self, handle: str) -> None:
+        from ale.core.errors import ProviderStartError
+
+        if handle in self.snapshots:
+            del self.snapshots[handle]
+        elif handle in self.kept:
+            await self.kept.pop(handle).destroy()
+        else:
+            raise ProviderStartError(f"{handle} is gone")
+
+    async def attach_retained(  # type: ignore[no-untyped-def]
+        self, handle, request, allocation, image
+    ):
+        """The retained Sandbox, driven for a later episode with that episode's request."""
+        import asyncio
+
+        from ale.core.errors import ProviderStartError
+
+        await asyncio.sleep(self.attach_delay)
+        sandbox = self.kept.get(handle)
+        if sandbox is None or sandbox.destroyed:
+            raise ProviderStartError(f"{handle} is gone")
+        self.attached.append(handle)
+        sandbox.request = request
+        return sandbox
 
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
         if isinstance(image, PreparedTaskImage):
@@ -506,5 +572,7 @@ class MemoryProvider(Provider):
         self.requests.append(request)
         await asyncio.sleep(self.create_delay)
         sandbox = MemorySandbox(self, request)
+        if request.snapshot is not None:
+            sandbox.files = dict(self.snapshots[request.snapshot])
         self.sandboxes.append(sandbox)
         return sandbox

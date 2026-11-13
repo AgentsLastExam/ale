@@ -21,7 +21,6 @@ from pathlib import Path
 import pytest
 from tests.support import CONTAINER_BASE
 
-from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import ImageRef
 from ale.core.testkit import ProviderConformance
 from ale.run.framework import framework_identity
@@ -105,9 +104,8 @@ async def close_connections() -> AsyncIterator[None]:
 class TestFleetProvider(ProviderConformance):
     """Every assertion in the shared suite, through the Fleet to a Docker Node.
 
-    The Fleet keeps no Sandbox past its episode, so it refuses retention before anything
-    is created. Its Node prepares every image itself, so a Sandbox runs the image the Node
-    prepared for the request's.
+    Its Node prepares every image itself, so a Sandbox runs the image the Node prepared for
+    the request's.
     """
 
     provider = FleetProvider(FleetClient(CONTROL, TOKEN))
@@ -129,15 +127,3 @@ class TestFleetProvider(ProviderConformance):
             assert sandbox.allocation.network_mode is request.network.mode
             assert sandbox.allocation.provider == self.provider.name
             assert sandbox.allocation.node == "conformance/docker"
-
-    @pytest.mark.asyncio
-    async def test_a_retained_sandbox_can_be_listed_and_destroyed(self) -> None:
-        with pytest.raises(ProviderCapabilityError):
-            await self.provider.create(await self.request(retention="keep"))
-
-    @pytest.mark.asyncio
-    async def test_a_reattached_sandbox_reaches_a_later_gateway_at_the_same_address(
-        self,
-    ) -> None:
-        with pytest.raises(ProviderCapabilityError):
-            await self.provider.create(await self.request(retention="keep"))

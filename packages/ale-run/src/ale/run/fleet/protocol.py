@@ -59,12 +59,15 @@ __all__ = [
     "PlanReply",
     "Platform",
     "RefusedRequest",
+    "RetainedView",
+    "Retention",
     "RosterEntry",
     "RunPlan",
     "SandboxDemand",
     "SandboxDescription",
     "SandboxProfile",
     "SandboxStatus",
+    "SnapshotHolding",
     "StartReport",
     "sign_grant",
     "verify_grant",
@@ -103,6 +106,9 @@ class SandboxStatus(StrEnum):
     STARTING = "starting"
     """The Node reports it is creating the Sandbox."""
     READY = "ready"
+    RETAINED = "retained"
+    """Kept after its episode: it holds its resources until a later Run continues in it or
+    an operator destroys it, and no lease ends it."""
     RELEASING = "releasing"
     """The Run released it; the Node has not yet confirmed it gone."""
     RELEASED = "released"
@@ -120,6 +126,7 @@ class SandboxStatus(StrEnum):
             SandboxStatus.PLACED,
             SandboxStatus.STARTING,
             SandboxStatus.READY,
+            SandboxStatus.RETAINED,
             SandboxStatus.RELEASING,
         }
 
@@ -222,11 +229,14 @@ class RosterEntry(BaseModel):
 
     sandbox_id: str = Field(pattern=IDENTIFIER)
     run_id: str = Field(pattern=IDENTIFIER)
-    state: Literal["creating", "ready", "destroying"]
+    state: Literal["creating", "ready", "retained", "destroying"]
     lease_expires_at: float
-    """Unix time at which the Node destroys it unless its Run renews the lease."""
+    """Unix time at which the Node destroys it unless its Run renews the lease; a retained
+    Sandbox has no lease."""
     create_sec: float | None = Field(default=None, ge=0)
     """Seconds its Provider took from the create request to a ready Sandbox, once ready."""
+    roles: tuple[Literal["solver", "verifier"], ...] = ()
+    """What a retained Sandbox was kept for."""
 
 
 #: An image as the Fleet names it, by what it is prepared from (see :class:`SandboxDemand`).
@@ -245,6 +255,24 @@ class ImageHolding(BaseModel):
     """How long the Node took to prepare it."""
 
 
+class SnapshotHolding(BaseModel):
+    """A snapshot a Node keeps, named after the Sandbox it was taken from.
+
+    It carries what the ledger records about it, so a ledger that missed the snapshot being
+    taken learns it from the Node."""
+
+    model_config = _STRICT
+
+    snapshot_id: str = Field(pattern=IDENTIFIER)
+    provider: str = Field(min_length=1)
+    demand: SandboxDemand
+    """The demand of the Sandbox it was taken from: a Sandbox that boots from it has the same
+    image."""
+    episode_id: str = ""
+    roles: tuple[Literal["solver", "verifier"], ...] = ()
+    created_at: float
+
+
 class Heartbeat(BaseModel):
     """What changes quickly on a Node, sent every few seconds with the full roster."""
 
@@ -253,6 +281,7 @@ class Heartbeat(BaseModel):
     boot_id: str = Field(min_length=1)
     roster: tuple[RosterEntry, ...] = ()
     images: tuple[ImageHolding, ...] = ()
+    snapshots: tuple[SnapshotHolding, ...] = ()
     disk_free_gb: int = Field(default=0, ge=0)
 
 
@@ -263,6 +292,8 @@ class HeartbeatReply(BaseModel):
     """False when the control plane has no declaration for this boot: register again."""
     destroy: tuple[str, ...] = ()
     """Sandboxes the Node holds that the ledger does not, or that their Run released."""
+    destroy_snapshots: tuple[str, ...] = ()
+    """Snapshots an operator destroyed."""
     draining: bool = False
 
 
@@ -285,6 +316,11 @@ class SandboxDemand(BaseModel):
     framework: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     """The Run's framework: a Sandbox carries the framework of the engine driving it, so only
     a Node running the same one can serve it."""
+    retention: Literal["destroy", "keep", "snapshot"] = "destroy"
+    """What the episode does with the Sandbox at its end; a snapshot needs a Provider that
+    saves them."""
+    snapshot: str | None = Field(default=None, pattern=IDENTIFIER)
+    """The snapshot to boot from, which only the Node that holds it can serve."""
 
 
 class AcquireRequest(BaseModel):
@@ -530,6 +566,32 @@ class LeaseRenewal(BaseModel):
     model_config = _STRICT
 
     lease_sec: float = Field(gt=0, le=3600)
+
+
+class Retention(BaseModel):
+    """Keep a Sandbox, or save its snapshot, at the end of its episode."""
+
+    model_config = _STRICT
+
+    roles: tuple[Literal["solver", "verifier"], ...]
+    reason: str
+
+
+class RetainedView(BaseModel):
+    """A kept Sandbox or a snapshot, as the control plane lists them for operators."""
+
+    model_config = _STRICT
+
+    kind: Literal["sandbox", "snapshot"]
+    sandbox_id: str
+    """The kept Sandbox, or the one the snapshot was taken from, which names it."""
+    status: SandboxStatus
+    node: str
+    provider: str
+    episode_id: str
+    roles: tuple[Literal["solver", "verifier"], ...]
+    reason: str
+    created_at: float
 
 
 class ExecCall(BaseModel):

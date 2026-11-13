@@ -90,7 +90,7 @@ def node(
 ) -> None:
     """Lend this machine's Providers to the Fleet until stopped.
 
-    A stopping agent destroys every Sandbox it holds.
+    A stopping agent destroys every Sandbox it holds, apart from retained ones.
     """
     import re
     import socket

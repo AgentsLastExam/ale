@@ -257,7 +257,7 @@ async def _run_one(
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
         resume = (
-            _continuation(continue_from, tasks, settings, harness)
+            _continuation(continue_from, tasks, settings, harness, providers)
             if continue_from is not None
             else None
         )
@@ -618,7 +618,7 @@ async def _reverify(
                 provenance: ProvenanceInputs = provenance,
                 episode_id: str = episode_id,
             ) -> EpisodeResult:
-                solver = await _attach_retained(handle, request, source_lock)
+                solver = await _attach_retained(handle, request, source_lock, providers)
                 return await run_episode(
                     task,
                     ReverificationProtocol(
@@ -704,7 +704,11 @@ def _retained_source_episodes(
 
 
 def _continuation(
-    episode_dir: Path, tasks: list[ManifestTask], settings: RunConfig, harness: Harness
+    episode_dir: Path,
+    tasks: list[ManifestTask],
+    settings: RunConfig,
+    harness: Harness,
+    providers: ProviderRegistry,
 ) -> Resume:
     """The retained solver and native session an earlier episode left for this run."""
     if len(tasks) != 1 or settings.episodes != 1:
@@ -742,11 +746,14 @@ def _continuation(
     recorded_and_current: dict[str, tuple[object, object]] = {
         "harness": (result.continuation.harness, harness.name),
         "CLI version": (lock.agent.version, harness.version()),
-        "prepared solver image": (
+    }
+    if lock.resources is None or lock.resources.effective.provider != "fleet":
+        # On the Fleet, which prepares images on its Nodes, the control plane checks the
+        # image's key as it hands the Sandbox over or boots the snapshot.
+        recorded_and_current["prepared solver image"] = (
             lock.image.prepared_identity,
             task.prepared_image.prepared_identity if task.prepared_image is not None else None,
-        ),
-    }
+        )
     if kept:
         recorded_and_current |= {
             "resources": (
@@ -774,7 +781,9 @@ def _continuation(
             continuation=result.continuation,
         ),
         trajectory=trajectory,
-        attach=(lambda request: _attach_retained(handle, request, lock)) if kept else None,
+        attach=(
+            (lambda request: _attach_retained(handle, request, lock, providers)) if kept else None
+        ),
     )
 
 
@@ -782,20 +791,32 @@ async def _attach_retained(
     handle: str,
     request: SandboxRequest,
     lock: RunLock,
+    providers: ProviderRegistry,
 ) -> Sandbox:
     assert lock.resources is not None
     allocation = lock.resources.effective
+    if allocation.provider == "fleet":
+        # Continuing hands the Sandbox to this Run, through the Run's own Fleet connection.
+        provider = providers.get(request.image_kind, request.os)
+        if provider.name != "fleet":
+            raise TaskDefinitionError(
+                f"{handle} is kept on the Fleet; continue it with the Fleet as the Provider"
+            )
+        return await provider.attach_retained(handle, request, allocation, _recorded_image(lock))
     try:
         provider = provider_named(allocation.provider)
     except ProviderCapabilityError as exc:
         raise TaskDefinitionError(f"unsupported retained sandbox handle: {handle}") from exc
-    image = ResolvedImage(
+    return await provider.attach_retained(handle, request, allocation, _recorded_image(lock))
+
+
+def _recorded_image(lock: RunLock) -> ResolvedImage:
+    return ResolvedImage(
         kind=lock.image.declaration.kind,
         prepared_identity=lock.image.prepared_identity,
         observed_identity=lock.image.observed_identity,
         observed_ref=lock.image.observed_ref,
     )
-    return await provider.attach_retained(handle, request, allocation, image)
 
 
 def _same_assets(recorded: AssetProvenance | None, current: TaskAssetObservation | None) -> bool:

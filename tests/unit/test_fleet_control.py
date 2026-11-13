@@ -18,15 +18,18 @@ from ale.run.fleet.protocol import (
     Arch,
     Grant,
     Heartbeat,
+    HeartbeatReply,
     ImageHolding,
     NodeDeclaration,
     NodeResources,
     Platform,
     RefusedRequest,
+    Retention,
     RosterEntry,
     SandboxDemand,
     SandboxProfile,
     SandboxStatus,
+    SnapshotHolding,
     sign_grant,
     verify_grant,
 )
@@ -90,10 +93,12 @@ def mac(name: str, *, slots: int = 2, boot: str = "boot-1") -> NodeDeclaration:
     )
 
 
-def linux(name: str, *, cpus: int = 16, framework: str = FRAMEWORK) -> NodeDeclaration:
+def linux(
+    name: str, *, cpus: int = 16, framework: str = FRAMEWORK, boot: str = "boot-1"
+) -> NodeDeclaration:
     return NodeDeclaration(
         name=name,
-        boot_id="boot-1",
+        boot_id=boot,
         address=f"http://{name}:7471",
         agent_version="0.1.1",
         engine_commit="abc",
@@ -112,6 +117,8 @@ def demand(
     cpus: int = 4,
     network: NetworkMode = NetworkMode.OPEN,
     image: str = IMAGE,
+    retention: str = "destroy",
+    snapshot: str | None = None,
 ) -> SandboxDemand:
     return SandboxDemand(
         kind=kind,
@@ -121,6 +128,8 @@ def demand(
         resources=Resources(cpus=cpus, memory_mb=8192),
         image=image,
         framework=FRAMEWORK,
+        retention=retention,  # type: ignore[arg-type]
+        snapshot=snapshot,
     )
 
 
@@ -610,3 +619,347 @@ class TestJoining:
         async with agent(linux("box"), answers=linux("other")) as declaration:
             status, reason = await self.register(control, declaration)
         assert status == 409 and "other" in reason
+
+
+KEPT = Retention(roles=("solver",), reason="requested by sandbox_retention run configuration")
+
+
+def saving(name: str, *, boot: str = "boot-1") -> NodeDeclaration:
+    """A Linux Node whose Docker saves snapshots."""
+    return linux(name, boot=boot).model_copy(
+        update={"profiles": (DOCKER.model_copy(update={"snapshot": True}),)}
+    )
+
+
+def keep_beat(
+    control: ControlPlane,
+    node: str,
+    *sandboxes: str,
+    snapshots: tuple[SnapshotHolding, ...] = (),
+):
+    """A heartbeat listing ``sandboxes`` as retained, whose leases ran out long ago."""
+    roster = tuple(
+        RosterEntry(
+            sandbox_id=sandbox,
+            run_id="run-aaaaaaaa",
+            state="retained",
+            lease_expires_at=0.0,
+            roles=("solver",),
+        )
+        for sandbox in sandboxes
+    )
+    return control.heartbeat(node, Heartbeat(boot_id="boot-1", roster=roster, snapshots=snapshots))
+
+
+def kept(control: ControlPlane, node: str, number: int = 1) -> str:
+    """A Sandbox ``node`` started and kept after its episode."""
+    sandbox_id = ask(control, number, container(retention="keep")).sandbox_id
+    beat(control, node, (sandbox_id, "ready"))
+    control.retain(sandbox_id, KEPT)
+    return sandbox_id
+
+
+def holding(snapshot_id: str, created_at: float) -> SnapshotHolding:
+    """A snapshot as its Node reports it."""
+    return SnapshotHolding(
+        snapshot_id=snapshot_id,
+        provider="docker",
+        demand=container(retention="snapshot"),
+        episode_id="episode",
+        roles=("solver",),
+        created_at=created_at,
+    )
+
+
+class TestRetention:
+    def test_a_retained_sandbox_keeps_its_resources_until_an_operator_destroys_it(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        control.register(mac("mac-a", slots=1))
+        kept = ask(control, 1, demand(cpus=1, retention="keep"))
+        beat(control, "mac-a", (kept.sandbox_id, "ready"))
+        control.retain(kept.sandbox_id, KEPT)
+        assert control.placement(kept.sandbox_id).status is SandboxStatus.RETAINED
+        # It keeps the machine's one macOS slot, and no lease ends it.
+        assert ask(control, 2, demand(cpus=1)).status is SandboxStatus.QUEUED
+        control.cancel_run("run-aaaaaaaa")
+        clock.now += 3600
+        keep_beat(control, "mac-a", kept.sandbox_id)
+        assert control.placement(kept.sandbox_id).status is SandboxStatus.RETAINED
+        assert [(view.kind, view.sandbox_id) for view in control.retained()] == [
+            ("sandbox", kept.sandbox_id)
+        ]
+        # Its Node going away loses it for a while; it is still retained when the Node is back.
+        clock.now += Timing().node_timeout_sec + 1
+        control.tick()
+        assert control.placement(kept.sandbox_id).status is SandboxStatus.LOST
+        keep_beat(control, "mac-a", kept.sandbox_id)
+        restored = control.placement(kept.sandbox_id)
+        assert (restored.status, restored.reason) == (
+            SandboxStatus.RETAINED,
+            "kept after its episode",
+        )
+        control.destroy(kept.sandbox_id)
+        assert keep_beat(control, "mac-a", kept.sandbox_id).destroy == (kept.sandbox_id,)
+        control.heartbeat("mac-a", Heartbeat(boot_id="boot-1"))
+        assert control.placement(kept.sandbox_id).status is SandboxStatus.RELEASED
+        assert ask(control, 3, demand(cpus=1)).status is SandboxStatus.PLACED
+        assert control.retained() == []
+
+    def test_a_kept_sandbox_outlasts_the_ledgers_history(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        """However long ago it was kept, and however long its Node is away; a Sandbox a long
+        episode still runs in outlasts it too."""
+        control.register(linux("box"))
+        sandbox_id = kept(control, "box")
+        running = ask(control, 2, container()).sandbox_id
+
+        def both() -> HeartbeatReply:
+            roster = (
+                RosterEntry(
+                    sandbox_id=sandbox_id,
+                    run_id="run-aaaaaaaa",
+                    state="retained",
+                    lease_expires_at=0.0,
+                    roles=("solver",),
+                ),
+                RosterEntry(
+                    sandbox_id=running,
+                    run_id="run-aaaaaaaa",
+                    state="ready",
+                    lease_expires_at=clock() + 300,
+                ),
+            )
+            return control.heartbeat("box", Heartbeat(boot_id="boot-1", roster=roster))
+
+        for _ in range(26):
+            clock.now += 3600
+            both()
+        clock.now += Timing().node_timeout_sec + 1
+        control.tick()
+        assert control.sandboxes[sandbox_id].status is SandboxStatus.LOST
+        assert control.sandboxes[running].status is SandboxStatus.LOST
+        assert both().destroy == ()
+        clock.now += Timing().orphan_grace_sec
+        assert both().destroy == ()
+        assert control.sandboxes[sandbox_id].status is SandboxStatus.RETAINED
+        assert control.sandboxes[running].status is SandboxStatus.READY
+        clock.now += Timing().history_sec + 3600
+        control.tick()
+        assert control.sandboxes[sandbox_id].status is SandboxStatus.LOST
+        assert keep_beat(control, "box", sandbox_id).destroy == ()
+        assert control.sandboxes[sandbox_id].status is SandboxStatus.RETAINED
+
+    def test_destroying_a_kept_sandbox_whose_node_is_away_waits_for_the_node(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        control.register(linux("box"))
+        sandbox_id = kept(control, "box")
+        clock.now += Timing().node_timeout_sec + 1
+        control.tick()
+        assert control.sandboxes[sandbox_id].status is SandboxStatus.LOST
+        assert control.destroy(sandbox_id).status is SandboxStatus.RELEASING
+        assert [view.status for view in control.retained()] == [SandboxStatus.RELEASING]
+        assert keep_beat(control, "box", sandbox_id).destroy == (sandbox_id,)
+        keep_beat(control, "box")
+        assert control.sandboxes[sandbox_id].status is SandboxStatus.RELEASED
+
+    def test_a_sandbox_its_node_reports_retained_is_retained(self, control: ControlPlane) -> None:
+        """The ledger follows the Node, as when the Run crashed before telling it."""
+        control.register(linux("box"))
+        placed = ask(control, 1, container(retention="keep"))
+        beat(control, "box", (placed.sandbox_id, "ready"))
+        keep_beat(control, "box", placed.sandbox_id)
+        assert control.placement(placed.sandbox_id).status is SandboxStatus.RETAINED
+        # One the Node no longer has, while it reports, is gone.
+        control.heartbeat("box", Heartbeat(boot_id="boot-1"))
+        record = control.sandboxes[placed.sandbox_id]
+        assert record.status is SandboxStatus.RELEASED
+        assert record.reason == "its Node no longer has it"
+
+    def test_a_later_run_continues_in_a_retained_sandbox(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        control.register(linux("box"))
+        sandbox_id = kept(control, "box")
+        record = control.sandboxes[sandbox_id]
+        before = record.model_copy()
+        later = AcquireRequest(
+            sandbox_id=sandbox_id,
+            run_id="run-bbbbbbbb",
+            demand=container(),
+            episode_id="continued",
+            role="shared",
+        )
+        with pytest.raises(FleetError, match="another image or resources"):
+            control.adopt(later.model_copy(update={"demand": container(image=OTHER_IMAGE)}))
+        granted = control.adopt(later)
+        assert granted.node == "box" and granted.grant is not None
+        grant = verify_grant(granted.grant, TOKEN, node="box", now=clock())
+        assert (grant.sandbox_id, grant.run_id) == (sandbox_id, "run-bbbbbbbb")
+        # It stays as it was, retained, until its Node hands it over.
+        assert record == before.model_copy(update={"continuation": later})
+        keep_beat(control, "box", sandbox_id)
+        assert control.placement(sandbox_id).status is SandboxStatus.RETAINED
+        assert (record.run_id, record.episode_id) == ("run-aaaaaaaa", "")
+        clock.now += 600
+        continued = RosterEntry(
+            sandbox_id=sandbox_id,
+            run_id="run-bbbbbbbb",
+            state="ready",
+            lease_expires_at=clock() + 120,
+        )
+        control.heartbeat("box", Heartbeat(boot_id="boot-1", roster=(continued,)))
+        assert (record.status, record.run_id, record.demand, record.episode_id, record.role) == (
+            SandboxStatus.READY,
+            "run-bbbbbbbb",
+            container(),
+            "continued",
+            "shared",
+        )
+        assert (record.roles, record.continuation) == ((), None)
+        # Its time ready starts with the episode that continues in it.
+        assert before.ready_at is not None and record.ready_at == clock()
+        assert control.retained() == []
+        with pytest.raises(FleetError, match="not a retained Sandbox"):
+            control.adopt(later)
+
+    def test_the_run_that_kept_a_sandbox_may_continue_in_it(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        """The roster names the same Run before and after; the kept roles going says when."""
+        control.register(linux("box"))
+        sandbox_id = kept(control, "box")
+        again = AcquireRequest(
+            sandbox_id=sandbox_id, run_id="run-aaaaaaaa", demand=container(), episode_id="again"
+        )
+        control.adopt(again)
+        handing = RosterEntry(
+            sandbox_id=sandbox_id,
+            run_id="run-aaaaaaaa",
+            state="creating",
+            lease_expires_at=clock() + 120,
+            roles=("solver",),
+        )
+        control.heartbeat("box", Heartbeat(boot_id="boot-1", roster=(handing,)))
+        record = control.sandboxes[sandbox_id]
+        assert (record.status, record.lease_expires_at) == (SandboxStatus.RETAINED, None)
+        beat(control, "box", (sandbox_id, "ready"))
+        assert (record.status, record.episode_id, record.roles) == (
+            SandboxStatus.READY,
+            "again",
+            (),
+        )
+
+    def test_a_restarted_machine_ends_its_retained_sandboxes_and_keeps_its_snapshots(
+        self, control: ControlPlane, tmp_path: Path, clock: Clock
+    ) -> None:
+        control.register(saving("box"))
+        destroyed = kept(control, "box", 3)
+        control.destroy(destroyed)
+        control.heartbeat("box", Heartbeat(boot_id="boot-1"))
+        ended = control.sandboxes[destroyed].model_copy()
+        assert ended.status is SandboxStatus.RELEASED
+        sandbox_id = kept(control, "box")
+        saved = ask(control, 2, container(retention="snapshot"))
+        beat(control, "box", (sandbox_id, "ready"), (saved.sandbox_id, "ready"))
+        keep_beat(control, "box", sandbox_id)
+        control.snapshot(saved.sandbox_id, KEPT)
+        control.release(saved.sandbox_id)
+        # Both outlive the control plane.
+        again = ControlPlane(Store(tmp_path / "fleet.db"), TOKEN, clock=clock)
+        assert again.sandboxes[sandbox_id].status is SandboxStatus.RETAINED
+        assert set(again.snapshots) == {saved.sandbox_id}
+        control.register(saving("box", boot="boot-2"))
+        record = control.sandboxes[sandbox_id]
+        assert (record.status, record.reason) == (
+            SandboxStatus.RELEASED,
+            "its Node's machine restarted",
+        )
+        # One that ended before keeps its own end.
+        assert control.sandboxes[destroyed] == ended
+        # The restarted Node lists the snapshot, which it still has, and nothing else.
+        reply = control.heartbeat(
+            "box", Heartbeat(boot_id="boot-2", snapshots=(holding(saved.sandbox_id, clock()),))
+        )
+        assert reply.destroy_snapshots == ()
+        assert record.status is SandboxStatus.RELEASED
+        assert [(view.kind, view.sandbox_id) for view in control.retained()] == [
+            ("snapshot", saved.sandbox_id)
+        ]
+
+    def test_a_snapshot_boots_only_on_the_node_that_keeps_it(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        control.register(saving("node-a"))
+        control.register(saving("node-b"))
+        source = ask(control, 1, container(retention="snapshot"))
+        node = source.node
+        assert node is not None
+        other = "node-b" if node == "node-a" else "node-a"
+        beat(control, node, (source.sandbox_id, "ready"))
+        control.snapshot(source.sandbox_id, KEPT)
+        control.release(source.sandbox_id)
+        # The snapshot's Node holds neither the image nor its source Sandbox any more, and
+        # the other Node holds the image, so every other Sandbox of the image goes there.
+        keep_beat(control, node, snapshots=(holding(source.sandbox_id, clock()),))
+        prepared = ImageHolding(key=IMAGE, bytes=7, prepare_sec=60.0)
+        control.heartbeat(other, Heartbeat(boot_id="boot-1", images=(prepared,)))
+        assert control.sandboxes[source.sandbox_id].status is SandboxStatus.RELEASED
+        assert ask(control, 2, container()).node == other
+        booted = [ask(control, n, container(snapshot=source.sandbox_id)) for n in (3, 4)]
+        assert [placement.node for placement in booted] == [node, node]
+        unknown = ask(control, 5, container(snapshot="sandbox-9999"))
+        assert (unknown.status, unknown.reason) == (
+            SandboxStatus.FAILED,
+            "there is no snapshot sandbox-9999",
+        )
+        image = ask(control, 6, container(snapshot=source.sandbox_id, image=OTHER_IMAGE))
+        assert image.status is SandboxStatus.FAILED and "another image" in image.reason
+
+    def test_a_snapshot_boot_fails_when_its_node_refuses_it_or_its_run_cannot_reach_it(
+        self, control: ControlPlane
+    ) -> None:
+        control.register(saving("node-a"))
+        control.register(saving("node-b"))
+        source = ask(control, 1, container(retention="snapshot"))
+        node = source.node
+        assert node is not None
+        beat(control, node, (source.sandbox_id, "ready"))
+        control.snapshot(source.sandbox_id, KEPT)
+        boot = ask(control, 2, container(snapshot=source.sandbox_id))
+        assert boot.node == node
+        refused = control.refused(boot.sandbox_id, RefusedRequest(node=node, reason="full"))
+        assert refused.status is SandboxStatus.FAILED
+        assert f"is on {node}, which refused this Sandbox" in refused.reason
+        # A Run that cannot reach the snapshot's Node fails every boot from it at once.
+        blocked = ask(control, 3, container(snapshot=source.sandbox_id), run="run-bbbbbbbb")
+        unreachable = RefusedRequest(node=node, reason="timed out", unreachable=True)
+        assert control.refused(blocked.sandbox_id, unreachable).status is SandboxStatus.FAILED
+        later = ask(control, 4, container(snapshot=source.sandbox_id), run="run-bbbbbbbb")
+        assert later.status is SandboxStatus.FAILED and "cannot reach" in later.reason
+
+    def test_a_node_that_saves_no_snapshots_takes_none(self, control: ControlPlane) -> None:
+        control.register(linux("plain"))
+        placement = ask(control, 1, container(retention="snapshot"))
+        assert placement.status is SandboxStatus.FAILED
+        assert "that saves snapshots" in placement.reason
+
+    def test_snapshots_follow_what_their_node_reports(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        control.register(saving("box"))
+        reported = holding("sandbox-0042", clock())
+        # Saved while the ledger was not told: the Node's report records it.
+        keep_beat(control, "box", snapshots=(reported,))
+        assert [(view.kind, view.status) for view in control.retained()] == [
+            ("snapshot", SandboxStatus.RETAINED)
+        ]
+        control.destroy_snapshot("sandbox-0042")
+        assert control.retained()[0].status is SandboxStatus.RELEASING
+        assert keep_beat(control, "box", snapshots=(reported,)).destroy_snapshots == (
+            "sandbox-0042",
+        )
+        keep_beat(control, "box")
+        assert control.snapshots == {} and control.retained() == []
