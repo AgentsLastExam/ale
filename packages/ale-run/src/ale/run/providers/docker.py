@@ -374,16 +374,35 @@ async def _kata_route(client: GuestClient, host_ip: str, *, present: bool) -> No
         raise ProviderStartError(f"could not {action} the Kata guest's route: {stderr.strip()}")
 
 
-async def _netfilter_helper(container: str, commands: list[str], purpose: str) -> None:
-    """Run commands with NET_ADMIN in the sandbox's network namespace on the Host, where the
-    sandbox has none."""
-    code, _, stderr = await _docker(
+async def _in_namespace(container: str, script: str) -> tuple[int, str, str]:
+    """Run a shell script with NET_ADMIN in the sandbox's network namespace on the Host,
+    where the sandbox has none."""
+    return await _docker(
         "run", "--rm", "--network", f"container:{container}", "--cap-add", "NET_ADMIN",
-        "--entrypoint", "sh", NETFILTER_IMAGE, "-c", " && ".join(commands),
+        "--entrypoint", "sh", NETFILTER_IMAGE, "-c", script,
         timeout=300,
     )  # fmt: skip
+
+
+async def _netfilter_helper(container: str, commands: list[str], purpose: str) -> None:
+    code, _, stderr = await _in_namespace(container, " && ".join(commands))
     if code != 0:
         raise ProviderStartError(f"could not {purpose}: {stderr.strip()}")
+
+
+async def _kata_sealed(container: str, host_ip: str) -> bool:
+    """Whether a Kata sandbox is sealed: whether the seal's drop filter is on the VM's tap."""
+    pref = next(
+        pref
+        for device, pref, spec in _kata_seal_filters(host_ip)
+        if device == KATA_TAP and spec.endswith("action drop")
+    )
+    code, shown, stderr = await _in_namespace(
+        container, f"tc filter show dev {KATA_TAP} ingress pref {pref}"
+    )
+    if code != 0:
+        raise ProviderStartError(f"could not read the Kata sandbox's seal: {stderr.strip()}")
+    return "action drop" in shown
 
 
 def _proxy_env(request: SandboxRequest) -> dict[str, str]:
@@ -431,6 +450,7 @@ class DockerSandbox(Sandbox):
         agent_user: str,
         agent_home: str,
         kata_host_ip: str | None = None,
+        sealed: bool = False,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -448,7 +468,7 @@ class DockerSandbox(Sandbox):
         self.kata_host_ip = kata_host_ip
         self._client = client
         self._file_client = file_client
-        self._sealed = False
+        self._sealed = sealed
         self.state = SandboxState.READY
 
     def _as(self, identity: Identity) -> str | None:
@@ -459,6 +479,10 @@ class DockerSandbox(Sandbox):
         agent did to its own files.
         """
         return self.agent_user if identity is Identity.AGENT else None
+
+    @property
+    def handle(self) -> str:
+        return f"{HANDLE_PREFIX}{self.container}"
 
     @property
     def gateway_url(self) -> str | None:
@@ -600,14 +624,13 @@ class DockerSandbox(Sandbox):
         gpu_devices = (
             self.allocation.gpu.provider_addresses if self.allocation.gpu is not None else ()
         )
-        handle = f"{HANDLE_PREFIX}{self.container}"
         return RetainedSandbox(
             provider="docker",
-            handle=handle,
+            handle=self.handle,
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {handle}",
+            cleanup_command=f"ale sandbox destroy {self.handle}",
             gpu_devices=gpu_devices,
         )
 
@@ -1153,7 +1176,7 @@ class DockerProvider(Provider):
         if not handles:
             return found
         code, raw, stderr = await _docker("inspect", *handles, timeout=30)
-        if code != 0 and not _only_vanished(stderr):
+        if code != 0 and not only_vanished(stderr):
             raise ProviderStartError(f"could not inspect ALE sandboxes: {stderr.strip()}")
         records = json.loads(raw) if raw.strip() else []
         for record in records:
@@ -1232,16 +1255,30 @@ class DockerProvider(Provider):
             if code != 0:
                 raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
             return
-        if not handle.startswith(HANDLE_PREFIX):
+        await self._destroy(handle, retained=True)
+
+    async def discard(self, handle: str) -> None:
+        await self._destroy(handle, retained=False)
+
+    async def _destroy(self, handle: str, *, retained: bool) -> None:
+        """Remove an ALE container and its network by its handle. ``retained`` requires a
+        kept one; otherwise one that is already gone needs nothing."""
+        if handle.startswith(SNAPSHOT_PREFIX) or not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
         container = handle.removeprefix(HANDLE_PREFIX)
         code, raw, stderr = await _docker("inspect", container, timeout=30)
         if code != 0:
-            raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
+            if not only_vanished(stderr):
+                raise ProviderStartError(f"could not inspect {handle}: {stderr.strip()}")
+            if retained:
+                raise ProviderStartError(f"sandbox {handle!r} does not exist")
+            return
         record = json.loads(raw)[0]
         labels = record.get("Config", {}).get("Labels", {}) or {}
-        if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "keep":
-            raise ProviderCapabilityError(f"{handle!r} is not an ALE-retained Docker sandbox")
+        kept = labels.get(RETENTION_LABEL) == "keep"
+        if labels.get(MANAGED_LABEL) != "true" or (retained and not kept):
+            kind = "ALE-retained" if retained else "ALE"
+            raise ProviderCapabilityError(f"{handle!r} is not an {kind} Docker sandbox")
         networks = tuple(
             name
             for name in (record.get("NetworkSettings", {}).get("Networks", {}) or {})
@@ -1261,6 +1298,27 @@ class DockerProvider(Provider):
         image: ResolvedImage,
     ) -> DockerSandbox:
         """Reconnect to a running retained container without taking ownership of it."""
+        return await self._attach(handle, request, allocation, image, retained=True)
+
+    async def reattach(
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+        image: ResolvedImage,
+    ) -> DockerSandbox:
+        return await self._attach(handle, request, allocation, image, retained=False)
+
+    async def _attach(
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+        image: ResolvedImage,
+        *,
+        retained: bool,
+    ) -> DockerSandbox:
+        """A running ALE container as a Sandbox again; ``retained`` requires a kept solver."""
         if handle.startswith(SNAPSHOT_PREFIX) or not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
         container = handle.removeprefix(HANDLE_PREFIX)
@@ -1270,32 +1328,34 @@ class DockerProvider(Provider):
         record = json.loads(raw)[0]
         labels = record.get("Config", {}).get("Labels", {}) or {}
         role = labels.get(ROLE_LABEL, "")
-        if (
-            labels.get(MANAGED_LABEL) != "true"
-            or labels.get(RETENTION_LABEL) != "keep"
+        if labels.get(MANAGED_LABEL) != "true" or role not in {r.value for r in SandboxRole}:
+            raise ProviderCapabilityError(f"{handle!r} is not an ALE Docker sandbox")
+        if retained and (
+            labels.get(RETENTION_LABEL) != "keep"
             or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
         ):
             raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
         if not record.get("State", {}).get("Running"):
-            raise ProviderStartError(f"retained sandbox {handle!r} is not running")
+            raise ProviderStartError(f"sandbox {handle!r} is not running")
 
         if record.get("Image") != image.observed_identity:
-            raise ProviderCapabilityError(f"{handle!r} does not use the expected solver image")
-        networks = tuple(
-            name
-            for name in (record.get("NetworkSettings", {}).get("Networks", {}) or {})
-            if name.startswith("ale-net-")
-        )
+            raise ProviderCapabilityError(f"{handle!r} does not use the expected image")
+        attached = record.get("NetworkSettings", {}).get("Networks", {}) or {}
+        networks = tuple(name for name in attached if name.startswith("ale-net-"))
         if len(networks) > 1:
             raise ProviderCapabilityError(f"{handle!r} has more than one ALE network")
-        # The container, not this run's configuration, says how it was isolated.
+        # The container, not this run's configuration, says how it was isolated, and whether
+        # it is sealed now: an allowlist agent's commands need the proxy only then.
+        isolated = request.network.mode is not NetworkMode.OPEN
         kata_host_ip = None
         if record.get("HostConfig", {}).get("Runtime") == KATA_RUNTIME:
             kata_host_ip = await self._wire_kata(container, request, reattached=True)
+            sealed = isolated and await _kata_sealed(container, kata_host_ip)
         else:
             await self._wire_host(
                 container, networks[0] if networks else None, request, reattached=True
             )
+            sealed = isolated and "bridge" not in attached
         agent_user = request.user
         client = await self._connect(container, agent_user)
         try:
@@ -1316,6 +1376,7 @@ class DockerProvider(Provider):
             agent_user=agent_user,
             agent_home=agent_home,
             kata_host_ip=kata_host_ip,
+            sealed=sealed,
         )
 
 
@@ -1325,11 +1386,11 @@ def _snapshot_reference(handle: str) -> str:
     return f"{SNAPSHOT_REPOSITORY}:{handle.removeprefix(SNAPSHOT_PREFIX)}"
 
 
-def _only_vanished(stderr: str) -> bool:
+def only_vanished(stderr: str) -> bool:
     """Whether ``docker inspect`` failed only for objects that no longer exist.
 
-    Another run can destroy a retained sandbox between listing and inspecting it; the
-    sandboxes it still found are on stdout.
+    Another process can destroy a sandbox between finding and inspecting it: a listing keeps
+    the sandboxes it still found, which are on stdout, and a discard has nothing left to do.
     """
     errors = [line for line in stderr.splitlines() if line.strip()]
     return bool(errors) and all("no such object" in line.lower() for line in errors)

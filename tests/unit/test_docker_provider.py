@@ -10,13 +10,17 @@ import pytest
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
+    Identity,
     PreparedTaskImage,
+    ResolvedImage,
+    ResourceAllocation,
     SandboxRequest,
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.run.providers.docker import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
+    KATA_RUNTIME,
     KATA_TAP,
     KATA_VETH,
     DockerProvider,
@@ -334,6 +338,92 @@ async def test_a_kata_sandbox_opens_and_seals_egress_with_its_tc_filters(
     assert sandbox._sealed
     assert order == ["route add", "helper", "route del"]
     assert not [call for call in calls if call[0] == "network"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "kata", "networks", "drop", "sealed"),
+    [
+        (NetworkMode.ALLOWLIST, False, ("ale-net-e1",), False, True),
+        (NetworkMode.ALLOWLIST, False, ("ale-net-e1", "bridge"), False, False),
+        (NetworkMode.OPEN, False, ("bridge",), False, False),
+        (NetworkMode.ALLOWLIST, True, ("bridge",), True, True),
+        (NetworkMode.ALLOWLIST, True, ("bridge",), False, False),
+        (NetworkMode.OPEN, True, ("bridge",), True, False),
+    ],
+)
+async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: NetworkMode,
+    kata: bool,
+    networks: tuple[str, ...],
+    drop: bool,
+    sealed: bool,
+) -> None:
+    """An allowlist agent's commands get the proxy only while the Sandbox is sealed, which
+    the container says, not the process driving it again: off the default bridge under runc,
+    with the seal's drop filter on the VM's tap under Kata."""
+    record = {
+        "Name": "/ale-e1",
+        "Image": DIGEST,
+        "Config": {"Labels": {"ale.managed": "true", "ale.role": "solver"}},
+        "State": {"Running": True},
+        "HostConfig": {"Runtime": KATA_RUNTIME if kata else "runc"},
+        "NetworkSettings": {"Networks": {name: {} for name in networks}},
+    }
+    dropping = (  # as the helper image's tc (iproute2 6.15) shows it
+        "filter protocol all matchall chain 0 \n"
+        "filter protocol all matchall chain 0 handle 0x1 \n"
+        "  not_in_hw\n"
+        "\taction order 1: gact action drop\n"
+    )
+    calls: list[tuple[str, ...]] = []
+    seen: list[dict[str, str] | None] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[0] == "inspect":
+            return 0, json.dumps([record]), ""
+        if argv[:2] == ("network", "inspect"):
+            return 0, "172.17.0.1\n", ""
+        if argv[-1].startswith("tc filter show"):
+            return 0, dropping if drop else "", ""
+        return 0, "", ""
+
+    async def guest_exec(argv: list[str], **kwargs: object) -> tuple[int, str, str, bool]:
+        seen.append(kwargs.get("env"))  # type: ignore[arg-type]
+        return 0, "", "", False
+
+    async def close() -> None:
+        pass
+
+    async def connect(_provider: DockerProvider, _container: str, _user: str) -> object:
+        return SimpleNamespace(exec=guest_exec, close=close)
+
+    async def contract(_provider: DockerProvider, _client: object) -> tuple[str, bool]:
+        return "/home/user", False
+
+    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    monkeypatch.setattr(DockerProvider, "_connect", connect)
+    monkeypatch.setattr(DockerProvider, "_guest_contract", contract)
+    network = (
+        NetworkPolicy(mode=mode, allowed_hosts=("a.b",))
+        if mode is NetworkMode.ALLOWLIST
+        else NetworkPolicy(mode=mode)
+    )
+    wanted = request(network=network, proxy_url="http://0.0.0.0:9443")
+    allocation = ResourceAllocation(
+        cpus=1, memory_mb=1024, sudo=False, network_mode=mode, provider="docker"
+    )
+    image = ResolvedImage(
+        kind="container", prepared_identity=DIGEST, observed_identity=DIGEST, observed_ref=DIGEST
+    )
+    sandbox = await DockerProvider().reattach("docker:ale-e1", wanted, allocation, image)
+    await sandbox.exec(["true"], identity=Identity.AGENT)
+    assert (seen[-1] is not None) is sealed
+    read = [call[-1] for call in calls if call[-1].startswith("tc filter show")]
+    isolated = mode is not NetworkMode.OPEN
+    assert read == ([f"tc filter show dev {KATA_TAP} ingress pref 21"] if kata and isolated else [])
 
 
 @pytest.mark.asyncio

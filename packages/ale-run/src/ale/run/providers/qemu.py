@@ -76,6 +76,7 @@ from ale.run.images import (
     set_parent,
 )
 from ale.run.providers.desktop import require_resolution
+from ale.run.providers.docker import only_vanished
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, TcpTransport
@@ -350,6 +351,7 @@ class QemuSandbox(Sandbox):
         agent_home: str,
         host_ip: str = "",
         snapshot_dir: Path | None = None,
+        sealed: bool = False,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -367,7 +369,7 @@ class QemuSandbox(Sandbox):
         self.snapshot_dir = snapshot_dir
         self._client = client
         self._file_client = file_client
-        self._sealed = False
+        self._sealed = sealed
         self.state = SandboxState.READY
 
     def _as(self, identity: Identity) -> str | None:
@@ -378,6 +380,10 @@ class QemuSandbox(Sandbox):
         by name because the name is the image's to choose, not ours.
         """
         return self.agent_user if identity is Identity.AGENT else None
+
+    @property
+    def handle(self) -> str:
+        return f"{HANDLE_PREFIX}{self.container}"
 
     @property
     def gateway_url(self) -> str | None:
@@ -650,14 +656,13 @@ class QemuSandbox(Sandbox):
         gpu_devices = (
             self.allocation.gpu.provider_addresses if self.allocation.gpu is not None else ()
         )
-        handle = f"{HANDLE_PREFIX}{self.container}"
         return RetainedSandbox(
             provider="qemu",
-            handle=handle,
+            handle=self.handle,
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {handle}",
+            cleanup_command=f"ale sandbox destroy {self.handle}",
             gpu_devices=gpu_devices,
         )
 
@@ -1377,16 +1382,30 @@ class QemuProvider(Provider):
         if handle.startswith(SNAPSHOT_PREFIX):
             await self._destroy_snapshot(handle)
             return
-        if not handle.startswith(HANDLE_PREFIX):
+        await self._destroy(handle, retained=True)
+
+    async def discard(self, handle: str) -> None:
+        await self._destroy(handle, retained=False)
+
+    async def _destroy(self, handle: str, *, retained: bool) -> None:
+        """Remove an ALE runner and its overlay by its handle. ``retained`` requires a kept
+        one; otherwise one that is already gone needs nothing."""
+        if handle.startswith(SNAPSHOT_PREFIX) or not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
         container = handle.removeprefix(HANDLE_PREFIX)
         code, raw, stderr = await _run("docker", "inspect", container, timeout=30)
         if code != 0:
-            raise ProviderStartError(f"sandbox {handle!r} does not exist: {stderr.strip()}")
+            if not only_vanished(stderr):
+                raise ProviderStartError(f"could not inspect {handle}: {stderr.strip()}")
+            if retained:
+                raise ProviderStartError(f"sandbox {handle!r} does not exist")
+            return
         record = json.loads(raw)[0]
         labels = record.get("Config", {}).get("Labels", {}) or {}
-        if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "keep":
-            raise ProviderCapabilityError(f"{handle!r} is not an ALE-retained QEMU sandbox")
+        kept = labels.get(RETENTION_LABEL) == "keep"
+        if labels.get(MANAGED_LABEL) != "true" or (retained and not kept):
+            kind = "ALE-retained" if retained else "ALE"
+            raise ProviderCapabilityError(f"{handle!r} is not an {kind} QEMU sandbox")
         storage = labels.get(STORAGE_LABEL, "")
         mounted_storage = {
             mount.get("Source", "")
@@ -1415,6 +1434,27 @@ class QemuProvider(Provider):
         image: ResolvedImage,
     ) -> QemuSandbox:
         """Reconnect to a running retained VM without taking ownership of it."""
+        return await self._attach(handle, request, allocation, image, retained=True)
+
+    async def reattach(
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+        image: ResolvedImage,
+    ) -> QemuSandbox:
+        return await self._attach(handle, request, allocation, image, retained=False)
+
+    async def _attach(
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+        image: ResolvedImage,
+        *,
+        retained: bool,
+    ) -> QemuSandbox:
+        """A running ALE VM as a Sandbox again; ``retained`` requires a kept solver."""
         if handle.startswith(SNAPSHOT_PREFIX) or not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
         container = handle.removeprefix(HANDLE_PREFIX)
@@ -1424,14 +1464,15 @@ class QemuProvider(Provider):
         record = json.loads(raw)[0]
         labels = record.get("Config", {}).get("Labels", {}) or {}
         role = labels.get(ROLE_LABEL, "")
-        if (
-            labels.get(MANAGED_LABEL) != "true"
-            or labels.get(RETENTION_LABEL) != "keep"
+        if labels.get(MANAGED_LABEL) != "true" or role not in {r.value for r in SandboxRole}:
+            raise ProviderCapabilityError(f"{handle!r} is not an ALE QEMU sandbox")
+        if retained and (
+            labels.get(RETENTION_LABEL) != "keep"
             or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
         ):
             raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
         if not record.get("State", {}).get("Running"):
-            raise ProviderStartError(f"retained sandbox {handle!r} is not running")
+            raise ProviderStartError(f"sandbox {handle!r} is not running")
         storage = labels.get(STORAGE_LABEL, "")
         mounted_storage = {
             mount.get("Source", "")
@@ -1443,7 +1484,7 @@ class QemuProvider(Provider):
         # The disk the runner's overlay sits on, not merely one of the layers it mounts.
         booted = await layer_parent(Path(storage) / "data.qcow2")
         if booted is None or booted.resolve() != Path(image.observed_ref).resolve():
-            raise ProviderCapabilityError(f"{handle!r} does not run the expected solver image")
+            raise ProviderCapabilityError(f"{handle!r} does not run the expected image")
         ports = record.get("NetworkSettings", {}).get("Ports", {}).get(f"{GUEST_PORT}/tcp") or []
         try:
             host_port = int(ports[0]["HostPort"])
@@ -1457,6 +1498,10 @@ class QemuProvider(Provider):
             agent_user, agent_home, _ = await self._read_guest_contract(client, attached_request)
             # A later run reaches its own Gateway, so its port is routed in as well.
             host_ip = await self._wire_network(container, attached_request)
+            # The runner, not this run's configuration, says whether the VM is sealed now: an
+            # allowlist agent's commands need the proxy only then.
+            isolated = request.network.mode is not NetworkMode.OPEN
+            sealed = isolated and await _runner_sealed(container)
             file_client = await _connect(host_port, token)
         except BaseException:
             await client.close()
@@ -1475,7 +1520,17 @@ class QemuProvider(Provider):
             agent_home=agent_home,
             host_ip=host_ip,
             snapshot_dir=self.snapshot_dir,
+            sealed=sealed,
         )
+
+
+async def _runner_sealed(container: str) -> bool:
+    """Whether a runner forwards nothing from its guest but what the seal lets through."""
+    code, _, _ = await _run(
+        "docker", "exec", container, "sh", "-c",
+        f"iptables -C FORWARD -i {GUEST_BRIDGE} -j DROP", timeout=60,
+    )  # fmt: skip
+    return code == 0
 
 
 def _is_blank(png: bytes) -> bool:

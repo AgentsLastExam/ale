@@ -65,10 +65,14 @@ class Fleet:
         self.url = str(server.make_url("")).rstrip("/")
         self._session = ClientSession()
 
-    async def add_node(self, name: str, *, cpus: int = 8) -> NodeAgent:
-        port = unused_port()
+    async def add_node(
+        self, name: str, *, cpus: int = 8, port: int | None = None, restart: bool = False
+    ) -> NodeAgent:
+        """A node agent on a new Node, or, with ``restart``, the next agent on one whose
+        agent crashed: same port, state and Provider."""
+        port = port or unused_port()
         state = self.tmp_path / name
-        state.mkdir()
+        state.mkdir(exist_ok=restart)
         settings = NodeSettings(
             name=name,
             control_url=self.url,
@@ -79,14 +83,16 @@ class Fleet:
             reserve_memory_mb=0,
             state_dir=state,
         )
-        provider = MemoryProvider("memory")
+        provider = self.providers[name] if restart else MemoryProvider("memory")
         declaration, providers = await probe(settings, make=lambda _name: provider)
         resources = declaration.resources.model_copy(update={"cpus": cpus})
         declaration = declaration.model_copy(update={"resources": resources})
         agent = NodeAgent(settings, TOKEN, declaration=declaration, providers=providers)
         agent._session = self._session
+        await agent.recover()
         server = TestServer(agent.app(), host="127.0.0.1", port=port)
-        await server.start_server()
+        # A killed agent's connections drop at once; closing the test server drops them soon.
+        await server.start_server(shutdown_timeout=0.5)
         self.servers.append(server)
         self.nodes[name] = server
         await agent.register()
@@ -241,11 +247,17 @@ class TestProvider:
             await sandbox.destroy()
 
     async def test_a_node_this_run_cannot_reach_takes_none_of_its_sandboxes(
-        self, fleet: Fleet, client: FleetClient, provider: FleetProvider, image: PreparedTaskImage
+        self,
+        fleet: Fleet,
+        client: FleetClient,
+        provider: FleetProvider,
+        image: PreparedTaskImage,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        monkeypatch.setattr("ale.run.providers.fleet.RECONNECT_SEC", 0.0)
         held = await fleet.add_node("node-a")
         await fleet.add_node("node-b")
-        # node-a holds the image, so placement prefers it; then this Run loses its route there.
+        # node-a holds the image, so placement prefers it; then its port closes for good.
         inputs = ImageInputs(
             key=image.prepared_identity,
             run_id=client.run_id,
@@ -261,6 +273,46 @@ class TestProvider:
         assert fleet.providers["node-a"].requests == []
         for sandbox in sandboxes:
             await sandbox.destroy()
+
+    async def test_a_run_keeps_its_sandbox_through_a_node_agent_crash(
+        self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        crashed = await fleet.add_node("node-a")
+        sandbox = await provider.create(request(image))
+        await sandbox.write_file("/home/user/f", b"kept")
+        await fleet.beat()
+        assert fleet.control.sandboxes[sandbox.sandbox_id].status is SandboxStatus.READY
+        # The agent dies: its port closes and it destroys nothing.
+        await fleet.nodes["node-a"].close()
+        port = int(crashed.settings.address.rsplit(":", 1)[1])
+        reading = asyncio.ensure_future(sandbox.read_file("/home/user/f"))
+        await asyncio.sleep(2.5)
+        assert not reading.done()
+        restarted = await fleet.add_node("node-a", port=port, restart=True)
+        assert await reading == b"kept"
+        assert (await sandbox.exec(["echo", "again"])).stdout == "echo again"
+        assert fleet.providers["node-a"].reattached == [f"memory:{image_episode(sandbox)}"]
+        assert set(restarted.held) == {sandbox.sandbox_id}
+        await fleet.beat()
+        assert fleet.control.sandboxes[sandbox.sandbox_id].status is SandboxStatus.READY
+        await sandbox.destroy()
+        await fleet.beat()
+        assert fleet.control.sandboxes[sandbox.sandbox_id].status is SandboxStatus.RELEASED
+
+    async def test_a_node_whose_agent_restarts_as_the_run_first_calls_it_takes_the_sandbox(
+        self, fleet: Fleet, client: FleetClient, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        crashed = await fleet.add_node("node-a")
+        await fleet.nodes["node-a"].close()
+        port = int(crashed.settings.address.rsplit(":", 1)[1])
+        creating = asyncio.ensure_future(provider.create(request(image)))
+        await asyncio.sleep(2.5)
+        assert not creating.done()
+        await fleet.add_node("node-a", port=port, restart=True)
+        sandbox = await creating
+        assert sandbox.allocation.node == "node-a/memory"
+        assert fleet.control.runs[client.run_id].unreachable == ()
+        await sandbox.destroy()
 
     async def test_a_node_error_is_raised_as_the_same_kind(
         self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
@@ -491,3 +543,8 @@ class TestConfiguration:
     def test_a_fleet_needs_its_control_plane(self) -> None:
         with pytest.raises(ValueError, match=r"fleet\.url"):
             RunConfig.model_validate({"vm": {"provider": "fleet"}})
+
+
+def image_episode(sandbox: FleetSandbox) -> str:
+    """The episode a Sandbox ran, which the memory Provider names its Sandboxes by."""
+    return sandbox.request.episode_id

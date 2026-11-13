@@ -397,6 +397,20 @@ class TestReconciliation:
         record = control.sandboxes[placed.sandbox_id]
         assert (record.status, record.reason) == (SandboxStatus.RELEASED, "its lease ran out")
 
+    def test_a_lost_sandbox_whose_lease_ran_out_while_its_node_was_away_is_released(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        """A restarted node agent destroys what no Run renewed while it was down."""
+        control.register(linux("box"))
+        placed = ask(control, 1, container())
+        beat(control, "box", (placed.sandbox_id, "ready"))
+        clock.now += 400  # the Node went silent, past the lease
+        control.tick()
+        assert control.placement(placed.sandbox_id).status is SandboxStatus.LOST
+        beat(control, "box")
+        record = control.sandboxes[placed.sandbox_id]
+        assert (record.status, record.reason) == (SandboxStatus.RELEASED, "its lease ran out")
+
     def test_a_placed_sandbox_waits_for_its_run_to_create_it(self, control: ControlPlane) -> None:
         control.register(linux("box"))
         placed = ask(control, 1, container())
@@ -415,6 +429,10 @@ class TestReconciliation:
         assert control.nodes["box"].online is False
         beat(control, "box", (placed.sandbox_id, "ready"))
         assert control.placement(placed.sandbox_id).status is SandboxStatus.READY
+        assert [event.kind for event in control.events() if event.sandbox][:2] == [
+            "sandbox.restored",
+            "sandbox.lost",
+        ]
 
     def test_a_restarted_node_has_none_of_its_sandboxes(self, control: ControlPlane) -> None:
         control.register(linux("box"))

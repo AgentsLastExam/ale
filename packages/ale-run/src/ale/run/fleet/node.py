@@ -8,8 +8,13 @@ every guarantee those give holds unchanged.
 
 Each Sandbox has a lease its Run renews here. The agent destroys a Sandbox whose lease ran
 out, so a Run that crashed or lost its way here leaves nothing behind, whatever the
-control plane is doing. When the agent itself stops it destroys every Sandbox it holds,
-since a restarted agent could not drive them.
+control plane is doing. When the agent itself stops it destroys every Sandbox it holds: an
+operator stops an agent to take its Node out of service, so it leaves nothing behind; a
+crash, which nobody chose, keeps them for their Runs.
+
+An agent that crashes leaves its Sandboxes running. It journals each one it holds, so the
+agent that starts next on this machine reattaches, through the Provider, those whose lease
+still runs and holds them again for their Runs, and destroys the rest.
 """
 
 from __future__ import annotations
@@ -25,7 +30,6 @@ import subprocess
 import tarfile
 import tempfile
 import time
-import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
@@ -33,7 +37,7 @@ from pathlib import Path
 from typing import Literal
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ale.core.errors import (
     AleError,
@@ -87,6 +91,9 @@ _log = logging.getLogger(__name__)
 HEARTBEAT_SEC = 5.0
 _KEY = re.compile(r"sha256:[0-9a-f]{64}")
 LEASE_CHECK_SEC = 1.0
+#: The longest a restarted agent spends driving one Sandbox again before it destroys it
+#: instead, well under the 90 seconds a Run waits for its Node to take connections again.
+RECOVER_SEC = 60.0
 
 #: What each Provider a node agent can drive starts, and on which architecture: ``None``
 #: is the machine's own.
@@ -178,6 +185,21 @@ def _platform() -> Platform:
     )
 
 
+def _boot_id() -> str:
+    """This machine's boot. An agent that restarts keeps it; a machine that restarts gets a
+    new one and has none of its Sandboxes."""
+    linux = Path("/proc/sys/kernel/random/boot_id")
+    if linux.is_file():
+        return linux.read_text().strip()
+    if platform.system() == "Darwin":
+        found = subprocess.run(
+            ["sysctl", "-n", "kern.bootsessionuuid"], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        if found:
+            return found
+    raise ProviderCapabilityError("cannot read this machine's boot identity")
+
+
 def profiles(name: str, provider: Provider, *, gpus: bool) -> tuple[SandboxProfile, ...]:
     """One profile per operating system a Provider's own capabilities name."""
     kind, arch = KINDS[name]
@@ -242,7 +264,7 @@ async def probe(
     declaration = NodeDeclaration(
         protocol=PROTOCOL_VERSION,
         name=settings.name,
-        boot_id=uuid.uuid4().hex,
+        boot_id=_boot_id(),
         address=settings.address,
         agent_version=__version__,
         engine_commit=framework.commit,
@@ -273,9 +295,28 @@ class _Held:
     lease_expires_at: float
     state: Literal["creating", "ready", "destroying"] = "creating"
     sandbox: Sandbox | None = None
-    created: asyncio.Task[SandboxDescription] | None = None
+    created: asyncio.Future[SandboxDescription] | None = None
     destroyed: asyncio.Task[None] | None = None
     create_sec: float | None = None
+    entry: _Entry | None = None
+
+
+class _Entry(BaseModel):
+    """What the agent journals about a Sandbox it holds, to drive it again after a crash."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    grant: Grant
+    provider: str
+    holds: Holds
+    request: SandboxRequest
+    """As the Node's Provider got it, with the Node's own Gateway and proxy addresses."""
+    lease_expires_at: float
+    ports: dict[int, int] = {}
+    """The Node ports this Sandbox reaches its Run's tunnel targets at."""
+    handle: str | None = None
+    """The Provider's name for the Sandbox, once it is created."""
+    description: SandboxDescription | None = None
 
 
 def _mismatch(demand: SandboxDemand, request: SandboxRequest) -> str | None:
@@ -321,6 +362,9 @@ class NodeAgent:
         self._session: ClientSession | None = None
         self._scratch = settings.state_dir / "uploads"
         self._scratch.mkdir(parents=True, exist_ok=True)
+        # Requests carry episode credentials, such as the egress proxy's token.
+        self._journal = settings.state_dir / "sandboxes"
+        self._journal.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._background: set[asyncio.Future[None]] = set()
 
     def _later(self, work: Coroutine[object, object, None]) -> None:
@@ -432,6 +476,102 @@ class NodeAgent:
             self.expire()
             await asyncio.sleep(LEASE_CHECK_SEC)
 
+    # --- the journal ----------------------------------------------------------------
+
+    def _write(self, held: _Held) -> None:
+        if held.entry is None:
+            return
+        held.entry.lease_expires_at = held.lease_expires_at
+        path = self._journal / f"{held.grant.sandbox_id}.json"
+        partial = path.with_suffix(".partial")
+        descriptor = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(held.entry.model_dump_json())
+        os.replace(partial, path)
+
+    def _forget(self, sandbox_id: str) -> None:
+        (self._journal / f"{sandbox_id}.json").unlink(missing_ok=True)
+
+    async def recover(self) -> None:
+        """Drive again, or destroy, the Sandboxes an earlier agent on this machine held.
+
+        One whose lease still runs is reattached through its Provider and held as before,
+        with its Run's tunnel ports, so the Run keeps it. Any other, or one that cannot be
+        reattached within ``RECOVER_SEC``, is destroyed. One whose creation never finished
+        has no handle and is left to its Provider. All recover at once, so a slow one holds
+        up none of the others.
+        """
+        for partial in self._journal.glob("*.partial"):
+            # A write the crash cut short; it may hold an episode's credentials.
+            partial.unlink(missing_ok=True)
+        journal = sorted(self._journal.glob("*.json"))
+        await asyncio.gather(*(self._recover(path) for path in journal))
+
+    async def _recover(self, path: Path) -> None:
+        try:
+            entry = _Entry.model_validate_json(path.read_text())
+        except (OSError, ValueError) as error:
+            _log.warning("dropping %s, which cannot be read: %s", path, error)
+            path.unlink(missing_ok=True)
+            return
+        sandbox_id = entry.grant.sandbox_id
+        if entry.handle is None or entry.description is None:
+            _log.warning("%s was still being created; left to its Provider", sandbox_id)
+            path.unlink(missing_ok=True)
+            return
+        provider = self._providers.get(entry.provider)
+        if provider is not None and entry.lease_expires_at > self._clock():
+            try:
+                async with asyncio.timeout(RECOVER_SEC):
+                    await self._reattach(entry, provider)
+            except Exception:
+                _log.warning("could not drive %s again", sandbox_id, exc_info=True)
+            else:
+                _log.info("drove %s again, which its Run still holds", sandbox_id)
+                return
+        try:
+            await (provider or _provider(entry.provider)).discard(entry.handle)
+            _log.info("destroyed %s, which no Run holds any more", sandbox_id)
+        except Exception:
+            _log.warning("could not destroy %s", sandbox_id, exc_info=True)
+        path.unlink(missing_ok=True)
+
+    async def _reattach(self, entry: _Entry, provider: Provider) -> None:
+        description = entry.description
+        assert description is not None and entry.handle is not None
+        request = entry.request
+        profile = next(
+            (
+                p
+                for p in self.declaration.profiles
+                if p.provider == entry.provider
+                and p.kind is request.image_kind
+                and p.os is request.os
+            ),
+            None,
+        )
+        if profile is None:
+            raise ProviderCapabilityError(f"this Node no longer lends {entry.provider} for it")
+        sandbox = await provider.reattach(
+            entry.handle, request, description.allocation, description.resolved_image
+        )
+        created: asyncio.Future[SandboxDescription] = asyncio.get_running_loop().create_future()
+        created.set_result(description)
+        held = _Held(
+            grant=entry.grant,
+            provider=provider,
+            profile=profile,
+            holds=entry.holds,
+            lease_expires_at=entry.lease_expires_at,
+            state="ready",
+            sandbox=sandbox,
+            created=created,
+            create_sec=description.create_sec,
+            entry=entry,
+        )
+        self.held[entry.grant.sandbox_id] = held
+        self._listeners_for(entry.grant.run_id).keep(entry.ports)
+
     # --- Sandboxes --------------------------------------------------------------------
 
     def _view(self) -> NodeView:
@@ -488,8 +628,16 @@ class NodeAgent:
                 holds=holds,
                 lease_expires_at=self._clock() + body.lease_sec,
             )
+            held.entry = _Entry(
+                grant=grant,
+                provider=profile.provider,
+                holds=holds,
+                request=body.request,
+                lease_expires_at=held.lease_expires_at,
+            )
             self.held[sandbox_id] = held
             held.created = asyncio.ensure_future(self._create(held, body))
+            self._write(held)
         assert held.created is not None
         return await asyncio.shield(held.created)
 
@@ -497,18 +645,24 @@ class NodeAgent:
         started = time.monotonic()
         request = body.request
         sandbox_id = held.grant.sandbox_id
+        entry = held.entry
+        assert entry is not None
         try:
             listeners = self._listeners_for(held.grant.run_id)
             update: dict[str, object] = {}
             if request.gateway_url and body.gateway_target is not None:
                 port = await listeners.port(body.gateway_target)
+                entry.ports[body.gateway_target] = port
                 update["gateway_url"] = with_port(request.gateway_url, port)
             if request.proxy_url and body.proxy_target is not None:
                 port = await listeners.port(body.proxy_target)
+                entry.ports[body.proxy_target] = port
                 update["proxy_url"] = with_port(request.proxy_url, port)
-            sandbox = await held.provider.create(request.model_copy(update=update))
+            entry.request = request.model_copy(update=update)
+            sandbox = await held.provider.create(entry.request)
         except BaseException:
             self.held.pop(sandbox_id, None)
+            self._forget(sandbox_id)
             await self._forget_run(held.grant.run_id)
             raise
         held.sandbox = sandbox
@@ -517,7 +671,7 @@ class NodeAgent:
             raise ProviderStartError(f"{sandbox_id} was destroyed while it was being created")
         held.state = "ready"
         _log.info("%s is ready after %.1fs", sandbox_id, held.create_sec)
-        return SandboxDescription(
+        description = SandboxDescription(
             sandbox_id=sandbox_id,
             node=self.name,
             provider=held.profile.provider,
@@ -528,6 +682,9 @@ class NodeAgent:
             gateway_url=sandbox.gateway_url,
             create_sec=held.create_sec,
         )
+        entry.handle, entry.description = sandbox.handle, description
+        self._write(held)
+        return description
 
     async def _destroy(self, held: _Held) -> None:
         if held.destroyed is None:
@@ -547,6 +704,7 @@ class NodeAgent:
             _log.exception("destroying %s failed", sandbox_id)
         finally:
             self.held.pop(sandbox_id, None)
+            self._forget(sandbox_id)
             await self._forget_run(held.grant.run_id)
 
     def renew(self, run_id: str, lease_sec: float) -> int:
@@ -555,6 +713,11 @@ class NodeAgent:
         for held in self.held.values():
             if held.grant.run_id == run_id and held.state != "destroying":
                 held.lease_expires_at = max(held.lease_expires_at, expires)
+                try:
+                    self._write(held)
+                except OSError as error:
+                    # The lease holds here; only a crash before the next renewal loses it.
+                    _log.warning("could not journal %s: %s", held.grant.sandbox_id, error)
                 renewed += 1
         return renewed
 
@@ -579,20 +742,20 @@ class NodeAgent:
         return _Api(self).app()
 
     async def serve(self) -> None:
-        """Serve until cancelled, then destroy every Sandbox held."""
+        """Drive again or destroy what an earlier agent on this machine held, then serve
+        until cancelled, and then destroy every Sandbox held."""
+        await self.recover()
         runner = web.AppRunner(self.app(), access_log=None)
         await runner.setup()
         await web.TCPSite(runner, self.settings.host, self.settings.port).start()
         self._session = ClientSession(timeout=ClientTimeout(total=30))
-        tasks: list[asyncio.Future[None]] = []
+        # Leases hold whether or not the control plane is up, the recovered ones included.
+        tasks: list[asyncio.Future[None]] = [asyncio.ensure_future(self._leases())]
         _log.info("node agent %s on %s", self.name, self.settings.address)
         try:
             # Listening first: the control plane connects back before it counts this Node.
             await self.register()
-            tasks = [
-                asyncio.ensure_future(self._heartbeats()),
-                asyncio.ensure_future(self._leases()),
-            ]
+            tasks.append(asyncio.ensure_future(self._heartbeats()))
             await asyncio.Event().wait()
         finally:
             for task in tasks:

@@ -438,6 +438,10 @@ class MemorySandbox(Sandbox):
     async def screenshot(self) -> bytes:
         return b"\x89PNG fake"
 
+    @property
+    def handle(self) -> str:
+        return f"memory:{self.sandbox_id}"
+
     async def destroy(self) -> None:
         if not self.destroyed:
             self.destroyed = True
@@ -453,6 +457,8 @@ class MemoryProvider(Provider):
         self.requests: list[SandboxRequest] = []
         self.sandboxes: list[MemorySandbox] = []
         self.destroyed: list[str] = []
+        self.reattached: list[str] = []
+        self.discarded: list[str] = []
 
     def capabilities(self):  # type: ignore[no-untyped-def]
         from ale.core.sandbox import Capabilities
@@ -477,6 +483,22 @@ class MemoryProvider(Provider):
             prepared_identity="sha256:" + "0" * 64,
             resolved_reference=image.reference,
         )
+
+    async def reattach(self, handle, request, allocation, image):  # type: ignore[no-untyped-def]
+        """The Sandbox this Provider still runs under ``handle``, as another process finds it."""
+        from ale.core.errors import ProviderStartError
+
+        for sandbox in self.sandboxes:
+            if sandbox.handle == handle and not sandbox.destroyed:
+                self.reattached.append(handle)
+                return sandbox
+        raise ProviderStartError(f"{handle} is gone")
+
+    async def discard(self, handle: str) -> None:
+        self.discarded.append(handle)
+        for sandbox in self.sandboxes:
+            if sandbox.handle == handle:
+                await sandbox.destroy()
 
     async def create(self, request: SandboxRequest) -> Sandbox:
         import asyncio

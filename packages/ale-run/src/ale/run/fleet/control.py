@@ -11,7 +11,7 @@ Node's full roster, and every disagreement resolves toward what the Node reports
   is the one that is behind);
 * a Sandbox the ledger expects that the Node no longer lists is lost;
 * a Node that stops sending heartbeats loses every Sandbox it had, and one that comes back
-  after a restart (a new boot ID) has none.
+  after its machine restarted (a new boot ID) has none.
 
 Leases are the Node's: a Run renews them with the Node directly, and the Node destroys
 a Sandbox whose lease ran out, whether or not the control plane is up.
@@ -203,6 +203,8 @@ class ControlPlane:
             if record.node != name or record.released or record.status.final:
                 destroy.append(entry.sandbox_id)
                 continue
+            if record.status is SandboxStatus.LOST:
+                self._event("sandbox.restored", node=name, sandbox=entry.sandbox_id)
             record.lease_expires_at = entry.lease_expires_at
             if entry.create_sec is not None:
                 record.create_sec = entry.create_sec
@@ -228,13 +230,14 @@ class ControlPlane:
                 continue
             if record.status is SandboxStatus.PLACED and not record.released:
                 continue  # the Run has not asked the Node yet
-            if record.status.holds_resources:
-                if record.lease_expires_at is not None and record.lease_expires_at <= now:
-                    # The Node destroyed it between two heartbeats, as its lease ran out.
-                    record.released = True
-                    self._end_on_node(record, "its lease ran out")
-                else:
-                    self._end_on_node(record, "the Node no longer lists it")
+            expired = record.lease_expires_at is not None and record.lease_expires_at <= now
+            if expired and (record.status.holds_resources or record.status is SandboxStatus.LOST):
+                # The Node destroyed it as its lease ran out: between two heartbeats, or
+                # while the Node was away, as a restarted node agent does.
+                record.released = True
+                self._end_on_node(record, "its lease ran out")
+            elif record.status.holds_resources:
+                self._end_on_node(record, "the Node no longer lists it")
         self.schedule()
         return HeartbeatReply(registered=True, destroy=tuple(destroy), draining=node.draining)
 

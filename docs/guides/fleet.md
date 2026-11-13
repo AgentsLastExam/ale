@@ -44,7 +44,11 @@ Docker and KVM. Its images, the build contexts Runs send and its upload scratch 
 under `$ALE_CACHE_DIR`, which belongs on local SSD for the same reason as
 [VM overlays](../../packages/ale-run/src/ale/run/providers/README.md#qemu).
 
-Stopping the agent destroys every Sandbox it holds.
+Stopping the agent destroys every Sandbox it holds. If the agent crashes instead, start it
+again with the same options: it drives again the Sandboxes whose Runs still hold them and
+destroys the rest, from the journal it keeps in `$ALE_CACHE_DIR/fleet/sandboxes`. A process
+supervisor that restarts it (systemd's `Restart=on-failure`, launchd's `KeepAlive`) does this
+unattended.
 
 ## Add a Mac Node
 

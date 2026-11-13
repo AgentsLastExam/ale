@@ -32,6 +32,7 @@ from ale.run.fleet.protocol import (
     SandboxDemand,
     SandboxStatus,
     sign_grant,
+    verify_grant,
 )
 from ale.run.fleet.server import control_app
 from ale.run.fleet.store import Store
@@ -382,6 +383,21 @@ class TestLeases:
         await agent.stop()
         assert sorted(provider.destroyed) == ["episode-1", "episode-2"]
 
+    async def test_a_journal_that_cannot_be_written_stops_no_renewal(
+        self, client: TestClient, agent: NodeAgent, clock: Clock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert (await create(client, agent, "sandbox-0001")).status == 200
+        other = request("episode-2")
+        assert (await create(client, agent, "sandbox-0002", wanted=other)).status == 200
+
+        def full(_held: object) -> None:
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(agent, "_write", full)
+        clock.now += 30
+        assert agent.renew(RUN, 60) == 2
+        assert {held.lease_expires_at for held in agent.held.values()} == {clock.now + 60}
+
 
 class TestTunnel:
     async def test_a_sandbox_reaches_the_runs_gateway_through_its_node(
@@ -619,3 +635,122 @@ class TestImages:
         inputs = ImageInputs(key=key, run_id=RUN, os=OperatingSystem.LINUX, task=task.spec)
         assert await images.prepare(inputs) == IMAGE
         assert not images.has_inputs(key)
+
+
+class TestJournal:
+    async def test_a_creation_whose_first_journal_write_failed_can_be_joined(
+        self,
+        client: TestClient,
+        agent: NodeAgent,
+        provider: MemoryProvider,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write = agent._write
+        failures = [OSError("no space left on device")]
+
+        def flaky(held: object) -> None:
+            if failures:
+                raise failures.pop()
+            write(held)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(agent, "_write", flaky)
+        assert (await create(client, agent)).status == 500
+        # The creation went on; the Run asking again joins it.
+        again = await create(client, agent)
+        assert again.status == 200 and len(provider.requests) == 1
+
+
+class TestRecovery:
+    async def test_a_restarted_agent_drives_again_what_its_runs_still_hold(
+        self, tmp_path: Path, provider: MemoryProvider, clock: Clock
+    ) -> None:
+        crashed = await make_agent(tmp_path, provider, clock)
+        async with TestClient(TestServer(crashed.app())) as client:
+            lapsed = request("episode-1")
+            assert (await create(client, crashed, "sandbox-0001", wanted=lapsed)).status == 200
+            clock.now += 50
+            live = request("episode-2")
+            assert (await create(client, crashed, "sandbox-0002", wanted=live)).status == 200
+        clock.now += 20  # sandbox-0001's lease ran out; sandbox-0002's runs
+        # The agent crashed: nothing was destroyed, and another one starts here.
+        restarted = await make_agent(tmp_path, provider, clock)
+        assert restarted.declaration.boot_id == crashed.declaration.boot_id
+        await restarted.recover()
+        assert set(restarted.held) == {"sandbox-0002"}
+        assert provider.reattached == ["memory:episode-2"]
+        assert provider.discarded == ["memory:episode-1"]
+        assert [entry.sandbox_id for entry in restarted.roster()] == ["sandbox-0002"]
+        assert restarted.ready("sandbox-0002") is provider.sandboxes[1]
+        async with TestClient(TestServer(restarted.app())) as client:
+            # The Run asking again joins what the earlier agent created.
+            again = await create(client, restarted, "sandbox-0002", wanted=live)
+            assert (await again.json())["sandbox_id"] == "sandbox-0002"
+            assert len(provider.requests) == 2
+        await restarted.stop()
+        assert list((tmp_path / "sandboxes").iterdir()) == []
+
+    async def test_a_sandbox_whose_creation_never_finished_is_dropped(
+        self, tmp_path: Path, provider: MemoryProvider, clock: Clock
+    ) -> None:
+        crashed = await make_agent(tmp_path, provider, clock)
+        grant = verify_grant(
+            grant_for(crashed, request(), "sandbox-0001"), TOKEN, node="box", now=clock.now
+        )
+        holds, _ = crashed.admit(grant, request())
+        entry = node_module._Entry(
+            grant=grant,
+            provider="memory",
+            holds=holds,
+            request=request(),
+            lease_expires_at=clock.now + 60,
+        )
+        (tmp_path / "sandboxes" / "sandbox-0001.json").write_text(entry.model_dump_json())
+        restarted = await make_agent(tmp_path, provider, clock)
+        await restarted.recover()
+        assert restarted.held == {} and provider.discarded == []
+        assert list((tmp_path / "sandboxes").iterdir()) == []
+
+    async def test_sandboxes_are_driven_again_at_once_and_each_in_its_time_or_destroyed(
+        self,
+        tmp_path: Path,
+        provider: MemoryProvider,
+        clock: Clock,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        crashed = await make_agent(tmp_path, provider, clock)
+        async with TestClient(TestServer(crashed.app())) as client:
+            for n in range(1, 5):
+                response = await create(
+                    client, crashed, f"sandbox-000{n}", wanted=request(f"episode-{n}")
+                )
+                assert response.status == 200
+        journal = tmp_path / "sandboxes"
+        (journal / "sandbox-0008.json").write_text("{")
+        (journal / "sandbox-0009.partial").write_text("a write the crash cut short")
+        monkeypatch.setattr(node_module, "RECOVER_SEC", 0.3)
+        started: list[str] = []
+        everyone = asyncio.Event()
+        reattach = provider.reattach
+
+        async def odd(handle: str, *args: object) -> object:
+            started.append(handle)
+            if len(started) == 4:
+                everyone.set()
+            if handle == "memory:episode-3":
+                raise RuntimeError("not an AleError")
+            if handle == "memory:episode-4":
+                await asyncio.Event().wait()  # never answers
+            await everyone.wait()  # only if all four are under way at once
+            return await reattach(handle, *args)
+
+        monkeypatch.setattr(provider, "reattach", odd)
+        restarted = await make_agent(tmp_path, provider, clock)
+        await restarted.recover()
+        assert set(restarted.held) == {"sandbox-0001", "sandbox-0002"}
+        assert sorted(provider.discarded) == ["memory:episode-3", "memory:episode-4"]
+        assert sorted(path.name for path in journal.iterdir()) == [
+            "sandbox-0001.json",
+            "sandbox-0002.json",
+        ]
+        assert "sandbox-0008.json" in caplog.text

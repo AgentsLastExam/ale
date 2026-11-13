@@ -48,7 +48,7 @@ it (labels, resources kept for the machine itself, fewer Providers).
 | `resources` | CPUs, memory, disk, GPUs by model, and `macos_vm_slots` |
 | `profiles` | One **Sandbox profile** per combination the Node can start: Provider, kind, operating system, architecture, desktop, network modes, snapshots, GPUs, CPU and memory limits, and the macOS VM slots each Sandbox holds |
 | `framework` | The identity of the framework its engine installs into every Sandbox |
-| `boot_id` | Changes whenever the node agent restarts, which ends every Sandbox it held |
+| `boot_id` | The machine's boot: it changes when the machine restarts, which ends every Sandbox on it, and a restarted node agent keeps it |
 
 Profiles are real combinations, not independent lists: a Mac that runs macOS and arm64
 Linux does not run x86-64 Windows, and a declaration that listed systems and
@@ -116,10 +116,11 @@ macOS VM that is shutting down still counts against its Mac.
   Node holds that the ledger does not know is destroyed after a short grace (the ledger may
   be the one behind); one its Run released is destroyed at once, by the heartbeat's reply. A
   `starting` or `ready` Sandbox missing from the roster is `lost`, unless its lease had run
-  out, in which case its Node destroyed it and it is `released`.
+  out, in which case its Node destroyed it and it is `released`; so is a `lost` one whose
+  lease ran out while its Node was away.
 - **Lost Nodes.** An offline Node's Sandboxes are `lost`, and its unstarted placements go
   back to the queue. A Node that returns with the same boot ID and lists a lost Sandbox
-  restores it; a Node that restarted has a new boot ID and none of its old Sandboxes. A lost
+  restores it; a machine that restarted has a new boot ID and none of its old Sandboxes. A lost
   Sandbox is not moved: whether its episode runs again elsewhere is the Run's retry policy.
 - **Restarts.** The ledger is written through on every change, so a restarted control plane
   resumes where it stopped and gives every Node its timeout to check in again.
@@ -141,9 +142,18 @@ Run's own machine; the agent only carries the calls.
   as a tar stream that keeps its links, and the Node's Sandbox uploads it, so upload
   semantics stay the guest service's.
 - **Leases.** Each Run renews its Sandboxes' leases with the agent. A Sandbox whose lease ran
-  out is destroyed, and a stopping agent destroys every Sandbox it holds, since a restarted
-  agent has a new boot ID and could not drive them. An agent that crashes leaves its
-  Sandboxes to the Provider, as a crashed Run leaves its own.
+  out is destroyed, and a stopping agent destroys every Sandbox it holds: an operator stops
+  an agent to take its Node out of service, so it leaves nothing behind; a crash, which
+  nobody chose, keeps them for their Runs.
+- **Crashes.** An agent that crashes leaves its Sandboxes running. It journals what it needs
+  to drive each Sandbox again. The agent that starts next on the machine, before it takes
+  connections, drives again through the Provider (`reattach`) each one whose lease still
+  runs and holds it for its Run as before, and destroys (`discard`) the rest. It keeps the
+  machine's boot ID, so the control plane keeps or restores the reattached Sandboxes and
+  records the destroyed ones as released when their lease ran out. A Run makes again a call
+  whose connection the Node refused while its agent was down ([FleetProvider](#fleetprovider));
+  a command under way when the agent crashed fails as an infrastructure failure. A Sandbox
+  still being created at the crash has no handle yet and is left to its Provider.
 - **Images.** The agent prepares every image it serves itself, through the very preparation
   a local Run uses: it pulls bases from their registries, builds a container Task's image,
   materializes a Linux VM disk, and builds a Windows Task's layer on its own copy of the base;
@@ -190,10 +200,11 @@ episode protocol knows it is there.
   keeps no Sandbox past its episode: `accepts` refuses `keep` and `snapshot`.
 - **Each Sandbox** is acquired under a fresh name, created on its Node with the grant, and
   driven through the node agent; its lease is renewed while the Run holds it, and destroying
-  it releases it in the ledger and on the Node. A Node that refuses before creating
-  anything, or that the Run cannot connect to at all, is refused back to the control plane,
-  which places the Sandbox elsewhere; an unreachable Node takes none of the Run's Sandboxes
-  again.
+  it releases it in the ledger and on the Node. A call whose connection the Node refused, as
+  while its agent restarts, never reached it, so the Run makes it again for up to 90 seconds.
+  A Node that refuses before creating anything, or that the Run cannot connect to at all, is
+  refused back to the control plane, which places the Sandbox elsewhere; an unreachable Node
+  takes none of the Run's Sandboxes again.
 - **Failures keep their kind.** An error the Node's Sandbox raised is raised as the same
   error, so an episode maps it as it would locally; a Node that cannot be reached, or no
   longer holds the Sandbox, raises `GuestUnreachableError`, an infrastructure failure the

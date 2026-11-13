@@ -47,6 +47,18 @@ serves it on.
 | Daytona | None: snapshots count against an organization quota shared with other tools, so `accepts` refuses them |
 | Orchard | None: Orchard keeps no VM past its episode, so `accepts` refuses retention and snapshots |
 
+## Reattaching by handle
+
+A Sandbox's `handle` names it to `reattach` and `discard`, by which another process on the
+same machine, such as a restarted Fleet node agent, drives it again or destroys it.
+
+| Provider | How `reattach` and `discard` find a Sandbox by its handle |
+|---|---|
+| Docker | `docker:<container>`: `docker inspect` finds the container, whose labels must name it ALE's, and it must be running the recorded image. Reattaching re-applies the [Gateway route](#gateway-address) as a reattaching run does and reads the seal back from the container: a runc one is sealed when it is off the default bridge, a Kata one when the seal's drop filter is on `tap0_kata`. `discard` removes the container and its network; one that is already gone needs nothing |
+| QEMU | `qemu:<runner>`: the same for the runner container, whose labels must name it ALE's and whose overlay must sit on the recorded disk. Reattaching refills the runner's `ALE_GATEWAY` chain and reads the seal back from its `FORWARD` drop rule. `discard` removes the runner and its overlay |
+| Orchard | `orchard:<name>:<uid>`: the VM by its name, which must still have that UID and run the image framing recorded on this Mac. Reattaching opens new guest sessions; the Gateway relay started at boot outlives the old ones. `discard` deletes the VM unless Orchard replaced it |
+| Daytona, Firecracker, Fleet | None: their Sandboxes have no handle, and `reattach` refuses |
+
 ## GPU models
 
 A Task's `gpu_types` decides which GPU models a Sandbox may get

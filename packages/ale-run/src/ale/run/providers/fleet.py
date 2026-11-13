@@ -96,6 +96,9 @@ RENEW_SEC = 30.0
 #: placement does not lapse.
 KEEPALIVE_SEC = 20.0
 WAIT_SEC = 25.0
+#: How long a Sandbox's calls wait for its Node to take connections again, as a restarted
+#: node agent does once it has driven its Sandboxes again.
+RECONNECT_SEC = 90.0
 CHUNK = 2**20
 #: What stands in for an image a Node has yet to prepare, before the key.
 STAND_IN = "fleet:"
@@ -121,6 +124,10 @@ class _Refused(Exception):
 
 class _Unreachable(GuestUnreachableError):
     """This Run could not connect to the Node at all; a connection lost midway is not this."""
+
+
+class _NotListening(_Unreachable):
+    """The Node refused the connection: nothing listens there, as while its agent restarts."""
 
 
 @dataclass(frozen=True)
@@ -231,7 +238,8 @@ class FleetClient:
         except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError) as error:
             reason = f"{type(error).__name__}: {error}"
             if node:
-                raise _Unreachable(f"Node {node} is unreachable: {reason}") from None
+                unreachable = _NotListening if _refused(error) else _Unreachable
+                raise unreachable(f"Node {node} is unreachable: {reason}") from None
             raise ProviderStartError(
                 f"the Fleet control plane at {self.url} is unreachable: {reason}"
             ) from None
@@ -243,6 +251,28 @@ class FleetClient:
                 f"lost the Fleet control plane at {self.url}: {reason}"
             ) from None
         self._fail(status, body, node=node)
+
+    async def node_call(
+        self,
+        method: str,
+        url: str,
+        *,
+        node: str,
+        body: Callable[[], Any] | None = None,
+        **kwargs: Any,
+    ) -> bytes:
+        """A call to a Node. One that refuses the connection, as one whose agent is
+        restarting does, never received the call, so it is made again until the Node takes
+        connections or ``RECONNECT_SEC`` passes; ``body`` makes its data anew."""
+        deadline = time.monotonic() + RECONNECT_SEC
+        while True:
+            data = {"data": body()} if body is not None else {}
+            try:
+                return await self._request(method, url, node=node, **data, **kwargs)
+            except _NotListening:
+                if time.monotonic() > deadline:
+                    raise
+                await asyncio.sleep(2)
 
     @staticmethod
     def _fail(status: int, body: bytes, *, node: str | None) -> NoReturn:
@@ -381,16 +411,16 @@ class FleetClient:
                 _log.warning("renewing leases on %s failed: %s", node.name, error)
 
     async def node_create(self, node: _Node, sandbox_id: str, body: CreateSandbox) -> bytes:
-        return await self._request(
+        return await self.node_call(
             "POST",
             f"{node.address}/v1/sandboxes/{sandbox_id}",
             node=node.name,
-            data=body.model_dump_json(),
+            body=body.model_dump_json,
             timeout=None,
         )
 
     async def node_delete(self, node: _Node, sandbox_id: str) -> None:
-        await self._request(
+        await self.node_call(
             "DELETE", f"{node.address}/v1/sandboxes/{sandbox_id}", node=node.name, timeout=600
         )
 
@@ -435,15 +465,15 @@ class FleetClient:
     ) -> PreparedTaskImage:
         url = f"{node.address}/v1/images/{key}"
         if recipe.context is not None:
-            known = ImageState.model_validate_json(await self._request("GET", url, node=node.name))
+            known = ImageState.model_validate_json(await self.node_call("GET", url, node=node.name))
             if not known.inputs:
                 await self._send_context(node, url, recipe)
         _log.info("having %s prepare %s", node.name, key)
-        body = await self._request(
+        body = await self.node_call(
             "POST",
             url,
             node=node.name,
-            data=recipe.inputs(key, self.run_id, operating_system).model_dump_json(),
+            body=recipe.inputs(key, self.run_id, operating_system).model_dump_json,
             timeout=None,
         )
         return PreparedTaskImage.model_validate_json(body)
@@ -468,11 +498,11 @@ class FleetClient:
                 raise TaskDefinitionError(
                     f"{recipe.context} changed since this Run started; run it again"
                 )
-            await self._request(
+            await self.node_call(
                 "PUT",
                 f"{url}/inputs",
                 node=node.name,
-                data=_file_chunks(archive),
+                body=lambda: _file_chunks(archive),
                 timeout=None,
             )
 
@@ -481,6 +511,12 @@ class FleetClient:
             await asyncio.sleep(KEEPALIVE_SEC)
             with contextlib.suppress(AleError):
                 await self.placement(sandbox_id)
+
+
+def _refused(error: aiohttp.ClientError) -> bool:
+    return isinstance(error, aiohttp.ClientConnectorError) and isinstance(
+        error.os_error, ConnectionRefusedError
+    )
 
 
 async def _file_chunks(path: Path) -> AsyncIterator[bytes]:
@@ -761,9 +797,12 @@ class FleetSandbox(Sandbox):
         """The Gateway as the Sandbox reaches it, at an address on its Node."""
         return self._gateway
 
-    async def _call(self, method: str, path: str, **kwargs: Any) -> bytes:
-        return await self._client._request(
-            method, f"{self._url}{path}", node=self.node.name, timeout=None, **kwargs
+    async def _call(
+        self, method: str, path: str, body: Callable[[], Any] | None = None, **kwargs: Any
+    ) -> bytes:
+        """One call to the Sandbox on its Node, made again while the Node is restarting."""
+        return await self._client.node_call(
+            method, f"{self._url}{path}", node=self.node.name, body=body, timeout=None, **kwargs
         )
 
     async def exec(
@@ -784,8 +823,23 @@ class FleetSandbox(Sandbox):
             identity=identity,
             stream=output_sink is not None,
         )
-        done: ExecDone | None = None
         session = self._client._state().session
+        deadline = time.monotonic() + RECONNECT_SEC
+        while True:
+            try:
+                return await self._exec(session, call, output_sink)
+            except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError) as error:
+                # The command never reached the Node, whose agent may be restarting.
+                if not _refused(error) or time.monotonic() > deadline:
+                    raise GuestUnreachableError(
+                        f"Node {self.node.name} is unreachable: {error}"
+                    ) from None
+                await asyncio.sleep(2)
+
+    async def _exec(
+        self, session: ClientSession, call: ExecCall, output_sink: ExecOutputSink | None
+    ) -> ExecResult:
+        done: ExecDone | None = None
         try:
             async with session.ws_connect(
                 f"{self._url}/exec", headers=self._client.headers, heartbeat=30, max_msg_size=0
@@ -805,6 +859,8 @@ class FleetSandbox(Sandbox):
             raise GuestUnreachableError(
                 f"Node {self.node.name} refused the command ({error.status}): {error.message}"
             ) from None
+        except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError):
+            raise
         except aiohttp.ClientError as error:
             raise GuestUnreachableError(f"Node {self.node.name} is unreachable: {error}") from None
         if done is None:
@@ -852,8 +908,8 @@ class FleetSandbox(Sandbox):
             await self._call(
                 "POST",
                 "/upload",
+                lambda: _file_chunks(archive),
                 params={"target": target, "identity": identity.value},
-                data=_file_chunks(archive),
             )
 
     async def screenshot(self) -> bytes:

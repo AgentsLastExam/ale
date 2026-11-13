@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from ale.core.errors import ProviderCapabilityError
+from ale.core.errors import AleError, ProviderCapabilityError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
@@ -256,6 +256,35 @@ class ProviderConformance:
             assert sandbox.allocation.memory_mb == request.resources.memory_mb
             assert sandbox.allocation.network_mode is request.network.mode
             assert sandbox.allocation.provider == self.provider.name
+
+    @pytest.mark.asyncio
+    async def test_a_sandbox_is_driven_again_by_its_handle(self) -> None:
+        """Another Sandbox object drives the same Sandbox by its handle, and ``discard``
+        destroys it, idempotently, after which reattaching fails."""
+        if type(self.provider).reattach is Provider.reattach:
+            pytest.skip(f"{self.provider.name} does not reattach to Sandboxes")
+        sandbox = await self.provider.create(await self.request())
+        opened = [sandbox]
+        try:
+            handle = sandbox.handle
+            assert handle is not None
+            path = PurePosixPath(sandbox.agent_home) / "reattached.bin"
+            await sandbox.write_file(path, b"kept")
+            recorded = (sandbox.request, sandbox.allocation, sandbox.resolved_image)
+            again = await self.provider.reattach(handle, *recorded)
+            opened.append(again)
+            assert again.handle == handle
+            assert await again.read_file(path) == b"kept"
+            assert (await again.exec(["echo", "again"])).stdout.strip() == "again"
+            await self.provider.discard(handle)
+            await self.provider.discard(handle)  # it is gone: nothing to do
+            with pytest.raises(AleError):
+                opened.append(await self.provider.reattach(handle, *recorded))
+        finally:
+            for each in opened:
+                # Destroying what discard destroyed may fail; it still closes connections.
+                with contextlib.suppress(AleError):
+                    await each.destroy()
 
     @pytest.mark.asyncio
     async def test_storage_and_sudo_are_enforced_or_rejected(self) -> None:
