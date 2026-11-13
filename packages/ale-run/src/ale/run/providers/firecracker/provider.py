@@ -68,6 +68,7 @@ from ale.run import ale_image, guestd
 from ale.run.framework import with_framework
 from ale.run.images import acquire_lock, resolve_container_image, resolve_prepared_container_image
 from ale.run.process import run
+from ale.run.providers import relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.providers.runner import (
@@ -76,7 +77,6 @@ from ale.run.providers.runner import (
     free_port,
     is_blank,
     issue_guest_token,
-    proxy_env,
     read_guest_token,
     url_port,
 )
@@ -320,6 +320,8 @@ class FirecrackerSandbox(Sandbox):
         self._client = client
         self._file_client = file_client
         self._sealed = False
+        #: The loopback address guestd relays the agent to the egress proxy from, while sealed.
+        self._relay: str | None = None
         self.state = SandboxState.READY
 
     def _as(self, identity: Identity) -> str | None:
@@ -340,12 +342,8 @@ class FirecrackerSandbox(Sandbox):
         identity: Identity = Identity.FRAMEWORK,
         output_sink: ExecOutputSink | None = None,
     ) -> ExecResult:
-        if (
-            identity is Identity.AGENT
-            and self._sealed
-            and self.request.network.mode is NetworkMode.ALLOWLIST
-        ):
-            env = proxy_env(self.request) | (env or {})
+        if identity is Identity.AGENT and self._sealed and self._relay:
+            env = relay.variables(self._relay, HOST_IP) | (env or {})
         loop = asyncio.get_running_loop()
         started = loop.time()
         exit_code, stdout, stderr, timed_out = await self._client.exec(
@@ -414,6 +412,9 @@ class FirecrackerSandbox(Sandbox):
 
     async def open_egress(self) -> None:
         """Lift the runner firewall for the framework's own phases."""
+        # Open, the account's programs go straight out again.
+        await relay.stop(self._client, self.request)
+        self._relay = None
         for rule in (
             *(f"iptables -w -D FORWARD {match} -j ACCEPT" for match in self._seal_rules()),
             f"iptables -w -D FORWARD -i {GUEST_TAP} -j DROP",
@@ -436,6 +437,13 @@ class FirecrackerSandbox(Sandbox):
             )
             if code != 0:
                 raise ProviderStartError(f"could not close egress: {stderr.strip()}")
+        self._relay = await relay.start(
+            self._client,
+            self.request,
+            self.allocation,
+            proxy=f"http://{HOST_IP}:{url_port(self.request.proxy_url)}",
+            host=HOST_IP,
+        )
         self._sealed = True
 
     async def snapshot(
@@ -497,6 +505,9 @@ class FirecrackerSandbox(Sandbox):
         so a later microVM can mount it read-only without replaying a journal. It stops
         guestd too, so the request's reply may never come.
         """
+        # The relay ends with this boot; the disk keeps the account's own settings.
+        await relay.stop(self._client, self.request)
+        self._relay = None
         with contextlib.suppress(Exception):
             await self._client.exec(
                 [guestd.PYTHON["linux"], "-c", "import os, signal; os.kill(1, signal.SIGINT)"],

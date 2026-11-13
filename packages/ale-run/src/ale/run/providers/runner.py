@@ -13,10 +13,9 @@ import secrets
 import socket
 import zlib
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 
 from ale.core.errors import ProviderCapabilityError
-from ale.core.sandbox import SandboxRequest
 from ale.run import guestd
 from ale.run.transport import GuestClient, TcpTransport
 
@@ -27,7 +26,6 @@ __all__ = [
     "free_port",
     "is_blank",
     "issue_guest_token",
-    "proxy_env",
     "read_guest_token",
     "url_port",
 ]
@@ -117,19 +115,3 @@ def url_port(url: str | None) -> str:
     """The port a URL names, or empty when a run has no such service."""
     port = urlsplit(url).port if url else None
     return str(port) if port else ""
-
-
-def proxy_env(request: SandboxRequest) -> dict[str, str]:
-    """The variables that send an agent's commands through the proxy the runner forwards."""
-    if not request.proxy_url:
-        return {}
-    proxy = f"http://{HOST_IP}:{url_port(request.proxy_url)}"
-    if request.proxy_token:
-        proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}:@", 1)
-    return {
-        "HTTP_PROXY": proxy,
-        "HTTPS_PROXY": proxy,
-        "http_proxy": proxy,
-        "https_proxy": proxy,
-        "NO_PROXY": f"{HOST_IP},localhost,127.0.0.1",
-    }

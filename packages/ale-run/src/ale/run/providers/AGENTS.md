@@ -11,5 +11,8 @@ Read [`README.md`](README.md) and `docs/specs/sandbox-image.md` before changing 
   semantics in every backend that shares it.
 - Mark real-runtime tests with `needs_docker`, `needs_kvm`, `needs_daytona`,
   `needs_orchard`, `needs_gui` or `needs_gpu`.
+- A problem peculiar to one backend goes in that Provider package's own `AGENTS.md`: the
+  problem as seen, its context as measured, the solution, and the decisions taken. Read it
+  before changing that backend, and update it in the same change.
 
 Run the matching conformance suite and backend integration tests before merging.

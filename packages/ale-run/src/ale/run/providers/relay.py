@@ -1,0 +1,79 @@
+"""How a sealed ``allowlist`` Sandbox reaches the Host's egress proxy.
+
+The proxy knows an episode by its token, which many programs cannot present: a browser
+sends proxy credentials only in answer to a challenge, and Chromium ignores those in the
+proxy variables. So Docker, QEMU and Firecracker, which seal a Sandbox to the Host, have
+guestd relay a loopback port to the proxy with the token (``guestd/egress.py``). The agent's
+proxy variables name the relay, and on a desktop so does the agent account's system proxy.
+"""
+
+from __future__ import annotations
+
+import logging
+from urllib.parse import quote
+
+from ale.core.errors import GuestUnreachableError, ProviderStartError
+from ale.core.sandbox import ResourceAllocation, SandboxRequest
+from ale.core.taskspec import NetworkMode
+from ale.run.transport import GuestClient
+
+__all__ = ["start", "stop", "variables"]
+
+
+async def start(
+    client: GuestClient,
+    request: SandboxRequest,
+    allocation: ResourceAllocation,
+    *,
+    proxy: str,
+    host: str,
+) -> str | None:
+    """Relay the agent to ``proxy``, the Host proxy as the guest reaches it at ``host``.
+
+    Returns the relay's address, or None when the Sandbox has no proxy to reach.
+    """
+    if request.network.mode is not NetworkMode.ALLOWLIST or not request.proxy_url:
+        return None
+    if request.proxy_token:
+        proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}:@", 1)
+    try:
+        return await client.egress_relay(
+            proxy, bypass=_bypass(host), desktop=allocation.desktop_resolution is not None
+        )
+    except (GuestUnreachableError, TimeoutError) as error:
+        raise ProviderStartError(f"could not start the agent's egress relay: {error}") from error
+
+
+async def stop(client: GuestClient, request: SandboxRequest) -> None:
+    """Stop the relay and give the agent account its own system proxy back.
+
+    Nothing that ran before is assumed: a guest left sealed by an earlier process, or by a
+    failure halfway, restores just the same, and one with nothing to restore is left as it
+    is. A failure is logged rather than raised, since the agent may have broken its own
+    desktop, and that must not keep the framework's phases from running.
+    """
+    if request.network.mode is not NetworkMode.ALLOWLIST:
+        return
+    try:
+        await client.egress_relay(None)
+    except (GuestUnreachableError, TimeoutError) as error:
+        logging.getLogger("ale.execution").warning(
+            "could not give the agent account its own system proxy back: %s", error
+        )
+
+
+def variables(relay: str, host: str) -> dict[str, str]:
+    """The proxy variables of the agent's commands while the Sandbox is sealed."""
+    proxy = f"http://{relay}"
+    return {
+        "HTTP_PROXY": proxy,
+        "HTTPS_PROXY": proxy,
+        "http_proxy": proxy,
+        "https_proxy": proxy,
+        "NO_PROXY": ",".join(_bypass(host)),
+    }
+
+
+def _bypass(host: str) -> list[str]:
+    """The Host's own address, which the Gateway is reached at, and the guest's loopback."""
+    return [host, "localhost", "127.0.0.1"]

@@ -27,7 +27,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
@@ -58,6 +58,7 @@ from ale.run.framework import with_framework
 from ale.run.gpu import GpuLease, accepts_model, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
 from ale.run.process import run
+from ale.run.providers import relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.docker import kata
 from ale.run.providers.privileges import set_elevation, verify_identities
@@ -360,21 +361,6 @@ class _KataConfinement:
 _Confinement = _RuncConfinement | _KataConfinement
 
 
-def _proxy_env(request: SandboxRequest) -> dict[str, str]:
-    if not request.proxy_url:
-        return {}
-    proxy = _reachable(request.proxy_url) or ""
-    if request.proxy_token:
-        proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}:@", 1)
-    return {
-        "HTTP_PROXY": proxy,
-        "HTTPS_PROXY": proxy,
-        "http_proxy": proxy,
-        "https_proxy": proxy,
-        "NO_PROXY": f"{HOST_ALIAS},localhost,127.0.0.1",
-    }
-
-
 def _verify_docker_gpu(
     selected: tuple[str, ...], observed: tuple[GpuDevice, ...]
 ) -> tuple[GpuDevice, ...]:
@@ -422,6 +408,8 @@ class DockerSandbox(Sandbox):
         self._client = client
         self._file_client = file_client
         self._sealed = sealed
+        #: The loopback address guestd relays the agent to the egress proxy from, while sealed.
+        self._relay: str | None = None
         self.state = SandboxState.READY
 
     def _as(self, identity: Identity) -> str | None:
@@ -457,12 +445,8 @@ class DockerSandbox(Sandbox):
         identity: Identity = Identity.FRAMEWORK,
         output_sink: ExecOutputSink | None = None,
     ) -> ExecResult:
-        if (
-            identity is Identity.AGENT
-            and self._sealed
-            and self.request.network.mode is NetworkMode.ALLOWLIST
-        ):
-            env = _proxy_env(self.request) | (env or {})
+        if identity is Identity.AGENT and self._sealed and self._relay:
+            env = relay.variables(self._relay, HOST_ALIAS) | (env or {})
         loop = asyncio.get_running_loop()
         started = loop.time()
         exit_code, stdout, stderr, timed_out = await self._client.exec(
@@ -521,6 +505,9 @@ class DockerSandbox(Sandbox):
         """
         if self.request.network.mode is NetworkMode.OPEN:
             return  # the task declared `open`; it is already on the bridge
+        # Open, the account's programs go straight out again.
+        await relay.stop(self._client, self.request)
+        self._relay = None
         await self.confinement.open(self.container, self._client)
         self._sealed = False
 
@@ -529,7 +516,17 @@ class DockerSandbox(Sandbox):
         if self.request.network.mode is NetworkMode.OPEN:
             return
         await self.confinement.close(self.container, self._client)
+        await self._start_relay()
         self._sealed = True
+
+    async def _start_relay(self) -> None:
+        self._relay = await relay.start(
+            self._client,
+            self.request,
+            self.allocation,
+            proxy=_reachable(self.request.proxy_url) or "",
+            host=HOST_ALIAS,
+        )
 
     async def destroy(self) -> None:
         """Idempotent: teardown also runs on failure paths, sometimes twice."""
@@ -572,6 +569,9 @@ class DockerSandbox(Sandbox):
         A sandbox mounts no volumes, so the commit holds all of its files. The image keeps
         the container's labels and command; a snapshot holds no GPU.
         """
+        # The relay ends with this container; the image keeps the account's own settings.
+        await relay.stop(self._client, self.request)
+        self._relay = None
         await asyncio.gather(
             self._client.close(), self._file_client.close(), return_exceptions=True
         )
@@ -1200,7 +1200,7 @@ class DockerProvider(Provider):
         except BaseException:
             await client.close()
             raise
-        return DockerSandbox(
+        sandbox = DockerSandbox(
             sandbox_id=container.removeprefix("ale-"),
             request=request.model_copy(update={"role": SandboxRole(role)}),
             container=container,
@@ -1213,6 +1213,14 @@ class DockerProvider(Provider):
             agent_home=agent_home,
             sealed=sealed,
         )
+        if sealed:
+            try:
+                # This run's proxy and token, through a guestd of this run's own.
+                await sandbox._start_relay()
+            except BaseException:
+                await asyncio.gather(client.close(), file_client.close(), return_exceptions=True)
+                raise
+        return sandbox
 
 
 def _snapshot_reference(handle: str) -> str:
