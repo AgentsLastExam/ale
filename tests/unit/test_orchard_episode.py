@@ -26,9 +26,10 @@ from ale.run.episode import run_episode
 from ale.run.framework import MACOS_PYTHON
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers import ProviderRegistry, orchard, privileges
+from ale.run.providers import ProviderRegistry, privileges
 from ale.run.providers.orchard import OrchardProvider
-from ale.run.providers.orchard_framing import FramedImage
+from ale.run.providers.orchard import provider as orchard
+from ale.run.providers.orchard.framing import FramedImage
 from ale.run.tasksets.manifest import load_tasks
 from ale.run.transport import GuestClient, StdioTransport
 

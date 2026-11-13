@@ -23,6 +23,7 @@ import aiohttp
 from yarl import URL
 
 from ale.core.errors import ProviderStartError
+from ale.run.process import run
 
 __all__ = ["MANIFEST", "Reference", "Registry", "retrying"]
 
@@ -414,21 +415,12 @@ async def _docker_credentials(registry: str) -> tuple[str, str] | None:
 
 async def _helper_credentials(helper: str, registry: str) -> tuple[str, str] | None:
     try:
-        process = await asyncio.create_subprocess_exec(
-            f"docker-credential-{helper}",
-            "get",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+        code, stdout, _ = await run(
+            f"docker-credential-{helper}", "get", stdin=registry.encode(), timeout=60
         )
     except OSError:
         raise ProviderStartError(f"Docker credential helper {helper} is not installed") from None
-    try:
-        stdout, _ = await asyncio.wait_for(process.communicate(registry.encode()), 60)
-    except TimeoutError:
-        process.kill()
-        raise ProviderStartError(f"Docker credential helper {helper} did not answer") from None
-    if process.returncode != 0:
+    if code != 0:
         return None  # the helper has nothing stored for this registry
     try:
         answer = json.loads(stdout)

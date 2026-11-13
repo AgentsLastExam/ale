@@ -14,7 +14,8 @@ from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
 from ale.run.framework import framework_identity
 from ale.run.providers import ProviderRegistry
-from ale.run.providers.docker import KATA_RUNTIME, DockerProvider, _docker
+from ale.run.providers.docker import kata
+from ale.run.providers.docker.provider import DockerProvider, _docker
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import prepare_task_image
 from ale.run.tasksets.manifest import load_tasks
@@ -88,12 +89,12 @@ async def test_a_kata_sandbox_is_a_vm_whose_processes_get_the_declared_memory() 
     process holds at least as much as on runc, with the same image and its desktop."""
     skip_without_kata()
     runc, recorded, host_kernel = await _most_memory_mb(DockerProvider())
-    kata, kata_recorded, kernel = await _most_memory_mb(DockerProvider(runtime="kata"))
-    assert (recorded, kata_recorded) == ("runc", KATA_RUNTIME)
+    in_vm, kata_recorded, kernel = await _most_memory_mb(DockerProvider(runtime="kata"))
+    assert (recorded, kata_recorded) == ("runc", kata.RUNTIME)
     assert kernel != host_kernel == os.uname().release, "the Kata sandbox shares the Host's kernel"
     # The guest kernel's work for the desktop is not charged to the container in a VM, so
     # Kata leaves somewhat more: 312-320 MiB against 240-288 MiB on runc when measured.
-    assert runc - 32 <= kata <= runc + 160, f"runc held {runc} MiB, Kata {kata} MiB"
+    assert runc - 32 <= in_vm <= runc + 160, f"runc held {runc} MiB, Kata {in_vm} MiB"
 
 
 @pytest.mark.needs_kvm
@@ -215,7 +216,7 @@ async def test_prepared_task_image_starts_without_remote_resolution(
         raise AssertionError("prepared Task images must not use remote resolution")
 
     monkeypatch.setattr(
-        "ale.run.providers.docker.resolve_container_image",
+        "ale.run.providers.docker.provider.resolve_container_image",
         remote_resolution_is_forbidden,
     )
     provider = DockerProvider()

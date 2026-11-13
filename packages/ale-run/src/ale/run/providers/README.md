@@ -2,17 +2,27 @@
 
 Providers turn prepared Task images into Sandboxes. ALE ships the following backends:
 
-| Module | Backend | Prepared input |
+| Package | Backend | Prepared input |
 |---|---|---|
-| `docker.py` | local Docker container, or a Kata microVM per container ([Kata](#docker-on-kata-containers)) | immutable OCI image identity |
-| `qemu.py` | QEMU/KVM guest runner | materialized qcow2 identity |
-| `firecracker.py` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
-| `daytona.py` | Daytona cloud container | immutable OCI image identity, pushed by digest |
-| `orchard.py` | macOS VM on Orchard/Tart | digest-pinned OCI image, or a local image `build.sh` built |
-| `fleet.py` | a Sandbox of any of these on a Fleet Node ([Fleet](../../../../../../docs/specs/fleet.md)) | what the Node's Provider takes; each Node prepares its own images |
+| `docker/` | local Docker container, or a Kata microVM per container ([Kata](#docker-on-kata-containers)) | immutable OCI image identity |
+| `qemu/` | QEMU/KVM guest runner | materialized qcow2 identity |
+| `firecracker/` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
+| `daytona/` | Daytona cloud container | immutable OCI image identity, pushed by digest |
+| `orchard/` | macOS VM on Orchard/Tart | digest-pinned OCI image, or a local image `build.sh` built |
+| `fleet/` | a Sandbox of any of these on a Fleet Node ([Fleet](../../../../../../docs/specs/fleet.md)) | what the Node's Provider takes; each Node prepares its own images |
 
-`daytona_api.py` is its REST client and `daytona_image.py` adapts and publishes images.
-`firecracker_init.py` is the init every microVM boots; it runs in the guest.
+Each package keeps its Provider and Sandbox in `provider.py` and exports both. Beside it,
+`docker/kata.py` builds the tc filters and VM size a sandbox in a Kata microVM needs;
+`daytona/api.py` is Daytona's REST client and `daytona/image.py` adapts and publishes
+images; `orchard/client.py` drives Orchard and Tart, `orchard/framing.py` frames images
+and `orchard/desktop.py` waits for the desktop; `fleet/tunnel.py` carries a Run's Gateway
+to its Sandboxes on a Node, both ends of it, and the node agent itself is the `ale-fleet`
+package. Two files run elsewhere and import nothing from the engine:
+`firecracker/guest_init.py` is the init every microVM boots, and `qemu/ntfs_discard.py`
+runs in the VM builder. `desktop.py` and `privileges.py` serve several Providers, and
+`runner.py` holds what QEMU and Firecracker share, as each boots its guest in a runner
+container: the guest service's token and connection, the proxy's variables, and the
+check for a desktop that has drawn nothing yet.
 
 They implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
 preflight, image verification, lifecycle, command/file transport, egress changes,
@@ -210,14 +220,14 @@ pay for it most.
 
 ## Daytona
 
-Daytona's sandboxes are built for a different trust model than ALE's, so `daytona.py`
+Daytona's sandboxes are built for a different trust model than ALE's, so `daytona/`
 works around several of its defaults to hold the same contract. Each row was measured on a
 live organization (daemon 0.225.2). Operating it is in
 [`docs/guides/daytona.md`](../../../../../../docs/guides/daytona.md).
 
 | Daytona | What the Provider does |
 |---|---|
-| Builds sandboxes only from registries registered with the organization; push credentials expire hourly | `daytona_image.py` adds one layer (`USER root`, and `iptables` if absent), pushes it by digest to Daytona's own registry, and keeps one organization registry entry, `ale-transient`, holding the current credentials. The sandbox is built `FROM` that digest, so nothing is rebuilt remotely |
+| Builds sandboxes only from registries registered with the organization; push credentials expire hourly | `daytona/image.py` adds one layer (`USER root`, and `iptables` if absent), pushes it by digest to Daytona's own registry, and keeps one organization registry entry, `ale-transient`, holding the current credentials. The sandbox is built `FROM` that digest, so nothing is rebuilt remotely |
 | Runs its daemon, and every command sent through it, as the image's final `USER` | That layer's `USER root`, so guestd is root |
 | Replaces the image's entrypoint and command with its own daemon | Starts them itself, detached, as the image's `USER` with its `ENV` and working directory, then waits for the desktop as Docker does |
 | Its daemon listens inside the sandbox (2280, 22220, 22222, 33333, and any other port PID 1 opens) and runs commands for anyone, as root | `iptables` owner rules reject every non-root user, IPv4 and IPv6; a probe as the agent must fail on every local address, or the sandbox is destroyed |
@@ -328,7 +338,7 @@ into `C:\ProgramData\ALE`:
 - A Task image build (`QemuProvider.create_builder`) frames its own overlay on the base
   before the VM boots, so its `build.ps1` runs beside the same guestd as every sandbox, and
   `save_image` keeps that overlay, framework and build together, as the Task's layer.
-- Before it is kept, `ntfs_discard.py` in the VM builder discards the overlay's clusters
+- Before it is kept, `qemu/ntfs_discard.py` in the VM builder discards the overlay's clusters
   that are only NTFS free space, by the volume's `$Bitmap` (libguestfs `ntfscat-i`), with
   `qemu-io`. An overlay holds whole 64 KiB clusters, so files a build wrote and deleted stay
   in it: on Windows base 0.1.2 that was 103 of 749 MiB for a Task that installs nothing and
@@ -394,7 +404,7 @@ Hosts have no KVM, so they cannot run it. Measured on a 112-core Linux Host with
 Firecracker 1.17.0, the guest kernel 6.1.155 its CI publishes, and the ALE container base:
 
 - **The disk.** The image gets the framework layer Docker adds, is exported with `docker
-  export`, and `firecracker_init.py` and the image's `ENV`, `USER`, `WORKDIR`,
+  export`, and `firecracker/guest_init.py` and the image's `ENV`, `USER`, `WORKDIR`,
   `ENTRYPOINT` and `CMD` are appended. The runner's `mke2fs -d` writes the tar into an
   ext4 with neither journal nor metadata checksums, as the Host's user, so nothing is
   extracted on the Host; checksums doubled `mke2fs`'s time. The container base took 72 s
@@ -429,7 +439,7 @@ Every macOS VM is a fresh Tart VM on the local Orchard controller and worker tha
 from its state directory, so macOS needs no run settings. Setup and cleanup are in the
 [macOS guide](../../../../../../docs/guides/macos-orchard.md).
 
-A Tart disk is APFS, which only macOS reads, so `orchard_framing.py` frames an image on
+A Tart disk is APFS, which only macOS reads, so `orchard/framing.py` frames an image on
 the Mac, once per image, framework and account, the way the QEMU Provider frames a qcow2:
 it clones the image with Tart and has `framework_macos.sh` change the clone's disk offline.
 `scripts/setup_macos.py` installs that script root-owned as
@@ -485,7 +495,7 @@ from the guest. Provisioning (1800 s, with queueing and pulls) and guest readine
 have separate deadlines.
 
 Orchard credentials travel through verified TLS, never command arguments or Run records.
-SIP is unchanged. `orchard_desktop.py` verifies actual capture as the Task account in every
+SIP is unchanged. `orchard/desktop.py` verifies actual capture as the Task account in every
 agent Sandbox before the solver starts. Desktop input uses native screenshot pixels; cursor
 read-back uses logical points, following the Driver's coordinate contract.
 

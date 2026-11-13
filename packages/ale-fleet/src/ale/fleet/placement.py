@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ale.run.fleet.protocol import NodeDeclaration, SandboxDemand, SandboxProfile
+from ale.core.fleet import NodeDeclaration, SandboxDemand, SandboxProfile
 from ale.run.gpu import accepts_model
 
 __all__ = [

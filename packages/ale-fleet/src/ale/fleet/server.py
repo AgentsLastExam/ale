@@ -22,10 +22,7 @@ import aiohttp
 from aiohttp import web
 from pydantic import BaseModel, ValidationError
 
-from ale.run import __version__
-from ale.run.fleet.control import ControlPlane, FleetError, UnknownSandboxError
-from ale.run.fleet.page import render
-from ale.run.fleet.protocol import (
+from ale.core.fleet import (
     PROTOCOL_VERSION,
     AcquireRequest,
     EpisodeReport,
@@ -37,6 +34,9 @@ from ale.run.fleet.protocol import (
     SandboxStatus,
     StartReport,
 )
+from ale.fleet.control import ControlPlane, FleetError, UnknownSandboxError
+from ale.fleet.page import render
+from ale.run import __version__
 
 __all__ = ["control_app", "serve"]
 

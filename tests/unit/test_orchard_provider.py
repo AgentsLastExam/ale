@@ -25,9 +25,12 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.run.providers import orchard, orchard_client, orchard_framing, privileges
-from ale.run.providers.orchard_client import OrchardExecResult
-from ale.run.providers.orchard_framing import FramedImage
+from ale.run.providers import privileges
+from ale.run.providers.orchard import client as orchard_client
+from ale.run.providers.orchard import framing as orchard_framing
+from ale.run.providers.orchard import provider as orchard
+from ale.run.providers.orchard.client import OrchardExecResult
+from ale.run.providers.orchard.framing import FramedImage
 
 pytestmark = pytest.mark.unit
 

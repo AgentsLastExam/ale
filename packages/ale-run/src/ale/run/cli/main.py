@@ -27,7 +27,6 @@ from ale.run.assets import (
     push_assets,
 )
 from ale.run.cli.assets import assets_app
-from ale.run.cli.fleet import fleet_app
 from ale.run.cli.tasks import (
     EXIT_BAD_REFERENCE,
     _config,
@@ -48,7 +47,6 @@ app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(assets_app, name="assets")
-app.add_typer(fleet_app, name="fleet")
 vm_image_app = typer.Typer(help="Publish and acquire prebuilt VM disks.", no_args_is_help=True)
 app.add_typer(vm_image_app, name="vm-image")
 sandbox_app = typer.Typer(
@@ -170,7 +168,7 @@ def run(
     if api_key_env:
         flags.append(f"gateway.api_key_env={api_key_env}")
     settings = _config(config, flags, agent=agent, model=model)
-    exit_code = _run_async(
+    exit_code = run_async(
         _run_one(reference, settings, runs_dir, run_id, require_reportable, continue_from)
     )
     raise typer.Exit(exit_code)
@@ -188,7 +186,7 @@ def validate(
     Verification uses the same run-level judge configuration as an ordinary episode.
     """
     settings = _config(config, overrides, agent="oracle", model="")
-    exit_code = _run_async(_validate(reference, settings, runs_dir))
+    exit_code = run_async(_validate(reference, settings, runs_dir))
     raise typer.Exit(exit_code)
 
 
@@ -200,7 +198,7 @@ def prepare(
 ) -> None:
     """Build or acquire Task images without starting an episode."""
     settings = _config(config, overrides, agent="oracle", model="")
-    raise typer.Exit(_run_async(_prepare_only(reference, settings)))
+    raise typer.Exit(run_async(_prepare_only(reference, settings)))
 
 
 @app.command(hidden=True)
@@ -223,7 +221,7 @@ def reverify(
     if episode_retries is not None:
         flags.append(f"episode_retries={episode_retries}")
     settings = _config(config, flags, agent="nop", model="")
-    raise typer.Exit(_run_async(_reverify(reference, source_run, settings, runs_dir)))
+    raise typer.Exit(run_async(_reverify(reference, source_run, settings, runs_dir)))
 
 
 @app.command()
@@ -254,7 +252,7 @@ def vm_image_push(
 
     typer.echo(f"pushing {source} to {reference}")
     try:
-        resolved = _run_async(publish_vm_image(source, reference))
+        resolved = run_async(publish_vm_image(source, reference))
     except AleError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
@@ -275,7 +273,7 @@ def vm_image_pull(
 
     typer.echo(f"pulling {reference}")
     try:
-        resolved = _run_async(pull_vm_image(reference, destination))
+        resolved = run_async(pull_vm_image(reference, destination))
     except AleError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
@@ -377,7 +375,7 @@ def _print_asset_sync(results: Sequence[AssetSyncResult]) -> None:
 def sandbox_list() -> None:
     """List ALE-managed sandboxes and snapshots requested for retention."""
     try:
-        records = _run_async(_list_retained_sandboxes())
+        records = run_async(_list_retained_sandboxes())
     except AleError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_PROVIDER) from error
@@ -394,7 +392,7 @@ def sandbox_destroy(
 ) -> None:
     """Destroy one ALE-retained sandbox or snapshot and its owned resources."""
     try:
-        _run_async(_destroy_retained_sandbox(handle))
+        run_async(_destroy_retained_sandbox(handle))
     except AleError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_PROVIDER) from error
@@ -434,7 +432,7 @@ async def _close(provider: Provider) -> None:
         await provider.client.close()
 
 
-def _run_async[T](main: Coroutine[Any, Any, T]) -> T:
+def run_async[T](main: Coroutine[Any, Any, T]) -> T:
     """Run a command's coroutine, cancelling it on SIGTERM as asyncio does on Ctrl-C.
 
     asyncio turns only SIGINT into cancellation. Without this, the SIGTERM of `kill`,

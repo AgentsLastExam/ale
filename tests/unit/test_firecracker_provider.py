@@ -27,8 +27,8 @@ from ale.core.sandbox import (
     SandboxRequest,
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.run.providers import firecracker_init
-from ale.run.providers.firecracker import (
+from ale.run.providers.firecracker import guest_init
+from ale.run.providers.firecracker.provider import (
     GUEST_TAP,
     HOST_IP,
     MAX_LAYERS,
@@ -215,7 +215,7 @@ async def test_sealing_drops_everything_but_replies_and_the_episode_ports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     recorder = _Recorder()
-    monkeypatch.setattr("ale.run.providers.firecracker._run", recorder)
+    monkeypatch.setattr("ale.run.providers.firecracker.provider._run", recorder)
     sealed = sandbox(
         request(network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
                 proxy_url="http://0.0.0.0:9000"),
@@ -237,7 +237,7 @@ async def test_an_open_task_is_never_sealed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     recorder = _Recorder()
-    monkeypatch.setattr("ale.run.providers.firecracker._run", recorder)
+    monkeypatch.setattr("ale.run.providers.firecracker.provider._run", recorder)
     await sandbox(request(network=NetworkPolicy(mode=NetworkMode.OPEN)), tmp_path).close_egress()
     assert recorder.calls == []
 
@@ -246,7 +246,7 @@ async def test_an_open_task_is_never_sealed(
 async def test_a_sealed_allowlist_agent_gets_the_proxy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("ale.run.providers.firecracker._run", _Recorder())
+    monkeypatch.setattr("ale.run.providers.firecracker.provider._run", _Recorder())
     client = _Client()
     req = request(
         network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
@@ -274,7 +274,7 @@ async def test_the_gateway_and_proxy_are_routed_to_the_host(
         calls.append(argv[-1])
         return 0, "172.17.0.1\n" if "ip route" in argv[-1] else "", ""
 
-    monkeypatch.setattr("ale.run.providers.firecracker._run", fake)
+    monkeypatch.setattr("ale.run.providers.firecracker.provider._run", fake)
     req = request(
         network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
         proxy_url="http://0.0.0.0:9000",
@@ -347,7 +347,7 @@ async def test_the_layer_chain_is_capped_before_the_guest_is_stopped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     recorder = _Recorder()
-    monkeypatch.setattr("ale.run.providers.firecracker._run", recorder)
+    monkeypatch.setattr("ale.run.providers.firecracker.provider._run", recorder)
     deep = sandbox(request(retention="snapshot"), tmp_path)
     deep.layers = tuple(tmp_path / f"{index}.ext4" for index in range(MAX_LAYERS))
     with pytest.raises(ProviderCapabilityError, match="snapshot layers"):
@@ -376,7 +376,7 @@ async def test_a_kept_container_must_carry_its_own_storage(
     async def fake(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
         return 0, json.dumps([record]), ""
 
-    monkeypatch.setattr("ale.run.providers.firecracker._run", fake)
+    monkeypatch.setattr("ale.run.providers.firecracker.provider._run", fake)
     with pytest.raises(ProviderCapabilityError, match="ALE-owned"):
         await FirecrackerProvider().destroy_retained("firecracker:ale-fc-x")
     with pytest.raises(ProviderCapabilityError, match="not a Firecracker sandbox handle"):
@@ -415,7 +415,7 @@ def test_the_init_and_the_image_config_ride_in_the_rootfs(tmp_path: Path) -> Non
         members = {member.name: member for member in tar.getmembers()}
         assert json.loads(tar.extractfile("opt/ale/firecracker/image.json").read()) == config  # type: ignore[union-attr]
         init = tar.extractfile("opt/ale/firecracker/init.py").read()  # type: ignore[union-attr]
-    assert init == Path(firecracker_init.__file__).read_bytes()
+    assert init == Path(guest_init.__file__).read_bytes()
     for name in ("opt/ale/firecracker", "opt/ale/firecracker/rw", "opt/ale/firecracker/old"):
         assert members[name].isdir() and members[name].mode == 0o700
     assert members["opt/ale/firecracker/init.py"].uid == 0
@@ -434,12 +434,12 @@ def test_the_init_resolves_an_oci_user_as_docker_does(monkeypatch: pytest.Monkey
     monkeypatch.setattr(pwd, "getpwuid", lambda uid: entry if uid == 1000 else _missing())
     monkeypatch.setattr(grp, "getgrnam", lambda name: grp.struct_group(("video", "x", 44, [])))
     monkeypatch.setattr(os, "getgrouplist", lambda name, gid: [gid, 27])
-    assert firecracker_init._account("user") == (1000, 1000, "/home/user", [1000, 27])
-    assert firecracker_init._account("1000:video") == (1000, 44, "/home/user", [44, 27])
+    assert guest_init._account("user") == (1000, 1000, "/home/user", [1000, 27])
+    assert guest_init._account("1000:video") == (1000, 44, "/home/user", [44, 27])
     # A numeric uid with no account still runs, as Docker runs it, with that gid and /.
-    assert firecracker_init._account("4242") == (4242, 4242, "/", [4242])
+    assert guest_init._account("4242") == (4242, 4242, "/", [4242])
     with pytest.raises(KeyError):
-        firecracker_init._account("nobody-here")
+        guest_init._account("nobody-here")
 
 
 def _missing() -> None:
@@ -447,7 +447,7 @@ def _missing() -> None:
 
 
 def test_the_init_gives_the_command_dockers_environment() -> None:
-    env = firecracker_init._environment(
+    env = guest_init._environment(
         ["PATH=/opt/bin", "A=image", "EMPTY="], {"A": "request"}, "ale-host", "/home/user"
     )
     assert env == {
@@ -457,8 +457,8 @@ def test_the_init_gives_the_command_dockers_environment() -> None:
         "HOME": "/home/user",
         "HOSTNAME": "ale-host",
     }
-    defaults = firecracker_init._environment([], {}, "h", "/root")
-    assert defaults["PATH"] == firecracker_init.DEFAULT_PATH
+    defaults = guest_init._environment([], {}, "h", "/root")
+    assert defaults["PATH"] == guest_init.DEFAULT_PATH
     assert defaults["HOME"] == "/root"
 
 

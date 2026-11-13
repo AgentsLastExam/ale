@@ -27,7 +27,8 @@ from ale.core.errors import ProviderStartError
 from ale.core.ids import content_hash
 from ale.core.sandbox import DesktopResolution, PreparedTaskImage
 from ale.run.framework import macos_framework_identity, macos_framework_payload
-from ale.run.providers.orchard_client import (
+from ale.run.images import acquire_lock
+from ale.run.providers.orchard.client import (
     PULL_TIMEOUT_SEC,
     LocalOrchard,
     OrchardClient,
@@ -172,12 +173,7 @@ def remove_locks(image: str) -> None:
 async def _exclusive(lock_name: str) -> AsyncIterator[None]:
     """Hold this Host's lock ``lock_name``, so one process makes each local image."""
     with (_records() / lock_name).open("a") as lock:
-        while True:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                await asyncio.sleep(0.5)
+        await acquire_lock(lock)
         try:
             yield
         finally:

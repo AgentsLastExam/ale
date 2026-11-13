@@ -7,7 +7,7 @@ import pytest
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.taskspec import Resources
-from ale.run.providers.docker import (
+from ale.run.providers.docker.provider import (
     DockerProvider,
     _eligible_gpus,
     _gpu_run_args,
@@ -94,7 +94,7 @@ async def test_managed_gpu_labels_are_reconciled(monkeypatch: pytest.MonkeyPatch
         assert "label=ale.managed=true" in args
         return 0, f"{UUID},GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\n\n", ""
 
-    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     assert await _managed_gpu_ids() == {
         UUID,
         "GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -134,7 +134,7 @@ async def test_retained_listing_includes_stale_state_and_cleanup_command(
             "",
         )
 
-    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     assert await DockerProvider().list_retained() == [
         {
             "provider": "docker",
@@ -170,7 +170,7 @@ async def test_a_sandbox_another_run_destroys_mid_listing_is_left_out(
         assert args == ("inspect", "kept", "gone")
         return 1, json.dumps([kept]), "error: no such object: gone"
 
-    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     listed = await DockerProvider().list_retained()
     assert [record["handle"] for record in listed] == ["docker:ale-kept"]
 
@@ -186,7 +186,7 @@ async def test_an_inspection_that_fails_otherwise_still_fails_the_listing(
             return 0, "", ""
         return 1, "", "Cannot connect to the Docker daemon"
 
-    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     with pytest.raises(ProviderStartError, match="could not inspect ALE sandboxes"):
         await DockerProvider().list_retained()
 
@@ -208,7 +208,7 @@ async def test_discard_destroys_any_ale_container_and_only_those(
             return 0, json.dumps([record]), ""
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     await DockerProvider().discard("docker:ale-e1")
     assert ("rm", "-f", "-v", "ale-e1") in calls and ("network", "rm", "ale-net-x") in calls
     await DockerProvider().discard("docker:ale-e1")  # gone already
@@ -228,7 +228,7 @@ async def test_discard_fails_when_docker_cannot_say_the_container_is_gone(
         calls.append(args)
         return 1, "", "Cannot connect to the Docker daemon"
 
-    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     with pytest.raises(ProviderStartError, match="Cannot connect to the Docker daemon"):
         await DockerProvider().discard("docker:ale-e1")
     assert calls == [("inspect", "ale-e1")]
@@ -239,6 +239,6 @@ async def test_destroy_rejects_non_ale_container(monkeypatch: pytest.MonkeyPatch
     async def docker(*args: str, **kwargs: object) -> tuple[int, str, str]:
         return 0, json.dumps([{"Config": {"Labels": {}}}]), ""
 
-    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     with pytest.raises(ProviderCapabilityError, match="not an ALE-retained"):
         await DockerProvider().destroy_retained("docker:someone-elses-container")

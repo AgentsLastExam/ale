@@ -13,6 +13,7 @@ import typer
 
 from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config, select_agent_name
 from ale.core.errors import AleError, ConfigError, ProviderCapabilityError, TaskDefinitionError
+from ale.core.fleet import RunPlan
 from ale.core.harness import EffectiveAgentResources, Harness
 from ale.core.ids import content_hash, task_component
 from ale.core.lock import AssetProvenance, ResumedFrom, RunLock
@@ -39,7 +40,6 @@ from ale.core.verdict import Status, Verdict
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.assets import observe_task_assets
 from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
-from ale.run.fleet.protocol import RunPlan
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits

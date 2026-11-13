@@ -11,8 +11,9 @@ import pytest
 from ale.core.errors import ProviderStartError
 from ale.core.sandbox import DesktopResolution, ImageKind, PreparedTaskImage
 from ale.run.framework import MACOS_FRAMER
-from ale.run.providers import orchard_client, orchard_framing
-from ale.run.providers.orchard_client import LocalOrchard, OrchardExecResult, OwnedVM
+from ale.run.providers.orchard import client as orchard_client
+from ale.run.providers.orchard import framing as orchard_framing
+from ale.run.providers.orchard.client import LocalOrchard, OrchardExecResult, OwnedVM
 
 pytestmark = pytest.mark.unit
 

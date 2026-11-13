@@ -11,10 +11,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, unused_port
 
-from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, Resources
-from ale.run.fleet.control import ControlPlane, FleetError, Timing
-from ale.run.fleet.placement import Busy, Holds, NodeView, choose, remaining_sec
-from ale.run.fleet.protocol import (
+from ale.core.fleet import (
     AcquireRequest,
     Arch,
     GpuPool,
@@ -35,8 +32,11 @@ from ale.run.fleet.protocol import (
     sign_grant,
     verify_grant,
 )
-from ale.run.fleet.server import control_app
-from ale.run.fleet.store import Store
+from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, Resources
+from ale.fleet.control import ControlPlane, FleetError, Timing
+from ale.fleet.placement import Busy, Holds, NodeView, choose, remaining_sec
+from ale.fleet.server import control_app
+from ale.fleet.store import Store
 
 pytestmark = pytest.mark.unit
 

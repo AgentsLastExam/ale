@@ -23,6 +23,7 @@ import aiohttp
 
 from ale.core.errors import GuestUnreachableError, ProviderStartError
 from ale.run.framework import MACOS_FRAMER
+from ale.run.process import run
 
 _CHUNK_BYTES = 16 * 1024
 _FRAME_BYTES = 1024 * 1024
@@ -452,23 +453,10 @@ class LocalOrchard:
         """Run Tart on the worker's own images. Pruning stays off: the cache is the worker's."""
         env = {key: value for key, value in os.environ.items() if not key.startswith("TART_")}
         env |= {"TART_HOME": str(self.tart_home), "TART_NO_AUTO_PRUNE": "1"}
-        process = await asyncio.create_subprocess_exec(
-            str(self.tart_binary),
-            *args,
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_sec)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-            raise ProviderStartError(f"tart {args[0]} did not finish in {timeout_sec:g}s") from None
-        if process.returncode:
-            detail = stderr.decode(errors="replace").strip()[-500:]
-            raise ProviderStartError(f"tart {args[0]} failed: {detail}")
-        return stdout.decode()
+        code, stdout, stderr = await run(str(self.tart_binary), *args, env=env, timeout=timeout_sec)
+        if code:
+            raise ProviderStartError(f"tart {args[0]} failed: {stderr.strip()[-500:]}")
+        return stdout
 
     async def local_images(self) -> set[str]:
         listing = json.loads(await self.tart("list", "--source", "local", "--format", "json"))
@@ -480,26 +468,12 @@ class LocalOrchard:
         """Install the framework into the stopped local VM ``name``; what it found as JSON."""
         check_framer()
         disk = self.tart_home / "vms" / name / "disk.img"
-        process = await asyncio.create_subprocess_exec(
-            "/usr/bin/sudo",
-            "-n",
-            str(FRAMER),
-            str(disk),
-            user,
-            CONTROL_ACCOUNT,
-            identity,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(payload), 600)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-            raise ProviderStartError("framing the macOS disk did not finish in 600s") from None
-        if process.returncode:
-            detail = stderr.decode(errors="replace").strip()[-1000:]
+        code, stdout, stderr = await run(
+            "/usr/bin/sudo", "-n", str(FRAMER), str(disk), user, CONTROL_ACCOUNT, identity,
+            stdin=payload, timeout=600,
+        )  # fmt: skip
+        if code:
+            detail = stderr.strip()[-1000:]
             raise ProviderStartError(f"could not install the macOS framework: {detail}")
         try:
             facts = json.loads(stdout)

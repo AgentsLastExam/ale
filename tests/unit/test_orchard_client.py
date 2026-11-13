@@ -9,7 +9,7 @@ import aiohttp
 import pytest
 
 from ale.core.errors import GuestUnreachableError, ProviderStartError
-from ale.run.providers.orchard_client import OrchardClient, OrchardTransport
+from ale.run.providers.orchard.client import OrchardClient, OrchardTransport
 
 pytestmark = pytest.mark.unit
 

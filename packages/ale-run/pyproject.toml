@@ -25,8 +25,8 @@ build-backend = "hatchling.build"
 ale-core = { workspace = true }
 ale-verify = { workspace = true }
 
-# `ale` is a PEP 420 namespace package shared with ale-core: there is deliberately no
-# src/ale/__init__.py in either package.
+# `ale` is a PEP 420 namespace package shared with ale-core and ale-fleet: there is
+# deliberately no src/ale/__init__.py in any of them.
 [tool.hatch.build.targets.wheel]
 packages = ["src/ale"]
 

@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "ale-core",
+    "ale-fleet",
     "ale-run",
     "ale-verify",
     "ale-workspace",
@@ -144,6 +145,27 @@ dependencies = [
 requires-dist = [{ name = "pydantic", specifier = ">=2.9" }]
 
 [[package]]
+name = "ale-fleet"
+version = "0.1.1"
+source = { editable = "packages/ale-fleet" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "ale-core" },
+    { name = "ale-run" },
+    { name = "pydantic" },
+    { name = "typer" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.11" },
+    { name = "ale-core", editable = "packages/ale-core" },
+    { name = "ale-run", editable = "packages/ale-run" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "typer", specifier = ">=0.15" },
+]
+
+[[package]]
 name = "ale-run"
 version = "0.1.1"
 source = { editable = "packages/ale-run" }
@@ -187,6 +209,7 @@ version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "ale-core" },
+    { name = "ale-fleet" },
     { name = "ale-run" },
     { name = "ale-verify" },
 ]
@@ -205,6 +228,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "ale-core", editable = "packages/ale-core" },
+    { name = "ale-fleet", editable = "packages/ale-fleet" },
     { name = "ale-run", editable = "packages/ale-run" },
     { name = "ale-verify", editable = "packages/ale-verify" },
 ]

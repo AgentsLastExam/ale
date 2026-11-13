@@ -4,16 +4,18 @@
 [importlinter]
 root_packages =
     ale.core
+    ale.fleet
     ale.run
     ale_verify
 include_external_packages = True
 
 [importlinter:contract:core-independent]
-name = ale.core never depends on the orchestrator
+name = ale.core never depends on the orchestrator or the Fleet
 type = forbidden
 source_modules =
     ale.core
 forbidden_modules =
+    ale.fleet
     ale.run
     ale_verify
 
@@ -24,6 +26,7 @@ source_modules =
     ale_verify
 forbidden_modules =
     ale.core
+    ale.fleet
     ale.run
 
 [importlinter:contract:gateway-provider-decoupling]
@@ -53,12 +56,12 @@ forbidden_modules =
 name = the microVM init runs in the guest and imports neither engine code nor third-party packages
 type = forbidden
 source_modules =
-    ale.run.providers.firecracker_init
+    ale.run.providers.firecracker.guest_init
 forbidden_modules =
     ale.core
     ale.run.gateway
     ale.run.guestd
-    ale.run.providers.firecracker
+    ale.run.providers.firecracker.provider
     aiohttp
     pydantic
     typer
@@ -72,14 +75,23 @@ source_modules =
 forbidden_modules =
     ale.run.providers
 
+[importlinter:contract:run-fleet-independent]
+name = the engine reaches the Fleet only as a Provider and never imports ale.fleet
+type = forbidden
+source_modules =
+    ale.run
+forbidden_modules =
+    ale.fleet
+
 [importlinter:contract:fleet-control-plane-decoupling]
 name = the Fleet control plane places data and never imports a Provider
 type = forbidden
 source_modules =
-    ale.run.fleet.control
-    ale.run.fleet.placement
-    ale.run.fleet.protocol
-    ale.run.fleet.server
-    ale.run.fleet.store
+    ale.fleet.control
+    ale.fleet.page
+    ale.fleet.placement
+    ale.fleet.server
+    ale.fleet.status
+    ale.fleet.store
 forbidden_modules =
     ale.run.providers

@@ -42,26 +42,7 @@ from ale.core.errors import (
     ProviderStartError,
     TaskDefinitionError,
 )
-from ale.core.ids import content_hash
-from ale.core.sandbox import (
-    Capabilities,
-    ExecOutputSink,
-    ExecResult,
-    Identity,
-    ImageKind,
-    ImageRef,
-    PreparedTaskImage,
-    Provider,
-    ResolvedImage,
-    ResourceAllocation,
-    RetainedSandbox,
-    Sandbox,
-    SandboxFile,
-    SandboxRequest,
-    SandboxState,
-)
-from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources, TaskSpec
-from ale.run.fleet.protocol import (
+from ale.core.fleet import (
     IDENTIFIER,
     PROTOCOL_VERSION,
     STDOUT,
@@ -87,8 +68,27 @@ from ale.run.fleet.protocol import (
     SandboxDescription,
     SandboxStatus,
 )
-from ale.run.fleet.tunnel import RunTunnel
+from ale.core.ids import content_hash
+from ale.core.sandbox import (
+    Capabilities,
+    ExecOutputSink,
+    ExecResult,
+    Identity,
+    ImageKind,
+    ImageRef,
+    PreparedTaskImage,
+    Provider,
+    ResolvedImage,
+    ResourceAllocation,
+    RetainedSandbox,
+    Sandbox,
+    SandboxFile,
+    SandboxRequest,
+    SandboxState,
+)
+from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources, TaskSpec
 from ale.run.framework import fleet_framework_identity
+from ale.run.providers.fleet.tunnel import RunTunnel
 from ale.run.sources import cache_root
 
 __all__ = ["FleetClient", "FleetProvider", "FleetSandbox"]
