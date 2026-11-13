@@ -110,7 +110,9 @@ def _task(tmp_path: Path, kind: str) -> ManifestTask:
     return load_tasks(root)[0]
 
 
-async def _kept_stages(handle: str, task: ManifestTask, run_dir: Path) -> list[str]:
+async def _kept_stages(
+    handle: str, task: ManifestTask, run_dir: Path, registry: ProviderRegistry
+) -> list[str]:
     """What a kept solver still holds of the Task's stages, seen through a new attachment."""
     lock = RunLock.model_validate_json((run_dir / "lock.json").read_text())
     assert task.prepared_image is not None
@@ -123,7 +125,7 @@ async def _kept_stages(handle: str, task: ManifestTask, run_dir: Path) -> list[s
         network=task.spec.network,
         user=task.spec.image.user,
     )
-    sandbox = await _attach_retained(handle, request, lock)
+    sandbox = await _attach_retained(handle, request, lock, registry)
     try:
         if task.spec.os is OperatingSystem.WINDOWS:
             # The base's stage directories stay, empty.
@@ -188,7 +190,7 @@ class _Chain:
         return result
 
     def continuing(self, result: EpisodeResult) -> Resume:
-        return _continuation(result.run_dir, [self.task], RunConfig(), self.harness)
+        return _continuation(result.run_dir, [self.task], RunConfig(), self.harness, self.registry)
 
 
 @asynccontextmanager
@@ -250,7 +252,7 @@ async def test_kept_episodes_continue_and_a_superseded_one_is_refused(
         assert first.verdict.rewards == {"reward": 0.25}
         assert first.record.continuation is not None
         (kept_first,) = [item.handle for item in first.record.sandboxes if item.handle]
-        assert await _kept_stages(kept_first, chain.task, first.run_dir) == []
+        assert await _kept_stages(kept_first, chain.task, first.run_dir, chain.registry) == []
         second = await chain.episode("second", resume=chain.continuing(first), retention="keep")
         assert second.verdict.status is Status.COMPLETED, second.verdict.failure
         assert second.verdict.rewards == {"reward": 0.5}
