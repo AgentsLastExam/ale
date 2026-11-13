@@ -27,7 +27,7 @@ from ale.core.errors import ProviderStartError
 from ale.core.ids import content_hash
 from ale.core.sandbox import DesktopResolution, PreparedTaskImage
 from ale.run.framework import macos_framework_identity, macos_framework_payload
-from ale.run.providers.orchard_client import (
+from ale.run.providers.orchard.client import (
     PULL_TIMEOUT_SEC,
     LocalOrchard,
     OrchardClient,

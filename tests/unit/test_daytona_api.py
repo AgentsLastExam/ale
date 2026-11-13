@@ -11,8 +11,8 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from ale.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
-from ale.run.providers import daytona_api
-from ale.run.providers.daytona_api import DaytonaApi, DaytonaError
+from ale.run.providers.daytona import api as daytona_api
+from ale.run.providers.daytona.api import DaytonaApi, DaytonaError
 
 pytestmark = pytest.mark.unit
 

@@ -56,12 +56,12 @@ forbidden_modules =
 name = the microVM init runs in the guest and imports neither engine code nor third-party packages
 type = forbidden
 source_modules =
-    ale.run.providers.firecracker_init
+    ale.run.providers.firecracker.guest_init
 forbidden_modules =
     ale.core
     ale.run.gateway
     ale.run.guestd
-    ale.run.providers.firecracker
+    ale.run.providers.firecracker.provider
     aiohttp
     pydantic
     typer

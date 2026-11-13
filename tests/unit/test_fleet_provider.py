@@ -32,7 +32,7 @@ from ale.fleet.node import NodeAgent, NodeSettings, probe
 from ale.fleet.server import control_app
 from ale.fleet.store import Store
 from ale.run.providers import ProviderRegistry
-from ale.run.providers.fleet import FleetClient, FleetProvider, FleetSandbox, _Unreachable
+from ale.run.providers.fleet.provider import FleetClient, FleetProvider, FleetSandbox, _Unreachable
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import ImagePreparationResult, prepare_task_image_result
 from ale.run.tasksets.manifest import load_task_folder
@@ -267,7 +267,7 @@ class TestProvider:
         image: PreparedTaskImage,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("ale.run.providers.fleet.RECONNECT_SEC", 0.0)
+        monkeypatch.setattr("ale.run.providers.fleet.provider.RECONNECT_SEC", 0.0)
         held = await fleet.add_node("node-a")
         await fleet.add_node("node-b")
         # node-a holds the image, so placement prefers it; then its port closes for good.

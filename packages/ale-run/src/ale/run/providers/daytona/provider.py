@@ -4,7 +4,7 @@ Daytona lets the Host reach into a sandbox and refuses everything the other way,
 runs its own daemon, which any process inside can drive, as the image's user. This backend
 works within that:
 
-* **Image.** The prepared image is adapted (``daytona_image``), pushed to Daytona's registry
+* **Image.** The prepared image is adapted (``image``), pushed to Daytona's registry
   and built from there by digest, with the requested CPU, memory and disk.
 * **Channel.** guestd runs over an SSH exec session, the way it runs over ``docker exec``.
   A second SSH session carries a stream tunnel (``guestd/tunnel.py``) so that the agent can
@@ -72,8 +72,8 @@ from ale.run.framework import MARKER, framework_identity, with_framework
 from ale.run.gpu import accepts_model, parse_nvidia_smi
 from ale.run.guestd.tunnel import Mux
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
-from ale.run.providers.daytona_api import DaytonaApi, DaytonaError
-from ale.run.providers.daytona_image import (
+from ale.run.providers.daytona.api import DaytonaApi, DaytonaError
+from ale.run.providers.daytona.image import (
     ImageConfig,
     ImagePublisher,
     PublishedImage,

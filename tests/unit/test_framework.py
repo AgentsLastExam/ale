@@ -338,7 +338,7 @@ async def test_docker_frames_an_image_unless_it_carries_exactly_this_framework(
 
     from ale.core.sandbox import ResolvedImage
     from ale.core.taskspec import ImageKind
-    from ale.run.providers import docker
+    from ale.run.providers.docker import provider as docker
 
     original = "sha256:" + "1" * 64
     framed = "sha256:" + "2" * 64
@@ -367,7 +367,7 @@ async def test_qemu_frames_a_disk_unless_it_carries_exactly_this_framework(
 ) -> None:
     from ale.core.sandbox import ResolvedImage, SandboxRequest
     from ale.core.taskspec import NetworkPolicy, Resources
-    from ale.run.providers import qemu
+    from ale.run.providers.qemu import provider as qemu
 
     original = "sha256:" + "1" * 64
     framed = "sha256:" + "2" * 64

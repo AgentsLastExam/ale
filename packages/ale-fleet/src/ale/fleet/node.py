@@ -87,7 +87,7 @@ from ale.fleet.placement import Holds, NodeView, choose
 from ale.run import __version__
 from ale.run.framework import fleet_framework_identity
 from ale.run.provenance import framework_provenance
-from ale.run.providers.fleet_tunnel import NodeListeners, with_port
+from ale.run.providers.fleet.tunnel import NodeListeners, with_port
 
 __all__ = ["NodeAgent", "NodeSettings", "probe"]
 

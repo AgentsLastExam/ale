@@ -88,7 +88,7 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources, TaskSpec
 from ale.run.framework import fleet_framework_identity
-from ale.run.providers.fleet_tunnel import RunTunnel
+from ale.run.providers.fleet.tunnel import RunTunnel
 from ale.run.sources import cache_root
 
 __all__ = ["FleetClient", "FleetProvider", "FleetSandbox"]

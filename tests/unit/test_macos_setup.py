@@ -41,7 +41,7 @@ def test_rejects_foreign_directory(tmp_path):
 
 
 def test_the_provider_reads_the_state_setup_writes():
-    from ale.run.providers.orchard_client import STATE_DIR
+    from ale.run.providers.orchard.client import STATE_DIR
 
     assert setup.STATE_DIR == STATE_DIR
 

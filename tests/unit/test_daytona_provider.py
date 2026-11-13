@@ -26,9 +26,17 @@ from ale.core.sandbox import (
 from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from ale.run import guestd
 from ale.run.guestd import tunnel as guest_tunnel
-from ale.run.providers import RETAINING_PROVIDERS, ProviderRegistry, daytona_image, provider_named
-from ale.run.providers import daytona as daytona_module
-from ale.run.providers.daytona import (
+from ale.run.providers import RETAINING_PROVIDERS, ProviderRegistry, provider_named
+from ale.run.providers.daytona import image as daytona_image
+from ale.run.providers.daytona import provider as daytona_module
+from ale.run.providers.daytona.api import DaytonaError
+from ale.run.providers.daytona.image import (
+    ImageConfig,
+    ImagePublisher,
+    PublishedImage,
+    image_config,
+)
+from ale.run.providers.daytona.provider import (
     DaytonaProvider,
     DaytonaSandbox,
     _domain_allowlist,
@@ -46,13 +54,6 @@ from ale.run.providers.daytona import (
     _start_image_command,
     _Tunnel,
     _tunnel_plan,
-)
-from ale.run.providers.daytona_api import DaytonaError
-from ale.run.providers.daytona_image import (
-    ImageConfig,
-    ImagePublisher,
-    PublishedImage,
-    image_config,
 )
 
 pytestmark = pytest.mark.unit

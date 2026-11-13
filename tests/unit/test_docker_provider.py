@@ -17,7 +17,7 @@ from ale.core.sandbox import (
     SandboxRequest,
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
-from ale.run.providers.docker import (
+from ale.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
     KATA_RUNTIME,
@@ -69,7 +69,7 @@ def _scripted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
             return 0, "172.18.0.1\n", ""
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     return calls
 
 
@@ -181,7 +181,7 @@ async def test_a_snapshot_boots_only_for_the_tasks_prepared_image(
         assert argv[:3] == ("image", "inspect", "ale-snapshot:e1-abcdef")
         return 0, _snapshot_inspect(labels), ""
 
-    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     provider = DockerProvider()
     image = await provider._snapshot_image("docker:snapshot:e1-abcdef", request())
     assert (image.observed_identity, image.observed_ref) == ("sha256:" + "5" * 64,) * 2
@@ -216,7 +216,7 @@ async def test_a_snapshot_is_listed_and_destroyed_by_its_handle(
             return (1, "", "conflict: image is being used") if len(removed) == 1 else (0, "", "")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     provider = DockerProvider()
     assert [record["handle"] for record in await provider.list_retained()] == [
         "docker:snapshot:e1-abcdef"
@@ -403,7 +403,7 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     async def contract(_provider: DockerProvider, _client: object) -> tuple[str, bool]:
         return "/home/user", False
 
-    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     monkeypatch.setattr(DockerProvider, "_connect", connect)
     monkeypatch.setattr(DockerProvider, "_guest_contract", contract)
     network = (

@@ -21,7 +21,7 @@ from tests.support import CONTAINER_BASE
 from ale.core.sandbox import Identity, ImageRef, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
-from ale.run.providers.daytona import DAEMON_PORTS, DaytonaProvider
+from ale.run.providers.daytona.provider import DAEMON_PORTS, DaytonaProvider
 
 pytestmark = [
     pytest.mark.conformance,

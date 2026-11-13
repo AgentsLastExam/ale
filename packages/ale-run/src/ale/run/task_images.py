@@ -47,8 +47,8 @@ from ale.run.images import finished_layer, remove_disk, resolve_loaded_image
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.fleet import FleetProvider
 from ale.run.providers.orchard import OrchardProvider, OrchardSandbox
-from ale.run.providers.orchard_client import CONTROL_ACCOUNT
-from ale.run.providers.qemu import NTFS_DISCARD, RUNNER_IMAGE, QemuProvider
+from ale.run.providers.orchard.client import CONTROL_ACCOUNT
+from ale.run.providers.qemu.provider import NTFS_DISCARD, RUNNER_IMAGE, QemuProvider
 from ale.run.sources import cache_root
 from ale.run.tasksets.manifest import SETUP_DIR
 

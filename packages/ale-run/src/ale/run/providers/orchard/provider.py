@@ -1,7 +1,7 @@
 """macOS sandboxes on the local Orchard controller and Tart worker.
 
 ``scripts/setup_macos.py`` runs both on this Mac. Every VM ALE creates is a clone of a local
-image that carries the framework (``orchard_framing``). ALE owns only the VMs it creates,
+image that carries the framework (``framing``). ALE owns only the VMs it creates,
 which last one episode unless kept; it never adopts a VM it did not create, nor changes the
 images it is given. Each sandbox the agent works in shows the desktop its image signs the
 Task's account in to.
@@ -49,9 +49,9 @@ from ale.core.sandbox import (
 from ale.core.taskspec import NetworkMode, OperatingSystem
 from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
 from ale.run.images import resolve_registry_reference
-from ale.run.providers import orchard_client
 from ale.run.providers.desktop import require_resolution
-from ale.run.providers.orchard_client import (
+from ale.run.providers.orchard import client as orchard_client
+from ale.run.providers.orchard.client import (
     CONTROL_ACCOUNT,
     LocalOrchard,
     OrchardClient,
@@ -62,8 +62,8 @@ from ale.run.providers.orchard_client import (
     delete_owned,
     vm_spec,
 )
-from ale.run.providers.orchard_desktop import await_desktop
-from ale.run.providers.orchard_framing import (
+from ale.run.providers.orchard.desktop import await_desktop
+from ale.run.providers.orchard.framing import (
     FORGET_DISPLAYS,
     FramedImage,
     at_resolution,

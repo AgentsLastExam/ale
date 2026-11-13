@@ -38,7 +38,7 @@ from ale.fleet.server import control_app
 from ale.fleet.store import Store
 from ale.run.framework import fleet_framework_identity
 from ale.run.guestd.tunnel import Mux
-from ale.run.providers.fleet_tunnel import NodeListeners, RunTunnel
+from ale.run.providers.fleet.tunnel import NodeListeners, RunTunnel
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import ImagePreparationResult
 from ale.run.tasksets.manifest import load_task_folder

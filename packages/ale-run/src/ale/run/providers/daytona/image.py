@@ -9,7 +9,7 @@ The adaptation layer exists because Daytona starts its own daemon as the image's
 ``USER`` and runs every command, including ours over SSH, as that user. The framework
 needs root to start guestd, so the layer ends in ``USER root``; it also makes sure the
 image has ``iptables``, which the Provider uses to keep the agent away from the daemon's
-unauthenticated local ports (see ``daytona.py``).
+unauthenticated local ports (see ``provider.py``).
 
 The registry credentials Daytona hands out expire within the hour, and its builder only
 authenticates to registries registered with the organization. The Provider therefore keeps
@@ -33,7 +33,7 @@ from pathlib import Path
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.ids import content_hash
 from ale.run.images import resolve_loaded_image
-from ale.run.providers.daytona_api import DaytonaApi
+from ale.run.providers.daytona.api import DaytonaApi
 from ale.run.sources import cache_root
 
 __all__ = ["ImageConfig", "ImagePublisher", "PublishedImage", "image_config"]

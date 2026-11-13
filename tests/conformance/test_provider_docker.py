@@ -14,7 +14,7 @@ from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
 from ale.run.framework import framework_identity
 from ale.run.providers import ProviderRegistry
-from ale.run.providers.docker import KATA_RUNTIME, DockerProvider, _docker
+from ale.run.providers.docker.provider import KATA_RUNTIME, DockerProvider, _docker
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import prepare_task_image
 from ale.run.tasksets.manifest import load_tasks
@@ -215,7 +215,7 @@ async def test_prepared_task_image_starts_without_remote_resolution(
         raise AssertionError("prepared Task images must not use remote resolution")
 
     monkeypatch.setattr(
-        "ale.run.providers.docker.resolve_container_image",
+        "ale.run.providers.docker.provider.resolve_container_image",
         remote_resolution_is_forbidden,
     )
     provider = DockerProvider()

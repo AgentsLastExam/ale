@@ -39,7 +39,7 @@ from ale.core.taskspec import (
 from ale.run.framework import MATERIALIZER_IMAGE
 from ale.run.gpu import parse_nvidia_smi
 from ale.run.images import chain_identity
-from ale.run.providers.qemu import (
+from ale.run.providers.qemu.provider import (
     EPISODE_LABEL,
     GATEWAY_CHAIN,
     GPU_LABEL,
@@ -140,9 +140,9 @@ def test_cancelled_boot_removes_the_started_runner(
     async def cancel_sleep(_seconds: float) -> None:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
     monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
-    monkeypatch.setattr("ale.run.providers.qemu.asyncio.sleep", cancel_sleep)
+    monkeypatch.setattr("ale.run.providers.qemu.provider.asyncio.sleep", cancel_sleep)
     base = write_qcow2(tmp_path / "base.qcow2")
     task = write_qcow2(tmp_path / "task.qcow2", backing="base.qcow2")
 
@@ -186,9 +186,9 @@ async def test_windows_admin_boot_is_explicit_and_uses_the_resolved_runner(
     async def no_sleep(_seconds: float) -> None:
         return None
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
     monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
-    monkeypatch.setattr("ale.run.providers.qemu.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("ale.run.providers.qemu.provider.asyncio.sleep", no_sleep)
     runner = "sha256:" + "a" * 64
     await QemuProvider(runner_image=runner)._boot(
         request(os=operating_system, sudo=sudo), tmp_path, write_qcow2(tmp_path / "b.qcow2"), 7411
@@ -213,9 +213,9 @@ async def test_the_display_announces_the_requested_resolution(
     async def no_sleep(_seconds: float) -> None:
         return None
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
     monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
-    monkeypatch.setattr("ale.run.providers.qemu.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("ale.run.providers.qemu.provider.asyncio.sleep", no_sleep)
     await QemuProvider()._boot(
         request(os=operating_system, desktop_resolution="1366x768"),
         tmp_path,
@@ -267,7 +267,7 @@ async def test_a_windows_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdo
         kind="vm", prepared_identity=DIGEST, observed_identity=DIGEST, observed_ref=str(base)
     )
     destination = base.parent / "task.qcow2"
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
     monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
     if failure:
         with pytest.raises(ProviderStartError, match="shut down"):
@@ -328,10 +328,10 @@ async def test_a_build_vm_frames_its_own_overlay_on_the_base_copy_before_it_boot
     async def ready(_provider: QemuProvider) -> None:
         pass
 
-    monkeypatch.setattr("ale.run.providers.qemu.resolve_prepared_vm_image", resolve)
-    monkeypatch.setattr("ale.run.providers.qemu.base_layer", copy)
-    monkeypatch.setattr("ale.run.providers.qemu.frame_disk", frame)
-    monkeypatch.setattr("ale.run.providers.qemu._run", FakeQemuImg())
+    monkeypatch.setattr("ale.run.providers.qemu.provider.resolve_prepared_vm_image", resolve)
+    monkeypatch.setattr("ale.run.providers.qemu.provider.base_layer", copy)
+    monkeypatch.setattr("ale.run.providers.qemu.provider.frame_disk", frame)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", FakeQemuImg())
     monkeypatch.setattr(QemuProvider, "_boot", boot)
     monkeypatch.setattr(QemuProvider, "preflight", ready)
     with pytest.raises(TaskDefinitionError if fails else Booted):
@@ -393,7 +393,7 @@ def _snapshot_run(monkeypatch: pytest.MonkeyPatch, commands: list[tuple[str, ...
             return await qemu_img(*argv)
         return (0, "0\n", "") if argv[:2] == ("docker", "wait") else (0, "", "")
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
     monkeypatch.setattr("ale.run.images._run", qemu_img)
     return qemu_img
 
@@ -518,7 +518,7 @@ async def test_a_snapshot_is_listed_and_not_destroyed_while_a_vm_runs_on_it(
         assert argv[:2] == ("docker", "inspect")
         return 0, json.dumps([{"Name": "/ale-qemu-fork", "Mounts": mounts}]), ""
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
     provider = QemuProvider(overlay_dir=tmp_path / "overlays", snapshot_dir=snapshots)
     assert provider._list_snapshots() == [
         {
@@ -545,7 +545,7 @@ async def test_a_snapshot_is_listed_and_not_destroyed_while_a_vm_runs_on_it(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("module_name", ["ale.run.providers.qemu", "ale.run.task_images"])
+@pytest.mark.parametrize("module_name", ["ale.run.providers.qemu.provider", "ale.run.task_images"])
 async def test_cancelled_image_command_reaps_its_subprocess(
     monkeypatch: pytest.MonkeyPatch, module_name: str
 ) -> None:
@@ -635,7 +635,7 @@ async def test_qemu_retained_listing_and_destroy_remove_the_overlay(
             return 0, "", ""
         raise AssertionError(argv)
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
 
     assert await QemuProvider().list_retained() == [
         {
@@ -713,9 +713,9 @@ async def test_qemu_retained_solver_can_be_reattached(
     ) -> tuple[str, str, bool]:
         return "user", "/home/user", False
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
-    monkeypatch.setattr("ale.run.providers.qemu.TcpTransport", Transport)
-    monkeypatch.setattr("ale.run.providers.qemu.GuestClient", Client)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider.TcpTransport", Transport)
+    monkeypatch.setattr("ale.run.providers.qemu.provider.GuestClient", Client)
     monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
     allocation = ResourceAllocation(
         cpus=2,
@@ -816,9 +816,9 @@ class _LeftRunning:
         ) -> tuple[str, str, bool]:
             return "user", "/home/user", False
 
-        monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
-        monkeypatch.setattr("ale.run.providers.qemu.TcpTransport", Transport)
-        monkeypatch.setattr("ale.run.providers.qemu.GuestClient", lambda _: self.client)
+        monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+        monkeypatch.setattr("ale.run.providers.qemu.provider.TcpTransport", Transport)
+        monkeypatch.setattr("ale.run.providers.qemu.provider.GuestClient", lambda _: self.client)
         monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
         self.allocation = ResourceAllocation(
             cpus=2, memory_mb=2048, sudo=False, network_mode=NetworkMode.BLOCK, provider="qemu"
@@ -900,7 +900,7 @@ def test_overlay_uses_the_prepared_disks_virtual_size(
             return 0, '{"virtual-size":42949672960}', ""
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
     asyncio.run(QemuProvider()._make_overlay(tmp_path / "overlay.qcow2", tmp_path / "base.qcow2"))
     assert commands[-1][-1] == "42949672960"
 
@@ -916,7 +916,7 @@ def test_overlay_size_is_driven_by_requested_storage(
             return 0, '{"virtual-size":7516192768}', ""
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
     asyncio.run(
         QemuProvider()._make_overlay(
             tmp_path / "overlay.qcow2",
@@ -992,7 +992,7 @@ def test_desktop_readiness_retries_a_transient_probe_timeout(
     async def no_sleep(_seconds: float) -> None:
         return None
 
-    monkeypatch.setattr("ale.run.providers.qemu.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("ale.run.providers.qemu.provider.asyncio.sleep", no_sleep)
     client = Client()
     asyncio.run(QemuProvider()._await_desktop(client, timeout_sec=1))  # type: ignore[arg-type]
     assert client.calls == 2
@@ -1125,8 +1125,8 @@ async def test_prepared_vm_is_checked_without_runtime_reference_resolution(
     async def forbidden(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("a prepared VM must not be pulled again")
 
-    monkeypatch.setattr("ale.run.providers.qemu.resolve_prepared_vm_image", check)
-    monkeypatch.setattr("ale.run.providers.qemu.resolve_vm_image", forbidden)
+    monkeypatch.setattr("ale.run.providers.qemu.provider.resolve_prepared_vm_image", check)
+    monkeypatch.setattr("ale.run.providers.qemu.provider.resolve_vm_image", forbidden)
     assert await QemuProvider().prepare_image(prepared) is prepared
     assert seen == [prepared]
 
@@ -1149,8 +1149,8 @@ async def test_vm_reference_uses_provider_acquisition_and_wrong_kind_is_refused(
             observed_ref=image.runtime_ref,
         )
 
-    monkeypatch.setattr("ale.run.providers.qemu.resolve_vm_image", acquire)
-    monkeypatch.setattr("ale.run.providers.qemu.resolve_prepared_vm_image", check)
+    monkeypatch.setattr("ale.run.providers.qemu.provider.resolve_vm_image", acquire)
+    monkeypatch.setattr("ale.run.providers.qemu.provider.resolve_prepared_vm_image", check)
     assert (
         await QemuProvider().prepare_image(ImageRef(kind="vm", reference="ghcr.io/acme/vm:v1"))
         == prepared
@@ -1311,7 +1311,7 @@ def test_open_mode_uses_only_the_runner_firewall(monkeypatch: pytest.MonkeyPatch
     async def fake_run(*_argv: str, **_kwargs: object) -> tuple[int, str, str]:
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox.request = request(network=NetworkPolicy(mode=NetworkMode.OPEN))  # type: ignore[attr-defined]
     sandbox.container = "runner"  # type: ignore[attr-defined]
@@ -1361,7 +1361,7 @@ def test_allowlist_forwards_gateway_and_proxy_ports(
         commands.append(command)
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
     provider = QemuProvider()
     host = asyncio.run(
         provider._wire_network(
@@ -1387,7 +1387,7 @@ def test_allowlist_direct_bypass_is_dropped(monkeypatch: pytest.MonkeyPatch) -> 
         rules.append(argv[-1])
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox.request = request(  # type: ignore[attr-defined]
         network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",))
@@ -1408,7 +1408,7 @@ def test_allowlist_direct_bypass_is_dropped(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_only_whole_clusters_of_ntfs_free_space_are_discarded() -> None:
-    from ale.run.providers.ntfs_discard import Volume, discardable
+    from ale.run.providers.qemu.ntfs_discard import Volume, discardable
 
     kib, mib = 1024, 1024 * 1024
     bitmap = bytearray(b"\xff" * (64 * mib // (4 * kib) // 8))

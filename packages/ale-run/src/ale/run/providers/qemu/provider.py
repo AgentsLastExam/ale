@@ -76,7 +76,7 @@ from ale.run.images import (
     set_parent,
 )
 from ale.run.providers.desktop import require_resolution
-from ale.run.providers.docker import only_vanished
+from ale.run.providers.docker.provider import only_vanished
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, TcpTransport

@@ -56,7 +56,7 @@ class ProviderRegistry:
         if (kind, macos) in self._instances:
             return self._instances[(kind, macos)]
         if self._on_fleet(kind):
-            from ale.run.providers.fleet import FleetProvider, fleet_client
+            from ale.run.providers.fleet.provider import FleetProvider, fleet_client
 
             if self._fleet is None:
                 config = self.settings.fleet
@@ -118,7 +118,7 @@ def provider_named(name: str) -> Provider:
 
         return OrchardProvider()
     if name == "fleet":
-        from ale.run.providers.fleet import FleetProvider, fleet_client
+        from ale.run.providers.fleet.provider import FleetProvider, fleet_client
 
         url = os.environ.get("ALE_FLEET_URL", "")
         if not url:

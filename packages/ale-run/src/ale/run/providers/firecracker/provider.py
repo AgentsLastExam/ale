@@ -10,7 +10,7 @@ Linux Task gets its own kernel at close to a container's price. Five choices sha
   into an ext4 disk. A Task needs nothing new to run here, and one prepared image serves
   both backends.
 * **Docker's job, done by a small init.** An OCI image has no kernel and usually no init.
-  ``firecracker_init.py`` becomes PID 1: it mounts what a process expects, starts guestd
+  ``guest_init.py`` becomes PID 1: it mounts what a process expects, starts guestd
   as root and the image's own command as its ``USER``, in its ``WORKDIR`` and with its
   ``ENV``, and stops the machine when that command exits, as a container would.
 * **One read-only disk per image, one writable disk per sandbox.** Firecracker reads raw
@@ -95,7 +95,7 @@ RUNNER_ROOTFS = "/images/rootfs.ext4"
 RUNNER_LAYERS = "/layers"
 RUNNER_STORAGE = "/storage"
 #: The init the kernel starts, run by the framework's Python, and the files it reads.
-INIT_SOURCE = Path(__file__).with_name("firecracker_init.py")
+INIT_SOURCE = Path(__file__).with_name("guest_init.py")
 GUEST_DIR = "/opt/ale/firecracker"
 
 #: Firecracker boots in a fraction of a second; this covers the image's own start.

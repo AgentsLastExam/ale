@@ -13,7 +13,7 @@ import pytest
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
 from ale.run.guestd import gui
-from ale.run.providers import orchard_desktop
+from ale.run.providers.orchard import desktop as orchard_desktop
 
 pytestmark = pytest.mark.unit
 
