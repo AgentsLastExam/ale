@@ -85,6 +85,24 @@ def request(**overrides: object) -> SandboxRequest:
 
 
 class TestPreflight:
+    def test_kvm_needs_no_access_of_this_accounts_own(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Docker's daemon opens /dev/kvm for the runner, so an account outside the kvm
+        group, as on a cloud VM, runs VMs."""
+        exists = Path.exists
+        monkeypatch.setattr(Path, "exists", lambda self: str(self) == "/dev/kvm" or exists(self))
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr("os.access", lambda *_args, **_kwargs: False)
+        asyncio.run(QemuProvider().preflight())
+
+    def test_a_host_without_kvm_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        exists = Path.exists
+        monkeypatch.setattr(Path, "exists", lambda self: str(self) != "/dev/kvm" and exists(self))
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+        with pytest.raises(ProviderCapabilityError, match="/dev/kvm is missing"):
+            asyncio.run(QemuProvider().preflight())
+
     def test_a_missing_image_names_the_way_to_prepare_one(self, tmp_path: Path) -> None:
         provider = QemuProvider(image=tmp_path / "absent.qcow2")
         with pytest.raises(ProviderCapabilityError, match=r"ale prepare"):

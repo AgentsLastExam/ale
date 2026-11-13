@@ -708,13 +708,13 @@ class QemuProvider(Provider):
             problems.append("docker is not on PATH; the runner image is what holds qemu")
         if shutil.which("qemu-img") is None:
             problems.append("qemu-img is not on PATH (apt install qemu-utils)")
+        # Only Docker's daemon opens /dev/kvm, for the runner, framer and materializer
+        # containers, so the account running ALE needs no access to it of its own.
         if not Path("/dev/kvm").exists():
             problems.append(
                 "/dev/kvm is missing: this host has no hardware virtualisation, so the "
                 "container backend is the usable one here"
             )
-        elif not os.access("/dev/kvm", os.R_OK | os.W_OK):
-            problems.append("/dev/kvm is present but not writable (add yourself to the kvm group)")
         if self.fixture_image is not None and not self.fixture_image.is_file():
             problems.append(
                 f"no injected guest image at {self.fixture_image}; run ale prepare on a VM Task"

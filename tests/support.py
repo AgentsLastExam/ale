@@ -34,8 +34,8 @@ def skip_without_kata() -> None:
     The shim is looked up on this process's PATH, which holds the same system directories
     as the daemon's on a host that runs ``ale`` beside its Docker daemon.
     """
-    if not os.access("/dev/kvm", os.R_OK | os.W_OK):
-        pytest.skip("/dev/kvm is unavailable")
+    if not Path("/dev/kvm").exists():
+        pytest.skip("/dev/kvm is missing")
     if shutil.which("containerd-shim-kata-v2") is None:
         pytest.skip("Kata Containers is not installed (containerd-shim-kata-v2 not on PATH)")
 
