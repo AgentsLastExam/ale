@@ -412,6 +412,12 @@ class Sandbox(ABC):
     def gateway_url(self) -> str | None:
         return self.request.gateway_url
 
+    @property
+    def handle(self) -> str | None:
+        """What this Sandbox's Provider names it by in :meth:`Provider.reattach` and
+        :meth:`Provider.discard`; None where the Provider cannot reattach to it."""
+        return None
+
     @abstractmethod
     async def exec(
         self,
@@ -563,3 +569,24 @@ class Provider(ABC):
         ``image`` is what the sandbox was recorded running, which the Provider confirms.
         """
         raise ProviderCapabilityError(f"{self.name} does not retain sandboxes")
+
+    async def reattach(
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+        image: ResolvedImage,
+    ) -> Sandbox:
+        """Drive a running Sandbox this Provider created on this machine again, after the
+        process that created it is gone, whatever its retention.
+
+        ``handle`` is the Sandbox's :attr:`Sandbox.handle`; ``request``, ``allocation`` and
+        ``image`` are what the creating process recorded, and the Provider confirms ``image``.
+        The returned Sandbox owns it, as the original did.
+        """
+        raise ProviderCapabilityError(f"{self.name} cannot reattach to a Sandbox")
+
+    async def discard(self, handle: str) -> None:
+        """Destroy a Sandbox this Provider created on this machine by its handle, when no
+        process drives it any more; nothing happens if it is already gone."""
+        raise ProviderCapabilityError(f"{self.name} cannot discard a Sandbox by its handle")

@@ -39,7 +39,7 @@ from ale.run.providers.orchard_client import (
 )
 from ale.run.sources import cache_root
 
-__all__ = ["FramedImage", "at_resolution", "frame_image"]
+__all__ = ["FramedImage", "at_resolution", "frame_image", "framed_record"]
 
 #: The first login of a framed disk, from boot until its notices have been posted.
 _SETTLE_TIMEOUT_SEC = 600
@@ -91,14 +91,29 @@ def _records() -> Path:
     return root
 
 
+def _framing(image: PreparedTaskImage, *, user: str) -> tuple[str, str, Path]:
+    """The identity of ``image`` framed for this account, the key its local image and lock
+    are named by, and where framing records it."""
+    identity = _identity(image, user=user)
+    key = identity.removeprefix("sha256:")[:32]
+    return identity, key, _records() / f"{key}.json"
+
+
+def framed_record(image: PreparedTaskImage, *, user: str) -> FramedImage | None:
+    """The framed copy of ``image`` for this account as framing recorded it, if it did."""
+    _, _, record = _framing(image, user=user)
+    try:
+        return FramedImage(**json.loads(record.read_text()))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 async def frame_image(local: LocalOrchard, image: PreparedTaskImage, *, user: str) -> FramedImage:
     """The framed copy of ``image`` for this account, made on first use and then reused.
 
     Solver and verifier VMs of one image and account share it.
     """
-    identity = _identity(image, user=user)
-    key = identity.removeprefix("sha256:")[:32]
-    record = _records() / f"{key}.json"
+    identity, key, record = _framing(image, user=user)
     async with _exclusive(f"{key}.lock"):
         images = await local.local_images()
         if record.is_file():

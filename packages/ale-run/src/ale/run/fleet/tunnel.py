@@ -86,6 +86,11 @@ class NodeListeners:
     def attached(self) -> bool:
         return self._attached.is_set()
 
+    def keep(self, ports: dict[int, int]) -> None:
+        """Listen on these ports again, which an earlier agent gave this Run's Sandboxes,
+        once the Run's tunnel opens."""
+        self._ports.update(ports)
+
     async def port(self, target: int) -> int:
         """The Node port that leads to the Run's ``target``; the Run's tunnel must be open.
 
@@ -136,6 +141,10 @@ class NodeListeners:
         self._ports.clear()
 
 
+#: The longest a Run waits between attempts to open its tunnel to a Node again.
+RECONNECT_DELAY_SEC = 4.0
+
+
 class RunTunnel:
     """The Run's end of its tunnel to one Node; it reconnects when the WebSocket drops.
 
@@ -180,6 +189,7 @@ class RunTunnel:
 
     async def _supervise(self) -> None:
         delay = 1.0
+        dropped = False
         while not self._closing:
             try:
                 async with self._session.ws_connect(
@@ -192,6 +202,9 @@ class RunTunnel:
                         await asyncio.wait_for(mux.ready.wait(), 30)
                         self._ready.set()
                         delay = 1.0
+                        if dropped:
+                            _log.info("tunnel to %s reconnected", self._url)
+                            dropped = False
                         await running
                     finally:
                         running.cancel()
@@ -200,10 +213,13 @@ class RunTunnel:
                 raise
             except Exception as error:
                 self._failure = error
-                _log.warning("tunnel to %s dropped: %s", self._url, error)
+                if not dropped:
+                    _log.warning("tunnel to %s dropped: %s; reconnecting", self._url, error)
+                dropped = True
             if not self._closing:
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, 15.0)
+                # A node agent that restarts is back within seconds, with its Sandboxes.
+                delay = min(delay * 2, RECONNECT_DELAY_SEC)
 
     async def close(self) -> None:
         self._closing = True

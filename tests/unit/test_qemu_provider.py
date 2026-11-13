@@ -43,6 +43,7 @@ from ale.run.providers.qemu import (
     EPISODE_LABEL,
     GATEWAY_CHAIN,
     GPU_LABEL,
+    GUEST_BRIDGE,
     HANDLE_PREFIX,
     HOST_IP,
     MANAGED_LABEL,
@@ -746,8 +747,146 @@ async def test_qemu_retained_solver_can_be_reattached(
     # Another disk, or a layer below the one the runner's overlay sits on, is refused.
     for elsewhere in (tmp_path / "other.qcow2", below):
         other = image.model_copy(update={"observed_ref": str(elsewhere)})
-        with pytest.raises(ProviderCapabilityError, match="expected solver image"):
+        with pytest.raises(ProviderCapabilityError, match="expected image"):
             await QemuProvider().attach_retained("qemu:ale-qemu-test", request(), allocation, other)
+
+
+class _LeftRunning:
+    """A runner a crashed node agent left: a verifier VM it created with retention destroy,
+    behind a scripted docker CLI."""
+
+    handle = "qemu:ale-qemu-test"
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        self.storage = tmp_path / "episode"
+        self.storage.mkdir()
+        (self.storage / "guestd-token").write_text("token\n")
+        base = write_qcow2(tmp_path / "base.qcow2")
+        write_qcow2(self.storage / "data.qcow2", backing=str(base))
+        monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
+        self.labels = {
+            MANAGED_LABEL: "true",
+            RETENTION_LABEL: "destroy",
+            EPISODE_LABEL: "e1",
+            ROLE_LABEL: "verifier",
+            STORAGE_LABEL: str(self.storage),
+        }
+        self.record: dict[str, Any] = {
+            "Name": "/ale-qemu-test",
+            "Config": {"Labels": self.labels},
+            "State": {"Running": True},
+            "Mounts": [{"Type": "bind", "Source": str(self.storage), "Destination": "/storage"}],
+            "NetworkSettings": {"Ports": {"7411/tcp": [{"HostPort": "17411"}]}},
+        }
+        self.removed: list[str] = []
+        self.rules: list[str] = []
+        #: Whether the runner's FORWARD chain holds the seal's drop rule.
+        self.sealed = False
+        #: What every ``docker inspect`` fails with, if anything does.
+        self.failure: str | None = None
+        self.client = _ExecClient()
+
+        async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+            if argv[:2] == ("docker", "exec"):
+                if "ip route" in argv[-1]:
+                    return 0, "172.17.0.1\n", ""
+                self.rules.append(argv[-1])
+                if argv[-1] == f"iptables -C FORWARD -i {GUEST_BRIDGE} -j DROP":
+                    return (0, "", "") if self.sealed else (1, "", "iptables: Bad rule")
+                return 0, "", ""
+            if argv[:3] == ("docker", "rm", "-f"):
+                self.removed.append(argv[3])
+                return 0, "", ""
+            assert argv[:2] == ("docker", "inspect")
+            if self.failure is not None:
+                return 1, "", self.failure
+            if self.removed:
+                return 1, "", "Error: No such object: ale-qemu-test"
+            return 0, json.dumps([self.record]), ""
+
+        class Transport:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            async def start(self, *, timeout_sec: float) -> None:
+                pass
+
+        async def contract(
+            _provider: QemuProvider, _client: object, _request: SandboxRequest
+        ) -> tuple[str, str, bool]:
+            return "user", "/home/user", False
+
+        monkeypatch.setattr("ale.run.providers.qemu._run", fake_run)
+        monkeypatch.setattr("ale.run.providers.qemu.TcpTransport", Transport)
+        monkeypatch.setattr("ale.run.providers.qemu.GuestClient", lambda _: self.client)
+        monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
+        self.allocation = ResourceAllocation(
+            cpus=2, memory_mb=2048, sudo=False, network_mode=NetworkMode.BLOCK, provider="qemu"
+        )
+        self.image = ResolvedImage(
+            kind="vm", prepared_identity=DIGEST, observed_identity=DIGEST, observed_ref=str(base)
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_vm_a_crashed_process_left_is_reattached_or_discarded_whatever_its_retention(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    left = _LeftRunning(monkeypatch, tmp_path)
+    handle, allocation, image = left.handle, left.allocation, left.image
+    with pytest.raises(ProviderCapabilityError, match="not a retained ALE solver"):
+        await QemuProvider().attach_retained(handle, request(), allocation, image)
+    sandbox = await QemuProvider().reattach(handle, request(), allocation, image)
+    assert sandbox.handle == handle
+    assert sandbox.request.role.value == "verifier"
+
+    await QemuProvider().discard(handle)
+    assert left.removed == ["ale-qemu-test"] and not left.storage.exists()
+    await QemuProvider().discard(handle)  # gone already: nothing to do
+    left.labels[MANAGED_LABEL] = "false"
+    left.removed.clear()
+    with pytest.raises(ProviderCapabilityError, match="not an ALE QEMU sandbox"):
+        await QemuProvider().reattach(handle, request(), allocation, image)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "drop", "sealed"),
+    [
+        (NetworkMode.ALLOWLIST, True, True),
+        (NetworkMode.ALLOWLIST, False, False),
+        (NetworkMode.OPEN, True, False),
+    ],
+)
+async def test_a_reattached_vm_is_sealed_as_its_runner_was_left(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: NetworkMode, drop: bool, sealed: bool
+) -> None:
+    """An allowlist agent's commands get the proxy only while the VM is sealed, which the
+    runner's firewall says, not the process driving it again."""
+    left = _LeftRunning(monkeypatch, tmp_path)
+    left.sealed = drop
+    network = (
+        NetworkPolicy(mode=mode, allowed_hosts=("example.com",))
+        if mode is NetworkMode.ALLOWLIST
+        else NetworkPolicy(mode=mode)
+    )
+    wanted = request(network=network, proxy_url="http://0.0.0.0:9443")
+    sandbox = await QemuProvider().reattach(left.handle, wanted, left.allocation, left.image)
+    await sandbox.exec(["true"], identity=Identity.AGENT)
+    assert (left.client.env is not None) is sealed
+    checked = f"iptables -C FORWARD -i {GUEST_BRIDGE} -j DROP" in left.rules
+    assert checked is (mode is not NetworkMode.OPEN)
+
+
+@pytest.mark.asyncio
+async def test_discard_fails_when_docker_cannot_say_the_runner_is_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    left = _LeftRunning(monkeypatch, tmp_path)
+    left.failure = "Cannot connect to the Docker daemon"
+    with pytest.raises(ProviderStartError, match="Cannot connect to the Docker daemon"):
+        await QemuProvider().discard(left.handle)
+    assert left.storage.exists()
 
 
 def test_overlay_uses_the_prepared_disks_virtual_size(
@@ -1163,6 +1302,9 @@ class _ExecClient:
         self.argv = argv
         self.env = kwargs.get("env")
         return 0, "", "", False
+
+    async def close(self) -> None:
+        pass
 
 
 def test_open_mode_uses_only_the_runner_firewall(monkeypatch: pytest.MonkeyPatch) -> None:

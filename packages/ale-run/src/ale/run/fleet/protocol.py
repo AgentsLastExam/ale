@@ -201,7 +201,8 @@ class NodeDeclaration(BaseModel):
     protocol: int = PROTOCOL_VERSION
     name: str = Field(pattern=NODE_NAME)
     boot_id: str = Field(min_length=1)
-    """Changes when the machine or the node agent restarts, which ends every Sandbox it had."""
+    """The machine's boot. It changes when the machine restarts, which ends every Sandbox on
+    it; a node agent that restarts keeps it and drives its Sandboxes again."""
     address: str = Field(pattern=r"^https?://")
     """Where Runs reach the node agent."""
     agent_version: str = Field(min_length=1)

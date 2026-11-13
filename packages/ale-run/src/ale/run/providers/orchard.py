@@ -54,7 +54,7 @@ from ale.run.providers.orchard_client import (
     vm_spec,
 )
 from ale.run.providers.orchard_desktop import await_desktop
-from ale.run.providers.orchard_framing import at_resolution, frame_image
+from ale.run.providers.orchard_framing import at_resolution, frame_image, framed_record
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.transport import GuestClient
 
@@ -117,6 +117,17 @@ asyncio.run(main())
 """
 
 
+#: How a handle names an Orchard VM: ``orchard:<name>:<uid>``.
+HANDLE_PREFIX = "orchard:"
+
+
+def _owned_vm(handle: str) -> tuple[str, str]:
+    name, separator, uid = handle.removeprefix(HANDLE_PREFIX).partition(":")
+    if not handle.startswith(HANDLE_PREFIX) or not separator or not name.startswith("ale-"):
+        raise ProviderCapabilityError(f"{handle!r} is not an Orchard VM handle")
+    return name, uid
+
+
 class OrchardSandbox(Sandbox):
     def __init__(
         self,
@@ -148,6 +159,10 @@ class OrchardSandbox(Sandbox):
         self._owned = OwnedVM(name, uid)
         self._destroy_lock = asyncio.Lock()
         self.state = SandboxState.READY
+
+    @property
+    def handle(self) -> str:
+        return f"{HANDLE_PREFIX}{self._owned.name}:{self._uid}"
 
     @property
     def gateway_url(self) -> str | None:
@@ -500,6 +515,127 @@ class OrchardProvider(Provider):
         if code or timed_out:
             raise ProviderStartError("Could not start the Gateway relay in the VM")
 
+    async def _open_guests(
+        self,
+        client: OrchardClient,
+        name: str,
+        request: SandboxRequest,
+        agent_home: str,
+        *,
+        agent: bool,
+        deadline: float,
+    ) -> tuple[GuestClient, GuestClient]:
+        """Two guest service sessions in the VM, the second for file reads while the first
+        runs a long command, after checking the guest is the account's framed macOS."""
+        env = dict(request.env) | {
+            "ALE_AGENT_USER": request.user,
+            "ALE_AGENT_HOME": agent_home,
+            "PATH": _PATH,
+            "HOME": "/var/root",
+        }
+        if agent:
+            env["ALE_CUA_DRIVER"] = MACOS_DRIVER
+            env["ALE_CUA_DRIVER_SOCKET"] = MACOS_DRIVER_SOCKET
+        guest_argv = [
+            "sudo",
+            "-n",
+            "/usr/bin/env",
+            "-i",
+            *(f"{k}={v}" for k, v in env.items()),
+            MACOS_PYTHON,
+            "-I",
+            "-S",
+            "-c",
+            _GUESTD,
+            "--stdio",
+        ]
+        guest = GuestClient(
+            await client.connect_guest(name, guest_argv, deadline=deadline),
+            acknowledge_exec_output=True,
+        )
+        file_guest: GuestClient | None = None
+        try:
+            file_guest = GuestClient(
+                await client.connect_guest(name, guest_argv, deadline=deadline)
+            )
+            await file_guest.health()
+            health = await guest.health()
+            if (
+                health.get("os") != "macos"
+                or health.get("framework_uid") != 0
+                or not isinstance(health.get("agent_uid"), int)
+                or health["agent_uid"] == 0
+                or health.get("agent_user") != request.user
+                or health.get("agent_home") != agent_home
+            ):
+                raise ProviderCapabilityError("Guest macOS/account/root identity check failed")
+        except BaseException:
+            await guest.close()
+            if file_guest is not None:
+                await file_guest.close()
+            raise
+        return guest, file_guest
+
+    async def reattach(
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+        image: ResolvedImage,
+    ) -> OrchardSandbox:
+        """A running VM this Mac's Orchard started for ALE, driven again through new guest
+        sessions; the Gateway relay inside it outlives the sessions that started it."""
+        name, uid = _owned_vm(handle)
+        framed = framed_record(request.prepared_image, user=request.user)
+        if framed is None or framed.identity != image.observed_identity:
+            raise ProviderCapabilityError(f"{handle!r} does not run a framed image recorded here")
+        client = self._local().client()
+        try:
+            await client.start()
+            record = await client.get_vm(name)
+            if record is None or record.get("uid") != uid:
+                raise ProviderStartError(f"Orchard VM {name} is gone or was replaced")
+            if not str(record.get("image", "")).startswith(framed.name):
+                raise ProviderCapabilityError(f"{handle!r} does not run the recorded image")
+            deadline = asyncio.get_running_loop().time() + 120
+            guest, file_guest = await self._open_guests(
+                client,
+                name,
+                request,
+                framed.agent_home,
+                agent=request.role is not SandboxRole.VERIFIER,
+                deadline=deadline,
+            )
+        except BaseException:
+            await client.close()
+            raise
+        return OrchardSandbox(
+            request=request,
+            local=self._local(),
+            orchard=client,
+            client=guest,
+            file_client=file_guest,
+            name=name,
+            uid=uid,
+            agent_home=framed.agent_home,
+            resolved_image=image,
+            allocation=allocation,
+        )
+
+    async def discard(self, handle: str) -> None:
+        name, uid = _owned_vm(handle)
+        client = self._local().client()
+        try:
+            await client.start()
+            record = await client.get_vm(name)
+            if record is None:
+                return
+            if record.get("uid") != uid:
+                raise ProviderStartError(f"Orchard VM {name} was replaced; not deleting it")
+            await delete_owned(client, OwnedVM(name, uid))
+        finally:
+            await client.close()
+
     async def create(self, request: SandboxRequest) -> OrchardSandbox:
         # A verifier runs no agent: it needs no desktop, and its account's rights are moot.
         return await self._create(request, agent=request.role is not SandboxRole.VERIFIER)
@@ -545,48 +681,9 @@ class OrchardProvider(Provider):
                     or record.get("assignedMemory") != request.resources.memory_mb
                 ):
                     raise ProviderStartError("Orchard assigned resources differ from request")
-                env = dict(request.env) | {
-                    "ALE_AGENT_USER": request.user,
-                    "ALE_AGENT_HOME": framed.agent_home,
-                    "PATH": _PATH,
-                    "HOME": "/var/root",
-                }
-                if agent:
-                    env["ALE_CUA_DRIVER"] = MACOS_DRIVER
-                    env["ALE_CUA_DRIVER_SOCKET"] = MACOS_DRIVER_SOCKET
-                guest_argv = [
-                    "sudo",
-                    "-n",
-                    "/usr/bin/env",
-                    "-i",
-                    *(f"{k}={v}" for k, v in env.items()),
-                    MACOS_PYTHON,
-                    "-I",
-                    "-S",
-                    "-c",
-                    _GUESTD,
-                    "--stdio",
-                ]
-                guest = GuestClient(
-                    await client.connect_guest(owned.name, guest_argv, deadline=deadline),
-                    acknowledge_exec_output=True,
+                guest, file_guest = await self._open_guests(
+                    client, owned.name, request, framed.agent_home, agent=agent, deadline=deadline
                 )
-                # A separate stdio process permits live evidence reads while the
-                # command session is occupied by a long-running native Harness.
-                file_guest = GuestClient(
-                    await client.connect_guest(owned.name, guest_argv, deadline=deadline)
-                )
-                await file_guest.health()
-                health = await guest.health()
-                if (
-                    health.get("os") != "macos"
-                    or health.get("framework_uid") != 0
-                    or not isinstance(health.get("agent_uid"), int)
-                    or health["agent_uid"] == 0
-                    or health.get("agent_user") != request.user
-                    or health.get("agent_home") != framed.agent_home
-                ):
-                    raise ProviderCapabilityError("Guest macOS/account/root identity check failed")
                 gateway_host = await self._resolve_gateway_host(guest, request)
                 if gateway_host is not None:
                     await self._start_gateway_relay(guest, gateway_host, request)

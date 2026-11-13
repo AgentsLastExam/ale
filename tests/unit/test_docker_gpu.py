@@ -192,6 +192,49 @@ async def test_an_inspection_that_fails_otherwise_still_fails_the_listing(
 
 
 @pytest.mark.asyncio
+async def test_discard_destroys_any_ale_container_and_only_those(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A container a crashed node agent created with retention destroy, by its handle."""
+    labels = {"ale.managed": "true", "ale.retention": "destroy", "ale.role": "verifier"}
+    record = {"Config": {"Labels": labels}, "NetworkSettings": {"Networks": {"ale-net-x": {}}}}
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*args: str, **kwargs: object) -> tuple[int, str, str]:
+        calls.append(args)
+        if args[0] == "inspect":
+            if ("rm", "-f", "-v", "ale-e1") in calls:
+                return 1, "", "No such object"
+            return 0, json.dumps([record]), ""
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    await DockerProvider().discard("docker:ale-e1")
+    assert ("rm", "-f", "-v", "ale-e1") in calls and ("network", "rm", "ale-net-x") in calls
+    await DockerProvider().discard("docker:ale-e1")  # gone already
+    calls.clear()
+    labels["ale.managed"] = "false"
+    with pytest.raises(ProviderCapabilityError, match="not an ALE Docker sandbox"):
+        await DockerProvider().discard("docker:ale-e1")
+
+
+@pytest.mark.asyncio
+async def test_discard_fails_when_docker_cannot_say_the_container_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*args: str, **kwargs: object) -> tuple[int, str, str]:
+        calls.append(args)
+        return 1, "", "Cannot connect to the Docker daemon"
+
+    monkeypatch.setattr("ale.run.providers.docker._docker", docker)
+    with pytest.raises(ProviderStartError, match="Cannot connect to the Docker daemon"):
+        await DockerProvider().discard("docker:ale-e1")
+    assert calls == [("inspect", "ale-e1")]
+
+
+@pytest.mark.asyncio
 async def test_destroy_rejects_non_ale_container(monkeypatch: pytest.MonkeyPatch) -> None:
     async def docker(*args: str, **kwargs: object) -> tuple[int, str, str]:
         return 0, json.dumps([{"Config": {"Labels": {}}}]), ""
