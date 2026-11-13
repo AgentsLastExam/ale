@@ -7,6 +7,7 @@ the guest service, never through provider-specific code paths.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from ale.core.config import RunConfig
@@ -21,7 +22,7 @@ __all__ = ["RETAINING_PROVIDERS", "ProviderRegistry", "provider_named"]
 
 #: Every Provider that can leave a sandbox behind. A retained sandbox outlives the run
 #: configuration that made it, so listing and destroying consult all of them.
-RETAINING_PROVIDERS = ("docker", "firecracker", "qemu", "daytona")
+RETAINING_PROVIDERS = ("docker", "firecracker", "qemu", "daytona", "fleet")
 
 
 class ProviderRegistry:
@@ -93,7 +94,8 @@ def provider_named(name: str) -> Provider:
     """A default-configured Provider, for work on sandboxes it retained earlier.
 
     Retained handles and RunLocks name the Provider that made a sandbox; that name, not
-    the current run configuration, decides who can attach to or destroy it.
+    the current run configuration, decides who can attach to or destroy it. The Fleet is
+    the one whose control plane ``$ALE_FLEET_URL`` names.
     """
     if name == "docker":
         from ale.run.providers.docker import DockerProvider
@@ -111,4 +113,11 @@ def provider_named(name: str) -> Provider:
         from ale.run.providers.daytona import DaytonaProvider
 
         return DaytonaProvider()
+    if name == "fleet":
+        from ale.run.providers.fleet import FleetProvider, fleet_client
+
+        url = os.environ.get("ALE_FLEET_URL", "")
+        if not url:
+            raise ProviderCapabilityError("set ALE_FLEET_URL to the Fleet's control plane")
+        return FleetProvider(fleet_client(url, "ALE_FLEET_TOKEN"))
     raise ProviderCapabilityError(f"unknown provider {name!r}")

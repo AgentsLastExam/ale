@@ -346,6 +346,16 @@ class TestSandboxApi:
         )
         assert response.status in {400, 404}
 
+    async def test_a_malformed_body_is_a_bad_request(
+        self, client: TestClient, agent: NodeAgent
+    ) -> None:
+        assert (await create(client, agent)).status == 200
+        for verb in ("retain", "snapshot", "adopt"):
+            response = await client.post(
+                f"/v1/sandboxes/sandbox-0001/{verb}", data=b"{}", headers=HEADERS
+            )
+            assert response.status == 400, verb
+
     async def test_a_cancelled_command_is_cancelled_in_the_sandbox(
         self, client: TestClient, agent: NodeAgent
     ) -> None:

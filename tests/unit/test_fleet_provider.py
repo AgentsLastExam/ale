@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -14,12 +16,13 @@ from tests.support import MemoryProvider
 
 from ale.core.config import RunConfig
 from ale.core.errors import (
+    AleError,
     GuestUnreachableError,
     ProviderCapabilityError,
     ProviderStartError,
     TaskDefinitionError,
 )
-from ale.core.sandbox import Identity, ImageRef, PreparedTaskImage, SandboxRequest
+from ale.core.sandbox import Identity, ImageRef, PreparedTaskImage, Sandbox, SandboxRequest
 from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from ale.run.fleet import images as images_module
 from ale.run.fleet import node as node_module
@@ -66,7 +69,13 @@ class Fleet:
         self._session = ClientSession()
 
     async def add_node(
-        self, name: str, *, cpus: int = 8, port: int | None = None, restart: bool = False
+        self,
+        name: str,
+        *,
+        cpus: int = 8,
+        port: int | None = None,
+        restart: bool = False,
+        saves_snapshots: bool = False,
     ) -> NodeAgent:
         """A node agent on a new Node, or, with ``restart``, the next agent on one whose
         agent crashed: same port, state and Provider."""
@@ -83,7 +92,11 @@ class Fleet:
             reserve_memory_mb=0,
             state_dir=state,
         )
-        provider = self.providers[name] if restart else MemoryProvider("memory")
+        provider = (
+            self.providers[name]
+            if restart
+            else MemoryProvider("memory", saves_snapshots=saves_snapshots)
+        )
         declaration, providers = await probe(settings, make=lambda _name: provider)
         resources = declaration.resources.model_copy(update={"cpus": cpus})
         declaration = declaration.model_copy(update={"resources": resources})
@@ -220,8 +233,8 @@ class TestProvider:
         await fleet.add_node("node-a")
         with pytest.raises(ProviderCapabilityError, match="no Node offers a container windows"):
             await provider.create(request(image, os=OperatingSystem.WINDOWS))
-        with pytest.raises(ProviderCapabilityError, match="keeps no Sandbox"):
-            await provider.create(request(image, retention="keep"))
+        with pytest.raises(ProviderCapabilityError, match="that saves snapshots"):
+            await provider.create(request(image, retention="snapshot"))
         assert fleet.providers["node-a"].requests == []
 
     async def test_only_images_the_fleet_prepares_run_on_it(
@@ -548,3 +561,196 @@ class TestConfiguration:
 def image_episode(sandbox: FleetSandbox) -> str:
     """The episode a Sandbox ran, which the memory Provider names its Sandboxes by."""
     return sandbox.request.episode_id
+
+
+def port_of(agent: NodeAgent) -> int:
+    return int(agent.settings.address.rsplit(":", 1)[1])
+
+
+async def settle(fleet: Fleet, waiting: asyncio.Future[None]) -> None:
+    """Beat until ``waiting``, which waits for a Node to act on a heartbeat's reply, is done."""
+    for _ in range(20):
+        await fleet.beat()
+        await asyncio.sleep(0.3)
+        if waiting.done():
+            break
+    await waiting
+
+
+@contextlib.asynccontextmanager
+async def later_run(fleet: Fleet) -> AsyncIterator[FleetProvider]:
+    """The FleetProvider of another Run on the same Fleet."""
+    client = FleetClient(fleet.url, TOKEN)
+    try:
+        yield FleetProvider(client)
+    finally:
+        await client.close()
+
+
+async def continue_in(later: FleetProvider, handle: str, kept: Sandbox) -> FleetSandbox:
+    """The later Run's next episode, continuing in the Sandbox ``handle`` names."""
+    stand_in = await later.prepare_image(REFERENCE)
+    return await later.attach_retained(
+        handle, request(stand_in, "episode-2"), kept.allocation, kept.resolved_image
+    )
+
+
+async def handing_over(agent: NodeAgent, sandbox_id: str) -> None:
+    """Wait until ``agent`` is handing its retained Sandbox to a later Run."""
+    async with asyncio.timeout(10):
+        while agent.held[sandbox_id].state != "creating":
+            await asyncio.sleep(0.01)
+
+
+class TestRetention:
+    async def test_a_kept_sandbox_outlives_its_run_and_a_later_run_continues_in_it(
+        self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        agent = await fleet.add_node("node-a")
+        sandbox = await provider.create(request(image, retention="keep"))
+        await sandbox.write_file("/home/user/work", b"kept")
+        retained = await sandbox.retain(roles=("solver",), reason="kept")
+        assert (retained.provider, retained.handle) == ("fleet", f"fleet:{sandbox.sandbox_id}")
+        assert retained.cleanup_command == f"ale sandbox destroy {retained.handle}"
+        record = fleet.control.sandboxes[sandbox.sandbox_id]
+        assert record.status is SandboxStatus.RETAINED
+        # No lease ends it, and neither does its agent stopping or a new one starting.
+        agent.held[sandbox.sandbox_id].lease_expires_at = 0.0
+        agent.expire()
+        await agent.stop()
+        await fleet.nodes["node-a"].close()
+        restarted = await fleet.add_node("node-a", port=port_of(agent), restart=True)
+        assert restarted.held[sandbox.sandbox_id].state == "retained"
+        assert fleet.providers["node-a"].destroyed == []
+        await fleet.beat()
+        assert record.status is SandboxStatus.RETAINED
+        assert [item["handle"] for item in await provider.list_retained()] == [retained.handle]
+
+        later_client = FleetClient(fleet.url, TOKEN)
+        try:
+            later = FleetProvider(later_client)
+            stand_in = await later.prepare_image(REFERENCE)
+            continued = await later.attach_retained(
+                retained.handle,
+                request(stand_in, "episode-2"),
+                sandbox.allocation,
+                sandbox.resolved_image,
+            )
+            assert continued.sandbox_id == sandbox.sandbox_id
+            assert await continued.read_file("/home/user/work") == b"kept"
+            assert fleet.providers["node-a"].attached == ["memory:episode-1"]
+            await fleet.beat()
+            assert (record.status, record.run_id) == (SandboxStatus.READY, later_client.run_id)
+            assert await provider.list_retained() == []
+            # Only one Run continues in it.
+            with pytest.raises(AleError, match="not a retained Sandbox"):
+                await provider.attach_retained(
+                    retained.handle, request(image, "episode-3"), sandbox.allocation,
+                    sandbox.resolved_image,
+                )  # fmt: skip
+            await continued.destroy()
+            await fleet.beat()
+            assert record.status is SandboxStatus.RELEASED
+        finally:
+            await later_client.close()
+
+    async def test_a_kept_sandbox_being_handed_over_outlives_its_old_lease(
+        self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        agent = await fleet.add_node("node-a")
+        sandbox = await provider.create(request(image, retention="keep"))
+        await sandbox.write_file("/home/user/work", b"kept")
+        retained = await sandbox.retain(roles=("solver",), reason="kept")
+        held = agent.held[sandbox.sandbox_id]
+        held.lease_expires_at = 0.0  # kept long ago
+        fleet.providers["node-a"].attach_delay = 0.5
+        async with later_run(fleet) as later:
+            attaching = asyncio.ensure_future(continue_in(later, retained.handle, sandbox))
+            await handing_over(agent, sandbox.sandbox_id)
+            # Its Node reports a lease from the handover on, which a slow handover may
+            # outlast; it stays kept until the later Run has it.
+            assert held.lease_expires_at > time.time()
+            held.lease_expires_at = 0.0
+            agent.expire()
+            await asyncio.sleep(0.1)  # the agent's background work takes its turn
+            continued = await attaching
+            assert fleet.providers["node-a"].destroyed == []
+            assert await continued.read_file("/home/user/work") == b"kept"
+            await continued.destroy()
+
+    async def test_a_stopping_agent_keeps_a_sandbox_it_is_handing_over(
+        self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        agent = await fleet.add_node("node-a")
+        sandbox = await provider.create(request(image, retention="keep"))
+        retained = await sandbox.retain(roles=("solver",), reason="kept")
+        fleet.providers["node-a"].attach_delay = 2.0
+        async with later_run(fleet) as later:
+            attaching = asyncio.ensure_future(continue_in(later, retained.handle, sandbox))
+            await handing_over(agent, sandbox.sandbox_id)
+            await agent.stop()
+            await fleet.nodes["node-a"].close()
+            with pytest.raises(AleError):
+                await attaching
+        assert fleet.providers["node-a"].destroyed == []
+        restarted = await fleet.add_node("node-a", port=port_of(agent), restart=True)
+        assert restarted.held[sandbox.sandbox_id].state == "retained"
+        await fleet.beat()
+        assert fleet.control.sandboxes[sandbox.sandbox_id].status is SandboxStatus.RETAINED
+
+    async def test_a_kept_sandbox_is_destroyed_by_its_handle(
+        self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        await fleet.add_node("node-a")
+        live = await provider.create(request(image, "episode-live"))
+        with pytest.raises(ProviderCapabilityError, match="no retained Sandbox"):
+            await provider.destroy_retained(f"fleet:{live.sandbox_id}")
+        sandbox = await provider.create(request(image, retention="keep"))
+        retained = await sandbox.retain(roles=("solver",), reason="kept")
+        await settle(fleet, asyncio.ensure_future(provider.destroy_retained(retained.handle)))
+        assert fleet.providers["node-a"].destroyed == ["episode-1"]
+        assert fleet.control.sandboxes[sandbox.sandbox_id].status is SandboxStatus.RELEASED
+        assert await provider.list_retained() == []
+        await live.destroy()
+
+    async def test_sandboxes_boot_from_a_snapshot_on_its_node_at_once(
+        self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        await fleet.add_node("node-a", saves_snapshots=True)
+        await fleet.add_node("node-b", saves_snapshots=True)
+        source = await provider.create(request(image, retention="snapshot"))
+        await source.write_file("/home/user/work", b"saved")
+        saved = await source.snapshot(roles=("solver",), reason="saved")
+        await source.destroy()
+        assert saved.handle == f"fleet:snapshot:{source.sandbox_id}"
+        name = source.node.name
+        # The snapshot outlives its agent.
+        agent = fleet.agents[name]
+        await agent.stop()
+        await fleet.nodes[name].close()
+        await fleet.add_node(name, port=port_of(agent), restart=True)
+        await fleet.beat()
+        booted = await asyncio.gather(
+            *(
+                provider.create(request(image, f"episode-{n}", snapshot=saved.handle))
+                for n in (2, 3)
+            )
+        )
+        assert {sandbox.node.name for sandbox in booted} == {name}
+        assert [await sandbox.read_file("/home/user/work") for sandbox in booted] == [
+            b"saved",
+            b"saved",
+        ]
+        inner = fleet.providers[name].requests[-2:]
+        assert {request.snapshot for request in inner} == {"memory:snapshot:episode-1"}
+        for sandbox in booted:
+            await sandbox.destroy()
+        listed = await provider.list_retained()
+        assert [(item["handle"], item["node"]) for item in listed] == [
+            (saved.handle, f"{name}/memory")
+        ]
+        await settle(fleet, asyncio.ensure_future(provider.destroy_retained(saved.handle)))
+        assert fleet.providers[name].snapshots == {}
+        assert await provider.list_retained() == []
+        with pytest.raises(ProviderCapabilityError, match="there is no snapshot"):
+            await provider.create(request(image, "episode-4", snapshot=saved.handle))

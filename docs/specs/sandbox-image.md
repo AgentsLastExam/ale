@@ -390,10 +390,13 @@ Daytona's registry, and memory and writable storage must be whole GiB, refused r
 than rounded.
 
 Retained handles are always provider-qualified: `docker:<runtime-id>` for containers,
-`qemu:<runtime-id>` for QEMU VMs, `firecracker:<runtime-id>` for Firecracker microVMs and
-`daytona:<sandbox-id>` for Daytona; Orchard retains nothing, so it has none. Unqualified
-handles are rejected. Listing, destroying and attaching are Provider operations, routed by
-the Provider a handle or RunLock names, so a new backend needs no CLI change.
+`qemu:<runtime-id>` for QEMU VMs, `firecracker:<runtime-id>` for Firecracker microVMs,
+`daytona:<sandbox-id>` for Daytona and `fleet:<sandbox>` for a Sandbox kept on the
+[Fleet](fleet.md#lifecycle), whichever Provider its Node used; Orchard retains nothing, so
+it has none. Unqualified handles are rejected. Listing, destroying and attaching are
+Provider operations, routed by the Provider a handle or RunLock names, so a new backend
+needs no CLI change, apart from the Fleet, which `ale sandbox` reaches at `$ALE_FLEET_URL`
+and `--continue-from` through the Run's own Fleet connection.
 
 GPU workload libraries such as CUDA, PyTorch, and simulators, and the Vulkan ICD and GLVND
 EGL vendor files a renderer loads, remain Task Dockerfile responsibility: not every

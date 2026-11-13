@@ -44,6 +44,8 @@ class NodeView:
     draining: bool = False
     images: frozenset[str] = frozenset()
     """The keys of the images the Node prepared and keeps."""
+    snapshots: frozenset[str] = frozenset()
+    """The snapshots the Node keeps, which only it can boot from."""
     holds: tuple[Holds, ...] = ()
     startup_sec: dict[str, float] = field(default_factory=dict)
     """Measured seconds from create to ready, per Provider, when the ledger has any."""
@@ -100,6 +102,7 @@ def _profile(declaration: NodeDeclaration, demand: SandboxDemand) -> SandboxProf
             and (profile.gpus or not resources.gpus)
             and (profile.max_cpus is None or resources.cpus <= profile.max_cpus)
             and (profile.max_memory_mb is None or resources.memory_mb <= profile.max_memory_mb)
+            and (profile.snapshot or (demand.retention != "snapshot" and demand.snapshot is None))
         ):
             return profile
     return None
@@ -158,6 +161,8 @@ def choose(
     reasons: list[str] = []
     for node in nodes:
         if not node.online or node.draining or node.name in refused:
+            continue
+        if demand.snapshot is not None and demand.snapshot not in node.snapshots:
             continue
         profile = _profile(node.declaration, demand)
         if profile is None:
@@ -220,6 +225,11 @@ def unservable(demand: SandboxDemand, nodes: Iterable[NodeView]) -> str | None:
             f"no Node offers a {demand.kind} {demand.os}/{demand.arch} Sandbox with "
             f"network {demand.network_mode}"
             + (f" and {resources.gpus} GPUs" if resources.gpus else "")
+            + (
+                " that saves snapshots"
+                if demand.retention == "snapshot" or demand.snapshot is not None
+                else ""
+            )
             + detail
         )
     for node, profile in matching:

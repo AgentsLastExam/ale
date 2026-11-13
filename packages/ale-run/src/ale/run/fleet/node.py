@@ -6,15 +6,17 @@ grant from the control plane creates its Sandbox here, then drives it through th
 agent's API, which calls the very Provider and Sandbox objects a local Run would, so
 every guarantee those give holds unchanged.
 
-Each Sandbox has a lease its Run renews here. The agent destroys a Sandbox whose lease ran
-out, so a Run that crashed or lost its way here leaves nothing behind, whatever the
-control plane is doing. When the agent itself stops it destroys every Sandbox it holds: an
-operator stops an agent to take its Node out of service, so it leaves nothing behind; a
-crash, which nobody chose, keeps them for their Runs.
+Each Sandbox has a lease its Run renews here, apart from a retained one, which no lease
+ends. The agent destroys a Sandbox whose lease ran out, so a Run that crashed or lost its
+way here leaves nothing behind, whatever the control plane is doing. When the agent itself
+stops it destroys every Sandbox it holds apart from retained ones: an operator stops an
+agent to take its Node out of service, so it leaves nothing behind; a crash, which nobody
+chose, keeps them for their Runs.
 
 An agent that crashes leaves its Sandboxes running. It journals each one it holds, so the
 agent that starts next on this machine reattaches, through the Provider, those whose lease
-still runs and holds them again for their Runs, and destroys the rest.
+still runs and holds them again for their Runs, keeps the retained ones and the snapshots
+its Provider still has, and destroys the rest.
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ from ale.core.errors import (
 from ale.core.sandbox import (
     Identity,
     Provider,
+    RetainedSandbox,
     Sandbox,
     SandboxRequest,
 )
@@ -74,10 +77,12 @@ from ale.run.fleet.protocol import (
     NodeDeclaration,
     NodeResources,
     Platform,
+    Retention,
     RosterEntry,
     SandboxDemand,
     SandboxDescription,
     SandboxProfile,
+    SnapshotHolding,
     verify_grant,
 )
 from ale.run.fleet.tunnel import NodeListeners, with_port
@@ -293,12 +298,14 @@ class _Held:
     profile: SandboxProfile
     holds: Holds
     lease_expires_at: float
-    state: Literal["creating", "ready", "destroying"] = "creating"
+    state: Literal["creating", "ready", "retained", "destroying"] = "creating"
     sandbox: Sandbox | None = None
     created: asyncio.Future[SandboxDescription] | None = None
     destroyed: asyncio.Task[None] | None = None
     create_sec: float | None = None
     entry: _Entry | None = None
+    retained: RetainedSandbox | None = None
+    """How its Provider names it as a retained Sandbox, once the episode kept it."""
 
 
 class _Entry(BaseModel):
@@ -317,6 +324,17 @@ class _Entry(BaseModel):
     handle: str | None = None
     """The Provider's name for the Sandbox, once it is created."""
     description: SandboxDescription | None = None
+    retained: RetainedSandbox | None = None
+    """Set once its episode kept it: no lease ends it and no stopping agent destroys it."""
+
+
+class _Snapshot(BaseModel):
+    """A snapshot the agent keeps, with its Provider's handle for it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    holding: SnapshotHolding
+    handle: str
 
 
 def _mismatch(demand: SandboxDemand, request: SandboxRequest) -> str | None:
@@ -327,7 +345,19 @@ def _mismatch(demand: SandboxDemand, request: SandboxRequest) -> str | None:
         return "network mode"
     if request.resources != demand.resources:
         return "resources"
+    if request.snapshot != demand.snapshot:
+        return "snapshot"
     return None
+
+
+def _save(path: Path, model: BaseModel) -> None:
+    """Write ``model`` to ``path`` as JSON in one step, readable by this user alone: a
+    Sandbox's request carries its episode's credentials."""
+    partial = path.with_suffix(".partial")
+    descriptor = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write(model.model_dump_json())
+    os.replace(partial, path)
 
 
 def _error(error: BaseException) -> ErrorBody:
@@ -365,6 +395,10 @@ class NodeAgent:
         # Requests carry episode credentials, such as the egress proxy's token.
         self._journal = settings.state_dir / "sandboxes"
         self._journal.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.snapshots: dict[str, _Snapshot] = {}
+        self._snapshot_journal = settings.state_dir / "snapshots"
+        self._snapshot_journal.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._deleting: set[str] = set()
         self._background: set[asyncio.Future[None]] = set()
 
     def _later(self, work: Coroutine[object, object, None]) -> None:
@@ -411,6 +445,7 @@ class NodeAgent:
                 state=held.state,
                 lease_expires_at=held.lease_expires_at,
                 create_sec=held.create_sec,
+                roles=held.retained.roles if held.retained is not None else (),
             )
             for sandbox_id, held in sorted(self.held.items())
         )
@@ -420,6 +455,7 @@ class NodeAgent:
             boot_id=self.declaration.boot_id,
             roster=self.roster(),
             images=self.images.inventory(),
+            snapshots=tuple(snapshot.holding for snapshot in self.snapshots.values()),
             disk_free_gb=self.images.free_gb(),
         )
         reply = HeartbeatReply.model_validate(
@@ -433,6 +469,9 @@ class NodeAgent:
             if (held := self.held.get(sandbox_id)) is not None and held.state != "destroying":
                 _log.info("destroying %s, which the control plane no longer holds", sandbox_id)
                 self._later(self._destroy(held))
+        for snapshot_id in reply.destroy_snapshots:
+            if snapshot_id in self.snapshots and snapshot_id not in self._deleting:
+                self._later(self._delete_snapshot(snapshot_id))
         return reply
 
     async def register(self) -> None:
@@ -464,10 +503,15 @@ class NodeAgent:
             await asyncio.sleep(HEARTBEAT_SEC)
 
     def expire(self) -> None:
-        """Destroy every Sandbox whose lease ran out."""
+        """Destroy every Sandbox whose lease ran out; a retained one, even while it is handed
+        to a later Run, has none."""
         now = self._clock()
         for sandbox_id, held in list(self.held.items()):
-            if held.state != "destroying" and held.lease_expires_at < now:
+            if (
+                held.state in {"creating", "ready"}
+                and held.retained is None
+                and held.lease_expires_at < now
+            ):
                 _log.info("the lease of %s ran out; destroying it", sandbox_id)
                 self._later(self._destroy(held))
 
@@ -482,32 +526,60 @@ class NodeAgent:
         if held.entry is None:
             return
         held.entry.lease_expires_at = held.lease_expires_at
-        path = self._journal / f"{held.grant.sandbox_id}.json"
-        partial = path.with_suffix(".partial")
-        descriptor = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w") as handle:
-            handle.write(held.entry.model_dump_json())
-        os.replace(partial, path)
+        _save(self._journal / f"{held.grant.sandbox_id}.json", held.entry)
 
     def _forget(self, sandbox_id: str) -> None:
         (self._journal / f"{sandbox_id}.json").unlink(missing_ok=True)
 
     async def recover(self) -> None:
-        """Drive again, or destroy, the Sandboxes an earlier agent on this machine held.
+        """Drive again, keep or destroy what an earlier agent on this machine held.
 
-        One whose lease still runs is reattached through its Provider and held as before,
-        with its Run's tunnel ports, so the Run keeps it. Any other, or one that cannot be
-        reattached within ``RECOVER_SEC``, is destroyed. One whose creation never finished
-        has no handle and is left to its Provider. All recover at once, so a slow one holds
-        up none of the others.
+        A Sandbox whose lease still runs is reattached through its Provider and held as
+        before, with its Run's tunnel ports, so the Run keeps it. Any other, or one that
+        cannot be reattached within ``RECOVER_SEC``, is destroyed. One whose creation never
+        finished has no handle and is left to its Provider. A retained Sandbox and a snapshot
+        have no lease: each is kept while its Provider still has it. All recover at once, so
+        a slow one holds up none of the others.
         """
-        for partial in self._journal.glob("*.partial"):
-            # A write the crash cut short; it may hold an episode's credentials.
-            partial.unlink(missing_ok=True)
-        journal = sorted(self._journal.glob("*.json"))
-        await asyncio.gather(*(self._recover(path) for path in journal))
+        for journal in (self._journal, self._snapshot_journal):
+            for partial in journal.glob("*.partial"):
+                # A write the crash cut short; it may hold an episode's credentials.
+                partial.unlink(missing_ok=True)
+        listings: dict[str, asyncio.Future[set[str] | None]] = {}
 
-    async def _recover(self, path: Path) -> None:
+        async def kept(name: str, handle: str) -> bool:
+            """Whether Provider ``name`` still keeps ``handle``; yes when it cannot say."""
+            if name not in listings:
+                listings[name] = asyncio.ensure_future(self._retained_handles(name))
+            handles = await listings[name]
+            return handles is None or handle in handles
+
+        for path in sorted(self._snapshot_journal.glob("*.json")):
+            try:
+                snapshot = _Snapshot.model_validate_json(path.read_text())
+            except (OSError, ValueError) as error:
+                _log.warning("dropping %s, which cannot be read: %s", path, error)
+                path.unlink(missing_ok=True)
+                continue
+            if await kept(snapshot.holding.provider, snapshot.handle):
+                self.snapshots[snapshot.holding.snapshot_id] = snapshot
+            else:
+                _log.warning("snapshot %s is gone", snapshot.holding.snapshot_id)
+                path.unlink(missing_ok=True)
+        journal = sorted(self._journal.glob("*.json"))
+        await asyncio.gather(*(self._recover(path, kept) for path in journal))
+
+    async def _retained_handles(self, name: str) -> set[str] | None:
+        """The handles of the Sandboxes and snapshots Provider ``name`` keeps on this
+        machine, or None when it cannot list them."""
+        try:
+            provider = self._providers.get(name) or _provider(name)
+            return {str(record["handle"]) for record in await provider.list_retained()}
+        except Exception:
+            _log.warning("could not list what %s keeps", name, exc_info=True)
+            return None
+
+    async def _recover(self, path: Path, kept: Callable[[str, str], Awaitable[bool]]) -> None:
         try:
             entry = _Entry.model_validate_json(path.read_text())
         except (OSError, ValueError) as error:
@@ -520,10 +592,34 @@ class NodeAgent:
             path.unlink(missing_ok=True)
             return
         provider = self._providers.get(entry.provider)
+        if entry.retained is not None:
+            if provider is None:
+                _log.warning(
+                    "%s is retained by %s, which this Node does not lend",
+                    sandbox_id,
+                    entry.provider,
+                )
+            elif await kept(entry.provider, entry.retained.handle):
+                try:
+                    self._hold(entry, provider, state="retained", sandbox=None)
+                except Exception:
+                    _log.warning("could not keep %s", sandbox_id, exc_info=True)
+                else:
+                    _log.info("keeps %s, which its episode retained", sandbox_id)
+            else:
+                _log.warning("%s, which its episode retained, is gone", sandbox_id)
+                path.unlink(missing_ok=True)
+            return
         if provider is not None and entry.lease_expires_at > self._clock():
             try:
                 async with asyncio.timeout(RECOVER_SEC):
-                    await self._reattach(entry, provider)
+                    sandbox = await provider.reattach(
+                        entry.handle,
+                        entry.request,
+                        entry.description.allocation,
+                        entry.description.resolved_image,
+                    )
+                self._hold(entry, provider, state="ready", sandbox=sandbox)
             except Exception:
                 _log.warning("could not drive %s again", sandbox_id, exc_info=True)
             else:
@@ -536,9 +632,17 @@ class NodeAgent:
             _log.warning("could not destroy %s", sandbox_id, exc_info=True)
         path.unlink(missing_ok=True)
 
-    async def _reattach(self, entry: _Entry, provider: Provider) -> None:
+    def _hold(
+        self,
+        entry: _Entry,
+        provider: Provider,
+        *,
+        state: Literal["ready", "retained"],
+        sandbox: Sandbox | None,
+    ) -> None:
+        """Hold again a Sandbox an earlier agent journaled, as it held it."""
         description = entry.description
-        assert description is not None and entry.handle is not None
+        assert description is not None
         request = entry.request
         profile = next(
             (
@@ -552,9 +656,6 @@ class NodeAgent:
         )
         if profile is None:
             raise ProviderCapabilityError(f"this Node no longer lends {entry.provider} for it")
-        sandbox = await provider.reattach(
-            entry.handle, request, description.allocation, description.resolved_image
-        )
         created: asyncio.Future[SandboxDescription] = asyncio.get_running_loop().create_future()
         created.set_result(description)
         held = _Held(
@@ -563,14 +664,16 @@ class NodeAgent:
             profile=profile,
             holds=entry.holds,
             lease_expires_at=entry.lease_expires_at,
-            state="ready",
+            state=state,
             sandbox=sandbox,
             created=created,
             create_sec=description.create_sec,
             entry=entry,
+            retained=entry.retained,
         )
         self.held[entry.grant.sandbox_id] = held
-        self._listeners_for(entry.grant.run_id).keep(entry.ports)
+        if state == "ready":
+            self._listeners_for(entry.grant.run_id).keep(entry.ports)
 
     # --- Sandboxes --------------------------------------------------------------------
 
@@ -589,7 +692,9 @@ class NodeAgent:
         listeners = self._listeners.get(run_id)
         if listeners is None or listeners.attached:
             return
-        if any(held.grant.run_id == run_id for held in self.held.values()):
+        if any(
+            held.grant.run_id == run_id and held.state != "retained" for held in self.held.values()
+        ):
             return
         del self._listeners[run_id]
         await listeners.close()
@@ -605,6 +710,7 @@ class NodeAgent:
             declaration=view.declaration,
             holds=view.holds,
             images=frozenset({grant.demand.image}),
+            snapshots=frozenset(self.snapshots),
         )
         choice, reason = choose(grant.demand, [view])
         if choice is None:
@@ -641,24 +747,33 @@ class NodeAgent:
         assert held.created is not None
         return await asyncio.shield(held.created)
 
+    async def _tunnelled(
+        self, run_id: str, body: CreateSandbox, ports: dict[int, int]
+    ) -> SandboxRequest:
+        """The request with its Gateway and egress proxy at the Node ports where this agent
+        listens for its Run's tunnel, each recorded in ``ports``."""
+        request = body.request
+        listeners = self._listeners_for(run_id)
+        update: dict[str, object] = {}
+        if request.gateway_url and body.gateway_target is not None:
+            ports[body.gateway_target] = await listeners.port(body.gateway_target)
+            update["gateway_url"] = with_port(request.gateway_url, ports[body.gateway_target])
+        if request.proxy_url and body.proxy_target is not None:
+            ports[body.proxy_target] = await listeners.port(body.proxy_target)
+            update["proxy_url"] = with_port(request.proxy_url, ports[body.proxy_target])
+        return request.model_copy(update=update)
+
     async def _create(self, held: _Held, body: CreateSandbox) -> SandboxDescription:
         started = time.monotonic()
-        request = body.request
         sandbox_id = held.grant.sandbox_id
         entry = held.entry
         assert entry is not None
         try:
-            listeners = self._listeners_for(held.grant.run_id)
-            update: dict[str, object] = {}
-            if request.gateway_url and body.gateway_target is not None:
-                port = await listeners.port(body.gateway_target)
-                entry.ports[body.gateway_target] = port
-                update["gateway_url"] = with_port(request.gateway_url, port)
-            if request.proxy_url and body.proxy_target is not None:
-                port = await listeners.port(body.proxy_target)
-                entry.ports[body.proxy_target] = port
-                update["proxy_url"] = with_port(request.proxy_url, port)
-            entry.request = request.model_copy(update=update)
+            request = await self._tunnelled(held.grant.run_id, body, entry.ports)
+            if request.snapshot is not None:
+                handle = self._snapshot_handle(request.snapshot, held.profile)
+                request = request.model_copy(update={"snapshot": handle})
+            entry.request = request
             sandbox = await held.provider.create(entry.request)
         except BaseException:
             self.held.pop(sandbox_id, None)
@@ -698,7 +813,9 @@ class NodeAgent:
             if held.created is not None and not held.created.done():
                 held.created.cancel()
                 await asyncio.gather(held.created, return_exceptions=True)
-            if held.sandbox is not None:
+            if held.retained is not None:
+                await held.provider.destroy_retained(held.retained.handle)
+            elif held.sandbox is not None:
                 await held.sandbox.destroy()
         except Exception:
             _log.exception("destroying %s failed", sandbox_id)
@@ -707,11 +824,121 @@ class NodeAgent:
             self._forget(sandbox_id)
             await self._forget_run(held.grant.run_id)
 
+    # --- retention ------------------------------------------------------------------
+
+    def _snapshot_handle(self, snapshot_id: str, profile: SandboxProfile) -> str:
+        snapshot = self.snapshots.get(snapshot_id)
+        if snapshot is None:
+            raise _Refused(f"this Node keeps no snapshot {snapshot_id}")
+        if snapshot.holding.provider != profile.provider:
+            raise ProviderCapabilityError(
+                f"snapshot {snapshot_id} is {snapshot.holding.provider}'s, not {profile.provider}'s"
+            )
+        return snapshot.handle
+
+    async def retain(self, sandbox_id: str, retention: Retention) -> RetainedSandbox:
+        """Keep a Sandbox past its episode: no lease ends it until a later Run continues in
+        it, and only the control plane destroys it."""
+        held = self.held.get(sandbox_id)
+        if held is not None and held.state == "retained" and held.retained is not None:
+            return held.retained
+        sandbox = self.ready(sandbox_id)
+        assert held is not None and held.entry is not None
+        retained = await sandbox.retain(roles=retention.roles, reason=retention.reason)
+        sandbox.release_resources()
+        held.state, held.sandbox, held.retained = "retained", None, retained
+        held.entry.retained = retained
+        self._write(held)
+        _log.info("keeps %s, which its episode retained", sandbox_id)
+        await self._forget_run(held.grant.run_id)
+        return retained
+
+    async def snapshot(self, sandbox_id: str, retention: Retention) -> RetainedSandbox:
+        """Save a Sandbox's snapshot, which this Node keeps until the control plane says."""
+        sandbox = self.ready(sandbox_id)
+        held = self.held[sandbox_id]
+        assert held.entry is not None
+        retained = await sandbox.snapshot(roles=retention.roles, reason=retention.reason)
+        snapshot = _Snapshot(
+            holding=SnapshotHolding(
+                snapshot_id=sandbox_id,
+                provider=held.profile.provider,
+                demand=held.grant.demand,
+                episode_id=held.entry.request.episode_id,
+                roles=retention.roles,
+                created_at=self._clock(),
+            ),
+            handle=retained.handle,
+        )
+        self.snapshots[sandbox_id] = snapshot
+        _save(self._snapshot_journal / f"{sandbox_id}.json", snapshot)
+        _log.info("saved snapshot %s as %s", sandbox_id, retained.handle)
+        return retained
+
+    async def _delete_snapshot(self, snapshot_id: str) -> None:
+        snapshot = self.snapshots[snapshot_id]
+        name = snapshot.holding.provider
+        self._deleting.add(snapshot_id)
+        try:
+            await (self._providers.get(name) or _provider(name)).destroy_retained(snapshot.handle)
+        except AleError as error:
+            # Tried again at the next heartbeat, as when a Sandbox still boots from it.
+            _log.warning("could not delete snapshot %s yet: %s", snapshot_id, error)
+            return
+        finally:
+            self._deleting.discard(snapshot_id)
+        del self.snapshots[snapshot_id]
+        (self._snapshot_journal / f"{snapshot_id}.json").unlink(missing_ok=True)
+        _log.info("deleted snapshot %s", snapshot_id)
+
+    async def adopt(self, body: CreateSandbox, sandbox_id: str) -> SandboxDescription:
+        """Hand a retained Sandbox to the later Run the grant names, as if it created it."""
+        try:
+            grant = verify_grant(body.grant, self._token, node=self.name, now=self._clock())
+        except ValueError as error:
+            raise web.HTTPForbidden(text=str(error)) from None
+        if grant.sandbox_id != sandbox_id:
+            raise ProviderCapabilityError("the grant is for another Sandbox")
+        held = self.held.get(sandbox_id)
+        if held is None or held.state != "retained" or held.retained is None:
+            state = "not held here" if held is None else held.state
+            raise _Refused(f"{sandbox_id} is {state}, not a retained Sandbox")
+        if (difference := _mismatch(grant.demand, body.request)) is not None:
+            raise ProviderCapabilityError(f"the request's {difference} differs from its grant")
+        entry, previous = held.entry, held.grant.run_id
+        assert entry is not None and entry.description is not None
+        # Its lease from before it was kept ran out long ago. It stays retained, which no
+        # lease or stopping agent ends, until the later Run has it.
+        held.lease_expires_at = self._clock() + body.lease_sec
+        held.state = "creating"
+        ports: dict[int, int] = {}
+        try:
+            request = await self._tunnelled(grant.run_id, body, ports)
+            sandbox = await held.provider.attach_retained(
+                held.retained.handle,
+                request,
+                entry.description.allocation,
+                entry.description.resolved_image,
+            )
+        except BaseException:
+            held.state = "retained"
+            await self._forget_run(grant.run_id)
+            raise
+        description = entry.description.model_copy(update={"gateway_url": sandbox.gateway_url})
+        held.grant, held.sandbox, held.retained, held.state = grant, sandbox, None, "ready"
+        held.lease_expires_at = self._clock() + body.lease_sec
+        entry.grant, entry.request, entry.ports = grant, request, ports
+        entry.retained, entry.description = None, description
+        self._write(held)
+        await self._forget_run(previous)
+        _log.info("%s continues in %s", grant.run_id, sandbox_id)
+        return description
+
     def renew(self, run_id: str, lease_sec: float) -> int:
         expires = self._clock() + lease_sec
         renewed = 0
         for held in self.held.values():
-            if held.grant.run_id == run_id and held.state != "destroying":
+            if held.grant.run_id == run_id and held.state in {"creating", "ready"}:
                 held.lease_expires_at = max(held.lease_expires_at, expires)
                 try:
                     self._write(held)
@@ -730,8 +957,11 @@ class NodeAgent:
         return held.sandbox
 
     async def stop(self) -> None:
+        """Destroy every Sandbox held, apart from those their episodes retained, even one
+        being handed to a later Run."""
         await asyncio.gather(
-            *(self._destroy(held) for held in list(self.held.values())), return_exceptions=True
+            *(self._destroy(held) for held in list(self.held.values()) if held.retained is None),
+            return_exceptions=True,
         )
         for listeners in list(self._listeners.values()):
             await listeners.close()
@@ -742,8 +972,9 @@ class NodeAgent:
         return _Api(self).app()
 
     async def serve(self) -> None:
-        """Drive again or destroy what an earlier agent on this machine held, then serve
-        until cancelled, and then destroy every Sandbox held."""
+        """Drive again, keep or destroy what an earlier agent on this machine held, then
+        serve until cancelled, and then destroy every Sandbox held apart from retained
+        ones."""
         await self.recover()
         runner = web.AppRunner(self.app(), access_log=None)
         await runner.setup()
@@ -788,6 +1019,9 @@ class _Api:
                 web.get("/v1/node", self.node),
                 web.post(sandbox, self.create),
                 web.delete(sandbox, self.destroy),
+                web.post(f"{sandbox}/retain", self.retain),
+                web.post(f"{sandbox}/snapshot", self.snapshot),
+                web.post(f"{sandbox}/adopt", self.adopt),
                 web.get(f"{sandbox}/exec", self.exec),
                 web.get(f"{sandbox}/files", self.read_file),
                 web.put(f"{sandbox}/files", self.write_file),
@@ -827,17 +1061,28 @@ class _Api:
         return _json(self.agent.declaration)
 
     async def create(self, request: web.Request) -> web.Response:
-        try:
-            body = CreateSandbox.model_validate_json(await request.read())
-        except ValidationError as error:
-            raise web.HTTPBadRequest(text=str(error)) from None
+        body = await _body(request, CreateSandbox)
         return _json(await self.agent.create(body, request.match_info["id"]))
 
     async def destroy(self, request: web.Request) -> web.Response:
         held = self.agent.held.get(request.match_info["id"])
+        if held is not None and held.state == "retained":
+            raise web.HTTPConflict(text="a retained Sandbox is destroyed through the Fleet")
         if held is not None:
             await self.agent._destroy(held)
         return web.Response(status=204)
+
+    async def retain(self, request: web.Request) -> web.Response:
+        retention = await _body(request, Retention)
+        return _json(await self.agent.retain(request.match_info["id"], retention))
+
+    async def snapshot(self, request: web.Request) -> web.Response:
+        retention = await _body(request, Retention)
+        return _json(await self.agent.snapshot(request.match_info["id"], retention))
+
+    async def adopt(self, request: web.Request) -> web.Response:
+        body = await _body(request, CreateSandbox)
+        return _json(await self.agent.adopt(body, request.match_info["id"]))
 
     async def exec(self, request: web.Request) -> web.StreamResponse:
         sandbox = self.agent.ready(request.match_info["id"])
@@ -980,13 +1225,17 @@ class _Api:
         return web.Response(status=204)
 
     async def prepare(self, request: web.Request) -> web.Response:
-        try:
-            inputs = ImageInputs.model_validate_json(await request.read())
-        except ValidationError as error:
-            raise web.HTTPBadRequest(text=str(error)) from None
+        inputs = await _body(request, ImageInputs)
         if inputs.key != self._key(request):
             raise web.HTTPBadRequest(text="the inputs are for another image")
         return _json(await self.agent.images.prepare(inputs))
+
+
+async def _body[T: BaseModel](request: web.Request, model: type[T]) -> T:
+    try:
+        return model.model_validate_json(await request.read())
+    except ValidationError as error:
+        raise web.HTTPBadRequest(text=str(error)) from None
 
 
 def _identity(request: web.Request) -> Identity:

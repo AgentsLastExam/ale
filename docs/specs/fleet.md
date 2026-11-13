@@ -58,21 +58,25 @@ whichever runtime starts it.
 
 A heartbeat carries the Node's full **roster** (every Sandbox it holds, with its state and
 lease expiry), the images it prepared, each by its key with its size and how long preparing
-it took, and its free disk. A Node silent for 30 seconds is offline.
+it took, the snapshots it keeps, and its free disk. A Node silent for 30 seconds is offline.
 
 ## Placement
 
 A Run asks for each Sandbox with a **demand**: kind, operating system, architecture,
-network mode, resources, the image's key, and the Run's framework identity. A Sandbox runs
-the framework of the engine driving it, so only a Node with the same framework identity
-serves it. Every Node prepares the images it serves itself, and Nodes never copy images from
-one another; an image's **key** is the identity of what it is prepared from, which the Run
-knows before any Node prepares it, and a Node keeps each image it prepared under its key.
+network mode, resources, the image's key, the Run's framework identity, the episode's
+retention, and any snapshot it boots from. A Sandbox runs the framework of the engine
+driving it, so only a Node with the same framework identity serves it. Every Node prepares
+the images it serves itself, and Nodes never copy images from one another; an image's
+**key** is the identity of what it is prepared from, which the Run knows before any Node
+prepares it, and a Node keeps each image it prepared under its key.
 
 1. **Filter.** A Node is a candidate when it is online and not draining, has a profile that
    matches the demand, has not refused this Sandbox, can be reached by its Run, and has the
-   resources free now: CPUs, memory, macOS VM slots and GPUs of an accepted model. A demand
-   that no registered Node could serve even when idle fails at once.
+   resources free now: CPUs, memory, macOS VM slots and GPUs of an accepted model. A profile
+   matches a snapshot's demand only if its Provider saves snapshots, and a boot from a
+   snapshot is served only by the Node that keeps the snapshot. A demand that no registered
+   Node could serve even when idle fails at once, as does a boot from a snapshot whose Node
+   refused it or cannot be reached by its Run.
 2. **Score.** The estimated time to a ready Sandbox: on a Node that lacks the image, the
    time preparing it took the Nodes that did (five minutes while none has), plus the Node's
    measured create time for that Provider. Preparing an image takes minutes where creating a
@@ -97,6 +101,7 @@ macOS VM that is shutting down still counts against its Mac.
 | `queued` | Waiting for a Node; it lapses if its Run stops asking about it |
 | `placed` | Reserved on a Node, with a grant for the Run; it lapses if its Run stops asking before creating it |
 | `starting`, `ready` | As the Node's roster reports |
+| `retained` | Kept after its episode: it holds its resources, and no lease ends it, until a later Run continues in it or an operator destroys it |
 | `releasing` | Released by its Run, not yet gone from the Node's roster |
 | `released` | Gone |
 | `failed` | No registered Node could serve the demand |
@@ -109,9 +114,10 @@ macOS VM that is shutting down still counts against its Mac.
   check disagrees with the ledger) sends the Sandbox back to the queue, never to that Node.
   A Run that cannot reach the Node it was placed on refuses it the same way; that Run's
   Sandboxes then go there no more, and the control plane records it as an event.
-- **Leases belong to the Node.** Every Sandbox has a lease its Run renews with the Node
-  directly. The Node destroys a Sandbox whose lease ran out, whether or not the control
-  plane is up, so a Run that crashes leaves nothing behind. The roster reports each lease.
+- **Leases belong to the Node.** Every Sandbox but a retained one has a lease its Run renews
+  with the Node directly. The Node destroys a Sandbox whose lease ran out, whether or not the
+  control plane is up, so a Run that crashes leaves nothing behind. The roster reports each
+  lease.
 - **Reconciliation** resolves every disagreement toward what the Node reports. A Sandbox the
   Node holds that the ledger does not know is destroyed after a short grace (the ledger may
   be the one behind); one its Run released is destroyed at once, by the heartbeat's reply. A
@@ -122,6 +128,20 @@ macOS VM that is shutting down still counts against its Mac.
   back to the queue. A Node that returns with the same boot ID and lists a lost Sandbox
   restores it; a machine that restarted has a new boot ID and none of its old Sandboxes. A lost
   Sandbox is not moved: whether its episode runs again elsewhere is the Run's retry policy.
+- **Retention.** A retained Sandbox and a snapshot outlive their Run, so the ledger owns them.
+  - A `retained` Sandbox keeps its resources reserved (a kept macOS VM keeps its slot). Only
+    an operator's destroy or a later Run's continuation ends that. A machine restart ends
+    the Sandbox itself, and the ledger records it as `released`.
+  - A later Run continues in a retained Sandbox through a grant the control plane gives it.
+    The Node hands the Sandbox to one such Run. That Run's lease and retention then govern
+    it, and the ledger follows the roster.
+  - A snapshot is recorded on the one Node that keeps it, since only that Node holds its
+    disk, and survives its Node's restarts. Only Sandboxes of the image it was taken from
+    boot from it, on that Node ([Placement](#placement)).
+  - Reconciliation applies to both. A retained Sandbox or snapshot that an online Node no
+    longer reports is gone. One the Node reports but the ledger missed is recorded. One an
+    operator destroyed is deleted by the Node at its next heartbeat; a snapshot that a
+    Sandbox still boots from is deleted once nothing boots from it.
 - **Restarts.** The ledger is written through on every change, so a restarted control plane
   resumes where it stopped and gives every Node its timeout to check in again.
 
@@ -133,27 +153,33 @@ Sandbox objects a local Run would, so every guarantee of the
 Run's own machine; the agent only carries the calls.
 
 - **Creation.** The agent creates a Sandbox only on a grant that names this Node and whose
-  demand matches the request's kind, system, network mode and resources, only from the image
-  this Node prepared for the grant's image key, and only when its own count of what it holds
-  has room. A refusal names the Node's reason, and the Run asks the control plane for another
-  Node. Asking again for the same Sandbox joins the creation under way.
+  demand matches the request's kind, system, network mode, resources and snapshot, only from
+  the image this Node prepared for the grant's image key, and only when its own count of what
+  it holds has room. A refusal names the Node's reason, and the Run asks the control plane
+  for another Node. Asking again for the same Sandbox joins the creation under way.
 - **The Sandbox API** mirrors the Sandbox contract. A command streams its output while it
   runs and is cancelled in the Sandbox when its caller goes away. A Run's directory arrives
   as a tar stream that keeps its links, and the Node's Sandbox uploads it, so upload
   semantics stay the guest service's.
 - **Leases.** Each Run renews its Sandboxes' leases with the agent. A Sandbox whose lease ran
-  out is destroyed, and a stopping agent destroys every Sandbox it holds: an operator stops
-  an agent to take its Node out of service, so it leaves nothing behind; a crash, which
-  nobody chose, keeps them for their Runs.
+  out is destroyed, and a stopping agent destroys every Sandbox it holds apart from retained
+  ones: an operator stops an agent to take its Node out of service, so it leaves nothing
+  behind; a crash, which nobody chose, keeps them for their Runs.
+- **Retention.** The agent keeps a Sandbox (`retain`) or saves its snapshot (`snapshot`)
+  through its Provider and journals it. A retained Sandbox has no lease. Only the control
+  plane's word destroys it, or hands it to a later Run, which the agent then drives as if
+  that Run had created it.
 - **Crashes.** An agent that crashes leaves its Sandboxes running. It journals what it needs
   to drive each Sandbox again. The agent that starts next on the machine, before it takes
   connections, drives again through the Provider (`reattach`) each one whose lease still
   runs and holds it for its Run as before, and destroys (`discard`) the rest. It keeps the
   machine's boot ID, so the control plane keeps or restores the reattached Sandboxes and
-  records the destroyed ones as released when their lease ran out. A Run makes again a call
-  whose connection the Node refused while its agent was down ([FleetProvider](#fleetprovider));
-  a command under way when the agent crashed fails as an infrastructure failure. A Sandbox
-  still being created at the crash has no handle yet and is left to its Provider.
+  records the destroyed ones as released when their lease ran out. It keeps each retained
+  Sandbox and snapshot its Provider still has, whatever their lease. A Run makes again a call
+  whose connection the Node refused while its agent was down
+  ([FleetProvider](#fleetprovider)); a command under way when the agent crashed fails as an
+  infrastructure failure. A Sandbox still being created at the crash has no handle yet and
+  is left to its Provider.
 - **Images.** The agent prepares every image it serves itself, through the very preparation
   a local Run uses: it pulls bases from their registries, builds a container Task's image,
   materializes a Linux VM disk, and builds a Windows Task's layer on its own copy of the base;
@@ -196,8 +222,15 @@ episode protocol knows it is there.
 - **Capabilities** are what the Fleet can carry. Which Node serves a request is placement's
   decision, and a request no registered Node could serve fails when the control plane
   receives it, before anything is created. A Task names no architecture, so a container or
-  a Linux or Windows VM asks for an x86-64 Node and a macOS VM for an arm64 one. The Fleet
-  keeps no Sandbox past its episode: `accepts` refuses `keep` and `snapshot`.
+  a Linux or Windows VM asks for an x86-64 Node and a macOS VM for an arm64 one.
+- **Retention** happens on the Sandbox's Node and in the ledger ([Lifecycle](#lifecycle),
+  [Node agent](#node-agent)). The handle is `fleet:<sandbox>` or `fleet:snapshot:<sandbox>`.
+  - `--continue-from` continues in a kept Sandbox through the Run's own Fleet connection, so
+    the Fleet must be this Run's Provider for that kind. The Run knows the image only by its
+    key until a Node prepares it, so the control plane checks that the key is the same one.
+  - `ale sandbox list` and `ale sandbox destroy` reach the Fleet whose control plane
+    `$ALE_FLEET_URL` names. A destroy waits until the Node confirms the Sandbox or snapshot
+    gone.
 - **Each Sandbox** is acquired under a fresh name, created on its Node with the grant, and
   driven through the node agent; its lease is renewed while the Run holds it, and destroying
   it releases it in the ledger and on the Node. A call whose connection the Node refused, as

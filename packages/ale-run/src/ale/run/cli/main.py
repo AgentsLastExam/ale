@@ -9,6 +9,7 @@ that imports it.
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 from collections.abc import Coroutine, Sequence
 from pathlib import Path
@@ -17,6 +18,7 @@ from typing import Annotated, Any
 import typer
 
 from ale.core.errors import AleError, ProviderCapabilityError
+from ale.core.sandbox import Provider
 from ale.run import __version__
 from ale.run.assets import (
     AssetSyncResult,
@@ -400,11 +402,15 @@ def sandbox_destroy(
 
 
 async def _list_retained_sandboxes() -> list[dict[str, object]]:
-    records = [
-        record
-        for name in RETAINING_PROVIDERS
-        for record in await provider_named(name).list_retained()
-    ]
+    records: list[dict[str, object]] = []
+    for name in RETAINING_PROVIDERS:
+        if name == "fleet" and not os.environ.get("ALE_FLEET_URL"):
+            continue  # no Fleet named here
+        provider = provider_named(name)
+        try:
+            records.extend(await provider.list_retained())
+        finally:
+            await _close(provider)
     return sorted(records, key=lambda item: str(item["handle"]))
 
 
@@ -413,7 +419,19 @@ async def _destroy_retained_sandbox(handle: str) -> None:
     if not separator or name not in RETAINING_PROVIDERS:
         offered = ", ".join(f"'{provider}:'" for provider in RETAINING_PROVIDERS)
         raise ProviderCapabilityError(f"retained sandbox handle must start with {offered}")
-    await provider_named(name).destroy_retained(handle)
+    provider = provider_named(name)
+    try:
+        await provider.destroy_retained(handle)
+    finally:
+        await _close(provider)
+
+
+async def _close(provider: Provider) -> None:
+    """Close the Fleet's connections; other Providers hold none between calls."""
+    from ale.run.providers.fleet import FleetProvider
+
+    if isinstance(provider, FleetProvider):
+        await provider.client.close()
 
 
 def _run_async[T](main: Coroutine[Any, Any, T]) -> T:

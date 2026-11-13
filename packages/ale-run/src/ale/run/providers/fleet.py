@@ -52,6 +52,9 @@ from ale.core.sandbox import (
     ImageRef,
     PreparedTaskImage,
     Provider,
+    ResolvedImage,
+    ResourceAllocation,
+    RetainedSandbox,
     Sandbox,
     SandboxFile,
     SandboxRequest,
@@ -59,6 +62,7 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources, TaskSpec
 from ale.run.fleet.protocol import (
+    IDENTIFIER,
     PROTOCOL_VERSION,
     STDOUT,
     AcquireRequest,
@@ -76,6 +80,8 @@ from ale.run.fleet.protocol import (
     PlanItem,
     PlanReply,
     RefusedRequest,
+    RetainedView,
+    Retention,
     RunPlan,
     SandboxDemand,
     SandboxDescription,
@@ -102,6 +108,20 @@ RECONNECT_SEC = 90.0
 CHUNK = 2**20
 #: What stands in for an image a Node has yet to prepare, before the key.
 STAND_IN = "fleet:"
+#: How a retained Sandbox and a snapshot on the Fleet are named, before the Sandbox's name.
+HANDLE_PREFIX = "fleet:"
+SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
+#: How long destroying a retained Sandbox or snapshot waits for its Node to confirm it.
+DESTROY_WAIT_SEC = 180.0
+
+
+def _named(handle: str, prefix: str) -> str:
+    """The Sandbox a Fleet handle names, for the kind of handle ``prefix`` starts."""
+    name = handle.removeprefix(prefix)
+    if not handle.startswith(prefix) or not re.fullmatch(IDENTIFIER, name):
+        kind = "snapshot" if prefix == SNAPSHOT_PREFIX else "retained Sandbox"
+        raise ProviderCapabilityError(f"{handle!r} is not a Fleet {kind} handle")
+    return name
 
 
 def _sandbox_id(episode_id: str) -> str:
@@ -331,6 +351,59 @@ class FleetClient:
         except AleError as error:
             _log.warning("could not release %s: %s", sandbox_id, error)
 
+    async def retain(self, sandbox_id: str, retention: Retention) -> None:
+        await self._request(
+            "POST",
+            f"{self.url}/v1/sandboxes/{sandbox_id}/retain",
+            data=retention.model_dump_json(),
+        )
+
+    async def snapshot(self, sandbox_id: str, retention: Retention) -> None:
+        await self._request(
+            "POST",
+            f"{self.url}/v1/sandboxes/{sandbox_id}/snapshot",
+            data=retention.model_dump_json(),
+        )
+
+    async def adopt(self, request: AcquireRequest) -> Placement:
+        body = await self._request(
+            "POST",
+            f"{self.url}/v1/sandboxes/{request.sandbox_id}/adopt",
+            data=request.model_dump_json(),
+        )
+        return Placement.model_validate_json(body)
+
+    async def retained(self) -> list[RetainedView]:
+        body = await self._request("GET", f"{self.url}/v1/retained", timeout=30)
+        return [RetainedView.model_validate(view) for view in json.loads(body)]
+
+    async def destroy_kept(self, sandbox_id: str) -> None:
+        """Destroy a retained Sandbox, waiting for its Node to confirm it gone."""
+        await self._request("POST", f"{self.url}/v1/sandboxes/{sandbox_id}/destroy")
+        deadline = time.monotonic() + DESTROY_WAIT_SEC
+        while (placement := await self.placement(sandbox_id)).status is not (
+            SandboxStatus.RELEASED
+        ):
+            if time.monotonic() > deadline:
+                raise ProviderStartError(
+                    f"{sandbox_id} is still {placement.status} on {placement.node}"
+                )
+            await asyncio.sleep(2)
+
+    async def destroy_snapshot(self, snapshot_id: str) -> None:
+        """Destroy a snapshot, waiting for its Node to delete it."""
+        await self._request("POST", f"{self.url}/v1/snapshots/{snapshot_id}/destroy")
+        deadline = time.monotonic() + DESTROY_WAIT_SEC
+        while any(
+            view.kind == "snapshot" and view.sandbox_id == snapshot_id
+            for view in await self.retained()
+        ):
+            if time.monotonic() > deadline:
+                raise ProviderStartError(
+                    f"snapshot {snapshot_id} is not deleted yet; a Sandbox may still boot from it"
+                )
+            await asyncio.sleep(2)
+
     async def plan(self, plan: RunPlan) -> PlanReply:
         """Send the Run's plan; the reply names the Nodes chosen for each image."""
         body = await self._request(
@@ -556,12 +629,8 @@ class FleetProvider(Provider):
             operating_systems=frozenset(OperatingSystem),
             gui=True,
             network_modes=frozenset(NetworkMode),
+            snapshot=True,
         )
-
-    def accepts(self, request: SandboxRequest) -> None:
-        super().accepts(request)
-        if request.retention != "destroy":
-            raise ProviderCapabilityError("the Fleet keeps no Sandbox past its episode")
 
     async def preflight(self) -> None:
         await self.client.check()
@@ -649,9 +718,14 @@ class FleetProvider(Provider):
         self.accepts(request)
         client = self.client
         await self.prepare_image(request.prepared_image)
+        if request.snapshot is not None:
+            # The Node that keeps the snapshot knows its Provider's name for it.
+            request = request.model_copy(
+                update={"snapshot": _named(request.snapshot, SNAPSHOT_PREFIX)}
+            )
         demand = self._demand(
             request.prepared_image, request.os, request.network.mode, request.resources
-        )
+        ).model_copy(update={"retention": request.retention, "snapshot": request.snapshot})
         sandbox_id = _sandbox_id(request.episode_id)
         asked = time.monotonic()
         placement = await client.acquire(
@@ -668,6 +742,83 @@ class FleetProvider(Provider):
         except BaseException:
             await asyncio.shield(client.release(sandbox_id))
             raise
+
+    async def attach_retained(
+        self,
+        handle: str,
+        request: SandboxRequest,
+        allocation: ResourceAllocation,
+        image: ResolvedImage,
+    ) -> FleetSandbox:
+        """Continue in a Sandbox an earlier episode kept on the Fleet: its Node hands it to
+        this Run, whose lease and retention then govern it."""
+        sandbox_id = _named(handle, HANDLE_PREFIX)
+        self.accepts(request)
+        client = self.client
+        await self.prepare_image(request.prepared_image)
+        demand = self._demand(
+            request.prepared_image, request.os, request.network.mode, request.resources
+        ).model_copy(update={"retention": request.retention})
+        placement = await client.adopt(
+            AcquireRequest(
+                sandbox_id=sandbox_id,
+                run_id=client.run_id,
+                demand=demand,
+                episode_id=request.episode_id,
+                role=request.role.value,
+            )
+        )
+        node = _Node(placement.node, placement.address)  # type: ignore[arg-type]
+        prepared = await client.prepared(node, demand.image, request.os)
+        sent, body = await self._creation(node, request, prepared, placement)
+        client.hold(node, sandbox_id)
+        try:
+            created = await client.node_call(
+                "POST",
+                f"{node.address}/v1/sandboxes/{sandbox_id}/adopt",
+                node=node.name,
+                body=body.model_dump_json,
+                timeout=None,
+            )
+        except _Refused as refusal:
+            client.drop(node, sandbox_id)
+            raise ProviderCapabilityError(f"cannot continue in {handle}: {refusal}") from None
+        except BaseException:
+            client.drop(node, sandbox_id)
+            raise
+        return FleetSandbox(client, node, SandboxDescription.model_validate_json(created), sent)
+
+    async def list_retained(self) -> list[dict[str, object]]:
+        found: list[dict[str, object]] = []
+        for view in await self.client.retained():
+            prefix = SNAPSHOT_PREFIX if view.kind == "snapshot" else HANDLE_PREFIX
+            handle = f"{prefix}{view.sandbox_id}"
+            found.append(
+                {
+                    "provider": self.name,
+                    "handle": handle,
+                    "episode": view.episode_id,
+                    "role": ",".join(view.roles),
+                    "node": f"{view.node}/{view.provider}",
+                    "status": view.status.value,
+                    "gpus": (),
+                    "running": view.kind == "sandbox" and view.status is SandboxStatus.RETAINED,
+                    "cleanup_command": f"ale sandbox destroy {handle}",
+                }
+            )
+        return found
+
+    async def destroy_retained(self, handle: str) -> None:
+        if handle.startswith(SNAPSHOT_PREFIX):
+            await self.client.destroy_snapshot(_named(handle, SNAPSHOT_PREFIX))
+            return
+        sandbox_id = _named(handle, HANDLE_PREFIX)
+        if not any(
+            view.kind == "sandbox" and view.sandbox_id == sandbox_id
+            for view in await self.client.retained()
+        ):
+            raise ProviderCapabilityError(f"{handle!r} is no retained Sandbox on the Fleet")
+        await self.client.destroy_kept(sandbox_id)
 
     async def _placed(self, sandbox_id: str, placement: Placement) -> Placement:
         while placement.status is SandboxStatus.QUEUED:
@@ -918,6 +1069,47 @@ class FleetSandbox(Sandbox):
     async def inject_input(self, actions: Sequence[object]) -> int:
         body = await self._call("POST", "/input", json=list(actions))
         return int(json.loads(body)["applied"])
+
+    async def retain(
+        self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
+    ) -> RetainedSandbox:
+        """Keep the Sandbox on its Node past its episode; the Fleet's ledger holds it now, and
+        no lease ends it."""
+        retention = Retention(roles=roles, reason=reason)
+        kept = RetainedSandbox.model_validate_json(
+            await self._call("POST", "/retain", body=retention.model_dump_json)
+        )
+        await self._client.retain(self.sandbox_id, retention)
+        self._client.drop(self.node, self.sandbox_id)
+        return self._retained(HANDLE_PREFIX, roles, reason, kept.gpu_devices)
+
+    async def snapshot(
+        self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
+    ) -> RetainedSandbox:
+        """Save the Sandbox's snapshot on its Node, which later Sandboxes of the same image
+        boot from there; the Sandbox is left for :meth:`destroy`."""
+        retention = Retention(roles=roles, reason=reason)
+        await self._call("POST", "/snapshot", body=retention.model_dump_json)
+        await self._client.snapshot(self.sandbox_id, retention)
+        return self._retained(SNAPSHOT_PREFIX, roles, reason, ())
+
+    def _retained(
+        self,
+        prefix: str,
+        roles: tuple[Literal["solver", "verifier"], ...],
+        reason: str,
+        gpu_devices: tuple[str, ...],
+    ) -> RetainedSandbox:
+        handle = f"{prefix}{self.sandbox_id}"
+        return RetainedSandbox(
+            provider=FleetProvider.name,
+            handle=handle,
+            episode_id=self.request.episode_id,
+            roles=roles,
+            reason=reason,
+            cleanup_command=f"ale sandbox destroy {handle}",
+            gpu_devices=gpu_devices,
+        )
 
     async def destroy(self) -> None:
         if self.state is SandboxState.DESTROYED:
