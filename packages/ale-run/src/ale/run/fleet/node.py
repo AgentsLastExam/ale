@@ -715,6 +715,9 @@ class NodeAgent:
         choice, reason = choose(grant.demand, [view])
         if choice is None:
             raise _Refused(reason or "no profile here serves it")
+        if choice.wait_sec is not None:
+            # Room expected later is no room: a Node admits only what fits now.
+            raise _Refused(f"{self.name} has no room for it now")
         return choice.holds, choice.profile
 
     async def create(self, body: CreateSandbox, sandbox_id: str) -> SandboxDescription:
