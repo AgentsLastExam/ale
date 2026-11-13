@@ -233,7 +233,7 @@ live organization (daemon 0.225.2). Operating it is in
 | Its daemon listens inside the sandbox (2280, 22220, 22222, 33333, and any other port PID 1 opens) and runs commands for anyone, as root | `iptables` owner rules reject every non-root user, IPv4 and IPv6; a probe as the agent must fail on every local address, or the sandbox is destroyed |
 | Accepts no connection from the sandbox outward; its SSH gateway refuses `-R` | guestd runs over two SSH exec sessions, one for commands and one for file reads. A third carries `guestd/tunnel.py`, which delivers the Gateway on the sandbox's loopback; the sandbox names an index into the Host's list, never an address |
 | Switches `networkBlockAll` and a domain allowlist at runtime (Tier 3 or 4 only), asynchronously | `block` uses `networkBlockAll`. `allowlist` uses `domainAllowList` with the hosts as declared, which Daytona matches as ALE does. `accepts` refuses addresses, ports and more than 100 hosts. Every switch waits for a TLS handshake with a public host the Task did not declare to behave as the setting says |
-| On a GPU runner, accepts connections under `networkBlockAll` that it passes nothing on, and names a proxy of its own in every process's environment (see below) | guestd starts without the runner's proxy variables, unless the image or Task sets them. The accepted connections are left as they are, as under the allowlist on every runner: the conformance suite counts the network as reached only when a TLS handshake with a public host completes |
+| Accepts connections under `networkBlockAll` that it passes nothing on, and on a GPU runner names a proxy of its own in every process's environment (see below) | guestd starts without the runner's proxy variables, unless the image or Task sets them. The accepted connections are left as they are: the Provider and the conformance suite count the network as reached only when a TLS handshake with a public host completes |
 | Serves GPUs from its own region, in several models, optionally as spot capacity it may reclaim | Asks for those of the Task's models Daytona offers ([GPU models](#gpu-models)) and never spot. The GPUs are read with `nvidia-smi` as the agent and recorded; another count or model, or a GPU the agent cannot open, destroys the sandbox |
 | Mounts the Host driver's libraries without registering them with the linker (see [GPU driver capabilities](#gpu-driver-capabilities)) | Runs `ldconfig` as root before it reads the GPUs, as Docker's NVIDIA paths do with their linker-cache hook; a sandbox where it fails is destroyed |
 | Rate-limits creates | A create answered 429 made nothing and is retried, honoring `Retry-After`, for up to five minutes. No other failed create is repeated, since it may have made a sandbox |
@@ -249,18 +249,16 @@ the allowed host; other ports of unlisted addresses are unreachable. The proxy a
 TCP connection to port 443 before it decides, which is why egress is checked with a TLS
 handshake rather than a connect.
 
-A GPU runner enforces the same settings differently, as measured on H100 sandboxes. Under
-`networkBlockAll` a CPU runner refuses every connection, while a GPU runner accepts TCP
-connections to ports 80, 443 and 53 of any address and passes nothing on them: a TLS
-handshake ends at once, an HTTP request gets no answer, and no name resolves. Every process
-in a GPU sandbox also starts with `HTTP_PROXY`, `HTTPS_PROXY` and their lower-case forms set
-to `http://172.20.0.1:18080`, and `NO_PROXY` to loopback. That proxy applies the sandbox's
+Under `networkBlockAll` every runner accepts TCP connections to ports 80 and 443 of any
+address, a GPU runner also to port 53, and passes nothing on them: a TLS handshake ends at
+once, an HTTP request gets no answer, and no name resolves. Other ports get no answer.
+
+A GPU runner, as measured on H100 sandboxes, starts every process with `HTTP_PROXY`,
+`HTTPS_PROXY` and their lower-case forms set to `http://172.20.0.1:18080`, and `NO_PROXY`
+to loopback. That proxy applies the sandbox's
 settings too: under `networkBlockAll` it answers every request with 403, under the
 allowlist it forwards only to allowed hosts, on any port. Direct connections otherwise
-behave as on a CPU runner, so the agent needs neither the proxy nor its variables. Under
-`networkBlockAll` an agent on a GPU runner therefore sees a connection to the Internet open
-and then fail where a CPU runner refuses it at once; under the allowlist every runner does
-that for a host the list leaves out.
+behave as on a CPU runner, so the agent needs neither the proxy nor its variables.
 
 ## QEMU
 
