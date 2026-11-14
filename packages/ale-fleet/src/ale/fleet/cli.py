@@ -247,7 +247,14 @@ def status(
             lease = f"lease {row.lease_left_sec:.0f}s" if row.lease_left_sec is not None else ""
             typer.echo(
                 f"  {row.sandbox_id:<40} {row.status:<9} {row.node or '-':<16} "
-                f"{row.run_id} {lease} {row.reason}"
+                f"{row.task or '-'} {row.role} {row.run_id} {lease} {row.reason}"
+            )
+    if fleet.images:
+        typer.echo("IMAGES")
+        for image in fleet.images:
+            typer.echo(
+                f"  {image.key[7:19]}  {image.bytes / 1e9:.1f} GB  {', '.join(image.nodes)}  "
+                f"{', '.join(image.tasks) or '-'}"
             )
 
 
