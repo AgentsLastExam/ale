@@ -292,8 +292,9 @@ The control plane serves one status document, `GET /v1/status`, and a page rende
 at `/`; `ale-fleet status` prints the same document. Both show Nodes (state, profiles,
 resources used of total including macOS slots, images, free disk, agent version), the queue
 with why each Sandbox waits, each Run's progress and mean start segments, the Sandboxes of
-the last hour, which Nodes prepared each image and how long it took them, and the latest
-events. An operator can drain a Node and
-resume it, destroy a Sandbox, and cancel a Run's queued Sandboxes, from the page or with
+the last hour with the Task and image each serves, which Nodes prepared each image, for
+which Tasks and how long it took them, and the latest events. A Sandbox's Task is the one
+its Run reported for its episode, or else the one its Run's plan names for its image. An
+operator can drain a Node and resume it, destroy a Sandbox, and cancel a Run's queued Sandboxes, from the page or with
 `ale-fleet drain`, `resume`, `destroy` and `cancel`; each action is an event in the ledger.
 The page needs the Fleet token once, through `/?token=`, which it keeps in a cookie.
