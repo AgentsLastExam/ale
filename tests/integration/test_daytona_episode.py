@@ -35,8 +35,14 @@ pytestmark = [
     ),
 ]
 
+#: Whether a TLS handshake with a public host completes. A TCP connection proves nothing:
+#: under ``networkBlockAll``, Daytona accepts connections to ports 80 and 443 for any address
+#: and closes them before anything reaches it.
 REACH = (
-    "python3 -c \"import socket; socket.create_connection(('1.1.1.1', 443), 5)\" >/dev/null 2>&1"
+    'python3 -c "import socket, ssl; context = ssl.create_default_context(); '
+    "context.check_hostname = False; context.verify_mode = ssl.CERT_NONE; "
+    "context.wrap_socket(socket.create_connection(('1.1.1.1', 443), 5), "
+    "server_hostname='one.one.one.one')\" >/dev/null 2>&1"
 )
 
 
