@@ -37,7 +37,6 @@ from ale.core.fleet import (
 from ale.core.taskspec import ImageKind, OperatingSystem, Resources
 from ale.fleet import cli as fleet_cli
 from ale.fleet.control import ControlPlane
-from ale.fleet.page import render
 from ale.fleet.placement import NodeView, assign
 from ale.fleet.server import COOKIE, control_app
 from ale.fleet.store import Store
@@ -173,7 +172,6 @@ class TestStatus:
             control.heartbeat(name, Heartbeat(boot_id="boot-1", images=(holding,)))
         (image,) = control.status().images
         assert (image.key, image.prepare_sec, image.nodes) == (IMAGE, 200.0, ("a", "b"))
-        assert "Prepared in" in render(control.status())
 
     def test_each_sandbox_and_image_names_its_task(self, control: ControlPlane) -> None:
         control.register(linux("box"))
@@ -223,16 +221,23 @@ class TestPage:
             assert "ALE Fleet" in await response.text()
             assert client.session.cookie_jar.filter_cookies(client.make_url("/"))[COOKIE]
 
-    async def test_an_operator_action_comes_back_to_the_page(self, control: ControlPlane) -> None:
+    async def test_the_page_embeds_the_status_and_acts_through_the_api(
+        self, control: ControlPlane
+    ) -> None:
         control.register(linux("box"))
+        item = PlanItem(task="org/hello", demand=container(), episodes=1)
+        control.plan("run-aaaaaaaa", RunPlan(label="</script><b>", concurrency=1, items=(item,)))
         async with TestClient(TestServer(control_app(control, TOKEN))) as client:
             await client.get("/", params={"token": TOKEN})
-            response = await client.post("/ui/nodes/box/drain", allow_redirects=False)
-            assert response.status == 303
+            page = await (await client.get("/")).text()
+            embedded = page.split('<script type="application/json" id="status">')[1]
+            # A name holding "</script>" cannot end the element early.
+            assert json.loads(embedded.split("</script>")[0])["runs"][0]["label"] == "</script><b>"
+            # The page's cookie authorizes the API operations its buttons call.
+            response = await client.post("/v1/nodes/box/drain", json={"draining": True})
+            assert response.status == 200
             assert control.nodes["box"].draining
             assert any(event.kind == "admin.drain" for event in control.events())
-            status = await (await client.get("/v1/status")).json()
-            assert status["nodes"][0]["draining"] is True
 
 
 class TestCommand:

@@ -233,19 +233,6 @@ class _Api:
     async def page(self, _request: web.Request) -> web.Response:
         return web.Response(text=render(self.control.status()), content_type="text/html")
 
-    async def act(self, request: web.Request) -> web.Response:
-        """One of the page's operator actions, then back to the page."""
-        kind, target, verb = (request.match_info[key] for key in ("kind", "target", "verb"))
-        if kind == "nodes" and verb in {"drain", "resume"}:
-            self.control.drain(target, verb == "drain")
-        elif kind == "sandboxes" and verb == "destroy":
-            self.control.destroy(target)
-        elif kind == "runs" and verb == "cancel":
-            self.control.cancel_run(target)
-        else:
-            raise web.HTTPNotFound()
-        raise web.HTTPSeeOther("/")
-
     async def info(self, _request: web.Request) -> web.Response:
         return _json({"protocol": PROTOCOL_VERSION, "version": __version__})
 
@@ -314,7 +301,6 @@ def control_app(control: ControlPlane, token: str, *, loopback: bool = False) ->
             web.get("/v1/events", api.events),
             web.get("/v1/status", api.status),
             web.get("/", api.page),
-            web.post("/ui/{kind}/{target}/{verb}", api.act),
         ]
     )
 
