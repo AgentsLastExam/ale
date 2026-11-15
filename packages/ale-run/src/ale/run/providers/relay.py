@@ -2,8 +2,8 @@
 
 The proxy knows an episode by its token, which many programs cannot present: a browser
 sends proxy credentials only in answer to a challenge, and Chromium ignores those in the
-proxy variables. So Docker, QEMU and Firecracker, which seal a Sandbox to the Host, have
-guestd relay a loopback port to the proxy with the token (``guestd/egress.py``). The agent's
+proxy variables. So every Provider that seals a Sandbox to the Host's proxy has guestd
+relay a loopback port to it with the token (``guestd/egress.py``). The agent's
 proxy variables name the relay, and on a desktop so does the agent account's system proxy.
 """
 
@@ -76,4 +76,4 @@ def variables(relay: str, host: str) -> dict[str, str]:
 
 def _bypass(host: str) -> list[str]:
     """The Host's own address, which the Gateway is reached at, and the guest's loopback."""
-    return [host, "localhost", "127.0.0.1"]
+    return list(dict.fromkeys([host, "localhost", "127.0.0.1"]))

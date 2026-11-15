@@ -21,6 +21,8 @@ from tests.support import CONTAINER_BASE
 from ale.core.sandbox import Identity, ImageRef, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
+from ale.run.gateway.proxy import EgressProxy
+from ale.run.gateway.session import GatewaySession, SessionRegistry
 from ale.run.providers.daytona.provider import DAEMON_PORTS, DaytonaProvider
 
 pytestmark = [
@@ -33,10 +35,25 @@ pytestmark = [
 ]
 
 
-#: What the agent reaches. Each check exchanges data: under Daytona's allowlist a bare TCP
-#: connect to port 443 always succeeds, because Daytona's own proxy accepts it first.
+#: What the agent reaches. Each check exchanges data: a GPU runner under ``networkBlockAll``
+#: accepts a bare TCP connect to port 443 and passes nothing on. A host through the proxy is
+#: reported with its certificate's issuer, which must be the host's own, not Daytona's.
 ALLOWLIST_PROBE = r"""
-import json, os, socket, ssl, sys, urllib.request
+import http.client, json, os, socket, ssl, sys, urllib.parse, urllib.request
+proxy = urllib.parse.urlsplit(os.environ.get("HTTPS_PROXY") or "http://127.0.0.1:9")
+def through_proxy(name):
+    connection = http.client.HTTPSConnection(
+        proxy.hostname, proxy.port, timeout=15, context=ssl.create_default_context()
+    )
+    connection.set_tunnel(name, 443)
+    try:
+        connection.connect()
+        issuer = dict(field[0] for field in connection.sock.getpeercert()["issuer"])
+        return "open, issued by " + issuer.get("organizationName", "?")
+    except OSError:
+        return "closed"
+    finally:
+        connection.close()
 def tls(host, name):
     context = ssl.create_default_context()
     context.check_hostname = False
@@ -60,15 +77,30 @@ def fetch(url):
     except Exception:
         return "closed"
 print(json.dumps({
-    "example.com": tls("example.com", "example.com"),
-    "www.example.com": tls("www.example.com", "www.example.com"),
+    "example.com": through_proxy("example.com"),
+    "www.example.com": through_proxy("www.example.com"),
     "one.one.one.one at 1.1.1.1": tls("1.1.1.1", "one.one.one.one"),
     "1.1.1.1 with no name": tls("1.1.1.1", None),
     "github.com resolves": resolves("github.com"),
     "gateway": fetch(sys.argv[1]),
-    "proxy variables": ",".join(k for k in os.environ if k.lower().endswith("_proxy")) or "none",
+    "proxy": proxy.hostname,
 }))
 """
+
+
+@contextlib.asynccontextmanager
+async def _egress_proxy(*hosts: str) -> AsyncIterator[tuple[str, str]]:
+    """The Host's egress proxy, with a session for ``hosts``: its URL and the token."""
+    sessions = SessionRegistry()
+    session = sessions.open(
+        GatewaySession(episode_id="conformance", model="none", allowed_hosts=frozenset(hosts))
+    )
+    proxy = EgressProxy(sessions, host="127.0.0.1")
+    await proxy.start()
+    try:
+        yield proxy.url, session.token
+    finally:
+        await proxy.stop()
 
 
 @contextlib.asynccontextmanager
@@ -144,17 +176,17 @@ class TestDaytonaProvider(ProviderConformance):
             assert hunt.stdout.strip() == "0", "a credential reached the sandbox environment"
 
     @pytest.mark.asyncio
-    async def test_allowlist_mode_reaches_the_declared_hosts_directly_and_nothing_else(
+    async def test_allowlist_mode_reaches_the_declared_hosts_through_the_proxy_alone(
         self,
     ) -> None:
-        """Daytona enforces the allowlist itself, by name, so allowed traffic never passes
-        through the Host. The Gateway still comes through the tunnel, and no proxy is set."""
-        async with _gateway() as port:
+        """Sealed as ``block`` is, the sandbox reaches its hosts through the Host's proxy, which
+        the tunnel carries in beside the Gateway; TLS is the host's own, end to end."""
+        async with _gateway() as port, _egress_proxy("example.com") as (proxy, token):
             request = await self.request(
                 network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
                 gateway_url=f"http://127.0.0.1:{port}",
-                proxy_url="http://127.0.0.1:9",  # the engine passes one; Daytona does not use it
-                proxy_token="t" * 32,
+                proxy_url=proxy,
+                proxy_token=token,
             )
             async with await self.provider.create(request) as sandbox:
                 await sandbox.open_egress()  # setup, as an episode runs it
@@ -165,14 +197,17 @@ class TestDaytonaProvider(ProviderConformance):
                     timeout_sec=120,
                 )
                 assert agent.ok, agent.stderr
-                assert json.loads(agent.stdout) == {
-                    "example.com": "open",
+                seen = json.loads(agent.stdout)
+                issued = seen.pop("example.com")
+                # Daytona's own allowlist re-signed with "netleash ephemeral CA".
+                assert issued.startswith("open, issued by ") and "netleash" not in issued
+                assert seen == {
                     "www.example.com": "closed",  # a name is that host alone
                     "one.one.one.one at 1.1.1.1": "closed",
                     "1.1.1.1 with no name": "closed",
                     "github.com resolves": "closed",
                     "gateway": "open",
-                    "proxy variables": "none",
+                    "proxy": "127.0.0.1",  # guestd's relay
                 }
                 await sandbox.open_egress()  # verification gets the network back
                 reopened = await sandbox.exec(["python3", "-c", ALLOWLIST_PROBE, "http://0:1"])
@@ -181,10 +216,12 @@ class TestDaytonaProvider(ProviderConformance):
     @pytest.mark.asyncio
     async def test_a_pattern_reaches_its_name_and_the_names_below_it(self) -> None:
         """As ALE's own proxy matches it, so a Task gets the same hosts on every Provider."""
-        async with _gateway() as port:
+        async with _gateway() as port, _egress_proxy("*.example.com") as (proxy, token):
             request = await self.request(
                 network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("*.example.com",)),
                 gateway_url=f"http://127.0.0.1:{port}",
+                proxy_url=proxy,
+                proxy_token=token,
             )
             async with await self.provider.create(request) as sandbox:
                 await sandbox.open_egress()
@@ -196,8 +233,8 @@ class TestDaytonaProvider(ProviderConformance):
                 )
                 assert agent.ok, agent.stderr
                 seen = json.loads(agent.stdout)
-                assert seen["example.com"] == "open"
-                assert seen["www.example.com"] == "open"
+                assert seen["example.com"].startswith("open")
+                assert seen["www.example.com"].startswith("open")
                 assert seen["github.com resolves"] == "closed"
 
 

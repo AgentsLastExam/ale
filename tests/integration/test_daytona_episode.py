@@ -19,6 +19,8 @@ from ale.core.config import RunConfig
 from ale.core.lock import TaskSource
 from ale.core.verdict import Status
 from ale.run.episode import run_episode
+from ale.run.gateway.proxy import EgressProxy
+from ale.run.gateway.session import SessionRegistry
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
@@ -47,21 +49,32 @@ REACH = (
 
 
 async def run_one(task_root: Path, run_dir: Path):  # type: ignore[no-untyped-def]
+    """An oracle episode, with the egress proxy a run starts when the Task declares hosts."""
     task = load_tasks(task_root)[0]
     settings = RunConfig()
-    return await run_episode(
-        task,
-        EpisodeProtocol(OracleHarness()),
-        provider_registry(DaytonaProvider()),
-        run_dir=run_dir,
-        collect_artifacts=True,
-        provenance=ProvenanceInputs(
-            source=TaskSource(kind="git", repo="https://e/x.git", commit="a" * 40, path="t"),
-            agent=agent_provenance(OracleHarness(), "none"),
-            gateway=gateway_provenance(settings),
-            config_hash=settings.config_hash,
-        ),
-    )
+    sessions = SessionRegistry()
+    proxy = EgressProxy(sessions, host="127.0.0.1")
+    if task.spec.network.allowed_hosts:
+        await proxy.start()
+    try:
+        return await run_episode(
+            task,
+            EpisodeProtocol(OracleHarness()),
+            provider_registry(DaytonaProvider()),
+            run_dir=run_dir,
+            collect_artifacts=True,
+            proxy_url=proxy.url if task.spec.network.allowed_hosts else "",
+            session_registry=sessions,
+            allowed_hosts=frozenset(task.spec.network.allowed_hosts),
+            provenance=ProvenanceInputs(
+                source=TaskSource(kind="git", repo="https://e/x.git", commit="a" * 40, path="t"),
+                agent=agent_provenance(OracleHarness(), "none"),
+                gateway=gateway_provenance(settings),
+                config_hash=settings.config_hash,
+            ),
+        )
+    finally:
+        await proxy.stop()
 
 
 def whole_gib(task_root: Path) -> None:
@@ -120,7 +133,7 @@ async def test_the_network_is_open_for_setup_and_closed_for_the_agent(
 
 
 @pytest.mark.asyncio
-async def test_an_allowlisted_task_reaches_its_host_directly_and_nothing_else(
+async def test_an_allowlisted_task_reaches_its_host_through_the_proxy_and_nothing_else(
     tmp_path: Path, write_repo: Callable[..., Path]
 ) -> None:
     task_root = write_repo(

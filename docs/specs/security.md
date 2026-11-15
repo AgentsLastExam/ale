@@ -56,13 +56,11 @@ Every supported Harness mode reaches its model only through the Gateway. Subscri
 provider hosts are Host-side upstreams and never widen the Sandbox's Task-declared
 egress policy.
 
-Daytona has neither bridge nor runner. It enforces `block` (`networkBlockAll`) and
-`allowlist` (its own domain allowlist) outside the sandbox, where the agent cannot lift
-them, so allowed traffic goes straight from the cloud to its host instead of through the
-Host. Daytona's allowlist matches names and `*.` patterns as the proxy does, but also passes
-plain HTTP and other ports of an allowed host. It refuses every connection from the
-sandbox to the Host, so the Host carries the Gateway in over SSH, and the sandbox can name
-only the Gateway, never an address.
+Daytona has neither bridge nor runner. It seals both `block` and `allowlist` with its own
+switch outside the sandbox, where the agent cannot lift it. It refuses every connection from
+the sandbox to the Host, so the Host carries the Gateway, and an allowlist's proxy, in over
+SSH, and the sandbox can name only those, never an address. An allowlist's hosts are
+reached through that proxy, as on every other Provider.
 
 Orchard enforces neither `block` nor `allowlist`, so it accepts only Tasks that declare
 `public` (`open`) and refuses the others before provisioning: a macOS sandbox has the
