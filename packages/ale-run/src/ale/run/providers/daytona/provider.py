@@ -8,12 +8,13 @@ works within that:
   and built from there by digest, with the requested CPU, memory and disk.
 * **Channel.** guestd runs over an SSH exec session, the way it runs over ``docker exec``.
   A second SSH session carries a stream tunnel (``guestd/tunnel.py``) so that the agent can
-  reach the Host's Gateway on the sandbox's own loopback.
-* **Network.** Daytona's ``networkBlockAll`` and domain allowlist apply outside the
-  sandbox, where the agent cannot lift them; they replace the internal bridge and the
-  Host's egress proxy that Docker uses, so allowed traffic never passes through the Host.
-  A GPU runner also names a proxy of its own in every process's environment, which nothing
-  needs, so guestd starts without it.
+  reach the Host's Gateway, and under ``allowlist`` the Host's egress proxy, on the
+  sandbox's own loopback.
+* **Network.** Daytona's ``networkBlockAll`` applies outside the sandbox, where the agent
+  cannot lift it, in place of Docker's internal bridge. ``block`` and ``allowlist`` both
+  seal with it; an allowlist then reaches its hosts through the tunneled proxy and guestd's
+  relay, as on Docker. A GPU runner also names a proxy of its own in every process's
+  environment, which nothing needs, so guestd starts without it.
 * **Daemon.** Daytona's daemon listens, without authentication, on a few local ports and
   runs what it is asked as root. The Provider rejects connections to them from every
   non-root user, then proves it by connecting as the agent. A sandbox that cannot be sealed
@@ -42,7 +43,7 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from ale.core.config import DaytonaProviderConfig
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
@@ -66,12 +67,13 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, OperatingSystem, host_allowed
+from ale.core.taskspec import NetworkMode, OperatingSystem
 from ale.run import guestd
 from ale.run.framework import MARKER, framework_identity, with_framework
 from ale.run.gpu import accepts_model, parse_nvidia_smi
 from ale.run.guestd.tunnel import Mux
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
+from ale.run.providers import relay
 from ale.run.providers.daytona.api import DaytonaApi, DaytonaError
 from ale.run.providers.daytona.image import (
     ImageConfig,
@@ -116,14 +118,10 @@ _SSH_MINUTES = 60
 _START_TIMEOUT_SEC = 900
 #: How long a cancelled start waits for Daytona's reply to the create it already sent.
 _CREATE_REPLY_SEC = 30
-#: Public TLS endpoints that tell an open network from a closed one, as (address, name). The
-#: first whose name the Task did not allowlist is used.
-_EGRESS_PROBES = (("1.1.1.1:443", "one.one.one.one"), ("8.8.8.8:443", "dns.google"))
-#: Daytona takes at most this many domains in an allowlist.
-_DOMAIN_LIMIT = 100
-_DNS_NAME = re.compile(
-    r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
-)
+#: A public TLS endpoint that tells an open network from a closed one, as (address, name).
+_EGRESS_PROBE = ("1.1.1.1:443", "one.one.one.one")
+#: Where the tunnel delivers the Host's egress proxy on a sealed allowlist sandbox's loopback.
+PROXY_PORT = SANDBOX_GATEWAY_PORT + 1
 #: What the RunLock records of each GPU, read as the Docker Provider reads it.
 _NVIDIA_QUERY = "uuid,name,pci.bus_id,driver_version"
 #: Daytona's GPU types by the ``gpu_types`` names that select them, as Harbor maps them. Not
@@ -243,8 +241,8 @@ os.execvpe(spec["argv"][0], spec["argv"], environment)
 """
 
 #: Whether a TLS handshake with ``host:port``, naming ``name``, completes from the sandbox.
-#: A bare TCP connect cannot tell: under a domain allowlist Daytona's own proxy accepts every
-#: connection to port 443 and drops the ones whose name is not listed.
+#: A bare TCP connect cannot tell: under ``networkBlockAll`` Daytona accepts connections to
+#: ports 80 and 443 and passes nothing on.
 _HANDSHAKE = r"""
 import socket, ssl, sys
 host, _, port = sys.argv[1].rpartition(":")
@@ -435,6 +433,9 @@ class DaytonaSandbox(Sandbox):
         self._file_client = file_client
         self._tunnel = tunnel
         self._local_gateway = local_gateway
+        self._sealed = False
+        #: The loopback address guestd relays the agent to the egress proxy from, while sealed.
+        self._relay: str | None = None
         self.state = SandboxState.READY
 
     def _as(self, identity: Identity) -> str | None:
@@ -455,6 +456,8 @@ class DaytonaSandbox(Sandbox):
         identity: Identity = Identity.FRAMEWORK,
         output_sink: ExecOutputSink | None = None,
     ) -> ExecResult:
+        if identity is Identity.AGENT and self._sealed and self._relay:
+            env = relay.variables(self._relay, "127.0.0.1") | (env or {})
         loop = asyncio.get_running_loop()
         started = loop.time()
         exit_code, stdout, stderr, timed_out = await self._client.exec(
@@ -511,31 +514,38 @@ class DaytonaSandbox(Sandbox):
         """Let the sandbox reach the network, for the framework's own phases."""
         if self.request.network.mode is NetworkMode.OPEN:
             return
+        # Open, the account's programs go straight out again.
+        await relay.stop(self._client, self.request)
+        self._relay = None
         await self._set_egress({"networkBlockAll": False})
+        self._sealed = False
 
     async def close_egress(self) -> None:
-        """Apply the Task's policy for the agent; Daytona enforces it outside the sandbox.
+        """Seal the sandbox for the agent; Daytona enforces it outside the sandbox.
 
-        ``block`` blocks all outbound traffic. ``allowlist`` is Daytona's own domain
-        allowlist, so allowed traffic goes straight from the sandbox to its host and never
-        through the Host; the Gateway alone comes through the tunnel.
+        ``block`` and ``allowlist`` both block all outbound traffic. An allowlist's hosts
+        are then reached through the egress proxy the tunnel carries in, and the relay
+        guestd puts in front of it. Daytona's own domain allowlist is not used: it
+        terminates TLS and re-signs with a CA that only some clients are told to trust.
         """
-        policy = self.request.network
-        if policy.mode is NetworkMode.OPEN:
+        if self.request.network.mode is NetworkMode.OPEN:
             return
-        if policy.mode is NetworkMode.ALLOWLIST:
-            domains = _domain_allowlist(policy.allowed_hosts)
-            await self._set_egress({"networkBlockAll": False, "domainAllowList": domains})
-        else:
-            await self._set_egress({"networkBlockAll": True})
+        await self._set_egress({"networkBlockAll": True})
+        self._relay = await relay.start(
+            self._client,
+            self.request,
+            self.allocation,
+            proxy=f"http://127.0.0.1:{PROXY_PORT}",
+            host="127.0.0.1",
+        )
+        self._sealed = True
 
     async def _set_egress(self, settings: dict[str, Any]) -> None:
         """Change the settings, then wait until the network behaves as they say.
 
         Daytona applies them asynchronously. Acting on the API's answer alone would start
         the agent, or a setup script, before the change reached the sandbox. The probe is a
-        TLS handshake with a public host the Task did not allowlist, which completes only
-        when the network is open.
+        TLS handshake with a public host, which completes only when the network is open.
         """
         data = await self._api.update_network(self.daytona_id, settings)
         stored = {key: data.get(key) for key in settings}
@@ -544,7 +554,7 @@ class DaytonaSandbox(Sandbox):
                 f"Daytona stored {stored}, not {settings}, on sandbox {self.daytona_id}"
             )
         want_open = settings == {"networkBlockAll": False}
-        address, name = _egress_probe(self.request.network.allowed_hosts)
+        address, name = _EGRESS_PROBE
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 60
         while await _handshakes(self._client, address, name) is not want_open:
@@ -636,12 +646,6 @@ class DaytonaProvider(Provider):
         storage = request.resources.storage_mb
         if storage is not None and storage % 1024:
             problems.append(f"storage_mb={storage} is not a whole number of GiB")
-        if request.network.mode is NetworkMode.ALLOWLIST:
-            try:
-                _domain_allowlist(request.network.allowed_hosts)
-                _egress_probe(request.network.allowed_hosts)
-            except ProviderCapabilityError as exc:
-                problems.append(str(exc))
         gpu_types = request.resources.gpu_types
         if request.resources.gpus and gpu_types and not _daytona_gpu_types(gpu_types):
             usable = ", ".join(sorted(set(_GPU_TYPES.values())))
@@ -1218,54 +1222,38 @@ async def _discard(
 def _tunnel_plan(
     request: SandboxRequest,
 ) -> tuple[str | None, list[tuple[int, int]], list[tuple[str, int]]]:
-    """What the tunnel carries: the Gateway's URL on the sandbox's loopback at the fixed
-    port, the port to listen on, and the Host address behind it.
+    """What the tunnel carries onto the sandbox's loopback: the Gateway at its fixed port and,
+    under ``allowlist``, the Host's egress proxy at ``PROXY_PORT``.
 
-    Only the Gateway. The Host's egress proxy is not used: allowlisted hosts are reached
-    directly, under Daytona's own allowlist.
+    Returns the Gateway's URL there, the ports to listen on with the index of the Host
+    address behind each, and those addresses.
     """
-    url = request.gateway_url
-    if not url:
-        return None, [], []
+    listeners: list[tuple[int, int]] = []
+    targets: list[tuple[str, int]] = []
+    local_gateway = None
+    if request.gateway_url:
+        parts = _tunneled(request.gateway_url)
+        local_gateway = parts._replace(netloc=f"127.0.0.1:{SANDBOX_GATEWAY_PORT}").geturl()
+        listeners.append((SANDBOX_GATEWAY_PORT, len(targets)))
+        targets.append((_host_end(parts), parts.port or 0))
+    if request.network.mode is NetworkMode.ALLOWLIST and request.proxy_url:
+        parts = _tunneled(request.proxy_url)
+        listeners.append((PROXY_PORT, len(targets)))
+        targets.append((_host_end(parts), parts.port or 0))
+    return local_gateway, listeners, targets
+
+
+def _tunneled(url: str) -> SplitResult:
     parts = urlsplit(url)
     if parts.port is None:
         raise ProviderCapabilityError(f"{url!r} has no explicit port to tunnel")
+    return parts
+
+
+def _host_end(parts: SplitResult) -> str:
+    """Where the Host dials a service that listens on every interface."""
     host = parts.hostname or "127.0.0.1"
-    if host in {"0.0.0.0", "::"}:
-        host = "127.0.0.1"
-    local = parts._replace(netloc=f"127.0.0.1:{SANDBOX_GATEWAY_PORT}").geturl()
-    return local, [(SANDBOX_GATEWAY_PORT, 0)], [(host, parts.port)]
-
-
-def _domain_allowlist(hosts: Sequence[str]) -> str:
-    """The Task's allowed hosts as Daytona's domain allowlist.
-
-    Daytona matches names and ``*.name`` patterns as ALE does, but takes at most
-    ``_DOMAIN_LIMIT`` and no address or port; a Task that needs those is refused rather than
-    widened.
-    """
-    names = sorted({host.lower().rstrip(".") for host in hosts})
-    unusable = [name for name in names if not _DNS_NAME.fullmatch(name.removeprefix("*."))]
-    if unusable:
-        raise ProviderCapabilityError(
-            f"Daytona's allowlist takes domain names; {', '.join(unusable)} is not one"
-        )
-    if len(names) > _DOMAIN_LIMIT:
-        raise ProviderCapabilityError(
-            f"Daytona's allowlist takes at most {_DOMAIN_LIMIT} domains, not {len(names)}"
-        )
-    return ",".join(names)
-
-
-def _egress_probe(allowed_hosts: Sequence[str]) -> tuple[str, str]:
-    """A public TLS endpoint whose name the allowlist does not cover, to probe egress with."""
-    for address, name in _EGRESS_PROBES:
-        if not host_allowed(name, allowed_hosts):
-            return address, name
-    raise ProviderCapabilityError(
-        "the allowlist covers every endpoint the Provider checks egress with: "
-        + ", ".join(name for _, name in _EGRESS_PROBES)
-    )
+    return "127.0.0.1" if host in {"0.0.0.0", "::"} else host
 
 
 def _observed_allocation(request: SandboxRequest, data: dict[str, Any]) -> ResourceAllocation:

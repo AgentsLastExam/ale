@@ -37,10 +37,9 @@ from ale.run.providers.daytona.image import (
     image_config,
 )
 from ale.run.providers.daytona.provider import (
+    PROXY_PORT,
     DaytonaProvider,
     DaytonaSandbox,
-    _domain_allowlist,
-    _egress_probe,
     _guest_environment,
     _guestd_command,
     _image_unavailable,
@@ -122,48 +121,39 @@ def test_ssh_command_is_read_for_user_host_and_port() -> None:
         _parse_ssh("echo nothing useful")
 
 
-def test_the_tunnel_carries_the_gateway_alone_and_never_a_wildcard_address() -> None:
-    """The egress proxy is not tunneled: allowlisted hosts are reached directly.
+def allowlist(*hosts: str) -> NetworkPolicy:
+    return NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=hosts)
 
-    The sandbox dials the fixed Gateway port whatever port the Host serves the Gateway on.
-    """
+
+def test_the_tunnel_carries_the_gateway_and_an_allowlists_proxy_never_a_wildcard() -> None:
+    """The sandbox dials fixed loopback ports whatever ports the Host serves them on."""
     local_gateway, listeners, targets = _tunnel_plan(
-        request(gateway_url="http://0.0.0.0:41000/v1", proxy_url="http://192.0.2.9:42000")
+        request(
+            network=allowlist("example.com"),
+            gateway_url="http://0.0.0.0:41000/v1",
+            proxy_url="http://192.0.2.9:42000",
+        )
     )
     assert local_gateway == f"http://127.0.0.1:{SANDBOX_GATEWAY_PORT}/v1"
-    assert listeners == [(SANDBOX_GATEWAY_PORT, 0)]
-    assert targets == [("127.0.0.1", 41000)]
+    assert listeners == [(SANDBOX_GATEWAY_PORT, 0), (PROXY_PORT, 1)]
+    assert targets == [("127.0.0.1", 41000), ("192.0.2.9", 42000)]
+    # An oracle run calls no model, yet its allowlist needs the proxy.
+    oracle = request(network=allowlist("example.com"), proxy_url="http://0.0.0.0:42000")
+    assert _tunnel_plan(oracle) == (None, [(PROXY_PORT, 0)], [("127.0.0.1", 42000)])
+    blocked = request(gateway_url="http://0.0.0.0:41000", proxy_url="http://0.0.0.0:42000")
+    assert _tunnel_plan(blocked)[1] == [(SANDBOX_GATEWAY_PORT, 0)]
     assert _tunnel_plan(request()) == (None, [], [])
     with pytest.raises(ProviderCapabilityError, match="explicit port"):
         _tunnel_plan(request(gateway_url="http://host/"))
 
 
-def allowlist(*hosts: str) -> NetworkPolicy:
-    return NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=hosts)
-
-
-def test_the_allowlist_becomes_daytonas_with_names_and_patterns_as_written() -> None:
-    assert _domain_allowlist(("PyPI.org.", "*.pypi.org", "pypi.org", "files.pythonhosted.org")) == (
-        "*.pypi.org,files.pythonhosted.org,pypi.org"
+def test_an_allowlist_takes_what_the_egress_proxy_takes() -> None:
+    """Addresses, ranges and any number of hosts, as on every other Provider."""
+    hosts = ("10.0.0.1", "10.0.0.0/8", "*.example.com", "one.one.one.one")
+    DaytonaProvider().accepts(request(network=allowlist(*hosts)))
+    DaytonaProvider().accepts(
+        request(network=allowlist(*(f"host{index}.example" for index in range(101))))
     )
-    provider = DaytonaProvider()
-    provider.accepts(request(network=allowlist("example.com")))
-    for unusable in ("10.0.0.1", "10.0.0.0/8", "2001:db8::1", "example.com:8443"):
-        with pytest.raises(ProviderCapabilityError, match="takes domain names"):
-            provider.accepts(request(network=allowlist(unusable)))
-    with pytest.raises(ProviderCapabilityError, match="at most 100"):
-        _domain_allowlist(tuple(f"host{index}.example" for index in range(101)))
-
-
-def test_a_pattern_alone_is_accepted() -> None:
-    DaytonaProvider().accepts(request(network=allowlist("*.example.com")))
-
-
-def test_egress_is_probed_with_an_endpoint_the_allowlist_leaves_out() -> None:
-    assert _egress_probe(()) == ("1.1.1.1:443", "one.one.one.one")
-    assert _egress_probe(("*.one.one.one",)) == ("8.8.8.8:443", "dns.google")
-    with pytest.raises(ProviderCapabilityError, match="covers every endpoint"):
-        DaytonaProvider().accepts(request(network=allowlist("one.one.one.one", "dns.google")))
 
 
 class NetworkApi:
@@ -185,6 +175,12 @@ class ProbingClient:
         self.api = api
         self.envs: list[dict[str, str] | None] = []
 
+    async def egress_relay(
+        self, proxy: str | None, *, bypass: Any = (), desktop: bool = False
+    ) -> str | None:
+        self.api.sent.append({"egress_relay": proxy, "bypass": list(bypass), "desktop": desktop})
+        return "127.0.0.1:41999" if proxy else None
+
     async def exec(self, argv: list[str], *, env: dict[str, str] | None = None, **_: Any):
         if argv[:2] == [guestd.PYTHON["linux"], "-c"] and "wrap_socket" in argv[2]:
             is_open = self.api.sent[-1] == {"networkBlockAll": False}
@@ -198,7 +194,7 @@ def network_sandbox(api: NetworkApi, policy: NetworkPolicy) -> tuple[DaytonaSand
     sandbox = DaytonaSandbox(
         sandbox_id="s",
         daytona_id="d",
-        request=request(network=policy),
+        request=request(network=policy, proxy_url="http://0.0.0.0:42000", proxy_token="t0ken"),
         api=api,  # type: ignore[arg-type]
         ssh=None,  # type: ignore[arg-type]
         client=client,  # type: ignore[arg-type]
@@ -220,21 +216,33 @@ def network_sandbox(api: NetworkApi, policy: NetworkPolicy) -> tuple[DaytonaSand
     return sandbox, client
 
 
-async def test_the_agent_gets_daytonas_allowlist_and_no_proxy_variables() -> None:
+async def test_an_allowlist_seals_as_block_does_and_relays_the_agent_through_the_tunnel() -> None:
+    """Daytona's own domain allowlist re-signs TLS with a CA browsers do not trust, so the
+    sandbox is sealed and its hosts come through the Host's proxy, as on Docker."""
     api = NetworkApi()
     sandbox, client = network_sandbox(api, allowlist("example.com"))
-    await sandbox.open_egress()
     await sandbox.close_egress()
-    assert api.sent == [
-        {"networkBlockAll": False},
-        {"networkBlockAll": False, "domainAllowList": "example.com"},
-    ]
     await sandbox.exec(["true"], identity=Identity.AGENT)
-    assert client.envs == [None]
+    await sandbox.open_egress()
+    await sandbox.exec(["true"], identity=Identity.AGENT)
 
-    blocked, _ = network_sandbox(api, NetworkPolicy(mode=NetworkMode.BLOCK))
+    relayed = {"bypass": ["127.0.0.1", "localhost"], "desktop": False}
+    assert api.sent == [
+        {"networkBlockAll": True},
+        {"egress_relay": f"http://t0ken:@127.0.0.1:{PROXY_PORT}", **relayed},
+        {"egress_relay": None, "bypass": [], "desktop": False},
+        {"networkBlockAll": False},
+    ]
+    sealed, opened = client.envs
+    assert sealed is not None and sealed["HTTPS_PROXY"] == "http://127.0.0.1:41999"
+    assert sealed["NO_PROXY"] == "127.0.0.1,localhost"
+    assert opened is None
+
+    blocked, blocked_client = network_sandbox(api, NetworkPolicy(mode=NetworkMode.BLOCK))
     await blocked.close_egress()
+    await blocked.exec(["true"], identity=Identity.AGENT)
     assert api.sent[-1] == {"networkBlockAll": True}
+    assert blocked_client.envs == [None]
 
 
 def test_guestd_starts_without_the_runners_proxy_variables() -> None:
@@ -257,7 +265,7 @@ def test_guestd_starts_without_the_runners_proxy_variables() -> None:
 
 
 async def test_a_setting_daytona_did_not_store_stops_the_phase() -> None:
-    api = NetworkApi(stores={"networkBlockAll": True, "domainAllowList": None})
+    api = NetworkApi(stores={"networkBlockAll": False, "domainAllowList": None})
     sandbox, _ = network_sandbox(api, allowlist("example.com"))
     with pytest.raises(ProviderStartError, match="Daytona stored"):
         await sandbox.close_egress()

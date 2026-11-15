@@ -60,9 +60,9 @@ it into the GPU region, about a minute and a half for the desktop base.
 
 ## Allowlisted Tasks
 
-A Task with `[agent].network_mode = "allowlist"` downloads straight from Daytona to its
-declared hosts, never through your machine. Daytona takes at most 100 domain names and `*.name`
-patterns, so a Task whose allowlist names an address or a port is refused.
+A Task with `[agent].network_mode = "allowlist"` reaches its declared hosts through the
+egress proxy on your machine, carried into the sandbox over SSH, as it does on Docker. Its
+downloads therefore pass through your machine's connection.
 
 ## Checking an organization
 
@@ -109,6 +109,5 @@ Nothing else is created: no snapshots, so Daytona's snapshot quota is not used, 
 | `Daytona rejected the API key` | `ALE_DAYTONA_API_KEY` is wrong or for another organization |
 | `would not change the sandbox's network settings at runtime` | the organization is below Tier 3 |
 | `is not a whole number of GiB` | the Task's memory or storage is not a multiple of 1024 MB |
-| `Daytona's allowlist takes domain names` | the Task's allowlist names an address or a port |
 | `can still reach Daytona's daemon` | the sandbox could not be sealed; it was destroyed. Report it with the image |
 | `REMOTE HOST IDENTIFICATION HAS CHANGED` | delete `~/.cache/ale/daytona/known_hosts` |
