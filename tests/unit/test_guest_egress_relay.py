@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -82,10 +83,22 @@ class _Account:
         self.writes.append(list(settings))
 
 
+def test_a_tunnel_to_the_proxy_probes_itself_when_quiet() -> None:
+    """A Mac's Softnet forgets a VM's connection that carried nothing for five minutes."""
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        connection = socket.create_connection(server.getsockname())
+        with connection:
+            egress._keep_alive(connection)
+            assert connection.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+            idle = getattr(socket, "TCP_KEEPALIVE", None) or socket.TCP_KEEPIDLE
+            assert connection.getsockopt(socket.IPPROTO_TCP, idle) == egress._IDLE_SEC
+
+
 @pytest.fixture
 def account(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Account:
     account = _Account()
     monkeypatch.setattr(egress, "_relay", None)
+    monkeypatch.setattr(egress, "_KEYED", False)  # three settings by position, as Windows'
     monkeypatch.setattr(egress, "_CHANGED", tmp_path / "run" / "system-proxy.json")
     monkeypatch.setattr(egress, "_has_settings", lambda: True)
     monkeypatch.setattr(egress, "_read_settings", lambda: list(account.settings))
@@ -143,6 +156,26 @@ def test_settings_written_before_they_were_read_back_all_go_back(account: _Accou
     assert account.settings == OWN
 
 
+def test_keyed_settings_go_back_only_where_they_still_hold_the_relays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As macOS's network services: one turned off meanwhile is left off, one turned on is
+    left alone, and a proxy the agent pointed elsewhere keeps the agent's server."""
+    monkeypatch.setattr(egress, "_KEYED", True)
+    own = [["Ethernet", "webproxy", [False, "", 0]], ["Wi-Fi", "webproxy", [False, "", 0]]]
+    relayed = [
+        ["Ethernet", "webproxy", [True, "127.0.0.1", 9]],
+        ["Wi-Fi", "webproxy", [True, "127.0.0.1", 9]],
+    ]
+    current = [
+        ["Ethernet", "webproxy", [True, "127.0.0.1", 9]],
+        ["USB", "webproxy", [True, "10.0.0.1", 3128]],
+    ]
+    assert egress._unchanged(own, relayed, current) == [own[0]]
+    current[0] = ["Ethernet", "webproxy", [True, "10.0.0.2", 8080]]
+    assert egress._unchanged(own, relayed, current) == []
+
+
 @pytest.mark.parametrize(("desktop", "settings"), [(False, True), (True, False)])
 def test_without_a_desktop_or_its_settings_only_the_relay_runs(
     account: _Account, monkeypatch: pytest.MonkeyPatch, desktop: bool, settings: bool
@@ -189,3 +222,126 @@ def test_a_desktop_without_gsettings_has_no_system_proxy_to_set(
 ) -> None:
     monkeypatch.setattr(egress.shutil, "which", lambda _name: None)
     assert egress._has_settings() is False
+
+
+class _NetworkSetup:
+    """macOS's ``networksetup`` over three services, one disabled, as its output reads."""
+
+    def __init__(self) -> None:
+        self.services: dict[str, dict[str, Any]] = {
+            "Ethernet": {
+                "proxybypassdomains": ["*.local", "169.254/16"],
+                "webproxy": [False, "", 0],
+                "securewebproxy": [False, "", 0],
+            },
+            "USB 10/100/1000 LAN": {
+                "proxybypassdomains": [],
+                "webproxy": [True, "proxy.corp", 3128],
+                "securewebproxy": [False, "proxy.corp", 3129],
+            },
+            "Thunderbolt Bridge": {},
+        }
+        self.writes: list[tuple[str, ...]] = []
+
+    def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == "/usr/sbin/networksetup"
+        flag, *args = argv[1:]
+        if flag == "-listallnetworkservices":
+            out = "An asterisk (*) denotes that a network service is disabled.\n"
+            out += "Ethernet\nUSB 10/100/1000 LAN\n*Thunderbolt Bridge\n"
+            return subprocess.CompletedProcess(argv, 0, out, "")
+        service = self.services[args[0]]
+        kind = flag[4:].removesuffix("state")
+        if flag.startswith("-get"):
+            if kind == "proxybypassdomains":
+                domains = service[kind]
+                out = "".join(f"{domain}\n" for domain in domains) or (
+                    f"There aren't any bypass domains set on {args[0]}.\n"
+                )
+            else:
+                enabled, server, port = service[kind]
+                out = (
+                    f"Enabled: {'Yes' if enabled else 'No'}\nServer: {server}\nPort: {port}\n"
+                    "Authenticated Proxy Enabled: 0\n"
+                )
+            return subprocess.CompletedProcess(argv, 0, out, "")
+        self.writes.append((flag, *args))
+        if kind == "proxybypassdomains":
+            service[kind] = [] if args[1:] == ["Empty"] else args[1:]
+        elif flag.endswith("state"):
+            service[kind][0] = args[1] == "on"
+        else:
+            service[kind] = [True, args[1], int(args[2])]
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+@pytest.fixture
+def mac(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _NetworkSetup:
+    """guestd's macOS system proxy, over a fake ``networksetup``."""
+    networksetup = _NetworkSetup()
+    monkeypatch.setattr(egress.subprocess, "run", networksetup)
+    monkeypatch.setattr(egress, "_relay", None)
+    monkeypatch.setattr(egress, "_CHANGED", tmp_path / "db" / "system-proxy.json")
+    monkeypatch.setattr(egress, "_has_settings", lambda: True)
+    monkeypatch.setattr(egress, "_read_settings", egress._read_network_proxies)
+    monkeypatch.setattr(egress, "_relay_settings", egress._relay_network_proxies)
+    monkeypatch.setattr(egress, "_write_settings", egress._write_network_proxies)
+    return networksetup
+
+
+def test_every_enabled_service_names_the_relay_and_gets_its_own_proxies_back(
+    mac: _NetworkSetup,
+) -> None:
+    own = json.loads(json.dumps(mac.services))
+    address = egress.apply("http://token:@192.168.64.1:9", BYPASS, desktop=True)
+    host, _, port = address.rpartition(":")
+    relayed = [True, host, int(port)]
+    for name in ("Ethernet", "USB 10/100/1000 LAN"):
+        service = mac.services[name]
+        assert service == {
+            "proxybypassdomains": BYPASS,
+            "webproxy": relayed,
+            "securewebproxy": relayed,
+        }
+        # The bypass domains are set first, so a proxy is on only once they are.
+        flags = [write[0] for write in mac.writes if write[1] == name]
+        assert flags[:3] == ["-setproxybypassdomains", "-setwebproxy", "-setsecurewebproxy"]
+    assert mac.services["Thunderbolt Bridge"] == {}
+    assert json.loads(egress._CHANGED.read_text())["relay"] == egress._read_network_proxies()
+
+    egress.restore()
+    assert mac.services["USB 10/100/1000 LAN"] == own["USB 10/100/1000 LAN"]
+    ethernet = mac.services["Ethernet"]
+    assert ethernet["proxybypassdomains"] == own["Ethernet"]["proxybypassdomains"]
+    # A proxy that had no server is turned off; the relay's address stays behind, unused.
+    assert ethernet["webproxy"][0] is False and ethernet["securewebproxy"][0] is False
+    assert not egress._CHANGED.exists()
+
+
+def test_what_the_agent_set_in_a_service_stays_for_verification(mac: _NetworkSetup) -> None:
+    egress.apply("http://token:@192.168.64.1:9", BYPASS, desktop=True)
+    mac.services["Ethernet"]["securewebproxy"] = [True, "agent.example", 8443]
+    mac.services["Ethernet"]["proxybypassdomains"] = ["agent.example"]
+    egress.restore()
+    assert mac.services["Ethernet"]["securewebproxy"] == [True, "agent.example", 8443]
+    assert mac.services["Ethernet"]["proxybypassdomains"] == ["agent.example"]
+    assert mac.services["Ethernet"]["webproxy"][0] is False
+    assert mac.services["USB 10/100/1000 LAN"]["webproxy"] == [True, "proxy.corp", 3128]
+
+
+def test_a_service_without_bypass_domains_gets_none_back(mac: _NetworkSetup) -> None:
+    mac.services["Ethernet"]["proxybypassdomains"] = []
+    egress.apply("http://token:@192.168.64.1:9", BYPASS, desktop=True)
+    egress.restore()
+    assert ("-setproxybypassdomains", "Ethernet", "Empty") in mac.writes
+    assert mac.services["Ethernet"]["proxybypassdomains"] == []
+
+
+def test_a_failed_networksetup_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        egress.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 4, "", "** Error: denied"),
+    )
+    with pytest.raises(OSError, match="denied"):
+        egress._read_network_proxies()

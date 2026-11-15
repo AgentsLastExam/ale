@@ -31,14 +31,18 @@ __all__ = ["Relay", "apply", "restore"]
 _HEAD_LIMIT = 16 * 1024
 #: As the Host proxy allows for a request head, and for reaching the other end.
 _TIMEOUT = 15.0
+#: Seconds of silence before a tunnel's connection to the Host proxy sends keepalive probes.
+_IDLE_SEC = 60
 #: What ``apply`` changed in the account's system proxy, kept where it outlives a guestd that
-#: ends while the Sandbox is sealed: one connected over ``docker exec`` ends with its run, and
-#: an agent with administrator rights can stop Windows' service. Only the framework reads it.
-_CHANGED = (
-    Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "ALE", "system-proxy.json")
-    if os.name == "nt"
-    else Path("/run/ale/system-proxy.json")
-)
+#: ends while the Sandbox is sealed: one connected over ``docker exec`` or Orchard's exec ends
+#: with its run, and an agent with administrator rights can stop Windows' service. Only the
+#: framework reads it.
+if os.name == "nt":
+    _CHANGED = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "ALE", "system-proxy.json")
+elif sys.platform == "darwin":
+    _CHANGED = Path("/var/db/ale/system-proxy.json")
+else:
+    _CHANGED = Path("/run/ale/system-proxy.json")
 
 _lock = threading.Lock()
 _relay: Relay | None = None
@@ -99,6 +103,7 @@ class Relay:
                 )
                 return
             with upstream:
+                _keep_alive(upstream)
                 client.settimeout(None)
                 upstream.settimeout(None)
                 upstream.sendall(
@@ -108,6 +113,16 @@ class Relay:
                 back.start()
                 _pump(client, upstream)
                 back.join()
+
+
+def _keep_alive(connection: socket.socket) -> None:
+    """Probe a quiet tunnel after a minute: a Mac's Softnet forgets a VM's connection that
+    carried nothing for five, as a long-poll or an idle WebSocket may not."""
+    with contextlib.suppress(OSError):
+        connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        idle = getattr(socket, "TCP_KEEPALIVE", None) or getattr(socket, "TCP_KEEPIDLE", None)
+        if idle is not None:
+            connection.setsockopt(socket.IPPROTO_TCP, idle, _IDLE_SEC)
 
 
 def _pump(source: socket.socket, sink: socket.socket) -> None:
@@ -161,13 +176,30 @@ def restore() -> None:
             return
         own, relayed = changed["own"], changed["relay"]
         if relayed is not None:
-            current = _read_settings()
-            own = [
-                mine if now == written else now
-                for mine, written, now in zip(own, relayed, current, strict=True)
-            ]
+            own = _unchanged(own, relayed, _read_settings())
         _write_settings(own)
         _CHANGED.unlink(missing_ok=True)
+
+
+def _unchanged(own: list[Any], relayed: list[Any], current: list[Any]) -> list[Any]:
+    """The account's own settings for what still holds what the relay wrote.
+
+    GNOME's and macOS's settings are entries ``[*key, value]``: one gone since, such as a
+    network service the agent turned off, is left gone, and one that appeared is left alone.
+    Windows' three are matched by position.
+    """
+    if not _KEYED:
+        return [
+            mine if now == written else now
+            for mine, written, now in zip(own, relayed, current, strict=True)
+        ]
+    written = {tuple(entry[:-1]): entry[-1] for entry in relayed}
+    present = {tuple(entry[:-1]): entry[-1] for entry in current}
+    return [
+        entry
+        for entry in own
+        if (key := tuple(entry[:-1])) in present and present[key] == written.get(key)
+    ]
 
 
 def _load() -> dict[str, Any] | None:
@@ -180,6 +212,76 @@ def _load() -> dict[str, Any] | None:
 def _store(changed: dict[str, Any]) -> None:
     _CHANGED.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     _CHANGED.write_text(json.dumps(changed))
+
+
+# --- macOS: the web and secure web proxies and bypass domains of every enabled network
+# service, which Safari, Chrome and other CFNetwork clients read, set as root with
+# networksetup for the whole system. Defined everywhere so the unit suite runs it. ---------
+
+_NETWORKSETUP = "/usr/sbin/networksetup"
+#: A service's proxies, each read with ``-get<kind>`` and named with ``-set<kind>``.
+_PROXIES = ("webproxy", "securewebproxy")
+_BYPASS = "proxybypassdomains"
+
+
+def _networksetup(*args: str) -> str:
+    result = subprocess.run(
+        [_NETWORKSETUP, *args], capture_output=True, text=True, timeout=30, check=False
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise OSError(f"networksetup {args[0]} failed: {detail}")
+    return result.stdout
+
+
+def _network_services() -> list[str]:
+    """The enabled network services; a first line explains the asterisk of a disabled one."""
+    lines = _networksetup("-listallnetworkservices").splitlines()
+    if lines and "asterisk" in lines[0]:
+        lines = lines[1:]
+    return [line for line in lines if line.strip() and not line.startswith("*")]
+
+
+def _read_network_proxies() -> list[list[Any]]:
+    """Per service: its bypass domains, then each proxy as ``[enabled, server, port]``."""
+    settings: list[list[Any]] = []
+    for service in _network_services():
+        lines = _networksetup(f"-get{_BYPASS}", service).splitlines()
+        domains = [line.strip() for line in lines if line.strip()]
+        if domains and domains[0].startswith("There aren't any"):
+            domains = []
+        settings.append([service, _BYPASS, domains])
+        for kind in _PROXIES:
+            fields = {}
+            for line in _networksetup(f"-get{kind}", service).splitlines():
+                key, _, value = line.partition(":")
+                fields[key.strip()] = value.strip()
+            port = fields.get("Port", "")
+            proxy = [fields.get("Enabled") == "Yes", fields.get("Server", ""), int(port or 0)]
+            settings.append([service, kind, proxy])
+    return settings
+
+
+def _relay_network_proxies(address: str, bypass: list[str]) -> list[list[Any]]:
+    host, _, port = address.rpartition(":")
+    settings: list[list[Any]] = []
+    for service in _network_services():
+        settings.append([service, _BYPASS, list(bypass)])
+        settings.extend([service, kind, [True, host, int(port)]] for kind in _PROXIES)
+    return settings
+
+
+def _write_network_proxies(settings: list[list[Any]]) -> None:
+    """Each service's bypass domains first, so a proxy is on only once they are set."""
+    for service, kind, value in settings:
+        if kind == _BYPASS:
+            _networksetup(f"-set{_BYPASS}", service, *(value or ["Empty"]))
+            continue
+        enabled, server, port = value
+        if server:
+            _networksetup(f"-set{kind}", service, server, str(port))  # which turns it on
+        if not enabled:
+            _networksetup(f"-set{kind}state", service, "off")
 
 
 # --- Windows: the default connection's WinINet settings, which the account's WinINet
@@ -198,6 +300,8 @@ _OPTION_PER_CONNECTION_OPTION = 75
 if os.name == "nt":
     import ctypes
     from ctypes import wintypes
+
+    _KEYED = False
 
     class _Value(ctypes.Union):
         _fields_ = (
@@ -289,24 +393,21 @@ if os.name == "nt":
         _check(_wininet.InternetSetOptionW(None, _OPTION_REFRESH, None, 0))
 
 elif sys.platform == "darwin":
+    _KEYED = True
 
     def _has_settings() -> bool:
-        return False
+        return True
 
-    def _read_settings() -> Any:
-        raise OSError("guestd sets no system proxy on macOS")
-
-    def _relay_settings(address: str, bypass: list[str]) -> Any:
-        raise OSError("guestd sets no system proxy on macOS")
-
-    def _write_settings(settings: Any) -> None:
-        raise OSError("guestd sets no system proxy on macOS")
+    _read_settings = _read_network_proxies
+    _relay_settings = _relay_network_proxies
+    _write_settings = _write_network_proxies
 
 else:
     # --- Linux: the agent's GNOME settings, which Chromium-family browsers, Firefox and
     # GNOME's own programs read, and watch, in a GNOME session. A desktop without them keeps
     # the proxy variables alone. ----------------------------------------------------------
 
+    _KEYED = True
     _SCHEMA = "org.gnome.system.proxy"
     #: The keys a relay changes, the mode last so that the proxy is on only once named.
     _GNOME = (

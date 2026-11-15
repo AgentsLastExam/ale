@@ -10,6 +10,7 @@ Task's account in to.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import ipaddress
 import json
@@ -49,6 +50,7 @@ from ale.core.sandbox import (
 from ale.core.taskspec import NetworkMode, OperatingSystem
 from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
 from ale.run.images import resolve_registry_reference
+from ale.run.providers import relay
 from ale.run.providers.desktop import require_resolution
 from ale.run.providers.orchard import client as orchard_client
 from ale.run.providers.orchard.client import (
@@ -58,8 +60,13 @@ from ale.run.providers.orchard.client import (
     OwnedVM,
     await_running,
     check_framer,
+    check_live_policy,
+    check_softnet,
     create_owned,
     delete_owned,
+    end_exec_connection,
+    set_softnet_policy,
+    softnet_policy,
     vm_spec,
 )
 from ale.run.providers.orchard.desktop import await_desktop
@@ -87,6 +94,11 @@ _PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _READ_CHUNK_BYTES = 64 * 1024
 #: From a framed clone's first boot to a guest whose account and desktop are checked.
 _BOOT_TIMEOUT_SEC = 300
+#: New guest sessions after a change of the VM's network policy.
+_RECONNECT_TIMEOUT_SEC = 120
+#: The Softnet rules of a restricted VM while it is open, for the framework's phases: every
+#: IPv4 address, as Tart's own network reaches.
+_OPEN_POLICY: tuple[tuple[str, ...], tuple[str, ...]] = (("0.0.0.0/0",), ())
 #: guestd from the sources framing installed, on the framework's Python.
 _GUESTD = (
     "import runpy,sys; sys.path.insert(0,'/opt/ale/guestd'); "
@@ -100,7 +112,9 @@ _ACCOUNT_HOME = (
 # Runs as root in the VM and forwards the fixed Gateway port on its loopback to the Host's
 # Gateway until the VM is deleted or a later episode stops it. It forks only once it listens,
 # so a port that cannot be bound fails the command; it prints the bound port and the relay's
-# process ID.
+# process ID. Its connections send keepalive probes after a minute of silence: a sealed VM's
+# Softnet forgets a connection the VM sent nothing on for five minutes, as it does waiting
+# for a long model call.
 _GATEWAY_RELAY = r"""
 import asyncio,os,socket,sys
 host,port,listen=sys.argv[1],int(sys.argv[2]),int(sys.argv[3])
@@ -111,6 +125,7 @@ if pid:
 os.setsid()
 null=os.open(os.devnull,os.O_RDWR)
 for fd in (0,1,2): os.dup2(null,fd)
+idle=getattr(socket,'TCP_KEEPALIVE',None) or socket.TCP_KEEPIDLE
 async def pipe(reader,writer):
     try:
         while data:=await reader.read(65536):
@@ -122,6 +137,9 @@ async def relay(reader,writer):
         upstream_reader,upstream=await asyncio.open_connection(host,port)
     except OSError:
         writer.close();return
+    connection=upstream.get_extra_info('socket')
+    connection.setsockopt(socket.SOL_SOCKET,socket.SO_KEEPALIVE,1)
+    connection.setsockopt(socket.IPPROTO_TCP,idle,60)
     flows=[asyncio.ensure_future(pipe(reader,upstream)),
            asyncio.ensure_future(pipe(upstream_reader,writer))]
     await asyncio.wait(flows,return_when=asyncio.FIRST_COMPLETED)
@@ -157,6 +175,78 @@ def _owned_vm(handle: str) -> tuple[str, str]:
     if not handle.startswith(HANDLE_PREFIX) or not separator or not name.startswith("ale-"):
         raise ProviderCapabilityError(f"{handle!r} is not an Orchard VM handle")
     return name, uid
+
+
+def _sealed_policy(request: SandboxRequest) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The Softnet rules of a sealed VM: nothing in but Orchard's SSH from the Mac (``@host``,
+    the VM's gateway), and nothing out but the episode's Gateway and, for an allowlist, its
+    proxy, at their ports on the Mac. Gateway DNS and every other port of the Mac stay shut.
+    """
+    urls = [request.gateway_url]
+    if request.network.mode is NetworkMode.ALLOWLIST:
+        urls.append(request.proxy_url)
+    ports = sorted({port for url in urls if url and (port := urlsplit(url).port)})
+    allow = ("in proto tcp @host port 22", *(f"out proto tcp @host port {port}" for port in ports))
+    return allow, ("0.0.0.0/0",)
+
+
+async def _open_guests(
+    client: OrchardClient,
+    name: str,
+    request: SandboxRequest,
+    agent_home: str,
+    *,
+    agent: bool,
+    deadline: float,
+) -> tuple[GuestClient, GuestClient]:
+    """Two guest service sessions in the VM, the second for file reads while the first
+    runs a long command, after checking the guest is the account's framed macOS."""
+    env = dict(request.env) | {
+        "ALE_AGENT_USER": request.user,
+        "ALE_AGENT_HOME": agent_home,
+        "PATH": _PATH,
+        "HOME": "/var/root",
+    }
+    if agent:
+        env["ALE_CUA_DRIVER"] = MACOS_DRIVER
+        env["ALE_CUA_DRIVER_SOCKET"] = MACOS_DRIVER_SOCKET
+    guest_argv = [
+        "sudo",
+        "-n",
+        "/usr/bin/env",
+        "-i",
+        *(f"{k}={v}" for k, v in env.items()),
+        MACOS_PYTHON,
+        "-I",
+        "-S",
+        "-c",
+        _GUESTD,
+        "--stdio",
+    ]
+    guest = GuestClient(
+        await client.connect_guest(name, guest_argv, deadline=deadline),
+        acknowledge_exec_output=True,
+    )
+    file_guest: GuestClient | None = None
+    try:
+        file_guest = GuestClient(await client.connect_guest(name, guest_argv, deadline=deadline))
+        await file_guest.health()
+        health = await guest.health()
+        if (
+            health.get("os") != "macos"
+            or health.get("framework_uid") != 0
+            or not isinstance(health.get("agent_uid"), int)
+            or health["agent_uid"] == 0
+            or health.get("agent_user") != request.user
+            or health.get("agent_home") != agent_home
+        ):
+            raise ProviderCapabilityError("Guest macOS/account/root identity check failed")
+    except BaseException:
+        await guest.close()
+        if file_guest is not None:
+            await file_guest.close()
+        raise
+    return guest, file_guest
 
 
 @dataclass(frozen=True)
@@ -234,6 +324,9 @@ class OrchardSandbox(Sandbox):
         allocation: ResourceAllocation,
         resolved_image: ResolvedImage,
         source: FramedImage,
+        agent: bool,
+        host: str | None,
+        sealed: bool = False,
     ) -> None:
         super().__init__(
             sandbox_id=name,
@@ -250,6 +343,15 @@ class OrchardSandbox(Sandbox):
         self._uid = uid
         self._owned = OwnedVM(name, uid)
         self._source = source
+        #: Whether its guest sessions drive an agent's desktop.
+        self._agent = agent
+        #: The Mac's address as the VM reaches it, where its Gateway and proxy are.
+        self._host = host
+        self._sealed = sealed
+        #: The loopback address guestd relays the agent to the egress proxy from, while sealed.
+        self._relay: str | None = None
+        #: The guest's boot session, once a change of its network policy has read it.
+        self._boot: str | None = None
         self._destroy_lock = asyncio.Lock()
         self.state = SandboxState.READY
 
@@ -278,6 +380,8 @@ class OrchardSandbox(Sandbox):
         identity: Identity = Identity.FRAMEWORK,
         output_sink: ExecOutputSink | None = None,
     ) -> ExecResult:
+        if identity is Identity.AGENT and self._sealed and self._relay:
+            env = relay.variables(self._relay, str(self._host)) | (env or {})
         started = asyncio.get_running_loop().time()
         try:
             code, stdout, stderr, timed_out = await self._client.exec(
@@ -347,14 +451,77 @@ class OrchardSandbox(Sandbox):
         await self._client.upload_dir(source, str(target), run_as=self._as(identity))
 
     async def open_egress(self) -> None:
-        # OPEN is the only policy accepted before provisioning; no firewall is changed.
-        if self.request.network.mode is not NetworkMode.OPEN:
-            raise ProviderCapabilityError("Orchard supports only open networking")
+        """Give a restricted VM every IPv4 address for the framework's phases; an open
+        Task's VM has Tart's own network throughout."""
+        if self.request.network.mode is NetworkMode.OPEN:
+            return
+        # Open, the account's programs go straight out again.
+        await relay.stop(self._client, self.request)
+        self._relay = None
+        await self._set_policy(*_OPEN_POLICY)
+        self._sealed = False
 
     async def close_egress(self) -> None:
-        # Sealing an OPEN task leaves networking unchanged, explicitly.
-        if self.request.network.mode is not NetworkMode.OPEN:
-            raise ProviderCapabilityError("Orchard cannot enforce restricted networking")
+        """Seal a restricted VM with Softnet on the Mac, outside the guest, before the agent
+        starts; an allowlist then reaches the proxy through guestd's relay."""
+        if self.request.network.mode is NetworkMode.OPEN:
+            return
+        await self._set_policy(*_sealed_policy(self.request))
+        await self._start_relay()
+        self._sealed = True
+
+    async def _set_policy(self, allow: tuple[str, ...], block: tuple[str, ...]) -> None:
+        """Give the VM the Softnet rules ``allow`` and ``block``, and new guest sessions.
+
+        Softnet drops the VM's connections when its rules change, so the sessions, and the
+        SSH connection Orchard carries them on, end first. The VM must not restart: Orchard's
+        worker does that when it cannot change the rules in place, and a guest with another
+        boot session has lost the agent's processes and the framework's relays.
+        """
+        name = self._owned.name
+        record = await self._orchard.get_vm(name)
+        if record is not None and softnet_policy(record) == (allow, block):
+            return
+        # After the first change, its own record: the sessions may have died with the agent.
+        boot = self._boot or await self._boot_session()
+        await asyncio.gather(
+            self._client.close(), self._file_client.close(), return_exceptions=True
+        )
+        await end_exec_connection(self._orchard, name)
+        await set_softnet_policy(self._orchard, self._owned, allow, block)
+        self._client, self._file_client = await _open_guests(
+            self._orchard,
+            name,
+            self.request,
+            self.agent_home,
+            agent=self._agent,
+            deadline=asyncio.get_running_loop().time() + _RECONNECT_TIMEOUT_SEC,
+        )
+        if await self._boot_session() != boot:
+            raise ProviderStartError(
+                f"the Orchard worker restarted {name} to change its network policy; "
+                "everything that ran in it is gone"
+            )
+        self._boot = boot
+
+    async def _boot_session(self) -> str:
+        """The guest kernel's ID of this boot, which a restart changes and nothing else."""
+        code, stdout, stderr, timed_out = await self._client.exec(
+            ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"], timeout_sec=30
+        )
+        if code or timed_out or not stdout.strip():
+            raise ProviderStartError(f"could not read the VM's boot session: {stderr.strip()}")
+        return stdout.strip()
+
+    async def _start_relay(self) -> None:
+        port = urlsplit(self.request.proxy_url).port if self.request.proxy_url else None
+        self._relay = await relay.start(
+            self._client,
+            self.request,
+            self.allocation,
+            proxy=f"http://{self._host}:{port}",
+            host=str(self._host),
+        )
 
     async def screenshot(self) -> bytes:
         # Orchard exec has a bounded output queue. Read one small response at a
@@ -407,8 +574,15 @@ class OrchardSandbox(Sandbox):
 
         A sandbox frames that image for its Task's account when it first uses it.
         """
-        await self._local.shut_down(self._orchard, self._owned)
+        await self._shut_down()
         await self._local.save(self._owned, image.runtime_ref)
+
+    async def _shut_down(self) -> None:
+        """Shut the guest down from inside, as a disk ALE keeps needs."""
+        # The relay ends with this boot; the disk keeps the account's own settings.
+        await relay.stop(self._client, self.request)
+        self._relay = None
+        await self._local.shut_down(self._orchard, self._owned)
 
     def _retained(
         self,
@@ -468,7 +642,7 @@ class OrchardSandbox(Sandbox):
         if forgotten.exit_code:
             detail = forgotten.stderr.decode(errors="replace").strip()
             raise ProviderStartError(f"could not forget the VM's display mode: {detail}")
-        await self._local.shut_down(self._orchard, self._owned)
+        await self._shut_down()
         await self._local.save(self._owned, image)
         source = FramedImage(
             name=image,
@@ -512,11 +686,16 @@ class OrchardProvider(Provider):
         return self._local_orchard
 
     def capabilities(self) -> Capabilities:
+        modes = {NetworkMode.OPEN}
+        # A Fleet places Tasks by these; the versions are checked when a VM is made.
+        with contextlib.suppress(ProviderCapabilityError):
+            check_softnet()
+            modes |= {NetworkMode.BLOCK, NetworkMode.ALLOWLIST}
         return Capabilities(
             operating_systems=frozenset({OperatingSystem.MACOS}),
             # Framing requires the image to sign the Task's account in to a desktop.
             gui=True,
-            network_modes=frozenset({NetworkMode.OPEN}),
+            network_modes=frozenset(modes),
             snapshot=True,
         )
 
@@ -597,6 +776,8 @@ class OrchardProvider(Provider):
         return result
 
     def accepts(self, request: SandboxRequest) -> None:
+        if request.network.mode is not NetworkMode.OPEN:
+            check_softnet()  # says what to run, where the generic refusal would not
         super().accepts(request)
         if request.resources.gpus:
             raise ProviderCapabilityError("Orchard GPU allocations are not supported")
@@ -628,12 +809,13 @@ class OrchardProvider(Provider):
                 "use another account for a Task without elevated privileges"
             )
 
-    async def _resolve_gateway_host(
-        self, guest: GuestClient, request: SandboxRequest
-    ) -> str | None:
-        if not request.gateway_url:
+    async def _resolve_host(self, guest: GuestClient, request: SandboxRequest) -> str | None:
+        """The Mac's address as the VM reaches it, when it reaches a Gateway or a proxy there."""
+        if not request.gateway_url and not (
+            request.network.mode is NetworkMode.ALLOWLIST and request.proxy_url
+        ):
             return None
-        # In Tart's NAT network, the guest's router is its Mac host.
+        # In Tart's NAT network, and in Softnet's, the guest's router is its Mac host.
         code, stdout, _, timed_out = await guest.exec(
             ["/sbin/route", "-n", "get", "-inet", "default"],
             run_as=request.user,
@@ -649,8 +831,8 @@ class OrchardProvider(Provider):
                 if not (address.is_loopback or address.is_unspecified or address.is_multicast):
                     return str(address)
         raise ProviderStartError(
-            "could not find the Mac from the VM's default IPv4 route; "
-            "the local Tart worker must use its default NAT network"
+            "could not find the Mac from the VM's default IPv4 route, which Tart's NAT and "
+            "Softnet both make the Mac"
         )
 
     async def _start_gateway_relay(
@@ -684,67 +866,6 @@ class OrchardProvider(Provider):
         if code or timed_out:
             raise ProviderStartError("Could not start the Gateway relay in the VM")
 
-    async def _open_guests(
-        self,
-        client: OrchardClient,
-        name: str,
-        request: SandboxRequest,
-        agent_home: str,
-        *,
-        agent: bool,
-        deadline: float,
-    ) -> tuple[GuestClient, GuestClient]:
-        """Two guest service sessions in the VM, the second for file reads while the first
-        runs a long command, after checking the guest is the account's framed macOS."""
-        env = dict(request.env) | {
-            "ALE_AGENT_USER": request.user,
-            "ALE_AGENT_HOME": agent_home,
-            "PATH": _PATH,
-            "HOME": "/var/root",
-        }
-        if agent:
-            env["ALE_CUA_DRIVER"] = MACOS_DRIVER
-            env["ALE_CUA_DRIVER_SOCKET"] = MACOS_DRIVER_SOCKET
-        guest_argv = [
-            "sudo",
-            "-n",
-            "/usr/bin/env",
-            "-i",
-            *(f"{k}={v}" for k, v in env.items()),
-            MACOS_PYTHON,
-            "-I",
-            "-S",
-            "-c",
-            _GUESTD,
-            "--stdio",
-        ]
-        guest = GuestClient(
-            await client.connect_guest(name, guest_argv, deadline=deadline),
-            acknowledge_exec_output=True,
-        )
-        file_guest: GuestClient | None = None
-        try:
-            file_guest = GuestClient(
-                await client.connect_guest(name, guest_argv, deadline=deadline)
-            )
-            await file_guest.health()
-            health = await guest.health()
-            if (
-                health.get("os") != "macos"
-                or health.get("framework_uid") != 0
-                or not isinstance(health.get("agent_uid"), int)
-                or health["agent_uid"] == 0
-                or health.get("agent_user") != request.user
-                or health.get("agent_home") != agent_home
-            ):
-                raise ProviderCapabilityError("Guest macOS/account/root identity check failed")
-        except BaseException:
-            await guest.close()
-            if file_guest is not None:
-                await file_guest.close()
-            raise
-        return guest, file_guest
-
     def _boot_source(self, request: SandboxRequest) -> FramedImage | None:
         """What a VM for ``request`` boots, as this Mac recorded it: the snapshot it names,
         or the framed copy of its image."""
@@ -770,13 +891,19 @@ class OrchardProvider(Provider):
         image: ResolvedImage,
         source: FramedImage | None,
         *,
-        relay: bool,
+        retarget: bool,
     ) -> OrchardSandbox:
         """A running ALE VM booted from ``source``, driven through new guest sessions;
-        ``relay`` points its Gateway relay at this request's Gateway."""
+        ``retarget`` points its Gateway relay at this request's Gateway.
+
+        Its Softnet rules, not this run's configuration, say whether it is sealed now: an
+        allowlist agent's commands need the egress relay only then, with this run's proxy and
+        token.
+        """
         name, uid = _owned_vm(handle)
         if source is None or source.identity != image.observed_identity:
             raise ProviderCapabilityError(f"{handle!r} does not run an image recorded here")
+        agent = request.role is not SandboxRole.VERIFIER
         client = self._local().client()
         try:
             await client.start()
@@ -785,18 +912,33 @@ class OrchardProvider(Provider):
                 raise ProviderStartError(f"Orchard VM {name} is gone or was replaced")
             if not str(record.get("image", "")).startswith(source.name):
                 raise ProviderCapabilityError(f"{handle!r} does not run the recorded image")
+            sealed = bool(softnet_policy(record)[1])
             deadline = asyncio.get_running_loop().time() + 120
-            guest, file_guest = await self._open_guests(
-                client,
-                name,
-                request,
-                source.agent_home,
-                agent=request.role is not SandboxRole.VERIFIER,
-                deadline=deadline,
+            guest, file_guest = await _open_guests(
+                client, name, request, source.agent_home, agent=agent, deadline=deadline
             )
             try:
-                if relay and (host := await self._resolve_gateway_host(guest, request)):
+                host = await self._resolve_host(guest, request)
+                if retarget and host and request.gateway_url:
                     await self._start_gateway_relay(guest, host, request, replace=True)
+                sandbox = OrchardSandbox(
+                    request=request,
+                    local=self._local(),
+                    orchard=client,
+                    client=guest,
+                    file_client=file_guest,
+                    name=name,
+                    uid=uid,
+                    agent_home=source.agent_home,
+                    resolved_image=image,
+                    allocation=allocation,
+                    source=source,
+                    agent=agent,
+                    host=host,
+                    sealed=sealed,
+                )
+                if sealed:
+                    await sandbox._start_relay()
             except BaseException:
                 await guest.close()
                 await file_guest.close()
@@ -804,19 +946,7 @@ class OrchardProvider(Provider):
         except BaseException:
             await client.close()
             raise
-        return OrchardSandbox(
-            request=request,
-            local=self._local(),
-            orchard=client,
-            client=guest,
-            file_client=file_guest,
-            name=name,
-            uid=uid,
-            agent_home=source.agent_home,
-            resolved_image=image,
-            allocation=allocation,
-            source=source,
-        )
+        return sandbox
 
     async def reattach(
         self,
@@ -836,7 +966,7 @@ class OrchardProvider(Provider):
             source: FramedImage | None = record.boots
         else:
             source = self._boot_source(request)
-        return await self._drive(handle, request, allocation, image, source, relay=False)
+        return await self._drive(handle, request, allocation, image, source, retarget=False)
 
     async def attach_retained(
         self,
@@ -854,7 +984,7 @@ class OrchardProvider(Provider):
             or record.role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
         ):
             raise ProviderCapabilityError(f"{handle!r} is not a retained Orchard solver VM")
-        return await self._drive(handle, request, allocation, image, record.boots, relay=True)
+        return await self._drive(handle, request, allocation, image, record.boots, retarget=True)
 
     async def list_retained(self) -> list[dict[str, object]]:
         records = _records()
@@ -951,8 +1081,11 @@ class OrchardProvider(Provider):
 
     async def _create(self, request: SandboxRequest, *, agent: bool) -> OrchardSandbox:
         self.accepts(request)
-        image = await self.prepare_image(request.prepared_image)
+        restricted = request.network.mode is not NetworkMode.OPEN
         local = self._local()
+        if restricted:
+            await check_live_policy(local)
+        image = await self.prepare_image(request.prepared_image)
         if request.snapshot is None:
             framed = await frame_image(local, image, user=request.user)
         else:
@@ -976,6 +1109,11 @@ class OrchardProvider(Provider):
                 memory_mb=request.resources.memory_mb,
                 storage_mb=request.resources.storage_mb,
             )
+            if restricted:
+                # Orchard changes a running VM's Softnet rules in place, but not whether it
+                # has Softnet at all, so a VM that is sealed later starts open on Softnet.
+                allow, block = map(list, _OPEN_POLICY)
+                spec |= {"netSoftnet": True, "netSoftnetAllow": allow, "netSoftnetBlock": block}
             owned = await create_owned(client, spec)
             record = await await_running(client, owned)
             readiness_started = True
@@ -990,12 +1128,12 @@ class OrchardProvider(Provider):
                     or record.get("assignedMemory") != request.resources.memory_mb
                 ):
                     raise ProviderStartError("Orchard assigned resources differ from request")
-                guest, file_guest = await self._open_guests(
+                guest, file_guest = await _open_guests(
                     client, owned.name, request, framed.agent_home, agent=agent, deadline=deadline
                 )
-                gateway_host = await self._resolve_gateway_host(guest, request)
-                if gateway_host is not None:
-                    await self._start_gateway_relay(guest, gateway_host, request)
+                host = await self._resolve_host(guest, request)
+                if host is not None and request.gateway_url:
+                    await self._start_gateway_relay(guest, host, request)
                 if agent:
                     await set_elevation(
                         guest,
@@ -1027,6 +1165,8 @@ class OrchardProvider(Provider):
                 uid=owned.uid,
                 agent_home=framed.agent_home,
                 source=framed,
+                agent=agent,
+                host=host,
                 resolved_image=ResolvedImage(
                     kind=ImageKind.VM,
                     prepared_identity=image.prepared_identity,

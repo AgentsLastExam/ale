@@ -19,14 +19,16 @@ Then, in another shell:
 uv run scripts/setup_macos.py --check
 ```
 
-Setup pins Orchard **0.55.0** and Tart **2.41.1**, verifies release checksums, and starts
-an isolated controller and worker. Their state, credentials and images live in
+Setup pins Orchard **0.58.0**, Tart **2.41.1** and Softnet **0.25.0**, verifies release
+checksums, and starts an isolated controller and worker. Once the pinned releases are in
+place it stops services an earlier pin started, and refuses while their controller holds VMs
+or their worker runs without its controller. Their state, credentials and images live in
 `~/.local/share/ale/macos`, where ALE finds them; existing services and system trust
 settings are unchanged. The worker is a child of the setup command, which stays in the
 foreground: macOS's Local Network privacy lets a program started from a Terminal or SSH
-login reach the VMs only while it descends from that login, and a worker left behind
-fails every VM with `no route to host`. Ctrl-C or closing the login stops the worker; run
-setup again to restart it, including after a reboot. To reuse installed binaries at these
+login reach the VMs only while it descends from that login, and a worker left behind fails
+every VM with `no route to host`. Ctrl-C or closing the login stops the worker; run setup
+again to restart it, including after a reboot. To reuse installed binaries at these
 versions, pass `--orchard-path` and `--tart-path`. Setup does not bypass macOS signature
 checks.
 
@@ -35,6 +37,15 @@ Setup also installs ALE's macOS framer, which frames images offline as root:
 sudoers rule `/etc/sudoers.d/ale-framework-macos`, which lets the account that runs setup
 run that one program as root without a password. sudo asks for the account's password the
 first time and whenever the framer changes; ALE refuses to frame with an outdated copy.
+
+On macOS 26 or later, setup also installs Softnet, the packet filter that seals the VMs of
+`no-network` and `allowlist` Tasks on this Mac, as `/usr/local/libexec/ale/softnet`, owned
+by root and set-user-ID because it sets a VM's network up as root, and puts it on the
+worker's PATH; sudo asks for the password for that too. `--check` says whether the worker
+has it. Without it, as on macOS before 26, only `public` Tasks run. Softnet sets the DHCP
+lease time for VM networks to 10 minutes, for every VM and Internet Sharing on the Mac, and
+that setting stays after cleanup
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#restricted-networking)).
 
 ## Choose an image
 
@@ -55,7 +66,7 @@ memory_mb = 4096
 
 [agent]
 user = "admin"
-network_mode = "public"
+network_mode = "no-network"
 sudo = true
 ```
 
@@ -92,7 +103,8 @@ account in `build.sh`: add it with `sysadminctl` and its home at `$ALE_HOME`, se
 Tag resolution needs the Docker CLI with Buildx (no Docker daemon); use `docker login` for
 private registries. Digest-pinned references need neither, and Tart pulls the image itself.
 
-Only `network_mode = "public"` is supported. Use the
+Every `network_mode` is supported; the sealed modes need Softnet, and their setup and
+verification reach IPv4 addresses only. Use the
 [standard Task layout](../specs/task-authoring.md) with `.sh` stage entries; the reward
 goes to `/opt/ale/logs/verifier`, because the macOS root volume is read-only. Every
 shipped Harness supports macOS. The npm-installed CLIs need Node/npm at the
@@ -124,7 +136,8 @@ collection and verification.
 For Provider conformance tests, run
 `ALE_TEST_ORCHARD=1 uv run pytest tests/conformance/test_provider_orchard.py`. The suite
 builds `macos-unprivileged` on this Mac the first time, so its sudo=false cases run as an
-account other than `admin`, then creates fresh VMs of it and checks cleanup. The CLI
+account other than `admin`, then creates fresh VMs of it, sealed as `no-network` unless a
+case asks otherwise, and checks cleanup. The CLI
 Harness integration tests run in macOS VMs as well ([Tests](../../tests/README.md)).
 
 ## Clean up
@@ -135,7 +148,7 @@ refuses. If a teardown fails, inspect the reported VM name and UID in Orchard be
 reconciling it; do not delete a same-name replacement. Uncollected guest logs and outputs
 can be lost when execution is interrupted.
 
-To remove the local services, their state, the framed images and the framer:
+To remove the local services, their state, the framed images, the framer and Softnet:
 
 ```bash
 uv run scripts/setup_macos.py --cleanup
