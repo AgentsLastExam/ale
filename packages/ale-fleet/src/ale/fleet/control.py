@@ -976,7 +976,10 @@ class ControlPlane:
             SandboxRow(
                 sandbox_id=r.sandbox_id,
                 run_id=r.run_id,
+                task=self._task(r),
+                image=r.demand.image,
                 node=r.node,
+                provider=r.provider,
                 status=r.status,
                 reason=r.reason,
                 episode_id=r.episode_id,
@@ -996,6 +999,13 @@ class ControlPlane:
             if r.status is SandboxStatus.QUEUED:
                 reasons = queue.setdefault(r.run_id, {})
                 reasons[r.reason or "waiting"] = reasons.get(r.reason or "waiting", 0) + 1
+        tasks: dict[str, set[str]] = {}
+        for run in self.runs.values():
+            for item in run.plan.items if run.plan is not None else ():
+                tasks.setdefault(item.demand.image, set()).add(item.task)
+        for r in self.sandboxes.values():
+            if task := self._task(r):
+                tasks.setdefault(r.demand.image, set()).add(task)
         copies: dict[str, list[ImageHolding]] = {}
         holders: dict[str, list[str]] = {}
         for name, record in sorted(self.nodes.items()):
@@ -1023,6 +1033,7 @@ class ControlPlane:
             images=tuple(
                 ImageCopies(
                     key=key,
+                    tasks=tuple(sorted(tasks.get(key, ()))),
                     bytes=max(image.bytes for image in held),
                     prepare_sec=round(sum(image.prepare_sec for image in held) / len(held), 1),
                     nodes=tuple(holders[key]),
@@ -1031,6 +1042,20 @@ class ControlPlane:
             ),
             events=tuple(self.events(50)),
         )
+
+    def _task(self, record: SandboxRecord) -> str:
+        """The Task a Sandbox serves: its episode's, or the one its Run planned for its image."""
+        run = self.runs.get(record.run_id)
+        if run is None:
+            return ""
+        if (report := run.episodes.get(record.episode_id)) is not None:
+            return report.task
+        planned = {
+            item.task
+            for item in (run.plan.items if run.plan is not None else ())
+            if item.demand.image == record.demand.image
+        }
+        return planned.pop() if len(planned) == 1 else ""
 
     def _label(self, run_id: str) -> str:
         run = self.runs.get(run_id)

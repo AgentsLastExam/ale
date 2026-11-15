@@ -60,7 +60,12 @@ class SandboxRow(BaseModel):
 
     sandbox_id: str
     run_id: str
+    task: str
+    """The Task it serves, by its episode or its Run's plan; empty when neither says."""
+    image: str
+    """The key of the prepared image it runs."""
     node: str | None
+    provider: str | None
     status: SandboxStatus
     reason: str
     episode_id: str
@@ -116,6 +121,8 @@ class ImageCopies(BaseModel):
     model_config = _VIEW
 
     key: str
+    tasks: tuple[str, ...]
+    """The Tasks whose Sandboxes run it, as far as the control plane's Runs said."""
     bytes: int
     """The most any of them takes for it on disk."""
     prepare_sec: float
