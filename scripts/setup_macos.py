@@ -5,7 +5,9 @@ Run with uv; this script uses only Python's standard library. It never changes
 Homebrew, launchd, system trust, desktop permissions, or the shared Tart home. With sudo,
 which asks for this account's password, it installs ALE's macOS framer: a root-owned copy of
 ``framework_macos.sh`` and a sudoers rule that lets this account run that program alone as
-root, which framing an image offline needs.
+root, which framing an image offline needs. On macOS 26 or later it also installs Softnet
+root-owned and set-user-ID as the worker's ``softnet``, which a VM whose network ALE
+restricts runs on.
 
 It stays in the foreground as the worker's parent. macOS's Local Network privacy lets a
 program started from a Terminal or SSH login reach the VMs only while it descends from
@@ -27,6 +29,7 @@ import shutil
 import signal
 import socket
 import ssl
+import stat
 import subprocess
 import sys
 import tarfile
@@ -48,11 +51,21 @@ FRAMER_SOURCE = (
     Path(__file__).resolve().parents[1] / "packages/ale-run/src/ale/run/framework_macos.sh"
 )
 FRAMER_RULE = Path("/etc/sudoers.d/ale-framework-macos")
+#: Softnet, which Tart runs for a VM whose network ALE restricts, and which needs root to set
+#: the VM's network up; the Orchard Provider looks for it here.
+SOFTNET = Path("/usr/local/libexec/ale/softnet")
+#: Its release archive and the SHA-256 of the archive and of the program in it.
+SOFTNET_RELEASE = (
+    "0.25.0",
+    "https://github.com/openai/softnet/releases/download/0.25.0/softnet.tar.gz",
+    "5a2e8ef779f0a2169b88d273ee806c0d64321ec7714c0dc99bf217523ae9b008",
+    "5c838134bb91af720d3575a9918e0bebe48a40bf37deaf0a5ec2219ba94b8534",
+)
 RELEASES = {
     "orchard": (
-        "0.55.0",
-        "https://github.com/openai/orchard/releases/download/0.55.0/orchard-darwin-arm64",
-        "35a6ca9f1770a6da9ccc508cee46df21f962d4c5fb437161e4fe8daa34bb14fe",
+        "0.58.0",
+        "https://github.com/openai/orchard/releases/download/0.58.0/orchard-darwin-arm64",
+        "8875ad3b34959ca1585860cbbdee447f069846d3aa05ec6d92038640a3b9800e",
     ),
     "tart": (
         "2.41.1",
@@ -126,10 +139,13 @@ def install_binary(root: Path, name: str) -> Path:
         download(url, archive)
         if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
             raise SetupError(f"{name} {version} download checksum mismatch")
+        # Staged, then renamed into place, so a service still running the old copy keeps it.
         if name == "orchard":
             target = directory / "orchard"
-            shutil.copyfile(archive, target)
-            target.chmod(0o755)
+            staged = Path(temporary) / "orchard"
+            shutil.copyfile(archive, staged)
+            staged.chmod(0o755)
+            os.replace(staged, target)
         else:
             unpacked = Path(temporary) / "unpacked"
             unpacked.mkdir()
@@ -139,9 +155,11 @@ def install_binary(root: Path, name: str) -> Path:
             if len(apps) != 1:
                 raise SetupError("Tart release does not contain exactly one application")
             destination = directory / "tart.app"
+            staged = directory / f"tart.app.{secrets.token_hex(4)}"
+            shutil.copytree(apps[0], staged, symlinks=True)
             if destination.exists():
-                shutil.rmtree(destination)
-            shutil.copytree(apps[0], destination, symlinks=True)
+                destination.rename(Path(temporary) / "replaced.app")
+            staged.rename(destination)
             target = destination / "Contents/MacOS/tart"
     return target
 
@@ -233,7 +251,12 @@ def start_process(
         except BrokenPipeError:
             pass
     started, command = process_info(process.pid)
-    state["processes"][role] = {"pid": process.pid, "started": started, "command": command}
+    state["processes"][role] = {
+        "pid": process.pid,
+        "started": started,
+        "command": command,
+        "orchard": RELEASES["orchard"][0],
+    }
     save_state(root, state)
     if process.poll() is not None:
         raise SetupError(f"{role} exited; inspect its private log")
@@ -304,6 +327,36 @@ def wait_for(predicate, description: str, timeout: float = 45) -> None:
     raise SetupError(f"Timed out waiting for {description}; inspect the private service logs")
 
 
+def stop_other_orchard(root: Path, state: dict) -> None:
+    """Stop the services a run of another Orchard pin started, so this run starts its own; not
+    while the controller holds VMs, which the worker would stop."""
+    pin = RELEASES["orchard"][0]
+    processes = state["processes"]
+    outdated = [
+        role
+        for role in ("worker", "controller")
+        if role in processes
+        and processes[role].get("orchard") != pin
+        and process_matches(processes[role])
+    ]
+    if not outdated:
+        return
+    controller = processes.get("controller")
+    if not (controller and process_matches(controller)):
+        # Without its controller, nothing says which VMs the worker still runs.
+        raise SetupError(
+            f"Setup now runs Orchard {pin}, but an earlier worker runs without its "
+            "controller; stop it once its VMs are collected, then run setup again"
+        )
+    if api(root, state, "vms"):
+        raise SetupError(
+            f"Setup now runs Orchard {pin}, but the running controller still holds VMs; "
+            "collect and delete them, then run setup again"
+        )
+    for role in outdated:
+        stop_process(processes[role])
+
+
 def initialize(
     root: Path, orchard_path: str | None, tart_path: str | None
 ) -> subprocess.Popen | None:
@@ -326,6 +379,7 @@ def initialize(
         save_state(root, state)
         private_write(root / "password", secrets.token_urlsafe(32))
     selected = state.get("binaries", {})
+    given = state.get("given", {})
     for name, explicit in (("orchard", orchard_path), ("tart", tart_path)):
         if (
             explicit
@@ -335,9 +389,19 @@ def initialize(
             raise SetupError(
                 "Existing setup uses different executables; clean up before changing tools"
             )
-    orchard = binary(root, "orchard", orchard_path or selected.get("orchard"))
-    tart = binary(root, "tart", tart_path or selected.get("tart"))
+
+    def chosen(name: str) -> str | None:
+        """The executable an earlier run was given. One it found on PATH or installed is
+        found again, and replaced by the pinned release when it is another version."""
+        return selected.get(name) if given.get(name) else None
+
+    explicit = {"orchard": orchard_path or chosen("orchard"), "tart": tart_path or chosen("tart")}
+    orchard = binary(root, "orchard", explicit["orchard"])
+    tart = binary(root, "tart", explicit["tart"])
+    # Only once both are in hand: a failed download leaves the earlier services running.
+    stop_other_orchard(root, state)
     state["binaries"] = {"orchard": str(orchard), "tart": str(tart)}
+    state["given"] = {name: bool(path) for name, path in explicit.items()}
     save_state(root, state)
     for name in ("orchard-home", "tart-home", "worker-bin"):
         (root / name).mkdir(mode=0o700, exist_ok=True)
@@ -351,6 +415,10 @@ def initialize(
         raise SetupError("Unexpected worker executable")
     else:
         link.symlink_to(tart)
+    # Tart finds Softnet on the worker's PATH when it starts a VM that has it.
+    softnet = root / "worker-bin/softnet"
+    if SOFTNET.exists() and not softnet.is_symlink():
+        softnet.symlink_to(SOFTNET)
     if not (root / "controller.crt").exists():
         private_write(
             root / "openssl.cnf",
@@ -480,11 +548,65 @@ def install_framer() -> None:
                 raise SetupError(f"could not install the macOS framer ({Path(argv[0]).name})")
 
 
-def remove_framer() -> None:
-    if FRAMER.exists() or FRAMER_RULE.exists():
-        argv = ["/usr/bin/sudo", "/bin/rm", "-f", str(FRAMER_RULE), str(FRAMER)]
+def softnet_installed() -> bool:
+    """Whether Softnet is in place: the pinned program, root-owned and set-user-ID."""
+    try:
+        info = SOFTNET.stat()
+        current = hashlib.sha256(SOFTNET.read_bytes()).hexdigest() == SOFTNET_RELEASE[3]
+    except OSError:
+        return False
+    return current and info.st_uid == 0 and bool(info.st_mode & stat.S_ISUID)
+
+
+def macos_major() -> int:
+    """This Mac's macOS major version. ``sw_vers`` reports it as it is, where Python built
+    for an older SDK may be shown the compatibility version, 16 for macOS 26."""
+    result = subprocess.run(
+        ["/usr/bin/sw_vers", "-productVersion"], capture_output=True, text=True, check=False
+    )
+    return int((result.stdout.strip() or "0").split(".")[0])
+
+
+def install_softnet() -> None:
+    """Install the pinned Softnet root-owned and set-user-ID, unless it is in place.
+
+    It needs macOS 26 or later; elsewhere it is left out, and only open macOS Tasks run.
+    """
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise SetupError("Local Tart setup requires an Apple Silicon Mac")
+    if macos_major() < 26:
+        print("Softnet needs macOS 26 or later; only open macOS Tasks run on this Mac.")
+        return
+    if softnet_installed():
+        return
+    version, url, archive_digest, digest = SOFTNET_RELEASE
+    with tempfile.TemporaryDirectory() as staging:
+        archive = Path(staging) / "softnet.tar.gz"
+        download(url, archive)
+        if hashlib.sha256(archive.read_bytes()).hexdigest() != archive_digest:
+            raise SetupError(f"softnet {version} download checksum mismatch")
+        unpacked = Path(staging) / "unpacked"
+        with tarfile.open(archive) as bundle:
+            bundle.extract("softnet", unpacked, filter="data")
+        program = unpacked / "softnet"
+        if hashlib.sha256(program.read_bytes()).hexdigest() != digest:
+            raise SetupError(f"softnet {version} program checksum mismatch")
+        print("Installing Softnet as root; sudo may ask for this account's password.")
+        owned = ["/usr/bin/install", "-o", "root", "-g", "wheel", "-m"]
+        for argv in (
+            [*owned, "0755", "-d", str(SOFTNET.parent)],
+            [*owned, "4755", str(program), str(SOFTNET)],
+        ):
+            if subprocess.run(["/usr/bin/sudo", *argv], check=False).returncode:
+                raise SetupError("could not install Softnet")
+
+
+def remove_installed() -> None:
+    """Remove the framer, its sudoers rule and Softnet."""
+    if FRAMER.exists() or FRAMER_RULE.exists() or SOFTNET.exists():
+        argv = ["/usr/bin/sudo", "/bin/rm", "-f", str(FRAMER_RULE), str(FRAMER), str(SOFTNET)]
         if subprocess.run(argv, check=False).returncode:
-            raise SetupError("could not remove the macOS framer")
+            raise SetupError("could not remove the macOS framer and Softnet")
 
 
 def cleanup(root: Path, state: dict) -> None:
@@ -511,7 +633,7 @@ def cleanup(root: Path, state: dict) -> None:
         if record := state["processes"].get(role):
             stop_process(record)
     shutil.rmtree(root)
-    remove_framer()
+    remove_installed()
 
 
 def hold(worker: subprocess.Popen) -> None:
@@ -543,6 +665,11 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "Local Orchard controller and Tart worker are ready; guest capabilities untested."
             )
+            linked = (root / "worker-bin/softnet").is_symlink()
+            if softnet_installed() and linked:
+                print(f"Softnet {SOFTNET_RELEASE[0]} is the worker's: restricted networking runs.")
+            else:
+                print("Softnet is not the worker's: only open macOS Tasks run.")
             return 0
         # A sibling lock does not disappear while cleanup removes the state directory.
         root.parent.mkdir(parents=True, exist_ok=True)
@@ -555,6 +682,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("Removed owned local services and setup data.")
             else:
                 install_framer()
+                install_softnet()
                 worker = initialize(root, args.orchard_path, args.tart_path)
                 print("Ready. In another shell, run macOS Tasks with: uv run ale run TASK")
         if worker is not None:

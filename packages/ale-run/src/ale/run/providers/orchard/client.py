@@ -12,8 +12,10 @@ import contextlib
 import json
 import math
 import os
+import re
 import shlex
 import ssl
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +23,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
 
-from ale.core.errors import GuestUnreachableError, ProviderStartError
+from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.run.framework import MACOS_FRAMER
 from ale.run.process import run
 
@@ -37,10 +39,47 @@ CONTROL_ACCOUNT = "admin"
 #: Where ``scripts/setup_macos.py`` installs ``framework_macos.sh``, owned by root, with a
 #: sudoers rule that lets the Orchard user run this program alone as root.
 FRAMER = Path("/usr/local/libexec/ale/framework-macos")
+#: Where ``scripts/setup_macos.py`` installs Softnet, root-owned and set-user-ID, as the
+#: worker's ``softnet``: Tart runs it for a VM whose network ALE restricts.
+SOFTNET = Path("/usr/local/libexec/ale/softnet")
+#: The oldest Orchard whose worker changes a running VM's Softnet policy in place, and the
+#: oldest Tart it does that with.
+LIVE_POLICY_ORCHARD = (0, 57, 0)
+LIVE_POLICY_TART = (2, 34, 0)
+#: A worker applying a changed Softnet policy, which it does at its next sync.
+POLICY_TIMEOUT_SEC = 60
 #: Pulling a macOS image of tens of gigabytes.
 PULL_TIMEOUT_SEC = 7200
 #: A guest's own shutdown, which writes everything it holds to disk.
 SHUTDOWN_TIMEOUT_SEC = 180
+#: The VMSpec fields a PUT replaces, which an update forwards from the VM's record; never
+#: credentials or metadata from the controller's full record.
+_SPEC_FIELDS = (
+    "os",
+    "arch",
+    "runtime",
+    "hostProcesses",
+    "endpoints",
+    "net-softnet",
+    "netSoftnet",
+    "netSoftnetAllow",
+    "netSoftnetBlock",
+    "suspendable",
+    "usbAccessories",
+    "powerState",
+)
+# Ends every SSH connection of the account Orchard logs in as, this command's among them:
+# its unprivileged sshd process runs as that account. pgrep and pkill do not see
+# `sshd-session` in a macOS 26 guest, so ps names them. The command never ends by itself.
+_END_SSH = (
+    "pids=$(/bin/ps -axo pid=,user=,comm= | /usr/bin/awk "
+    f"'$2 == \"{CONTROL_ACCOUNT}\" && $3 ~ /^sshd/ {{print $1}}'); "
+    '[ -n "$pids" ] || exit 3; kill -TERM $pids; sleep 30'
+)
+
+
+class ExecConnectionError(GuestUnreachableError):
+    """Orchard opened no exec session, so the command never ran."""
 
 
 @dataclass(frozen=True)
@@ -154,6 +193,12 @@ class OrchardClient:
                 "Orchard connection or response failed; the request was not retried"
             ) from None
 
+    async def controller_info(self) -> dict[str, object]:
+        result = await self._request("GET", "/controller/info")
+        if not isinstance(result, dict):
+            raise ProviderStartError("Orchard controller info has an invalid shape")
+        return result
+
     async def list_workers(self) -> list[dict[str, object]]:
         result = await self._request("GET", "/workers")
         if not isinstance(result, list) or any(not isinstance(worker, dict) for worker in result):
@@ -223,7 +268,7 @@ class OrchardClient:
                     max_msg_size=_FRAME_BYTES,
                 )
         except (aiohttp.ClientError, OSError, TimeoutError, ValueError):
-            raise GuestUnreachableError(
+            raise ExecConnectionError(
                 "Orchard exec connection failed; command was not retried"
             ) from None
 
@@ -538,6 +583,52 @@ def check_framer() -> None:
         )
 
 
+#: How a Mac gets what restricted networking needs.
+_SETUP = "run `uv run scripts/setup_macos.py` on macOS 26 or later"
+
+
+async def check_live_policy(local: LocalOrchard) -> None:
+    """Refuse restricted networking unless this Mac can change a running VM's Softnet policy:
+    setup's Softnet as the worker's, and an Orchard controller and Tart new enough."""
+    check_softnet()
+    client = local.client()
+    try:
+        await client.start()
+        orchard = _version(str((await client.controller_info()).get("version", "")))
+    finally:
+        await client.close()
+    tart = _version(await local.tart("--version"))
+    for name, found, oldest in (
+        ("Orchard", orchard, LIVE_POLICY_ORCHARD),
+        ("Tart", tart, LIVE_POLICY_TART),
+    ):
+        if found is None or found < oldest:
+            raise ProviderCapabilityError(
+                f"restricted macOS networking needs {name} {'.'.join(map(str, oldest))} or "
+                f"later on the local Orchard; {_SETUP}"
+            )
+
+
+def check_softnet(root: Path = STATE_DIR) -> None:
+    """Refuse restricted networking unless the worker's ``softnet`` is setup's, which Tart
+    can start as root only when it is root-owned and set-user-ID."""
+    try:
+        installed: os.stat_result | None = SOFTNET.stat()
+        linked = (root / "worker-bin" / "softnet").resolve(strict=True) == SOFTNET
+    except OSError:
+        installed, linked = None, False
+    if installed is None or installed.st_uid or not installed.st_mode & stat.S_ISUID or not linked:
+        raise ProviderCapabilityError(
+            f"restricted macOS networking needs Softnet installed as {SOFTNET} for the local "
+            f"Orchard worker; {_SETUP}"
+        )
+
+
+def _version(text: str) -> tuple[int, int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+    return (int(match[1]), int(match[2]), int(match[3])) if match else None
+
+
 @dataclass
 class OwnedVM:
     name: str
@@ -635,23 +726,7 @@ async def stop_owned(client: OrchardClient, owned: OwnedVM) -> None:
             f"Orchard VM {name} (UID {uid}) is terminal failed; controller rejects stop; "
             "physical stop unconfirmed, inspect worker before cleanup"
         )
-    # PUT replaces VMSpec. Forward only public mutable fields, never credentials
-    # or metadata from the controller's full VM record.
-    fields = (
-        "os",
-        "arch",
-        "runtime",
-        "hostProcesses",
-        "endpoints",
-        "net-softnet",
-        "netSoftnet",
-        "netSoftnetAllow",
-        "netSoftnetBlock",
-        "suspendable",
-        "usbAccessories",
-    )
-    spec = {key: record[key] for key in fields if key in record}
-    spec["powerState"] = "stopped"
+    spec = _spec(record) | {"powerState": "stopped"}
     try:
         changed = (
             record if record.get("powerState") == "stopped" else await client.update_vm(name, spec)
@@ -667,14 +742,7 @@ async def stop_owned(client: OrchardClient, owned: OwnedVM) -> None:
                         f"Orchard VM {name} disappeared or changed during stop"
                     )
                 observed = record.get("observedGeneration")
-                conditions = record.get("conditions")
-                stopped = isinstance(conditions, list) and any(
-                    isinstance(item, dict)
-                    and item.get("type") == "running"
-                    and item.get("state") == "false"
-                    for item in conditions
-                )
-                if type(observed) is int and observed >= generation and stopped:
+                if type(observed) is int and observed >= generation and _running(record) is False:
                     owned.stopped = True
                     break
                 await asyncio.sleep(1)
@@ -684,6 +752,91 @@ async def stop_owned(client: OrchardClient, owned: OwnedVM) -> None:
         raise ProviderStartError(
             f"Orchard VM {name} (UID {uid}) stop unconfirmed; inspect worker cleanup"
         ) from exc
+
+
+def softnet_policy(record: Mapping[str, object]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The Softnet allow and block rules a VM's record names."""
+    allow, block = record.get("netSoftnetAllow"), record.get("netSoftnetBlock")
+    return (
+        tuple(map(str, allow)) if isinstance(allow, list) else (),
+        tuple(map(str, block)) if isinstance(block, list) else (),
+    )
+
+
+async def set_softnet_policy(
+    client: OrchardClient, owned: OwnedVM, allow: Sequence[str], block: Sequence[str]
+) -> None:
+    """Replace a running owned VM's Softnet rules and wait until its worker applied them.
+
+    A worker that cannot change them in place stops and starts the VM instead, which takes
+    away everything running in it; a stop seen meanwhile fails here. A stop missed between
+    two polls is the caller's to find in the guest.
+    """
+    name, uid = owned.name, owned.uid
+    record = await client.get_vm(name)
+    if record is None or record.get("uid") != uid or record.get("status") != "running":
+        raise ProviderStartError(f"Orchard VM {name} is not running as created")
+    changed = await client.update_vm(
+        name, _spec(record) | {"netSoftnetAllow": list(allow), "netSoftnetBlock": list(block)}
+    )
+    generation = changed.get("generation")
+    if changed.get("uid") != uid or type(generation) is not int:
+        raise ProviderStartError(f"Orchard update identity/generation mismatch for {name}")
+    try:
+        async with asyncio.timeout(POLICY_TIMEOUT_SEC):
+            while True:
+                record = await client.get_vm(name)
+                if record is None or record.get("uid") != uid:
+                    raise ProviderStartError(f"Orchard VM {name} disappeared or was replaced")
+                if record.get("status") == "failed" or _running(record) is False:
+                    raise ProviderStartError(
+                        f"the Orchard worker stopped {name} to change its network policy "
+                        "instead of changing it in place; see the worker's log"
+                    )
+                observed = record.get("observedGeneration")
+                if type(observed) is int and observed >= generation:
+                    return
+                await asyncio.sleep(0.5)
+    except TimeoutError:
+        raise ProviderStartError(
+            f"the Orchard worker did not apply {name}'s network policy within {POLICY_TIMEOUT_SEC}s"
+        ) from None
+
+
+async def end_exec_connection(client: OrchardClient, name: str) -> None:
+    """End the SSH connection the controller keeps to a VM for all of its exec sessions.
+
+    Softnet drops the connections it carries when the VM's policy changes, telling neither
+    end, and the controller would go on opening sessions on a connection that is gone. Ended
+    from inside while the policy still carries its close, the next session opens another.
+    """
+    try:
+        result = await client.exec(name, ["sudo", "-n", "/bin/sh", "-c", _END_SSH], timeout_sec=60)
+    except ExecConnectionError as error:
+        raise ProviderStartError(
+            f"could not end Orchard's SSH connection to {name}: {error}"
+        ) from error
+    except GuestUnreachableError:
+        return  # Orchard reports the session lost with the connection the command ended
+    # The command never ends by itself, so any exit means it did not end the connection.
+    detail = result.stderr.decode(errors="replace").strip()
+    raise ProviderStartError(
+        f"could not end Orchard's SSH connection to {name} (exit {result.exit_code}): {detail}"
+    )
+
+
+def _spec(record: Mapping[str, object]) -> dict[str, object]:
+    """The VMSpec a PUT would leave unchanged; the PUT replaces every field."""
+    return {key: record[key] for key in _SPEC_FIELDS if key in record}
+
+
+def _running(record: Mapping[str, object]) -> bool | None:
+    """What the VM's ``running`` condition says, or None when it has none."""
+    conditions = record.get("conditions")
+    for item in conditions if isinstance(conditions, list) else ():
+        if isinstance(item, dict) and item.get("type") == "running":
+            return {"true": True, "false": False}.get(str(item.get("state")))
+    return None
 
 
 async def delete_owned(client: OrchardClient, owned: OwnedVM) -> None:

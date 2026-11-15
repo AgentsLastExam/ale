@@ -53,31 +53,37 @@ The egress proxy knows an episode by its token, which many programs cannot prese
 Edge, Firefox and PowerShell 5.1's `Invoke-WebRequest` send proxy credentials only in answer
 to a challenge, and the proxy's 407 carries none (Chrome reports
 `ERR_PROXY_AUTH_UNSUPPORTED`); Chromium also drops those in the proxy variables. So once
-Docker, QEMU, Firecracker or Daytona has sealed an `allowlist` Sandbox, `relay.py` has
-guestd (`guestd/egress.py`) listen on an ephemeral loopback port, add the token to the
+Docker, QEMU, Firecracker, Daytona or Orchard has sealed an `allowlist` Sandbox, `relay.py`
+has guestd (`guestd/egress.py`) listen on an ephemeral loopback port, add the token to the
 request that opens each tunnel, and forward it to the proxy. The agent's proxy variables
 name that port, with no token. On a desktop the agent account's system proxy names it too,
 bypassed for the Host's address and loopback: on Windows the default connection's WinINet
 settings, which WinINet clients and Chromium-family browsers read; on Linux the GNOME
 settings (`org.gnome.system.proxy`), which Chromium-family browsers and Firefox read in a
-GNOME session, written with `gsettings` in that session. A Linux desktop without them keeps
-the variables alone. Programs already running follow the change.
+GNOME session, written with `gsettings` in that session; on macOS the web and secure web
+proxies and bypass domains of every enabled network service, written as root with
+`networksetup`, which Safari, Chrome and other CFNetwork clients read, and which are the
+whole system's rather than one account's. A Linux desktop without GNOME's settings keeps the
+variables alone. Programs already running follow the change on Windows and Linux.
 
 `open_egress`, a power-off and a snapshot stop the relay and give the account its own
 settings back: open, its programs go straight out again, and a snapshot outlives the relay.
 Only settings that still name the relay go back, so what the agent set itself stays for
-verification. A failure is logged, not raised: the agent may have broken its own desktop.
-guestd keeps what it changed in `/run/ale/system-proxy.json`, or
-`%ProgramData%\ALE\system-proxy.json` on Windows, because a guestd connected over
-`docker exec` ends with its run, sealed or not. A run that reattaches to a sealed Sandbox
-starts the relay again with its own proxy and token.
+verification. A macOS proxy that had no server is turned off again with the relay's address
+left in it, unused. A failure is logged, not raised: the agent may have broken its own
+desktop. guestd keeps what it changed in `/run/ale/system-proxy.json`,
+`%ProgramData%\ALE\system-proxy.json` on Windows or `/var/db/ale/system-proxy.json` on
+macOS, because a guestd connected over `docker exec` or Orchard's exec ends with its run,
+sealed or not. A run that reattaches to a sealed Sandbox starts the relay again with its own
+proxy and token.
 
 Measured with Chrome 157 on Windows base 0.1.3, where a browser started before the seal
-switches as well, and with Chrome 157 and Firefox 160 on the container base's GNOME 42,
-started from the desktop or from an agent's command: each reaches the declared host and is
-refused the rest, its own background hosts included. Windows' `curl.exe` honors the
-variables, but schannel fails its certificate revocation check, which goes over plain HTTP
-the proxy does not carry, unless it runs with `--ssl-revoke-best-effort`.
+switches as well, with Chrome 157 and Firefox 160 on the container base's GNOME 42, started
+from the desktop or from an agent's command, and with Safari on Cirrus Labs' macOS 26 base:
+each reaches the declared host and is refused the rest, its own background hosts included.
+Windows' `curl.exe` honors the variables, but schannel fails its certificate revocation
+check, which goes over plain HTTP the proxy does not carry, unless it runs with
+`--ssl-revoke-best-effort`.
 
 ## Snapshots
 
@@ -524,10 +530,8 @@ Commands and file reads use separate authenticated WebSocket exec channels. File
 are bounded, screenshot transfers are integrity-checked, and command output is
 acknowledged after Host consumption to avoid overrunning Orchard's exec output queue.
 
-Only explicit `network.mode: open` is supported. Restricted networking needs integration
-and validation across Orchard/Tart versions and worker network configurations. GPU and
-reset requests are rejected. Orchard credentials remain on the Host; Orchard/Tart and the
-selected image are trusted infrastructure.
+GPU and reset requests are rejected. Orchard credentials remain on the Host; Orchard/Tart
+and the selected image are trusted infrastructure.
 
 A kept VM stays running and holds its VM slot. Orchard keeps no labels on a VM, so each
 kept VM and each snapshot has a record under the local Orchard's state
@@ -541,3 +545,62 @@ VM. Deletion is not conditional, so the controller must not replace names during
 Worker disk garbage collection is asynchronous. Cancellation, command timeout or lost
 command transport tears down the VM; uncollected evidence can be lost. Cleanup errors
 are recorded separately from execution failures.
+
+### Restricted networking
+
+An `open` Task's VM has Tart's own NAT network throughout. A `block` or `allowlist` VM runs
+on Softnet, Tart's packet filter, which sits on the Mac between the VM and the Mac's
+network, outside the guest, where the agent cannot lift it even as root. It needs:
+
+- Softnet 0.25.0 or later, for its protocol and port rules. `scripts/setup_macos.py`
+  installs it on macOS 26 or later, which it requires, as `/usr/local/libexec/ale/softnet`,
+  root-owned and set-user-ID because it sets the VM's network up as root, and links it
+  into the worker's PATH;
+- Orchard 0.57.0 or later, whose worker changes a running VM's Softnet rules in place, and
+  Tart 2.34.0 or later, which it does that through. Setup pins Orchard 0.58.0 and Tart
+  2.41.1, and restarts services an earlier pin started, once both are in place, unless
+  their controller holds VMs or their worker runs without it.
+
+The Provider declares the restricted modes only where setup's Softnet is the worker's,
+and provisioning also checks the running controller's and Tart's versions, refusing a
+restricted Task before any VM exists; the Softnet release itself is setup's to pin.
+
+Orchard changes a running VM's rules in place but not whether it has Softnet, so the VM
+boots on Softnet with every IPv4 address allowed (`netSoftnetAllow = ["0.0.0.0/0"]`) for
+the framework's phases. Softnet drops IPv6 in every phase. Sealed, the VM's rules block
+`0.0.0.0/0` and allow only:
+
+```text
+in proto tcp @host port 22            Orchard's SSH from the Mac, which exec rides on
+out proto tcp @host port <Gateway>    the Gateway's port on the Mac
+out proto tcp @host port <proxy>      for an allowlist, the egress proxy's port
+```
+
+`@host` is the VM's gateway, the Mac's address on the VM's network. It also answers the
+VM's DNS, which stays shut with every other port of the Mac; Softnet answers DHCP itself.
+Softnet forgets a connection the VM sent nothing on for five minutes, so the in-VM Gateway
+relay's connections, and guestd's egress relay's to the proxy, send TCP keepalive probes
+after a minute of silence.
+
+A change PUTs the VM's whole VMSpec with the new lists, then waits until the worker's
+`observedGeneration` reaches the new `generation`. Softnet clears its flow table when the
+rules change, which silently strands the TCP connections it carried, and the controller
+sends every exec session of a VM over one pooled SSH connection. So both guest sessions
+close first, and a command ends that connection from inside while the old rules still carry
+its close: it stops the `admin` account's `sshd-session` processes, which serve it, found
+with `ps`, since `pgrep` and `pkill` do not see them in a macOS 26 guest. Two new sessions
+then open a new connection. A worker that cannot change the rules in place stops and starts
+the VM instead, and Orchard records no restart of that kind (`restart_count` counts its
+scheduler's restarts, `started_at` is set once), so the change fails when the `running`
+condition reads false while it waits, or when the guest's `kern.bootsessionuuid` differs
+afterwards.
+
+`open_egress` stops guestd's egress relay before it opens the rules, and so does shutting
+the guest down for a snapshot or a `build.sh` image. A VM driven again is sealed when its
+record's `netSoftnetBlock` is not empty, and then gets this run's egress relay; its rules
+stay those of the run that sealed it until this run's setup opens them.
+
+On a shared Mac, Softnet sets `bootpd`'s lease time to 600 seconds and has it ignore DHCP
+client identifiers (`com.apple.InternetSharing.default.plist`), for every VM and Internet
+Sharing on the Mac; cleanup leaves that setting. Any local account can run its
+set-user-ID program.

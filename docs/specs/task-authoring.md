@@ -197,18 +197,16 @@ solver image or names a `vm_image`. The Verification APIs and records are define
 
 `[environment]` selects container or VM behavior; Tasks never name a Provider.
 `[agent].network_mode` applies to the evaluated agent and the oracle: `no-network` reaches
-only the Gateway, `allowlist` also the declared hosts, `public` everything. A macOS Task
-must declare `public`: the Orchard Provider can enforce neither of the others and refuses
-them before any Sandbox exists ([macOS guide](../guides/macos-orchard.md)). An
+only the Gateway, `allowlist` also the declared hosts, `public` everything. An
 `allowed_hosts` entry `pypi.org` is that host alone, `*.pypi.org` that host and every name
 below it at any depth, which every Provider that offers `allowlist` can enforce, and an
 address or CIDR range a client connecting to that address, never a name that resolves into
 it. Entries reaching the Host itself (loopback, link-local, and ranges holding them) fail,
 because allowed traffic leaves from the Host. An allowlist carries TLS and needs a client
 that honors the proxy variables or, on a desktop, the agent account's system proxy (WinINet
-on Windows, GNOME's settings on Linux), both of which the framework points at the proxy for
-the agent and the oracle; raw TCP to an allowed address stays blocked. Setup and
-verification network is framework-controlled; its
+on Windows, GNOME's settings on Linux, the network services' web proxies on macOS), both of
+which the framework points at the proxy for the agent and the oracle; raw TCP to an allowed
+address stays blocked. Setup and verification network is framework-controlled; its
 enforcement is specified in [Security](security.md). The quality standard owns resource
 feasibility and network-policy selection. `ale lint` requires
 `[metadata].network_justification` for `public`.

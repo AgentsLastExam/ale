@@ -62,9 +62,13 @@ the sandbox to the Host, so the Host carries the Gateway, and an allowlist's pro
 SSH, and the sandbox can name only those, never an address. An allowlist's hosts are
 reached through that proxy, as on every other Provider.
 
-Orchard enforces neither `block` nor `allowlist`, so it accepts only Tasks that declare
-`public` (`open`) and refuses the others before provisioning: a macOS sandbox has the
-ordinary network of Tart's NAT.
+Orchard seals a macOS VM outside the guest as well, with a packet filter on its Mac
+between the VM and the Mac's network, which admits only the episode's ports on the Mac's
+address and the control channel the Mac opens into the VM. Its rules change while the VM
+runs; a change that restarts the VM fails the episode instead, because the restarted VM no
+longer holds what the agent or the framework left running in it
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#restricted-networking)).
+A Mac without that filter refuses restricted Tasks before provisioning.
 
 `open` is a deliberate escape hatch: an ordinary bridge with normal egress. A task must
 declare it, and the declaration is recorded in provenance.
@@ -72,8 +76,9 @@ declare it, and the declaration is recorded in provenance.
 Verified by `tests/integration/test_gateway_isolation.py`, including that a sealed
 sandbox reaches no other host port, by the QEMU Provider unit tests for the runner rules,
 by `tests/integration/test_allowlist_relay.py` for the relay and a desktop's system proxy,
-and by the `demo-netprobe` task, which attempts DNS resolution and a raw TCP connection
-from inside a sandbox and fails admission if either succeeds.
+by the Orchard conformance suite on a Mac, and by the `demo-netprobe` task, which attempts
+DNS resolution and a raw TCP connection from inside a sandbox and fails admission if either
+succeeds.
 
 ## 2. Egress is a decision made in our code
 

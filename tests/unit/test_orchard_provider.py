@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import os
 import signal
+import stat
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -60,6 +61,14 @@ class FakeOrchard:
             }
         ]
         self.worker_reads = 0
+        #: What happened to the VM, in order: its policy changes and ended SSH connections.
+        self.events = []
+        #: How many polls a worker takes to apply a changed policy.
+        self.lag = 1
+        #: How a worker that cannot change a policy in place goes on: it stops the VM where a
+        #: poll sees it ("stopped"), or between two polls ("rebooted").
+        self.fallback = None
+        self.guest = None
 
     async def start(self):
         pass
@@ -72,11 +81,19 @@ class FakeOrchard:
         return self.workers
 
     async def get_vm(self, name):
+        if self.record is not None and self.record.get("applying"):
+            self.record["applying"] -= 1
+            if not self.record["applying"]:
+                self.record["observedGeneration"] = self.record["generation"]
         return self.record
 
     async def create_vm(self, spec):
         self.created.append(spec)
         self.record = dict(spec) | {
+            "powerState": "running",
+            "generation": 0,
+            "observedGeneration": 0,
+            "conditions": [{"type": "running", "state": "true"}],
             "uid": "uid-1",
             "status": "running",
             "image_fqn": spec["image"],
@@ -90,11 +107,24 @@ class FakeOrchard:
         return self.record
 
     async def update_vm(self, name, spec):
+        if spec.get("powerState") != "stopped":
+            return self.change_policy(spec)
         self.record.update(spec)
         self.record.update(
             generation=2, observedGeneration=2, conditions=[{"type": "running", "state": "false"}]
         )
         return self.record
+
+    def change_policy(self, spec):
+        """Apply a PUT that changes only the Softnet rules, as a worker does at its next sync."""
+        self.events.append(("policy", spec["netSoftnetAllow"], spec["netSoftnetBlock"]))
+        self.put = dict(spec)
+        self.record.update(spec, generation=self.record["generation"] + 1, applying=self.lag)
+        if self.fallback == "stopped":
+            self.record["conditions"] = [{"type": "running", "state": "false"}]
+        elif self.fallback == "rebooted":
+            self.guest.boot = "boot-2"
+        return dict(self.record)
 
     async def delete_vm(self, name):
         self.deleted.append(name)
@@ -102,9 +132,13 @@ class FakeOrchard:
 
     async def exec(self, name, argv, **kwargs):
         assert argv[:2] == ["sudo", "-n"]
+        if "kill -TERM" in argv[-1]:
+            self.events.append(("end-ssh", name))
+            raise GuestUnreachableError("the command's connection ended")
         return OrchardExecResult(0, b'{"agent_home":"/Users/user"}', b"")
 
     async def connect_guest(self, name, argv, *, deadline=None):
+        self.events.append(("connect", name))
         return object()
 
 
@@ -120,6 +154,10 @@ class FakeGuest:
         self.uploads = []
         self.calls = []
         self.screen = (1024, 768)
+        self.boot = "boot-1"
+        self.closes = 0
+        #: Every egress relay guestd was asked for: the proxy URL, bypass and desktop flag.
+        self.relays = []
 
     async def screen_size(self):
         return self.screen
@@ -140,6 +178,8 @@ class FakeGuest:
             raise self.failure
         if argv[:2] == ["/sbin/route", "-n"]:
             return self.route
+        if argv[:1] == ["/usr/sbin/sysctl"]:
+            return 0, self.boot + "\n", "", False
         if orchard._GATEWAY_RELAY in argv:
             return self.relay
         if argv[:2] == ["sh", "-c"]:
@@ -151,7 +191,11 @@ class FakeGuest:
         return 64 * 1024**3, 0, 64 * 1024**3
 
     async def close(self):
-        pass
+        self.closes += 1
+
+    async def egress_relay(self, proxy, *, bypass=(), desktop=False):
+        self.relays.append((proxy, list(bypass), desktop))
+        return "127.0.0.1:41000" if proxy else None
 
     async def write_file(self, path, data, **kwargs):
         self.files[path] = data
@@ -172,6 +216,7 @@ def backend(monkeypatch):
     api = FakeOrchard()
     guest = FakeGuest(None)
     provider = orchard.OrchardProvider(SimpleNamespace(client=lambda: api))
+    api.guest = guest
     api.framed = FRAMED
     api.frames = []
 
@@ -198,12 +243,14 @@ def backend(monkeypatch):
 async def request(provider, **kwargs):
     image = await provider.prepare_image(ImageRef(kind=ImageKind.VM, reference=REF))
     return SandboxRequest(
-        episode_id="episode-1",
-        os=OperatingSystem.MACOS,
-        prepared_image=image,
-        resources=Resources(),
-        network=NetworkPolicy(mode=NetworkMode.OPEN),
-        **kwargs,
+        **{
+            "episode_id": "episode-1",
+            "os": OperatingSystem.MACOS,
+            "prepared_image": image,
+            "resources": Resources(),
+            "network": NetworkPolicy(mode=NetworkMode.OPEN),
+        }
+        | kwargs
     )
 
 
@@ -239,7 +286,6 @@ async def test_local_image_is_rejected_before_api(backend):
 @pytest.mark.parametrize(
     "change",
     [
-        {"network": NetworkPolicy(mode=NetworkMode.BLOCK)},
         {"resources": Resources(gpus=1)},
         {"os": OperatingSystem.LINUX},
         {"user": "root"},
@@ -650,6 +696,8 @@ async def test_file_contract_and_streamed_upload_with_unprivileged_guestd(
         client=GuestClient(command_transport),
         file_client=GuestClient(file_transport),
         source=FRAMED,
+        agent=True,
+        host=None,
         name="unit-guest-files",
         uid="uid-1",
         agent_home=str(tmp_path),
@@ -895,9 +943,258 @@ async def test_no_model_gateway_needs_no_route_discovery(backend):
 async def test_invalid_gateway_discovery_cleans_up_vm(backend, route):
     provider, api, guest = backend
     guest.route = route
-    with pytest.raises(ProviderStartError, match="default NAT network"):
+    with pytest.raises(ProviderStartError, match="default IPv4 route"):
         await provider.create(await request(provider, gateway_url="http://0.0.0.0:4567"))
     assert len(api.deleted) == 1
+
+
+@pytest.fixture
+def softnet(monkeypatch):
+    """A Mac whose local Orchard changes a running VM's Softnet rules in place."""
+    checked = []
+
+    async def check(local):
+        checked.append(local)
+
+    monkeypatch.setattr(orchard, "check_live_policy", check)
+    monkeypatch.setattr(orchard, "check_softnet", lambda: None)
+    return checked
+
+
+def test_restricted_modes_are_declared_only_where_softnet_is_the_workers(monkeypatch) -> None:
+    """A Fleet places Tasks by the declared modes; a Mac without Softnet refuses them early,
+    saying what to run."""
+
+    def missing() -> None:
+        raise ProviderCapabilityError("restricted macOS networking needs Softnet; run setup")
+
+    monkeypatch.setattr(orchard, "check_softnet", missing)
+    provider = orchard.OrchardProvider(SimpleNamespace())  # type: ignore[arg-type]
+    assert provider.capabilities().network_modes == {NetworkMode.OPEN}
+    monkeypatch.setattr(orchard, "check_softnet", lambda: None)
+    assert provider.capabilities().network_modes == set(NetworkMode)
+
+
+BLOCK = NetworkPolicy(mode=NetworkMode.BLOCK)
+ALLOWLIST = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",))
+OPEN_RULES = (["0.0.0.0/0"], [])
+
+
+@pytest.mark.asyncio
+async def test_a_restricted_vm_starts_open_on_softnet_and_is_sealed_outside_it(backend, softnet):
+    """The rules change in place, on new guest sessions over a new SSH connection."""
+    provider, api, guest = backend
+    api.lag = 2
+    sandbox = await provider.create(
+        await request(provider, network=BLOCK, gateway_url="http://0.0.0.0:4567/v1")
+    )
+    name = sandbox.sandbox_id
+    created = api.created[0]
+    assert created["netSoftnet"] is True
+    assert (created["netSoftnetAllow"], created["netSoftnetBlock"]) == OPEN_RULES
+    assert len(softnet) == 1
+    api.events.clear()
+    await sandbox.open_egress()  # setup's, on a VM that is open already
+    assert api.events == []
+
+    closes = guest.closes
+    await sandbox.close_egress()
+    sealed = (["in proto tcp @host port 22", "out proto tcp @host port 4567"], ["0.0.0.0/0"])
+    replaced = [("connect", name), ("connect", name)]
+    assert api.events == [("end-ssh", name), ("policy", *sealed), *replaced]
+    assert guest.closes == closes + 2
+    # The PUT replaces the whole VMSpec: everything else in it is forwarded unchanged.
+    assert {key: api.put[key] for key in ("os", "arch", "runtime", "netSoftnet")} == {
+        "os": "darwin",
+        "arch": "arm64",
+        "runtime": "tart",
+        "netSoftnet": True,
+    }
+    assert api.put["powerState"] == "running" and "uid" not in api.put
+    await sandbox.exec(["true"], identity=Identity.AGENT)
+    assert guest.commands[-1][1]["env"] is None and guest.relays == []
+
+    api.events.clear()
+    await sandbox.open_egress()
+    assert api.events == [("end-ssh", name), ("policy", *OPEN_RULES), *replaced]
+    await sandbox.destroy()
+    assert api.deleted == [name]
+
+
+@pytest.mark.asyncio
+async def test_a_sealed_allowlist_agent_reaches_its_proxy_through_the_relay(backend, softnet):
+    provider, api, guest = backend
+    host = "192.168.70.1"
+    guest.route = (0, f"gateway: {host}\n", "", False)
+    sandbox = await provider.create(
+        await request(
+            provider,
+            network=ALLOWLIST,
+            gateway_url="http://0.0.0.0:4567/v1",
+            proxy_url="http://0.0.0.0:4568",
+            proxy_token="token",
+        )
+    )
+    await sandbox.close_egress()
+    assert api.record["netSoftnetAllow"] == [
+        "in proto tcp @host port 22",
+        "out proto tcp @host port 4567",
+        "out proto tcp @host port 4568",
+    ]
+    assert guest.relays == [(f"http://token:@{host}:4568", [host, "localhost", "127.0.0.1"], True)]
+    await sandbox.exec(["curl"], identity=Identity.AGENT)
+    env = guest.commands[-1][1]["env"]
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:41000" and host in env["NO_PROXY"].split(",")
+    await sandbox.exec(["true"])
+    assert guest.commands[-1][1]["env"] is None
+
+    await sandbox.open_egress()
+    assert guest.relays[-1] == (None, [], False)
+    assert (api.record["netSoftnetAllow"], api.record["netSoftnetBlock"]) == OPEN_RULES
+    await sandbox.exec(["curl"], identity=Identity.AGENT)
+    assert guest.commands[-1][1]["env"] is None
+    await sandbox.destroy()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["close_egress", "open_egress"])
+@pytest.mark.parametrize(
+    ("fallback", "message"),
+    [("stopped", "instead of changing it in place"), ("rebooted", "restarted")],
+)
+async def test_a_vm_the_worker_restarts_for_its_rules_fails_the_change(
+    backend, softnet, change, fallback, message
+):
+    """A worker that cannot change the rules in place stops and starts the VM instead."""
+    provider, api, _ = backend
+    sandbox = await provider.create(await request(provider, network=BLOCK))
+    if change == "open_egress":
+        await sandbox.close_egress()
+    api.fallback = fallback
+    with pytest.raises(ProviderStartError, match=message):
+        await getattr(sandbox, change)()
+    assert api.deleted == []  # the episode's teardown deletes it, as after any failed seal
+    await sandbox.destroy()
+
+
+@pytest.mark.asyncio
+async def test_rules_the_worker_does_not_apply_fail_the_seal(backend, softnet, monkeypatch):
+    provider, api, _ = backend
+    sandbox = await provider.create(await request(provider, network=BLOCK))
+    api.lag = 10**6
+    monkeypatch.setattr(orchard_client, "POLICY_TIMEOUT_SEC", 0.05)
+    with pytest.raises(ProviderStartError, match="did not apply"):
+        await sandbox.close_egress()
+    await sandbox.destroy()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        OrchardExecResult(0, b"", b""),
+        OrchardExecResult(1, b"", b"sudo: a password is required"),
+        orchard_client.ExecConnectionError("Orchard exec connection failed"),
+    ],
+    ids=["exited", "sudo-refused", "never-connected"],
+)
+async def test_an_ssh_connection_the_command_did_not_end_fails_the_seal(
+    backend, softnet, monkeypatch, outcome
+):
+    """Only the session Orchard reports lost with its connection shows the command ended
+    it; an exit of any kind, or no session at all, would leave it to strand the next."""
+    provider, api, _ = backend
+    sandbox = await provider.create(await request(provider, network=BLOCK))
+
+    async def survived(name, argv, **kwargs):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(api, "exec", survived)
+    with pytest.raises(ProviderStartError, match="SSH connection"):
+        await sandbox.close_egress()
+    assert not any(event[0] == "policy" for event in api.events)
+    await sandbox.destroy()
+
+
+@pytest.mark.asyncio
+async def test_an_open_task_keeps_tarts_own_network(backend, softnet):
+    provider, api, _ = backend
+    sandbox = await provider.create(await request(provider))
+    assert "netSoftnet" not in api.created[0] and softnet == []
+    await sandbox.close_egress()
+    await sandbox.open_egress()
+    assert not any(event[0] in {"policy", "end-ssh"} for event in api.events)
+    await sandbox.destroy()
+
+
+@pytest.mark.asyncio
+async def test_restricted_networking_is_refused_before_any_vm_without_softnet(
+    backend, monkeypatch, tmp_path
+):
+    provider, api, _ = backend
+    monkeypatch.setattr(orchard_client, "SOFTNET", tmp_path / "softnet")
+    with pytest.raises(ProviderCapabilityError, match=r"setup_macos\.py"):
+        await provider.create(await request(provider, network=BLOCK))
+    assert not api.created and not api.frames
+
+
+def test_softnet_must_be_setups_root_owned_set_uid_program(monkeypatch, tmp_path):
+    """Tart starts it as root only so, and it must be the ``softnet`` the worker finds."""
+    program = tmp_path / "libexec/softnet"
+    root = tmp_path / "state"
+    (root / "worker-bin").mkdir(parents=True)
+
+    class RootOwned(type(program)):
+        def stat(self, **kwargs):
+            return SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | stat.S_ISUID | 0o755)
+
+    monkeypatch.setattr(orchard_client, "SOFTNET", program)
+    with pytest.raises(ProviderCapabilityError, match="Softnet"):
+        orchard_client.check_softnet(root)
+    program.parent.mkdir()
+    program.write_bytes(b"softnet")
+    program.chmod(0o4755)
+    with pytest.raises(ProviderCapabilityError, match="Softnet"):
+        orchard_client.check_softnet(root)  # not the worker's
+    (root / "worker-bin/softnet").symlink_to(program)
+    with pytest.raises(ProviderCapabilityError, match="Softnet"):
+        orchard_client.check_softnet(root)  # this account's, not root's
+    monkeypatch.setattr(orchard_client, "SOFTNET", RootOwned(program))
+    orchard_client.check_softnet(root)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("controller", "tart", "refused"),
+    [
+        ("0.58.0", "2.41.1", None),
+        ("0.57.0", "2.34.0", None),
+        ("0.56.1", "2.41.1", "Orchard 0.57.0"),
+        ("unknown", "2.41.1", "Orchard 0.57.0"),
+        ("0.58.0", "2.33.0", "Tart 2.34.0"),
+    ],
+)
+async def test_restricted_networking_needs_policy_changes_in_place(
+    monkeypatch, controller, tart, refused
+):
+    """The running controller and the worker's Tart, not the binaries setup pins."""
+    monkeypatch.setattr(orchard_client, "check_softnet", lambda: None)
+    api = FakeOrchard()
+    api.controller_info = AsyncMock(return_value={"version": controller})
+
+    async def tart_version(*args, **kwargs):
+        assert args == ("--version",)
+        return tart
+
+    local = SimpleNamespace(client=lambda: api, tart=tart_version)
+    if refused is None:
+        await orchard_client.check_live_policy(local)
+    else:
+        with pytest.raises(ProviderCapabilityError, match=refused):
+            await orchard_client.check_live_policy(local)
+    assert api.closed
 
 
 @pytest.mark.asyncio
@@ -1237,6 +1534,8 @@ class FakeMac(FakeOrchard):
         self.vms[name] = dict(spec) | {
             "uid": f"uid-{len(self.created)}",
             "status": "running",
+            "powerState": "running",
+            "generation": 0,
             "assignedCPU": spec["cpu"],
             "assignedMemory": spec["memory"],
         }
@@ -1245,9 +1544,14 @@ class FakeMac(FakeOrchard):
         return self.vms[name]
 
     async def update_vm(self, name, spec):
+        vm = self.vms[name]
+        if spec.get("powerState") != "stopped":
+            vm.update(spec, generation=vm["generation"] + 1)
+            vm["observedGeneration"] = vm["generation"]
+            return dict(vm)
         stopped = [{"type": "running", "state": "false"}]
-        self.vms[name].update(spec, generation=2, observedGeneration=2, conditions=stopped)
-        return self.vms[name]
+        vm.update(spec, generation=2, observedGeneration=2, conditions=stopped)
+        return vm
 
     async def delete_vm(self, name):
         self.deleted.append(name)
@@ -1255,6 +1559,8 @@ class FakeMac(FakeOrchard):
 
     async def exec(self, name, argv, **kwargs):
         self.events.append(("exec", name, list(argv)))
+        if "kill -TERM" in argv[-1]:
+            raise GuestUnreachableError("the command's connection ended")
         return OrchardExecResult(0, b"", b"")
 
     async def connect_guest(self, name, argv, *, deadline=None):
@@ -1357,6 +1663,74 @@ async def test_a_kept_vm_is_listed_continued_and_destroyed(mac):
         await provider.attach_retained(
             sandbox.handle, later, sandbox.allocation, sandbox.resolved_image
         )
+
+
+@pytest.mark.asyncio
+async def test_a_sealed_vm_continued_in_relays_to_this_runs_proxy(mac, softnet):
+    """Its rules say it is sealed; the relay is this run's, until this run's setup opens it."""
+    provider, fake = mac
+    first = await request(
+        provider,
+        retention="keep",
+        network=ALLOWLIST,
+        gateway_url="http://127.0.0.1:9001",
+        proxy_url="http://0.0.0.0:9002",
+        proxy_token="first",
+    )
+    sandbox = await provider.create(first)
+    await sandbox.close_egress()
+    retained = await sandbox.retain(roles=("solver",), reason="kept")
+    later = first.model_copy(
+        update={
+            "gateway_url": "http://127.0.0.1:9101",
+            "proxy_url": "http://0.0.0.0:9102",
+            "proxy_token": "later",
+        }
+    )
+    attached = await provider.attach_retained(
+        retained.handle, later, sandbox.allocation, sandbox.resolved_image
+    )
+    guest = fake.guests[sandbox.sandbox_id]
+    assert guest.relays[-1][0] == "http://later:@192.168.64.1:9102"
+    await attached.exec(["curl"], identity=Identity.AGENT)
+    assert guest.commands[-1][1]["env"]["HTTPS_PROXY"] == "http://127.0.0.1:41000"
+    await attached.open_egress()
+    assert guest.relays[-1] == (None, [], False)
+    assert fake.vms[sandbox.sandbox_id]["netSoftnetBlock"] == []
+    # Sealed again by this run, the rules name this run's Gateway and proxy, not the first's.
+    await attached.close_egress()
+    allowed = fake.vms[sandbox.sandbox_id]["netSoftnetAllow"]
+    assert "out proto tcp @host port 9101" in allowed
+    assert "out proto tcp @host port 9102" in allowed
+    assert not any(rule.endswith(("9001", "9002")) for rule in allowed)
+    await provider.destroy_retained(retained.handle)
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_of_a_sealed_vm_gives_the_account_its_settings_back_first(mac, softnet):
+    provider, fake = mac
+    sandbox = await provider.create(
+        await request(
+            provider,
+            retention="snapshot",
+            network=ALLOWLIST,
+            proxy_url="http://0.0.0.0:9002",
+            proxy_token="token",
+        )
+    )
+    await sandbox.close_egress()
+    guest = fake.guests[sandbox.sandbox_id]
+    shut_down = fake.shut_down
+    relays_at_shutdown = []
+
+    async def recorded(client, owned):
+        relays_at_shutdown.append(list(guest.relays))
+        await shut_down(client, owned)
+
+    fake.shut_down = recorded
+    await sandbox.snapshot(roles=("solver",), reason="saved")
+    assert relays_at_shutdown[0][-1] == (None, [], False)
+    await sandbox.destroy()
 
 
 @pytest.mark.asyncio

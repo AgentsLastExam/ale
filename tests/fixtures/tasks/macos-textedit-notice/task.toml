@@ -7,7 +7,6 @@ keywords = ["macos", "desktop", "textedit", "smoke"]
 
 [metadata]
 readiness = "draft-awaiting-desktop-acceptance"
-network_justification = "Orchard supports open networking only; no external research is needed."
 
 [environment]
 os = "macos"
@@ -18,7 +17,7 @@ memory_mb = 4096
 [agent]
 user = "admin"
 timeout_sec = 1200
-network_mode = "public"
+network_mode = "no-network"
 sudo = true
 
 [verifier]
