@@ -44,9 +44,13 @@ This is why the address is read from the network rather than assumed: Docker's
 would look like a broken run rather than a broken guarantee.
 
 `allowlist` preserves that deny-all topology. Docker reaches the host proxy over its
-internal bridge. QEMU DNATs the episode Gateway and proxy ports through the runner.
-Agent and oracle commands receive authenticated proxy variables only after the sandbox
-is sealed; direct traffic that ignores them remains blocked.
+internal bridge. QEMU DNATs the episode Gateway and proxy ports through the runner. Once the
+sandbox is sealed, guestd relays a port on the guest's loopback to the proxy with the
+episode token, and agent and oracle commands receive proxy variables naming that relay; on
+a desktop the agent account's system proxy names it too, for the programs that take their
+proxy from there, a browser above all. The proxy still decides every connection, and direct
+traffic remains blocked
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#allowlist-relay)).
 
 Every supported Harness mode reaches its model only through the Gateway. Subscription
 provider hosts are Host-side upstreams and never widen the Sandbox's Task-declared
@@ -69,6 +73,7 @@ declare it, and the declaration is recorded in provenance.
 
 Verified by `tests/integration/test_gateway_isolation.py`, including that a sealed
 sandbox reaches no other host port, by the QEMU Provider unit tests for the runner rules,
+by `tests/integration/test_allowlist_relay.py` for the relay and a desktop's system proxy,
 and by the `demo-netprobe` task, which attempts DNS resolution and a raw TCP connection
 from inside a sandbox and fails admission if either succeeds.
 
@@ -125,8 +130,8 @@ provider-owned observations.
 
 Allowlisting is enforced here rather than with `iptables` on the host or a filtering tool
 inside the image, for two reasons: it needs no privilege we would otherwise not require,
-and it does not depend on tooling in an image we did not build. **Traffic that ignores
-the proxy variables has nowhere to go**, so the failure mode is closed. Daytona's own
+and it does not depend on tooling in an image we did not build. **Traffic that bypasses
+the proxy has nowhere to go**, so the failure mode is closed. Daytona's own
 allowlist takes this role there, for the same two reasons (section 1).
 
 Matching is on the requested name: `pypi.org` is that host, and `*.pypi.org`

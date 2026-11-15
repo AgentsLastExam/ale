@@ -452,6 +452,19 @@ class GuestClient:
         data, _ = await self.call("input", {"actions": actions}, timeout_sec=120 + wait_ms / 1000)
         return int(data.get("applied", 0))
 
+    async def egress_relay(
+        self, proxy: str | None, *, bypass: Sequence[str] = (), desktop: bool = False
+    ) -> str | None:
+        """Relay a guest loopback port to ``proxy``, a URL carrying the episode's credentials,
+        and return its address; with ``desktop`` it is also the agent account's system proxy,
+        bypassed for ``bypass``. ``None`` stops the relay and restores the account's settings."""
+        data, _ = await self.call(
+            "egress_relay",
+            {"proxy": proxy, "bypass": list(bypass), "desktop": desktop},
+            timeout_sec=60,
+        )
+        return data.get("address")
+
     async def close(self) -> None:
         await self._transport.close()
 

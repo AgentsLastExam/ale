@@ -80,6 +80,11 @@ class _Recorder:
 class _Client:
     def __init__(self) -> None:
         self.env: dict[str, str] | None = None
+        self.relays: list[tuple[str | None, list[str], bool]] = []
+
+    async def egress_relay(self, proxy, *, bypass=(), desktop=False):  # type: ignore[no-untyped-def]
+        self.relays.append((proxy, list(bypass), desktop))
+        return "127.0.0.1:41999" if proxy else None
 
     async def exec(
         self, argv, *, cwd=None, env=None, timeout_sec=None, run_as=None, output_sink=None
@@ -257,10 +262,16 @@ async def test_a_sealed_allowlist_agent_gets_the_proxy(
     await box.exec(["true"], identity=Identity.AGENT)
     assert client.env is None
     await box.close_egress()
+    bypass = [HOST_IP, "localhost", "127.0.0.1"]
+    assert client.relays == [(f"http://t0ken:@{HOST_IP}:9000", bypass, False)]
     await box.exec(["true"], identity=Identity.AGENT)
     assert client.env is not None
-    assert client.env["HTTPS_PROXY"] == f"http://t0ken:@{HOST_IP}:9000"
+    assert client.env["HTTPS_PROXY"] == "http://127.0.0.1:41999"
     await box.exec(["true"])
+    assert client.env is None
+    await box.open_egress()
+    assert client.relays[-1] == (None, [], False)
+    await box.exec(["true"], identity=Identity.AGENT)
     assert client.env is None
 
 

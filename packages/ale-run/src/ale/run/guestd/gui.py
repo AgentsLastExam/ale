@@ -249,30 +249,7 @@ def _start_server() -> bool:
         return False
     if _server is not None and _server.poll() is None:
         return False
-    import pwd
-
-    try:
-        account = pwd.getpwnam(os.environ.get("ALE_AGENT_USER") or "user")
-    except KeyError as exc:
-        raise GuiUnavailable("the agent account does not exist in this image") from exc
-    session = _session_environment(account)
-    if session is None:
-        raise GuiUnavailable("the agent account's desktop session is still starting")
-    env = {key: session[key] for key in _SESSION_KEYS if key in session}
-    env.update(
-        HOME=account.pw_dir,
-        USER=account.pw_name,
-        LOGNAME=account.pw_name,
-        PATH=session.get("PATH") or "/usr/local/bin:/usr/bin:/bin",
-    )
-    if "DBUS_SESSION_BUS_ADDRESS" not in env:
-        try:
-            with open("/tmp/dbus-session-bus-address") as handle:
-                if address := handle.read().strip():
-                    env["DBUS_SESSION_BUS_ADDRESS"] = address
-        except OSError:
-            pass
-
+    account, env = session()
     with contextlib.suppress(FileNotFoundError):
         os.unlink(_LINUX_SOCKET)
     try:
@@ -362,6 +339,35 @@ _SHELLS = (
     "icewm",
     "fvwm",
 )
+
+
+def session() -> tuple[Any, dict[str, str]]:
+    """The agent account on Linux, and what a program it starts in its desktop session needs
+    from that session's environment."""
+    import pwd
+
+    try:
+        account = pwd.getpwnam(os.environ.get("ALE_AGENT_USER") or "user")
+    except KeyError as exc:
+        raise GuiUnavailable("the agent account does not exist in this image") from exc
+    found = _session_environment(account)
+    if found is None:
+        raise GuiUnavailable("the agent account's desktop session is still starting")
+    env = {key: found[key] for key in _SESSION_KEYS if key in found}
+    env.update(
+        HOME=account.pw_dir,
+        USER=account.pw_name,
+        LOGNAME=account.pw_name,
+        PATH=found.get("PATH") or "/usr/local/bin:/usr/bin:/bin",
+    )
+    if "DBUS_SESSION_BUS_ADDRESS" not in env:
+        try:
+            with open("/tmp/dbus-session-bus-address") as handle:
+                if address := handle.read().strip():
+                    env["DBUS_SESSION_BUS_ADDRESS"] = address
+        except OSError:
+            pass
+    return account, env
 
 
 def _session_environment(account: Any) -> dict[str, str] | None:

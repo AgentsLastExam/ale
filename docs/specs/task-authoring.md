@@ -205,10 +205,13 @@ below it at any depth, which every Provider that offers `allowlist` can enforce,
 address or CIDR range a client connecting to that address, never a name that resolves into
 it. Entries reaching the Host itself (loopback, link-local, and ranges holding them) fail,
 because allowed traffic leaves from the Host. An allowlist carries TLS and needs a client
-that honors the proxy variables, so raw TCP to an allowed address stays blocked. Setup and
-verification network is framework-controlled; its enforcement is specified in
-[Security](security.md). The quality standard owns resource feasibility and network-policy
-selection. `ale lint` requires `[metadata].network_justification` for `public`.
+that honors the proxy variables or, on a desktop, the agent account's system proxy (WinINet
+on Windows, GNOME's settings on Linux), both of which the framework points at the proxy for
+the agent and the oracle; raw TCP to an allowed address stays blocked. Setup and
+verification network is framework-controlled; its
+enforcement is specified in [Security](security.md). The quality standard owns resource
+feasibility and network-policy selection. `ale lint` requires
+`[metadata].network_justification` for `public`.
 
 `[environment]` resources are the whole Sandbox's allocation. The image's own processes, such
 as the GUI base images' desktop, share it with the agent and every program the agent starts,

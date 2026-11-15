@@ -10,6 +10,7 @@ import pytest
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
+    DesktopResolution,
     Identity,
     PreparedTaskImage,
     ResolvedImage,
@@ -132,9 +133,40 @@ def _sandbox() -> DockerSandbox:
     sandbox.sandbox_id = "e1-abcdef"
     sandbox.container = "ale-e1-abcdef"
     sandbox.request = request(retention="snapshot")
+    sandbox.agent_user = "user"
+    sandbox.allocation = ResourceAllocation(
+        cpus=1, memory_mb=1024, sudo=False, network_mode=NetworkMode.BLOCK, provider="docker"
+    )
     sandbox._client = SimpleNamespace(close=close)  # type: ignore[assignment]
     sandbox._file_client = SimpleNamespace(close=close)  # type: ignore[assignment]
+    sandbox._relay = None
     return sandbox
+
+
+@pytest.mark.asyncio
+async def test_a_sealed_snapshot_gives_the_account_its_settings_back_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The committed image outlives the relay its system proxy names."""
+    calls = _scripted(monkeypatch)
+
+    async def egress_relay(proxy: str | None, **_: object) -> str | None:
+        calls.append(("egress_relay", str(proxy)))
+        return None
+
+    async def close() -> None:
+        calls.append(("close",))
+
+    sandbox = _sandbox()
+    sandbox.request = request(
+        network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("a.b",)),
+        proxy_url="http://0.0.0.0:9443",
+    )
+    sandbox._client = SimpleNamespace(egress_relay=egress_relay, close=close)  # type: ignore[assignment]
+    sandbox._relay = "127.0.0.1:41999"
+    await sandbox.snapshot(roles=("solver",), reason="kept")
+    assert calls[:2] == [("egress_relay", "None"), ("close",)]
+    assert sandbox._relay is None
 
 
 @pytest.mark.asyncio
@@ -342,6 +374,57 @@ async def test_a_kata_sandbox_opens_and_seals_egress_with_its_tc_filters(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("desktop", [True, False])
+async def test_an_allowlist_seal_relays_the_agent_once_the_container_is_confined(
+    monkeypatch: pytest.MonkeyPatch, desktop: bool
+) -> None:
+    """The relay starts once the container is off the bridge, and on a desktop is the
+    account's system proxy too; it stops, the account's settings back, before it rejoins."""
+    calls = _scripted(monkeypatch)
+    seen: list[dict[str, str] | None] = []
+
+    async def guest_exec(_argv: list[str], **kwargs: object) -> tuple[int, str, str, bool]:
+        seen.append(kwargs.get("env"))  # type: ignore[arg-type]
+        return 0, "", "", False
+
+    async def egress_relay(
+        proxy: str | None, *, bypass: object = (), desktop: bool = False
+    ) -> str | None:
+        calls.append(("egress_relay", str(proxy), str(bypass), str(desktop)))
+        return "127.0.0.1:41999" if proxy else None
+
+    sandbox = _sandbox()
+    sandbox.container = "ale-e1"
+    sandbox.request = request(
+        network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("a.b",)),
+        proxy_url="http://0.0.0.0:9443",
+        proxy_token="t0ken",
+    )
+    sandbox.allocation = sandbox.allocation.model_copy(
+        update={"desktop_resolution": DesktopResolution() if desktop else None}
+    )
+    sandbox.confinement = _RuncConfinement("ale-net-e1")
+    sandbox._sealed = False
+    sandbox._client = SimpleNamespace(exec=guest_exec, egress_relay=egress_relay)  # type: ignore[assignment]
+
+    await sandbox.close_egress()
+    await sandbox.exec(["true"], identity=Identity.AGENT)
+    await sandbox.open_egress()
+    await sandbox.exec(["true"], identity=Identity.AGENT)
+
+    bypass = str([HOST_ALIAS, "localhost", "127.0.0.1"])
+    assert calls == [
+        ("network", "disconnect", "bridge", "ale-e1"),
+        ("egress_relay", f"http://t0ken:@{HOST_ALIAS}:9443", bypass, str(desktop)),
+        ("egress_relay", "None", "()", "False"),
+        ("network", "connect", "bridge", "ale-e1"),
+    ]
+    assert seen[0] is not None and seen[0]["HTTPS_PROXY"] == "http://127.0.0.1:41999"
+    assert seen[0]["NO_PROXY"] == f"{HOST_ALIAS},localhost,127.0.0.1"
+    assert seen[1] is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "in_kata", "networks", "drop", "sealed"),
     [
@@ -398,8 +481,14 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     async def close() -> None:
         pass
 
+    relays: list[str | None] = []
+
+    async def egress_relay(proxy: str | None, **_: object) -> str | None:
+        relays.append(proxy)
+        return "127.0.0.1:41999" if proxy else None
+
     async def connect(_provider: DockerProvider, _container: str, _user: str) -> object:
-        return SimpleNamespace(exec=guest_exec, close=close)
+        return SimpleNamespace(exec=guest_exec, close=close, egress_relay=egress_relay)
 
     async def contract(_provider: DockerProvider, _client: object) -> tuple[str, bool]:
         return "/home/user", False
@@ -422,6 +511,9 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     sandbox = await DockerProvider().reattach("docker:ale-e1", wanted, allocation, image)
     await sandbox.exec(["true"], identity=Identity.AGENT)
     assert (seen[-1] is not None) is sealed
+    # The guestd that relayed the run which sealed it is gone; this run relays from its own.
+    assert relays == ([f"http://{HOST_ALIAS}:9443"] if sealed else [])
+    assert seen[-1] is None or seen[-1]["HTTPS_PROXY"] == "http://127.0.0.1:41999"
     read = [call[-1] for call in calls if call[-1].startswith("tc filter show")]
     isolated = mode is not NetworkMode.OPEN
     assert read == (

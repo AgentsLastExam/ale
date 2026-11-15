@@ -74,6 +74,7 @@ from ale.run.images import (
     set_parent,
 )
 from ale.run.process import run
+from ale.run.providers import relay
 from ale.run.providers.desktop import require_resolution
 from ale.run.providers.docker.provider import only_vanished
 from ale.run.providers.privileges import set_elevation, verify_identities
@@ -83,7 +84,6 @@ from ale.run.providers.runner import (
     free_port,
     is_blank,
     issue_guest_token,
-    proxy_env,
     read_guest_token,
     url_port,
 )
@@ -337,6 +337,8 @@ class QemuSandbox(Sandbox):
         self._client = client
         self._file_client = file_client
         self._sealed = sealed
+        #: The loopback address guestd relays the agent to the egress proxy from, while sealed.
+        self._relay: str | None = None
         self.state = SandboxState.READY
 
     def _as(self, identity: Identity) -> str | None:
@@ -378,12 +380,8 @@ class QemuSandbox(Sandbox):
         identity: Identity = Identity.FRAMEWORK,
         output_sink: ExecOutputSink | None = None,
     ) -> ExecResult:
-        if (
-            identity is Identity.AGENT
-            and self._sealed
-            and self.request.network.mode is NetworkMode.ALLOWLIST
-        ):
-            env = proxy_env(self.request) | (env or {})
+        if identity is Identity.AGENT and self._sealed and self._relay:
+            env = relay.variables(self._relay, HOST_IP) | (env or {})
         loop = asyncio.get_running_loop()
         started = loop.time()
         exit_code, stdout, stderr, timed_out = await self._client.exec(
@@ -465,8 +463,20 @@ class QemuSandbox(Sandbox):
             *allowed,
         )
 
+    async def _start_relay(self) -> None:
+        self._relay = await relay.start(
+            self._client,
+            self.request,
+            self.allocation,
+            proxy=f"http://{HOST_IP}:{url_port(self.request.proxy_url)}",
+            host=HOST_IP,
+        )
+
     async def open_egress(self) -> None:
         """Lift the runner firewall for the framework's own phases."""
+        # Open, the account's programs go straight out again.
+        await relay.stop(self._client, self.request)
+        self._relay = None
         for rule in (
             *(f"iptables -D FORWARD {match} -j ACCEPT" for match in self._seal_rules()),
             f"iptables -D FORWARD -i {GUEST_BRIDGE} -j DROP",
@@ -494,6 +504,7 @@ class QemuSandbox(Sandbox):
                 # Loud: the alternative is an agent measured with a network it was never
                 # meant to have and a lock file that says otherwise.
                 raise ProviderStartError(f"could not close egress: {stderr.strip()}")
+        await self._start_relay()
         self._sealed = True
 
     async def save_image(self, destination: Path) -> str:
@@ -549,6 +560,9 @@ class QemuSandbox(Sandbox):
 
     async def _power_off(self) -> None:
         """Shut the guest down cleanly and wait for its runner to exit."""
+        # The relay ends with this boot; the disk keeps the account's own settings.
+        await relay.stop(self._client, self.request)
+        self._relay = None
         if self.request.os is OperatingSystem.WINDOWS:
             command = ["shutdown.exe", "/s", "/t", "1"]
         else:
@@ -1475,7 +1489,7 @@ class QemuProvider(Provider):
         except BaseException:
             await client.close()
             raise
-        return QemuSandbox(
+        sandbox = QemuSandbox(
             sandbox_id=container.removeprefix("ale-qemu-"),
             request=attached_request,
             container=container,
@@ -1491,6 +1505,14 @@ class QemuProvider(Provider):
             snapshot_dir=self.snapshot_dir,
             sealed=sealed,
         )
+        if sealed:
+            try:
+                # This run's proxy and token, not those of the run that sealed it.
+                await sandbox._start_relay()
+            except BaseException:
+                await asyncio.gather(client.close(), file_client.close(), return_exceptions=True)
+                raise
+        return sandbox
 
 
 async def _runner_sealed(container: str) -> bool:

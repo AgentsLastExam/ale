@@ -47,6 +47,38 @@ serves it on.
 | Orchard | A relay the Provider starts as root at boot listens at `127.0.0.1:7412` in the VM and connects to the Gateway's port at the Mac, the VM's default IPv4 route; it lives until the VM is deleted, or until a later episode that continues in a retained VM stops it (through `lsof` on the port) and starts its own |
 | Fleet | The Node's Provider's own route, to the port where the node agent listens for the Run; the agent carries each connection over the Run's tunnel to its Gateway |
 
+## Allowlist relay
+
+The egress proxy knows an episode by its token, which many programs cannot present: Chrome,
+Edge, Firefox and PowerShell 5.1's `Invoke-WebRequest` send proxy credentials only in answer
+to a challenge, and the proxy's 407 carries none (Chrome reports
+`ERR_PROXY_AUTH_UNSUPPORTED`); Chromium also drops those in the proxy variables. So once
+Docker, QEMU or Firecracker has sealed an `allowlist` Sandbox, `relay.py` has guestd
+(`guestd/egress.py`) listen on an ephemeral loopback port, add the token to the request
+that opens each tunnel, and forward it to the proxy. The agent's proxy variables name that
+port, with no token. On a desktop the agent account's system proxy names it too, bypassed
+for the Host's address and loopback: on Windows the default connection's WinINet settings,
+which WinINet clients and Chromium-family browsers read; on Linux the GNOME settings
+(`org.gnome.system.proxy`), which Chromium-family browsers and Firefox read in a GNOME
+session, written with `gsettings` in that session. A Linux desktop without them keeps the
+variables alone. Programs already running follow the change.
+
+`open_egress`, a power-off and a snapshot stop the relay and give the account its own
+settings back: open, its programs go straight out again, and a snapshot outlives the relay.
+Only settings that still name the relay go back, so what the agent set itself stays for
+verification. A failure is logged, not raised: the agent may have broken its own desktop.
+guestd keeps what it changed in `/run/ale/system-proxy.json`, or
+`%ProgramData%\ALE\system-proxy.json` on Windows, because a guestd connected over
+`docker exec` ends with its run, sealed or not. A run that reattaches to a sealed Sandbox
+starts the relay again with its own proxy and token.
+
+Measured with Chrome 157 on Windows base 0.1.3, where a browser started before the seal
+switches as well, and with Chrome 157 and Firefox 160 on the container base's GNOME 42,
+started from the desktop or from an agent's command: each reaches the declared host and is
+refused the rest, its own background hosts included. Windows' `curl.exe` honors the
+variables, but schannel fails its certificate revocation check, which goes over plain HTTP
+the proxy does not carry, unless it runs with `--ssl-revoke-best-effort`.
+
 ## Snapshots
 
 | Provider | How a snapshot is saved, booted and destroyed |

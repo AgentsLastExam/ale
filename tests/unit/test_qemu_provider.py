@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,9 +20,15 @@ from typing import Any
 import pytest
 from tests.support import FakeQemuImg, write_qcow2
 
-from ale.core.errors import ProviderCapabilityError, ProviderStartError, TaskDefinitionError
+from ale.core.errors import (
+    GuestUnreachableError,
+    ProviderCapabilityError,
+    ProviderStartError,
+    TaskDefinitionError,
+)
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
+    DesktopResolution,
     Identity,
     ImageRef,
     PreparedTaskImage,
@@ -1297,14 +1304,37 @@ class _ExecClient:
     def __init__(self) -> None:
         self.env: dict[str, str] | None = None
         self.argv: object = None
+        self.calls: list[object] = []
 
     async def exec(self, argv: object, **kwargs: Any) -> tuple[int, str, str, bool]:
         self.argv = argv
         self.env = kwargs.get("env")
+        self.calls.append(argv)
         return 0, "", "", False
+
+    async def egress_relay(
+        self, proxy: str | None, *, bypass: Sequence[str] = (), desktop: bool = False
+    ) -> str | None:
+        self.calls.append(("egress_relay", proxy, list(bypass), desktop))
+        return RELAY if proxy else None
 
     async def close(self) -> None:
         pass
+
+
+#: Where the fake guestd relays the agent from.
+RELAY = "127.0.0.1:41999"
+
+
+def _allocation(*, desktop: bool = False) -> ResourceAllocation:
+    return ResourceAllocation(
+        cpus=2,
+        memory_mb=2048,
+        sudo=False,
+        network_mode=NetworkMode.ALLOWLIST,
+        provider="qemu",
+        desktop_resolution=DesktopResolution() if desktop else None,
+    )
 
 
 def test_open_mode_uses_only_the_runner_firewall(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1325,7 +1355,7 @@ def test_open_mode_uses_only_the_runner_firewall(monkeypatch: pytest.MonkeyPatch
     assert sandbox._sealed is False  # type: ignore[attr-defined]
 
 
-def test_allowlist_proxy_is_injected_only_for_sealed_agent_commands() -> None:
+def test_the_relay_is_injected_only_for_sealed_agent_commands() -> None:
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox.request = request(  # type: ignore[attr-defined]
         network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
@@ -1334,19 +1364,23 @@ def test_allowlist_proxy_is_injected_only_for_sealed_agent_commands() -> None:
     sandbox.agent_user = "user"  # type: ignore[attr-defined]
     sandbox._client = _ExecClient()  # type: ignore[attr-defined]
     sandbox._sealed = False  # type: ignore[attr-defined]
+    sandbox._relay = RELAY  # type: ignore[attr-defined]
 
     asyncio.run(sandbox.exec(["true"], identity=Identity.AGENT))
     assert sandbox._client.env is None  # type: ignore[attr-defined]
 
     sandbox._sealed = True  # type: ignore[attr-defined]
     asyncio.run(sandbox.exec(["true"], identity=Identity.AGENT))
+    # No token: guestd's relay adds it, so a client that cannot send one gets through.
     assert sandbox._client.env == {  # type: ignore[attr-defined]
-        "HTTP_PROXY": "http://episode-token:@172.30.0.1:9443",
-        "HTTPS_PROXY": "http://episode-token:@172.30.0.1:9443",
-        "http_proxy": "http://episode-token:@172.30.0.1:9443",
-        "https_proxy": "http://episode-token:@172.30.0.1:9443",
+        "HTTP_PROXY": f"http://{RELAY}",
+        "HTTPS_PROXY": f"http://{RELAY}",
+        "http_proxy": f"http://{RELAY}",
+        "https_proxy": f"http://{RELAY}",
         "NO_PROXY": "172.30.0.1,localhost,127.0.0.1",
     }
+    asyncio.run(sandbox.exec(["true"]))
+    assert sandbox._client.env is None  # type: ignore[attr-defined]
 
 
 def test_allowlist_forwards_gateway_and_proxy_ports(
@@ -1394,6 +1428,7 @@ def test_allowlist_direct_bypass_is_dropped(monkeypatch: pytest.MonkeyPatch) -> 
     )
     sandbox.container = "runner"  # type: ignore[attr-defined]
     sandbox.host_ip = "172.17.0.1"  # type: ignore[attr-defined]
+    sandbox.allocation = _allocation()  # type: ignore[attr-defined]
     sandbox._client = _ExecClient()  # type: ignore[attr-defined]
     sandbox._sealed = False  # type: ignore[attr-defined]
 
@@ -1405,6 +1440,148 @@ def test_allowlist_direct_bypass_is_dropped(monkeypatch: pytest.MonkeyPatch) -> 
     assert all("ESTABLISHED" in rule or "--dports" in rule for rule in accepted)
     assert not any("! -d" in rule for rule in rules)
     assert sandbox._sealed is True  # type: ignore[attr-defined]
+
+
+def _sealing_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+    client: _ExecClient,
+    operating_system: OperatingSystem = OperatingSystem.WINDOWS,
+    mode: NetworkMode = NetworkMode.ALLOWLIST,
+    *,
+    desktop: bool = True,
+) -> QemuSandbox:
+    """A sandbox whose runner rules and guest calls land, in order, in ``client.calls``."""
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        client.calls.append(argv[-1])
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+    sandbox = QemuSandbox.__new__(QemuSandbox)
+    sandbox.request = request(  # type: ignore[attr-defined]
+        os=operating_system,
+        network=NetworkPolicy(
+            mode=mode,
+            allowed_hosts=("example.com",) if mode is NetworkMode.ALLOWLIST else (),
+        ),
+        proxy_url="http://0.0.0.0:9443",
+    )
+    sandbox.container = "runner"  # type: ignore[attr-defined]
+    sandbox.host_ip = "172.17.0.1"  # type: ignore[attr-defined]
+    sandbox.agent_user = "user"  # type: ignore[attr-defined]
+    sandbox.allocation = _allocation(desktop=desktop)  # type: ignore[attr-defined]
+    sandbox._client = client  # type: ignore[attr-defined]
+    sandbox._sealed = False  # type: ignore[attr-defined]
+    return sandbox
+
+
+@pytest.mark.parametrize(
+    ("operating_system", "mode", "desktop"),
+    [
+        (OperatingSystem.WINDOWS, NetworkMode.ALLOWLIST, True),
+        (OperatingSystem.LINUX, NetworkMode.ALLOWLIST, True),
+        (OperatingSystem.LINUX, NetworkMode.ALLOWLIST, False),
+        (OperatingSystem.WINDOWS, NetworkMode.BLOCK, True),
+    ],
+)
+def test_an_allowlist_seal_relays_the_agent_to_the_episode_proxy(
+    monkeypatch: pytest.MonkeyPatch, operating_system: OperatingSystem, mode: NetworkMode,
+    desktop: bool,
+) -> None:  # fmt: skip
+    """The relay starts once the runner is sealed, and on a desktop is the account's system
+    proxy too; it stops, the account's settings back, before the runner opens."""
+    client = _ExecClient()
+    sandbox = _sealing_sandbox(monkeypatch, client, operating_system, mode, desktop=desktop)
+
+    asyncio.run(sandbox.close_egress())
+    sealed, client.calls = client.calls, []
+    asyncio.run(sandbox.exec(["true"], identity=Identity.AGENT))
+    variables, client.calls = client.env, []
+    asyncio.run(sandbox.open_egress())
+    lifted = client.calls
+
+    if mode is NetworkMode.ALLOWLIST:
+        bypass = ["172.30.0.1", "localhost", "127.0.0.1"]
+        assert all(isinstance(rule, str) for rule in sealed[:-1])
+        assert sealed[-1] == (
+            "egress_relay",
+            "http://episode-token:@172.30.0.1:9443",
+            bypass,
+            desktop,
+        )
+        assert variables is not None and variables["HTTPS_PROXY"] == f"http://{RELAY}"
+        assert lifted[0] == ("egress_relay", None, [], False)
+        assert all(isinstance(rule, str) for rule in lifted[1:])
+    else:
+        assert all(isinstance(call, str) for call in sealed + lifted)
+        assert variables is None
+
+
+@pytest.mark.parametrize("failure", [GuestUnreachableError("guest session closed"), TimeoutError()])
+def test_a_relay_the_guest_cannot_start_fails_the_seal(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    class Unanswered(_ExecClient):
+        async def egress_relay(
+            self, proxy: str | None, *, bypass: Sequence[str] = (), desktop: bool = False
+        ) -> str | None:
+            raise failure
+
+    sandbox = _sealing_sandbox(monkeypatch, Unanswered())
+    with pytest.raises(ProviderStartError, match="could not start the agent's egress relay"):
+        asyncio.run(sandbox.close_egress())
+
+
+def test_egress_opens_even_when_the_guest_cannot_restore_its_settings(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The agent may have broken its own desktop; verification still runs."""
+
+    class Broken(_ExecClient):
+        async def egress_relay(
+            self, proxy: str | None, *, bypass: Sequence[str] = (), desktop: bool = False
+        ) -> str | None:
+            if proxy is None:
+                raise GuestUnreachableError("guest operation 'egress_relay' failed")
+            return RELAY
+
+    client = Broken()
+    sandbox = _sealing_sandbox(monkeypatch, client)
+    asyncio.run(sandbox.close_egress())
+    client.calls = []
+    asyncio.run(sandbox.open_egress())
+
+    assert sandbox._sealed is False  # type: ignore[attr-defined]
+    assert client.calls and all(rule.startswith("iptables -D") for rule in client.calls)
+    assert "its own system proxy back" in caplog.text
+
+
+@pytest.mark.parametrize("operating_system", [OperatingSystem.WINDOWS, OperatingSystem.LINUX])
+def test_an_allowlist_guest_gets_its_own_proxy_settings_back_before_power_off(
+    monkeypatch: pytest.MonkeyPatch, operating_system: OperatingSystem
+) -> None:
+    """A snapshot outlives the relay its system proxy names, even one a failed seal set."""
+
+    async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
+        return 0, "0\n", ""
+
+    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+    sandbox = QemuSandbox.__new__(QemuSandbox)
+    sandbox.request = request(  # type: ignore[attr-defined]
+        os=operating_system,
+        network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
+        proxy_url="http://0.0.0.0:9443",
+    )
+    sandbox.container = "runner"  # type: ignore[attr-defined]
+    sandbox.agent_user = "user"  # type: ignore[attr-defined]
+    sandbox._client = client = _ExecClient()  # type: ignore[attr-defined]
+    sandbox._file_client = _ExecClient()  # type: ignore[attr-defined]
+    sandbox._sealed = False  # type: ignore[attr-defined]
+
+    asyncio.run(sandbox._power_off())
+
+    assert client.calls[0] == ("egress_relay", None, [], False)
+    assert isinstance(client.calls[1], list)
 
 
 def test_only_whole_clusters_of_ntfs_free_space_are_discarded() -> None:

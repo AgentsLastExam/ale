@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from importlib import import_module
@@ -23,6 +24,7 @@ from ale.run.cli.tasks import (
     _validation_notices,
     _validation_outcome,
 )
+from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.builtin import NopHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.task_images import ImagePreparationResult, ImagePreparationStep
@@ -346,3 +348,69 @@ async def test_validation_passes_artifact_policy_to_episodes(
     settings = RunConfig.model_validate({"seed": 42, "artifacts": {"collect": policy}})
     with pytest.raises(EpisodeReached):
         await task_cli._validate(str(repository), settings, tmp_path / "runs")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["validate", "run"])
+async def test_an_oracle_run_gives_an_allowlist_task_its_egress_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_task_repo,  # type: ignore[no-untyped-def]
+    command: str,
+) -> None:
+    """An oracle run calls no model, yet the oracle meets the agent's network, allowlist
+    included: the episode gets the proxy and a registry for its session."""
+    repository = write_task_repo(
+        "oracle-allowlist",
+        config={"agent": {"network_mode": "allowlist", "allowed_hosts": ["example.com"]}},
+    )
+    task_cli = import_module("ale.run.cli.tasks")
+    digest = "sha256:" + "a" * 64
+
+    async def fake_prepare(tasks, _providers):  # type: ignore[no-untyped-def]
+        for task in tasks:
+            task.prepared_image = PreparedTaskImage(
+                kind=ImageKind.CONTAINER,
+                source="solver-local",
+                input_identity=digest,
+                image_source_identity=digest,
+                runtime_ref="ale-task:fixture",
+                prepared_identity=digest,
+            )
+        return ()
+
+    class EpisodeReached(Exception):
+        pass
+
+    seen: dict[str, object] = {}
+
+    async def fake_episode(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        seen["gateway"] = kwargs["gateway"]
+        session = kwargs["session_registry"].open(
+            GatewaySession(
+                episode_id=kwargs["episode_id"],
+                model="",
+                allowed_hosts=kwargs["allowed_hosts"],
+            )
+        )
+        port = int(kwargs["proxy_url"].rpartition(":")[2])
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(
+            f"CONNECT pypi.org:443 HTTP/1.1\r\nProxy-Authorization: Bearer {session.token}"
+            "\r\n\r\n".encode()
+        )
+        seen["status"] = (await reader.readline()).decode()
+        writer.close()
+        raise EpisodeReached
+
+    monkeypatch.setattr(task_cli, "_prepare_images", fake_prepare)
+    monkeypatch.setattr(task_cli, "run_episode", fake_episode)
+    if command == "validate":
+        with pytest.raises(EpisodeReached):
+            await task_cli._validate(str(repository), RunConfig(), tmp_path / "runs")
+    else:
+        oracle = RunConfig.model_validate({"agent": {"name": "oracle"}})
+        await task_cli._run_one(str(repository), oracle, tmp_path / "runs")
+    assert seen["gateway"] is None
+    # The proxy knows the episode's session, and holds it to the Task's allowlist.
+    assert str(seen["status"]).split()[1] == "403", seen["status"]

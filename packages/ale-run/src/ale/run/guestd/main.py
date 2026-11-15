@@ -519,6 +519,23 @@ class Handler:
         width, height = screen_size()
         return ok(req_id, width=width, height=height)
 
+    # --- network ------------------------------------------------------------
+
+    def op_egress_relay(self, req_id: int, params: dict[str, Any]) -> dict[str, Any]:
+        """Relay a loopback port to ``proxy``, a URL carrying the episode's credentials, and
+        with ``desktop`` make it the agent account's system proxy; a null ``proxy`` stops the
+        relay and restores the account's own settings."""
+        from egress import apply, restore
+
+        proxy = params.get("proxy")
+        if proxy is None:
+            restore()
+            return ok(req_id)
+        address = apply(
+            str(proxy), list(params.get("bypass") or []), desktop=bool(params.get("desktop"))
+        )
+        return ok(req_id, address=address)
+
 
 def _require(params: dict[str, Any], key: str) -> Any:
     if key not in params:
