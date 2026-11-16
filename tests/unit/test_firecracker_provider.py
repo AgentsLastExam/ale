@@ -505,3 +505,7 @@ def test_a_run_can_name_firecracker() -> None:
     assert isinstance(chosen, FirecrackerProvider)
     assert provider_named("firecracker").name == "firecracker"
     assert "firecracker" in RETAINING_PROVIDERS
+
+
+def test_guestd_runs_isolated_from_the_images_variables() -> None:
+    assert guest_init.GUESTD == ("/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/main.py")

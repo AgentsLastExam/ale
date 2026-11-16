@@ -59,7 +59,7 @@ from protocol import (
     ok,
 )
 
-GUESTD_VERSION = "0.1.1"
+GUESTD_VERSION = "0.1.2"
 
 #: Where a claimed TCP token survives a service restart. /run is tmpfs: a reboot or a disk
 #: saved as an image carries no token forward. Windows keeps it in memory only, because
@@ -1089,6 +1089,26 @@ class _TCPHandler(socketserver.StreamRequestHandler):
         serve_stream(self.rfile, _TextWriter(), self.server.claim)  # type: ignore[arg-type, attr-defined]
 
 
+class _Descriptor:
+    """Text written whole to a file descriptor, the session's stdout.
+
+    A pipe may take less than one write offers, as gVisor's take at most 64 KiB, and a text
+    stream over an unbuffered file drops the rest; so every reply is written until the last
+    byte is taken, whatever buffering the interpreter was started with.
+    """
+
+    def __init__(self, descriptor: int) -> None:
+        self._descriptor = descriptor
+
+    def write(self, text: str) -> None:
+        data = memoryview(text.encode("utf-8"))
+        while data:
+            data = data[os.write(self._descriptor, data) :]
+
+    def flush(self) -> None:
+        """Nothing: every write is whole when it returns."""
+
+
 class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -1117,7 +1137,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.ready_file).write_text(f"{GUESTD_VERSION}\n", encoding="utf-8")
 
     if args.stdio:
-        serve_stream(sys.stdin.buffer, sys.stdout)
+        serve_stream(sys.stdin.buffer, _Descriptor(sys.stdout.fileno()))  # type: ignore[arg-type]
         return 0
 
     host, _, port = args.tcp.rpartition(":")

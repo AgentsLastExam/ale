@@ -159,7 +159,8 @@ After=network.target
 
 [Service]
 Environment=ALE_AGENT_USER={{user}}
-ExecStart={guestd.PYTHON["linux"]} /opt/ale/guestd/main.py --tcp 0.0.0.0:{guestd.PORT}
+WorkingDirectory=/
+ExecStart={guestd.PYTHON["linux"]} -I /opt/ale/guestd/main.py --tcp 0.0.0.0:{guestd.PORT}
 Restart=always
 RestartSec=1
 

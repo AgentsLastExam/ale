@@ -43,7 +43,7 @@ OLD = f"{HERE}/old"
 #: A private tmpfs for guestd's claimed token, which must not outlive a boot.
 RUN = f"{HERE}/run"
 COMMAND_LOG = f"{RW}/ale/command.log"
-GUESTD = ("/opt/ale/python/bin/python3", "/opt/ale/guestd/main.py")
+GUESTD = ("/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/main.py")
 DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 MS_RDONLY = 1

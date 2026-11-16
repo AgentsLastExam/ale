@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -69,6 +69,17 @@ class TestOrchardProvider(ProviderConformance):
         overrides.setdefault("os", OperatingSystem.MACOS)
         overrides.setdefault("user", self.user)
         return await super().request(**overrides)
+
+    @pytest.mark.asyncio
+    async def test_large_replies_arrive_whatever_python_the_image_configures(self) -> None:
+        """Without the image's PYTHON* variables: Orchard refuses any from a request."""
+        async with await self.provider.create(await self.request()) as sandbox:
+            path = PurePosixPath(sandbox.agent_home) / "large.bin"
+            payload = bytes(range(256)) * 4096
+            await sandbox.write_file(path, payload)
+            assert await sandbox.read_file(path) == payload
+            printed = await sandbox.exec(["sh", "-c", "head -c 1048576 /dev/zero | tr '\\0' x"])
+            assert printed.ok and printed.stdout == "x" * (1 << 20)
 
     @pytest.mark.asyncio
     async def test_a_sealed_allowlist_desktop_names_the_relay_in_its_system_proxy(self) -> None:

@@ -101,7 +101,7 @@ _RECONNECT_TIMEOUT_SEC = 120
 _OPEN_POLICY: tuple[tuple[str, ...], tuple[str, ...]] = (("0.0.0.0/0",), ())
 #: guestd from the sources framing installed, on the framework's Python.
 _GUESTD = (
-    "import runpy,sys; sys.path.insert(0,'/opt/ale/guestd'); "
+    "import os,runpy,sys; os.chdir('/'); sys.path.insert(0,'/opt/ale/guestd'); "
     "runpy.run_path('/opt/ale/guestd/main.py',run_name='__main__')"
 )
 #: Prints the home of the account named by its argument, or nothing when there is none.

@@ -253,7 +253,9 @@ async def test_an_allowlist_seals_as_block_does_and_relays_the_agent_through_the
 def test_guestd_starts_without_the_runners_proxy_variables() -> None:
     """A GPU runner names its own proxy in every process's environment; a CPU runner none."""
     words = shlex.split(_guestd_command("user", {"PATH": "/usr/bin", "HTTPS_PROXY": "http://p"}))
-    assert words[:2] == ["exec", "env"]
+    # In the root directory, on the framework's Python isolated from the image's variables.
+    assert words[:5] == ["cd", "/", "&&", "exec", "env"]
+    assert words[-4:] == ["/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/main.py", "--stdio"]
     removed = {words[i + 1] for i, word in enumerate(words) if word == "-u"}
     assert removed == {
         "HTTP_PROXY",
@@ -657,6 +659,13 @@ def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+async def test_the_tunnel_runs_isolated_in_the_root_directory() -> None:
+    tunnel = _Tunnel(LocalRelay(), listeners=[(7412, 0)], targets=[("127.0.0.1", 1)])  # type: ignore[arg-type]
+    assert shlex.split(tunnel._command)[:7] == [
+        "cd", "/", "&&", "exec", "/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/tunnel.py"
+    ]  # fmt: skip
 
 
 async def test_the_host_tunnel_serves_the_sandbox_and_reconnects_when_ssh_drops() -> None:

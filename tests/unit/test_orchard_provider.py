@@ -1874,3 +1874,8 @@ async def test_a_kept_vm_booted_from_a_snapshot_is_driven_again_from_its_record(
     assert await again.read_file("/Users/user/work.txt") == b"saved"
     await again.destroy()
     assert [item["handle"] for item in await provider.list_retained()] == [saved.handle]
+
+
+def test_guestd_starts_in_the_root_directory_isolated() -> None:
+    """Orchard's exec starts it where the session does, which the agent may own."""
+    assert orchard._GUESTD.startswith("import os,runpy,sys; os.chdir('/');")

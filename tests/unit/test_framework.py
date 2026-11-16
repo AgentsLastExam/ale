@@ -154,7 +154,8 @@ async def test_a_vm_disk_gets_the_same_pieces_offline(
     assert "/framework/ale-guestd.service:/etc/systemd/system/ale-guestd.service" in argv
     assert set(guestd.FILES) <= set(seen["files"])  # type: ignore[arg-type]
     assert "Environment=ALE_AGENT_USER=app" in str(seen["unit"])
-    assert f"ExecStart={guestd.PYTHON['linux']} /opt/ale/guestd/main.py" in str(seen["unit"])
+    assert f"ExecStart={guestd.PYTHON['linux']} -I /opt/ale/guestd/main.py" in str(seen["unit"])
+    assert "WorkingDirectory=/\n" in str(seen["unit"])
 
 
 @pytest.mark.asyncio

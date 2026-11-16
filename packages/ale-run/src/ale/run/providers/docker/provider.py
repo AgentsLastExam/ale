@@ -1062,9 +1062,15 @@ class DockerProvider(Provider):
                 "0",
                 "--env",
                 f"ALE_AGENT_USER={agent_user}",
+                # In a directory the agent cannot write, which root children start in.
+                "--workdir",
+                "/",
                 container,
-                # The framework's own Python, whatever the image has.
+                # The framework's own Python, whatever the image has, isolated from the
+                # image's environment, which an exec inherits: PYTHONUNBUFFERED would leave
+                # its output to a pipe's short writes, PYTHONPATH would replace its modules.
                 guestd.PYTHON["linux"],
+                "-I",
                 str(GUESTD_DIR / "main.py"),
                 "--stdio",
             ]

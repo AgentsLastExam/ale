@@ -264,6 +264,21 @@ class ProviderConformance:
             assert await sandbox.read_file(path) == payload
 
     @pytest.mark.asyncio
+    async def test_large_replies_arrive_whatever_python_the_image_configures(self) -> None:
+        """The guest service runs on the framework's Python whatever the image's variables
+        say: under ``PYTHONUNBUFFERED`` a pipe that takes less than one write offers, as
+        gVisor's do above 64 KiB, would drop the rest of a reply. (``PYTHONHOME`` would end
+        a desktop image's own command, whose session starts Python programs.)"""
+        variables = {"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/nonexistent"}
+        async with await self.provider.create(await self.request(env=variables)) as sandbox:
+            path = PurePosixPath(sandbox.agent_home) / "large.bin"
+            payload = bytes(range(256)) * 4096
+            await sandbox.write_file(path, payload)
+            assert await sandbox.read_file(path) == payload
+            printed = await sandbox.exec(["sh", "-c", "head -c 1048576 /dev/zero | tr '\\0' x"])
+            assert printed.ok and printed.stdout == "x" * (1 << 20)
+
+    @pytest.mark.asyncio
     async def test_file_reads_progress_while_a_command_is_running(self) -> None:
         async with await self.provider.create(await self.request()) as sandbox:
             directory = str(PurePosixPath(sandbox.agent_home) / "concurrent-read")

@@ -23,8 +23,12 @@ of the Task's own build or the image it names (the framework layer):
   `/opt/ale`, so it always speaks the protocol of the engine driving it;
 - the framework's own Python at a pinned version, which guestd runs on whatever Python the
   image has (or lacks): `/opt/ale/python` on Linux and macOS, `C:\ProgramData\ALE\python` on
-  Windows. Only the framework's identity can run it, except on macOS, where the agent's
-  desktop tool and Harness helpers run it too; the agent's PATH never includes it;
+  Windows. guestd runs it isolated (`-I`), in a directory only the framework writes, and so
+  does every root process guestd starts on it, so neither the image's `PYTHON*` variables,
+  which a container's exec inherits, nor the agent's files change their modules or the
+  buffering of guestd's replies. Only the framework's identity can run it, except on macOS,
+  where the agent's desktop tool and Harness helpers run it too; the agent's PATH never
+  includes it;
 - Cua Driver at a pinned version, the one desktop capture and input implementation, which
   every account may run, because the agent's `cua-desktop` MCP server runs it too;
 - for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
@@ -551,6 +555,7 @@ Task content (the engine).
 | Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[agent].sudo` asks, whatever image or snapshot it starts from | Provider in `create`: set at every start, then checked both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected`, `test_one_image_serves_an_agent_with_and_without_elevation`, `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |
+| Replies of any size arrive whatever Python variables the image sets | the Provider starting guestd isolated; guestd writing each reply whole | `test_large_replies_arrive_whatever_python_the_image_configures` |
 | Framework phases have the network; after `close_egress` the agent reaches its Gateway (and, for `allowlist`, the declared hosts) and nothing else; `open` Tasks are never sealed | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |
 | Every Sandbox reaches its Gateway at the same fixed port, whatever port the Host serves it on, and a reattached Sandbox reaches a later run's Gateway there: an agent may keep the address in its native session | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_reattached_sandbox_reaches_a_later_gateway_at_the_same_address` |
 | Resources are applied or rejected; the RunLock records the observed image and allocation, with the Provider selected for the Sandbox and the leaf whose profile served it | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |

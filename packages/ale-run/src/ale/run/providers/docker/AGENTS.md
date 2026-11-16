@@ -79,3 +79,26 @@ that capability stays inside the guest.
   every other Sandbox and the Host share. A Task that needs one runs on another leaf.
 - Kata grants `CAP_SYS_ADMIN` only on request, so a Sandbox has no privilege its Task did
   not name, even inside its own VM.
+
+## guestd's replies under gVisor
+
+**Problem.** A screenshot of 1.1 MB never arrived from a gVisor sandbox whose image set
+`PYTHONUNBUFFERED=1`; the same image under runc delivered it.
+
+**Context.** guestd runs on the framework's Python but inherits the image's environment
+through `docker exec`. Under `runsc` a write to a pipe outside the sandbox returns at most
+64 KiB, and a text stream over an unbuffered file, which `PYTHONUNBUFFERED` makes stdout,
+drops the rest of each write.
+
+**Solution.** guestd writes each reply until the last byte is taken, and every Provider
+starts it with `-I`, which ignores the image's `PYTHON*` variables and user site, in the
+root directory; the Python it runs as root to read the desktop session's variables is
+isolated too.
+
+**Decisions.**
+- Both, on every Provider: the writer holds whatever a pipe takes, and `-I` keeps an
+  image's `PYTHONPATH` or `PYTHONHOME` from replacing guestd's modules.
+- No root process of guestd's starts in a directory, or with variables, the agent may have
+  chosen: `docker exec --workdir /`, `cd /` over Daytona's SSH, `os.chdir('/')` in Orchard's
+  start, `WorkingDirectory=/` in the VM unit; Firecracker's init and the Windows service
+  already start it in `/` and the framework's own folder.

@@ -37,6 +37,7 @@ from ale.run.providers.docker.provider import (
     _RuncConfinement,
     _sandbox_gateway,
 )
+from ale.run.transport import StdioTransport
 
 pytestmark = pytest.mark.unit
 
@@ -420,6 +421,28 @@ async def test_a_kata_sandbox_opens_and_seals_egress_with_its_tc_filters(
     assert sandbox._sealed
     assert order == ["route add", "helper", "route del"]
     assert not [call for call in calls if call[0] == "network"]
+
+
+@pytest.mark.asyncio
+async def test_guestd_is_reached_isolated_in_the_root_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def started(_self: object) -> None:
+        return None
+
+    async def healthy(_self: object) -> dict[str, object]:
+        return {}
+
+    monkeypatch.setattr(StdioTransport, "start", started)
+    monkeypatch.setattr("ale.run.transport.GuestClient.health", healthy)
+    client = await DockerProvider()._connect("ale-e1", "user")
+    transport = client._transport
+    assert isinstance(transport, StdioTransport)
+    assert transport._argv == [
+        "docker", "exec", "-i", "--user", "0", "--env", "ALE_AGENT_USER=user",
+        "--workdir", "/", "ale-e1",
+        "/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/main.py", "--stdio",
+    ]  # fmt: skip
 
 
 @pytest.mark.asyncio

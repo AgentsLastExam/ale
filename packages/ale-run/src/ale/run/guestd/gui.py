@@ -375,7 +375,10 @@ def _session_environment(account: Any) -> dict[str, str] | None:
     try:
         result = subprocess.run(
             [
+                # Isolated, as guestd itself is: it runs as root in a directory and with
+                # variables the agent's processes may have chosen.
                 sys.executable,
+                "-I",
                 "-c",
                 _SESSION_SCAN,
                 account.pw_name,

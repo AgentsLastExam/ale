@@ -326,7 +326,7 @@ class _Tunnel:
     ) -> None:
         self._ssh = ssh
         self._targets = targets
-        self._command = "exec {} {} {}".format(
+        self._command = "cd / && exec {} -I {} {}".format(
             PYTHON,
             GUESTD_DIR / "tunnel.py",
             " ".join(f"--listen {port}:{target}" for port, target in listeners),
@@ -999,7 +999,7 @@ def _guestd_command(agent_user: str, environment: dict[str, str]) -> str:
         shlex.quote(f"{name}={value}")
         for name, value in {**environment, "ALE_AGENT_USER": agent_user}.items()
     )
-    return f"exec env {removed} {assignments} {PYTHON} {GUESTD_DIR / 'main.py'} --stdio"
+    return f"cd / && exec env {removed} {assignments} {PYTHON} -I {GUESTD_DIR / 'main.py'} --stdio"
 
 
 async def _guest_contract(client: GuestClient) -> tuple[str, bool]:
