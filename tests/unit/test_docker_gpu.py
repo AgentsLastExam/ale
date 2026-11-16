@@ -75,13 +75,16 @@ def test_a_device_list_reaches_docker_as_one_field() -> None:
 
 
 def test_container_must_observe_exact_selected_uuids() -> None:
-    devices = _parse_nvidia_smi(f"{UUID}, RTX, 00000000:65:00.0, 570.1\n")
-    assert _verify_docker_gpu((UUID,), devices) == devices
+    """And the allocation records each as the Host does: nvidia-smi under gVisor's nvproxy
+    reports no PCI address."""
+    host = _parse_host_nvidia_smi(
+        f"0, {OTHER}, RTX, 00000000:64:00.0, 570.1\n1, {UUID}, RTX, 00000000:65:00.0, 570.1\n"
+    )
+    inside = _parse_nvidia_smi(f"{UUID}, RTX, [Unknown Error], 570.1\n")
+    (recorded,) = _verify_docker_gpu((UUID,), inside, host)
+    assert recorded == host[1] and recorded.pci_address == "00000000:65:00.0"
     with pytest.raises(ProviderCapabilityError, match="mismatch"):
-        _verify_docker_gpu(
-            ("GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",),
-            devices,
-        )
+        _verify_docker_gpu((OTHER,), inside, host)
 
 
 def test_storage_quota_uses_docker_native_writable_layer_limit() -> None:

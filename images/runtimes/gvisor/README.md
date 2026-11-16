@@ -76,6 +76,11 @@ alone:
 }
 ```
 
+ALE's `docker:gvisor` leaf starts a sandbox under `runsc`, or under `runsc-net-raw` when its
+Task needs raw sockets, and its preflight refuses a Host where a runtime it needs is
+missing, is registered with other arguments than these, or is not this build
+([Providers](../../../packages/ale-run/src/ale/run/providers/README.md#docker-on-gvisor)).
+
 - Registered by `path`, `runsc` runs under containerd's runc shim, which passes it
   `runtimeArgs`. gVisor's own shim, `io.containerd.runsc.v1`, would read `runsc`'s flags
   only from a TOML file that `ConfigPath` names in the runtime's options; its
@@ -133,7 +138,7 @@ Anonymous memory allocated past `--memory`, in steps, with this build:
 Rootful Docker's default already ranks every stub above the Sentry, and these runs are too
 few to tell 0 from 500 there; rootless Docker's default ties them, and when the OOM killer
 takes the Sentry the sandbox ends. A gVisor container therefore needs `--oom-score-adj`
-above the inherited value. `runsc` cannot hold the Sentry lower instead: an
+above the inherited value; ALE passes 500. `runsc` cannot hold the Sentry lower instead: an
 unprivileged process cannot go below its `oom_score_adj_min`, the value its user's systemd
 manager was started with (`OOMScoreAdjust` of `user@.service`: 100 in systemd 259, unset
 and so 0 in systemd 249).

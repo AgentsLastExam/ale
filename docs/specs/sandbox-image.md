@@ -394,9 +394,10 @@ Given a conforming image, the Docker Provider:
   [resolution](#desktop-resolution) and waits for it;
 - applies CPU, memory, writable storage, network, sudo, and GPU requests or rejects them;
 - injects only selected NVIDIA devices through the configured runtime/CDI path;
-- names its leaf's runtime for every container, refusing one that ran under another, so
-  the daemon's default never stands in for it;
-- observes the resulting image, runtime and resource allocation;
+- observes the resulting image, runtime and resource allocation, and refuses a container
+  that ran otherwise than its leaf asked, so a Host's defaults never stand in for what the
+  RunLock records
+  ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#docker-runtimes));
 - labels every ALE container with episode, physical role, requested retention, and GPU
   identity;
 - destroys by default, or after framework sanitation returns a retained handle or saves a
@@ -520,15 +521,18 @@ Run with a Sandbox that no listed Provider serves is refused whole, naming each 
 and role and why each Provider does not serve it, rather than failing its episodes one by
 one.
 
-Before any episode starts, the Run has each selected leaf run its preflight once, which
-finds what the leaf runs with, such as its container runtime. Then, for each set of
-container features its selected Sandboxes ask for, the leaf starts one throwaway Sandbox
-as it would the first that asks for that set, and the Run probes each feature in it as
-root; one it lacks refuses the Run, naming the leaf and the feature. A profile says what a
-leaf gives; only the Host shows that it gives it here, where a kernel setting or a missing
-device can take a feature away. Each set is probed on its own because a grant one feature
-brings can make another pass. A scheduler's leaves run on machines the Run does not reach,
-and the Run checks none of them.
+Before any episode starts, the Run has each selected leaf run its preflight with the needs
+of the Sandboxes selected for it, which finds what the leaf runs those with, such as its
+container runtimes, and again only for needs a later selection adds. Then, for each set of
+container features its selected Sandboxes ask for, the leaf starts one throwaway Sandbox as
+it would the first that asks for that set, and the Run probes each feature in it as root;
+one it lacks refuses the Run, naming the leaf and the feature. What only a running Sandbox
+shows of the Host, such as that it runs on the runtime the leaf names, the preflight leaves
+as a check, which runs once, in the first such Sandbox, or in one started for it alone when
+no Sandbox asks for a feature. A profile says what a leaf gives; only the Host shows that it
+gives it here, where a kernel setting or a missing device can take a feature away. Each set
+is probed on its own because a grant one feature brings can make another pass. A scheduler's
+leaves run on machines the Run does not reach, and the Run checks none of them.
 
 A prepared image belongs to the Provider selected for it, so one image is prepared once for
 each Provider that runs it. A Sandbox kept or snapshotted is reached only through the

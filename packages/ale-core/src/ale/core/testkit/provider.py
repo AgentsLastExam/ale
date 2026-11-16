@@ -200,8 +200,12 @@ class ProviderConformance:
 
     @pytest.mark.asyncio
     async def test_preflight_is_explicit(self) -> None:
-        """A provider either works here or says why, before anything is provisioned."""
-        await self.provider.preflight()
+        """A provider either works here or says why, before anything is provisioned; what
+        only a running Sandbox of it shows, it checks in one."""
+        check = await self.provider.preflight()
+        if check is not None:
+            async with await self.provider.create(await self.request()) as sandbox:
+                await check(sandbox)
 
     @pytest.mark.asyncio
     async def test_declares_profiles(self) -> None:

@@ -45,9 +45,9 @@ images, the build contexts Runs send and its upload scratch space live under
 
 The agent lends each of `docker:runc`, `qemu` and `orchard` whose preflight passes.
 `--provider` names the leaves to lend instead, by provider id, most preferred first, and
-then each must pass: `docker:runc`, `docker:kata`, `qemu` or `orchard`. Placement takes a
-Node's first leaf that serves a Sandbox, so this Node keeps Kata for the Tasks that need a
-container feature runc lacks:
+then each must pass: `docker:runc`, `docker:kata`, `docker:gvisor`, `qemu` or `orchard`.
+Placement takes a Node's first leaf that serves a Sandbox, so this Node keeps Kata for the
+Tasks that need a container feature runc lacks:
 
 ```bash
 uv run ale-fleet node --control-plane http://CONTROL:7470 --address http://NODE:7471 \

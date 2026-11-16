@@ -249,7 +249,14 @@ class SandboxRetentionConfig(BaseModel):
 #: scheduler places them on machines it manages, with the leaves there: the Fleet on its
 #: Nodes, Daytona on its own.
 ProviderId = Literal[
-    "docker:runc", "docker:kata", "qemu", "firecracker", "orchard", "fleet", "daytona"
+    "docker:runc",
+    "docker:kata",
+    "docker:gvisor",
+    "qemu",
+    "firecracker",
+    "orchard",
+    "fleet",
+    "daytona",
 ]
 
 

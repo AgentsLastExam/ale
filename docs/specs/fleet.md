@@ -46,7 +46,8 @@ A Run that cannot connect to a Node it was placed on treats it as that Node refu
 
 A node agent registers by sending its **declaration** and then sends a heartbeat every
 few seconds. The declaration is probed, never configured: it holds what each lent leaf's
-own `preflight` and profiles reported on the machine, and an operator can only narrow it
+own `preflight`, given no needs, and profiles reported on the machine, a check the preflight
+leaves having passed in one Sandbox of the leaf, and an operator can only narrow it
 (labels, resources kept for the machine itself, fewer leaves, their order). The operator
 names the leaves a Node lends by provider id, most preferred first, as a Run names its
 Providers; a Node lends no scheduler, since it is itself where Sandboxes start.

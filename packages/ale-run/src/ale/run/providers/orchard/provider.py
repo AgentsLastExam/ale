@@ -724,7 +724,7 @@ class OrchardProvider(Provider):
             ),
         )
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
         check_framer()
         client = self._local().client()
         try:

@@ -6,9 +6,10 @@ import asyncio
 import os
 import re
 import time
+from typing import Literal
 
 import pytest
-from tests.support import CONTAINER_BASE, skip_without_kata
+from tests.support import CONTAINER_BASE, skip_without_gvisor, skip_without_kata
 
 from ale.core.errors import GuestUnreachableError
 from ale.core.sandbox import SANDBOX_GATEWAY_PORT, Identity, ImageRef, SandboxRequest
@@ -17,7 +18,7 @@ from ale.core.testkit import ProviderConformance
 from ale.run import guestd
 from ale.run.framework import framework_identity
 from ale.run.providers import missing_features
-from ale.run.providers.docker import kata
+from ale.run.providers.docker import gvisor, kata
 from ale.run.providers.docker.provider import (
     DockerProvider,
     DockerSandbox,
@@ -66,6 +67,18 @@ class TestDockerKataProvider(TestDockerProvider):
         skip_without_kata()
 
 
+class TestDockerGvisorProvider(TestDockerProvider):
+    """The same suite with every sandbox on gVisor, whose network the Provider confines with
+    tc filters on the veth's egress and ALE's chains in netstack; the container feature test
+    runs its sandbox under the runtime registered for raw and packet sockets."""
+
+    provider = DockerProvider(runtime="gvisor")
+
+    @pytest.fixture(autouse=True)
+    def _gvisor(self) -> None:
+        skip_without_gvisor()
+
+
 #: Allocates and touches memory 8 MiB at a time until the kernel kills it, printing the
 #: MiB held after each step.
 _ALLOCATE = """
@@ -76,19 +89,56 @@ while True:
 """
 
 
-async def _most_memory_mb(provider: DockerProvider) -> tuple[int, str | None, str]:
-    """The most one process held, the runtime the allocation records, and the kernel."""
+#: Ends every process of a sandbox of the container base but guestd's and its command's,
+#: supervisord, which reloads with no programs: the desktop's memory, which varies by about
+#: 50 MiB from run to run on a loaded Host, then leaves what one process holds alone.
+_QUIET = """
+import glob, os, signal, time
+for conf in glob.glob("/etc/supervisor/conf.d/*.conf"):
+    os.remove(conf)
+os.kill(1, signal.SIGHUP)
+time.sleep(3)
+keep = {1, os.getpid(), os.getppid()}
+for _ in range(10):
+    left = []
+    for name in os.listdir("/proc"):
+        if name.isdigit() and int(name) not in keep:
+            try:
+                state = open(f"/proc/{name}/stat").read().rsplit(")", 1)[1].split()[0]
+                command = open(f"/proc/{name}/cmdline", "rb").read()
+                # A zombie, such as a child guestd has yet to reap, holds no memory.
+                if state != "Z" and b"guestd" not in command:
+                    left.append(name)
+                    os.kill(int(name), signal.SIGKILL)
+            except OSError:
+                pass
+    if not left:
+        break
+    time.sleep(1)
+else:
+    raise SystemExit(f"still running: {left}")
+"""
+
+
+async def _most_memory_mb(
+    provider: DockerProvider, *, quiet: bool = False, memory_mb: int = 512
+) -> tuple[int, str | None, str]:
+    """The most one process held in a Sandbox of ``memory_mb``, beside the desktop or,
+    ``quiet``, alone, the runtime the allocation records, and the kernel."""
     request = SandboxRequest(
-        episode_id=f"memory-{provider.runtime}",
+        episode_id=f"memory-{provider.runtime}-{memory_mb}",
         prepared_image=await provider.prepare_image(
             ImageRef(kind="container", reference=CONTAINER_BASE)
         ),
-        resources=Resources(cpus=1, memory_mb=512),
+        resources=Resources(cpus=1, memory_mb=memory_mb),
         network=NetworkPolicy(mode=NetworkMode.BLOCK),
     )
     async with await provider.create(request) as sandbox:
-        result = await sandbox.exec(["python3", "-c", _ALLOCATE], timeout_sec=120)
-        assert not result.ok, "a 512 MB sandbox held memory without limit"
+        if quiet:
+            stopped = await sandbox.exec(["python3", "-c", _QUIET], timeout_sec=120)
+            assert stopped.ok, stopped.stdout + stopped.stderr
+        result = await sandbox.exec(["python3", "-c", _ALLOCATE], timeout_sec=600)
+        assert not result.ok, f"a {memory_mb} MB sandbox held memory without limit"
         kernel = await sandbox.exec(["uname", "-r"])
         return int(result.stdout.split()[-1]), sandbox.allocation.runtime, kernel.stdout.strip()
 
@@ -176,8 +226,48 @@ async def _plain_request(
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("memory_mb", [512, 2048, 4096, 8192])
+async def test_processes_in_a_gvisor_sandbox_get_the_declared_memory(memory_mb: int) -> None:
+    """The Sentry's own memory is added to the container's limit, not taken from the Task's:
+    with the desktop ended, one process holds what it holds under runc, give or take the
+    allocator's 8 MiB steps and their spread from run to run."""
+    skip_without_gvisor()
+    runc, recorded, host_kernel = await _most_memory_mb(
+        DockerProvider(), quiet=True, memory_mb=memory_mb
+    )
+    on_gvisor, gvisor_recorded, kernel = await _most_memory_mb(
+        DockerProvider(runtime="gvisor"), quiet=True, memory_mb=memory_mb
+    )
+    assert (recorded, gvisor_recorded) == ("runc", gvisor.RUNTIME)
+    assert kernel != host_kernel, "the gVisor sandbox reports the Host's kernel"
+    assert abs(on_gvisor - runc) <= 16, f"runc held {runc} MiB, gVisor {on_gvisor} MiB"
+
+
+@pytest.mark.asyncio
+async def test_a_gvisor_sandbox_has_mount_and_raw_sockets_only_when_it_asked() -> None:
+    """``mount`` is a capability and ``raw_sockets`` the raw sockets runtime, which a
+    Sandbox that did not ask lacks; the container's memory holds the Sentry's beside the
+    Task's."""
+    skip_without_gvisor()
+    provider = DockerProvider(runtime="gvisor")
+    wanted = {ContainerFeature.MOUNT, ContainerFeature.RAW_SOCKETS}
+    async with await provider.create(await _plain_request(provider, "gvisor-plain")) as sandbox:
+        assert set(await missing_features(sandbox, wanted)) == wanted
+        assert sandbox.allocation.runtime == gvisor.RUNTIME
+        code, limit, stderr = await _docker(
+            "inspect", "--format", "{{.HostConfig.Memory}}", sandbox.container
+        )
+        assert code == 0 and int(limit) == gvisor.memory_mb(512) << 20, stderr
+    asked = await _plain_request(provider, "gvisor-asked", *sorted(wanted))
+    async with await provider.create(asked) as sandbox:
+        assert await missing_features(sandbox, wanted) == {}
+        assert sandbox.allocation.runtime == gvisor.NET_RAW
+
+
 #: Sends, as root, ``count`` frames no sealed sandbox may get past its seal:
-#: ``frame DST_MAC SRC_MAC SRC DST PORT`` a TCP SYN as a whole Ethernet frame on eth0,
+#: ``ip SRC DST PORT`` a TCP SYN from a raw IP socket,
+#: ``frame DST_MAC SRC_MAC SRC DST PORT`` the same as a whole Ethernet frame on eth0,
 #: ``arp DST_MAC SRC_MAC SENDER TARGET`` an ARP reply.
 _FORGE = r"""
 import socket, struct, sys
@@ -201,18 +291,23 @@ def mac(text):
     return bytes.fromhex(text.replace(":", ""))
 
 kind, count, args = sys.argv[1], int(sys.argv[2]), sys.argv[3:]
-head = mac(args[0]) + mac(args[1])
-if kind == "frame":
-    frame = head + b"\x08\x00" + syn(args[2], args[3], int(args[4]))
+if kind == "ip":
+    with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW) as raw:
+        for _ in range(count):
+            raw.sendto(syn(args[0], args[1], int(args[2])), (args[1], 0))
 else:
-    sender, target = socket.inet_aton(args[2]), socket.inet_aton(args[3])
-    reply = struct.pack("!HHBBH", 1, 0x0800, 6, 4, 2) + mac(args[1]) + sender
-    reply += bytes(6) + target
-    frame = head + b"\x08\x06" + reply
-with socket.socket(socket.AF_PACKET, socket.SOCK_RAW) as link:
-    link.bind(("eth0", 0))
-    for _ in range(count):
-        link.send(frame)
+    head = mac(args[0]) + mac(args[1])
+    if kind == "frame":
+        frame = head + b"\x08\x00" + syn(args[2], args[3], int(args[4]))
+    else:
+        sender, target = socket.inet_aton(args[2]), socket.inet_aton(args[3])
+        reply = struct.pack("!HHBBH", 1, 0x0800, 6, 4, 2) + mac(args[1]) + sender
+        reply += bytes(6) + target
+        frame = head + b"\x08\x06" + reply
+    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW) as link:
+        link.bind(("eth0", 0))
+        for _ in range(count):
+            link.send(frame)
 print("sent")
 """
 #: Connects to the fixed Gateway port, whatever answers there.
@@ -275,6 +370,29 @@ async def _addresses(container: str, network: str = "bridge") -> tuple[str, str]
     return ip, mac
 
 
+@pytest.mark.asyncio
+async def test_a_sealed_gvisor_sandbox_with_raw_sockets_forges_nothing_past_its_seal() -> None:
+    """Root with raw sockets writes any IP packet: one from another address to the Gateway's
+    port is dropped at the seal, while the sandbox's own pass. The sandbox dials first, so
+    netstack has resolved the Host's address and sends what is forged at once: while it
+    resolves, it drops most of what it is given."""
+    skip_without_gvisor()
+    provider = DockerProvider(runtime="gvisor")
+    request = (
+        await _plain_request(provider, "gvisor-forge", ContainerFeature.RAW_SOCKETS)
+    ).model_copy(update={"gateway_url": "http://127.0.0.1:41999"})
+    async with await provider.create(request) as sandbox:
+        before = await _acted(sandbox.container, gvisor.VETH, "egress")
+        await sandbox.exec(["python3", "-c", _DIAL], identity=Identity.AGENT)
+        after = await _acted(sandbox.container, gvisor.VETH, "egress")
+        assert after.get(10, 0) > before.get(10, 0), "the sandbox's own frames do not pass"
+        host = sandbox.confinement.host_ip
+        passed, dropped = await _forged_past(
+            sandbox, gvisor.VETH, "egress", "ip", "172.17.255.250", host, "41999"
+        )
+        assert passed <= 2 and dropped >= 10, (passed, dropped)
+
+
 @pytest.mark.needs_kvm
 @pytest.mark.asyncio
 async def test_root_in_a_sealed_kata_vm_forges_nothing_past_its_seal() -> None:
@@ -304,23 +422,25 @@ async def test_root_in_a_sealed_kata_vm_forges_nothing_past_its_seal() -> None:
         assert after.get(10, 0) > before.get(10, 0), "the sandbox's own frames no longer pass"
 
 
-@pytest.mark.needs_kvm
 @pytest.mark.asyncio
-async def test_a_sealed_sandbox_gets_nothing_a_neighbour_forges_as_the_host() -> None:
-    """A Kata sandbox boots on a network of its own, so a container with raw sockets on
-    Docker's default bridge cannot reach its segment: a TCP SYN it writes as the Host, from
-    its own MAC or the Host's, to the sandbox's MAC or through the Host, and an ARP reply
-    that claims the Host's address never arrive, while the Host's own frames still do.
-    Counted by tc filters on the sandbox's veth, whose ingress sees every frame that arrives
-    there."""
-    skip_without_kata()
+@pytest.mark.parametrize("runtime", [pytest.param("kata", marks=pytest.mark.needs_kvm), "gvisor"])
+async def test_a_sealed_sandbox_gets_nothing_a_neighbour_forges_as_the_host(
+    runtime: Literal["kata", "gvisor"],
+) -> None:
+    """A Kata or gVisor sandbox boots on a network of its own, so a container with raw
+    sockets on Docker's default bridge cannot reach its segment: a TCP SYN it writes as the
+    Host, from its own MAC or the Host's, to the sandbox's MAC or through the Host, and an
+    ARP reply that claims the Host's address never arrive, while the Host's own frames still
+    do. Counted by tc filters on the sandbox's veth, whose ingress sees every frame that
+    arrives there, whether or not netstack has read it."""
+    (skip_without_kata if runtime == "kata" else skip_without_gvisor)()
     server = await asyncio.start_server(lambda _, writer: writer.close(), "0.0.0.0", 0)
     port = server.sockets[0].getsockname()[1]
-    provider = DockerProvider(runtime="kata")
-    request = (await _plain_request(provider, "kata-from-host")).model_copy(
+    provider = DockerProvider(runtime=runtime)
+    request = (await _plain_request(provider, f"{runtime}-from-host")).model_copy(
         update={"gateway_url": f"http://127.0.0.1:{port}"}
     )
-    forger = "ale-kata-host-forger"
+    forger = f"ale-{runtime}-host-forger"
     await _docker("rm", "-f", forger)
     code, _, stderr = await _docker(
         "run", "-d", "--name", forger, "--runtime", "runc", "--cap-add", "NET_RAW",
@@ -369,9 +489,100 @@ async def test_a_sealed_sandbox_gets_nothing_a_neighbour_forges_as_the_host() ->
 
 
 @pytest.mark.asyncio
-async def test_a_docker_sandbox_killed_from_outside_says_so() -> None:
-    provider = DockerProvider()
-    async with await provider.create(await _plain_request(provider, "killed-runc")) as sandbox:
+async def test_a_sealed_gvisor_sandbox_with_its_chains_flushed_still_reaches_nothing() -> None:
+    """The chains in netstack only make refusals fast; the filters outside are the boundary.
+    With the chains flushed, the Internet and a raw ICMP echo stay out of reach."""
+    skip_without_gvisor()
+    provider = DockerProvider(runtime="gvisor")
+    request = await _plain_request(provider, "gvisor-flushed", ContainerFeature.RAW_SOCKETS)
+    reach = (
+        "import socket, struct\n"
+        "try:\n"
+        "    socket.create_connection(('1.1.1.1', 443), timeout=5).close(); print('tcp open')\n"
+        "except OSError:\n"
+        "    print('tcp closed')\n"
+        "with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP) as icmp:\n"
+        "    icmp.settimeout(5)\n"
+        "    body = struct.pack('!BBHHH', 8, 0, 0, 7, 1) + b'ale'\n"
+        "    words = sum(struct.unpack('!5H', body[:10])) + (body[10] << 8)\n"
+        "    total = (words & 0xFFFF) + (words >> 16)\n"
+        "    body = body[:2] + struct.pack('!H', ~total & 0xFFFF) + body[4:]\n"
+        "    icmp.sendto(body, ('1.1.1.1', 0))\n"
+        "    try:\n"
+        "        icmp.recv(1024); print('icmp open')\n"
+        "    except OSError:\n"
+        "        print('icmp closed')\n"
+    )
+    async with await provider.create(request) as sandbox:
+        await sandbox.open_egress()
+        opened = await sandbox.exec(["python3", "-c", reach], timeout_sec=60)
+        assert opened.stdout.split("\n")[:2] == ["tcp open", "icmp open"], opened.stdout
+        await sandbox.close_egress()
+        # What root holding CAP_NET_ADMIN in netstack could do.
+        flush = gvisor.set_netstack(sandbox.container, {"tables": {"filter": {}, "nat": {}}})
+        code, _, stderr = await _docker(*flush, timeout=60)
+        assert code == 0, stderr
+        sealed = await sandbox.exec(["python3", "-c", reach], timeout_sec=60)
+        assert sealed.stdout.split("\n")[:2] == ["tcp closed", "icmp closed"], sealed.stdout
+
+
+@pytest.mark.asyncio
+async def test_a_gvisor_sandbox_resolves_names_while_open_and_fails_at_once_while_sealed() -> None:
+    """On its own network netstack resolves through the Host's upstream servers, where
+    Docker's embedded DNS server would answer nothing; sealed, a connection off the Host and
+    a lookup are refused at once."""
+    skip_without_gvisor()
+    provider = DockerProvider(runtime="gvisor")
+    request = await _plain_request(provider, "gvisor-names")
+    probe = (
+        "import socket, time\n"
+        "started = time.monotonic()\n"
+        "try:\n"
+        "    socket.create_connection(('192.0.2.1', 8000), timeout=5).close(); print('open')\n"
+        "except OSError:\n"
+        "    print('closed', round(time.monotonic() - started, 2))\n"
+    )
+    async with await provider.create(request) as sandbox:
+        await sandbox.open_egress()
+        lookup = await sandbox.exec(["getent", "hosts", "example.com"], identity=Identity.AGENT)
+        assert lookup.ok, "an open sandbox resolves no name"
+        await sandbox.close_egress()
+        sealed = await sandbox.exec(["python3", "-c", probe], identity=Identity.AGENT)
+        assert sealed.stdout.split()[:1] == ["closed"], (
+            f"a sealed sandbox reached past the Host: {sealed.stdout}{sealed.stderr}"
+        )
+        _, seconds = sealed.stdout.split()
+        assert float(seconds) < 1, "the seal's refusal waited for a timeout"
+        started = time.monotonic()
+        lookup = await sandbox.exec(["getent", "hosts", "example.com"], identity=Identity.AGENT)
+        assert lookup.exit_code != 0 and time.monotonic() - started < 10
+
+
+@pytest.mark.asyncio
+async def test_a_gvisor_sandbox_that_fills_its_memory_with_a_tmpfs_says_it_died() -> None:
+    """A tmpfs is the Sentry's memory, so filling the limit with one ends the whole sandbox,
+    and the session that ends says so."""
+    skip_without_gvisor()
+    provider = DockerProvider(runtime="gvisor")
+    request = await _plain_request(provider, "gvisor-tmpfs", ContainerFeature.MOUNT)
+    fill = (
+        "mkdir -p /mnt/fill && mount -t tmpfs -o size=4g none /mnt/fill && "
+        "dd if=/dev/zero of=/mnt/fill/zeros bs=1M count=2048"
+    )
+    async with await provider.create(request) as sandbox:
+        with pytest.raises(GuestUnreachableError, match="exceeded its memory limit"):
+            await sandbox.exec(["sh", "-c", fill], timeout_sec=120)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["runc", "gvisor"])
+async def test_a_docker_sandbox_killed_from_outside_says_so(runtime: str) -> None:
+    if runtime == "gvisor":
+        skip_without_gvisor()
+    provider = DockerProvider(runtime=runtime)
+    async with await provider.create(
+        await _plain_request(provider, f"killed-{runtime}")
+    ) as sandbox:
         running = asyncio.ensure_future(sandbox.exec(["sleep", "60"], timeout_sec=120))
         await asyncio.sleep(2)
         code, _, stderr = await _docker("kill", sandbox.container)

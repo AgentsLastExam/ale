@@ -5,7 +5,7 @@ import json
 import platform
 import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,15 +15,16 @@ from pydantic import ValidationError
 from tests.support import MemoryProvider, edit_task_config, write_task
 from typer.testing import CliRunner
 
-from ale.core.capability import CapabilityProfile
+from ale.core.capability import CapabilityProfile, SandboxNeeds
 from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config
-from ale.core.errors import ProviderCapabilityError
+from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     DesktopResolution,
     ExecResult,
     ImageKind,
     PreparedTaskImage,
     Sandbox,
+    SandboxCheck,
     SandboxRequest,
     SandboxRole,
 )
@@ -284,14 +285,17 @@ def test_a_refused_selection_stops_the_command_before_anything_is_prepared(
 
 
 class _Leaf(MemoryProvider):
-    """A leaf giving ``features``, which counts its preflights."""
+    """A leaf giving ``features``, which keeps the needs each of its preflights was given,
+    and whose preflight returns ``check``."""
 
-    def __init__(self, provider_id: str, *features: str) -> None:
+    def __init__(self, provider_id: str, *features: str, check: SandboxCheck | None = None) -> None:
         super().__init__(provider_id, container_features=frozenset(map(ContainerFeature, features)))
-        self.preflights = 0
+        self.preflights: list[list[SandboxNeeds]] = []
+        self.check = check
 
-    async def preflight(self) -> None:
-        self.preflights += 1
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> SandboxCheck | None:
+        self.preflights.append(list(needs))
+        return self.check
 
 
 def _selected(task: ManifestTask, solver: str, verifier: str | None = None) -> ManifestTask:
@@ -349,7 +353,15 @@ async def test_each_selected_leaf_is_checked_once_for_each_set_of_features_asked
     await registry.preflight(tasks)
     await registry.preflight(tasks)
 
-    assert (runc.preflights, kata.preflights, fleet.preflights) == (1, 1, 0)
+    assert [len(leaf.preflights) for leaf in (runc, kata, fleet)] == [1, 1, 0]
+    # Each with the needs of the Sandboxes it was selected for.
+    ((plain, verifier),) = runc.preflights
+    assert (plain.resources.container_features, verifier.network_mode) == ((), NetworkMode.OPEN)
+    assert [need.resources.container_features for need in kata.preflights[0]] == [
+        (ContainerFeature.PERF,),
+        (ContainerFeature.PERF,),
+        (ContainerFeature.MOUNT, ContainerFeature.PERF),
+    ]
     assert runc.requests == fleet.requests == []
     # Each set as its Sandboxes ask for it, with its grants and no other's.
     (perf, perf_wanted), (both, both_wanted) = probed
@@ -362,6 +374,122 @@ async def test_each_selected_leaf_is_checked_once_for_each_set_of_features_asked
     assert perf.network.mode is NetworkMode.BLOCK
     assert perf.resources.gpus == 0
     assert kata.destroyed == [sandbox.sandbox_id for sandbox in kata.sandboxes]
+
+
+@pytest.mark.asyncio
+async def test_a_check_the_preflight_of_a_leaf_returns_runs_once_in_a_sandbox_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In the Sandbox that probes its features when one does, else in one started as its
+    first Sandbox asks, with no GPU."""
+    checked: list[SandboxRequest] = []
+
+    async def check(sandbox: Sandbox) -> None:
+        checked.append(sandbox.request)
+
+    probed = _Leaf("docker:gvisor", "mount", check=check)
+    plain = _Leaf("docker:runc", check=check)
+    registry = ProviderRegistry(_settings("docker:gvisor", "docker:runc"))
+    registry._instances.update({leaf.id: leaf for leaf in (probed, plain)})
+    tasks = [
+        _selected(_task(tmp_path / "plain-on-gvisor"), "docker:gvisor"),
+        _selected(
+            _task(tmp_path / "mount", {"environment": {"container_features": ["mount"]}}),
+            "docker:gvisor",
+        ),
+        _selected(_task(tmp_path / "gpu", {"environment": {"gpus": 1}}), "docker:runc"),
+    ]
+
+    async def probe(_sandbox: Sandbox, _features: object) -> dict[ContainerFeature, str]:
+        return {}
+
+    monkeypatch.setattr("ale.run.providers.missing_features", probe)
+    await registry.preflight(tasks)
+    await registry.preflight(tasks)
+
+    (in_probe, alone) = checked
+    assert [request.resources.container_features for request in probed.requests] == [
+        (ContainerFeature.MOUNT,)
+    ]
+    assert in_probe is probed.requests[0]
+    assert alone is plain.requests[0] and alone.resources.gpus == 0
+    assert alone.network.mode is NetworkMode.BLOCK
+    assert len(probed.destroyed) == len(plain.destroyed) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_preflight_of_a_leaf_runs_again_only_for_needs_it_has_not_passed_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later Task may need what the first did not, another runtime or a GPU; the check
+    its preflight leaves runs once."""
+    checked: list[SandboxRequest] = []
+
+    async def check(sandbox: Sandbox) -> None:
+        checked.append(sandbox.request)
+
+    gvisor = _Leaf("docker:gvisor", "raw_sockets", check=check)
+    registry = ProviderRegistry(_settings("docker:gvisor"))
+    registry._instances[gvisor.id] = gvisor
+    plain = _selected(_task(tmp_path / "plain"), "docker:gvisor")
+    raw = _selected(
+        _task(tmp_path / "raw", {"environment": {"container_features": ["raw_sockets"]}}),
+        "docker:gvisor",
+    )
+    gpu = _selected(_task(tmp_path / "gpu", {"environment": {"gpus": 1}}), "docker:gvisor")
+
+    async def probe(_sandbox: Sandbox, _features: object) -> dict[ContainerFeature, str]:
+        return {}
+
+    monkeypatch.setattr("ale.run.providers.missing_features", probe)
+    for tasks in ([plain], [plain], [plain, raw], [raw, gpu]):
+        await registry.preflight(tasks)
+    asked = [
+        [(need.resources.container_features, need.resources.gpus) for need in needs]
+        for needs in gvisor.preflights
+    ]
+    assert asked == [[((), 0)], [((ContainerFeature.RAW_SOCKETS,), 0)], [((), 1)]]
+    assert len(checked) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["check", "probe"])
+async def test_needs_whose_check_or_probe_failed_are_preflighted_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    """A registry used again, as a Fleet Node's is, runs the leaf's preflight again rather
+    than take needs whose check or probe failed for passed, and the check until it
+    passes."""
+    checked: list[SandboxRequest] = []
+
+    async def check(sandbox: Sandbox) -> None:
+        checked.append(sandbox.request)
+        if failing == "check" and len(checked) == 1:
+            raise ProviderStartError("Docker does not see what the sandbox writes")
+
+    gvisor = _Leaf("docker:gvisor", "mount", check=check)
+    registry = ProviderRegistry(_settings("docker:gvisor"))
+    registry._instances[gvisor.id] = gvisor
+    task = _selected(
+        _task(tmp_path / "mount", {"environment": {"container_features": ["mount"]}}),
+        "docker:gvisor",
+    )
+    probes: list[object] = []
+
+    async def probe(_sandbox: Sandbox, _features: object) -> dict[ContainerFeature, str]:
+        probes.append(_features)
+        if failing == "probe" and len(probes) == 1:
+            return {ContainerFeature.MOUNT: "mount EPERM"}
+        return {}
+
+    monkeypatch.setattr("ale.run.providers.missing_features", probe)
+    with pytest.raises((ProviderStartError, ProviderCapabilityError)):
+        await registry.preflight([task])
+    await registry.preflight([task])
+    await registry.preflight([task])
+    assert len(gvisor.preflights) == 2
+    assert len(checked) == (2 if failing == "check" else 1)
+    assert len(probes) == (1 if failing == "check" else 2)
 
 
 @pytest.mark.asyncio
@@ -415,7 +543,7 @@ def test_ale_run_refuses_to_start_when_a_leaf_lacks_a_feature_here(
     )
     assert result.exit_code == 3, result.output
     assert "docker:kata: perf (perf_event_open EACCES)" in result.output
-    assert kata.preflights == 1
+    assert len(kata.preflights) == 1
     assert kata.destroyed == [kata.sandboxes[0].sandbox_id]
 
 

@@ -94,8 +94,9 @@ def node(
     provider: Annotated[
         list[str] | None,
         typer.Option(
-            help="A leaf to lend: docker:runc, docker:kata, qemu or orchard (repeat, most "
-            "preferred first). Default: docker:runc, qemu and orchard, where each works."
+            help="A leaf to lend: docker:runc, docker:kata, docker:gvisor, qemu or orchard "
+            "(repeat, most preferred first). Default: docker:runc, qemu and orchard, where "
+            "each works."
         ),
     ] = None,
     label: Annotated[

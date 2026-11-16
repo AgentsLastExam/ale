@@ -665,7 +665,7 @@ class FleetProvider(Provider):
             key=len,
         )
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
         await self.client.check()
 
     def defer(

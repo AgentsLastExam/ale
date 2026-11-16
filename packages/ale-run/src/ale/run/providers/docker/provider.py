@@ -9,12 +9,13 @@ that bridge. Deny-all with a single controlled egress therefore falls out of the
 network's shape — there are no firewall rules to survive a daemon restart, and nothing
 inside the sandbox can lift them.
 
-Under the Kata runtime each container is a microVM, which sees no network attached after
-it boots, nor lets the namespace's netfilter see its packets. There the sandbox boots on a
-bridge of its own that is not internal, and tc filters in its network namespace, outside
-the VM, seal it instead (``kata.py``). A sandbox's confinement object holds which of the
-two it gets; nothing else in this module depends on the runtime but the ``docker run``
-flags.
+Under the Kata runtime each container is a microVM, and under gVisor it runs on a kernel in
+user space with a network stack of its own; neither sees a network attached after it boots,
+nor lets the namespace's netfilter see its packets. There the sandbox boots on a bridge of
+its own that is not internal, and tc filters in its network namespace, outside the sandbox,
+seal it instead (``kata.py``, ``gvisor.py``). Each runtime's entry in :data:`RUNTIMES`
+holds all that differs between them: its grants, GPUs, size, ``docker run`` flags and
+confinement.
 """
 
 from __future__ import annotations
@@ -26,13 +27,13 @@ import re
 import shutil
 import uuid
 from collections import Counter
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal, Self
 from urllib.parse import urlsplit
 
-from ale.core.capability import CapabilityProfile, accepts_model
+from ale.core.capability import CapabilityProfile, SandboxNeeds, accepts_model
 from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -50,6 +51,7 @@ from ale.core.sandbox import (
     ResourceAllocation,
     RetainedSandbox,
     Sandbox,
+    SandboxCheck,
     SandboxFile,
     SandboxRequest,
     SandboxRole,
@@ -60,10 +62,11 @@ from ale.run import HELPER_RUNTIME, ale_image, guestd
 from ale.run.framework import with_framework
 from ale.run.gpu import GpuLease, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
+from ale.run.iptables import GATEWAY_CHAIN
 from ale.run.process import run
 from ale.run.providers import machine_arch, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.docker import kata, tc
+from ale.run.providers.docker import gvisor, kata, tc
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, StdioTransport
@@ -74,8 +77,8 @@ __all__ = [
 ]
 
 GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
-#: Any image with iptables, and tc for a Kata sandbox, can apply a sandbox's host rules;
-#: ALE's QEMU runner, which needs both for its own guest, is one.
+#: Any image with iptables, and tc for a Kata or gVisor sandbox, can apply a sandbox's host
+#: rules; ALE's QEMU runner, which needs both for its own guest, is one.
 NETFILTER_IMAGE = ale_image("ale-qemu-runner")
 
 LABEL = "ale.episode"
@@ -84,8 +87,8 @@ ROLE_LABEL = "ale.role"
 RETENTION_LABEL = "ale.retention"
 #: The network mode a container was started with, which reattaching confines it by.
 NETWORK_LABEL = "ale.network"
-#: The MAC of the Host's end of a Kata sandbox's own network, which its seal's filters
-#: match: read before the sandbox starts, and kept for a reattaching run.
+#: The MAC of the Host's end of a Kata or gVisor sandbox's own network, which its seal's
+#: filters match: read before the sandbox starts, and kept for a reattaching run.
 BRIDGE_MAC_LABEL = "ale.bridge-mac"
 GPU_LABEL = "ale.gpus"
 PREPARED_LABEL = "ale.prepared"
@@ -101,50 +104,17 @@ SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
 #: off the host, and exactly one destination still reachable.
 HOST_ALIAS = "ale-gateway.internal"
 
-#: The nat chain, in a sandbox's own network namespace, that sends the fixed Gateway port
-#: to the port the Host serves the Gateway on.
-GATEWAY_CHAIN = "ALE_GATEWAY"
 
-
-@dataclass(frozen=True)
-class Runtime:
-    """An OCI runtime a Docker leaf starts every one of its Sandboxes with."""
-
-    registered: str
-    """The name Docker's daemon knows it by, which ``--runtime`` takes and ``docker inspect``
-    reports as the container's. A containerd shim's name, ``io.containerd.<shim>.<version>``,
-    Docker also runs from its PATH as ``containerd-shim-<shim>-<version>``."""
-    features: frozenset[ContainerFeature]
-    """What it gives a Sandbox that asks for them, as measured (see the Providers README)."""
-    gpus: bool
-    """Whether Docker's GPU injection reaches its Sandboxes."""
-    devices: tuple[str, ...] = ()
-    """The Host devices it needs."""
-
-
-#: Each Docker leaf's runtime, by the part of its provider id after ``docker:``. runc gives
-#: raw sockets to every container, as Docker does by default; Kata's microVM runs no seccomp
-#: filter, and ``mount`` adds ``CAP_SYS_ADMIN``. Docker's GPU injection does not reach a
-#: Kata microVM.
-RUNTIMES: dict[str, Runtime] = {
-    "runc": Runtime("runc", frozenset({ContainerFeature.RAW_SOCKETS}), gpus=True),
-    "kata": Runtime(
-        kata.RUNTIME,
-        frozenset(
-            {
-                ContainerFeature.PERF,
-                ContainerFeature.BPF,
-                ContainerFeature.IO_URING,
-                ContainerFeature.RAW_SOCKETS,
-                ContainerFeature.USER_NAMESPACES,
-                ContainerFeature.MOUNT,
-            }
-        ),
-        gpus=False,
-        devices=("/dev/kvm",),
-    ),
-}
 _SHIM = re.compile(r"io\.containerd\.(\w+)\.(v\d+)")
+
+#: Prints the kernel log of the Sandbox it runs in (``syslog(SYSLOG_ACTION_READ_ALL)``), on
+#: the framework's Python, whatever the image has.
+_KERNEL_LOG = """
+import ctypes
+log = ctypes.create_string_buffer(1 << 20)
+size = ctypes.CDLL(None, use_errno=True).klogctl(3, log, len(log))
+print(log.raw[: max(size, 0)].decode("utf-8", "replace"))
+"""
 
 _NVIDIA_QUERY = "uuid,name,pci.bus_id,driver_version"
 _HOST_NVIDIA_QUERY = f"index,{_NVIDIA_QUERY}"
@@ -556,8 +526,9 @@ class _OnOwnBridge:
         default bridge's ``resolv.conf``; writing it needs no network.
 
         On any other network Docker names its embedded DNS server, ``127.0.0.11``, which it
-        serves through netfilter in the sandbox's namespace, out of reach of a VM's guest.
-        Written in place, the file stays the container's own, as Docker's is.
+        serves through netfilter in the sandbox's namespace, out of reach of a VM's guest
+        and of netstack. Written in place, the file stays the container's own, as Docker's
+        is.
         """
         resolv_conf = await self.bridge.resolv_conf()
         code, _, stderr = await _docker(
@@ -618,7 +589,95 @@ class _KataConfinement(_OnOwnBridge):
         await kata.set_route(client, self.host_ip, present=False)
 
 
-_Confinement = _RuncConfinement | _KataConfinement
+class _GvisorConfinement(_OnOwnBridge):
+    """A sandbox under gVisor, sealed by tc filters on its veth's egress while it is
+    isolated.
+
+    ALE's chains in its netstack route the Gateway and refuse what the filters drop, so that
+    fails at once. The sandbox's own processes lack ``CAP_NET_ADMIN`` there; the filters
+    outside are what binds it.
+    """
+
+    def __init__(self, bridge: _DefaultBridge, network: str, host_ip: str, host_mac: str) -> None:
+        super().__init__(bridge, network, host_ip, host_mac)
+        self._isolated = False
+        #: The Gateway's own port, when the fixed one is routed to it, and every port of
+        #: the Host's address an isolated sandbox reaches, as the wiring run asked.
+        self._gateway_port = ""
+        self._ports: list[str] = []
+        #: The seal a reattaching run found, until egress next changes.
+        self._found_sealed: bool | None = None
+
+    async def wire(
+        self, container: str, request: SandboxRequest, *, reattached: bool = False
+    ) -> None:
+        """Route the fixed Gateway port to the Host and start an isolated sandbox sealed.
+
+        A reattaching run keeps the seal the container has, and replaces the rest.
+        """
+        routed = _sandbox_gateway(request.gateway_url) != request.gateway_url
+        self._isolated = request.network.mode is not NetworkMode.OPEN
+        self._gateway_port = _url_port(request.gateway_url) if routed else ""
+        self._ports = []
+        sealed = False
+        if self._isolated:
+            proxy_port = _url_port(request.proxy_url)
+            self._ports = [port for port in (self._gateway_port, proxy_port) if port]
+            commands = gvisor.filters(
+                await self.peers(container),
+                gateway_port=self._gateway_port,
+                proxy_port=proxy_port,
+                reattached=reattached,
+            )
+            await _netfilter_helper(container, commands, "confine the gVisor sandbox's network")
+            sealed = not reattached or await self.sealed(container, {})
+        await self._netstack(container, sealed=sealed)
+        if not reattached:
+            await self._resolve(container)
+
+    async def sealed(self, container: str, attached: Mapping[str, object]) -> bool:
+        """Whether a sandbox found running is sealed: whether the seal's drop filter is on
+        its veth. Read once by a reattaching run."""
+        if self._found_sealed is None:
+            self._found_sealed = await _shows_drop(container, gvisor.SEAL_PROBE)
+        return self._found_sealed
+
+    async def seal_guest(self, client: GuestClient) -> None:
+        """Nothing more: wiring sealed its netstack too."""
+
+    async def open(self, container: str, client: GuestClient) -> None:
+        self._found_sealed = None
+        # The inside first, so its rules never refuse what the outside already passes.
+        await self._netstack(container, sealed=False)
+        unseal = gvisor.unseal(await self.peers(container))
+        await _netfilter_helper(container, unseal, "open egress")
+
+    async def close(self, container: str, client: GuestClient) -> None:
+        self._found_sealed = None
+        # The outside first, so the sandbox is never open while its rules say it is sealed.
+        seal = gvisor.seal(await self.peers(container))
+        await _netfilter_helper(container, seal, "close egress")
+        await self._netstack(container, sealed=True)
+
+    async def _netstack(self, container: str, *, sealed: bool) -> None:
+        """Set ALE's chains in the sandbox's netstack; nothing when there is none to set."""
+        if not self._isolated and not self._gateway_port:
+            return
+        state = gvisor.netstack(
+            self.host_ip,
+            gateway_port=self._gateway_port,
+            ports=self._ports,
+            isolated=self._isolated,
+            sealed=sealed,
+        )
+        code, _, stderr = await _docker(*gvisor.set_netstack(container, state), timeout=60)
+        if code != 0:
+            raise ProviderStartError(
+                f"could not set ALE's chains in the gVisor sandbox: {stderr.strip()}"
+            )
+
+
+_Confinement = _RuncConfinement | _KataConfinement | _GvisorConfinement
 
 
 async def _shows_drop(container: str, probe: str) -> bool:
@@ -627,6 +686,133 @@ async def _shows_drop(container: str, probe: str) -> bool:
     if code != 0:
         raise ProviderStartError(f"could not read the sandbox's seal: {stderr.strip()}")
     return "action drop" in shown
+
+
+@dataclass(frozen=True)
+class Grant:
+    """What a Sandbox that asks for a container feature is started with beyond its leaf's
+    own flags: Linux capabilities, and the registered runtime it needs instead of the
+    leaf's."""
+
+    capabilities: tuple[str, ...] = ()
+    runtime: str | None = None
+
+
+def _as_declared(memory_mb: int) -> int:
+    return memory_mb
+
+
+@dataclass(frozen=True)
+class Runtime:
+    """An OCI runtime a Docker leaf starts every one of its Sandboxes with."""
+
+    registered: str
+    """The name Docker's daemon knows it by, which ``--runtime`` takes and
+    ``docker inspect`` reports as the container's. A containerd shim's name,
+    ``io.containerd.<shim>.<version>``, Docker also runs from its PATH as
+    ``containerd-shim-<shim>-<version>``."""
+    grants: Mapping[ContainerFeature, Grant]
+    """The container features it gives a Sandbox that asks for them, as measured (see the
+    Providers README), each with what that Sandbox gets for it."""
+    gpus: bool
+    """Whether Docker's GPU injection reaches its Sandboxes."""
+    confinement: type[_Confinement]
+    """How its Sandboxes are kept to the Host's address while they are isolated."""
+    devices: tuple[str, ...] = ()
+    """The Host devices it needs."""
+    memory_mb: Callable[[int], int] = _as_declared
+    """The container memory that leaves a Sandbox's processes what its Task declared."""
+    flags: tuple[str, ...] = ()
+    """``docker run`` flags every one of its Sandboxes gets."""
+    arguments: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    """For each name it is registered under by path, the ``runtimeArgs`` it is registered
+    with, no more and no fewer."""
+    build: str = ""
+    """What the version ``<runtime> --version`` reports ends in for the build of it this
+    engine runs, for one ALE builds itself."""
+    drivers: tuple[str, ...] = ()
+    """The command of it that lists the NVIDIA driver versions it supports, for one that
+    proxies the Host's driver rather than passing it through."""
+    banner: str = ""
+    """What the kernel log of each of its Sandboxes starts with, which shows a Sandbox runs
+    on it, together with Docker seeing what the Sandbox writes."""
+
+    @property
+    def features(self) -> frozenset[ContainerFeature]:
+        return frozenset(self.grants)
+
+    def granted(self, features: Sequence[ContainerFeature]) -> tuple[str, tuple[str, ...]]:
+        """The registered runtime and the capabilities of a Sandbox that asks for
+        ``features``: the union of their grants."""
+        grants = [self.grants[feature] for feature in features]
+        runtimes = {grant.runtime for grant in grants if grant.runtime}
+        assert len(runtimes) <= 1, f"{features} need runtimes {runtimes}"
+        capabilities = sorted({name for grant in grants for name in grant.capabilities})
+        return (runtimes.pop() if runtimes else self.registered), tuple(capabilities)
+
+    def names(self, needs: Sequence[SandboxNeeds]) -> list[str]:
+        """The registered names Sandboxes of ``needs`` run under; with none, every one."""
+        wanted = (
+            {self.granted(need.resources.container_features)[0] for need in needs}
+            if needs
+            else {
+                self.registered,
+                *(grant.runtime for grant in self.grants.values() if grant.runtime),
+            }
+        )
+        return sorted(wanted)
+
+
+#: Each Docker leaf's runtime, by the part of its provider id after ``docker:``. runc gives
+#: raw sockets to every container, as Docker does by default; Kata's microVM runs no seccomp
+#: filter, and ``mount`` adds ``CAP_SYS_ADMIN``. Docker's GPU injection does not reach a
+#: Kata microVM. gVisor runs a Sandbox that needs raw sockets under the runtime registered
+#: for them.
+RUNTIMES: dict[str, Runtime] = {
+    "runc": Runtime(
+        "runc", {ContainerFeature.RAW_SOCKETS: Grant()}, gpus=True, confinement=_RuncConfinement
+    ),
+    "kata": Runtime(
+        kata.RUNTIME,
+        {
+            ContainerFeature.PERF: Grant(),
+            ContainerFeature.BPF: Grant(),
+            ContainerFeature.IO_URING: Grant(),
+            ContainerFeature.RAW_SOCKETS: Grant(),
+            ContainerFeature.USER_NAMESPACES: Grant(),
+            ContainerFeature.MOUNT: Grant(capabilities=("SYS_ADMIN",)),
+        },
+        gpus=False,
+        confinement=_KataConfinement,
+        devices=("/dev/kvm",),
+        memory_mb=kata.memory_mb,
+    ),
+    "gvisor": Runtime(
+        gvisor.RUNTIME,
+        {
+            ContainerFeature.USER_NAMESPACES: Grant(),
+            ContainerFeature.FUSE: Grant(),
+            ContainerFeature.MOUNT: Grant(capabilities=("SYS_ADMIN",)),
+            ContainerFeature.RAW_SOCKETS: Grant(runtime=gvisor.NET_RAW),
+        },
+        gpus=True,
+        confinement=_GvisorConfinement,
+        memory_mb=gvisor.memory_mb,
+        flags=gvisor.FLAGS,
+        arguments=gvisor.ARGUMENTS,
+        build=gvisor.BUILD,
+        drivers=gvisor.DRIVERS,
+        banner=gvisor.BANNER,
+    ),
+}
+
+
+def _runtime_named(registered: str) -> Runtime:
+    """The runtime a container ``docker inspect`` reports was started under belongs to."""
+    for runtime in RUNTIMES.values():
+        if registered in runtime.names(()):
+            return runtime
+    raise ProviderCapabilityError(f"no Docker leaf starts containers under runtime {registered!r}")
 
 
 #: How long an ended guestd session waits for its container to stop. A container whose
@@ -671,7 +857,7 @@ async def _death(container: str) -> str | None:
 
     ``docker wait`` returns once it has stopped, while its state, read when the session
     ended, could still say it runs. ``OOMKilled`` alone is no death: Docker keeps it once
-    the OOM killer has taken any process of the container.
+    the OOM killer has taken any process of the container, as a gVisor sandbox survives.
     """
     try:
         code, _, _ = await _docker("wait", container, timeout=_DEATH_SEC)
@@ -693,15 +879,18 @@ async def _death(container: str) -> str | None:
 
 
 def _verify_docker_gpu(
-    selected: tuple[str, ...], observed: tuple[GpuDevice, ...]
+    selected: tuple[str, ...], observed: tuple[GpuDevice, ...], host: dict[int, GpuDevice]
 ) -> tuple[GpuDevice, ...]:
+    """The selected GPUs as the Host records them, once the sandbox shows exactly those:
+    gVisor's nvproxy reports no PCI address to nvidia-smi in the sandbox."""
     actual = tuple(sorted(device.id for device in observed))
     expected = tuple(sorted(selected))
     if actual != expected:
         raise ProviderCapabilityError(
             f"Docker GPU identity mismatch: selected {expected}, observed {actual}"
         )
-    return observed
+    recorded = {device.id: device for device in host.values()}
+    return tuple(recorded[key] for key in selected)
 
 
 class DockerSandbox(Sandbox):
@@ -734,7 +923,7 @@ class DockerSandbox(Sandbox):
         )
         self.container = container
         #: How the sandbox is kept to the Host's address while it is sealed: an internal
-        #: network under runc, tc filters outside the VM under Kata.
+        #: network under runc, tc filters outside it under Kata and gVisor.
         self.confinement = confinement
         self._client = client
         self._file_client = file_client
@@ -989,25 +1178,47 @@ class DockerProvider(Provider):
             )
         return self._gpu_models
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> SandboxCheck | None:
+        """Find each registered name the Sandboxes of ``needs`` run under, every one its
+        profile declares when none are given, registered with exactly the arguments the
+        runtime takes, and the leaf's devices. A runtime ALE builds must be this engine's
+        build, and one that proxies the NVIDIA driver must support the Host's when GPUs may
+        be attached: a Sandbox needs them, or, with no needs, its profile offers them. What
+        a Sandbox of it must show is returned as a check."""
         if shutil.which("docker") is None:
             raise ProviderStartError("docker is not installed — see `just doctor`")
-        code, names, stderr = await _docker(
-            "info", "--format", "{{range $name, $_ := .Runtimes}}{{$name}} {{end}}", timeout=30
-        )
+        code, raw, stderr = await _docker("info", "--format", "{{json .Runtimes}}", timeout=30)
         if code != 0:
             raise ProviderStartError(f"docker daemon unreachable: {stderr.strip()}")
+        known: dict[str, dict[str, object]] = json.loads(raw)
         runtime = RUNTIMES[self.runtime]
-        shim = _SHIM.fullmatch(runtime.registered)
-        if runtime.registered not in names.split() and not (
-            shim and shutil.which(f"containerd-shim-{shim[1]}-{shim[2]}")
-        ):
-            raise ProviderStartError(
-                f"{self.id} needs the {runtime.registered} runtime, which Docker does not have "
-                "here; see the Providers README"
-            )
+        names = runtime.names(needs)
+        for name in names:
+            shim = _SHIM.fullmatch(name)
+            if name not in known and not (
+                shim and shutil.which(f"containerd-shim-{shim[1]}-{shim[2]}")
+            ):
+                raise ProviderStartError(
+                    f"{self.id} needs the {name} runtime, which Docker does not have here; "
+                    "see the Providers README"
+                )
+            wanted = runtime.arguments.get(name)
+            given = [str(arg) for arg in known.get(name, {}).get("runtimeArgs") or []]  # type: ignore[attr-defined]
+            if wanted is not None and Counter(given) != Counter(wanted):
+                raise ProviderStartError(
+                    f"{self.id} needs Docker's {name} runtime registered with "
+                    f"{' '.join(wanted)}, not {' '.join(given) or 'no arguments'}; see the "
+                    "Providers README"
+                )
         if missing := [device for device in runtime.devices if not Path(device).exists()]:
             raise ProviderStartError(f"{self.id} needs {', '.join(missing)}, which is missing")
+        if runtime.build or runtime.drivers:
+            gpus = (
+                any(need.resources.gpus for need in needs) if needs else bool(await self._models())
+            )
+            for path in sorted({str(known[name]["path"]) for name in names}):
+                await self._check_build(path, runtime, gpus=gpus)
+        return self._shows_runtime if runtime.banner else None
 
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
         if image.kind is not ImageKind.CONTAINER:
@@ -1021,14 +1232,68 @@ class DockerProvider(Provider):
             )
         return prepared
 
+    async def _check_build(self, path: str, runtime: Runtime, *, gpus: bool) -> None:
+        """Check that the runtime Docker runs from ``path`` is ALE's build of it, and, when
+        Sandboxes need GPUs, that it supports the Host's NVIDIA driver."""
+        if runtime.build:
+            try:
+                code, version, stderr = await run(path, "--version", timeout=30)
+            except OSError as error:
+                raise ProviderStartError(f"{self.id} cannot run {path}: {error}") from None
+            reported = (version.strip() or stderr.strip()).splitlines()[:1]
+            if code != 0 or not any(
+                word.endswith(runtime.build) for word in "".join(reported).split()
+            ):
+                raise ProviderStartError(
+                    f"{self.id} needs ALE's build {runtime.build} of {path}, not "
+                    f"{reported[0] if reported else 'what it reports'}; see the Providers README"
+                )
+        if not gpus or not runtime.drivers:
+            return
+        drivers = {device.driver_version for device in (await self._host_gpus()).values()}
+        code, listed, stderr = await run(path, *runtime.drivers, timeout=30)
+        if code != 0:
+            raise ProviderStartError(f"{path} {' '.join(runtime.drivers)} failed: {stderr.strip()}")
+        if unsupported := sorted(drivers - set(listed.split())):
+            raise ProviderCapabilityError(
+                f"{self.id} cannot attach GPUs here: {path} does not support NVIDIA driver "
+                f"{', '.join(unsupported)}"
+            )
+
+    async def _shows_runtime(self, sandbox: Sandbox) -> None:
+        """Check that ``sandbox`` runs on this leaf's runtime, as its kernel log says, and
+        that Docker sees what it writes, which its snapshots keep."""
+        assert isinstance(sandbox, DockerSandbox)
+        runtime = RUNTIMES[self.runtime]
+        log = await sandbox.exec([guestd.PYTHON["linux"], "-I", "-c", _KERNEL_LOG], timeout_sec=60)
+        if runtime.banner not in log.stdout:
+            raise ProviderStartError(
+                f"{self.id} started {sandbox.container}, whose kernel log does not say "
+                f"{runtime.banner!r}: {(log.stdout or log.stderr).strip()[:200]}"
+            )
+        # The contents differ from the name, which the archive docker cp writes holds too.
+        path = str(GUESTD_DIR.parent / f"preflight-{uuid.uuid4().hex}")
+        contents = uuid.uuid4().hex
+        await sandbox.write_file(path, contents.encode())
+        code, copied, stderr = await _docker("cp", f"{sandbox.container}:{path}", "-", timeout=60)
+        if code != 0 or contents not in copied:
+            ran = sandbox.allocation.runtime or runtime.registered
+            raise ProviderStartError(
+                f"Docker does not see what {sandbox.container} writes, so a snapshot would "
+                f"lose it: is {ran} registered with "
+                f"{' '.join(runtime.arguments.get(ran, ()))}? {stderr.strip()}"
+            )
+
     async def create(self, request: SandboxRequest) -> Sandbox:
         await self.accepts(request)
-        in_kata = self.runtime == "kata"
+        runtime = RUNTIMES[self.runtime]
         lease: GpuLease | None = None
         selected: tuple[str, ...] = ()
         candidates: tuple[str, ...] = ()
+        host_gpus: dict[int, GpuDevice] = {}
         if request.resources.gpus:
-            candidates = _eligible_gpus(await self._host_gpus(), self.gpus, request.resources)
+            host_gpus = await self._host_gpus()
+            candidates = _eligible_gpus(host_gpus, self.gpus, request.resources)
         if request.snapshot is not None:
             resolved_image = await self._snapshot_image(request.snapshot, request)
         else:
@@ -1045,8 +1310,7 @@ class DockerProvider(Provider):
         container = f"ale-{sandbox_id}"
         isolated = request.network.mode is not NetworkMode.OPEN
         # Named even for runc: a Host whose default runtime is another would run it there.
-        registered = RUNTIMES[self.runtime].registered
-        memory_mb = request.resources.memory_mb
+        registered, capabilities = runtime.granted(request.resources.container_features)
         argv = [
             "run", "-d", "--name", container,
             "--label", f"{LABEL}={request.episode_id}",
@@ -1055,11 +1319,12 @@ class DockerProvider(Provider):
             "--label", f"{RETENTION_LABEL}={request.retention}",
             "--label", f"{NETWORK_LABEL}={request.network.mode.value}",
             "--cpus", str(request.resources.cpus),
-            "--memory", f"{kata.memory_mb(memory_mb) if in_kata else memory_mb}m",
+            "--memory", f"{runtime.memory_mb(request.resources.memory_mb)}m",
             "--runtime", registered,
+            *runtime.flags,
         ]  # fmt: skip
-        if in_kata and ContainerFeature.MOUNT in request.resources.container_features:
-            argv += ["--cap-add", "SYS_ADMIN"]
+        for capability in capabilities:
+            argv += ["--cap-add", capability]
         for key, value in request.env.items():
             argv += ["-e", f"{key}={value}"]
         argv += ["-e", f"{CONTAINER_VARIABLE}={request.desktop_resolution}"]
@@ -1085,8 +1350,7 @@ class DockerProvider(Provider):
         try:
             # Its network, if it has one of its own, is created here, so that every failure
             # from now on removes it.
-            kind = _KataConfinement if in_kata else _RuncConfinement
-            confinement = await kind.start(sandbox_id, request, self._bridge)
+            confinement = await runtime.confinement.start(sandbox_id, request, self._bridge)
             argv += confinement.run_args(isolated)
             if request.gateway_url or request.proxy_url:
                 host_ip = confinement.host_ip
@@ -1120,15 +1384,15 @@ class DockerProvider(Provider):
             code, started, stderr = await _docker(
                 "inspect", "--format", "{{.Image}} {{.HostConfig.Runtime}}", container, timeout=30
             )
-            started_content, _, runtime = started.strip().partition(" ")
+            started_content, _, ran_under = started.strip().partition(" ")
             if code != 0 or started_content != resolved_image.observed_identity:
                 raise ProviderStartError(
                     "started container image identity does not match the resolved image: "
                     f"{stderr.strip() or started_content}"
                 )
-            if runtime != registered:
+            if ran_under != registered:
                 raise ProviderStartError(
-                    f"Docker started {container} under runtime {runtime!r}, not {registered!r}"
+                    f"Docker started {container} under runtime {ran_under!r}, not {registered!r}"
                 )
 
             runtime_identity = None
@@ -1153,9 +1417,10 @@ class DockerProvider(Provider):
                 client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
             )
             await verify_identities(client, agent_user, sudo=request.sudo)
-            observed_gpu = await self._container_gpus(client) if selected else ()
+            observed_gpu: tuple[GpuDevice, ...] = ()
             if selected:
-                _verify_docker_gpu(selected, observed_gpu)
+                inside = await self._container_gpus(client)
+                observed_gpu = _verify_docker_gpu(selected, inside, host_gpus)
             desktop: DesktopResolution | None = None
             if has_desktop:
                 await self._await_desktop(client)
@@ -1204,7 +1469,7 @@ class DockerProvider(Provider):
                 network_mode=request.network.mode,
                 provider=self.id,
                 leaf=self.id,
-                runtime=runtime,
+                runtime=ran_under,
                 desktop_resolution=desktop,
             ),
             resource_lease=lease,
@@ -1549,9 +1814,8 @@ class DockerProvider(Provider):
             update={"network": request.network.model_copy(update={"mode": mode})}
         )
         isolated = mode is not NetworkMode.OPEN
-        in_kata = record.get("HostConfig", {}).get("Runtime") == kata.RUNTIME
-        kind = _KataConfinement if in_kata else _RuncConfinement
-        confinement = await kind.found(networks, self._bridge, labels)
+        runtime = _runtime_named(str(record.get("HostConfig", {}).get("Runtime")))
+        confinement = await runtime.confinement.found(networks, self._bridge, labels)
         await confinement.wire(container, request, reattached=True)
         sealed = isolated and await confinement.sealed(container, attached)
         agent_user = request.user

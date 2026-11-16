@@ -7,7 +7,7 @@ import dataclasses
 import hashlib
 import io
 import tarfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -15,6 +15,7 @@ from aiohttp import ClientSession, WSMsgType
 from aiohttp.test_utils import TestClient, TestServer, unused_port
 from tests.support import MemoryProvider
 
+from ale.core.capability import SandboxNeeds
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.fleet import (
     AcquireRequest,
@@ -29,7 +30,14 @@ from ale.core.fleet import (
     sign_grant,
     verify_grant,
 )
-from ale.core.sandbox import GpuDevice, ImageRef, PreparedTaskImage, SandboxRequest
+from ale.core.sandbox import (
+    GpuDevice,
+    ImageRef,
+    PreparedTaskImage,
+    Sandbox,
+    SandboxCheck,
+    SandboxRequest,
+)
 from ale.core.taskspec import (
     ContainerFeature,
     ImageKind,
@@ -185,7 +193,7 @@ class TestDeclaration:
         self, tmp_path: Path
     ) -> None:
         class Broken(MemoryProvider):
-            async def preflight(self) -> None:
+            async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
                 raise ProviderStartError("no daemon")
 
         settings = NodeSettings(
@@ -197,6 +205,41 @@ class TestDeclaration:
         )
         with pytest.raises(ProviderStartError, match="no daemon"):
             await probe(settings, make=lambda _name: Broken("memory"))
+
+    async def test_a_leaf_lent_only_once_a_sandbox_of_it_shows_what_its_preflight_left(
+        self, tmp_path: Path
+    ) -> None:
+        """One Sandbox of the container base, which a failing check keeps from being
+        lent."""
+        checked: list[SandboxRequest] = []
+
+        class Checked(MemoryProvider):
+            failing = False
+
+            async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> SandboxCheck:
+                async def check(sandbox: Sandbox) -> None:
+                    checked.append(sandbox.request)
+                    if self.failing:
+                        raise ProviderStartError("its kernel log does not say 'Starting gVisor'")
+
+                return check
+
+        settings = NodeSettings(
+            name="box", control_url="", address="http://box:7471", state_dir=tmp_path
+        )
+        leaf = Checked("memory")
+        _, lent = await probe(
+            dataclasses.replace(settings, providers=("memory",)), make=lambda _: leaf
+        )
+        assert list(lent) == ["memory"]
+        (request,) = checked
+        assert request.prepared_image.runtime_ref == node_module.CHECK_IMAGE
+        assert request.network.mode is NetworkMode.BLOCK and leaf.destroyed
+        leaf.failing = True
+        with pytest.raises(ProviderStartError, match="Starting gVisor"):
+            await probe(dataclasses.replace(settings, providers=("memory",)), make=lambda _: leaf)
+        assert len(leaf.sandboxes) == 2
+        assert leaf.destroyed == [sandbox.sandbox_id for sandbox in leaf.sandboxes]
 
     async def test_a_node_lends_its_leaves_in_the_order_named_with_what_each_gives(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -217,23 +260,28 @@ class TestDeclaration:
             name="box",
             control_url="",
             address="http://box:7471",
-            providers=("docker:runc", "docker:kata"),
+            providers=("docker:runc", "docker:kata", "docker:gvisor"),
             state_dir=tmp_path,
         )
         declaration, lent = await probe(settings)
-        runc, kata = declaration.profiles
-        assert (runc.provider, kata.provider) == ("docker:runc", "docker:kata")
+        runc, kata, gvisor = declaration.profiles
+        assert (runc.provider, kata.provider, gvisor.provider) == (
+            "docker:runc",
+            "docker:kata",
+            "docker:gvisor",
+        )
         assert ContainerFeature.MOUNT in kata.container_features
+        assert ContainerFeature.RAW_SOCKETS in gvisor.container_features
         assert runc.container_features == {ContainerFeature.RAW_SOCKETS}
         # Only a leaf that attaches GPUs offers the Node's, by their models.
-        assert (runc.gpus, runc.gpu_models) == (True, (H100,))
+        assert (runc.gpus, runc.gpu_models) == (gvisor.gpus, gvisor.gpu_models) == (True, (H100,))
         assert (kata.gpus, kata.gpu_models) == (False, ())
         # And none starts a Sandbox larger than the Node lends in all.
         resources = declaration.resources
         assert {(p.max_cpus, p.max_memory_mb) for p in declaration.profiles} == {
             (resources.cpus, resources.memory_mb)
         }
-        assert list(lent) == ["docker:runc", "docker:kata"]
+        assert list(lent) == ["docker:runc", "docker:kata", "docker:gvisor"]
         with pytest.raises(ProviderCapabilityError, match="cannot drive a 'docker' Provider"):
             await probe(dataclasses.replace(settings, providers=("docker",)))
         with pytest.raises(ProviderCapabilityError, match="cannot drive a 'firecracker'"):

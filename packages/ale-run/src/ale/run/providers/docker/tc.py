@@ -1,9 +1,9 @@
 """tc filters in a Docker sandbox's network namespace, as the network helper applies them.
 
-Kata's microVM keeps its sandbox's packets from the namespace's netfilter, so a Kata sandbox
-is confined by tc filters on the devices its frames cross instead. Each filter is a device,
-a hook (``ingress`` or ``egress``), a preference, lower running first, and what it matches
-and does.
+A runtime that keeps its sandbox's packets from the namespace's netfilter, Kata's microVM or
+gVisor's netstack, is confined by tc filters on the devices its frames cross instead. Each
+filter is a device, a hook (``ingress`` or ``egress``), a preference, lower running first,
+and what it matches and does.
 """
 
 from __future__ import annotations

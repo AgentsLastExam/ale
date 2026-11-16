@@ -32,6 +32,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
@@ -75,15 +76,17 @@ from ale.core.fleet import (
 )
 from ale.core.sandbox import (
     Identity,
+    ImageRef,
     Provider,
     RetainedSandbox,
     Sandbox,
+    SandboxCheck,
     SandboxRequest,
 )
-from ale.core.taskspec import ImageKind, OperatingSystem
+from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from ale.fleet.images import NodeImages
 from ale.fleet.placement import Holds, NodeView, choose
-from ale.run import __version__
+from ale.run import __version__, ale_image
 from ale.run.framework import fleet_framework_identity
 from ale.run.provenance import framework_provenance
 from ale.run.providers import leaf, machine_arch
@@ -102,6 +105,9 @@ RECOVER_SEC = 60.0
 
 #: The leaves a node agent lends when it is told none, in the order it prefers them.
 DEFAULT_LEAVES = ("docker:runc", "qemu", "orchard")
+#: The image of the one Sandbox a node agent starts of a container leaf whose preflight
+#: leaves a check, the container base the Node's Tasks build on.
+CHECK_IMAGE = ale_image("container-ubuntu22-base")
 
 
 def _provider(leaf_id: str) -> Provider:
@@ -184,12 +190,30 @@ def _boot_id() -> str:
     raise ProviderCapabilityError("cannot read this machine's boot identity")
 
 
+async def _show(
+    provider: Provider, profiles: tuple[CapabilityProfile, ...], check: SandboxCheck
+) -> None:
+    """Run what a leaf's preflight left to check in one Sandbox of it, before it is lent."""
+    if any(profile.kind is not ImageKind.CONTAINER for profile in profiles):
+        raise ProviderCapabilityError(f"{provider.id} leaves a check no container can run")
+    image = await provider.prepare_image(ImageRef(kind=ImageKind.CONTAINER, reference=CHECK_IMAGE))
+    request = SandboxRequest(
+        episode_id=f"node-check-{uuid.uuid4().hex[:8]}",
+        prepared_image=image,
+        resources=Resources(cpus=1, memory_mb=2048),
+        network=NetworkPolicy(mode=NetworkMode.BLOCK),
+    )
+    async with await provider.create(request) as sandbox:
+        await check(sandbox)
+
+
 async def probe(
     settings: NodeSettings,
     *,
     make: Callable[[str], Provider] = _provider,
 ) -> tuple[NodeDeclaration, dict[str, Provider]]:
-    """What this machine offers, from each leaf's own preflight and profiles.
+    """What this machine offers, from each leaf's own preflight and profiles, and from one
+    Sandbox of a leaf whose preflight leaves a check.
 
     A leaf named in ``settings.providers`` that fails its preflight stops the agent; when
     none is named, every default one that passes is lent and the rest are logged. The
@@ -207,7 +231,8 @@ async def probe(
                 raise ProviderCapabilityError(f"{name} runs only on {foreign.pop()} machines")
             continue
         try:
-            await provider.preflight()
+            if check := await provider.preflight():
+                await _show(provider, profiles, check)
         except AleError as error:
             if settings.providers:
                 raise

@@ -33,14 +33,16 @@ no firewall of its own: enforcement lives where the agent cannot reach it, and t
 framework's `open_egress` for setup and verification is not undone by rules inside the
 guest.
 
-A Docker sandbox in a Kata microVM is outside the reach of netfilter rules and of networks
-attached after it boots, so the same helper confines it with tc filters on the frames
-between the VM and its veth: they seal it on a network of its own and admit only the
-episode's ports on the Host's address, and only from the sandbox's own addresses, since root
-in the VM may write any frame. Such a sandbox holds `NET_ADMIN` inside its VM, so
-the framework can remove its default route while it is sealed and blocked traffic fails at
-once as on runc; the filters stay outside the VM, where that capability does not reach
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers)).
+A Docker sandbox whose runtime keeps a network stack of its own, a Kata microVM's kernel or
+gVisor's netstack, is outside the reach of the namespace's netfilter and of networks
+attached after it boots, so the same helper confines it with tc filters on the frames it
+exchanges through its namespace: they seal it on a network of its own and admit only the
+episode's ports on the Host's address, and only from the sandbox's own addresses, since
+root in such a sandbox may write any frame. The filters are the boundary, outside the
+sandbox; what the framework sets inside it only makes blocked traffic fail at once, and
+root in the sandbox that undoes it slows its own failures and still reaches nothing
+([Kata](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers),
+[gVisor](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-gvisor)).
 
 This is why the address is read from the network rather than assumed: Docker's
 `host-gateway` alias does not work on an internal bridge, and a wrong assumption here
@@ -382,15 +384,16 @@ are reviewed content, not untrusted input; the identity model protects a result 
 aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host Gateway; a
 malicious verifier can only spend its episode's Judge session while that episode runs.
 
-**Container escape.** A container sandbox on `docker:runc` uses Docker's default
-isolation, and a kernel exploit reaches the host. For stronger isolation, name a leaf whose
-Sandboxes each have a kernel of their own, such as `docker:kata` or `firecracker`, ahead of
-it in `sandbox.providers`, and still do not put anything on that host you would mind
-losing. Neither attaches a GPU, so a GPU Task still goes to `docker:runc` while it is
-listed; leave it out to keep every Task on a kernel of its own. Each
-[container feature](task-authoring.md#container-features) a Task names exposes
-more of the kernel its Sandbox runs on; no Provider widens a Sandbox for a feature it did
-not name. On Daytona, Daytona itself sees everything in the sandbox and in the image pushed
+**Container escape.** A container Sandbox on a leaf that shares the Host's kernel with it
+has a container's isolation, and a kernel exploit reaches the Host. A leaf whose Sandboxes
+each have a kernel of their own, a VM's or one in user space, puts that kernel between an
+exploit and the Host's, so listing such leaves first in `sandbox.providers`, or only them,
+keeps Tasks off the Host's kernel; still put nothing on that Host you would mind losing.
+Which leaf gives which kernel, and how a GPU reaches each, is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles).
+Each [container feature](task-authoring.md#container-features) a Task names exposes more of
+the kernel its Sandbox runs on; no Provider widens a Sandbox for a feature it did not
+name. On Daytona, Daytona itself sees everything in the sandbox and in the image pushed
 to its registry.
 
 **Traffic analysis, or what is said over an allowlisted tunnel.** Once `CONNECT`

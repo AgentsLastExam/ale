@@ -6,14 +6,14 @@ import os
 import shutil
 import subprocess
 import tomllib
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ale.core.capability import CapabilityProfile
+from ale.core.capability import CapabilityProfile, SandboxNeeds
 from ale.core.config import RunConfig, SandboxConfig
 from ale.core.sandbox import ImageRef, PreparedTaskImage, Provider, Sandbox, SandboxRequest
 from ale.core.taskspec import (
@@ -47,6 +47,33 @@ def skip_without_kata() -> None:
         pytest.skip("/dev/kvm is missing")
     if shutil.which("containerd-shim-kata-v2") is None:
         pytest.skip("Kata Containers is not installed (containerd-shim-kata-v2 not on PATH)")
+
+
+def skip_without_gvisor() -> None:
+    """Skip unless Docker here registers ALE's build of gVisor's runtime, as ``runsc`` and
+    ``runsc-net-raw`` ([Providers](../packages/ale-run/src/ale/run/providers/README.md))."""
+    from ale.run.providers.docker import gvisor
+
+    try:
+        shown = subprocess.run(
+            ["docker", "info", "--format", "{{json .Runtimes}}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        pytest.skip(f"docker is not reachable: {error}")
+    runtimes = json.loads(shown.stdout or "{}")
+    missing = {gvisor.RUNTIME, gvisor.NET_RAW} - set(runtimes)
+    if missing:
+        pytest.skip(f"gVisor is not registered with Docker: {', '.join(sorted(missing))}")
+    path = runtimes[gvisor.RUNTIME].get("path", gvisor.RUNTIME)
+    try:
+        version = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        pytest.skip(f"{path} does not run here: {error}")
+    if gvisor.BUILD not in version.stdout:
+        pytest.skip(f"{path} is not ALE's build {gvisor.BUILD}: {version.stdout.strip()}")
 
 
 def sibling_checkout(name: str) -> Path:
@@ -527,7 +554,7 @@ class MemoryProvider(Provider):
             ),
         )
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
         return None
 
     async def list_retained(self) -> list[dict[str, object]]:

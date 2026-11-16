@@ -673,7 +673,7 @@ class DaytonaProvider(Provider):
             )
         return tuple(problems)
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
         for tool, why in (("docker", "builds and pushes the image"), ("ssh", "reaches guestd")):
             if shutil.which(tool) is None:
                 raise ProviderStartError(f"{tool} is not installed; Daytona needs it, it {why}")

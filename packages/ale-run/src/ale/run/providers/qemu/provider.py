@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from ale.core.capability import Arch, CapabilityProfile, accepts_model
+from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -695,7 +695,7 @@ class QemuProvider(Provider):
             for system in (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
         )
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
         """Fail early and specifically, before anything is provisioned."""
         problems: list[str] = []
 

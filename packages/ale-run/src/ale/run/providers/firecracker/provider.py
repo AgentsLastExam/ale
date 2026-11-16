@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from ale.core.capability import Arch, CapabilityProfile
+from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -630,7 +630,7 @@ class FirecrackerProvider(Provider):
             ),
         )
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
         problems: list[str] = []
         if shutil.which("docker") is None:
             problems.append("docker is not on PATH; the runner image is what holds Firecracker")

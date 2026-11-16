@@ -1,14 +1,16 @@
-"""The container backend's Gateway routing and snapshots, against a scripted docker CLI."""
+"""The Docker Provider against a scripted docker CLI: each runtime's leaf, preflight,
+grants, confinement and Gateway routing, the sandbox's death, reattaching and snapshots."""
 
 from __future__ import annotations
 
 import ast
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 
 import pytest
 
@@ -29,8 +31,8 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
-from ale.run import guestd
-from ale.run.providers.docker import kata, tc
+from ale.run import guestd, iptables
+from ale.run.providers.docker import gvisor, kata, tc
 from ale.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
@@ -38,6 +40,7 @@ from ale.run.providers.docker.provider import (
     DockerProvider,
     DockerSandbox,
     _DefaultBridge,
+    _GvisorConfinement,
     _KataConfinement,
     _RuncConfinement,
     _sandbox_gateway,
@@ -366,14 +369,17 @@ def _helper_commands(call: tuple[str, ...]) -> list[str]:
     return call[-1].split(" && ")
 
 
-def _on_own_bridge(kind: type[_KataConfinement]) -> _KataConfinement:
+def _on_own_bridge(kind: type[_KataConfinement] | type[_GvisorConfinement]) -> Any:
     return kind(_DefaultBridge(), "ale-net-e1", "172.18.0.1", BRIDGE_MAC)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [_KataConfinement, _GvisorConfinement])
 @pytest.mark.parametrize("mode", [NetworkMode.OPEN, NetworkMode.BLOCK])
-async def test_a_kata_sandbox_boots_on_a_network_of_its_own(
-    monkeypatch: pytest.MonkeyPatch, mode: NetworkMode
+async def test_a_kata_or_gvisor_sandbox_boots_on_a_network_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: type[_KataConfinement] | type[_GvisorConfinement],
+    mode: NetworkMode,
 ) -> None:
     """No other container shares its segment. The network is not internal, whatever the
     Task's mode: the runtime never sees a network attached later, so egress opens through
@@ -383,7 +389,7 @@ async def test_a_kata_sandbox_boots_on_a_network_of_its_own(
     sandbox removes the network."""
     calls = _scripted(monkeypatch)
     wanted = request(network=NetworkPolicy(mode=mode))
-    confinement = await _KataConfinement.start("e1-abcdef", wanted, _DefaultBridge())
+    confinement = await kind.start("e1-abcdef", wanted, _DefaultBridge())
     network = "ale-net-e1-abcdef"
     assert calls[:2] == [
         ("network", "create", network),
@@ -479,7 +485,7 @@ async def test_the_bridges_mac_is_read_on_the_network_by_a_helper_gone_before_it
 async def test_a_sandbox_that_records_no_bridge_mac_is_not_reattached() -> None:
     """A helper on its network would be its neighbour, so the MAC comes from its label."""
     with pytest.raises(ProviderCapabilityError, match="records no MAC"):
-        await _KataConfinement.found(("ale-net-e1",), _DefaultBridge(), {})
+        await _GvisorConfinement.found(("ale-net-e1",), _DefaultBridge(), {})
 
 
 REPLACE = "tc filter replace dev"
@@ -592,11 +598,243 @@ async def test_a_kata_sandbox_opens_and_seals_egress_with_its_tc_filters(
     assert not [call for call in calls if call[:2] == ("network", "connect")]
 
 
-def test_the_seal_probe_reads_the_drop_the_seal_puts_in_place() -> None:
-    first_drop = next(item for item in kata.seal(PEERS) if item.endswith(tc.DROP_ALL))
+@pytest.mark.parametrize("module", [kata, gvisor])
+def test_the_seal_probe_reads_the_drop_the_seal_puts_in_place(module: Any) -> None:
+    first_drop = next(item for item in module.seal(PEERS) if item.endswith(tc.DROP_ALL))
     words = first_drop.split()
     device, hook, pref = words[words.index("dev") + 1], words[5], words[words.index("pref") + 1]
-    assert f"tc filter show dev {device} {hook} pref {pref}" == kata.SEAL_PROBE
+    assert f"tc filter show dev {device} {hook} pref {pref}" == module.SEAL_PROBE
+
+
+def _netstack_state(call: tuple[str, ...]) -> dict[str, Any]:
+    """The state a privileged exec of the iptables writer sets, checked to be one it
+    takes."""
+    assert call[:5] == ("exec", "--privileged", "-u", "0", "ale-e1")
+    assert call[5:8] == ("/opt/ale/python/bin/python3", "-I", "-c")
+    assert call[8] == Path(iptables.__file__).read_text()
+    iptables.plan(call[9])
+    return json.loads(call[9])
+
+
+def _netstack_calls(calls: list[tuple[str, ...]]) -> list[tuple[str, ...]]:
+    return [call for call in calls if call[:2] == ("exec", "--privileged")]
+
+
+@pytest.mark.asyncio
+async def test_a_gvisor_sandbox_is_sealed_outside_and_refused_inside(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """netstack reads every frame through a packet socket before tc's ingress, so the seal
+    is on the veth's egress, where the wire carries the Gateway's own port, and only from
+    the sandbox's own addresses to the bridge's; ALE's chains in netstack route the fixed
+    port and refuse what the seal drops."""
+    calls = _scripted(monkeypatch)
+    proxied = request(
+        network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("a.b",)),
+        proxy_url="http://172.18.0.1:9443",
+    )
+    await _on_own_bridge(_GvisorConfinement).wire("ale-e1", proxied)
+    (filters,) = _helpers(calls)
+    (netstack,) = _netstack_calls(calls)
+    assert calls.index(netstack) > max(
+        calls.index(call) for call in calls if "container:ale-e1" in call
+    )
+    egress = f"{REPLACE} {gvisor.VETH} egress"
+    host = "172.18.0.1"
+    to_host = f"src_mac {SANDBOX_MAC} dst_mac {BRIDGE_MAC} src_ip {SANDBOX_IP} dst_ip {host}"
+    assert filters == [
+        f"test -e /sys/class/net/{gvisor.VETH}",
+        "tc qdisc replace dev eth0 clsact",
+        f"{egress} pref 12 handle 1 protocol ip flower dst_ip {host} action drop",
+        f"{egress} pref 20 handle 1 protocol arp flower src_mac {SANDBOX_MAC} "
+        f"arp_sip {SANDBOX_IP} arp_sha {SANDBOX_MAC} arp_tip {host} action pass",
+        f"{egress} pref 21 handle 1 protocol all flower action drop",
+        f"{egress} pref 10 handle 1 protocol ip flower {to_host} ip_proto tcp dst_port 41000 "
+        "action pass",
+        f"{egress} pref 11 handle 1 protocol ip flower {to_host} ip_proto tcp dst_port 9443 "
+        "action pass",
+    ]
+    tables = _netstack_state(netstack)["tables"]
+    episode = {"dst": host, "proto": "tcp", "dports": [41000, 9443]}
+    assert tables["nat"] == {
+        "chains": {
+            "ALE_GATEWAY": [
+                {
+                    "dst": host,
+                    "proto": "tcp",
+                    "dports": [SANDBOX_GATEWAY_PORT],
+                    "target": {"DNAT": f"{host}:41000"},
+                }
+            ]
+        },
+        "jumps": {"OUTPUT": ["ALE_GATEWAY"]},
+    }
+    assert tables["filter"]["chains"] == {
+        "ALE_HOST": [
+            episode | {"target": "ACCEPT"},
+            {"dst": host, "proto": "tcp", "target": "REJECT_TCP_RESET"},
+            {"dst": host, "target": "REJECT"},
+        ],
+        "ALE_SEAL": [
+            {"out": "lo", "target": "ACCEPT"},
+            episode | {"target": "ACCEPT"},
+            {"proto": "tcp", "target": "REJECT_TCP_RESET"},
+            {"target": "REJECT"},
+        ],
+        "ALE_INPUT": [
+            {"in": "lo", "target": "ACCEPT"},
+            {"ctstate": ["ESTABLISHED", "RELATED"], "target": "ACCEPT"},
+            {"target": "DROP"},
+        ],
+    }
+    assert tables["filter"]["jumps"] == {
+        "OUTPUT": ["ALE_HOST", "ALE_SEAL"],
+        "FORWARD": ["ALE_HOST", "ALE_SEAL"],
+        "INPUT": ["ALE_INPUT"],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gateway_url", ["http://0.0.0.0:41000", None])
+async def test_an_open_gvisor_sandbox_gets_only_the_gateway_route_in_netstack(
+    monkeypatch: pytest.MonkeyPatch, gateway_url: str | None
+) -> None:
+    """No filter outside it, and the privileged writer runs only for a Gateway to route."""
+    calls = _scripted(monkeypatch)
+    await _on_own_bridge(_GvisorConfinement).wire(
+        "ale-e1", request(network=NetworkPolicy(mode=NetworkMode.OPEN), gateway_url=gateway_url)
+    )
+    assert _helpers(calls) == []
+    if gateway_url is None:
+        assert _netstack_calls(calls) == []
+        return
+    (netstack,) = _netstack_calls(calls)
+    tables = _netstack_state(netstack)["tables"]
+    assert list(tables["nat"]["chains"]) == ["ALE_GATEWAY"] and tables["filter"] == {}
+
+
+@pytest.mark.asyncio
+async def test_a_reattaching_run_replaces_only_the_gvisor_gateway_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seal stays as the container has it, read once; netstack's chains follow it; a
+    proxy filter the blocked sandbox no longer has goes."""
+    calls = _scripted(monkeypatch)
+    scripted = docker_provider._docker
+
+    async def docker(*argv: str, **kwargs: object) -> tuple[int, str, str]:
+        if argv[-1] == gvisor.SEAL_PROBE:
+            calls.append(argv)
+            return 0, "action order 1: gact action drop", ""
+        return await scripted(*argv, **kwargs)
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    confinement = _on_own_bridge(_GvisorConfinement)
+    later = request(gateway_url="http://0.0.0.0:42000")
+    await confinement.wire("ale-e1", later, reattached=True)
+    assert await confinement.sealed("ale-e1", {}) is True
+    filters, probe = _helpers(calls)
+    assert probe == [gvisor.SEAL_PROBE]
+    put = [item for item in filters if item.startswith(REPLACE)]
+    assert len(put) == 1 and "pref 10" in put[0] and "dst_port 42000" in put[0]
+    assert [item for item in filters if " del " in item] == [
+        f"{{ tc filter del dev {gvisor.VETH} egress pref 11 2>/dev/null || true; }}"
+    ]
+    (netstack,) = _netstack_calls(calls)
+    tables = _netstack_state(netstack)["tables"]
+    assert tables["filter"]["chains"]["ALE_SEAL"]  # still sealed
+    assert tables["nat"]["chains"]["ALE_GATEWAY"][0]["target"] == {"DNAT": "172.18.0.1:42000"}
+
+
+@pytest.mark.asyncio
+async def test_a_gvisor_sandbox_opens_inside_first_and_seals_outside_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The boundary is never open while netstack's chains still refuse, and never sealed
+    while they still pass; sealing again replaces the filters, never removing the drop."""
+    calls = _scripted(monkeypatch)
+    sandbox = _sandbox()
+    sandbox.container = "ale-e1"
+    confinement = _on_own_bridge(_GvisorConfinement)
+    await confinement.wire("ale-e1", request())
+    calls.clear()
+    sandbox.confinement = confinement
+    sandbox._sealed = True
+    sandbox._client = SimpleNamespace(egress_relay=None)  # type: ignore[assignment]
+
+    async def nothing(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("ale.run.providers.docker.provider.relay.stop", nothing)
+    monkeypatch.setattr("ale.run.providers.docker.provider.relay.start", nothing)
+    await sandbox.open_egress()
+    (inside, outside) = calls
+    assert _netstack_state(inside)["tables"]["filter"]["chains"]["ALE_SEAL"] == []
+    assert _helper_commands(outside)[-1] == (
+        f'test -z "$(tc filter show dev {gvisor.VETH} egress pref 21)"'
+    )
+    calls.clear()
+    await sandbox.close_egress()
+    (outside, inside) = calls
+    assert _helper_commands(outside) == gvisor.seal(PEERS)
+    assert _netstack_state(inside)["tables"]["filter"]["chains"]["ALE_SEAL"]
+
+
+@pytest.mark.parametrize("isolated", [True, False])
+@pytest.mark.parametrize("sealed", [True, False])
+@pytest.mark.parametrize("ports", [[], ["41000"], ["41000", "9443"]])
+def test_every_netstack_state_is_one_the_writer_takes(
+    isolated: bool, sealed: bool, ports: list[str]
+) -> None:
+    state = gvisor.netstack(
+        "172.17.0.1",
+        gateway_port=ports[0] if ports else "",
+        ports=ports,
+        isolated=isolated,
+        sealed=sealed and isolated,
+    )
+    plans = iptables.plan(json.dumps(state))
+    assert set(plans) == {"nat", "filter"}
+    chains, _ = plans["filter"]
+    assert set(chains) == ({"ALE_HOST", "ALE_SEAL", "ALE_INPUT"} if isolated else set())
+
+
+def test_a_gvisor_sandbox_holds_the_declared_memory_and_what_the_sentry_takes() -> None:
+    assert gvisor.memory_mb(512) == 572
+    assert gvisor.memory_mb(8192) == 8260
+
+
+def test_gvisor_is_registered_as_its_readme_shows() -> None:
+    """Both names, with exactly these arguments: raw sockets but no packet socket writes."""
+    readme = (Path(ale.run.__file__).parents[5] / "images/runtimes/gvisor/README.md").read_text()
+    shown = json.loads(readme.split("```json\n", 1)[1].split("```", 1)[0])["runtimes"]
+    assert {name: tuple(entry["runtimeArgs"]) for name, entry in shown.items()} == {
+        "runsc": ("--overlay2=none", "--allow-suid", "--nvproxy-allowed-driver-capabilities=all"),
+        "runsc-net-raw": (
+            "--overlay2=none",
+            "--allow-suid",
+            "--nvproxy-allowed-driver-capabilities=all",
+            "--net-raw",
+        ),
+    }
+    assert {name: tuple(args) for name, args in gvisor.ARGUMENTS.items()} == {
+        name: tuple(entry["runtimeArgs"]) for name, entry in shown.items()
+    }
+
+
+def test_the_gvisor_build_ale_runs_is_the_one_its_build_script_makes() -> None:
+    """And the one both READMEs name, in its version string and the path it installs to."""
+    root = Path(ale.run.__file__).parents[5]
+    build = (root / "images/runtimes/gvisor/build.sh").read_text()
+    (version,) = re.findall(r"^VERSION=([0-9.]+)$", build, re.MULTILINE)
+    assert version == gvisor.VERSION and f"+ale.{version}" == gvisor.BUILD
+    for readme in ("images/runtimes/gvisor", "packages/ale-run/src/ale/run/providers"):
+        path = root / readme / "README.md"
+        text = path.read_text()
+        named = re.findall(r"\+ale\.([0-9][0-9.]*[0-9])", text)
+        named += re.findall(r"ale-gvisor/([0-9][0-9.]*[0-9])", text)
+        named += re.findall(r"^version=([0-9.]+)$", text, re.MULTILINE)
+        assert named and set(named) == {version}, f"{path} names {sorted(set(named))}"
 
 
 @pytest.mark.asyncio
@@ -606,8 +844,8 @@ def test_the_seal_probe_reads_the_drop_the_seal_puts_in_place() -> None:
         (0, {"Running": False, "OOMKilled": True, "ExitCode": 137}, "exceeded its memory limit"),
         (0, {"Running": False, "OOMKilled": False, "ExitCode": 137}, "killed from outside"),
         (0, {"Running": False, "OOMKilled": False, "ExitCode": 3}, "exited with code 3"),
-        # Docker keeps OOMKilled once the OOM killer took any process; the main process
-        # exited later of its own.
+        # Docker keeps OOMKilled once the OOM killer took any process, as a gVisor sandbox
+        # survives; the main process exited later of its own.
         (
             0,
             {"Running": False, "OOMKilled": True, "ExitCode": 3},
@@ -824,6 +1062,10 @@ async def test_an_allowlist_seal_relays_the_agent_once_the_container_is_confined
         (NetworkMode.ALLOWLIST, kata.RUNTIME, ("ale-net-e1",), True, True),
         (NetworkMode.ALLOWLIST, kata.RUNTIME, ("ale-net-e1",), False, False),
         (NetworkMode.OPEN, kata.RUNTIME, ("ale-net-e1",), True, False),
+        (NetworkMode.ALLOWLIST, gvisor.RUNTIME, ("ale-net-e1",), True, True),
+        (NetworkMode.ALLOWLIST, gvisor.NET_RAW, ("ale-net-e1",), True, True),
+        (NetworkMode.ALLOWLIST, gvisor.RUNTIME, ("ale-net-e1",), False, False),
+        (NetworkMode.OPEN, gvisor.RUNTIME, ("ale-net-e1",), True, False),
     ],
 )
 @pytest.mark.parametrize("asked", ["same", "open"])
@@ -838,8 +1080,9 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
 ) -> None:
     """An allowlist agent's commands get the proxy only while the Sandbox is sealed, which
     the container says, not the process driving it again: off the default bridge under runc,
-    with the seal's drop filter on the VM's tap under Kata. Its own network mode, which it
-    was started with, decides how it is confined, whatever the reattaching run asks."""
+    with the seal's drop filter on the VM's tap under Kata and on the veth under gVisor,
+    whichever of its runtimes it runs under. Its own network mode, which it was started
+    with, decides how it is confined, whatever the reattaching run asks."""
     record = {
         "Name": "/ale-e1",
         "Image": DIGEST,
@@ -928,7 +1171,13 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     # The seal is read once, by the helper.
     read = [call[-1] for call in calls if call[-1].startswith("tc filter show")]
     isolated = mode is not NetworkMode.OPEN
-    assert read == ([kata.SEAL_PROBE] if isolated and runtime == kata.RUNTIME else [])
+    probes = {kata.RUNTIME: kata.SEAL_PROBE, gvisor.RUNTIME: gvisor.SEAL_PROBE}
+    probes[gvisor.NET_RAW] = gvisor.SEAL_PROBE
+    assert read == ([probes[runtime]] if isolated and runtime in probes else [])
+    if runtime in (gvisor.RUNTIME, gvisor.NET_RAW):
+        # Its netstack chains are written again, sealed as the veth's filters say.
+        (written,) = [json.loads(call[-1]) for call in calls if call[0] == "exec"]
+        assert bool(written["tables"]["filter"].get("chains", {}).get("ALE_SEAL")) is sealed
 
 
 @pytest.mark.asyncio
@@ -970,7 +1219,15 @@ async def test_kata_refuses_gpus_before_anything_starts(monkeypatch: pytest.Monk
 async def test_each_runtime_is_a_leaf_with_the_features_it_gives() -> None:
     (runc,) = await DockerProvider().profiles()
     (in_kata,) = await DockerProvider(runtime="kata").profiles()
+    (in_gvisor,) = await DockerProvider(runtime="gvisor").profiles()
     assert (runc.provider, in_kata.provider) == ("docker:runc", "docker:kata")
+    assert in_gvisor.provider == "docker:gvisor" and in_gvisor.gui and in_gvisor.snapshot
+    assert in_gvisor.container_features == {
+        ContainerFeature.USER_NAMESPACES,
+        ContainerFeature.FUSE,
+        ContainerFeature.MOUNT,
+        ContainerFeature.RAW_SOCKETS,
+    }
     assert runc.container_features == {ContainerFeature.RAW_SOCKETS}
     assert in_kata.container_features == {
         ContainerFeature.PERF,
@@ -1018,9 +1275,11 @@ async def test_a_leaf_offers_the_gpus_of_this_host_that_it_may_lease(
     assert await DockerProvider(gpus=(0, 2)).unserved(
         request(resources=h100).needs, user="user", role=SandboxRole.SHARED
     ) == (f"attaches {a100}, none of gpu_types ['H100']",)
-    # Docker's GPU injection does not reach a Kata microVM.
+    # Docker's GPU injection does not reach a Kata microVM; gVisor proxies the driver.
     (in_kata,) = await DockerProvider(runtime="kata").profiles()
     assert (in_kata.gpus, in_kata.gpu_models) == (False, ())
+    (in_gvisor,) = await DockerProvider(runtime="gvisor").profiles()
+    assert (in_gvisor.gpus, in_gvisor.gpu_models) == (True, (a100, "NVIDIA H100 80GB HBM3"))
 
 
 async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
@@ -1034,14 +1293,66 @@ async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
     ) == ("runs arm64, not x86_64",)
 
 
+_RUNSC = "/usr/local/lib/ale-gvisor/0.1.0/runsc"
+_REGISTERED = dict(gvisor.ARGUMENTS)
+
+
+def _known(*names: str, arguments: dict[str, tuple[str, ...]] | None = None) -> str:
+    """``docker info``'s Runtimes: each name registered by path, some with arguments."""
+    known: dict[str, dict[str, object]] = {name: {"path": name} for name in names}
+    for name, args in (arguments or {}).items():
+        known[name] = {"path": _RUNSC, "runtimeArgs": list(args)}
+    return json.dumps(known)
+
+
+def _preflight_host(
+    monkeypatch: pytest.MonkeyPatch,
+    known: str,
+    *,
+    shims: tuple[str, ...] = (),
+    devices: tuple[str, ...] = (),
+    version: str = "runsc version release-20261109.0+ale.0.1.0\nspec: 1.2.1\n",
+    drivers: str = "570.124.06\n580.95.05\n",
+    gpus: bool = True,
+) -> list[tuple[str, ...]]:
+    """A Host whose daemon knows ``known``; what it ran of a runtime's own commands."""
+    ran: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        assert argv == ("info", "--format", "{{json .Runtimes}}")
+        return 0, known, ""
+
+    async def run(*argv: str, timeout: float) -> tuple[int, str, str]:
+        ran.append(argv)
+        return 0, version if argv[1] == "--version" else drivers, ""
+
+    async def host_gpus(_provider: DockerProvider) -> dict[int, GpuDevice]:
+        if not gpus:
+            raise ProviderCapabilityError("nvidia-smi is not installed on the Docker host")
+        h100 = GpuDevice(id="GPU-0", model="NVIDIA H100 80GB HBM3", driver_version="570.124.06")
+        return {0: h100}
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider.run", run)
+    monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
+    monkeypatch.setattr(
+        "ale.run.providers.docker.provider.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name == "docker" or name in shims else None,
+    )
+    monkeypatch.setattr(
+        "ale.run.providers.docker.provider.Path.exists", lambda path: str(path) in devices
+    )
+    return ran
+
+
 @pytest.mark.parametrize(
     ("runtime", "known", "shims", "devices", "missing"),
     [
-        ("runc", "io.containerd.runc.v2 runc ", (), (), None),
-        ("runc", "io.containerd.runc.v2 runsc ", (), (), "needs the runc runtime"),
-        ("kata", "runc ", ("containerd-shim-kata-v2",), ("/dev/kvm",), None),
-        ("kata", "runc ", (), ("/dev/kvm",), "needs the io.containerd.kata.v2 runtime"),
-        ("kata", "runc ", ("containerd-shim-kata-v2",), (), "needs /dev/kvm"),
+        ("runc", _known("io.containerd.runc.v2", "runc"), (), (), None),
+        ("runc", _known("io.containerd.runc.v2", "runsc"), (), (), "needs the runc runtime"),
+        ("kata", _known("runc"), ("containerd-shim-kata-v2",), ("/dev/kvm",), None),
+        ("kata", _known("runc"), (), ("/dev/kvm",), "needs the io.containerd.kata.v2 runtime"),
+        ("kata", _known("runc"), ("containerd-shim-kata-v2",), (), "needs /dev/kvm"),
     ],
 )
 async def test_a_leafs_preflight_finds_its_runtime(
@@ -1053,25 +1364,148 @@ async def test_a_leafs_preflight_finds_its_runtime(
     missing: str | None,
 ) -> None:
     """A leaf whose runtime is missing here refuses the Run before any Sandbox starts."""
-
-    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
-        assert argv[:2] == ("info", "--format")
-        return 0, known, ""
-
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
-    monkeypatch.setattr(
-        "ale.run.providers.docker.provider.shutil.which",
-        lambda name: f"/usr/bin/{name}" if name == "docker" or name in shims else None,
-    )
-    monkeypatch.setattr(
-        "ale.run.providers.docker.provider.Path.exists", lambda path: str(path) in devices
-    )
+    _preflight_host(monkeypatch, known, shims=shims, devices=devices)
     preflight = DockerProvider(runtime=runtime).preflight()
     if missing is None:
-        await preflight
+        assert await preflight is None  # nothing left for a Sandbox to show
     else:
         with pytest.raises(ProviderStartError, match=missing):
             await preflight
+
+
+_PLAIN = gvisor.ARGUMENTS[gvisor.RUNTIME]
+_RAW = gvisor.ARGUMENTS[gvisor.NET_RAW]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "features", "missing"),
+    [
+        (_REGISTERED, (), None),
+        # In any order.
+        ({name: tuple(reversed(args)) for name, args in _REGISTERED.items()}, None, None),
+        ({gvisor.RUNTIME: _PLAIN}, (), None),
+        ({gvisor.RUNTIME: _PLAIN}, (ContainerFeature.RAW_SOCKETS,), "needs the runsc-net-raw"),
+        # A Node lends it to any Sandbox.
+        ({gvisor.RUNTIME: _PLAIN}, None, "needs the runsc-net-raw runtime"),
+        ({gvisor.RUNTIME: _PLAIN[1:]}, (), "runsc runtime registered with --overlay2=none"),
+        # No more than its arguments, an operator's GPU memory limit included.
+        (
+            {**_REGISTERED, gvisor.RUNTIME: (*_PLAIN, "--nvproxy-gpu-memory-limit=1")},
+            (),
+            "not --overlay2=none --allow-suid",
+        ),
+        (
+            {**_REGISTERED, gvisor.NET_RAW: (*_RAW, "--allow-packet-socket-write")},
+            (ContainerFeature.RAW_SOCKETS,),
+            "runsc-net-raw runtime registered with",
+        ),
+    ],
+)
+async def test_the_gvisor_preflight_finds_the_runtimes_its_sandboxes_need(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, tuple[str, ...]],
+    features: tuple[ContainerFeature, ...] | None,
+    missing: str | None,
+) -> None:
+    """Registered with exactly the arguments its README gives: the raw sockets runtime only
+    when a Sandbox needs it, or for a Node, which lends the leaf to any."""
+    ran = _preflight_host(monkeypatch, _known("runc", arguments=arguments), gpus=False)
+    needs = (
+        ()
+        if features is None
+        else [request(resources=Resources(container_features=features)).needs]
+    )
+    preflight = DockerProvider(runtime="gvisor").preflight(needs)
+    if missing is not None:
+        with pytest.raises(ProviderStartError, match=missing):
+            await preflight
+        return
+    assert await preflight is not None  # what only a Sandbox of it shows
+    assert ran == [(_RUNSC, "--version")]  # one binary, under both names
+
+
+@pytest.mark.parametrize(
+    ("version", "drivers", "needs_gpus", "refused"),
+    [
+        ("runsc version release-20261109.0\nspec: 1.2.1\n", "", 0, "needs ALE's build"),
+        ("runsc version release-20261109.0+ale.0.1.01\n", "", 0, "ale.0.1.0 of"),
+        ("runsc version release-20261109.0+ale.0.2.0\n", "", 0, "ale.0.1.0 of"),
+        ("runsc version release-20261109.0+ale.0.1.0\n", "580.95.05\n", 0, None),
+        ("runsc version release-20261109.0+ale.0.1.0\n", "580.95.05\n", 1, "driver 570.124.06"),
+        ("runsc version release-20261109.0+ale.0.1.0\n", "570.124.06\n", 1, None),
+        # With no needs, as a Node lends it, its profile offers the Host's GPUs.
+        ("runsc version release-20261109.0+ale.0.1.0\n", "580.95.05\n", None, "570.124.06"),
+    ],
+)
+async def test_a_gvisor_leaf_runs_the_build_of_ale_which_must_support_the_gpu_driver_here(
+    monkeypatch: pytest.MonkeyPatch,
+    version: str,
+    drivers: str,
+    needs_gpus: int | None,
+    refused: str | None,
+) -> None:
+    """A stock runsc lacks ALE's patches, and another build of ALE's is not the one this
+    engine was tested with; the GPU driver is checked whenever GPUs may be attached."""
+    ran = _preflight_host(
+        monkeypatch, _known("runc", arguments=_REGISTERED), version=version, drivers=drivers
+    )
+    needs = [] if needs_gpus is None else [request(resources=Resources(gpus=needs_gpus)).needs]
+    preflight = DockerProvider(runtime="gvisor").preflight(needs)
+    if refused is not None:
+        with pytest.raises((ProviderStartError, ProviderCapabilityError), match=refused):
+            await preflight
+    else:
+        await preflight
+    if needs_gpus != 0 and "+ale.0.1.0\n" in version:
+        assert ran[-1] == (_RUNSC, "nvproxy", "list-supported-drivers")
+    else:
+        assert all(argv[1] == "--version" for argv in ran)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("log", "copied", "refused"),
+    [
+        ("<6>[   0.000000] Starting gVisor...\n", "contents", None),
+        ("<6>[   0.000000] Linux version 7.0.0\n", "contents", "does not say 'Starting gVisor'"),
+        # docker cp's archive names the file even when it lost what the Sandbox wrote.
+        ("<6>[   0.000000] Starting gVisor...\n", "name", "is runsc-net-raw registered with"),
+    ],
+)
+async def test_a_gvisor_sandbox_shows_it_runs_on_gvisor_and_writes_where_docker_sees(
+    monkeypatch: pytest.MonkeyPatch, log: str, copied: str, refused: str | None
+) -> None:
+    """The check its preflight leaves for the Run's first Sandbox of it."""
+    written: dict[str, bytes] = {}
+
+    async def guest_exec(argv: list[str], **_: object) -> tuple[int, str, str, bool]:
+        assert argv[:3] == ["/opt/ale/python/bin/python3", "-I", "-c"]
+        return 0, log, "", False
+
+    async def write_file(path: str, data: bytes, **_: object) -> None:
+        written[path] = data
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        assert argv[0] == "cp" and argv[-1] == "-"
+        container, _, path = argv[1].partition(":")
+        assert container == "ale-e1-abcdef" and path.startswith("/opt/ale/preflight-")
+        archive = path.rpartition("/")[2] + "\0" * 100
+        return 0, archive + (written[path].decode() if copied == "contents" else ""), ""
+
+    _preflight_host(monkeypatch, _known("runc", arguments=_REGISTERED), gpus=False)
+    check = await DockerProvider(runtime="gvisor").preflight()
+    assert check is not None
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    sandbox = _sandbox()
+    sandbox.allocation = sandbox.allocation.model_copy(update={"runtime": gvisor.NET_RAW})
+    sandbox._client = SimpleNamespace(exec=guest_exec, write_file=write_file)  # type: ignore[assignment]
+    if refused is None:
+        await check(sandbox)
+    else:
+        with pytest.raises(ProviderStartError, match=refused):
+            await check(sandbox)
+    for path, contents in written.items():
+        assert path.rpartition("/")[2] not in contents.decode()
 
 
 @pytest.mark.asyncio
@@ -1087,23 +1521,43 @@ async def test_a_feature_its_runtime_does_not_give_is_refused_before_anything_st
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("runtime", "features", "granted"),
+    ("runtime", "features", "granted", "registered", "memory"),
     [
-        ("runc", (), []),
-        ("runc", (ContainerFeature.RAW_SOCKETS,), []),
-        ("kata", (), []),
-        ("kata", (ContainerFeature.PERF, ContainerFeature.USER_NAMESPACES), []),
-        ("kata", (ContainerFeature.MOUNT,), ["SYS_ADMIN"]),
+        ("runc", (), [], "runc", "512m"),
+        ("runc", (ContainerFeature.RAW_SOCKETS,), [], "runc", "512m"),
+        ("kata", (), [], kata.RUNTIME, "620m"),
+        (
+            "kata",
+            (ContainerFeature.PERF, ContainerFeature.USER_NAMESPACES),
+            [],
+            kata.RUNTIME,
+            "620m",
+        ),
+        ("kata", (ContainerFeature.MOUNT,), ["SYS_ADMIN"], kata.RUNTIME, "620m"),
+        ("gvisor", (), [], "runsc", "572m"),
+        ("gvisor", (ContainerFeature.USER_NAMESPACES, ContainerFeature.FUSE), [], "runsc", "572m"),
+        ("gvisor", (ContainerFeature.MOUNT,), ["SYS_ADMIN"], "runsc", "572m"),
+        ("gvisor", (ContainerFeature.RAW_SOCKETS,), [], "runsc-net-raw", "572m"),
+        (
+            "gvisor",
+            (ContainerFeature.RAW_SOCKETS, ContainerFeature.MOUNT),
+            ["SYS_ADMIN"],
+            "runsc-net-raw",
+            "572m",
+        ),
     ],
 )
 async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     monkeypatch: pytest.MonkeyPatch,
-    runtime: Literal["runc", "kata"],
+    runtime: Literal["runc", "kata", "gvisor"],
     features: tuple[ContainerFeature, ...],
     granted: list[str],
+    registered: str,
+    memory: str,
 ) -> None:
-    """Its network mode recorded, and, under Kata, a network of its own, which goes again
-    when the Sandbox does not start."""
+    """The union of their grants, the whole Sandbox under the runtime one of them needs, its
+    memory with what the runtime itself takes, its network mode recorded, and, under Kata or
+    gVisor, a network of its own, which goes again when the Sandbox does not start."""
     calls: list[tuple[str, ...]] = []
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
@@ -1137,7 +1591,7 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     monkeypatch.setattr(provider, "_framed", framed)
     asked = request(
         network=NetworkPolicy(mode=NetworkMode.OPEN),
-        resources=Resources(container_features=features),
+        resources=Resources(memory_mb=512, container_features=features),
     )
     with pytest.raises(ProviderStartError, match="stopped after the flags were read"):
         await provider.create(asked)
@@ -1145,7 +1599,10 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     assert [run[index + 1] for index, flag in enumerate(run) if flag == "--cap-add"] == granted
     # Named even for runc, so a Host's default runtime never stands in for the leaf's.
     pinned = [run[index + 1] for index, flag in enumerate(run) if flag == "--runtime"]
-    assert pinned == ["runc" if runtime == "runc" else kata.RUNTIME]
+    assert pinned == [registered]
+    assert run[run.index("--memory") + 1] == memory
+    # An application, not gVisor's Sentry, is what the OOM killer takes.
+    assert ("--oom-score-adj" in run) is (runtime == "gvisor")
     created = [call[2:] for call in calls if call[:2] == ("network", "create")]
     if runtime == "runc":
         assert "--network" not in run and created == []
@@ -1161,8 +1618,63 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
 
 
 @pytest.mark.asyncio
-async def test_a_sandbox_whose_gpus_cannot_be_leased_leaves_no_network_behind(
+async def test_a_gvisor_sandbox_gets_its_gpus_as_a_runc_one_does(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--gpus`` turns nvproxy on for that container alone; ``--nvproxy`` would for all."""
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[:2] == ("run", "-d"):
+            return 1, "", "stopped after the flags were read"
+        return _scripted_reply(argv)
+
+    async def host_gpus(_provider: DockerProvider) -> dict[int, GpuDevice]:
+        return {
+            index: GpuDevice(
+                id=f"GPU-{index}", model="NVIDIA H100 80GB HBM3", driver_version="570.1"
+            )
+            for index in (0, 1)
+        }
+
+    image = ResolvedImage(
+        kind="container",
+        prepared_identity=DIGEST,
+        observed_identity=DIGEST,
+        observed_ref="image@" + DIGEST,
+    )
+
+    async def resolved(_prepared: PreparedTaskImage) -> ResolvedImage:
+        return image
+
+    async def no_problems(_reference: str) -> list[str]:
+        return []
+
+    async def framed(found: ResolvedImage, _request: SandboxRequest) -> ResolvedImage:
+        return found
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr(
+        "ale.run.providers.docker.provider.resolve_prepared_container_image", resolved
+    )
+    monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
+    provider = DockerProvider(runtime="gvisor", gpu_lock_dir=tmp_path)
+    monkeypatch.setattr(provider, "check_image", no_problems)
+    monkeypatch.setattr(provider, "_framed", framed)
+    with pytest.raises(ProviderCapabilityError, match="stopped after the flags were read"):
+        await provider.create(request(resources=Resources(gpus=2)))
+    (run,) = [call for call in calls if call[:2] == ("run", "-d")]
+    assert run[run.index("--gpus") + 1] == '"device=GPU-0,GPU-1"'
+    assert "NVIDIA_DRIVER_CAPABILITIES=all" in run
+    assert run[run.index("--runtime") + 1] == "runsc"
+    assert not [flag for flag in run if "nvproxy" in flag]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["runc", "gvisor"])
+async def test_a_sandbox_whose_gpus_cannot_be_leased_leaves_no_network_behind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, runtime: str
 ) -> None:
     """Docker's default address pools hold about 31 networks, so a failed start must not
     keep the one it made."""
@@ -1199,7 +1711,7 @@ async def test_a_sandbox_whose_gpus_cannot_be_leased_leaves_no_network_behind(
         "ale.run.providers.docker.provider.resolve_prepared_container_image", resolved
     )
     monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
-    provider = DockerProvider(gpu_lock_dir=tmp_path)
+    provider = DockerProvider(runtime=runtime, gpu_lock_dir=tmp_path)
     monkeypatch.setattr(provider, "check_image", no_problems)
     monkeypatch.setattr(provider, "_framed", framed)
     with pytest.raises(ProviderCapabilityError, match="GPUs"):
@@ -1216,12 +1728,14 @@ async def test_a_sandbox_whose_gpus_cannot_be_leased_leaves_no_network_behind(
     [
         (_RuncConfinement, "Gateway"),
         (_KataConfinement, "Gateway"),
+        (_GvisorConfinement, "Gateway"),
         (_KataConfinement, "172.18.0.1"),
+        (_GvisorConfinement, "172.18.0.1"),
     ],
 )
 async def test_a_network_whose_facts_cannot_be_read_is_removed_again(
     monkeypatch: pytest.MonkeyPatch,
-    kind: type[_RuncConfinement] | type[_KataConfinement],
+    kind: type[_RuncConfinement] | type[_KataConfinement] | type[_GvisorConfinement],
     unread: str,
 ) -> None:
     """The Host's address on it, or its bridge's MAC."""

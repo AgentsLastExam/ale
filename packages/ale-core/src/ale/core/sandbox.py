@@ -9,7 +9,7 @@ is no provider-specific path for callers to special-case.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from enum import StrEnum
 from typing import Literal, Protocol, Self
 
@@ -35,6 +35,7 @@ __all__ = [
     "ResourceAllocation",
     "RetainedSandbox",
     "Sandbox",
+    "SandboxCheck",
     "SandboxFile",
     "SandboxRequest",
     "SandboxRole",
@@ -304,8 +305,9 @@ class ResourceAllocation(BaseModel):
     """The provider id of the profile that served it: the Provider's own for a leaf, the
     Node's leaf under the Fleet, and Daytona's own, which names no machine of its."""
     runtime: str | None = None
-    """The runtime that ran a container Sandbox, as Docker reports it: ``runc``, or
-    ``io.containerd.kata.v2`` for a Kata microVM. None where the Provider has no choice."""
+    """The runtime that ran a container Sandbox, as Docker reports it: ``runc``,
+    ``io.containerd.kata.v2`` for a Kata microVM, or ``runsc`` or ``runsc-net-raw`` under
+    gVisor. None where the Provider has no choice."""
     node: str | None = None
     """For a Sandbox a Fleet ran, the Node and the Node's leaf, as ``<node>/<leaf>``."""
     desktop_resolution: DesktopResolution | None = None
@@ -486,6 +488,10 @@ class Sandbox(ABC):
         await self.destroy()
 
 
+#: A check of what only a running Sandbox shows of its Host, which fails loudly.
+SandboxCheck = Callable[[Sandbox], Awaitable[None]]
+
+
 class Provider(ABC):
     """Supplies Sandboxes.
 
@@ -536,8 +542,14 @@ class Provider(ABC):
             )
 
     @abstractmethod
-    async def preflight(self) -> None:
-        """Fail loudly if this provider cannot run here (missing daemon, no KVM)."""
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> SandboxCheck | None:
+        """Fail loudly if this provider cannot run here (missing daemon, no KVM), or cannot
+        run here the Sandboxes whose ``needs`` a Run gives it; with none, any Sandbox its
+        profiles declare, as a Node lends it.
+
+        What only a running Sandbox of it shows of the Host, it returns as a check, which
+        the Run's preflight runs in one Sandbox it starts there before any episode.
+        """
 
     @abstractmethod
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage: ...

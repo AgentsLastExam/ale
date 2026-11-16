@@ -67,11 +67,12 @@ forbidden_modules =
     typer
     yaml
 
-[importlinter:contract:capprobe-stdlib-only]
-name = the container feature probe runs in the guest and imports neither engine code nor third-party packages
+[importlinter:contract:in-sandbox-scripts-stdlib-only]
+name = the container feature probe and the iptables writer run in the guest and import neither engine code nor third-party packages
 type = forbidden
 source_modules =
     ale.run.capprobe
+    ale.run.iptables
 forbidden_modules =
     ale.core
     ale.run.gateway

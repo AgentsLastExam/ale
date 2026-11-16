@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 from ale.core.capability import Arch, SandboxNeeds
 from ale.core.config import RunConfig
 from ale.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
-from ale.core.sandbox import Provider, Sandbox, SandboxRequest, SandboxRole
+from ale.core.sandbox import Provider, Sandbox, SandboxCheck, SandboxRequest, SandboxRole
 from ale.core.task import Task
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, VerificationMode
 from ale.run import capprobe, guestd
@@ -155,9 +155,12 @@ class ProviderRegistry:
         self.settings = settings
         self._instances: dict[str, Provider] = {}
         self._fleet: FleetClient | None = None
-        #: The leaves whose preflight passed, each with the sets of container features a
-        #: Sandbox of it was seen to have when it asked for them.
+        #: The leaves whose preflight passed, each with the needs it passed for and the sets
+        #: of container features a Sandbox of it was seen to have when it asked for them.
+        self._checked: dict[str, set[SandboxNeeds]] = {}
         self._ready: dict[str, set[frozenset[ContainerFeature]]] = {}
+        #: The leaves whose preflight's check passed in a Sandbox of theirs.
+        self._shown: set[str] = set()
 
     @property
     def fleet(self) -> FleetClient | None:
@@ -232,15 +235,20 @@ class ProviderRegistry:
         """Check, before any of their episodes starts, that each leaf selected for ``tasks``
         can run here and gives the container features its Sandboxes need.
 
-        Each leaf runs its own preflight, once. Then, for each set of container features its
-        Sandboxes ask for, it starts a throwaway Sandbox as it would the first that asks for
-        that set, with the same grants but no GPU, and :func:`missing_features` probes it: a
-        profile says what the leaf gives, and only the Host shows that it does. A Sandbox is
-        probed by its own set, since a grant one feature brings can make another pass.
-        Missing features refuse the Run, naming each leaf and feature. A scheduler's leaves
-        run on machines it manages, so they are not checked from here. ``solvers`` is as for
-        :meth:`select`.
+        Each leaf runs its own preflight with the needs of the Sandboxes it was selected
+        for, again only for needs it has not passed for yet, its check and probes included,
+        such as a GPU or another runtime a later Task asks for. Then, for each set of
+        container features its Sandboxes ask for, it starts a throwaway Sandbox as it would
+        the first that asks for that set, with the same grants but no GPU, and
+        :func:`missing_features` probes it: a profile says what the leaf gives, and only the
+        Host shows that it does. A Sandbox is probed by its own set, since a grant one
+        feature brings can make another pass. Missing features refuse the Run, naming each
+        leaf and feature. A check a leaf's preflight returns runs once, in the first such
+        Sandbox of it, or in one started as its first Sandbox asks when none asks for a
+        feature. A scheduler's leaves run on machines it manages, so they are not checked
+        from here. ``solvers`` is as for :meth:`select`.
         """
+        wanted: dict[str, list[SandboxNeeds]] = {}
         first: dict[tuple[str, frozenset[ContainerFeature]], SandboxRequest] = {}
         for task in tasks:
             for role, user, needs in _sandboxes(task, snapshot=False, solver=solvers):
@@ -249,16 +257,11 @@ class ProviderRegistry:
                 assert provider_id is not None, "select before preflight"
                 if provider_id in SCHEDULERS:
                     continue
-                if provider_id not in self._ready:
-                    await self.get(provider_id).preflight()
-                    self._ready[provider_id] = set()
-                features = frozenset(needs.resources.container_features)
-                if not features or features in self._ready[provider_id]:
-                    continue
+                wanted.setdefault(provider_id, []).append(needs)
                 image = task.prepared_verifier_image if verifier else task.prepared_image
                 assert image is not None, "prepare before preflight"
                 first.setdefault(
-                    (provider_id, features),
+                    (provider_id, frozenset(needs.resources.container_features)),
                     SandboxRequest(
                         episode_id=f"preflight-{uuid.uuid4().hex[:8]}",
                         os=needs.os,
@@ -270,9 +273,30 @@ class ProviderRegistry:
                         user=user,
                     ),
                 )
+        checks: dict[str, SandboxCheck] = {}
+        preflighted: dict[str, list[SandboxNeeds]] = {}
+        for provider_id, needs in wanted.items():
+            passed = self._checked.setdefault(provider_id, set())
+            if fresh := [need for need in dict.fromkeys(needs) if need not in passed]:
+                check = await self.get(provider_id).preflight(fresh)
+                preflighted[provider_id] = fresh
+                if check is not None and provider_id not in self._shown:
+                    checks[provider_id] = check
+            self._ready.setdefault(provider_id, set())
+        probes = {
+            (provider_id, features): request
+            for (provider_id, features), request in first.items()
+            if features and features not in self._ready[provider_id]
+        }
+        for provider_id in checks:
+            if not any(leaf == provider_id for leaf, _ in probes):
+                probes[(provider_id, frozenset())] = first[(provider_id, frozenset())]
         lacking: dict[str, dict[ContainerFeature, str]] = {}
-        for (provider_id, features), request in first.items():
+        for (provider_id, features), request in probes.items():
             async with await self.get(provider_id).create(request) as sandbox:
+                if check := checks.pop(provider_id, None):
+                    await check(sandbox)
+                    self._shown.add(provider_id)
                 missing = await missing_features(sandbox, features)
             if missing:
                 lacking.setdefault(provider_id, {}).update(missing)
@@ -288,6 +312,10 @@ class ProviderRegistry:
                     for provider_id, missing in lacking.items()
                 )
             )
+        # Passed only now: a check or a probe that failed leaves its leaf's preflight, and
+        # the check it returns, to run again when the registry is used again.
+        for provider_id, fresh in preflighted.items():
+            self._checked[provider_id].update(fresh)
 
 
 def provider_named(name: str) -> Provider:

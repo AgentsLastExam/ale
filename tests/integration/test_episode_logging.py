@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from ale.core.capability import CapabilityProfile
+from ale.core.capability import CapabilityProfile, SandboxNeeds
 from ale.core.episode import EpisodeContext
 from ale.core.lock import (
     AgentProvenance,
@@ -70,7 +71,7 @@ class NoSandboxProvider(Provider):
     async def profiles(self) -> tuple[CapabilityProfile, ...]:
         return ()
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
         return None
 
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
