@@ -4,7 +4,9 @@
 # Every ALE image is published once per version and never overwritten. The builder and
 # runner share the engine's version (packages/ale-run/pyproject.toml); a base has its own
 # (BASES in packages/ale-run/src/ale/run/__init__.py). A version the registry already has is
-# pulled; one not published yet is built here, for testing before CI publishes it.
+# pulled; one not published yet is built here, for testing before CI publishes it. The
+# gVisor runtime is installed on a Host rather than used from here; its own build.sh builds
+# it.
 #
 # The Linux VM base is a VM disk, not a Docker image. ALE downloads a published one when a
 # Task first names it, so nothing is pulled ahead; an unpublished one is built into ALE's

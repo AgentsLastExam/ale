@@ -11,6 +11,8 @@ repos:
     hooks:
       - id: end-of-file-fixer
       - id: trailing-whitespace
+        # A patch's blank context lines are a single space.
+        exclude: \.patch$
       - id: check-yaml
       - id: check-toml
       - id: check-merge-conflict

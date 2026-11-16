@@ -1,0 +1,67 @@
+runsc: skip an exiting process when setting oom_score_adj
+
+What: when runsc cannot open a process's oom_score_adj (EACCES) because the
+process has begun to exit (PF_EXITING in /proc/<pid>/stat), it skips the
+process, as it already skips one that has exited, instead of failing.
+
+Why: a process gives up its mm early in its exit, and from then on its proc
+files belong to the host's root, so a runsc that is not the host's root, as
+under rootless Docker, cannot open them. runsc skips a process that has exited,
+but one that leads a PID namespace, as the gofer and the Sentry do, counts as
+running until every process in its namespace is gone. When a container's
+process exits at once, runsc start sets their oom_score_adj while they exit,
+and the container failed to start with "open /proc/<pid>/oom_score_adj:
+permission denied".
+
+Verified: under rootless Docker 29.9.3 (systemd cgroup driver, cgroup v2,
+kernel 5.15), docker run --rm python:3.12-slim true failed that way in 1 of 5
+runs with stock runsc (with --ignore-cgroups), and with --memory 64m in 5 of 5
+runs with 0001 and 0002 alone, which set the stubs first and so reach the
+gofer later. With this patch it started in 15 of 15 runs, and runsc's debug log
+showed the gofer and the Sentry skipped as exiting. Under rootful Docker 29.1.3
+(cgroup v2, kernel 7.0) it started in 5 of 5 runs.
+
+diff --git a/runsc/container/container.go b/runsc/container/container.go
+index 6773449..fcf46e0 100644
+--- a/runsc/container/container.go
++++ b/runsc/container/container.go
+@@ -2411,6 +2411,13 @@ func setOOMScoreAdj(pid int, scoreAdj int) error {
+ 				log.Warningf("Process (%d) exited while setting oom_score_adj", pid)
+ 				return nil
+ 			}
++			// A process gives up its mm early in its exit but counts as
++			// running until all its threads are gone and, if it leads a PID
++			// namespace like the gofer and the Sentry, every process in it.
++			if processExiting(pid) {
++				log.Warningf("Process (%d) is exiting while setting oom_score_adj", pid)
++				return nil
++			}
+ 		}
+ 		return err
+ 	}
+@@ -2425,6 +2432,25 @@ func setOOMScoreAdj(pid int, scoreAdj int) error {
+ 	return nil
+ }
+ 
++// processExiting returns true if the given process has begun to exit, from
++// the PF_EXITING flag in /proc/<pid>/stat.
++func processExiting(pid int) bool {
++	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
++	if err != nil {
++		return false
++	}
++	// The flags are the seventh field after the command name, which is in
++	// parentheses and may contain spaces.
++	stat := string(data)
++	fields := strings.Fields(stat[strings.LastIndexByte(stat, ')')+1:])
++	if len(fields) < 7 {
++		return false
++	}
++	const pfExiting = 0x4
++	flags, err := strconv.ParseUint(fields[6], 10, 64)
++	return err == nil && flags&pfExiting != 0
++}
++
+ // populateStats populates event with stats estimates based on cgroups and the
+ // sentry's accounting.
+ func (c *Container) populateStats(event *sentryapi.EventOut) {

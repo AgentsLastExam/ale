@@ -8,8 +8,10 @@ Read [`README.md`](README.md) and `../docs/specs/sandbox-image.md` first.
   sync with Provider checks and the image specification.
 - Never bake provider credentials, benchmark answers or Task-specific dependencies.
 - Images are published once per version and never overwritten. The builder and runner
-  share the engine's version; a changed base gets the next version of its own. No base
-  carries guestd, Cua Driver or the framework's Python: the engine installs them. A changed image contract requires container/VM conformance coverage.
+  share the engine's version; a changed base, or a changed gVisor runtime, gets the next
+  version of its own. No base carries guestd, Cua Driver or the framework's Python: the
+  engine installs them. A changed image contract requires container/VM conformance
+  coverage.
 - Avoid extra bootstrap mechanisms: long-lived fixed software belongs in the image,
   Task-specific software belongs in the Task's Dockerfile or VM build script.
 

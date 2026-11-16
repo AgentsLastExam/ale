@@ -11,7 +11,8 @@ builders/
 └── vm-materializer/     VM builder: makes the Linux base disk; frames and trims VM disks
 runtimes/
 ├── qemu-runner/         container that runs a prepared qcow2 with QEMU/KVM
-└── firecracker-runner/  container that runs a container Task as a Firecracker microVM
+├── firecracker-runner/  container that runs a container Task as a Firecracker microVM
+└── gvisor/              ALE's patched gVisor runsc, a container runtime for Docker
 ```
 
 Task repositories extend or reference only entries under `base/`. The VM bases are disks:
@@ -20,6 +21,9 @@ on Windows) builds the Task's layer on it, and the QEMU runner boots the result.
 builder makes the Linux base's disk from `vm-ubuntu24`'s Dockerfile once per version.
 The Firecracker runner takes a container Task's prepared image instead: it converts the
 image's filesystem into an ext4 disk once and boots it with its own kernel.
+The gVisor image only carries files: an operator copies its runsc onto the Host and
+registers it with Docker. It has a version of its own
+([`runtimes/gvisor/`](runtimes/gvisor/README.md)).
 macOS Tasks name a Tart image of their own; the Orchard and Tart that run it come from
 `scripts/setup_macos.py`, not from this directory.
 

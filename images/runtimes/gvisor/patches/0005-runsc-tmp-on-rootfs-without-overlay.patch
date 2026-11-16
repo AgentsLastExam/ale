@@ -1,0 +1,148 @@
+runsc: keep /tmp on the root filesystem when it has no overlay
+
+What: runsc no longer mounts its internal tmpfs on an empty or missing /tmp
+when the container's root filesystem is writable, served by the gofer and has
+no overlay (its gofer mount config has no upper layer, as with
+--overlay2=none). /tmp is then a directory of the root filesystem, and what
+the container writes there goes to its filesystem on the host, as under runc.
+With an overlay on the root (runsc's default root:self, or root:memory) and
+with a read-only root, runsc mounts the tmpfs as before; an explicit /tmp
+mount and a non-empty /tmp are left alone as before.
+
+Why: ALE runs every sandbox with --overlay2=none so that a container's writes
+stay in its Docker filesystem, as under runc: docker commit keeps them in a
+snapshot, docker cp reads them, and they take disk, not the container's
+memory. The internal tmpfs broke that for the /tmp of an image whose /tmp is
+empty, such as python:3.12-slim: 300 MB written there was charged to the
+container (docker stats 307 MiB, Shmem 293 MB), and docker commit dropped
+it. This follows the overlay setting rather than a new flag: an operator who
+turns the root's overlay off asks for the container's writes to land in its
+filesystem on the host, and writes to /tmp are among them. With the overlay
+on, the container's writes stay in the sandbox anyway, and a read-only root
+keeps the writable tmpfs it had, since nothing it writes reaches the host.
+
+Verified:
+- gVisor's unit tests in its builder container: the new TestMountTmp
+  (runsc/boot/loader_test.go) mounts a container's filesystems (mountAll)
+  over a root directory with an empty /tmp and checks the filesystem at
+  /tmp: tmpfs with a memory overlay on the root, the root's own gofer
+  filesystem (9p) without one, and tmpfs for a read-only root without one.
+  Without this patch the case without an overlay fails ("/tmp is on tmpfs,
+  want 9p"); with it, all three and the rest of //runsc/boot:boot_test pass.
+- runsc run as the host's root (kernel 7.0, --network=none,
+  --ignore-cgroups) on an OCI bundle whose root directory has an empty /tmp,
+  owned by root with mode 1777: with --overlay2=none, before this patch
+  /proc/mounts listed "none /tmp tmpfs rw,mode=01777", statfs of /tmp
+  returned TMPFS_MAGIC (0x1021994), and a file written to /tmp did not reach
+  the bundle's root directory on the host while one written to / did; with
+  it, /tmp was no mount, statfs returned the root's V9FS_MAGIC (0x1021997),
+  and both files were in the root directory on the host. With the default
+  overlay, before and after, /tmp was the tmpfs and neither file reached the
+  host; with --overlay2=none and a read-only root, /tmp was the tmpfs.
+
+diff --git a/runsc/boot/loader_test.go b/runsc/boot/loader_test.go
+index 1bb40ba..172a6f1 100644
+--- a/runsc/boot/loader_test.go
++++ b/runsc/boot/loader_test.go
+@@ -19,6 +19,7 @@ import (
+ 	"math/rand"
+ 	"net"
+ 	"os"
++	"path/filepath"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -32,6 +33,8 @@ import (
+ 	"gvisor.dev/gvisor/pkg/fspath"
+ 	"gvisor.dev/gvisor/pkg/lisafs"
+ 	"gvisor.dev/gvisor/pkg/log"
++	"gvisor.dev/gvisor/pkg/sentry/fsimpl/gofer"
++	"gvisor.dev/gvisor/pkg/sentry/fsimpl/tmpfs"
+ 	"gvisor.dev/gvisor/pkg/sentry/kernel"
+ 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+ 	"gvisor.dev/gvisor/pkg/sentry/vfs"
+@@ -576,6 +579,58 @@ func TestCreateMountNamespace(t *testing.T) {
+ 	}
+ }
+ 
++// TestMountTmp checks that an empty /tmp gets runsc's internal tmpfs unless the
++// root filesystem is writable and has no overlay.
++func TestMountTmp(t *testing.T) {
++	for _, tc := range []struct {
++		name     string
++		readonly bool
++		upper    specutils.GoferMountConfUpperType
++		want     string // The type of the filesystem at /tmp.
++	}{
++		{name: "overlay", upper: specutils.MemoryOverlay, want: tmpfs.Name},
++		{name: "no overlay", upper: specutils.NoOverlay, want: gofer.Name},
++		{name: "read-only root", readonly: true, upper: specutils.NoOverlay, want: tmpfs.Name},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			rootDir := t.TempDir()
++			if err := os.Mkdir(filepath.Join(rootDir, "tmp"), 0777); err != nil {
++				t.Fatalf("os.Mkdir: %v", err)
++			}
++			spec := testSpec()
++			spec.Root = &specs.Root{Path: rootDir, Readonly: tc.readonly}
++			spec.Mounts = []specs.Mount{{Destination: "/proc", Type: "tmpfs"}}
++			l, loaderCleanup, err := createLoader(testConfig(), spec)
++			if err != nil {
++				t.Fatalf("failed to create loader: %v", err)
++			}
++			defer l.Destroy()
++			defer loaderCleanup()
++
++			l.mu.Lock()
++			defer l.mu.Unlock()
++			l.root.goferMountConfs = []specutils.GoferMountConf{{Lower: specutils.Lisafs, Upper: tc.upper}}
++			mntr := l.newContainerMounter(&l.root)
++			ctx := l.k.SupervisorContext()
++			creds := auth.NewRootCredentials(l.root.procArgs.Credentials.UserNamespace)
++			mns, err := mntr.mountAll(ctx, creds, l.root.spec, l.root.conf, &l.root.procArgs)
++			if err != nil {
++				t.Fatalf("mountAll: %v", err)
++			}
++			root := mns.Root(ctx)
++			defer root.DecRef(ctx)
++			tmp, err := l.k.VFS().GetDentryAt(ctx, creds, &vfs.PathOperation{Root: root, Start: root, Path: fspath.Parse("/tmp")}, &vfs.GetDentryOptions{})
++			if err != nil {
++				t.Fatalf("GetDentryAt(/tmp): %v", err)
++			}
++			defer tmp.DecRef(ctx)
++			if got := tmp.Mount().Filesystem().FilesystemType().Name(); got != tc.want {
++				t.Errorf("/tmp is on %s, want %s", got, tc.want)
++			}
++		})
++	}
++}
++
+ type createMountPointTestCase struct {
+ 	name string
+ 	path string
+diff --git a/runsc/boot/vfs.go b/runsc/boot/vfs.go
+index 7072ba9..f3b2801 100644
+--- a/runsc/boot/vfs.go
++++ b/runsc/boot/vfs.go
+@@ -1261,6 +1261,10 @@ func createPrivateMemoryFile(file *os.File, resourceID checkpoint.ResourceID, ci
+ //  1. /tmp is mounted explicitly: we should not override user's wish
+ //  2. /tmp is not empty: mounting tmpfs would hide existing files in /tmp
+ //
++// It's not mounted either when the root filesystem is writable and has no
++// overlay (--overlay2=none): the operator then asked for the container's writes
++// to go to its filesystem on the host, and /tmp is part of it, as under runc.
++//
+ // Note that when there are submounts inside of '/tmp', directories for the
+ // mount points must be present, making '/tmp' not empty anymore.
+ func (c *containerMounter) mountTmp(ctx context.Context, spec *specs.Spec, conf *config.Config, creds *auth.Credentials, mns *vfs.MountNamespace) error {
+@@ -1271,6 +1275,10 @@ func (c *containerMounter) mountTmp(ctx context.Context, spec *specs.Spec, conf
+ 			return nil
+ 		}
+ 	}
++	if rootfsConf := c.goferMountConfs[0]; rootfsConf.ShouldUseLisafs() && !rootfsConf.ShouldUseOverlayfs() && !spec.Root.Readonly {
++		log.Infof(`Root filesystem has no overlay, skipping internal tmpfs for "/tmp"`)
++		return nil
++	}
+ 
+ 	root := mns.Root(ctx)
+ 	defer root.DecRef(ctx)

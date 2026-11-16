@@ -1,0 +1,177 @@
+runsc: give the containers' oom_score_adj to the stubs, not the Sentry or gofer
+
+What: runsc gives the containers' oom_score_adj (when a container starts, and
+again when one leaves a multi-container sandbox) to the platform's stubs, the
+children of the sandbox process, which run the application. The Sentry and
+each container's gofer get it only where it is below the value the sandbox
+inherited; on a platform without stubs the Sentry gets it as before.
+
+runsc finds the stubs in /proc/<pid>/task/<tid>/children, which the Host
+kernel has only with CONFIG_PROC_CHILDREN. Without it runsc finds none and
+logs nothing: the Sentry gets the containers' value as before, the stubs keep
+the inherited one, and each gofer still gets it only where it is lower, so
+under rootful Docker a container that exceeds --memory loses the whole
+sandbox, as with stock runsc.
+
+Why: under rootful Docker, a container that exceeded --memory lost the whole
+sandbox. The Sentry forks the first stub at boot and clones every later stub
+from it, so the stubs kept the -998 of containerd's runc shim while the Sentry
+got the container's 0, and the OOM killer chose the Sentry. Giving the stubs 0
+as well is not enough: the application's memory lives in the Sentry's memory
+file and is mostly not mapped in any stub, so the Sentry's resident set (about
+50 MB) is often the largest and the Sentry is still chosen. The gofer,
+about 11 MB resident, is likewise chosen before any stub that maps less, and
+the sandbox cannot serve the container's files without it. Kept at the
+inherited value, both leave the OOM killer the stub that maps the most memory,
+normally the allocating process's, and only that process dies, as under runc.
+
+Under rootless Docker the inherited value is one above the user's containerd
+(1 where it runs at 0), and an unprivileged process cannot go below its
+oom_score_adj_min, the value its user's systemd manager started with, so with
+Docker's default the Sentry, the gofer and the stubs tie. A container
+oom_score_adj above the inherited value (docker run --oom-score-adj) puts the
+stubs ahead of them there too. Memory written into a tmpfs in the sandbox with
+write(2) is mapped by the Sentry itself, so filling the limit that way still
+ends the sandbox.
+
+Verified, in containers run with --memory 512m --memory-swap 512m in which one
+process writes a heartbeat every second while another uses memory:
+- Rootful Docker 29.1.3 (cgroup v2, kernel 7.0), a process allocating 1.5 GB.
+  Stock runsc (stubs -998, Sentry 0) lost the whole container, and so did
+  stubs given the Sentry's 0. With this patch (Sentry, gofer and FD-parking sidecar -998,
+  stubs 0) the kernel killed the allocating stub, the allocator exited with 137
+  and the heartbeat kept running, in 3 runs of 3.
+- The same, a process filling /dev/shm through mmap 50 MB at a time and
+  unmapping each part, so that little of the memory is mapped: the kernel
+  killed the writer's stub (about 2800 resident pages, the gofer about 2950)
+  and the heartbeat kept running, in 3 runs of 3, as under runc. With the
+  gofer set to the container's 0 by hand, it killed the gofer and the
+  container exited with 137.
+- The same, dd filling /dev/shm: the kernel killed the Sentry at -998, which
+  mapped 500 MB of it, and the container exited with 137, in 2 runs of 2.
+  Under runc it killed the heartbeat and dd, and the shell went on.
+- Rootless Docker 29.9.3 (systemd cgroup driver, cgroup v2, kernel 5.15), with
+  --oom-score-adj 500 (stubs 500, Sentry, gofer and FD-parking sidecar 1):
+  only the allocator died in 4 runs of 4, and only the mmap writer in 2 of 2.
+  With Docker's default 0 the allocator, which mapped more than the Sentry,
+  died alone in 3 runs of 3, but the mmap writer took the whole container in
+  2 of 2.
+
+gVisor's root tests TestOOMScoreAdjSingle and TestOOMScoreAdjMulti
+(test/root/oom_score_adj_test.go) still expect the container's value on the
+Sentry and the gofer; ALE's build does not run them.
+
+diff --git a/runsc/container/container.go b/runsc/container/container.go
+index 3b80cd4..6773449 100644
+--- a/runsc/container/container.go
++++ b/runsc/container/container.go
+@@ -581,8 +581,8 @@ func (c *Container) startImpl(conf *config.Config, action string, startRoot func
+ 		return err
+ 	}
+ 
+-	// Set container's oom_score_adj to the gofer since it is dedicated to
+-	// the container, in case the gofer uses up too much memory.
++	// Set container's oom_score_adj to the gofer, unless the sandbox inherited
++	// a lower one.
+ 	return c.adjustGoferOOMScoreAdj()
+ }
+ 
+@@ -2240,12 +2240,17 @@ func (c *Container) IsSandboxRoot() bool {
+ }
+ 
+ // adjustGoferOOMScoreAdj sets the oom_store_adj for the container's gofer.
++//
++// Like the Sentry, the gofer gets the container's value only where it is below
++// the value the sandbox inherited. The sandbox cannot serve the container's
++// files without it, so the OOM killer must not choose it; with the stubs' value
++// it would, as soon as no stub maps more memory than the gofer holds.
+ func (c *Container) adjustGoferOOMScoreAdj() error {
+ 	goferPid := c.GoferPid.Load()
+ 	if goferPid == 0 || c.Spec.Process.OOMScoreAdj == nil {
+ 		return nil
+ 	}
+-	return setOOMScoreAdj(goferPid, *c.Spec.Process.OOMScoreAdj)
++	return setOOMScoreAdj(goferPid, min(*c.Spec.Process.OOMScoreAdj, c.Sandbox.OriginalOOMScoreAdj))
+ }
+ 
+ // adjustSandboxOOMScoreAdj sets the oom_score_adj for the sandbox.
+@@ -2314,8 +2319,77 @@ func adjustSandboxOOMScoreAdj(s *sandbox.Sandbox, spec *specs.Spec, rootDir stri
+ 		return nil
+ 	}
+ 
+-	// Set the lowest of all containers oom_score_adj to the sandbox.
+-	return setOOMScoreAdj(s.Getpid(), lowScore)
++	// Set the lowest of all containers oom_score_adj to the processes that run
++	// them.
++	return setApplicationOOMScoreAdj(s.Getpid(), lowScore, containers[0].Sandbox.OriginalOOMScoreAdj)
++}
++
++// setApplicationOOMScoreAdj gives scoreAdj to the processes that run the
++// application: the platform's stubs, which are the children of the sandbox
++// process, or the sandbox process itself on a platform without stubs. The
++// kernel gives a stub's value to every process that shares its address space,
++// such as systrap's sysmsg threads.
++//
++// With stubs, the sandbox process, the Sentry, gets scoreAdj only where it is
++// below original, the value the Sentry inherited from its parent, so that the
++// kernel's OOM killer chooses a stub before the Sentry. Under containerd's runc
++// shim the Sentry thus keeps -998, like the shim. The application's memory
++// lives in the Sentry's memory file and little of it is mapped in any stub at a
++// time, so the Sentry has the largest resident set in the container's cgroup:
++// with the stubs' value, it would be the one killed when the container exceeds
++// its memory limit, and every process with it. Held back, it leaves the OOM
++// killer the stub that maps the most memory, normally the one allocating, and
++// only that application process dies, as under runc.
++func setApplicationOOMScoreAdj(pid, scoreAdj, original int) error {
++	if len(childProcesses(pid)) == 0 {
++		return setOOMScoreAdj(pid, scoreAdj)
++	}
++	if err := setOOMScoreAdj(pid, min(scoreAdj, original)); err != nil {
++		return err
++	}
++	// The Sentry forks the first stub at boot, before this runs, and clones
++	// every later stub from it, so a stub inherits the value its source has
++	// when it is cloned. Repeat until a pass finds no stub it has not set.
++	set := make(map[int]bool)
++	for pass := 0; pass < 10; pass++ {
++		found := false
++		for _, stub := range childProcesses(pid) {
++			if set[stub] {
++				continue
++			}
++			set[stub] = true
++			found = true
++			if err := setOOMScoreAdj(stub, scoreAdj); err != nil {
++				return err
++			}
++		}
++		if !found {
++			return nil
++		}
++	}
++	return nil
++}
++
++// childProcesses returns the PIDs of the child processes of every thread of
++// the given process.
++func childProcesses(pid int) []int {
++	tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid))
++	if err != nil {
++		return nil
++	}
++	var children []int
++	for _, task := range tasks {
++		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%s/children", pid, task.Name()))
++		if err != nil {
++			continue
++		}
++		for _, field := range strings.Fields(string(data)) {
++			if child, err := strconv.Atoi(field); err == nil {
++				children = append(children, child)
++			}
++		}
++	}
++	return children
+ }
+ 
+ // setOOMScoreAdj sets oom_score_adj to the given value for the given PID.

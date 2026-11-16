@@ -3,8 +3,9 @@ name: images
 # Every ALE image is published once per version and never again: a version the registry
 # already has is skipped, so an image never changes under the engines and Tasks that use it.
 # The builder and runner share the engine's version (packages/ale-run/pyproject.toml); a
-# base has its own (BASES in packages/ale-run/src/ale/run/__init__.py). To publish a changed
-# image, raise its version.
+# base has its own (BASES in packages/ale-run/src/ale/run/__init__.py), and so does the
+# gVisor runtime (VERSION in images/runtimes/gvisor/build.sh). To publish a changed image,
+# raise its version.
 
 on:
   push:
@@ -165,6 +166,53 @@ jobs:
         run: >-
           uv run ale vm-image push "$RUNNER_TEMP/vm-ubuntu24-base.qcow2"
           "${{ steps.release.outputs.image }}"
+
+  # ALE's gVisor runtime is built by gVisor's own Bazel build, which build.sh runs before
+  # it builds the image, and has its own version: VERSION in that script.
+  gvisor:
+    if: github.event_name != 'workflow_dispatch' || inputs.promote_repository == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check whether this version is published
+        id: release
+        run: |
+          version=$(sed -n 's/^VERSION=\([0-9.]*\)$/\1/p' images/runtimes/gvisor/build.sh)
+          [ -n "$version" ] || { echo "::error::no version for ale-gvisor"; exit 1; }
+          image="ghcr.io/agentslastexam/ale-gvisor:$version"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+            echo "$image is already published and stays as it is"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # gVisor's builder image and Bazel cache take about 15 GB.
+      - name: Free disk space
+        if: steps.release.outputs.published == 'false'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+
+      - name: Build
+        if: steps.release.outputs.published == 'false'
+        run: images/runtimes/gvisor/build.sh "$RUNNER_TEMP/gvisor"
+
+      - name: Publish
+        if: steps.release.outputs.published == 'false' && github.event_name != 'pull_request'
+        run: docker push "${{ steps.release.outputs.image }}"
 
   # Give an image that was published without a version (such as a floating tag's current
   # target) a version, by pointing a new tag at the very same manifest. Nothing is rebuilt.

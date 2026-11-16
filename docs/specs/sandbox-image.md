@@ -146,7 +146,8 @@ The VM builder and the QEMU runner run the engine's own logic, so they are publi
 the engine's version, such as `0.2.0`; an engine runs exactly those of its own version, and
 a changed one ships with the next engine version. A base carries no part of the framework,
 so nothing in it depends on the engine: each base has its own version, raised when the base
-itself changes, and any engine runs any version of it.
+itself changes, and any engine runs any version of it. A container runtime that ALE builds
+for Hosts to install depends on no engine either and has a version of its own.
 
 A Task may build from any image. Task repositories maintained with ALE name an exact
 version of an ALE base, such as `container-ubuntu22-base:0.1.1`, so that a Task keeps
