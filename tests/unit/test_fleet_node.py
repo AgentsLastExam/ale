@@ -629,12 +629,13 @@ class TestImages:
         (folder / "environment" / "Dockerfile").unlink()
         text = (folder / "task.toml").read_text()
         (folder / "task.toml").write_text(
-            text.replace(
-                "[environment]\n", f'[environment]\ndocker_image = "{REFERENCE.reference}"\n'
-            )
+            text.replace("[environment]\n", f'[environment]\nimage = "{REFERENCE.reference}"\n')
         )
         task = load_task_folder(folder)
         assert task.spec.image.ref == REFERENCE.reference
+        # The Run reads the kind from the registry before it ships the Task to a Node.
+        image = task.spec.image.model_copy(update={"kind": REFERENCE.kind})
+        task.spec = task.spec.model_copy(update={"image": image})
 
         async def prepared(built, _providers):  # type: ignore[no-untyped-def]
             return ImagePreparationResult(task="referenced", role="solver", image=IMAGE, steps=())

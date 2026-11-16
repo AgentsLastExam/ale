@@ -6,11 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tests.support import VM_BASE
 from tests.support import edit_task_config as edit
 from typer.testing import CliRunner
 
 from ale.core.errors import TaskDefinitionError
+from ale.core.taskspec import SCHEMA_VERSION
 from ale.run.cli.main import app
 from ale.run.lint import lint_repository
 from ale.run.scaffold import scaffold_task
@@ -28,7 +28,7 @@ def test_new_task_is_standalone_and_lints_clean(tmp_path: Path) -> None:
     assert (task / "environment" / "Dockerfile").is_file()
     assert not (task / "environment" / "setup").exists()
     config = tomllib.loads((task / "task.toml").read_text())
-    assert config["schema_version"] == "1.4+ale.1"
+    assert config["schema_version"] == SCHEMA_VERSION
     assert config["task"]["name"] == "agentslastexam/fresh"
     assert config["agent"]["network_mode"] == "no-network"
 
@@ -102,6 +102,10 @@ def test_fixed_installation_in_setup_is_reported(tmp_path: Path) -> None:
     entry.write_text("#!/bin/sh\napt-get install -y jq\n")
     entry.chmod(0o755)
     assert "belongs in the image's Dockerfile" in messages(task)
+    (task / "environment" / "Dockerfile").unlink()
+    (task / "environment" / "build.sh").write_text("apt-get install -y curl\n")
+    edit(task, {"environment": {"image": "ghcr.io/acme/vm-base:1.0"}})
+    assert "belongs in environment/build.sh" in messages(task)
 
 
 @pytest.mark.parametrize(
@@ -127,9 +131,16 @@ def test_an_image_that_can_change_under_a_task_is_reported(tmp_path: Path, base:
     dockerfile = task / "environment" / "Dockerfile"
     dockerfile.write_text(f"FROM --platform=linux/amd64 {base} AS build\nFROM build\n")
     assert f"{base} can change" in messages(task)
-    dockerfile.write_text("FROM python:3.12\n")
-    edit(task, {"environment": {"docker_image": base}})
+    dockerfile.unlink()
+    edit(task, {"environment": {"image": base}})
     assert f"{base} can change" in messages(task)
+
+
+def test_a_local_disk_is_its_own_version(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    (task / "environment" / "Dockerfile").unlink()
+    edit(task, {"environment": {"image": "/images/task.qcow2"}})
+    assert messages(task) == ""
 
 
 def test_a_public_network_needs_its_reason(tmp_path: Path) -> None:
@@ -140,45 +151,16 @@ def test_a_public_network_needs_its_reason(tmp_path: Path) -> None:
     assert messages(task) == ""
 
 
-def _vm_task(tmp_path: Path) -> Path:
-    task = scaffold_task(tmp_path / "fresh")
-    config = task / "task.toml"
-    config.write_text(config.read_text().replace("[environment]\n", "[environment]\nvm = true\n"))
-    return task
-
-
-def test_vm_final_stage_owns_no_boot_contract(tmp_path: Path) -> None:
-    task = _vm_task(tmp_path)
-    (task / "environment" / "Dockerfile").write_text(f'FROM {VM_BASE}\nCMD ["bash"]\n')
-    assert "CMD" in messages(task)
-    (task / "environment" / "Dockerfile").write_text(f"FROM {VM_BASE}\n")
-    (task / "environment" / "mkosi.conf").write_text("")
-    assert "ALE-owned" in messages(task)
-    # Setup is not part of the image build, so its file names are its own.
-    (task / "environment" / "mkosi.conf").unlink()
-    (task / "environment" / "setup").mkdir()
-    (task / "environment" / "setup" / "mkosi.conf").write_text("")
-    assert "ALE-owned" not in messages(task)
-
-
 def test_assets_without_a_build_are_reported(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "fresh")
-    config = task / "task.toml"
-    config.write_text(
-        config.read_text().replace("memory_mb = 4096", 'memory_mb = 4096\ndocker_image = "x:1"')
-    )
     (task / "environment" / "Dockerfile").unlink()
+    edit(task, {"environment": {"image": "ghcr.io/acme/task:1"}})
     (task / "environment" / "assets").mkdir()
     (task / "environment" / "assets" / "unused.bin").write_bytes(b"unused")
     assert "environment/assets is unused" in messages(task)
-
-    task = _vm_task(tmp_path / "vm")
-    (task / "environment" / "Dockerfile").unlink()
-    config = task / "task.toml"
-    config.write_text(config.read_text() + 'vm_image = "ghcr.io/acme/task-vm:v1"\n')
-    (task / "environment" / "assets").mkdir()
-    (task / "environment" / "assets" / "unused.bin").write_bytes(b"unused")
-    assert "environment/assets is unused" in messages(task)
+    # A Linux VM build on that image uses them.
+    (task / "environment" / "build.sh").write_text("cp assets/unused.bin /opt/\n")
+    assert messages(task) == ""
 
 
 def test_assets_cli_accepts_multiple_paths_and_force(

@@ -8,6 +8,7 @@ from tests.support import MINIMAL_TASK_CONFIG, merged_config
 
 from ale.core.ids import TaskId, canonical_json, content_hash, task_component
 from ale.core.taskspec import (
+    SCHEMA_VERSION,
     Artifact,
     ImageKind,
     ImageSpec,
@@ -29,6 +30,7 @@ from ale.core.taskspec import (
 from ale.core.verdict import Status, Verdict
 
 pytestmark = pytest.mark.unit
+IMAGE = "ghcr.io/acme/image:v1"
 
 
 def make_spec(**overrides: object) -> TaskSpec:
@@ -53,6 +55,7 @@ def test_task_spec_is_strict_and_path_independent() -> None:
 def test_image_spec_is_explicit_strict_and_nonblank() -> None:
     assert ImageSpec(kind="vm", ref="ghcr.io/acme/disk:v1").kind is ImageKind.VM
     assert ImageSpec(kind="vm", base_ref="/images/base.qcow2").ref is None
+    assert ImageSpec(kind=None, ref="ghcr.io/acme/image:v1").kind is None
     for payload in (
         {},
         {"kind": "unknown"},
@@ -62,9 +65,14 @@ def test_image_spec_is_explicit_strict_and_nonblank() -> None:
         {"kind": "vm", "base_ref": "   "},
         {"kind": "vm", "ref": "task.qcow2", "base_ref": "base.qcow2"},
         {"kind": "container", "base_ref": "base:latest"},
+        {"kind": None, "base_ref": "base:latest"},
     ):
         with pytest.raises(ValidationError):
             ImageSpec.model_validate(payload)
+    # Only a container is built from the Task folder; a VM is named or built on a base.
+    for kind in ("vm", None):
+        with pytest.raises(ValidationError, match="only a container image is built"):
+            ImageSpec.model_validate({"kind": kind})
 
     with pytest.raises(ValidationError, match="base ref"):
         VerifySpec(
@@ -72,6 +80,27 @@ def test_image_spec_is_explicit_strict_and_nonblank() -> None:
             resources=VerifierResources(cpus=1, memory_mb=512, storage_mb=None, gpus=0),
             image={"kind": "vm", "base_ref": "/images/base.qcow2"},
         )
+
+
+def test_only_a_linux_registry_image_leaves_its_kind_open() -> None:
+    named = {"kind": None, "ref": IMAGE}
+    resources = VerifierResources(cpus=1, memory_mb=512, storage_mb=None, gpus=0)
+    separate = {"environment_mode": "separate", "resources": resources}
+    assert make_spec(image=named).image.kind is None
+    assert make_spec(verify={**separate, "image": named}).verify.image is not None
+    disk = {"kind": None, "ref": "/images/disk.qcow2"}
+    for overrides in (
+        {"os": "windows", "image": named},
+        {
+            "os": "macos",
+            "image": {"kind": "vm", "ref": IMAGE},
+            "verify": {**separate, "image": named},
+        },
+        {"image": disk},
+        {"verify": {**separate, "image": disk}},
+    ):
+        with pytest.raises(ValidationError, match="leaves its kind open"):
+            make_spec(**overrides)
 
 
 def test_task_spec_hash_tracks_semantics() -> None:
@@ -99,9 +128,9 @@ def test_task_ids_are_org_and_name_and_one_safe_component() -> None:
 
 
 def test_task_config_requires_only_its_version_and_name() -> None:
-    assert config().environment.kind is ImageKind.CONTAINER
+    assert config().environment.image is None
     minimal = TaskConfig.model_validate(
-        {"schema_version": "1.4+ale.1", "task": {"name": "org/demo"}}
+        {"schema_version": SCHEMA_VERSION, "task": {"name": "org/demo"}}
     )
     assert (minimal.environment.cpus, minimal.environment.memory_mb) == (1, 4096)
     assert minimal.environment.build_timeout_sec == 3600
@@ -114,8 +143,11 @@ def test_task_config_requires_only_its_version_and_name() -> None:
             TaskConfig.model_validate(payload)
         assert raised.value.errors()[0]["type"] == "missing"
         assert raised.value.errors()[0]["loc"] == ((table, key) if table else (key,))
-    for version in ("1.3", "1.4"):
-        with pytest.raises(ValidationError, match=r"1\.4\+ale\.1"):
+    # The format is named by the ALE version that last changed it, and only that one is
+    # read.
+    assert SCHEMA_VERSION == "0.2.0"
+    for version in ("1.4", "1.4+ale.1", "0.1.1"):
+        with pytest.raises(ValidationError, match=r"0\.2\.0"):
             config({"schema_version": version})
 
 
@@ -142,7 +174,15 @@ def test_harbor_keys_ale_does_not_implement_say_so(layer: dict[str, object], key
 
 
 def test_task_config_rejects_unknown_keys() -> None:
-    for layer in ({"domain": "demo"}, {"ale": {"sudo": True}}, {"task": {"org": "x"}}):
+    for layer in (
+        {"domain": "demo"},
+        {"ale": {"sudo": True}},
+        {"task": {"org": "x"}},
+        # Harbor's container reference; ALE names every image with [environment].image.
+        {"environment": {"docker_image": "ghcr.io/acme/task:v1"}},
+        {"environment": {"vm": True}},
+        {"verifier": {"environment": {"docker_image": "ghcr.io/acme/verifier:v1"}}},
+    ):
         with pytest.raises(ValidationError, match="Extra inputs"):
             config(layer)
 
@@ -150,14 +190,7 @@ def test_task_config_rejects_unknown_keys() -> None:
 @pytest.mark.parametrize(
     ("layer", "message"),
     [
-        ({"environment": {"docker_image": "x", "vm": True}}, "docker_image is a container"),
-        ({"environment": {"docker_image": "x", "vm_image": "d"}}, "docker_image is a container"),
-        ({"environment": {"docker_image": "x", "os": "windows"}}, "docker_image is a container"),
-        ({"environment": {"vm_base": "base.qcow2"}}, "vm_base requires os 'windows'"),
-        (
-            {"environment": {"os": "windows", "vm_base": "b.qcow2", "vm_image": "i.qcow2"}},
-            "mutually exclusive",
-        ),
+        ({"environment": {"image": ""}}, "at least 1 character"),
         ({"agent": {"network_mode": "allowlist"}}, "non-empty allowed_hosts"),
         ({"agent": {"allowed_hosts": ["example.org"]}}, "requires network_mode 'allowlist'"),
         *(
@@ -193,21 +226,6 @@ def test_task_config_rejects_unknown_keys() -> None:
             },
             "shared",
         ),
-        (
-            {
-                "verifier": {
-                    "environment": {"docker_image": "x", "vm": True, "cpus": 1, "memory_mb": 512}
-                }
-            },
-            "docker_image is a container",
-        ),
-        (
-            {
-                "environment": {"os": "windows", "vm_image": "w.qcow2"},
-                "verifier": {"environment": {"docker_image": "x", "cpus": 1, "memory_mb": 512}},
-            },
-            "only a Linux verifier runs in a container",
-        ),
         ({"environment": {"cpus": 1.5}}, "valid integer"),
         ({"environment": {"skills_dir": "skills"}}, "skills_dir must be an absolute path"),
         ({"environment": {"gpu_types": ["H100"]}}, r"\[environment\]\.gpu_types requires gpus"),
@@ -217,7 +235,6 @@ def test_task_config_rejects_unknown_keys() -> None:
         ),
         ({"environment": {"gpus": 1, "gpu_types": []}}, "at least 1 item"),
         ({"environment": {"gpus": 1, "gpu_types": [" - "]}}, "should match pattern"),
-        ({"environment": {"vm": "yes"}}, "valid boolean"),
         ({"agent": {"sudo": "yes"}}, "valid boolean"),
         (
             {
@@ -316,7 +333,7 @@ def test_network_modes_map_onto_the_runtime_policy() -> None:
 
 
 def test_windows_artifacts_use_windows_path_rules() -> None:
-    windows = {"environment": {"os": "windows", "vm_image": "w.qcow2"}}
+    windows = {"environment": {"os": "windows", "image": "/images/w.qcow2"}}
     declared = config(windows, {"artifacts": [r"C:\Users\user\output"]}).artifacts
     assert declared == (Artifact(source=r"C:\Users\user\output"),)
     with pytest.raises(ValidationError, match="filesystem roots"):
@@ -324,7 +341,7 @@ def test_windows_artifacts_use_windows_path_rules() -> None:
 
 
 def test_harbor_s_spellings_are_accepted() -> None:
-    assert config({"environment": {"os": "Windows", "vm_image": "w.qcow2"}}).environment.os == (
+    assert config({"environment": {"os": "Windows", "image": "w.qcow2"}}).environment.os == (
         OperatingSystem.WINDOWS
     )
     http = {"name": "s", "transport": "http", "url": "https://mcp.example.org/mcp"}

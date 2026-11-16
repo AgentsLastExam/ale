@@ -234,19 +234,28 @@ async def test_the_display_announces_the_requested_resolution(
     assert "-global VGA.xres=1366 -global VGA.yres=768" in arguments
 
 
+#: How a build VM's guest is shut down, and how its free space is discarded, by its OS.
+_BUILD_SHUTDOWN = {
+    "windows": (["shutdown.exe", "/s", "/t", "1"],),
+    "linux": (["sync"], ["systemctl", "poweroff", "--no-block"]),
+}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [None, "shutdown", "wait"])
-async def test_a_windows_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdown(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None
+@pytest.mark.parametrize("operating_system", ["windows", "linux"])
+async def test_a_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None, operating_system: str
 ) -> None:
     commands: list[tuple[str, ...]] = []
+    shutdown = list(_BUILD_SHUTDOWN[operating_system])
 
     class Client:
         closed = False
 
         async def exec(self, argv: list[str], **_kwargs: object) -> tuple[int, str, str, bool]:
-            assert argv == ["shutdown.exe", "/s", "/t", "1"]
-            return int(failure == "shutdown"), "", "shutdown result", False
+            assert argv == shutdown.pop(0)
+            return int(failure == "shutdown" and not shutdown), "", "shutdown result", False
 
         async def close(self) -> None:
             self.closed = True
@@ -265,7 +274,7 @@ async def test_a_windows_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdo
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox._client = client  # type: ignore[assignment]
     sandbox._file_client = Client()  # type: ignore[assignment]
-    sandbox.request = request(os="windows")
+    sandbox.request = request(os=operating_system)
     sandbox.container = "ale-qemu-build"
     sandbox.storage = tmp_path / "storage"
     base = write_qcow2(tmp_path / "vm-builds/base.qcow2", data=b"windows")
@@ -284,12 +293,23 @@ async def test_a_windows_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdo
         return
 
     identity = await sandbox.save_image(destination)
-    assert sandbox._file_client.closed
+    assert sandbox._file_client.closed and shutdown == []
     wait, discard = commands
     assert wait == ("docker", "wait", "ale-qemu-build")
-    # The VM builder discards free clusters, with the overlay writable and its base not.
+    # The VM builder discards free space, with the overlay writable and its base not: NTFS
+    # by its own bitmap, any Linux filesystem by trimming it.
     assert discard[:2] == ("docker", "run") and MATERIALIZER_IMAGE in discard
-    assert discard[-2:] == ("/ale/ntfs_discard.py", str(overlay.resolve()))
+    assert discard[-2:] == (
+        "/ale/ntfs_discard.py" if operating_system == "windows" else "qcow2",
+        str(overlay.resolve()),
+    )
+    if operating_system == "linux":
+        entrypoint = discard.index("--entrypoint")
+        assert discard[entrypoint + 1 : entrypoint + 4] == (
+            "virt-sparsify",
+            MATERIALIZER_IMAGE,
+            "--in-place",
+        )
     assert f"type=bind,src={overlay.resolve()},dst={overlay.resolve()}" in discard
     assert f"type=bind,src={base.resolve()},dst={base.resolve()},readonly" in discard
     # Not flattened: the overlay itself, naming its base relative to itself.

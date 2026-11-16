@@ -5,15 +5,15 @@ from __future__ import annotations
 import re
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ale.core.errors import TaskDefinitionError
 from ale.core.task import Stage
 from ale.core.taskspec import OperatingSystem, VariableReference, is_credential_name
 from ale.run.tasksets.manifest import (
+    BUILD_SCRIPTS,
     ENVIRONMENT_DIR,
     INSTRUCTION,
-    SETUP_DIR,
     TASK_CONFIG,
     TaskFolder,
     discover_task_folders,
@@ -27,12 +27,6 @@ _FIXED_SETUP = re.compile(
     r"Invoke-WebRequest|Invoke-RestMethod)",
     re.IGNORECASE,
 )
-_VM_RESERVED_NAMES = {
-    "ale-guestd.service",
-    "autoinstall.yaml",
-    "loader.conf",
-    "mkosi.conf",
-}
 _FROM = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", re.I | re.M)
 _TOP_LEVEL = {
     TASK_CONFIG,
@@ -137,30 +131,15 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
                 "environment/assets is unused without an image build",
             )
         )
-    vm = isinstance(environment, dict) and environment.get("vm") is True
-    if vm and folder.dockerfile is not None:
-        # Any base image is accepted; the engine adds what it needs when it prepares one.
-        if _vm_boot_override(folder.dockerfile):
-            findings.append(
-                Finding(folder.dockerfile, "VM final stage must not declare CMD or ENTRYPOINT")
-            )
-        for entry in folder.environment_dir.rglob("*"):
-            in_context = entry.relative_to(folder.environment_dir).parts[0] != SETUP_DIR
-            if (
-                in_context
-                and entry.is_file()
-                and (entry.name in _VM_RESERVED_NAMES or entry.suffix in {".qcow2", ".raw"})
-            ):
-                findings.append(
-                    Finding(entry, "VM boot and disk materialization files are ALE-owned")
-                )
 
     setup = folder.stage_entry(Stage.SETUP, operating_system)
     if setup and _FIXED_SETUP.search(setup.read_text(encoding="utf-8", errors="replace")):
-        image_build = {
-            OperatingSystem.WINDOWS: "environment/build.ps1",
-            OperatingSystem.MACOS: "environment/build.sh",
-        }.get(operating_system, "the image's Dockerfile")
+        # A Linux Task builds a VM with build.sh only when it has no Dockerfile.
+        dockerfile = operating_system is OperatingSystem.LINUX and (
+            folder.dockerfile is not None or folder.build_script(operating_system) is None
+        )
+        script = BUILD_SCRIPTS[operating_system]
+        image_build = "the image's Dockerfile" if dockerfile else f"environment/{script}"
         findings.append(
             Finding(
                 setup,
@@ -189,6 +168,8 @@ def _moves(image: str) -> bool:
     """Whether ``image`` can change under a Task: no digest, and no tag or ``latest``."""
     if "@" in image or "$" in image:  # a build argument names it elsewhere
         return False
+    if PurePosixPath(image).is_absolute():  # a local disk, whose content is its identity
+        return False
     return image.rpartition("/")[2].partition(":")[2] in ("", "latest")
 
 
@@ -205,7 +186,7 @@ def _check_image_versions(folder: TaskFolder, config: dict[str, object]) -> list
     verifier = config.get("verifier")
     nested = verifier.get("environment") if isinstance(verifier, dict) else None
     for table in (environment, nested):
-        image = table.get("docker_image") if isinstance(table, dict) else None
+        image = table.get("image") if isinstance(table, dict) else None
         if isinstance(image, str):
             named.append((folder.root / TASK_CONFIG, image))
     return [
@@ -261,15 +242,6 @@ def _read_config(path: Path) -> dict[str, object]:
             return tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError):
         return {}
-
-
-def _vm_boot_override(path: Path) -> bool:
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    final_from = max(
-        (index for index, line in enumerate(lines) if re.match(r"^\s*FROM\s+", line, re.I)),
-        default=-1,
-    )
-    return any(re.match(r"^\s*(CMD|ENTRYPOINT)\b", line, re.I) for line in lines[final_from + 1 :])
 
 
 def _has_files(path: Path) -> bool:

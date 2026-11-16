@@ -203,15 +203,16 @@ Run's own machine; the agent only carries the calls.
   is left to its Provider.
 - **Images.** The agent prepares every image it serves itself, through the very preparation
   a local Run uses: it pulls bases from their registries, builds a container Task's image,
-  materializes a Linux VM disk, and builds a Windows Task's layer on its own copy of the base;
-  Orchard pulls a macOS image by its reference. The Run sends only what that needs: the
-  image's inputs (the Task's specification and which of its images, or a bare reference) and,
-  for an image built from the Task folder, its build context, `environment/` without `setup/`
-  or `tests/` for a verifier built from `tests/Dockerfile`. The agent keeps the context and
-  the image it prepared under the image's key and lists them in its heartbeat. Like a local
-  Run, it runs the preparation once per Run, which finds its own caches and so takes seconds
-  for an image it built before; within a Run it checks the image is still there each time
-  it hands it out.
+  and builds a Linux or Windows VM Task's layer on its own copy of the base; Orchard pulls a
+  macOS image by its reference. The Run sends only what that needs: the image's inputs (the
+  Task's specification, with every image's kind
+  [decided](sandbox-image.md#source-selection-and-identity), and which of its images, or a
+  bare reference) and, for an image built from the Task folder, its build context,
+  `environment/` without `setup/` or `tests/` for a verifier built from `tests/Dockerfile`.
+  The agent keeps the context and the image it prepared under the image's key and lists them
+  in its heartbeat. Like a local Run, it runs the preparation once per Run, which finds its
+  own caches and so takes seconds for an image it built before; within a Run it checks the
+  image is still there each time it hands it out.
   Preparing costs a Node what it costs a local Run, about five minutes for a container build
   or a Windows layer, once per Task and Node, and placement keeps a Task's episodes on the
   Nodes that hold its image. Sending prepared images instead would cost the Run's uplink once

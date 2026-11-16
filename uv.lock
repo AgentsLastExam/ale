@@ -135,7 +135,7 @@ wheels = [
 
 [[package]]
 name = "ale-core"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "packages/ale-core" }
 dependencies = [
     { name = "pydantic" },
@@ -146,7 +146,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.9" }]
 
 [[package]]
 name = "ale-fleet"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "packages/ale-fleet" }
 dependencies = [
     { name = "aiohttp" },
@@ -167,7 +167,7 @@ requires-dist = [
 
 [[package]]
 name = "ale-run"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "packages/ale-run" }
 dependencies = [
     { name = "aiohttp" },
@@ -194,7 +194,7 @@ requires-dist = [
 
 [[package]]
 name = "ale-verify"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "packages/ale-verify" }
 dependencies = [
     { name = "fastjsonschema" },

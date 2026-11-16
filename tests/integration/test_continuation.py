@@ -74,7 +74,7 @@ def _task(tmp_path: Path, kind: str) -> ManifestTask:
             config={
                 "environment": {
                     "os": "windows",
-                    "vm_base": "local/windows-base",
+                    "image": "local/windows-base",
                     "cpus": 2,
                     "memory_mb": 8192,
                 },
@@ -96,10 +96,12 @@ def _task(tmp_path: Path, kind: str) -> ManifestTask:
     else:
         scaffold_task(root)
     if kind == "vm":
-        edit_task_config(root, {"environment": {"cpus": 2, "vm": True}})
-        dockerfile = root / "environment/Dockerfile"
-        _, rest = dockerfile.read_text().split("\n", 1)
-        dockerfile.write_text(f"FROM {VM_BASE}\n{rest}")
+        # The scaffold's Dockerfile, as a build on the VM base.
+        edit_task_config(root, {"environment": {"cpus": 2, "image": VM_BASE}})
+        (root / "environment/Dockerfile").unlink()
+        (root / "environment/build.sh").write_text(
+            'mkdir -p "$ALE_HOME/output" && chown -R user:user "$ALE_HOME/output"\n'
+        )
     (root / "tests/verify.py").write_text(
         "from pathlib import Path\n"
         "from ale_verify import write\n"

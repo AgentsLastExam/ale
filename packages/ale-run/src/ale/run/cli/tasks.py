@@ -78,6 +78,7 @@ from ale.run.task_images import (
     ImagePreparationStep,
     prepare_task_image_result,
     prepare_verifier_image_result,
+    resolve_image_kinds,
 )
 from ale.run.tasksets.manifest import ManifestTask, load_tasks
 from ale.run.verification import preflight_judges
@@ -505,6 +506,18 @@ async def _reverify(
         sources = _retained_source_episodes(source_run)
         _resolve_variables(tasks, settings, oracle=False)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
+        matched = []
+        for *_, lock, _ in sources:
+            task = by_name.get(str(lock.task.name))
+            if task is None:
+                continue
+            matched.append(task)
+            declared, recorded = task.spec.image, lock.image.declaration
+            if declared.kind is None and declared.ref == recorded.ref:
+                # The solver is reused, not prepared: its image is of the kind its run read.
+                declared = declared.model_copy(update={"kind": recorded.kind})
+                task.spec = task.spec.model_copy(update={"image": declared})
+        await resolve_image_kinds(matched)
     except (AleError, OSError, ValueError) as error:
         typer.echo(str(error), err=True)
         return EXIT_BAD_REFERENCE
@@ -530,6 +543,14 @@ async def _reverify(
                 typer.echo(
                     f"{task.spec.name}: content outside tests/ changed or source evidence is "
                     "missing; run the solver again",
+                    err=True,
+                )
+                failures += 1
+                continue
+            if task.spec.image != source_lock.image.declaration:
+                typer.echo(
+                    f"{task.spec.name}: its image differs from the source run's; "
+                    "run the solver again",
                     err=True,
                 )
                 failures += 1
@@ -565,8 +586,6 @@ async def _reverify(
                 prepared_identity=image.prepared_identity,
                 base_materials=image.base_materials,
                 resolved_reference=image.resolved_reference,
-                oci_identity=image.oci_identity,
-                materializer_identity=image.materializer_identity,
                 builder_identity=image.builder_identity,
             )
             try:
@@ -1076,6 +1095,7 @@ def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
 async def _prepare_images(
     tasks: list[ManifestTask], providers: ProviderRegistry
 ) -> tuple[ImagePreparationResult, ...]:
+    await resolve_image_kinds(tasks)
     by_source: dict[str, PreparedTaskImage] = {}
     by_identity: dict[tuple[ImageKind, str], PreparedTaskImage] = {}
     results: list[ImagePreparationResult] = []

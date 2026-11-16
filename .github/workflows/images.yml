@@ -49,9 +49,6 @@ jobs:
           - repository: container-ubuntu22-base
             dockerfile: images/base/container-ubuntu22/Dockerfile
             context: images/base/container-ubuntu22
-          - repository: vm-ubuntu24-base
-            dockerfile: images/base/vm-ubuntu24/Dockerfile
-            context: .
           - repository: ale-vm-materializer
             dockerfile: images/builders/vm-materializer/Dockerfile
             context: images/builders/vm-materializer
@@ -100,6 +97,74 @@ jobs:
           tags: ${{ steps.release.outputs.image }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ALE's Linux VM base is a VM disk, not a container image: its build.sh makes the disk
+  # from its Dockerfile's root filesystem with the VM builder, and `ale vm-image push`
+  # publishes it. Its version is in BASES, like the container base's.
+  vm-ubuntu24-base:
+    if: github.event_name != 'workflow_dispatch' || inputs.promote_repository == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    env:
+      UV_FROZEN: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check whether this version is published
+        id: release
+        run: |
+          version=$(sed -n 's/.*"vm-ubuntu24-base": "\([0-9.]*\)".*/\1/p' packages/ale-run/src/ale/run/__init__.py)
+          [ -n "$version" ] || { echo "::error::no version for vm-ubuntu24-base"; exit 1; }
+          image="ghcr.io/agentslastexam/vm-ubuntu24-base:$version"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+            echo "$image is already published and stays as it is"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The root filesystem's image, its export and the disk take about 25 GB. This runs
+      # before uv is installed, which goes to the tool cache it removes.
+      - name: Free disk space
+        if: steps.release.outputs.published == 'false'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        if: steps.release.outputs.published == 'false'
+        with:
+          enable-cache: true
+
+      # build.sh and `ale vm-image push` read the disk with qemu-img, which the runner
+      # lacks.
+      - name: Install qemu-img
+        if: steps.release.outputs.published == 'false'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
+
+      # The VM builder is the engine's: pulled once published, built here while a new
+      # version is still under review.
+      - name: Build
+        if: steps.release.outputs.published == 'false'
+        run: |
+          images/build.sh ale-vm-materializer
+          images/base/vm-ubuntu24/build.sh "$RUNNER_TEMP/vm-ubuntu24-base.qcow2"
+
+      - name: Publish
+        if: steps.release.outputs.published == 'false' && github.event_name != 'pull_request'
+        run: >-
+          uv run ale vm-image push "$RUNNER_TEMP/vm-ubuntu24-base.qcow2"
+          "${{ steps.release.outputs.image }}"
 
   # Give an image that was published without a version (such as a floating tag's current
   # target) a version, by pointing a new tag at the very same manifest. Nothing is rebuilt.

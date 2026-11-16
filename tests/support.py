@@ -15,7 +15,14 @@ import pytest
 
 from ale.core.config import RunConfig
 from ale.core.sandbox import ImageRef, PreparedTaskImage, Provider, Sandbox, SandboxRequest
-from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from ale.core.taskspec import (
+    SCHEMA_VERSION,
+    ImageKind,
+    NetworkMode,
+    NetworkPolicy,
+    OperatingSystem,
+    Resources,
+)
 from ale.run import ale_image
 from ale.run.providers import ProviderRegistry
 
@@ -70,7 +77,7 @@ async def prepare_reference(
 
 #: The smallest valid ``task.toml``: a container Task with no network.
 MINIMAL_TASK_CONFIG: dict[str, Any] = {
-    "schema_version": "1.4+ale.1",
+    "schema_version": SCHEMA_VERSION,
     "task": {"name": "agentslastexam/demo"},
     "environment": {"cpus": 1, "memory_mb": 512},
     "agent": {"user": "user", "timeout_sec": 120, "network_mode": "no-network"},
@@ -210,7 +217,7 @@ async def cli_sandbox(
             folder,
             name="agentslastexam/cli-runtime",
             config={
-                "environment": {"os": "macos", "vm_base": MACOS_BASE},
+                "environment": {"os": "macos", "image": MACOS_BASE},
                 "agent": {"user": "admin", "sudo": True, "network_mode": "public"},
             },
             dockerfile=None,

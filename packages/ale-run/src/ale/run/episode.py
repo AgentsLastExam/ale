@@ -61,7 +61,11 @@ from ale.run.protocol.episode_protocol import SETUP_TIMEOUT_SEC, EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, build_lock, judge_provenance
 from ale.run.providers import ProviderRegistry
 from ale.run.recording import EpisodeRecording, Redactor
-from ale.run.task_images import prepare_task_image, prepare_verifier_image
+from ale.run.task_images import (
+    prepare_task_image,
+    prepare_verifier_image,
+    resolve_image_kinds,
+)
 from ale.run.verification import judge_endpoints, open_judge_sessions
 from ale_verify import JudgeInvocation
 
@@ -596,6 +600,7 @@ async def run_episode(
         task.variables = ResolvedVariables()
     variables = task.variables
     task.asset_observation = observe_task_assets(task)
+    await resolve_image_kinds([task])
     if task.prepared_image is None:
         task.prepared_image = await prepare_task_image(task, providers)
     if task.prepared_verifier_image is None:

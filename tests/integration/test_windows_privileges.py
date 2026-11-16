@@ -38,7 +38,7 @@ async def test_windows_framework_copies_protected_artifacts_and_verifies_as_admi
             ],
             "environment": {
                 "os": "windows",
-                "vm_image": "local/windows-privileges",
+                "image": "local/windows-privileges",
                 "cpus": 2,
                 "memory_mb": 8192,
             },

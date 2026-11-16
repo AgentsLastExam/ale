@@ -9,13 +9,21 @@ from tests.support import edit_task_config as edit
 
 from ale.core.errors import TaskDefinitionError
 from ale.core.task import Stage
-from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, VerificationMode
+from ale.core.taskspec import (
+    SCHEMA_VERSION,
+    ImageKind,
+    NetworkMode,
+    OperatingSystem,
+    VerificationMode,
+)
 from ale.run.assets import ASSET_ROOTS
 from ale.run.lint import lint_repository
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import discover_task_folders, load_tasks
 
 pytestmark = pytest.mark.unit
+#: A Linux VM disk published to a registry, as a base or an image used directly.
+VM_DISK = "ghcr.io/acme/vm-base:1.0"
 
 
 def test_collection_order_and_names_are_configuration_owned(tmp_path: Path) -> None:
@@ -104,7 +112,7 @@ def test_configuration_maps_onto_the_runtime_spec(tmp_path: Path) -> None:
 def test_a_task_needs_only_its_version_and_name(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     (task / "task.toml").write_text(
-        'schema_version = "1.4+ale.1"\n\n[task]\nname = "agentslastexam/demo"\n'
+        f'schema_version = "{SCHEMA_VERSION}"\n\n[task]\nname = "agentslastexam/demo"\n'
     )
     spec = load_tasks(task)[0].spec
     assert (spec.resources.cpus, spec.resources.memory_mb) == (1, 4096)
@@ -158,7 +166,13 @@ def test_load_errors_name_the_key(tmp_path: Path) -> None:
     edit(task, {"task": {"name": "agentslastexam/demo"}, "agent": {"shell": "bash"}})
     with pytest.raises(TaskDefinitionError, match=r"agent\.shell is not a task\.toml key"):
         load_tasks(task)
-    edit(task, {"agent": {"shell": None}, "environment": {"docker_image": " "}})
+    edit(task, {"agent": {"shell": None}, "environment": {"docker_image": "ghcr.io/a/b:1"}})
+    with pytest.raises(
+        TaskDefinitionError, match=r"environment\.docker_image is not a task\.toml key"
+    ):
+        load_tasks(task)
+    (task / "environment/Dockerfile").unlink()
+    edit(task, {"environment": {"docker_image": None, "image": " "}})
     with pytest.raises(TaskDefinitionError, match="must not be blank"):
         load_tasks(task)
     (task / "task.toml").write_text("schema_version = ")
@@ -190,10 +204,18 @@ def test_asset_roots_and_setup_are_excluded_where_they_must_be(tmp_path: Path) -
     assert load_tasks(task)[0].non_verifier_digest == changed.non_verifier_digest
 
 
+def _linux_vm_build(task: Path) -> Path:
+    """``task`` turned into a Linux VM built by ``environment/build.sh`` on ``VM_DISK``."""
+    (task / "environment/Dockerfile").unlink()
+    (task / "environment/build.sh").write_text("apt-get install -y jq\n")
+    edit(task, {"environment": {"image": VM_DISK}})
+    return task
+
+
 def test_vm_assets_are_excluded_from_the_vm_image_source(tmp_path: Path) -> None:
-    task = scaffold_task(tmp_path / "demo")
-    edit(task, {"environment": {"vm": True}})
+    task = _linux_vm_build(scaffold_task(tmp_path / "demo"))
     loaded = load_tasks(task)[0]
+    assert loaded.image_source_digest is not None
     (task / "environment/assets").mkdir()
     (task / "environment/assets/disk.bin").write_bytes(b"large")
     after = load_tasks(task)[0]
@@ -210,56 +232,74 @@ def test_duplicate_names_fail_before_runtime(tmp_path: Path) -> None:
         load_tasks(collection)
 
 
-def test_a_named_image_wins_over_a_build_definition(tmp_path: Path) -> None:
+def test_a_dockerfile_names_its_base_itself(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
-    edit(task, {"environment": {"docker_image": "ghcr.io/acme/task:v1"}})
+    edit(task, {"environment": {"image": "ghcr.io/acme/task:v1"}})
+    with pytest.raises(TaskDefinitionError, match="Dockerfile names its base in FROM"):
+        load_tasks(task)
+    (task / "environment/Dockerfile").unlink()
     loaded = load_tasks(task)[0]
     assert loaded.spec.image.ref == "ghcr.io/acme/task:v1"
     assert loaded.image_source_digest is None
-    (task / "environment/Dockerfile").unlink()
-    assert load_tasks(task)[0].spec.image.ref == "ghcr.io/acme/task:v1"
 
 
-def test_vm_decides_what_environment_dockerfile_builds(tmp_path: Path) -> None:
+def test_the_task_folder_decides_a_linux_image_kind(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     container = load_tasks(task)[0]
     assert container.spec.image.kind is ImageKind.CONTAINER
-    edit(task, {"environment": {"vm": True}})
-    loaded = load_tasks(task)[0]
-    assert loaded.spec.image.kind is ImageKind.VM
-    assert loaded.image_source_digest == container.image_source_digest
+    assert (container.spec.image.ref, container.spec.image.base_ref) == (None, None)
+
+    # Beside a Dockerfile, build.sh is only part of its context.
+    (task / "environment/build.sh").write_text("echo helper\n")
+    assert load_tasks(task)[0].spec.image.kind is ImageKind.CONTAINER
 
     (task / "environment/Dockerfile").unlink()
+    with pytest.raises(TaskDefinitionError, match=r"build\.sh requires \[environment\]\.image"):
+        load_tasks(task)
+    edit(task, {"environment": {"image": VM_DISK}})
+    built = load_tasks(task)[0]
+    assert built.spec.image.kind is ImageKind.VM
+    assert (built.spec.image.ref, built.spec.image.base_ref) == (None, VM_DISK)
+    assert built.image_source_digest is not None
+
+    # A registry reference alone is either kind: the registry decides, before preparation.
+    (task / "environment/build.sh").unlink()
+    named = load_tasks(task)[0]
+    assert (named.spec.image.kind, named.spec.image.ref) == (None, VM_DISK)
+    assert named.image_source_digest is None
+    edit(task, {"environment": {"image": "/images/task.qcow2"}})
+    assert load_tasks(task)[0].spec.image.kind is ImageKind.VM
+
+    edit(task, {"environment": {"image": None}})
     with pytest.raises(
-        TaskDefinitionError, match=r"environment/Dockerfile or \[environment\].vm_image"
+        TaskDefinitionError,
+        match=r"a Linux Task requires environment/Dockerfile or \[environment\]\.image",
     ):
         load_tasks(task)
-    edit(task, {"environment": {"vm": None, "vm_image": "ghcr.io/acme/task-vm:v1"}})
-    loaded = load_tasks(task)[0]
-    assert loaded.spec.image.ref == "ghcr.io/acme/task-vm:v1"
-    assert loaded.image_source_digest is None
 
 
-@pytest.mark.parametrize("vm", [False, True])
-def test_linux_tasks_reject_a_windows_build(tmp_path: Path, vm: bool) -> None:
+def test_linux_tasks_reject_a_windows_build(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
-    edit(task, {"environment": {"vm": vm}})
     (task / "environment/build.ps1").write_text("Write-Output 'build'\n")
     with pytest.raises(TaskDefinitionError, match="requires os 'windows'"):
         load_tasks(task)
+    _linux_vm_build(task)
+    with pytest.raises(TaskDefinitionError, match="requires os 'windows'"):
+        load_tasks(task)
     shutil.rmtree(task / "environment")
+    edit(task, {"environment": {"image": None}})
     with pytest.raises(TaskDefinitionError, match="environment/Dockerfile or"):
         load_tasks(task)
 
 
 def _windows_task(tmp_path: Path, *, build: bool = False) -> Path:
     task = scaffold_task(tmp_path / "windows-demo")
-    source = {"vm_base": "/images/windows-base.qcow2"} if build else {"vm_image": "/images/w.qcow2"}
+    image = "/images/windows-base.qcow2" if build else "/images/w.qcow2"
     edit(
         task,
         {
             "artifacts": [r"C:\Users\user\output"],
-            "environment": {"os": "windows", **source},
+            "environment": {"os": "windows", "image": image},
         },
     )
     (task / "tests/test.sh").rename(task / "tests/test.ps1")
@@ -279,6 +319,9 @@ def test_windows_task_uses_powershell_stage_entries(tmp_path: Path) -> None:
     assert loaded.spec.image.ref == "/images/w.qcow2"
     assert loaded.spec.image.base_ref is None
     assert loaded.folder.stage_entry(Stage.TESTS, loaded.spec.os).name == "test.ps1"  # type: ignore[union-attr]
+    # Windows runs only VMs, so a registry reference is one without asking the registry.
+    edit(task, {"environment": {"image": "ghcr.io/acme/windows:1"}})
+    assert load_tasks(task)[0].spec.image.kind is ImageKind.VM
     (task / "solution/solve.ps1").unlink()
     with pytest.raises(TaskDefinitionError, match=r"solution/solve\.ps1"):
         load_tasks(task)
@@ -318,9 +361,8 @@ def test_windows_build_script_tracks_source_and_ignores_assets(tmp_path: Path) -
     ("invalid", "message"),
     [
         ("dockerfile", "builds environment/build.ps1, not a Dockerfile"),
-        ("missing-base", r"build\.ps1 requires \[environment\]\.vm_base"),
-        ("missing-script", r"vm_base requires environment/build\.ps1"),
-        ("container", "docker_image is a container image"),
+        ("missing-base", r"build\.ps1 requires \[environment\]\.image"),
+        ("nothing", r"a Windows Task requires \[environment\]\.image"),
         ("verifier-dockerfile", "only a Linux verifier"),
     ],
 )
@@ -331,11 +373,10 @@ def test_windows_image_contract_rejects_invalid_sources(
     if invalid == "dockerfile":
         (task / "environment/Dockerfile").write_text("FROM scratch\n")
     elif invalid == "missing-base":
-        edit(task, {"environment": {"vm_base": None, "vm_image": "/images/w.qcow2"}})
-    elif invalid == "missing-script":
+        edit(task, {"environment": {"image": None}})
+    elif invalid == "nothing":
         (task / "environment/build.ps1").unlink()
-    elif invalid == "container":
-        edit(task, {"environment": {"docker_image": "ghcr.io/acme/w:v1", "vm_base": None}})
+        edit(task, {"environment": {"image": None}})
     else:
         edit(task, {"verifier": {"environment_mode": "separate"}})
         (task / "tests/Dockerfile").write_text("FROM scratch\n")
@@ -365,26 +406,21 @@ def test_separate_verification_follows_harbor(tmp_path: Path) -> None:
     assert loaded.spec.verify.image.ref is None
     assert loaded.verifier_image_source_digest is not None
 
-    edit(task, {"verifier": {"environment": {"docker_image": "example/verifier:v1"}}})
+    edit(task, {"verifier": {"environment": {"image": "example/verifier:v1"}}})
+    with pytest.raises(TaskDefinitionError, match="tests/Dockerfile names its base in FROM"):
+        load_tasks(task)
+    (task / "tests/Dockerfile").unlink()
     loaded = load_tasks(task)[0]
     assert loaded.spec.verify.image is not None
-    assert loaded.spec.verify.image.ref == "example/verifier:v1"
-    assert loaded.verifier_image_source_digest is None
-
-    edit(
-        task,
-        {
-            "verifier": {"environment": {"docker_image": None, "vm": True}},
-        },
+    # Classified as the solver's is: the registry decides a Linux reference's kind.
+    assert (loaded.spec.verify.image.kind, loaded.spec.verify.image.ref) == (
+        None,
+        "example/verifier:v1",
     )
+    assert loaded.verifier_image_source_digest is None
+    edit(task, {"verifier": {"environment": {"image": "/images/verifier.qcow2"}}})
     image = load_tasks(task)[0].spec.verify.image
-    assert image is not None and image.kind is ImageKind.VM and image.ref is None
-    (task / "tests/Dockerfile").unlink()
-    with pytest.raises(TaskDefinitionError, match="requires vm_image or tests/Dockerfile"):
-        load_tasks(task)
-    edit(task, {"verifier": {"environment": {"vm_image": "ghcr.io/acme/verifier:v1"}}})
-    image = load_tasks(task)[0].spec.verify.image
-    assert image is not None and image.ref == "ghcr.io/acme/verifier:v1"
+    assert image is not None and image.kind is ImageKind.VM and image.base_ref is None
 
 
 def test_verifier_dockerfile_requires_separate_verification(tmp_path: Path) -> None:

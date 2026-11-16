@@ -81,7 +81,7 @@ async def test_every_provenance_field_is_populated(
     lock = result.lock
     assert lock is not None
 
-    assert lock.framework.schema_version == 2
+    assert lock.framework.schema_version == 3
     assert lock.image.declaration.kind == "container"
     assert lock.image.source == "local"
     assert lock.image.input_identity.startswith("sha256:")

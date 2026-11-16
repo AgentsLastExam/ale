@@ -1,17 +1,18 @@
 # Container and VM sandbox image specification
 
 Normative for standard container and VM Tasks. Every solver and dedicated verifier runs
-in a container or a VM. Linux builds a Dockerfile (a VM with `[environment].vm = true`) or
-uses an image directly (`docker_image`, `vm_image`); Windows and macOS use `vm_image`
-directly, or build `environment/build.ps1` or `environment/build.sh` on `vm_base`.
+in a container or a VM. A Linux container builds `environment/Dockerfile`; a VM builds
+`environment/build.sh` (`build.ps1` on Windows) on the VM image `[environment].image` names;
+an image named alone is used directly ([Source selection](#source-selection-and-identity)).
 
 ## What a Linux image needs
 
 A Linux Task may build from any x86-64 image with glibc that has:
 
-- the agent account the Task names with `[agent].user`, with a home;
+- the agent account the Task names with `[agent].user`, with a home; a VM build's base must
+  have it already, since ALE installs the framework for it before the build runs;
 - for a container, a long-lived command that ALE does not replace;
-- for a VM, a bootable systemd system (the VM base provides one);
+- for a VM, a qcow2 disk of a bootable systemd system (the VM base is one);
 - for GUI work, a running desktop session, such as an X server with a window manager,
   that starts at the [desktop resolution](#desktop-resolution) it is given.
 
@@ -36,12 +37,12 @@ of the Task's own build or the image it names (the framework layer):
 - a marker file recording which framework the image carries: `/opt/ale/framework` on
   Linux and macOS, `C:\ProgramData\ALE\framework` on Windows.
 
-A VM disk named by a qcow2 `vm_image` gets the same pieces, installed offline into a layer
-on the disk by the VM builder's libguestfs, so nothing on the disk runs on the Host. On
-Linux its small appliance VM runs the disk's own programs that the setup calls; on Windows
-the install is file and registry edits only. Each layer is made once per disk and
-framework and then used directly, and a disk that already carries this framework is used
-as it is.
+A Linux or Windows VM disk, used directly or as a build's base, gets the same pieces,
+installed offline into a layer on the disk by the VM builder's libguestfs, so nothing on the
+disk runs on the Host. On Linux its small appliance VM runs the disk's own programs that the
+setup calls; on Windows the install is file and registry edits only. Each layer is made once
+per disk and framework and then used directly, and a disk that already carries this
+framework is used as it is.
 
 An image or disk handed straight to a Provider, rather than prepared from a Task, gets the
 same layer from the Provider when it does not carry this framework, so every sandbox runs
@@ -115,9 +116,10 @@ desktop starts at its display's preferred mode. How each Provider sets them is i
 
 - `container-ubuntu22-base` provides an Ubuntu 22.04 GNOME desktop container and the
   `user` account.
-- `vm-ubuntu24-base` provides Ubuntu 24.04, systemd, full GNOME/GDM and the `user`
-  account for QEMU. It has no firewall of its own: network policy is enforced by the QEMU
-  runner outside the guest ([security.md](security.md#1-a-sandbox-has-only-declared-ways-out)).
+- `vm-ubuntu24-base` is a published VM disk of Ubuntu 24.04 with systemd, full GNOME/GDM and
+  the `user` account, for QEMU. It has no firewall of its own: network policy is enforced by
+  the QEMU runner outside the guest
+  ([security.md](security.md#1-a-sandbox-has-only-declared-ways-out)).
 - The Windows 10 base provides a logged-in desktop, system Python, WinGet, Chocolatey, and
   the runtimes required by autonomous agents.
 
@@ -125,10 +127,14 @@ No base carries guestd or Cua Driver; ALE installs both when it prepares a Task 
 boots a disk. The bases do not contain domain stacks, benchmark data, databases, robotics
 suites, or Task-specific tools.
 
-Repository sources are separated by responsibility: `images/base/` contains the three
-Task foundations, `images/builders/vm-materializer/` turns Linux VM OCI content into
-qcow2 and installs the framework into a Linux or Windows qcow2 named by reference, and
-`images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM.
+Repository sources are separated by responsibility:
+
+- `images/base/` contains the three Task foundations;
+- `images/builders/vm-materializer/` is the VM builder. It makes the Linux base's disk from
+  its root filesystem once per version, so initramfs, boot and partition assembly are never
+  a Task's code; it also installs the framework into Linux and Windows disks and discards a
+  VM build's free space;
+- `images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM.
 
 ## Versions
 
@@ -137,7 +143,7 @@ workflow skips a version the registry already has, and no `latest` tag is publis
 a tag that every change overwrote would change every checkout's next build behind its back.
 
 The VM builder and the QEMU runner run the engine's own logic, so they are published under
-the engine's version, such as `0.1.1`; an engine runs exactly those of its own version, and
+the engine's version, such as `0.2.0`; an engine runs exactly those of its own version, and
 a changed one ships with the next engine version. A base carries no part of the framework,
 so nothing in it depends on the engine: each base has its own version, raised when the base
 itself changes, and any engine runs any version of it.
@@ -149,8 +155,8 @@ current version.
 
 ## Task image
 
-A local container or Linux VM image builds `environment/Dockerfile` with `environment/` as
-the sole ordinary Docker build context, less `setup/`:
+A container image builds `environment/Dockerfile` with `environment/` as the sole ordinary
+Docker build context, less `setup/`:
 
 ```dockerfile
 FROM ghcr.io/agentslastexam/container-ubuntu22-base:0.1.1
@@ -176,55 +182,68 @@ ordinary relative `COPY`; ALE creates no generated view or named BuildKit contex
 
 ## Source selection and identity
 
-Before any solver model call, ALE builds the Task's Linux Dockerfile, Windows
-`environment/build.ps1` or macOS `environment/build.sh`; failure is terminal. A Windows or
-macOS build uses `[environment].vm_base` as the base. `docker_image` and `vm_image` always
-name an image for direct use and exclude `vm_base`; on Linux one wins over a Dockerfile. A
-base requires the solver's build script for its OS; it is unsupported for Linux and
-separate verifier declarations. An image named directly is
-resolved by the matching Provider. Container and VM images are both supported and recorded
-immutably.
+Before any solver model call, ALE prepares the Task's image; failure is terminal. The Task
+folder decides how:
 
-On Linux and Windows, a `vm_image` or `vm_base` may also be an absolute host path to a
+- `environment/Dockerfile` builds a Linux container. Its `FROM` names its base, so
+  `[environment].image` beside it fails; on Windows and macOS a Dockerfile fails.
+- A build script, `environment/build.sh` on Linux and macOS or `environment/build.ps1` on
+  Windows, builds a VM on the VM image `[environment].image` names, which it requires.
+- `[environment].image` alone is used directly, resolved by the matching Provider.
+
+The Task folder decides every image's kind as the Task loads, so loading reads nothing
+else: Windows and macOS images are VMs, a Linux absolute path is a VM disk, and only a Linux
+image named alone by a registry reference may be either. Its manifest decides: an OCI
+manifest whose `artifactType` is `application/vnd.ale.vm-disk.v1` is an ALE VM disk, a
+container image's manifest or index (OCI or Docker) is a container, and anything else is
+refused, naming its type. The Run reads each such manifest once, with the Host's Docker
+credentials, before it selects a Provider, places a Sandbox or records anything about the
+image, since each of those depends on the kind; [Fleet](fleet.md) Nodes receive the kind
+decided. A digest-pinned reference the Host already holds, as a pulled disk or a Docker
+image, is answered without the registry. An image only the local Docker daemon holds cannot
+be named: nothing could pin it and no other Host could run it. Container and VM images are
+both recorded immutably.
+
+On Linux and Windows, `[environment].image` may also be an absolute host path to a
 standalone qcow2; a macOS image is always a Tart OCI reference. Local disks are structurally
 checked and their actual file bytes are SHA-256 hashed at preparation, without contacting a
 registry. Disks with backing or external data files are rejected: ALE knows a layer's parent
 only for the layers it makes, so a disk it is handed must hold its whole content. The
 operator must keep prepared local disks unchanged while they are in use.
 
-Any other Linux or Windows `vm_image`, or Windows `vm_base`, names a VM disk published to
-an OCI registry with `ale vm-image push`, and its identity is the manifest digest. The
-standalone qcow2 travels as fixed-size chunks, each compressed alone as one layer, because
-a whole disk in one layer approaches registries' documented limits on a layer and an
-upload, and downloads over a single connection, which reaches about half the throughput of
-several. Every chunk is checked against the digest of its uncompressed bytes, and a
-downloaded one also against its layer digest, before the disk is used. The published qcow2
-is itself uncompressed, so the one copy a Host pulls is also the base of the layers built on
-it, read without decompressing. Its format is in the
+Any other Linux or Windows VM image names a VM disk published to an OCI registry with
+`ale vm-image push`, and its identity is the manifest digest. The standalone qcow2 travels
+as fixed-size chunks, each compressed alone as one layer, because a whole disk in one layer
+approaches registries' documented limits on a layer and an upload, and downloads over a
+single connection, which reaches about half the throughput of several. Every chunk is
+checked against the digest of its uncompressed bytes, and a downloaded one also against its
+layer digest, before the disk is used. The published qcow2 is itself uncompressed, so the
+one copy a Host pulls, once per manifest digest, is also the base of the layers every Task
+builds on it, read without decompressing. Its format is in the
 [Providers README](../../packages/ale-run/src/ale/run/providers/README.md#registry-disks).
 
 A Provider may keep a prepared VM disk as a chain of layers, each holding only what changed
 on the one below, rather than flattening it, so a Host stores a base once under all the
-Tasks built on it; the QEMU Provider keeps a Windows Task image and a snapshot that way
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#disk-layers)). A layer's
-identity is the hash of its parent's identity and the SHA-256 of its own bytes, as an OCI
-ChainID is; the bottom disk's is the identity it was resolved under, whatever form a Host
-stores it in. Each layer is hashed once, when it is made, and a chain in which a layer sits
-on another parent than the one it recorded is refused, so the top layer's identity covers
-the whole disk without hashing it whole.
+Tasks built on it; the QEMU Provider keeps a Linux or Windows Task image and a snapshot
+that way ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#disk-layers)).
+A layer's identity is the hash of its parent's identity and the SHA-256 of its own bytes, as
+an OCI ChainID is; the bottom disk's is the identity it was resolved under, whatever form a
+Host stores it in. Each layer is hashed once, when it is made, and a chain in which a layer
+sits on another parent than the one it recorded is refused, so the top layer's identity
+covers the whole disk without hashing it whole.
 
 The authored image source digest covers the build context except its asset root ([Task
 assets](task-assets.md)) and `setup/`, so normal Task identity and asset provenance remain
-separate and a setup change never rebuilds the image. A prepared Linux image is recorded
+separate and a setup change never rebuilds the image. A prepared container image is recorded
 under the same context's file contents, its asset inventory (path, size, modification time
 and mode, as for asset dirtiness) and the framework identity. An unchanged Task finds its
 image there and uses it directly, without asking Docker to build or check anything, so a
-base tag that moves is not followed: name exact base versions. Windows and macOS cache keys
-include the actual image asset bytes. Dirty or unsynchronized assets disable resume and
-reporting. RunLock schema 2 records declaration, preparation, Provider, and exact observed
-identity; it does not invent a whole-disk content digest. Local Linux VMs record OCI and
-materializer identities; local Windows and macOS VMs record builder identity and resolved
-base materials, and a layered disk's prepared identity is its top layer's.
+base tag that moves is not followed: name exact base versions. VM build cache keys include
+the actual image asset bytes. Dirty or unsynchronized assets disable resume and reporting.
+RunLock schema 3 records declaration, preparation, Provider, and exact observed identity; it
+does not invent a whole-disk content digest. A VM built from the Task folder records its
+builder identity and resolved base materials, and a layered disk's prepared identity is its
+top layer's.
 
 ## Reverification
 
@@ -240,8 +259,10 @@ repository, Task path and commit, clean on both sides. Any outside change, any a
 evidence requires a fresh solver run. This also protects direct CLI use.
 
 When only verification changed, ALE does not build or resolve the solver image again.
-It attaches the retained solver using the source RunLock's exact image identity, and
-prepares only a separate verifier image when needed. Provider attachment remains strict;
+It attaches the retained solver using the source RunLock's exact image identity, takes the
+image's kind from that RunLock rather than the registry, and prepares only a separate
+verifier image when needed. A solver image declared otherwise than in the source RunLock
+requires a fresh solver run. Provider attachment remains strict;
 missing retained resources are not replaced with a different sandbox. The new RunLock
 keeps the actual solver image and records the new verifier. No image-config or layer
 comparison is needed. New builds resolve immutable output digests from Buildx metadata,
@@ -249,28 +270,24 @@ not mutable tags that concurrent builds can overwrite.
 
 ## VM preparation
 
-A Linux VM Task's `environment/Dockerfile` usually ends in `vm-ubuntu24-base`. ALE adds
-the framework layer, exports the resulting OCI rootfs and runs its pinned materializer, which owns
-initramfs, boot, partition assembly, and the minimal bootable qcow2 template. Reuse is
-keyed by the layered OCI and materializer identities and validated structurally without
-hashing the whole disk.
+A Linux or Windows Task image is built in a temporary VM whose disk is a framed layer on
+the resolved base. ALE stages only `environment/` less `setup/` and executes `build.sh` or
+`build.ps1` there under the framework's identity, with network access for unattended
+installation. The script has `build_timeout_sec`, one hour by default, for installation,
+integrity checks and extraction; Host-to-VM staging happens before that timer starts. ALE
+removes the build materials, shuts down the VM, and keeps its disk as the Task's layer on
+the base. Linux and Windows share this one path, its cache and its layers, and a Task never
+assembles boot or a disk itself. Reuse covers the whole build and is keyed by base,
+framework, builder, and every file staged; there is no per-command cache or new recipe
+language. Authoring details belong to [Task authoring](task-authoring.md#environment).
 
-Windows 10 has no public ISO build path in ALE. The current base starts from the GCP image
-`agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1` recipe
-installs and pins ALE's cross-platform components, and `compact.sh` validates the
+Windows 10 has no public ISO build path in ALE. The current Windows base starts from the GCP
+image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
+recipe installs and pins ALE's cross-platform components, and `compact.sh` validates the
 resulting qcow2 and rewrites it uncompressed. Episodes always cold-boot a fresh overlay,
-over a retention snapshot when they continue one. ALE creates no ready snapshot or warm pool;
-the [Fleet](fleet.md) places Sandboxes on other machines but starts none before a request.
-
-Windows Task preparation boots a temporary VM whose disk is a framed layer on the resolved
-base, stages only `environment/` less `setup/`, and executes `build.ps1` there with network
-access for unattended installation. The image script has a one-hour budget for
-installation, integrity checks and extraction; Host-to-VM staging happens before that timer
-starts.
-ALE removes the build materials, shuts down the VM, and keeps its disk as the Task's layer
-on the base. Reuse covers the whole build and is keyed by base, framework, builder, and every file
-staged; there is no per-command cache or new recipe language. Authoring details belong to
-[Task authoring](task-authoring.md#environment).
+over a retention snapshot when they continue one. ALE creates no ready snapshot or warm
+pool; the [Fleet](fleet.md) places Sandboxes on other machines but starts none before a
+request.
 
 A macOS Task image builds the same way on the local Orchard: `build.sh` runs as root in a
 VM of the base framed for `admin`, and the stopped VM is kept as a local Tart image on the
@@ -321,16 +338,18 @@ Runtime never downloads it.
 
 ## Verifier images
 
-Shared verification uses the solver image. Separate verification uses, in Harbor's order:
+Shared verification uses the solver image. Separate verification uses one of:
 
-1. `[verifier.environment].docker_image` or `vm_image`, resolved through the matching Provider;
-2. on Linux, `tests/Dockerfile` built with `tests/` as context, as a VM with
-   `[verifier.environment].vm = true`;
-3. the prepared solver image.
+1. `[verifier.environment].image`, used directly and resolved through the matching
+   Provider; its kind follows the [solver's rules](#source-selection-and-identity) under
+   the Task's `os`;
+2. on Linux, a container built from `tests/Dockerfile` with `tests/` as context;
+3. otherwise the prepared solver image.
 
-The local verifier context is fixed at `tests/`; its Dockerfile is the declaration. Named
-images are pulled and resolved to an immutable repository/content identity before
-solver execution.
+Naming an image beside `tests/Dockerfile` fails, as the Dockerfile names its base in `FROM`,
+and a verifier never builds on a base. The local verifier context is fixed at `tests/`; its
+Dockerfile is the declaration. Named images are pulled and resolved to an immutable
+repository/content identity before solver execution.
 
 Any verifier image must satisfy the same guest contract and permit ALE to stage
 `ale_verify`. Verification runs as framework-controlled Task code.
@@ -399,7 +418,7 @@ change, apart from the Fleet, which `ale sandbox` reaches at `$ALE_FLEET_URL` an
 `--continue-from` through the Run's own Fleet connection.
 
 GPU workload libraries such as CUDA, PyTorch, and simulators, and the Vulkan ICD and GLVND
-EGL vendor files a renderer loads, remain Task Dockerfile responsibility: not every
+EGL vendor files a renderer loads, remain the Task image's responsibility: not every
 injection path mounts those files. Tasks request a count and the models they accept
 ([GPUs](task-authoring.md#gpus)). Provider configuration may narrow the devices a Provider
 leases, such as Docker host indices, but never widens the models a Task accepts; ALE
@@ -436,7 +455,7 @@ account's interactive session and launches agent commands with the desktop's lim
 token, unless the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a limited
 desktop session are required; the Provider checks both framework and agent privileges
 before Task execution. A Windows Task image is rebuilt when the framework changes, and a
-direct `vm_image` disk is framed like any other.
+disk named directly by `[environment].image` is framed like any other.
 
 Elevation is never part of an image. On every system the Provider sets it as every sandbox
 the agent works in starts, before Task code runs, so one prepared image serves a Task with

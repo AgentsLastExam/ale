@@ -6,12 +6,13 @@ environment, data visibility, and stage interfaces. Design and acceptance standa
 the [Task quality standard](task-quality-standard.md); scoring and Judge APIs belong to
 [Verification](verification.md).
 
-The format is Harbor's (`task.toml` schema 1.4, `environment/`, `tests/`, `solution/`): a
-field ALE implements as Harbor does keeps Harbor's name, table and meaning. A field ALE adds
-sits in the Harbor table of what it configures, under a name Harbor gives no other meaning: a
-separate namespace would not stop one name meaning two things, and would have to mirror every
-table it extends. ALE runs Tasks in its own runtime and a Task reaches Harbor through a
-conversion, so `schema_version = "1.4+ale.1"` marks the file as ALE's.
+The format is based on Harbor's task format (`task.toml`, `environment/`, `tests/`,
+`solution/`). A field ALE implements as Harbor does keeps Harbor's name, table and meaning.
+A field ALE adds sits in the Harbor table of what it configures, under a name Harbor gives
+no other meaning: a separate namespace would not stop one name meaning two things, and would
+have to mirror every table it extends. `schema_version` is the ALE version in which the
+format last changed, and ALE accepts exactly that value, so a file written for another
+format fails as it loads instead of being read with a different meaning.
 
 ## Task folder
 
@@ -20,9 +21,9 @@ my-task/
 ├── task.toml                  # Task configuration
 ├── instruction.md             # instruction shown to the evaluated agent
 ├── environment/               # the machine the agent starts on
-│   ├── Dockerfile             # container or Linux VM image; context environment/ without setup/
-│   ├── build.ps1              # Windows image, on the same context
-│   ├── build.sh               # macOS image, on the same context; Linux uses the Dockerfile
+│   ├── Dockerfile             # Linux container image; context environment/ without setup/
+│   ├── build.sh               # Linux or macOS VM image on [environment].image, same context
+│   ├── build.ps1              # Windows VM image on [environment].image, same context
 │   └── setup/                 # optional per-episode initialization
 │       └── setup.sh           # setup.ps1 on Windows
 ├── tests/                     # verification
@@ -35,12 +36,19 @@ my-task/
 
 Required files are `task.toml`, `instruction.md`, and the tests and solution entries for the
 Task OS: `tests/test.sh` and `solution/solve.sh` on Linux and macOS, `test.ps1` and
-`solve.ps1` on Windows. `[environment]` decides what `environment/` builds. A container Task
-builds `environment/Dockerfile` or uses `docker_image`. A Linux VM Task sets `vm = true` to
-build `environment/Dockerfile`, or uses `vm_image`. A Windows Task builds
-`environment/build.ps1` on `vm_base`, or uses `vm_image` alone; a macOS Task does the same
-with `environment/build.sh`. Every image build has `environment/` as its context, `setup/`
-excluded. A Linux image named directly wins over a build definition.
+`solve.ps1` on Windows. `[environment].image` and `environment/` decide the solver's image:
+
+- `environment/Dockerfile` builds a Linux container. It names its base in `FROM`, so an
+  `image` beside it fails, and any `build.sh` beside it is only a file in its context.
+- `environment/build.sh` on Linux and macOS, `environment/build.ps1` on Windows, builds a VM
+  on the VM image `image` names.
+- `image` alone is used directly.
+
+Windows and macOS Tasks run only in VMs, so a Dockerfile fails there. A Linux image used
+directly is a VM when `image` is an absolute path to a qcow2 or names an ALE VM disk, and a
+container when it names a container image
+([Sandbox image](sandbox-image.md#source-selection-and-identity)). Every image build has
+`environment/` as its context, `setup/` excluded.
 
 ## task.toml
 
@@ -50,7 +58,7 @@ Harbor key ALE does not implement fails with a message saying so. The annotated 
 describes every key, with `ALE` marking the ones Harbor does not have.
 
 ```toml
-schema_version = "1.4+ale.1"                # required; exactly this
+schema_version = "0.2.0"                    # required; exactly this
 artifacts = [                               # outcome paths
   "output",                                 # below where the agent starts
   "/home/user/games/*.sgf",
@@ -69,10 +77,7 @@ network_justification = "the Task reads one publisher's live catalog"
 
 [environment]                               # the solver's machine
 os = "linux"                                # linux | windows | macos; default linux
-vm = false                                  # ALE; a Linux VM built from a Dockerfile
-# docker_image = "registry.example/image:tag"  # a container image used directly
-# vm_image = "/path/to/disk.qcow2"          # ALE; a VM image used directly
-# vm_base = "/path/to/windows-base.qcow2"   # ALE; the base build.ps1 or build.sh builds on
+# image = "registry.example/image:tag"      # ALE; used directly, or a build script's base
 build_timeout_sec = 3600                    # seconds the Task's own build may run; default 3600
 cpus = 1                                    # whole CPUs; default 1
 memory_mb = 4096                            # default 4096
@@ -104,9 +109,7 @@ environment_mode = "separate"               # shared | separate
 env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
 
 [verifier.environment]                      # a separate verifier's own sandbox
-vm = false                                  # ALE; tests/Dockerfile builds a VM
-# docker_image = "registry.example/verifier:tag"  # a container image used directly
-# vm_image = "/path/to/verifier.qcow2"      # ALE; a VM image used directly
+# image = "registry.example/verifier:tag"   # ALE; used directly instead of tests/Dockerfile
 build_timeout_sec = 3600                    # default 3600
 cpus = 1                                    # default [environment].cpus
 memory_mb = 4096                            # default [environment].memory_mb
@@ -119,17 +122,14 @@ env = {}                                    # replaces [environment].env
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
 ```
 
-`vm = true` is needed only for a Linux VM built from a Dockerfile: an `os` other than Linux,
-`vm_image` and `vm_base` already mean a VM. `vm_image` and `vm_base` are mutually exclusive;
-`vm_base` requires Windows with `environment/build.ps1` or macOS with
-`environment/build.sh`. `[agent].workdir` is below the agent's home when relative, so a Task
-need not spell its home per OS. It must be a directory when the agent starts; stages keep
-their fixed directories.
+`[agent].workdir` is below the agent's home when relative, so a Task need not spell its home
+per OS. It must be a directory when the agent starts; stages keep their fixed directories.
 
 Harbor's other fields fall into two groups. Nothing in ALE replaces multi-step Tasks (`steps`,
 `multi_step_reward_strategy`), compose sidecars (`docker-compose.yaml`, which `ale lint` refuses,
 an artifact's `service`, `[[verifier.collect]]`), or TPU selection (`tpu`). ALE's design
-covers the rest. `environment/setup/` can wait for a service, so there is no `healthcheck`.
+covers the rest. `[environment].image` names every image, so `docker_image` is an unknown
+key. `environment/setup/` can wait for a service, so there is no `healthcheck`.
 Stages run in fixed directories under the framework's identity, so there is no
 `[environment].workdir` or `[verifier].user`. `[agent].network_mode` is the one network setting.
 ALE keeps its copies in an inventory of its own, so an artifact has no `destination`. An origin
@@ -187,11 +187,12 @@ shared verification.
 Verification is shared unless `environment_mode = "separate"` or `[verifier.environment]`
 says otherwise, as in Harbor. Separate verification runs in an independent sandbox with the
 `[verifier.environment]` resources, or the solver's without sudo when that table is absent.
-Its image is the first of `[verifier.environment].docker_image` or `vm_image`,
-`tests/Dockerfile` (a VM with `[verifier.environment].vm = true`), and the solver image.
-`tests/Dockerfile` requires separate verification. A Windows or macOS verifier reuses the
-solver image or names a `vm_image`. The Verification APIs and records are defined only in
-[Verification](verification.md).
+Its image is `[verifier.environment].image` used directly, a Linux container built from
+`tests/Dockerfile`, or else the solver image. A named verifier image is a container or a VM
+as the solver's would be under the Task's `os`; a verifier never builds on a base, and
+naming an image beside `tests/Dockerfile` fails, since the Dockerfile names its base in
+`FROM`. `tests/Dockerfile` requires separate verification, and on Windows and macOS it
+fails. The Verification APIs and records are defined only in [Verification](verification.md).
 
 ### Resources and network
 
@@ -283,20 +284,23 @@ GUI base matching the Task OS and sandbox (macOS has none: name a Tart image, as
 then add every stable dependency, service, file, permission, and piece of initial state
 required by the Task. The Linux bases are:
 
-- container: `ghcr.io/agentslastexam/container-ubuntu22-base` (Ubuntu 22.04);
-- VM: `ghcr.io/agentslastexam/vm-ubuntu24-base` (Ubuntu 24.04).
+- container: `ghcr.io/agentslastexam/container-ubuntu22-base` (Ubuntu 22.04), for `FROM`;
+- VM: `ghcr.io/agentslastexam/vm-ubuntu24-base` (Ubuntu 24.04), a VM disk for
+  `[environment].image`.
 
-Name an exact version, such as `:0.1.1`, never `latest`; `ale new-task` writes the
-base's current version, and `ale lint` reports a `FROM` or `docker_image` with no tag or
+Name an exact version, such as `:0.1.1`, never `latest`; `ale new-task` writes the container
+base's current version, and `ale lint` reports a registry `FROM` or `image` with no tag or
 `latest`. A Task keeps building from the version it names until its author moves it
 ([Sandbox image](sandbox-image.md#versions)).
 
 The submitted initial environment must be reproducible from `environment/`; an exploratory
-sandbox snapshot is not Task source. A container image builds `environment/Dockerfile` with
-`environment/` as context, `setup/` excluded. Build-local scripts may implement non-trivial
-installation and configuration. Build-only large inputs can use read-only BuildKit mounts;
-runtime data belongs in the image. `build_timeout_sec` bounds the Task's own build, which is not
-part of the image's identity, so changing it rebuilds nothing.
+sandbox snapshot is not Task source. Build-local scripts may implement non-trivial
+installation and configuration. `build_timeout_sec` bounds the Task's own build, which is
+not part of the image's identity, so changing it rebuilds nothing.
+
+A container image builds `environment/Dockerfile` with `environment/` as context, `setup/`
+excluded. Build-only large inputs can use read-only BuildKit mounts; runtime data belongs in
+the image.
 
 ```dockerfile
 FROM ghcr.io/agentslastexam/container-ubuntu22-base:0.1.1
@@ -306,20 +310,29 @@ RUN /tmp/install.sh && rm /tmp/install.sh
 COPY --chmod=0644 corpus.json /home/user/input/corpus.json
 ```
 
-A Linux VM Task builds `environment/Dockerfile` the same way, with the VM base as the final
-stage. ALE converts that OCI image into the bootable VM; Task code does
-not implement boot or disk assembly.
+A VM image is built by a script on the base `[environment].image` names. A Linux VM Task
+provides `environment/build.sh`:
 
-A Windows Task declares a base and provides `environment/build.ps1`:
+```toml
+[environment]
+image = "ghcr.io/agentslastexam/vm-ubuntu24-base:0.2.0"
+```
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+apt-get update
+apt-get install -y --no-install-recommends sqlite3
+install -d -o user -g user "$ALE_HOME/output"
+```
+
+A Windows Task provides `environment/build.ps1`; its base includes WinGet and Chocolatey:
 
 ```toml
 [environment]
 os = "windows"
-vm_base = "ghcr.io/agentslastexam/vm-windows10-base:0.1.3"
+image = "ghcr.io/agentslastexam/vm-windows10-base:0.1.3"
 ```
-
-The base includes WinGet and Chocolatey. Put installation and configuration in
-`build.ps1`; Dockerfiles are unsupported on Windows. For example:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -328,37 +341,32 @@ if ($LASTEXITCODE -ne 0) { throw "7zip installation failed: $LASTEXITCODE" }
 Copy-Item .\input.txt "$env:ALE_HOME\input.txt"
 ```
 
-`ale prepare TASK` copies `environment/`, less `setup/`, into a temporary Windows VM that
-already runs ALE's current guestd and Cua Driver, runs `build.ps1` with that directory as
-cwd and `ALE_HOME` set to the agent home, then keeps the VM's disk. Scripts may use WinGet,
-Chocolatey, or local unattended installers; pin package versions where supported and check
-native command exit codes. Scripts must finish within `build_timeout_sec`; nonzero exits fail the build. Suppress
-installer reboots; builds requiring a mid-script restart are unsupported. ALE owns shutdown.
-Build-only materials are removed before saving; copy required files to their final locations.
-Only that context is staged, and the whole build is cached by base, builder, and every file
-in it. A prepared image used directly is named by `[environment].vm_image` without `build.ps1`.
+`ale prepare TASK` boots a temporary VM of the base that already runs ALE's current guestd
+and Cua Driver, copies `environment/`, less `setup/`, into it and runs the script under the
+framework's identity (root, Administrator on Windows) with that directory as cwd,
+`ALE_HOME` set to the agent home and the network open. The copy's files are not executable,
+whatever their mode in the folder, as every upload's are not
+([Permissions](sandbox-image.md#permissions)), so the script runs a helper through its
+interpreter, `bash install.sh` rather than `./install.sh`. It then removes the directory and
+keeps the VM's disk as the Task's layer on the base. A Linux or Windows base must already
+have the `[agent].user` account, because ALE installs the framework for it before the script
+runs. Scripts may use the system's package managers or local unattended installers; pin
+package versions where supported and check native command exit codes. Scripts must finish
+within `build_timeout_sec`; nonzero exits fail the build. Suppress installer reboots; builds
+requiring a mid-script restart are unsupported. ALE owns shutdown. Copy required files out
+of the build directory to their final locations, and set the owner of what the script
+writes for the agent. Only that context is staged, and the whole build is cached by base,
+builder, and every file in it.
 
-A macOS Task builds the same way on a Tart image named by `vm_base`, with
-`environment/build.sh`:
-
-```toml
-[environment]
-os = "macos"
-vm_base = "ghcr.io/cirruslabs/macos-tahoe-base:latest"
-```
-
-`ale prepare TASK` boots the base with ALE's framework installed for `admin`, the account
-ALE controls the VM through, which the base must therefore sign in, copies `environment/`,
-less `setup/`, into it and runs `bash build.sh` as root with that directory as cwd and
-`ALE_HOME` set to the agent home, as for `build.ps1`, then removes the directory and keeps
-the VM's disk as a local image on the Mac. The same rules as for `build.ps1` apply: finish
-within `build_timeout_sec`, no reboots, and copy what the image needs out of the build
-directory. ALE frames the result for `[agent].user` when a sandbox first uses it, so
-`build.sh` may create that account; `ALE_HOME` is then `/Users/<user>`, the home the build
-must give it, and the build fails if the account is missing or lives elsewhere. Such an
-account must sign in automatically with its first login settings done, as the
-[macOS guide](../guides/macos-orchard.md#choose-an-image) says. As `build.sh` runs as root,
-it sets the owner of what it writes there.
+A macOS Task (`os = "macos"`) builds the same way on a Tart image named by `image`, with
+`environment/build.sh`. `ale prepare TASK` boots the base with ALE's framework installed for
+`admin`, the account ALE controls the VM through, which the base must therefore sign in,
+runs `bash build.sh` there as for Linux, and keeps the VM's disk as a local image on the
+Mac. ALE frames the result for `[agent].user` when a sandbox first uses it, so `build.sh`
+may create that account; `ALE_HOME` is then `/Users/<user>`, the home the build must give
+it, and the build fails if the account is missing or lives elsewhere. Such an account must
+sign in automatically with its first login settings done, as the
+[macOS guide](../guides/macos-orchard.md#choose-an-image) says.
 
 ## environment/setup/
 

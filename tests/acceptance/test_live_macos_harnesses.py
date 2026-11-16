@@ -61,7 +61,7 @@ def _write_task(root: Path, image: str, user: str, *, policy: bool) -> Path:
         name="agentslastexam/macos-harness-acceptance",
         config={
             "artifacts": [f"{home}/output"],
-            "environment": {"os": "macos", "vm_image": image, "cpus": 2, "memory_mb": 4096},
+            "environment": {"os": "macos", "image": image, "cpus": 2, "memory_mb": 4096},
             "agent": {"user": user, "timeout_sec": 600, "network_mode": "public", "sudo": True},
         },
         dockerfile=None,

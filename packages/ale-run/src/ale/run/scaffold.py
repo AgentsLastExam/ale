@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ale.core.errors import TaskDefinitionError
 from ale.core.ids import TaskId
+from ale.core.taskspec import SCHEMA_VERSION
 from ale.run import ale_image
 
 __all__ = ["DEFAULT_ORGANIZATION", "scaffold_task"]
@@ -14,12 +15,12 @@ __all__ = ["DEFAULT_ORGANIZATION", "scaffold_task"]
 #: The organization of a scaffolded Task's ``org/name``; edit ``[task].name`` for another.
 DEFAULT_ORGANIZATION = "agentslastexam"
 
-TASK_TOML = """\
-schema_version = "1.4+ale.1"
+TASK_TOML = f"""\
+schema_version = "{SCHEMA_VERSION}"
 artifacts = ["/home/user/output"]
 
 [task]
-name = "{name}"
+name = "{{name}}"
 
 [environment]
 cpus = 1

@@ -49,7 +49,7 @@ __all__ = [
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class TaskSource(BaseModel):
@@ -115,10 +115,8 @@ class ImageProvenance(BaseModel):
     image_source_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     prepared_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     runtime_ref: str = Field(min_length=1)
-    oci_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     base_materials: tuple[str, ...] = ()
     resolved_reference: str | None = None
-    materializer_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     builder_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     provider: str
     observed_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -133,19 +131,13 @@ class ImageProvenance(BaseModel):
             raise ValueError("local image provenance requires image_source_identity")
         if local == (self.resolved_reference is not None):
             raise ValueError("ref image provenance requires resolved_reference")
+        if self.declaration.kind is None:
+            raise ValueError("image provenance records the image's decided kind")
         if self.declaration.kind is ImageKind.VM and local:
-            if self.builder_identity is not None:
-                if self.oci_identity is not None or self.materializer_identity is not None:
-                    raise ValueError("VM builder provenance cannot declare OCI materialization")
-                if not self.base_materials:
-                    raise ValueError("VM builder provenance requires base_materials")
-                return self
-            if self.oci_identity is None or self.materializer_identity is None:
-                raise ValueError(
-                    "local VM provenance requires OCI/materializer or builder identities"
-                )
-        elif any((self.oci_identity, self.materializer_identity, self.builder_identity)):
-            raise ValueError("only local VM provenance has VM build identities")
+            if self.builder_identity is None or not self.base_materials:
+                raise ValueError("local VM provenance requires builder_identity and base_materials")
+        elif self.builder_identity is not None:
+            raise ValueError("only local VM provenance has a builder_identity")
         return self
 
 
@@ -299,7 +291,7 @@ class FrameworkProvenance(BaseModel):
 
     version: str
     commit: str = Field(description="Engine git commit; 'unknown' is not acceptable in a report")
-    schema_version: Literal[2] = SCHEMA_VERSION
+    schema_version: Literal[3] = SCHEMA_VERSION
 
 
 class RunLock(BaseModel):

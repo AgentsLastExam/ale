@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import asyncio
-import io
 import json
-import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -15,21 +12,21 @@ from ale.core.errors import ProviderCapabilityError, ProviderStartError, TaskDef
 from ale.core.ids import content_hash
 from ale.core.sandbox import Capabilities, ExecResult, ImageRef, PreparedTaskImage
 from ale.core.task import Task
-from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, VerifySpec
+from ale.core.taskspec import ImageKind, ImageSpec, NetworkMode, OperatingSystem, VerifySpec
 from ale.run.cli.tasks import _prepare_images
 from ale.run.task_images import (
-    _materialize,
-    _materialize_vm,
-    _OciBuild,
     prepare_task_image,
     prepare_task_image_result,
     prepare_verifier_image,
+    prepare_verifier_image_result,
+    resolve_image_kinds,
 )
 from ale.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
 
-#: What the framework layer was asked for, by the tests that look.
+#: What the framework was asked to frame, by the tests that look: an image or disk, the
+#: account, and whether it is a VM disk.
 LAYERED: list[tuple[str, str, bool]] = []
 
 
@@ -37,8 +34,8 @@ LAYERED: list[tuple[str, str, bool]] = []
 def framework_layer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """These tests exercise the pipeline; the layer itself is tested in test_framework."""
 
-    async def layer(image: str, *, user: str, vm: bool = False) -> str:
-        LAYERED.append((image, user, vm))
+    async def layer(image: str, *, user: str) -> str:
+        LAYERED.append((image, user, False))
         return image
 
     async def frame(
@@ -58,6 +55,22 @@ def _task(write_task_repo, **kwargs: object) -> object:  # type: ignore[no-untyp
     return load_tasks(repository / "tasks/demo")[0]
 
 
+def _classified(task: Task, kind: ImageKind) -> Task:
+    """``task`` as it reaches preparation: each image it names alone found to be ``kind``.
+
+    Loading leaves a Linux registry reference's kind to the registry, which is read before
+    anything prepares the image.
+    """
+
+    def decided(image: ImageSpec | None) -> ImageSpec | None:
+        return image.model_copy(update={"kind": kind}) if image and image.kind is None else image
+
+    spec = task.spec
+    verify = spec.verify.model_copy(update={"image": decided(spec.verify.image)})
+    task.spec = spec.model_copy(update={"image": decided(spec.image), "verify": verify})
+    return task
+
+
 def _prepared(kind: ImageKind, source: str = "solver-local") -> PreparedTaskImage:
     digest = "sha256:" + "d" * 64
     values: dict[str, object] = {
@@ -72,8 +85,8 @@ def _prepared(kind: ImageKind, source: str = "solver-local") -> PreparedTaskImag
     else:
         values["image_source_identity"] = digest
     if kind is ImageKind.VM and source != "external-ref":
-        values["oci_identity"] = digest
-        values["materializer_identity"] = digest
+        values["builder_identity"] = digest
+        values["base_materials"] = (digest,)
     return PreparedTaskImage.model_validate(values)
 
 
@@ -119,7 +132,7 @@ class _Registry:
 def windows_task(write_task_repo) -> Task:  # type: ignore[no-untyped-def]
     repository = write_task_repo(
         config={
-            "environment": {"os": "windows", "vm_base": "/images/windows.qcow2"},
+            "environment": {"os": "windows", "image": "/images/windows.qcow2"},
         },
         dockerfile=None,
     )
@@ -131,10 +144,22 @@ def windows_task(write_task_repo) -> Task:  # type: ignore[no-untyped-def]
     return load_tasks(folder)[0]
 
 
-def _windows_builder(  # type: ignore[no-untyped-def]
+@pytest.fixture
+def linux_vm_task(write_task_repo) -> Task:  # type: ignore[no-untyped-def]
+    repository = write_task_repo(
+        config={"environment": {"image": "ghcr.io/acme/vm-base:1"}}, dockerfile=None
+    )
+    folder = repository / "tasks/demo"
+    (folder / "environment").mkdir()
+    (folder / "environment/build.sh").write_text("apt-get install -y jq\n")
+    return load_tasks(folder)[0]
+
+
+def _qemu_builder(  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None = None
 ):
-    """The real Windows build, in a builder VM whose sandbox only records what it is told.
+    """The real Linux or Windows build, in a builder VM whose sandbox only records what it
+    is told.
 
     Its ``save_image`` keeps the layer it is given; ``finished_layer`` reads it back."""
     import ale.run.task_images as images
@@ -152,11 +177,12 @@ def _windows_builder(  # type: ignore[no-untyped-def]
         async def create_builder(self, request):  # type: ignore[no-untyped-def]
             seen.requests.append(request)
             sandbox = AsyncMock(spec=QemuSandbox)
-            sandbox.agent_home = "C:\\Users\\user"
+            windows = request.os is OperatingSystem.WINDOWS
+            sandbox.agent_home = "C:\\Users\\user" if windows else "/home/user"
             seen.sandboxes.append(sandbox)
 
             async def run(argv, **kwargs):  # type: ignore[no-untyped-def]
-                if "build.ps1" in argv[-1]:
+                if "build.ps1" in argv[-1] or argv == ["bash", "build.sh"]:
                     assert (Path(kwargs["cwd"].replace("\\", "/")).name) == "environment"
                     if failure == "input-change":
                         environment = seen.task.folder.environment_dir
@@ -199,7 +225,7 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
 ) -> None:
     import ale.run.task_images as images
 
-    seen, built = _windows_builder(monkeypatch, tmp_path)
+    seen, built = _qemu_builder(monkeypatch, tmp_path)
     registry = _Registry()
     first = await prepare_task_image_result(windows_task, registry)  # type: ignore[arg-type]
     assert registry.get(ImageKind.VM).inputs[0] == ImageRef(
@@ -226,7 +252,7 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
     assert second.steps[2].outcome == "reused"
     assert first.image == second.image
     assert first.image.base_materials == ("sha256:" + "b" * 64,)
-    assert first.image.builder_identity and first.image.oci_identity is None
+    assert first.image.builder_identity
 
     assert windows_task.folder is not None
     setup = windows_task.folder.environment_dir / "setup/setup.ps1"
@@ -252,7 +278,7 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
     await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
     assert len(seen.requests) == 6
     base = _prepared(ImageKind.VM, "external-ref")
-    await images._prepare_windows_image(windows_task, base)
+    await images._prepare_qemu_image(windows_task, base)
     assert len(seen.requests) == 7
 
     other = load_tasks(windows_task.folder.root)[0]
@@ -270,15 +296,80 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["script", "input-change", "save"])
-async def test_failed_windows_build_does_not_publish_or_fall_back(
-    windows_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+async def test_a_linux_image_is_built_on_its_base_disk_as_on_windows(
+    linux_vm_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seen, built = _windows_builder(monkeypatch, tmp_path, failure)
-    seen.task = windows_task
+    import ale.run.task_images as images
+
+    seen, built = _qemu_builder(monkeypatch, tmp_path)
     registry = _Registry()
-    with pytest.raises((TaskDefinitionError, ProviderStartError), match="windows-build:"):
-        await prepare_task_image(windows_task, registry)  # type: ignore[arg-type]
+    first = await prepare_task_image_result(linux_vm_task, registry)  # type: ignore[arg-type]
+    assert registry.get(ImageKind.VM).inputs[0] == ImageRef(
+        kind=ImageKind.VM, reference="ghcr.io/acme/vm-base:1"
+    )
+    (request,) = seen.requests
+    assert request.os is OperatingSystem.LINUX and request.user == "user"
+    assert request.network.mode is NetworkMode.OPEN
+    # As root, in a copy of environment/ under root-only /opt/ale, which it leaves behind.
+    (sandbox,) = seen.sandboxes
+    assert sandbox.upload_dir.await_args.args[1] == "/opt/ale/environment"
+    build, cleanup = sandbox.exec.await_args_list
+    assert build.args[0] == ["bash", "build.sh"]
+    assert build.kwargs["cwd"] == "/opt/ale/environment"
+    assert build.kwargs["env"] == {"ALE_HOME": "/home/user"}
+    assert "identity" not in build.kwargs
+    assert cleanup.args[0] == ["rm", "-rf", "/opt/ale/environment"]
+    (layer,) = built
+    sandbox.save_image.assert_awaited_once_with(layer)
+    assert layer.parent == tmp_path / "cache/vm-builds"
+    assert first.image.runtime_ref == str(layer) and first.image.prepared_identity == built[layer]
+    assert [step.name for step in first.steps] == [
+        "lint",
+        "base-resolution",
+        "linux-build",
+        "artifact-check",
+    ]
+    assert first.image.base_materials == ("sha256:" + "b" * 64,)
+    assert first.image.builder_identity
+    second = await prepare_task_image_result(linux_vm_task, registry)  # type: ignore[arg-type]
+    assert second.steps[2].outcome == "reused" and second.image == first.image
+    assert len(seen.requests) == 1
+    # Another runner, VM builder, build contract, discard method or Linux framework is
+    # another build.
+    changes = (
+        lambda: setattr(seen, "runner", "sha256:" + "1" * 64),
+        lambda: setattr(seen, "builder", "sha256:" + "2" * 64),
+        lambda: monkeypatch.setattr(images, "LINUX_BUILD_CONTRACT", "ale-linux-bash/next"),
+        lambda: monkeypatch.setattr(images, "LINUX_DISCARD", (*images.LINUX_DISCARD, "-v")),
+        lambda: monkeypatch.setattr(images, "framework_identity", lambda **_: "sha256:" + "3" * 64),
+    )
+    identities = {first.image.builder_identity}
+    for change in changes:
+        change()
+        image = await prepare_task_image(linux_vm_task, registry)  # type: ignore[arg-type]
+        identities.add(image.builder_identity)
+    assert len(seen.requests) == len(identities) == len(changes) + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["script", "input-change", "save"])
+@pytest.mark.parametrize(
+    ("fixture", "step"), [("windows_task", "windows"), ("linux_vm_task", "linux")]
+)
+async def test_failed_vm_build_does_not_publish_or_fall_back(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    fixture: str,
+    step: str,
+) -> None:
+    task = request.getfixturevalue(fixture)
+    seen, built = _qemu_builder(monkeypatch, tmp_path, failure)
+    seen.task = task
+    registry = _Registry()
+    with pytest.raises((TaskDefinitionError, ProviderStartError), match=f"{step}-build:"):
+        await prepare_task_image(task, registry)  # type: ignore[arg-type]
     assert len(registry.get(ImageKind.VM).inputs) == 1
     assert isinstance(registry.get(ImageKind.VM).inputs[0], ImageRef)
     assert built == {} and list((tmp_path / "cache").rglob("*.qcow2")) == []
@@ -290,7 +381,7 @@ async def test_failed_windows_build_does_not_publish_or_fall_back(
 def macos_task(write_task_repo) -> Task:  # type: ignore[no-untyped-def]
     repository = write_task_repo(
         config={
-            "environment": {"os": "macos", "vm_base": "ghcr.io/acme/macos:latest"},
+            "environment": {"os": "macos", "image": "ghcr.io/acme/macos:latest"},
             "agent": {"user": "admin", "network_mode": "public", "sudo": True},
         },
         dockerfile=None,
@@ -377,7 +468,7 @@ async def test_macos_build_gets_the_home_of_the_account_it_creates(
 
     repository = write_task_repo(
         config={
-            "environment": {"os": "macos", "vm_base": "ghcr.io/acme/macos:latest"},
+            "environment": {"os": "macos", "image": "ghcr.io/acme/macos:latest"},
             "agent": {"user": "tester", "network_mode": "public"},
         },
         dockerfile=None,
@@ -561,8 +652,13 @@ async def test_unchanged_task_uses_its_prepared_image_without_building(
 
 
 @pytest.mark.asyncio
-async def test_a_named_image_wins_over_the_dockerfile(write_task_repo) -> None:  # type: ignore[no-untyped-def]
-    task = _task(write_task_repo, config={"environment": {"docker_image": "ghcr.io/acme/t:v1"}})
+async def test_a_named_container_is_prepared_by_reference(write_task_repo) -> None:  # type: ignore[no-untyped-def]
+    task = _task(
+        write_task_repo,
+        config={"environment": {"image": "ghcr.io/acme/t:v1"}},
+        dockerfile=None,
+    )
+    _classified(task, ImageKind.CONTAINER)  # type: ignore[arg-type]
     registry = _Registry()
     await prepare_task_image(task, registry)  # type: ignore[arg-type]
     assert registry.get(ImageKind.CONTAINER).inputs == [
@@ -590,10 +686,13 @@ async def test_build_failure_never_falls_back(
 
 @pytest.mark.asyncio
 async def test_ref_only_solver_is_prepared_by_matching_provider(write_task_repo) -> None:  # type: ignore[no-untyped-def]
-    task = _task(
-        write_task_repo,
-        config={"environment": {"vm_image": "ghcr.io/acme/task-vm:v1"}},
-        dockerfile=None,
+    task = _classified(
+        _task(
+            write_task_repo,
+            config={"environment": {"image": "ghcr.io/acme/task-vm:v1"}},
+            dockerfile=None,
+        ),
+        ImageKind.VM,
     )
     registry = _Registry()
     prepared = await prepare_task_image(task, registry)  # type: ignore[arg-type]
@@ -606,10 +705,13 @@ async def test_ref_only_solver_is_prepared_by_matching_provider(write_task_repo)
 
 @pytest.mark.asyncio
 async def test_preparation_result_orders_ref_and_artifact_stages(write_task_repo) -> None:  # type: ignore[no-untyped-def]
-    task = _task(
-        write_task_repo,
-        config={"environment": {"vm_image": "ghcr.io/acme/task-vm:v1"}},
-        dockerfile=None,
+    task = _classified(
+        _task(
+            write_task_repo,
+            config={"environment": {"image": "ghcr.io/acme/task-vm:v1"}},
+            dockerfile=None,
+        ),
+        ImageKind.VM,
     )
     result = await prepare_task_image_result(task, _Registry())  # type: ignore[arg-type]
     assert result.task == "agentslastexam/demo"
@@ -626,10 +728,13 @@ async def test_preparation_result_orders_ref_and_artifact_stages(write_task_repo
 
 @pytest.mark.asyncio
 async def test_preparation_failure_names_and_bounds_its_stage(write_task_repo) -> None:  # type: ignore[no-untyped-def]
-    task = _task(
-        write_task_repo,
-        config={"environment": {"vm_image": "example.invalid/vm:latest"}},
-        dockerfile=None,
+    task = _classified(
+        _task(
+            write_task_repo,
+            config={"environment": {"image": "example.invalid/vm:latest"}},
+            dockerfile=None,
+        ),
+        ImageKind.VM,
     )
 
     class _FailingProvider:
@@ -707,11 +812,9 @@ async def test_verifier_builds_tests_dockerfile_unless_an_image_is_named(
     assert built[0]["exclude"] == ()
     assert built[0]["source_digest"] == task.verifier_image_source_digest  # type: ignore[attr-defined]
 
-    named = {"docker_image": "ghcr.io/acme/v:1", "cpus": 1, "memory_mb": 512}
-    repository = write_task_repo(
-        "ale-tasks-named", config={"verifier": {"environment": named}}, verifier_dockerfile=True
-    )
-    task = load_tasks(repository / "tasks/demo")[0]
+    named = {"image": "ghcr.io/acme/v:1", "cpus": 1, "memory_mb": 512}
+    repository = write_task_repo("ale-tasks-named", config={"verifier": {"environment": named}})
+    task = _classified(load_tasks(repository / "tasks/demo")[0], ImageKind.CONTAINER)
     registry = _Registry()
     await prepare_verifier_image(task, registry)  # type: ignore[arg-type]
     assert len(built) == 1
@@ -721,161 +824,13 @@ async def test_verifier_builds_tests_dockerfile_unless_an_image_is_named(
 
 
 @pytest.mark.asyncio
-async def test_local_vm_candidate_is_materialized_before_provider_check(
-    write_task_repo, monkeypatch: pytest.MonkeyPatch
-) -> None:  # type: ignore[no-untyped-def]
-    task = _task(write_task_repo, config={"environment": {"vm": True}})
-    vm = _prepared(ImageKind.VM)
-
-    async def fake_build(**kwargs: object) -> _OciBuild:
-        assert kwargs["source_digest"] == task.image_source_digest
-        assert kwargs["dockerfile"] == task.folder.environment_dir / "Dockerfile"  # type: ignore[attr-defined]
-        assert kwargs["exclude"] == ("setup",)
-        return _vm_build()
-
-    async def fake_materialize(build: object, *, source: str) -> tuple[PreparedTaskImage, bool]:
-        assert source == "solver-local"
-        return vm, False
-
-    monkeypatch.setattr("ale.run.task_images._build_oci", fake_build)
-    monkeypatch.setattr("ale.run.task_images._materialize_vm_with_status", fake_materialize)
-    registry = _Registry()
-    assert await prepare_task_image(task, registry) == vm  # type: ignore[arg-type]
-    assert registry.get(ImageKind.VM).inputs == [vm]
-
-
-def test_vm_derivation_uses_oci_and_materializer_identities_only() -> None:
-    from ale.run.task_images import vm_materialization_identity
-
-    oci = "sha256:" + "1" * 64
-    materializer = "sha256:" + "2" * 64
-    expected = content_hash(
-        {
-            "output_contract": "ale-vm-qcow2/v1",
-            "final_oci_identity": oci,
-            "materializer_identity": materializer,
-        }
-    )
-    assert vm_materialization_identity(oci, materializer) == expected
-
-
-#: The labels a VM base declares, which configure the guest service the engine installs.
-VM_LABELS = '{"ale.user": "user", "ale.gui": "true"}'
-
-
-def _vm_build() -> _OciBuild:
-    return _OciBuild(
-        input_identity="sha256:" + "1" * 64,
-        image_source_identity="sha256:" + "2" * 64,
-        runtime_ref="ale-vm:fixture",
-        oci_identity="sha256:" + "3" * 64,
-        base_materials=("sha256:" + "4" * 64,),
-    )
-
-
-@pytest.mark.asyncio
-async def test_unchanged_vm_derivation_materializes_once_under_concurrency(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr(
-        "ale.run.task_images._materializer_identity",
-        lambda: asyncio.sleep(0, result="sha256:" + "5" * 64),
-    )
-    calls = 0
-
-    async def valid(path: Path) -> bool:
-        return path.is_file()
-
-    async def materialize(_runtime_ref: str, disk: Path) -> None:
-        nonlocal calls
-        calls += 1
-        await asyncio.sleep(0.02)
-        disk.write_bytes(b"qcow2")
-
-    monkeypatch.setattr("ale.run.task_images.valid_qcow2", valid)
-    monkeypatch.setattr("ale.run.task_images._materialize", materialize)
-    first, second = await asyncio.gather(
-        _materialize_vm(_vm_build(), source="solver-local"),
-        _materialize_vm(_vm_build(), source="solver-local"),
-    )
-    assert first == second
-    assert calls == 1
-
-
-def _write_rootfs_tar(path: Path) -> None:
-    payload = b"initrd"
-    info = tarfile.TarInfo("boot/initrd.img-test")
-    info.size = len(payload)
-    with tarfile.open(path, "w") as archive:
-        archive.addfile(info, io.BytesIO(payload))
-
-
-@pytest.mark.asyncio
-async def test_vm_materialization_publishes_only_valid_output_and_cleans_temporary_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    disk = tmp_path / "final.qcow2"
-    commands: list[tuple[str, ...]] = []
-
-    async def run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
-        commands.append(argv)
-        if argv[:2] == ("docker", "create"):
-            return 0, "container-id\n", ""
-        if argv[:3] == ("docker", "image", "inspect"):
-            return 0, VM_LABELS, ""
-        if argv[:2] == ("docker", "export"):
-            _write_rootfs_tar(Path(argv[argv.index("--output") + 1]))
-        if argv[:2] == ("docker", "run"):
-            output_mount = next(value for value in argv if "dst=/output" in value)
-            output_dir = Path(output_mount.split("src=", 1)[1].split(",", 1)[0])
-            (output_dir / "disk.qcow2").write_bytes(b"valid")
-        return 0, "", ""
-
-    async def valid(path: Path) -> bool:
-        return path.read_bytes() == b"valid" if path.is_file() else False
-
-    monkeypatch.setattr("ale.run.task_images._run", run)
-    monkeypatch.setattr("ale.run.task_images.valid_qcow2", valid)
-    await _materialize("ale-vm:fixture", disk)
-    assert disk.read_bytes() == b"valid"
-    assert not list(tmp_path.glob(".final-*"))
-    assert any(command[:3] == ("docker", "rm", "-f") for command in commands)
-
-
-@pytest.mark.asyncio
-async def test_failed_vm_materialization_leaves_no_reusable_artifact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    disk = tmp_path / "final.qcow2"
-
-    async def run(*argv: str, timeout: float = 1800) -> tuple[int, str, str]:
-        if argv[:2] == ("docker", "create"):
-            return 0, "container-id\n", ""
-        if argv[:3] == ("docker", "image", "inspect"):
-            return 0, VM_LABELS, ""
-        if argv[:2] == ("docker", "export"):
-            _write_rootfs_tar(Path(argv[argv.index("--output") + 1]))
-            return 0, "", ""
-        if argv[:2] == ("docker", "run"):
-            return 1, "", "materializer failed"
-        return 0, "", ""
-
-    monkeypatch.setattr("ale.run.task_images._run", run)
-    with pytest.raises(Exception, match="materializer failed"):
-        await _materialize("ale-vm:fixture", disk)
-    assert not disk.exists()
-    assert not list(tmp_path.glob(".final-*"))
-
-
-@pytest.mark.asyncio
 async def test_macos_external_images_skip_linux_framework_preparation(write_task_repo) -> None:
     reference = "ghcr.io/example/macos@sha256:" + "a" * 64
     repository = write_task_repo(
         config={
-            "environment": {"os": "macos", "vm_image": reference},
+            "environment": {"os": "macos", "image": reference},
             "agent": {"user": "admin", "network_mode": "public"},
-            "verifier": {"environment": {"vm_image": reference}},
+            "verifier": {"environment": {"image": reference}},
         },
         dockerfile=None,
     )
@@ -891,3 +846,89 @@ async def test_macos_external_images_skip_linux_framework_preparation(write_task
         "artifact-check",
     ]
     assert LAYERED == []
+
+
+@pytest.mark.asyncio
+async def test_registry_images_are_classified_once_before_preparation(
+    write_task_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    read: list[str] = []
+
+    async def classify(reference: str) -> ImageKind:
+        read.append(reference)
+        return ImageKind.VM if "/vm" in reference else ImageKind.CONTAINER
+
+    monkeypatch.setattr("ale.run.task_images.classify_image", classify)
+    monkeypatch.setattr("ale.run.cli.tasks.observe_task_assets", lambda task: None)
+    named = write_task_repo(
+        "ale-tasks-named",
+        tasks=("one", "two"),
+        config={
+            "environment": {"image": "ghcr.io/acme/vm:1"},
+            "verifier": {"environment": {"image": "ghcr.io/acme/checker:1"}},
+        },
+        dockerfile=None,
+    )
+    tasks = load_tasks(named / "tasks")
+    built = _task(write_task_repo)
+    declared = built.spec  # type: ignore[attr-defined]
+    assert {task.spec.image.kind for task in tasks} == {None}
+    registry = _Registry()
+    results = await _prepare_images([*tasks, built], registry)  # type: ignore[arg-type, list-item]
+    assert sorted(read) == ["ghcr.io/acme/checker:1", "ghcr.io/acme/vm:1"]
+    for task in tasks:
+        assert task.spec.image.kind is ImageKind.VM
+        assert task.spec.verify.image is not None
+        assert task.spec.verify.image.kind is ImageKind.CONTAINER
+        assert task.spec.spec_hash  # decided, so it can be hashed and recorded
+    assert built.spec is declared  # type: ignore[attr-defined]
+    assert [result.image.kind for result in results[:2]] == [ImageKind.VM, ImageKind.CONTAINER]
+    await resolve_image_kinds(tasks)
+    assert len(read) == 2  # a decided kind is never read again
+
+
+@pytest.mark.asyncio
+async def test_an_episode_decides_its_image_kinds_before_preparing_them(
+    write_task_repo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    """An episode reached without ``_prepare_images`` still prepares only decided kinds."""
+    from ale.run.episode import run_episode
+
+    task = _task(
+        write_task_repo, config={"environment": {"image": "ghcr.io/acme/vm:1"}}, dockerfile=None
+    )
+    read: list[str] = []
+    prepared: list[ImageKind | None] = []
+
+    async def classify(reference: str) -> ImageKind:
+        read.append(reference)
+        return ImageKind.VM
+
+    async def prepare(task: Task, providers: object) -> PreparedTaskImage:
+        prepared.append(task.spec.image.kind)
+        raise ProviderStartError("stop before a Sandbox starts")
+
+    monkeypatch.setattr("ale.run.task_images.classify_image", classify)
+    monkeypatch.setattr("ale.run.episode.prepare_task_image", prepare)
+    monkeypatch.setattr("ale.run.episode.observe_task_assets", lambda task: None)
+    with pytest.raises(ProviderStartError, match="stop before"):
+        await run_episode(task, None, None, run_dir=tmp_path / "runs")  # type: ignore[arg-type]
+    assert read == ["ghcr.io/acme/vm:1"] and prepared == [ImageKind.VM]
+
+
+@pytest.mark.asyncio
+async def test_an_undecided_kind_is_never_prepared(write_task_repo) -> None:  # type: ignore[no-untyped-def]
+    task = _task(
+        write_task_repo,
+        config={
+            "environment": {"image": "ghcr.io/acme/t:v1"},
+            "verifier": {"environment": {"image": "ghcr.io/acme/v:1"}},
+        },
+        dockerfile=None,
+    )
+    with pytest.raises(ValueError, match="kinds of its images are decided"):
+        _ = task.spec.spec_hash  # type: ignore[attr-defined]
+    with pytest.raises(TaskDefinitionError, match="was not decided before its preparation"):
+        await prepare_task_image_result(task, _Registry())  # type: ignore[arg-type]
+    with pytest.raises(TaskDefinitionError, match="was not decided before its preparation"):
+        await prepare_verifier_image_result(task, _Registry())  # type: ignore[arg-type]

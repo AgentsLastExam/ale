@@ -37,11 +37,11 @@ existing package before preparing another. Slow acquisition or compilation can a
 offline asset. Installed VM state alone is not a rebuildable asset.
 
 Keep deployment scripts and Task-specific configuration beside the build definition: the
-Dockerfile on Linux, `build.ps1` on Windows, `build.sh` on macOS. Scripts consume Task-local
-materials, choose their own extraction or installation method, and declare external
-dependencies. Linux has no required package format. For Windows software requiring
-repackaging, prefer the [MSIX workflow](../guides/windows-task-images.md). No Task depends
-on another Task's files.
+Dockerfile of a Linux container, `build.sh` of a Linux or macOS VM, `build.ps1` on Windows.
+Scripts consume Task-local materials, choose their own extraction or installation method,
+and declare external dependencies. Linux has no required package format. For Windows
+software requiring repackaging, prefer the
+[MSIX workflow](../guides/windows-task-images.md). No Task depends on another Task's files.
 
 Record the source, version, integrity hash, compatible base, and deployment requirements. Keep
 credentials out of assets. Validate from a clean base as the actual agent user, including required

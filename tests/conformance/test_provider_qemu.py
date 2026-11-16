@@ -4,9 +4,9 @@ One suite, two backends, no per-provider assertions: that is what makes "the san
 contract is real" a claim rather than an aspiration, and what turns the future OS
 roadmap into "swap the guest image".
 
-The disk is the current VM base, materialized once per host, without the
-framework: the Provider adds it, as Docker adds it to the container base. Set
-``ALE_QEMU_IMAGE`` to run the suite on another Linux disk. Needs KVM and Docker.
+The disk is the current VM base, pulled once per host, without the framework: the
+Provider adds it, as Docker adds it to the container base. Set ``ALE_QEMU_IMAGE`` to run
+the suite on another Linux disk. Needs KVM and Docker.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ from tests.support import CONTAINER_BASE, VM_BASE
 from ale.core.sandbox import Identity, ImageRef, Sandbox, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
-from ale.run import task_images
 from ale.run.framework import framework_identity
+from ale.run.images import resolve_vm_image
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.qemu import QemuProvider
 
@@ -42,18 +42,10 @@ def vm_disk() -> Path:
     if not os.access("/dev/kvm", os.R_OK | os.W_OK):
         pytest.skip("/dev/kvm is unavailable")
 
-    async def materialize() -> Path:
-        identity = await task_images._docker_image_identity(VM_BASE)
-        build = task_images._OciBuild(
-            input_identity=identity,
-            image_source_identity=identity,
-            runtime_ref=identity,
-            oci_identity=identity,
-            base_materials=(),
-        )
-        return Path((await task_images._materialize_vm(build, source="solver-local")).runtime_ref)
+    async def pull() -> Path:
+        return Path((await resolve_vm_image(ImageRef(kind="vm", reference=VM_BASE))).runtime_ref)
 
-    return asyncio.run(materialize())
+    return asyncio.run(pull())
 
 
 class TestQemuProvider(ProviderConformance):

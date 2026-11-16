@@ -379,7 +379,7 @@ def episode_fixture(
         name="agentslastexam/mac-fixture",
         config={
             "artifacts": [OUTPUT],
-            "environment": {"os": "macos", "vm_image": IMAGE},
+            "environment": {"os": "macos", "image": IMAGE},
             "agent": {"network_mode": "public"},
         },
         dockerfile=None,
@@ -485,7 +485,7 @@ async def test_orchard_separate_verifier_restores_solver_artifacts_and_modes(
         task,
         {
             "verifier": {
-                "environment": {"vm_image": IMAGE, "cpus": 2, "memory_mb": 4096},
+                "environment": {"image": IMAGE, "cpus": 2, "memory_mb": 4096},
             }
         },
     )

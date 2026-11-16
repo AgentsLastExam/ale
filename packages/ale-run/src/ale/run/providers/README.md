@@ -5,7 +5,7 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 | Package | Backend | Prepared input |
 |---|---|---|
 | `docker/` | local Docker container, or a Kata microVM per container ([Kata](#docker-on-kata-containers)) | immutable OCI image identity |
-| `qemu/` | QEMU/KVM guest runner | materialized qcow2 identity |
+| `qemu/` | QEMU/KVM guest runner | qcow2 disk, or a chain of [layers](#disk-layers) on one |
 | `firecracker/` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
 | `daytona/` | Daytona cloud container | immutable OCI image identity, pushed by digest |
 | `orchard/` | macOS VM on Orchard/Tart | digest-pinned OCI image, or a local image `build.sh` built |
@@ -303,10 +303,9 @@ Measured on a KVM host:
   (`images.base_layer`), once per disk, framework identity and builder image. A disk
   pulled from a registry is that base as it is ([registry disks](#registry-disks)). A local
   disk, which may be compressed and is not ALE's to keep, gets an uncompressed copy once
-  per disk and Host: about 4.5 GB for the 2.3 GB Linux VM base, 17.7 GB for the 10.2 GB
-  Windows base 0.1.2, which took about 30 s. A compressed disk is decompressed on every
-  read: with the zstd-compressed Windows base under a Task layer a guest booted 15% slower
-  and read the base's files 4–5 times slower.
+  per disk and Host: 17.7 GB for the 10.2 GB Windows base 0.1.2, which took about 30 s.
+  A compressed disk is decompressed on every read: with the zstd-compressed Windows base
+  under a Task layer a guest booted 15% slower and read the base's files 4–5 times slower.
 - The resolved image keeps the request's prepared identity and observes the layer that
   boots, which the RunLock records.
 
@@ -319,15 +318,15 @@ and a Windows guest 250–310 s rather than 52 s.
 
 ### Disk layers
 
-A framed disk, a Windows Task image and a snapshot are each a qcow2 overlay on the disk
-below it, never flattened. Beside each, `<name>.json` records the identity of its parent and
-the SHA-256 of its own file, taken once when it is made (`images.record_layer`); the base a
-chain starts from, a pulled disk or the copy of a local one, records the identity the disk
-was resolved under. A layer names its parent by a path relative to itself, so the chain
-stays whole when the ALE cache moves. `images.layer_identity` follows a chain with
-`qemu-img info --backing-chain` and refuses one in which a layer sits on another parent
-than its record names; every prepared disk with a backing file is checked that way before
-it boots.
+A framed disk, a Linux or Windows Task image and a snapshot are each a qcow2 overlay on the
+disk below it, never flattened. Beside each, `<name>.json` records the identity of its
+parent and the SHA-256 of its own file, taken once when it is made (`images.record_layer`);
+the base a chain starts from, a pulled disk or the copy of a local one, records the
+identity the disk was resolved under. A layer names its parent by a path relative to
+itself, so the chain stays whole when the ALE cache moves. `images.layer_identity` follows
+a chain with `qemu-img info --backing-chain` and refuses one in which a layer sits on
+another parent than its record names; every prepared disk with a backing file is checked
+that way before it boots.
 
 The runner and the VM builder are containers, so every layer of a chain is mounted in them
 at its own Host path (`images.chain_mounts`), read-only except the one being written, and
@@ -371,6 +370,14 @@ into `C:\ProgramData\ALE`:
   in it: on Windows base 0.1.2 that was 103 of 749 MiB for a Task that installs nothing and
   90 of 2,417 MiB for a LibreOffice Task, each discarded in about 5 s. Free space is never
   zero-filled instead, which would write every free cluster into the overlay.
+
+A Linux Task image is built the same way: the build VM's overlay is framed by
+`virt-customize` before it boots, `build.sh` runs as root in `/opt/ale/environment`, and
+`save_image` keeps the overlay as the Task's layer. Before it is kept, the VM builder's
+`virt-sparsify --in-place` mounts each filesystem on the disk and trims it; the overlay
+turns every trimmed cluster it holds into one that reads as zeros. A build that installs
+`jq`, writes a 300 MiB file, syncs it and deletes it kept a 343 MiB layer, the same as
+without the file, and the discard took 3 s.
 
 ### Registry disks
 

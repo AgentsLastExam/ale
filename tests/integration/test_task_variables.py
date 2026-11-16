@@ -82,13 +82,13 @@ def _task(root: Path, kind: str, verifier: dict[str, Any]) -> ManifestTask:
         "solution": {"env": {"SOLUTION_ONLY": "solution"}},
     }
     if kind == "vm":
-        config |= {"environment": {"env": ENVIRONMENT, **VM_RESOURCES, "vm": True}}
+        config |= {"environment": {"env": ENVIRONMENT, **VM_RESOURCES, "image": VM_BASE}}
     if windows:
         config |= {
             "environment": {
                 "env": ENVIRONMENT,
                 "os": "windows",
-                "vm_image": "local/windows-variables",
+                "image": "local/windows-variables",
                 "cpus": 2,
                 "memory_mb": 8192,
             },
@@ -97,7 +97,7 @@ def _task(root: Path, kind: str, verifier: dict[str, Any]) -> ManifestTask:
         root,
         name="agentslastexam/variables",
         config=config,
-        dockerfile=None if windows else f"FROM {VM_BASE if kind == 'vm' else CONTAINER_BASE}\n",
+        dockerfile=None if kind in ("vm", "windows") else f"FROM {CONTAINER_BASE}\n",
         test=None,
         solve=None,
     )

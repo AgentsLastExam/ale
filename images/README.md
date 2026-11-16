@@ -5,24 +5,25 @@ This directory separates Task foundations from the tools that build and run them
 ```text
 base/
 ├── container-ubuntu22/  Ubuntu desktop container base
-├── vm-ubuntu24/         Ubuntu OCI source for a bootable VM
+├── vm-ubuntu24/         Ubuntu root filesystem of the Linux VM base disk, and its build
 └── vm-windows10/        Windows seed preparation recipe
 builders/
-└── vm-materializer/     converts a VM OCI rootfs to qcow2; frames a Linux qcow2 ref
+└── vm-materializer/     VM builder: makes the Linux base disk; frames and trims VM disks
 runtimes/
 ├── qemu-runner/         container that runs a prepared qcow2 with QEMU/KVM
 └── firecracker-runner/  container that runs a container Task as a Firecracker microVM
 ```
 
-Task repositories extend or reference only entries under `base/`. Linux VM Tasks build an
-OCI rootfs from `vm-ubuntu24`; the materializer converts it to qcow2 and the QEMU runner
-boots it. Windows preparation already produces qcow2, so it goes directly to the runner.
+Task repositories extend or reference only entries under `base/`. The VM bases are disks:
+a VM Task names one as its `[environment].image`, its `environment/build.sh` (`build.ps1`
+on Windows) builds the Task's layer on it, and the QEMU runner boots the result. The VM
+builder makes the Linux base's disk from `vm-ubuntu24`'s Dockerfile once per version.
 The Firecracker runner takes a container Task's prepared image instead: it converts the
 image's filesystem into an ext4 disk once and boots it with its own kernel.
 macOS Tasks name a Tart image of their own; the Orchard and Tart that run it come from
 `scripts/setup_macos.py`, not from this directory.
 
-The image contract, identity rules and required labels are defined in
+The image contract and identity rules are defined in
 [`../docs/specs/sandbox-image.md`](../docs/specs/sandbox-image.md).
 
 Every image is published once per version and never overwritten. The builder and runner
@@ -34,13 +35,21 @@ Raise a base's version to publish it changed.
 
 ```bash
 just images                                  # pull published images, build unpublished ones
-images/build.sh vm-ubuntu24-base             # one image
+images/build.sh ale-qemu-runner              # one image
 ```
 
 `.github/workflows/images.yml` publishes each version once; its manual `promote` input
 gives an already-published image a version without rebuilding it. It pushes with this
 repository's workflow token, so each GHCR package must grant `AgentsLastExam/ale` write
 access in its package settings (Manage Actions access); a package first pushed by hand has
-none, and its pushes fail with `permission_denied: write_package`. The Windows base's disk
-is not in the repository, so it is published from a Host that has it, with
-`ale vm-image push`. Do not add Task content or Provider credentials here.
+none, and its pushes fail with `permission_denied: write_package`. It publishes the Linux
+VM base, a disk, with these two commands; `images/build.sh` builds an unpublished one into
+ALE's cache instead, where a Task names it by path:
+
+```bash
+images/base/vm-ubuntu24/build.sh disk.qcow2
+uv run ale vm-image push disk.qcow2 ghcr.io/agentslastexam/vm-ubuntu24-base:VERSION
+```
+
+The Windows base's disk is not in the repository, so it is published from a Host that
+has it, with `ale vm-image push`. Do not add Task content or Provider credentials here.

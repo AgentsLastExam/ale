@@ -393,7 +393,7 @@ content. A Transport Trace proves routing and accounting; it is not a content po
 
 **A compromised image.** The exact locally built Task-image content is recorded in
 provenance, so a change is *detectable*. Nothing verifies that its base or authored
-Dockerfile was benign to begin with.
+build was benign to begin with.
 
 **Processes the agent leaves running.** ALE does not stop processes the agent started,
 because a Task may ask the agent to deploy a service that verification then checks. In

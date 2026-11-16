@@ -122,12 +122,15 @@ _HOST_NETWORKS = tuple(
 class ImageSpec(BaseModel):
     """A solver or dedicated-verifier image: an image used directly or a build's base.
 
-    Without ``ref`` or ``base_ref`` the image is built from the Task folder.
+    Without ``ref`` or ``base_ref``, a container image is built from the Task folder's
+    Dockerfile. ``kind`` is ``None`` only for a Linux image named by a registry reference
+    alone: what the registry holds decides it, before anything prepares or records the
+    image.
     """
 
     model_config = _FROZEN
 
-    kind: ImageKind
+    kind: ImageKind | None
     ref: str | None = Field(default=None, min_length=1)
     base_ref: str | None = Field(default=None, min_length=1)
     user: str = Field(default="user", pattern=_ACCOUNT)
@@ -151,6 +154,8 @@ class ImageSpec(BaseModel):
                 raise ValueError("an image ref and a base ref are mutually exclusive")
             if self.kind is not ImageKind.VM:
                 raise ValueError("a base ref requires a VM image")
+        elif self.ref is None and self.kind is not ImageKind.CONTAINER:
+            raise ValueError("only a container image is built without a ref or base ref")
         return self
 
 
@@ -502,6 +507,8 @@ class TaskSpec(BaseModel):
 
     @property
     def spec_hash(self) -> str:
+        if any(image and image.kind is None for image in (self.image, self.verify.image)):
+            raise ValueError("a specification is hashed once the kinds of its images are decided")
         return content_hash(self.model_dump(mode="json"))
 
     def start_directory(self, home: str) -> str:
@@ -519,10 +526,22 @@ class TaskSpec(BaseModel):
         _validate_artifact_paths(self.artifacts, self.os)
         return self
 
+    @model_validator(mode="after")
+    def _kind_left_open_only_for_a_registry(self) -> Self:
+        for image in (self.image, self.verify.image):
+            if image is None or image.kind is not None:
+                continue
+            local = image.ref is not None and PurePosixPath(image.ref).is_absolute()
+            if self.os is not OperatingSystem.LINUX or local:
+                raise ValueError(
+                    "only a Linux image named by a registry reference leaves its kind open"
+                )
+        return self
 
-#: The ``task.toml`` schema ALE reads: revision 1 of ALE's fields on Harbor's schema 1.4. Plain
-#: ``1.4`` is a Harbor file, which a conversion turns into this one.
-SCHEMA_VERSION = "1.4+ale.1"
+
+#: The ``task.toml`` format ALE reads, named by the ALE version that last changed it. ALE
+#: accepts exactly this value.
+SCHEMA_VERSION = "0.2.0"
 
 #: ``task.toml`` network modes and what they mean for the evaluated agent and the oracle.
 _NETWORK_MODES = {
@@ -656,10 +675,8 @@ class EnvironmentTable(BaseModel):
     model_config = _FROZEN
 
     os: OperatingSystem = OperatingSystem.LINUX
-    vm: bool = Field(default=False, strict=True)
-    docker_image: str | None = Field(default=None, min_length=1)
-    vm_image: str | None = Field(default=None, min_length=1)
-    vm_base: str | None = Field(default=None, min_length=1)
+    image: str | None = Field(default=None, min_length=1)
+    """An image used directly, or the base ``environment/``'s build script builds on."""
     build_timeout_sec: float = Field(default=3600, gt=0, allow_inf_nan=False, strict=True)
     cpus: int = Field(default=1, ge=1, strict=True)
     memory_mb: int = Field(default=4096, ge=1, strict=True)
@@ -670,13 +687,6 @@ class EnvironmentTable(BaseModel):
     env: TaskEnv = Field(default_factory=dict)
     skills_dir: str | None = Field(default=None, min_length=1)
     mcp_servers: tuple[McpServerTable, ...] = ()
-
-    @property
-    def kind(self) -> ImageKind:
-        """A VM when anything here says so; only a Linux VM built from a Dockerfile sets ``vm``."""
-        linux = self.os is OperatingSystem.LINUX
-        vm = self.vm or not linux or self.vm_image is not None or self.vm_base is not None
-        return ImageKind.VM if vm else ImageKind.CONTAINER
 
     # --- validation ---
 
@@ -728,9 +738,8 @@ class VerifierEnvironmentTable(BaseModel):
 
     model_config = _FROZEN
 
-    vm: bool = Field(default=False, strict=True)
-    docker_image: str | None = Field(default=None, min_length=1)
-    vm_image: str | None = Field(default=None, min_length=1)
+    image: str | None = Field(default=None, min_length=1)
+    """An image used directly; ``tests/Dockerfile`` builds one otherwise."""
     build_timeout_sec: float = Field(default=3600, gt=0, allow_inf_nan=False, strict=True)
     cpus: int | None = Field(default=None, ge=1, strict=True)
     memory_mb: int | None = Field(default=None, ge=1, strict=True)
@@ -738,10 +747,6 @@ class VerifierEnvironmentTable(BaseModel):
     gpus: int = Field(default=0, ge=0, strict=True)
     gpu_types: tuple[_GpuType, ...] | None = Field(default=None, min_length=1)
     env: TaskEnv = Field(default_factory=dict)
-
-    @property
-    def kind(self) -> ImageKind:
-        return ImageKind.VM if self.vm or self.vm_image is not None else ImageKind.CONTAINER
 
 
 class VerifierTable(BaseModel):
@@ -790,7 +795,7 @@ class TaskConfig(BaseModel):
 
     model_config = _FROZEN
 
-    schema_version: Literal["1.4+ale.1"]
+    schema_version: Literal["0.2.0"]
     artifacts: tuple[Artifact, ...] = ()
     task: TaskTable
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -830,13 +835,6 @@ class TaskConfig(BaseModel):
     @model_validator(mode="after")
     def _consistent(self) -> Self:
         environment, verifier = self.environment, self.verifier
-        linux = environment.os is OperatingSystem.LINUX
-        if environment.docker_image is not None and environment.kind is ImageKind.VM:
-            raise ValueError("[environment].docker_image is a container image; a VM has vm_image")
-        if environment.vm_image is not None and environment.vm_base is not None:
-            raise ValueError("vm_image and vm_base are mutually exclusive")
-        if environment.vm_base is not None and linux:
-            raise ValueError("[environment].vm_base requires os 'windows' or 'macos'")
         names = [server.name for server in environment.mcp_servers]
         if len(names) != len(set(names)):
             raise ValueError("[[environment.mcp_servers]] names must be unique")
@@ -849,12 +847,5 @@ class TaskConfig(BaseModel):
         ):
             if sized is not None and sized.gpu_types is not None and not sized.gpus:
                 raise ValueError(f"[{table}].gpu_types requires gpus")
-        if verifier.environment is not None and verifier.environment.docker_image is not None:
-            if verifier.environment.kind is ImageKind.VM:
-                raise ValueError(
-                    "[verifier.environment].docker_image is a container image; a VM has vm_image"
-                )
-            if environment.os is not OperatingSystem.LINUX:
-                raise ValueError("only a Linux verifier runs in a container")
         _validate_artifact_paths(self.artifacts, environment.os)
         return self

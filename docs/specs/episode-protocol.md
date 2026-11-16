@@ -9,7 +9,9 @@ Before the protocol starts, the engine has already:
 
 - loaded the Task folder into `TaskSpec` and resolved its
   [variables](task-authoring.md#variables);
-- linted the Task and prepared the solver image and any dedicated verifier image;
+- linted the Task, decided any image kind its folder leaves open
+  ([Source selection](sandbox-image.md#source-selection-and-identity)), and prepared the
+  solver image and any dedicated verifier image;
 - resolved the Harness and the effective Skill/MCP resources;
 - resolved the Harness authentication path, created its episode capabilities and
   evidence sinks, and prepared the Provider registry, run policy, and RunLock inputs.

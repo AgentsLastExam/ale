@@ -33,7 +33,7 @@ def test_macos_vms_need_no_run_settings(vm: dict) -> None:
 def _macos_task(path: Path, layer: dict | None = None, dockerfile: str | None = None) -> Path:
     base = {
         "artifacts": ["/Users/admin/output"],
-        "environment": {"os": "macos", "vm_image": IMAGE, "cpus": 2, "memory_mb": 4096},
+        "environment": {"os": "macos", "image": IMAGE, "cpus": 2, "memory_mb": 4096},
         "agent": {"user": "admin", "network_mode": "public"},
     }
     return write_task(path, config=merged_config(base, layer), dockerfile=dockerfile)
@@ -49,9 +49,9 @@ def test_macos_task_is_a_vm_named_directly(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("layer", "dockerfile"),
     [
-        ({"environment": {"vm_image": None}}, None),
+        ({"environment": {"image": None}}, None),
         ({}, "FROM scratch\n"),
-        ({"environment": {"vm_image": None}}, "FROM scratch\n"),
+        ({"environment": {"image": None}}, "FROM scratch\n"),
     ],
 )
 def test_macos_task_names_or_builds_its_image(
@@ -61,12 +61,10 @@ def test_macos_task_names_or_builds_its_image(
         load_tasks(_macos_task(tmp_path / "task", layer, dockerfile))
 
 
-def _built_macos_task(path: Path, *, base: bool = True, script: bool = True) -> Path:
-    layer = {"environment": {"vm_image": None, "vm_base": IMAGE if base else None}}
-    task = _macos_task(path, layer)
-    if script:
-        (task / "environment").mkdir(exist_ok=True)
-        (task / "environment" / "build.sh").write_text("echo installed\n")
+def _built_macos_task(path: Path, *, base: bool = True) -> Path:
+    task = _macos_task(path, {"environment": {"image": IMAGE if base else None}})
+    (task / "environment").mkdir(exist_ok=True)
+    (task / "environment" / "build.sh").write_text("echo installed\n")
     return task
 
 
@@ -76,15 +74,9 @@ def test_macos_task_builds_on_its_base(tmp_path: Path) -> None:
     assert (spec.image.ref, spec.image.base_ref) == (None, IMAGE)
 
 
-@pytest.mark.parametrize(
-    ("base", "script", "message"),
-    [(True, False, "vm_base requires environment/build.sh"), (False, True, "requires .*vm_base")],
-)
-def test_macos_build_needs_both_base_and_script(
-    tmp_path: Path, base: bool, script: bool, message: str
-) -> None:
-    with pytest.raises(TaskDefinitionError, match=message):
-        load_tasks(_built_macos_task(tmp_path / "task", base=base, script=script))
+def test_macos_build_needs_a_base(tmp_path: Path) -> None:
+    with pytest.raises(TaskDefinitionError, match=r"build\.sh requires \[environment\]\.image"):
+        load_tasks(_built_macos_task(tmp_path / "task", base=False))
 
 
 def test_a_linux_build_helper_named_build_sh_is_only_a_file(tmp_path: Path) -> None:
@@ -100,10 +92,10 @@ def test_macos_verifier_builds_no_image(tmp_path: Path) -> None:
         load_tasks(task)
 
 
-def test_macos_verifier_cannot_run_in_a_container(tmp_path: Path) -> None:
-    layer = {"verifier": {"environment": {"docker_image": "ubuntu:24.04"}}}
-    with pytest.raises(TaskDefinitionError, match="only a Linux verifier runs in a container"):
-        load_tasks(_macos_task(tmp_path / "task", layer))
+def test_a_macos_verifier_image_is_a_vm(tmp_path: Path) -> None:
+    layer = {"verifier": {"environment": {"image": IMAGE}}}
+    image = load_tasks(_macos_task(tmp_path / "task", layer))[0].spec.verify.image
+    assert image is not None and (image.kind, image.ref) == (ImageKind.VM, IMAGE)
 
 
 def test_registry_sends_macos_vms_to_orchard(monkeypatch: pytest.MonkeyPatch) -> None:

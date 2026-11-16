@@ -36,6 +36,14 @@ HELLO_DOCKERFILE = (
     " && chown -R user:user /home/user/input /home/user/output\n"
 )
 
+#: ``HELLO_DOCKERFILE`` for a Linux VM Task: its ``environment/build.sh`` on the VM base.
+HELLO_BUILD = (
+    "set -euo pipefail\n"
+    'mkdir -p "$ALE_HOME/input" "$ALE_HOME/output"\n'
+    "printf 'world' > \"$ALE_HOME/input/word.txt\"\n"
+    'chown -R user:user "$ALE_HOME/input" "$ALE_HOME/output"\n'
+)
+
 HELLO_SOLVE = (
     "#!/usr/bin/env bash\nset -euo pipefail\n"
     "word=$(cat /home/user/input/word.txt)\n"
@@ -51,8 +59,13 @@ def _write_repo(
     config: Mapping[str, Any] | None = None,
     asset_roots: tuple[str, ...] = (),
     dockerfile: str | None = HELLO_DOCKERFILE,
+    build_script: str | None = None,
 ) -> Path:
-    """Create one complete Task, ``agentslastexam/hello``, below ``root/tasks/hello``."""
+    """Create one complete Task, ``agentslastexam/hello``, below ``root/tasks/hello``.
+
+    ``build_script`` is ``environment/build.sh``, which builds a Linux VM on
+    ``[environment].image``.
+    """
     task = write_task(
         root / "tasks" / "hello",
         name="agentslastexam/hello",
@@ -66,6 +79,9 @@ def _write_repo(
         solve=HELLO_SOLVE if with_solution else None,
     )
     (task / "tests" / "verify.py").write_text(VERIFY_CHECK + "\n")
+    if build_script is not None:
+        (task / "environment").mkdir(exist_ok=True)
+        (task / "environment" / "build.sh").write_text(build_script)
     for relative in asset_roots:
         assets = task / relative
         assets.mkdir(parents=True, exist_ok=True)

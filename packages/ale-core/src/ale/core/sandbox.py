@@ -83,9 +83,8 @@ class PreparedTaskImage(BaseModel):
     prepared_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     base_materials: tuple[str, ...] = ()
     resolved_reference: str | None = None
-    oci_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
-    materializer_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     builder_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    """What built a local VM image on its base, the framework it installed included."""
 
     # --- validation ---
 
@@ -109,16 +108,10 @@ class PreparedTaskImage(BaseModel):
             raise ValueError("external prepared images cannot declare image_source_identity")
 
         if self.kind is ImageKind.VM and local:
-            if self.builder_identity is not None:
-                if self.oci_identity is not None or self.materializer_identity is not None:
-                    raise ValueError("VM builders cannot declare OCI materialization identities")
-                if not self.base_materials:
-                    raise ValueError("VM builders require base_materials")
-                return self
-            if self.oci_identity is None or self.materializer_identity is None:
-                raise ValueError("local VM images require OCI/materializer or builder identities")
-        elif any((self.oci_identity, self.materializer_identity, self.builder_identity)):
-            raise ValueError("only local VM images can declare VM build identities")
+            if self.builder_identity is None or not self.base_materials:
+                raise ValueError("a local VM image requires builder_identity and base_materials")
+        elif self.builder_identity is not None:
+            raise ValueError("only a local VM image has a builder_identity")
         return self
 
 

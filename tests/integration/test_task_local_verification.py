@@ -28,7 +28,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 def framework_layer(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fake image identities are not Docker images; the layer is tested on real ones."""
 
-    async def layer(image: str, *, user: str, vm: bool = False) -> str:
+    async def layer(image: str, *, user: str) -> str:
         return image if image.startswith("sha256:") else DIGEST
 
     monkeypatch.setattr("ale.run.task_images.with_framework", layer)
@@ -55,8 +55,8 @@ def _prepared(kind: ImageKind, source: str = "solver-local") -> PreparedTaskImag
     else:
         values["image_source_identity"] = DIGEST
     if kind is ImageKind.VM and source != "external-ref":
-        values["oci_identity"] = DIGEST
-        values["materializer_identity"] = DIGEST
+        values["builder_identity"] = DIGEST
+        values["base_materials"] = (DIGEST,)
     return PreparedTaskImage.model_validate(values)
 
 
@@ -111,9 +111,11 @@ async def test_separate_verifier_reuses_solver_prepared_kind(
     tmp_path: Path, kind: ImageKind
 ) -> None:
     task = load_tasks(scaffold_task(tmp_path / f"reuse-{kind}"))[0]
+    # Only a container is built from the Task folder; a VM solver names its image.
+    named = None if kind is ImageKind.CONTAINER else "ghcr.io/acme/solver:v1"
     task.spec = task.spec.model_copy(
         update={
-            "image": ImageSpec(kind=kind),
+            "image": ImageSpec(kind=kind, ref=named),
             "verify": VerifySpec.model_validate(
                 {
                     "environment_mode": "separate",
@@ -165,18 +167,17 @@ async def test_external_separate_verifier_uses_matching_provider(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", tuple(ImageKind))
-async def test_local_separate_verifier_builds_declared_kind(
-    tmp_path: Path, kind: ImageKind, monkeypatch: pytest.MonkeyPatch, framework_layer: None
+async def test_local_separate_verifier_builds_a_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, framework_layer: None
 ) -> None:
-    task = load_tasks(scaffold_task(tmp_path / f"local-{kind}"))[0]
+    task = load_tasks(scaffold_task(tmp_path / "local-verifier"))[0]
     (task.folder.root / "tests/Dockerfile").write_text("FROM fixture\n")
     task.spec = task.spec.model_copy(
         update={
             "verify": VerifySpec.model_validate(
                 {
                     "environment_mode": "separate",
-                    "image": {"kind": kind},
+                    "image": {"kind": "container"},
                     "resources": {
                         "cpus": 1,
                         "memory_mb": 512,
@@ -194,19 +195,10 @@ async def test_local_separate_verifier_builds_declared_kind(
         return build
 
     monkeypatch.setattr("ale.run.task_images._build_oci", build_oci)
-    if kind is ImageKind.VM:
-
-        async def materialize(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
-            return _prepared(ImageKind.VM, "verifier-local"), False
-
-        monkeypatch.setattr(
-            "ale.run.task_images._materialize_vm_with_status",
-            materialize,
-        )
     registry = _Registry()
     result = await prepare_verifier_image_result(task, registry)  # type: ignore[arg-type]
     assert result is not None
-    assert result.image.kind is kind
+    assert result.image.kind is ImageKind.CONTAINER
     assert result.image.source == "verifier-local"
 
 
@@ -361,7 +353,7 @@ async def test_separate_verifier_image_sources_restore_identically_without_setup
     named: bool,
 ) -> None:
     task = scaffold_task(tmp_path / ("separate-ref" if named else "separate-reuse"))
-    verifier = {"cpus": 1, "memory_mb": 512} | ({"docker_image": CONTAINER_BASE} if named else {})
+    verifier = {"cpus": 1, "memory_mb": 512} | ({"image": CONTAINER_BASE} if named else {})
     edit_task_config(
         task,
         {

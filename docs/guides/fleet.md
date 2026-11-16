@@ -131,11 +131,14 @@ uv run ale run TASK --agent claude-code --set container.provider=fleet --set fle
 ```
 
 The Run prepares no image itself: each Node prepares the images it runs, so the Run's
-machine needs neither Docker nor KVM for the kinds it sends to the Fleet. It sends a Node a
-Task's build context the first time a Sandbox there needs the image. Its Gateway stays on
-its own machine; Nodes reach it through the tunnel the Run opens to each, so the Run's
-machine accepts no connection from them. A Node the Run cannot reach is refused back to the
-control plane, and the Run uses it no more.
+machine needs neither a Docker daemon nor KVM for the kinds it sends to the Fleet. A Linux
+Task that names its image by a registry reference alone needs the Docker CLI with Buildx
+there, with `docker login` for a private registry, because the Run reads the image's
+manifest to learn whether it is a container or a VM. It sends a Node a Task's build context
+the first time a Sandbox there needs the image. Its Gateway stays on its own machine; Nodes
+reach it through the tunnel the Run opens to each, so the Run's machine accepts no
+connection from them. A Node the Run cannot reach is refused back to the control plane, and
+the Run uses it no more.
 
 A Run sends its plan before its first episode and prints the Nodes chosen for each image;
 its first Sandboxes go there, and those Nodes prepare the image. Progress appears on the

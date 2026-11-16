@@ -68,7 +68,7 @@ async def test_task_owned_docker_runs_a_nested_offline_container(tmp_path: Path)
         Phase.TEARDOWN,
     ]
     assert result.lock is not None
-    assert result.lock.framework.schema_version == 2
+    assert result.lock.framework.schema_version == 3
     assert result.lock.resources is not None
     assert result.lock.resources.effective.storage_mb is not None
     assert result.lock.resources.effective.storage_mb >= 8192
@@ -77,5 +77,5 @@ async def test_task_owned_docker_runs_a_nested_offline_container(tmp_path: Path)
     assert image.source == "local"
     assert image.provider == "qemu"
     assert image.observed_identity == image.prepared_identity
-    assert image.oci_identity and image.materializer_identity
+    assert image.builder_identity and image.base_materials
     assert "content_digest" not in image.model_dump()

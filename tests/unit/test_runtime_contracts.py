@@ -41,6 +41,7 @@ from ale.core.sandbox import (
     ResourceAllocation,
 )
 from ale.core.taskspec import (
+    SCHEMA_VERSION,
     ImageKind,
     ImageSpec,
     NetworkMode,
@@ -147,10 +148,10 @@ class TestRunLock:
         with pytest.raises(ProvenanceIncompleteError, match="commit"):
             lock.require_reportable()
 
-    def test_pre_release_schema_version_does_not_change(self) -> None:
-        assert make_lock().framework.schema_version == 2
+    def test_runlock_schema_version_is_pinned(self) -> None:
+        assert make_lock().framework.schema_version == 3
 
-    def test_windows_build_identity_survives_provenance_and_rejects_mixed_builders(self) -> None:
+    def test_vm_build_identity_survives_provenance_and_is_required(self) -> None:
         prepared = PreparedTaskImage(
             kind="vm",
             source="solver-local",
@@ -191,18 +192,17 @@ class TestRunLock:
         assert restored.image.declaration.ref is None
         assert restored.image.builder_identity == DIGEST
         assert restored.image.base_materials == (DIGEST,)
-        assert restored.image.oci_identity is None
-        assert restored.image.materializer_identity is None
 
         for model in (prepared, restored.image):
             values = model.model_dump(mode="json")
-            for invalid in (
-                {"base_materials": []},
-                {"builder_identity": None},
-                {"oci_identity": DIGEST, "materializer_identity": DIGEST},
-            ):
+            for invalid in ({"base_materials": []}, {"builder_identity": None}):
                 with pytest.raises(ValidationError):
                     type(model).model_validate(values | invalid)
+        # A RunLock records what the image turned out to be, never a kind left open.
+        undecided = restored.image.model_dump(mode="json")
+        undecided["declaration"] = {"kind": None, "ref": "ghcr.io/acme/vm:1"}
+        with pytest.raises(ValidationError, match="decided kind"):
+            ImageProvenance.model_validate(undecided)
 
 
 class TestConfigLayering:
@@ -452,7 +452,7 @@ def test_a_task_source_is_read_from_its_git_checkout(tmp_path: Path) -> None:
 
     task = tmp_path / "tasks" / "demo"
     task.mkdir(parents=True)
-    (task / "task.toml").write_text('schema_version = "1.4+ale.1"\n')
+    (task / "task.toml").write_text(f'schema_version = "{SCHEMA_VERSION}"\n')
     assert resolve(str(task)).source.kind == "local"
     git("init", "-q")
     git("remote", "add", "origin", "https://example.invalid/tasks.git")
@@ -486,7 +486,7 @@ def test_a_task_source_records_no_credentials_and_needs_no_git(
 
     task = tmp_path / "tasks" / "demo"
     task.mkdir(parents=True)
-    (task / "task.toml").write_text('schema_version = "1.4+ale.1"\n')
+    (task / "task.toml").write_text(f'schema_version = "{SCHEMA_VERSION}"\n')
     git("init", "-q")
     git("remote", "add", "origin", "https://user:ghp_secret@example.invalid/tasks.git")
     git("add", "-A")
