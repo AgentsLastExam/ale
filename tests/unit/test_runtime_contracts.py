@@ -21,7 +21,7 @@ from ale.core.config import (
     parse_override,
     resolve_asset_collection,
 )
-from ale.core.errors import ConfigError, ProvenanceIncompleteError, ProviderCapabilityError
+from ale.core.errors import ConfigError, ProvenanceIncompleteError
 from ale.core.lock import (
     AgentProvenance,
     FrameworkProvenance,
@@ -33,7 +33,6 @@ from ale.core.lock import (
     TaskSource,
 )
 from ale.core.sandbox import (
-    Capabilities,
     DesktopResolution,
     ImageRef,
     PreparedTaskImage,
@@ -44,8 +43,6 @@ from ale.core.taskspec import (
     SCHEMA_VERSION,
     ImageKind,
     ImageSpec,
-    NetworkMode,
-    NetworkPolicy,
     Resources,
     TaskSpec,
 )
@@ -80,7 +77,7 @@ def make_lock(**overrides: object) -> RunLock:
             image_source_identity=DIGEST,
             prepared_identity=DIGEST,
             runtime_ref="ale-task:fixture",
-            provider="docker",
+            provider="docker:runc",
             observed_identity=DIGEST,
             observed_ref="ale-task:fixture",
         ),
@@ -91,7 +88,8 @@ def make_lock(**overrides: object) -> RunLock:
                 memory_mb=1024,
                 sudo=False,
                 network_mode="block",
-                provider="docker",
+                provider="docker:runc",
+                leaf="docker:runc",
             ),
         ),
         "agent": AgentProvenance(
@@ -203,6 +201,70 @@ class TestRunLock:
         undecided["declaration"] = {"kind": None, "ref": "ghcr.io/acme/vm:1"}
         with pytest.raises(ValidationError, match="decided kind"):
             ImageProvenance.model_validate(undecided)
+
+    def test_the_provider_and_leaf_of_each_sandbox_are_recorded(self) -> None:
+        """The solver's and a separate verifier's: their isolation, which a result's
+        comparability rests on, depends on both."""
+        existing = make_lock()
+        assert existing.resources is not None
+        solver = existing.resources.effective.model_copy(
+            update={"provider": "fleet", "leaf": "docker:kata", "node": "gpu-1/docker:kata"}
+        )
+        verifier = solver.model_copy(
+            update={"provider": "docker:runc", "leaf": "docker:runc", "node": None}
+        )
+        image = ResolvedImage(
+            kind="container",
+            prepared_identity=DIGEST,
+            observed_identity=DIGEST,
+            observed_ref="ale-task:fixture",
+        )
+        prepared = PreparedTaskImage(
+            kind="container",
+            source="solver-local",
+            input_identity=DIGEST,
+            image_source_identity=DIGEST,
+            runtime_ref="ale-task:fixture",
+            prepared_identity=DIGEST,
+        )
+        lock = build_lock(
+            ProvenanceInputs(
+                source=existing.task.source,
+                agent=existing.agent,
+                gateway=existing.gateway,
+                config_hash=DIGEST,
+                framework=existing.framework,
+            ),
+            TaskSpec(
+                name="agentslastexam/separate",
+                image={"kind": "container", "ref": "ghcr.io/acme/tool:1"},
+                instruction="Complete the task.",
+                verify={
+                    "environment_mode": "separate",
+                    "resources": {"cpus": 1, "memory_mb": 512, "storage_mb": None, "gpus": 0},
+                },
+            ),
+            resolved_image=image,
+            allocation=solver,
+            task_digest=DIGEST,
+            prepared_image=prepared,
+            verifier_resolved_image=image,
+            verifier_allocation=verifier,
+            prepared_verifier_image=prepared,
+        )
+        restored = RunLock.model_validate_json(lock.model_dump_json())
+        assert restored.resources is not None and restored.verification.resources is not None
+        effective = restored.resources.effective
+        assert (effective.provider, effective.leaf, effective.node) == (
+            "fleet",
+            "docker:kata",
+            "gpu-1/docker:kata",
+        )
+        checked = restored.verification.resources.effective
+        assert (checked.provider, checked.leaf) == ("docker:runc", "docker:runc")
+        assert restored.image.provider == "fleet"
+        assert restored.verification.image is not None
+        assert restored.verification.image.provider == "docker:runc"
 
 
 class TestConfigLayering:
@@ -325,19 +387,6 @@ class TestConfigLayering:
             LoggingPolicy.model_validate({"native_logs": "sometimes"})
         with pytest.raises(ValidationError):
             LoggingPolicy.model_validate({"unknown": True})
-
-
-class TestCapabilities:
-    def test_rejects_unsupported_network_mode(self) -> None:
-        caps = Capabilities(network_modes=frozenset({NetworkMode.OPEN}))
-        with pytest.raises(ProviderCapabilityError, match="network mode"):
-            caps.check(Resources(), NetworkPolicy(mode=NetworkMode.BLOCK))
-
-    def test_accepts_a_satisfiable_request(self) -> None:
-        caps = Capabilities(
-            gui=True, network_modes=frozenset({NetworkMode.BLOCK}), max_cpus=4, max_memory_mb=8192
-        )
-        caps.check(Resources(cpus=2, memory_mb=2048), NetworkPolicy())
 
 
 class TestGuestProtocol:

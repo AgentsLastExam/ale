@@ -11,7 +11,7 @@ import pytest
 
 from ale.core.config import LoggingPolicy
 from ale.core.sandbox import Identity, SandboxRequest
-from ale.core.taskspec import ImageKind, NetworkPolicy, OperatingSystem, Resources
+from ale.core.taskspec import NetworkPolicy, OperatingSystem, Resources
 from ale.core.verdict import Status
 from ale.run.episode import run_episode
 from ale.run.gateway.server import Gateway
@@ -53,9 +53,7 @@ async def test_windows_builtin_desktop_mcp_over_stdio(
     provider = QemuProvider(image=image, overlay_dir=tmp_path / "qemu")
     # The base carries no Cua Driver; building a Task image on it installs one.
     task = load_task_folder(_write_windows_gui_task(tmp_path / "tasks"))
-    prepared = (
-        await prepare_task_image_result(task, provider_registry(provider, kind=ImageKind.VM))
-    ).image
+    prepared = (await prepare_task_image_result(task, provider)).image
     sandbox = await provider.create(
         SandboxRequest(
             episode_id="windows-desktop-mcp",
@@ -147,9 +145,9 @@ async def test_windows_task_image_installs_software_and_reuses_cache(
     """).lstrip()
     )
     task = load_task_folder(folder)
-    providers = provider_registry(QemuProvider(image=image), kind=ImageKind.VM)
-    built = await prepare_task_image_result(task, providers)
-    cached = await prepare_task_image_result(task, providers)
+    provider = QemuProvider(image=image)
+    built = await prepare_task_image_result(task, provider)
+    cached = await prepare_task_image_result(task, provider)
     assert built.image == cached.image
     assert built.steps[2].outcome == "executed"
     assert cached.steps[2].outcome == "reused"
@@ -383,7 +381,7 @@ async def test_standard_task_assets_across_operating_systems(
         if not image.is_file():
             pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
         provider = QemuProvider(image=image, overlay_dir=tmp_path / "qemu")
-        providers = provider_registry(provider, kind=ImageKind.VM)
+        providers = provider_registry(provider)
     else:
         providers = provider_registry(DockerProvider())
 
@@ -424,10 +422,7 @@ async def test_real_llm_reads_and_edits_the_windows_desktop(tmp_path: Path) -> N
                 max_steps=20,
                 stall_limit=6,
             ),
-            provider_registry(
-                QemuProvider(image=image, overlay_dir=tmp_path / "qemu"),
-                kind=ImageKind.VM,
-            ),
+            provider_registry(QemuProvider(image=image, overlay_dir=tmp_path / "qemu")),
             run_dir=tmp_path / "runs",
             gateway_url=gateway.base_url,
             gateway=gateway,

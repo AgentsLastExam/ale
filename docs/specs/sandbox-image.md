@@ -190,7 +190,7 @@ folder decides how:
   `[environment].image` beside it fails; on Windows and macOS a Dockerfile fails.
 - A build script, `environment/build.sh` on Linux and macOS or `environment/build.ps1` on
   Windows, builds a VM on the VM image `[environment].image` names, which it requires.
-- `[environment].image` alone is used directly, resolved by the matching Provider.
+- `[environment].image` alone is used directly, resolved by the Provider selected for it.
 
 The Task folder decides every image's kind as the Task loads, so loading reads nothing
 else: Windows and macOS images are VMs, a Linux absolute path is a VM disk, and only a Linux
@@ -341,11 +341,18 @@ Runtime never downloads it.
 
 Shared verification uses the solver image. Separate verification uses one of:
 
-1. `[verifier.environment].image`, used directly and resolved through the matching
+1. `[verifier.environment].image`, used directly and resolved through the verifier's
    Provider; its kind follows the [solver's rules](#source-selection-and-identity) under
    the Task's `os`;
-2. on Linux, a container built from `tests/Dockerfile` with `tests/` as context;
-3. otherwise the prepared solver image.
+2. on Linux, a container built from `tests/Dockerfile` with `tests/` as context, which
+   requires separate verification and fails a Windows or macOS Task;
+3. otherwise the very image the solver runs, checked by the verifier's Provider when that
+   is not the solver's, so the two never resolve a tag apart. Where either is the Fleet,
+   which prepares images on its Nodes, the verifier's Provider prepares it again from the
+   solver's declaration: a named image at the digest the solver's resolved to, unless the
+   solver is on the Fleet, whose Node resolves the tag only after the Run has prepared its
+   images, so the verifier resolves it again; a built image is built again, so a build that
+   is not reproducible can give the verifier another image.
 
 Naming an image beside `tests/Dockerfile` fails, as the Dockerfile names its base in `FROM`,
 and a verifier never builds on a base. The local verifier context is fixed at `tests/`; its
@@ -383,6 +390,8 @@ Given a conforming image, the Docker Provider:
   [resolution](#desktop-resolution) and waits for it;
 - applies CPU, memory, writable storage, network, sudo, and GPU requests or rejects them;
 - injects only selected NVIDIA devices through the configured runtime/CDI path;
+- names its leaf's runtime for every container, refusing one that ran under another, so
+  the daemon's default never stands in for it;
 - observes the resulting image, runtime and resource allocation;
 - labels every ALE container with episode, physical role, requested retention, and GPU
   identity;
@@ -412,7 +421,7 @@ than rounded.
 Retained handles are always provider-qualified: `docker:<runtime-id>` for containers,
 `qemu:<runtime-id>` for QEMU VMs, `firecracker:<runtime-id>` for Firecracker microVMs,
 `daytona:<sandbox-id>` for Daytona, `orchard:<vm>:<uid>` for Orchard VMs and `fleet:<sandbox>`
-for a Sandbox kept on the [Fleet](fleet.md#lifecycle), whichever Provider its Node used.
+for a Sandbox kept on the [Fleet](fleet.md#lifecycle), whichever leaf its Node used.
 Unqualified handles are rejected. Listing, destroying and attaching are Provider
 operations, routed by the Provider a handle or RunLock names, so a new backend needs no CLI
 change, apart from the Fleet, which `ale sandbox` reaches at `$ALE_FLEET_URL` and
@@ -474,6 +483,57 @@ use sudo.
 ALE does not pre-create artifacts or repair their ownership: image/setup/agent code owns
 their type and existence.
 
+## Provider selection
+
+A Task states what its Sandboxes need and never names a Provider or runtime, so it runs
+unchanged wherever a Provider serves it. A Provider is one of two classes. A
+[leaf](lexicon.md) starts Sandboxes on the machine it runs on, and declares each real
+combination it can start as a [capability profile](lexicon.md): kind, operating system,
+architecture, desktop, network modes, snapshots, GPUs and their models, CPU and memory
+limits, and container features. A scheduler places Sandboxes on machines it manages, which
+start them with the leaves there, and offers what those leaves do: the Fleet those of the
+leaves its registered Nodes lend, Daytona the one of its own Sandboxes. Which leaves a
+scheduler uses, and in which order, is its own configuration, never a Run's.
+
+A Sandbox needs its image's kind and operating system, the architecture that system implies
+(arm64 for macOS, x86-64 otherwise), its network mode, its resources (CPUs, memory, GPUs and
+the models it accepts, container features), and snapshots when it saves or boots from one.
+One rule compares needs with a profile, naming each need the profile misses, wherever a
+Provider or Node is chosen: in a Run's selection, in every leaf's `create`, and in the
+Fleet's placement, so a Sandbox is accepted or refused the same way wherever it is asked
+for. A leaf may also refuse by rules no profile states
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles)
+lists them); they hold wherever it runs, so selection asks them of a leaf, and of the
+leaves a scheduler would use, by the method `create` asks. A request that `create` would
+refuse is thus refused before the Run starts.
+
+The Run's `sandbox.providers` lists provider ids in order of preference. Each Sandbox, a
+Task's solver and a separate verifier by its own needs, goes to the first Provider with a
+profile that serves it and no rule of its own against it. The choice is by capability alone,
+never by load, so one configuration always chooses the same way. Every Task is selected once
+the kinds of its images are decided and before any image is prepared or Sandbox started. A
+Run with a Sandbox that no listed Provider serves is refused whole, naming each such Task
+and role and why each Provider does not serve it, rather than failing its episodes one by
+one.
+
+Before any episode starts, the Run has each selected leaf run its preflight once, which
+finds what the leaf runs with, such as its container runtime. Then, for each set of
+container features its selected Sandboxes ask for, the leaf starts one throwaway Sandbox
+as it would the first that asks for that set, and the Run probes each feature in it as
+root; one it lacks refuses the Run, naming the leaf and the feature. A profile says what a
+leaf gives; only the Host shows that it gives it here, where a kernel setting or a missing
+device can take a feature away. Each set is probed on its own because a grant one feature
+brings can make another pass. A scheduler's leaves run on machines the Run does not reach,
+and the Run checks none of them.
+
+A prepared image belongs to the Provider selected for it, so one image is prepared once for
+each Provider that runs it. A Sandbox kept or snapshotted is reached only through the
+Provider that kept it, so a continuation's solver needs what booting it from a snapshot
+needs, and is refused before any image is prepared unless the Run selects that Provider
+for it. The RunLock records, for the solver and a separate verifier, the Provider selected
+and the leaf that started the Sandbox
+([Security](security.md#7-a-result-carries-what-produced-it)).
+
 ## Provider contract
 
 A Provider turns a SandboxRequest into a running Sandbox that holds the guarantees below,
@@ -486,13 +546,15 @@ Task content (the engine).
 
 | Guarantee | Enforced by | Conformance test |
 |---|---|---|
+| It declares its capability profiles, and refuses, before creating anything, a request that they or its own rules do not serve, by the check the Run's selection made | Provider: `profiles` and `refusals`; a leaf's `accepts` in `create`, the Fleet's placement | `test_declares_profiles`, `test_refuses_up_front_a_container_feature_none_of_its_profiles_gives`, `test_rejects_a_request_it_cannot_serve` |
 | Every sandbox runs the framework of the engine driving it, whatever image or disk it was handed | Provider in `create` | `test_a_sandbox_carries_the_engines_framework` |
 | Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[agent].sudo` asks, whatever image or snapshot it starts from | Provider in `create`: set at every start, then checked both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected`, `test_one_image_serves_an_agent_with_and_without_elevation`, `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |
 | Framework phases have the network; after `close_egress` the agent reaches its Gateway (and, for `allowlist`, the declared hosts) and nothing else; `open` Tasks are never sealed | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |
 | Every Sandbox reaches its Gateway at the same fixed port, whatever port the Host serves it on, and a reattached Sandbox reaches a later run's Gateway there: an agent may keep the address in its native session | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_reattached_sandbox_reaches_a_later_gateway_at_the_same_address` |
-| Resources are applied or rejected; the RunLock records the observed image and allocation | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
+| Resources are applied or rejected; the RunLock records the observed image and allocation, with the Provider selected for the Sandbox and the leaf whose profile served it | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
+| A container Sandbox that asks for the container features a profile declares has each of them, as root | Provider in `create`; the Run's preflight on the Host | `test_gives_every_container_feature_it_declares` |
 | Destroy is idempotent; retained sandboxes can be listed and destroyed through their Provider | Provider | `test_destroy_is_idempotent`, `test_a_retained_sandbox_can_be_listed_and_destroyed` |
 | A Provider that can names each Sandbox by a `handle`, by which another process on the same machine drives it again (`reattach`) or destroys it (`discard`) after the creating process is gone, whatever its retention ([which Providers do, and how](../../packages/ale-run/src/ale/run/providers/README.md#reattaching-by-handle)) | Provider | `test_a_sandbox_is_driven_again_by_its_handle` |
 | A snapshot holds the disk, any number of Sandboxes boot from it, and it is listed and destroyed through its Provider; a Provider without snapshots refuses them before provisioning | Provider | `test_a_snapshot_boots_new_sandboxes_with_its_files` |
@@ -502,10 +564,10 @@ Task content (the engine).
 
 `open_egress` and `close_egress` are abstract: a default that did nothing would let a new
 backend run the agent with the network while its RunLock said `block`. A backend that
-cannot change policy at runtime raises there, and one that cannot apply a policy rejects it
-in `accepts`. A Provider is complete when it passes `ale.core.testkit.ProviderConformance`;
-an escape the suite cannot observe, such as a platform's own in-sandbox service, is that
-Provider's to close and to check in `create`.
+cannot change policy at runtime raises there, and one that cannot apply a policy leaves its
+mode out of its profiles. A Provider is complete when it passes
+`ale.core.testkit.ProviderConformance`; an escape the suite cannot observe, such as a
+platform's own in-sandbox service, is that Provider's to close and to check in `create`.
 
 ## Base-image changes
 

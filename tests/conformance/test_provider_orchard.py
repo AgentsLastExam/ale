@@ -17,14 +17,12 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import RunConfig
 from ale.core.sandbox import Identity, PreparedTaskImage, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from ale.core.testkit import ProviderConformance
 from ale.run.framework import MACOS_PYTHON
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.session import GatewaySession, SessionRegistry
-from ale.run.providers import ProviderRegistry
 from ale.run.providers.orchard import OrchardProvider
 from ale.run.task_images import prepare_task_image
 from ale.run.tasksets.manifest import load_tasks
@@ -45,7 +43,7 @@ TASK = Path(__file__).resolve().parents[1] / "fixtures/tasks/macos-unprivileged"
 def unprivileged() -> tuple[PreparedTaskImage, str]:
     """The fixture Task's image, built on its base the first time, and its account."""
     task = load_tasks(TASK)[0]
-    image = asyncio.run(prepare_task_image(task, ProviderRegistry(RunConfig())))
+    image = asyncio.run(prepare_task_image(task, OrchardProvider()))
     return image, task.spec.image.user
 
 

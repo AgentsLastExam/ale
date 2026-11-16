@@ -20,11 +20,13 @@ from ale.run.harnesses.builtin import OracleHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
 from ale.run.providers import ProviderRegistry
+from ale.run.providers.docker import DockerProvider
+from ale.run.providers.qemu import QemuProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import prepare_task_image, prepare_task_image_result
 from ale.run.tasksets.manifest import load_tasks
 from tests.integration.conftest import HELLO_BUILD
-from tests.support import VM_BASE, VM_RESOURCES
+from tests.support import VM_BASE, VM_RESOURCES, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -82,10 +84,10 @@ async def test_local_container_build_reuse_and_input_boundaries(
     tmp_path: Path, isolated_ale_cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     task_path = scaffold_task(tmp_path / "task")
-    registry = ProviderRegistry(RunConfig())
+    provider = DockerProvider()
     first, second = await asyncio.gather(
-        prepare_task_image(load_tasks(task_path)[0], registry),
-        prepare_task_image(load_tasks(task_path)[0], registry),
+        prepare_task_image(load_tasks(task_path)[0], provider),
+        prepare_task_image(load_tasks(task_path)[0], provider),
     )
     assert second.input_identity == first.input_identity
     assert second.prepared_identity == first.prepared_identity
@@ -99,7 +101,7 @@ async def test_local_container_build_reuse_and_input_boundaries(
         return await run(*argv, timeout=timeout)
 
     monkeypatch.setattr(task_images, "_run", recording_run)
-    reused = await prepare_task_image_result(load_tasks(task_path)[0], registry)
+    reused = await prepare_task_image_result(load_tasks(task_path)[0], provider)
     monkeypatch.setattr(task_images, "_run", run)
     assert reused.image == first
     assert [(step.name, step.outcome) for step in reused.steps[1:3]] == [
@@ -110,12 +112,12 @@ async def test_local_container_build_reuse_and_input_boundaries(
 
     verifier = task_path / "tests" / "verify.py"
     verifier.write_text(verifier.read_text() + "\n# verifier-only edit\n")
-    verifier_edit = await prepare_task_image(load_tasks(task_path)[0], registry)
+    verifier_edit = await prepare_task_image(load_tasks(task_path)[0], provider)
     assert verifier_edit.input_identity == first.input_identity
 
     dockerfile = task_path / "environment" / "Dockerfile"
     dockerfile.write_text(dockerfile.read_text() + "\nRUN true\n")
-    image_edit = await prepare_task_image(load_tasks(task_path)[0], registry)
+    image_edit = await prepare_task_image(load_tasks(task_path)[0], provider)
     assert image_edit.input_identity != first.input_identity
 
 
@@ -139,11 +141,11 @@ async def test_setup_never_enters_the_container_build_context(
         + "RUN test -f /opt/context/keep.txt && test ! -e /opt/context/ignored.txt "
         + "&& test ! -e /opt/context/setup\n"
     )
-    registry = ProviderRegistry(RunConfig())
-    first = await prepare_task_image(load_tasks(task_path)[0], registry)
+    provider = DockerProvider()
+    first = await prepare_task_image(load_tasks(task_path)[0], provider)
 
     (environment / "setup" / "setup.sh").write_text("echo changed\n")
-    assert await prepare_task_image(load_tasks(task_path)[0], registry) == first
+    assert await prepare_task_image(load_tasks(task_path)[0], provider) == first
 
 
 def _chain(disk: Path) -> list[Path]:
@@ -175,11 +177,11 @@ async def test_a_linux_vm_build_is_one_layer_on_the_pulled_base(
         build_script=HELLO_BUILD,
     )
     build = task_path / "environment" / "build.sh"
-    registry = ProviderRegistry(RunConfig())
+    provider = QemuProvider()
 
     first, second = await asyncio.gather(
-        prepare_task_image(load_tasks(task_path)[0], registry),
-        prepare_task_image(load_tasks(task_path)[0], registry),
+        prepare_task_image(load_tasks(task_path)[0], provider),
+        prepare_task_image(load_tasks(task_path)[0], provider),
     )
     assert first.kind is ImageKind.VM and first.source == "solver-local"
     assert second == first
@@ -192,13 +194,13 @@ async def test_a_linux_vm_build_is_one_layer_on_the_pulled_base(
     assert _chain(layer) == [layer, base.resolve()]
 
     started = time.monotonic()
-    reused = await prepare_task_image_result(load_tasks(task_path)[0], registry)
+    reused = await prepare_task_image_result(load_tasks(task_path)[0], provider)
     assert time.monotonic() - started < 30
     assert ("linux-build", "reused") in [(step.name, step.outcome) for step in reused.steps]
 
     verifier = task_path / "tests" / "verify.py"
     verifier.write_text(verifier.read_text() + "\n# unrelated edit\n")
-    assert await prepare_task_image(load_tasks(task_path)[0], registry) == first
+    assert await prepare_task_image(load_tasks(task_path)[0], provider) == first
 
     # Another Task on the same base uses the same pulled disk, and its own layer holds only
     # the framework and what its build wrote.
@@ -208,7 +210,7 @@ async def test_a_linux_vm_build_is_one_layer_on_the_pulled_base(
         dockerfile=None,
         build_script=HELLO_BUILD + "printf other > /etc/other-task\n",
     )
-    own = Path((await prepare_task_image(load_tasks(other)[0], registry)).runtime_ref)
+    own = Path((await prepare_task_image(load_tasks(other)[0], provider)).runtime_ref)
     assert list((isolated_ale_cache / "vm-images").glob("*/disk.qcow2")) == [base]
     assert own != layer and _chain(own) == [own, base.resolve()]
     for disk in (layer, own):
@@ -221,7 +223,7 @@ async def test_a_linux_vm_build_is_one_layer_on_the_pulled_base(
     result = await run_episode(
         task,
         EpisodeProtocol(OracleHarness()),
-        registry,
+        provider_registry(provider),
         run_dir=tmp_path / "runs",
         provenance=ProvenanceInputs(
             source=TaskSource(kind="local", path=str(task_path)),
@@ -234,10 +236,10 @@ async def test_a_linux_vm_build_is_one_layer_on_the_pulled_base(
     assert result.lock is not None
     assert result.lock.image.builder_identity == first.builder_identity
     assert result.lock.image.base_materials == first.base_materials
-    assert await prepare_task_image(load_tasks(task_path)[0], registry) == first
+    assert await prepare_task_image(load_tasks(task_path)[0], provider) == first
 
     build.write_text(build.read_text() + "printf second > /etc/task-layer\n")
-    changed = await prepare_task_image(load_tasks(task_path)[0], registry)
+    changed = await prepare_task_image(load_tasks(task_path)[0], provider)
     assert changed.prepared_identity != first.prepared_identity
     assert changed.base_materials == first.base_materials
     assert _chain(Path(changed.runtime_ref))[1:] == [base.resolve()]
@@ -259,7 +261,7 @@ async def test_failed_linux_vm_build_leaves_no_partial_disk(
         build_script="echo 'the build broke' >&2\nexit 3\n",
     )
     with pytest.raises(TaskDefinitionError, match=r"build\.sh failed \(exit=3.*the build broke"):
-        await prepare_task_image(load_tasks(task_path)[0], ProviderRegistry(RunConfig()))
+        await prepare_task_image(load_tasks(task_path)[0], QemuProvider())
     root = isolated_ale_cache / "vm-builds"
     assert not list(root.glob("*.qcow2"))
     assert not list(root.glob(".*-*"))
@@ -269,7 +271,7 @@ async def test_failed_linux_vm_build_leaves_no_partial_disk(
 async def test_episode_starts_exact_prepared_local_image(tmp_path: Path) -> None:
     task = load_tasks(scaffold_task(tmp_path / "task"))[0]
     providers = ProviderRegistry(RunConfig())
-    task.prepared_image = await prepare_task_image(task, providers)
+    task.prepared_image = await prepare_task_image(task, providers.get("docker:runc"))
     result = await run_episode(
         task,
         EpisodeProtocol(OracleHarness()),

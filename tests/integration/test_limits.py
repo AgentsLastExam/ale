@@ -57,9 +57,8 @@ async def build_images(task_root: Path) -> None:
     With a cold cache, or another run holding the build lock, the build would spend the grace.
     """
     task = load_tasks(task_root)[0]
-    providers = provider_registry(DockerProvider())
-    await prepare_task_image(task, providers)
-    await prepare_verifier_image(task, providers)
+    task.prepared_image = await prepare_task_image(task, DockerProvider())
+    await prepare_verifier_image(task, DockerProvider())
 
 
 def set_timeout(task_root: Path, phase: str, seconds: int) -> None:

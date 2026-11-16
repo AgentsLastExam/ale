@@ -70,6 +70,33 @@ def test_living_task_docs_do_not_recommend_removed_contracts(path: Path) -> None
     assert not [snippet for snippet in forbidden if snippet in text]
 
 
+def test_no_doc_names_a_run_setting_that_sandbox_providers_replaced() -> None:
+    docs = [
+        ROOT / "README.md",
+        ROOT / ".env.example",
+        *(ROOT / "docs").rglob("*.md"),
+        *(ROOT / "packages").rglob("*.md"),
+    ]
+    removed = (
+        "container.provider",
+        "container.runtime",
+        "container.gpus",
+        "container.daytona",
+        "vm.provider",
+        "[container]",
+        "[vm]",
+        "[fleet]",
+        " fleet.url",
+        "`fleet.url",
+    )
+    named = {
+        str(path.relative_to(ROOT)): found
+        for path in docs
+        if (found := [key for key in removed if key in path.read_text(encoding="utf-8")])
+    }
+    assert named == {}
+
+
 def test_authoring_contract_names_the_current_task_shape() -> None:
     text = (ROOT / "docs/specs/task-authoring.md").read_text(encoding="utf-8")
     for required in (

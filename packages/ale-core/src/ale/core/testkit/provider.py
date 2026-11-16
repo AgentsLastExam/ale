@@ -15,7 +15,7 @@ import hashlib
 import struct
 import tempfile
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -32,7 +32,14 @@ from ale.core.sandbox import (
     Sandbox,
     SandboxRequest,
 )
-from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from ale.core.taskspec import (
+    ContainerFeature,
+    ImageKind,
+    NetworkMode,
+    NetworkPolicy,
+    OperatingSystem,
+    Resources,
+)
 
 __all__ = ["ProviderConformance"]
 
@@ -58,6 +65,18 @@ for target in sys.argv[1:]:
         print(target, "open")
     except Exception:
         print(target, "closed")
+"""
+
+
+#: A container image to run inside a Sandbox, pinned so the check stays the same.
+_BUSYBOX = "busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
+#: Installs Docker from the image's distribution, starts it, and runs a container in it.
+_NESTED = f"""
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq && apt-get install -y -qq docker.io >/dev/null || exit 2
+(dockerd >/tmp/dockerd.log 2>&1 &)
+for _ in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
+docker run --rm {_BUSYBOX} echo nested-container-ok
 """
 
 
@@ -149,7 +168,7 @@ class ProviderConformance:
     """An image that starts a desktop, if this backend has one to test with.
 
     A desktop is a property of the *image*, not of the backend: a provider that can host
-    one says so in its capabilities, but whether a given sandbox has a screen depends on
+    one says so in its profiles, but whether a given sandbox has a screen depends on
     what it was built from. So the GUI assertions need an image that claims a desktop,
     and skip rather than fail where none is configured."""
 
@@ -159,6 +178,14 @@ class ProviderConformance:
     Every sandbox carries it in ``/opt/ale/framework`` whatever image it was handed. The
     suite depends on no engine package, so a backend's suite supplies the value; ``None``
     skips the check."""
+
+    missing_features: (
+        Callable[[Sandbox, Iterable[ContainerFeature]], Awaitable[Mapping[ContainerFeature, str]]]
+        | None
+    ) = None
+    """The engine's probe of container features, as a staticmethod: those a Sandbox lacks,
+    each with why. The suite depends on no engine package, so a backend's suite supplies it;
+    ``None`` checks only ``nested_containers``, by starting a container."""
 
     async def request(self, **overrides: object) -> SandboxRequest:
         image = overrides.pop("image", self.image)
@@ -177,10 +204,44 @@ class ProviderConformance:
         await self.provider.preflight()
 
     @pytest.mark.asyncio
-    async def test_declares_capabilities(self) -> None:
-        caps = self.provider.capabilities()
-        assert caps.network_modes, "a provider must declare at least one network mode"
-        assert caps.operating_systems
+    async def test_declares_profiles(self) -> None:
+        profiles = await self.provider.profiles()
+        assert profiles, "a provider must declare what it can start"
+        for profile in profiles:
+            assert profile.network_modes, "a profile must declare at least one network mode"
+
+    @pytest.mark.asyncio
+    async def test_gives_every_container_feature_it_declares(self) -> None:
+        """A container Sandbox that asks for all the features a profile declares has each,
+        as root: what a profile declares is what selection and placement trust."""
+        declared = {
+            profile.container_features
+            for profile in await self.provider.profiles()
+            if profile.kind is ImageKind.CONTAINER and profile.container_features
+        }
+        if self.missing_features is None:
+            # Only a container engine shows itself without the suite's probe.
+            declared = {
+                features for features in declared if ContainerFeature.NESTED_CONTAINERS in features
+            }
+        if not declared:
+            pytest.skip("it declares no container features this suite can show")
+        for features in declared:
+            nested = ContainerFeature.NESTED_CONTAINERS in features
+            request = await self.request(
+                resources=Resources(
+                    cpus=1, memory_mb=2048, container_features=tuple(sorted(features))
+                ),
+                # Its container engine and the container's image are installed from the
+                # Internet.
+                network=NetworkPolicy(mode=NetworkMode.OPEN if nested else NetworkMode.BLOCK),
+            )
+            async with await self.provider.create(request) as sandbox:
+                if self.missing_features is not None:
+                    assert await self.missing_features(sandbox, features) == {}
+                if nested:
+                    result = await sandbox.exec(["sh", "-c", _NESTED], timeout_sec=900)
+                    assert "nested-container-ok" in result.stdout, result.stderr[-2000:]
 
     @pytest.mark.asyncio
     async def test_exec_reports_exit_codes_and_streams(self) -> None:
@@ -255,7 +316,10 @@ class ProviderConformance:
             assert sandbox.allocation.cpus == request.resources.cpus
             assert sandbox.allocation.memory_mb == request.resources.memory_mb
             assert sandbox.allocation.network_mode is request.network.mode
-            assert sandbox.allocation.provider == self.provider.name
+            assert sandbox.allocation.provider == self.provider.id
+            # The leaf of one of its profiles: its own, or one a scheduler placed it on.
+            leaves = {profile.provider for profile in await self.provider.profiles()}
+            assert sandbox.allocation.leaf in leaves
 
     @pytest.mark.asyncio
     async def test_a_sandbox_is_driven_again_by_its_handle(self) -> None:
@@ -490,7 +554,7 @@ class ProviderConformance:
         Each gets the elevation and desktop resolution its own request asks for, whatever
         the snapshot's had.
         """
-        if not self.provider.capabilities().snapshot:
+        if not any(profile.snapshot for profile in await self.provider.profiles()):
             with pytest.raises(ProviderCapabilityError):
                 await self.provider.create(await self.request(retention="snapshot"))
             return
@@ -557,6 +621,28 @@ class ProviderConformance:
             await sandbox.destroy()
 
     @pytest.mark.asyncio
+    async def test_refuses_up_front_a_container_feature_none_of_its_profiles_gives(
+        self,
+    ) -> None:
+        """What it would refuse to create, it reports as unserved, which a Run selects by
+        before anything starts."""
+        offered = {
+            feature
+            for profile in await self.provider.profiles()
+            for feature in profile.container_features
+        }
+        lacking = sorted(set(ContainerFeature) - offered)
+        if not lacking:
+            pytest.skip("its profiles give every container feature")
+        request = await self.request(
+            resources=Resources(cpus=1, memory_mb=512, container_features=(lacking[0],))
+        )
+        assert await self.provider.unserved(request.needs, user=request.user, role=request.role)
+        with pytest.raises(ProviderCapabilityError):
+            sandbox = await self.provider.create(request)
+            await sandbox.destroy()
+
+    @pytest.mark.asyncio
     async def test_never_gives_a_gpu_model_the_task_does_not_accept(self) -> None:
         resources = Resources(gpus=1, gpu_types=("ALE-NO-SUCH-GPU",))
         try:
@@ -577,7 +663,7 @@ class ProviderConformance:
 
         Skipped where the provider does not claim a desktop — that is an honest answer.
         """
-        if not (self.provider.capabilities().gui and self.gui_image):
+        if not (self.gui_image and any(profile.gui for profile in await self.provider.profiles())):
             pytest.skip("no desktop image configured for this backend")
 
         request = await self.request(image=self.gui_image)
@@ -596,7 +682,7 @@ class ProviderConformance:
         The same prepared image serves every resolution, so one the image ignored would
         leave the agent another screen than the one its RunLock records.
         """
-        if not (self.provider.capabilities().gui and self.gui_image):
+        if not (self.gui_image and any(profile.gui for profile in await self.provider.profiles())):
             pytest.skip("no desktop image configured for this backend")
 
         resolution = DesktopResolution(width=1366, height=768)
@@ -609,7 +695,7 @@ class ProviderConformance:
     @pytest.mark.asyncio
     async def test_a_declared_desktop_accepts_input(self) -> None:
         """The other half of a desktop: an agent can act on it, not only look at it."""
-        if not (self.provider.capabilities().gui and self.gui_image):
+        if not (self.gui_image and any(profile.gui for profile in await self.provider.profiles())):
             pytest.skip("no desktop image configured for this backend")
 
         request = await self.request(image=self.gui_image)

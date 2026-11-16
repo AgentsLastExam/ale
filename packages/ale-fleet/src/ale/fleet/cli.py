@@ -93,7 +93,10 @@ def node(
     ] = None,
     provider: Annotated[
         list[str] | None,
-        typer.Option(help="A Provider to lend (repeat). Default: every one that works here."),
+        typer.Option(
+            help="A leaf to lend: docker:runc, docker:kata, qemu or orchard (repeat, most "
+            "preferred first). Default: docker:runc, qemu and orchard, where each works."
+        ),
     ] = None,
     label: Annotated[
         list[str] | None, typer.Option(help="A KEY=VALUE label for operators (repeat).")
@@ -143,6 +146,11 @@ def node(
             typer.echo(
                 f"lending {profile.provider}: {profile.kind} {profile.os}/{profile.arch} "
                 f"network={','.join(sorted(profile.network_modes))}"
+                + (
+                    f" features={','.join(sorted(profile.container_features))}"
+                    if profile.container_features
+                    else ""
+                )
             )
         agent = NodeAgent(
             settings,

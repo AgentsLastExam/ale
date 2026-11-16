@@ -2,26 +2,34 @@
 
 from __future__ import annotations
 
+import ast
 import json
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal, get_args
 
 import pytest
 
+import ale.run
+from ale.core.config import ProviderId
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
+    GpuDevice,
     Identity,
     PreparedTaskImage,
     ResolvedImage,
     ResourceAllocation,
     SandboxRequest,
+    SandboxRole,
 )
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.run.providers.docker import kata
 from ale.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
+    RUNTIMES,
     DockerProvider,
     DockerSandbox,
     _bridge_host_ip,
@@ -135,7 +143,12 @@ def _sandbox() -> DockerSandbox:
     sandbox.request = request(retention="snapshot")
     sandbox.agent_user = "user"
     sandbox.allocation = ResourceAllocation(
-        cpus=1, memory_mb=1024, sudo=False, network_mode=NetworkMode.BLOCK, provider="docker"
+        cpus=1,
+        memory_mb=1024,
+        sudo=False,
+        network_mode=NetworkMode.BLOCK,
+        provider="docker:runc",
+        leaf="docker:runc",
     )
     sandbox._client = SimpleNamespace(close=close)  # type: ignore[assignment]
     sandbox._file_client = SimpleNamespace(close=close)  # type: ignore[assignment]
@@ -259,18 +272,54 @@ async def test_a_snapshot_is_listed_and_destroyed_by_its_handle(
     assert removed == ["ale-snapshot:e1-abcdef"] * 2
 
 
-def test_a_provider_without_snapshots_refuses_them_before_anything_starts() -> None:
+async def test_a_provider_without_snapshots_refuses_them_before_anything_starts() -> None:
     from ale.run.providers.daytona import DaytonaProvider
 
-    with pytest.raises(ProviderCapabilityError, match="does not save or boot snapshots"):
-        DaytonaProvider().accepts(request(retention="snapshot", network=NetworkPolicy()))
-    with pytest.raises(ProviderCapabilityError, match="does not save or boot snapshots"):
-        DaytonaProvider().accepts(request(snapshot="docker:snapshot:e1", network=NetworkPolicy()))
-    DockerProvider().accepts(request(retention="snapshot"))
+    with pytest.raises(ProviderCapabilityError, match="saves and boots no snapshots"):
+        await DaytonaProvider().accepts(request(retention="snapshot", network=NetworkPolicy()))
+    with pytest.raises(ProviderCapabilityError, match="saves and boots no snapshots"):
+        await DaytonaProvider().accepts(
+            request(snapshot="docker:snapshot:e1", network=NetworkPolicy())
+        )
+    await DockerProvider().accepts(request(retention="snapshot"))
+
+
+def test_every_helper_container_of_ales_runs_under_runc() -> None:
+    """ALE's own containers, its runners, builders and netfilter helper, need what runc
+    gives them of the Host, whatever runtime the daemon starts others with."""
+    root = Path(ale.run.__file__).parent
+    helpers: list[str] = []
+    unpinned: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            # A command line: a call's arguments, or a list of them built first.
+            if isinstance(node, ast.Call):
+                argv = node.args
+                through = isinstance(node.func, ast.Name) and node.func.id == "_docker"
+            elif isinstance(node, ast.List):
+                argv, through = node.elts, False
+            else:
+                continue
+            words = [arg.value for arg in argv[:2] if isinstance(arg, ast.Constant)]
+            if words != ["docker", "run"] and not (through and words[:1] == ["run"]):
+                continue
+            where = f"{path.relative_to(root)}:{node.lineno}"
+            helpers.append(where)
+            if not any(
+                isinstance(arg, ast.Starred)
+                and isinstance(arg.value, ast.Name)
+                and arg.value.id == "HELPER_RUNTIME"
+                for arg in argv
+            ):
+                unpinned.append(where)
+    assert len(helpers) >= 7, helpers
+    assert unpinned == []
 
 
 def _helper_commands(call: tuple[str, ...]) -> list[str]:
-    assert call[:5] == ("run", "--rm", "--network", "container:ale-e1", "--cap-add")
+    assert call[:7] == (
+        "run", "--rm", "--runtime", "runc", "--network", "container:ale-e1", "--cap-add"
+    )  # fmt: skip
     return call[-1].split(" && ")
 
 
@@ -503,7 +552,12 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     )
     wanted = request(network=network, proxy_url="http://0.0.0.0:9443")
     allocation = ResourceAllocation(
-        cpus=1, memory_mb=1024, sudo=False, network_mode=mode, provider="docker"
+        cpus=1,
+        memory_mb=1024,
+        sudo=False,
+        network_mode=mode,
+        provider="docker:runc",
+        leaf="docker:runc",
     )
     image = ResolvedImage(
         kind="container", prepared_identity=DIGEST, observed_identity=DIGEST, observed_ref=DIGEST
@@ -524,9 +578,235 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
 @pytest.mark.asyncio
 async def test_kata_refuses_gpus_before_anything_starts(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _scripted(monkeypatch)
-    with pytest.raises(ProviderCapabilityError, match="Kata"):
+    with pytest.raises(ProviderCapabilityError, match=r"docker:kata .*: attaches no GPUs"):
         await DockerProvider(runtime="kata").create(request(resources=Resources(gpus=1)))
     assert calls == []
+
+
+async def test_each_runtime_is_a_leaf_with_the_features_it_gives() -> None:
+    (runc,) = await DockerProvider().profiles()
+    (in_kata,) = await DockerProvider(runtime="kata").profiles()
+    assert (runc.provider, in_kata.provider) == ("docker:runc", "docker:kata")
+    assert runc.container_features == {ContainerFeature.RAW_SOCKETS}
+    assert in_kata.container_features == {
+        ContainerFeature.PERF,
+        ContainerFeature.BPF,
+        ContainerFeature.IO_URING,
+        ContainerFeature.RAW_SOCKETS,
+        ContainerFeature.USER_NAMESPACES,
+        ContainerFeature.MOUNT,
+    }
+    # The name keeps naming its handles and GPU locks, whatever the runtime.
+    assert DockerProvider(runtime="kata").name == "docker"
+
+
+def test_every_docker_runtime_is_a_provider_id_a_run_can_name() -> None:
+    named = {name for name in get_args(ProviderId) if name.startswith("docker:")}
+    assert named == {f"docker:{runtime}" for runtime in RUNTIMES}
+
+
+async def test_a_leaf_offers_the_gpus_of_this_host_that_it_may_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GPU Task goes to a leaf that attaches a GPU it accepts, or to the next Provider."""
+    a100 = "NVIDIA A100-SXM4-80GB"
+    found: list[int] = []
+
+    async def host_gpus(_provider: DockerProvider) -> dict[int, GpuDevice]:
+        found.append(1)
+        models = {0: a100, 1: "NVIDIA H100 80GB HBM3", 2: a100}
+        return {
+            index: GpuDevice(id=f"GPU-{index}", model=model, driver_version="570.1")
+            for index, model in models.items()
+        }
+
+    (none,) = await DockerProvider().profiles()
+    assert (none.gpus, none.gpu_models) == (False, ())
+    monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
+    every = DockerProvider()
+    (runc,) = await every.profiles()
+    assert (runc.gpus, runc.gpu_models) == (True, (a100, "NVIDIA H100 80GB HBM3"))
+    await every.profiles()
+    assert found == [1]  # read once
+    (configured,) = await DockerProvider(gpus=(0, 2)).profiles()
+    assert configured.gpu_models == (a100,)
+    h100 = Resources(gpus=1, gpu_types=("H100",))
+    assert await DockerProvider(gpus=(0, 2)).unserved(
+        request(resources=h100).needs, user="user", role=SandboxRole.SHARED
+    ) == (f"attaches {a100}, none of gpu_types ['H100']",)
+    # Docker's GPU injection does not reach a Kata microVM.
+    (in_kata,) = await DockerProvider(runtime="kata").profiles()
+    assert (in_kata.gpus, in_kata.gpu_models) == (False, ())
+
+
+async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ALE's Linux images and the Tasks built on them are x86-64, which Docker runs
+    natively."""
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+    assert await DockerProvider().unserved(
+        request().needs, user="user", role=SandboxRole.SHARED
+    ) == ("runs arm64, not x86_64",)
+
+
+@pytest.mark.parametrize(
+    ("runtime", "known", "shims", "devices", "missing"),
+    [
+        ("runc", "io.containerd.runc.v2 runc ", (), (), None),
+        ("runc", "io.containerd.runc.v2 runsc ", (), (), "needs the runc runtime"),
+        ("kata", "runc ", ("containerd-shim-kata-v2",), ("/dev/kvm",), None),
+        ("kata", "runc ", (), ("/dev/kvm",), "needs the io.containerd.kata.v2 runtime"),
+        ("kata", "runc ", ("containerd-shim-kata-v2",), (), "needs /dev/kvm"),
+    ],
+)
+async def test_a_leafs_preflight_finds_its_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: str,
+    known: str,
+    shims: tuple[str, ...],
+    devices: tuple[str, ...],
+    missing: str | None,
+) -> None:
+    """A leaf whose runtime is missing here refuses the Run before any Sandbox starts."""
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        assert argv[:2] == ("info", "--format")
+        return 0, known, ""
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr(
+        "ale.run.providers.docker.provider.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name == "docker" or name in shims else None,
+    )
+    monkeypatch.setattr(
+        "ale.run.providers.docker.provider.Path.exists", lambda path: str(path) in devices
+    )
+    preflight = DockerProvider(runtime=runtime).preflight()
+    if missing is None:
+        await preflight
+    else:
+        with pytest.raises(ProviderStartError, match=missing):
+            await preflight
+
+
+@pytest.mark.asyncio
+async def test_a_feature_its_runtime_does_not_give_is_refused_before_anything_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _scripted(monkeypatch)
+    nested = request(resources=Resources(container_features=(ContainerFeature.MOUNT,)))
+    with pytest.raises(ProviderCapabilityError, match="gives no container features mount"):
+        await DockerProvider().create(nested)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runtime", "features", "granted"),
+    [
+        ("runc", (), []),
+        ("runc", (ContainerFeature.RAW_SOCKETS,), []),
+        ("kata", (), []),
+        ("kata", (ContainerFeature.PERF, ContainerFeature.USER_NAMESPACES), []),
+        ("kata", (ContainerFeature.MOUNT,), ["SYS_ADMIN"]),
+    ],
+)
+async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: Literal["runc", "kata"],
+    features: tuple[ContainerFeature, ...],
+    granted: list[str],
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[:2] == ("network", "inspect"):
+            return 0, "172.17.0.1\n", ""
+        if argv[0] == "run":
+            return 1, "", "stopped after the flags were read"
+        return 0, "", ""
+
+    image = ResolvedImage(
+        kind="container",
+        prepared_identity=DIGEST,
+        observed_identity=DIGEST,
+        observed_ref="image@" + DIGEST,
+    )
+
+    async def resolved(_prepared: PreparedTaskImage) -> ResolvedImage:
+        return image
+
+    async def no_problems(_reference: str) -> list[str]:
+        return []
+
+    async def framed(found: ResolvedImage, _request: SandboxRequest) -> ResolvedImage:
+        return found
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr(
+        "ale.run.providers.docker.provider.resolve_prepared_container_image", resolved
+    )
+    provider = DockerProvider(runtime=runtime)
+    monkeypatch.setattr(provider, "check_image", no_problems)
+    monkeypatch.setattr(provider, "_framed", framed)
+    asked = request(
+        network=NetworkPolicy(mode=NetworkMode.OPEN),
+        resources=Resources(container_features=features),
+    )
+    with pytest.raises(ProviderStartError, match="stopped after the flags were read"):
+        await provider.create(asked)
+    (run,) = [call for call in calls if call[0] == "run"]
+    assert [run[index + 1] for index, flag in enumerate(run) if flag == "--cap-add"] == granted
+    # Named even for runc, so a Host's default runtime never stands in for the leaf's.
+    pinned = [run[index + 1] for index, flag in enumerate(run) if flag == "--runtime"]
+    assert pinned == ["runc" if runtime == "runc" else kata.RUNTIME]
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_started_under_another_runtime_is_refused_and_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[:2] == ("network", "inspect"):
+            return 0, "172.17.0.1\n", ""
+        if argv[0] == "inspect":
+            # What a daemon whose default runtime is gVisor's reports for an unpinned start.
+            return 0, f"{DIGEST} runsc\n", ""
+        return 0, "", ""
+
+    image = ResolvedImage(
+        kind="container",
+        prepared_identity=DIGEST,
+        observed_identity=DIGEST,
+        observed_ref="image@" + DIGEST,
+    )
+
+    async def resolved(_prepared: PreparedTaskImage) -> ResolvedImage:
+        return image
+
+    async def no_problems(_reference: str) -> list[str]:
+        return []
+
+    async def framed(found: ResolvedImage, _request: SandboxRequest) -> ResolvedImage:
+        return found
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr(
+        "ale.run.providers.docker.provider.resolve_prepared_container_image", resolved
+    )
+    provider = DockerProvider()
+    monkeypatch.setattr(provider, "check_image", no_problems)
+    monkeypatch.setattr(provider, "_framed", framed)
+    with pytest.raises(ProviderStartError, match="under runtime 'runsc', not 'runc'"):
+        await provider.create(request(network=NetworkPolicy(mode=NetworkMode.OPEN)))
+    (run,) = [call for call in calls if call[0] == "run"]
+    container = run[run.index("--name") + 1]
+    assert ("rm", "-f", "-v", container) in calls
 
 
 def test_a_kata_vm_holds_the_declared_memory_and_its_guests_own() -> None:

@@ -11,12 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import RunConfig
 from ale.core.sandbox import Identity, ImageRef, PreparedTaskImage, Provider, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.session import GatewaySession, SessionRegistry
-from ale.run.providers import ProviderRegistry
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.qemu import QemuProvider
 from ale.run.task_images import prepare_task_image, resolve_image_kinds
@@ -141,8 +139,8 @@ async def test_a_sealed_vm_desktop_names_the_relay_in_its_gnome_settings(
     )
     tasks = load_tasks(task)
     await resolve_image_kinds(tasks)
-    image = await prepare_task_image(tasks[0], ProviderRegistry(RunConfig()))
     provider = QemuProvider(overlay_dir=tmp_path / "overlays")
+    image = await prepare_task_image(tasks[0], provider)
     await _check_linux_desktop(provider, image, Resources(**VM_RESOURCES), "172.30.0.1")
 
 

@@ -16,7 +16,7 @@ input="$(realpath "$1")"
 builder="$(uv run python -c 'from ale.run.framework import MATERIALIZER_IMAGE; print(MATERIALIZER_IMAGE)')"
 
 qemu-img check "$input"
-docker run --rm --device=/dev/kvm --network=none \
+docker run --rm --runtime runc --device=/dev/kvm --network=none \
     --mount "type=bind,src=$(dirname "$input"),dst=/disk" \
     --mount "type=bind,src=$here/finalize.py,dst=/tools/finalize.py,readonly" \
     --mount "type=bind,src=$tools/framework_windows.py,dst=/tools/framework_windows.py,readonly" \

@@ -53,7 +53,7 @@ class DaytonaApi:
         if not key:
             raise ConfigError(
                 f"{variable} is not set. Put your Daytona API key in the checkout's .env "
-                "(copy .env.example) or name another variable with container.daytona.api_key_env."
+                "(copy .env.example) or name another variable with sandbox.daytona.api_key_env."
             )
         return cls(key)
 

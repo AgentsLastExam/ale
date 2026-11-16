@@ -41,6 +41,7 @@ from typing import Literal
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from ale.core.capability import CapabilityProfile
 from ale.core.errors import (
     AleError,
     ProviderCapabilityError,
@@ -50,7 +51,6 @@ from ale.core.fleet import (
     PROTOCOL_VERSION,
     STDERR,
     STDOUT,
-    Arch,
     CreateSandbox,
     ErrorBody,
     ExecCall,
@@ -70,7 +70,6 @@ from ale.core.fleet import (
     RosterEntry,
     SandboxDemand,
     SandboxDescription,
-    SandboxProfile,
     SnapshotHolding,
     verify_grant,
 )
@@ -87,6 +86,7 @@ from ale.fleet.placement import Holds, NodeView, choose
 from ale.run import __version__
 from ale.run.framework import fleet_framework_identity
 from ale.run.provenance import framework_provenance
+from ale.run.providers import leaf, machine_arch
 from ale.run.providers.fleet.tunnel import NodeListeners, with_port
 
 __all__ = ["NodeAgent", "NodeSettings", "probe"]
@@ -100,29 +100,16 @@ LEASE_CHECK_SEC = 1.0
 #: instead, well under the 90 seconds a Run waits for its Node to take connections again.
 RECOVER_SEC = 60.0
 
-#: What each Provider a node agent can drive starts, and on which architecture: ``None``
-#: is the machine's own.
-KINDS: dict[str, tuple[ImageKind, Arch | None]] = {
-    "docker": (ImageKind.CONTAINER, None),
-    "qemu": (ImageKind.VM, Arch.X86_64),
-    "orchard": (ImageKind.VM, Arch.ARM64),
-}
+#: The leaves a node agent lends when it is told none, in the order it prefers them.
+DEFAULT_LEAVES = ("docker:runc", "qemu", "orchard")
 
 
-def _provider(name: str) -> Provider:
-    if name == "docker":
-        from ale.run.providers.docker import DockerProvider
-
-        return DockerProvider()
-    if name == "qemu":
-        from ale.run.providers.qemu import QemuProvider
-
-        return QemuProvider()
-    if name == "orchard":
-        from ale.run.providers.orchard import OrchardProvider
-
-        return OrchardProvider()
-    raise ProviderCapabilityError(f"a node agent cannot drive a {name!r} Provider")
+def _provider(leaf_id: str) -> Provider:
+    """The leaf a node agent drives, by its provider id: Docker under any of its runtimes,
+    QEMU or Orchard."""
+    if leaf_id.startswith("docker:") or leaf_id in {"qemu", "orchard"}:
+        return leaf(leaf_id)
+    raise ProviderCapabilityError(f"a node agent cannot drive a {leaf_id!r} Provider")
 
 
 @dataclass(frozen=True)
@@ -134,7 +121,8 @@ class NodeSettings:
     host: str = "0.0.0.0"
     port: int = 7471
     providers: tuple[str, ...] = ()
-    """The Providers to lend; empty lends every one whose preflight passes here."""
+    """The leaves to lend, by provider id, in the order placement prefers them; empty lends
+    every default one whose preflight passes here."""
     labels: dict[str, str] = field(default_factory=dict)
     reserve_cpus: int = 1
     reserve_memory_mb: int = 4096
@@ -144,15 +132,6 @@ class NodeSettings:
 
 
 # --- probing ------------------------------------------------------------------------------
-
-
-def _machine_arch() -> Arch:
-    machine = platform.machine().lower()
-    if machine in {"arm64", "aarch64"}:
-        return Arch.ARM64
-    if machine in {"x86_64", "amd64"}:
-        return Arch.X86_64
-    raise ProviderCapabilityError(f"unsupported machine architecture {machine}")
 
 
 def _memory_mb() -> int:
@@ -184,9 +163,9 @@ def _gpus() -> tuple[GpuPool, ...]:
 
 def _platform() -> Platform:
     if platform.system() == "Darwin":
-        return Platform(os="macos", os_version=platform.mac_ver()[0], arch=_machine_arch())
+        return Platform(os="macos", os_version=platform.mac_ver()[0], arch=machine_arch())
     return Platform(
-        os=platform.system().lower(), os_version=platform.release(), arch=_machine_arch()
+        os=platform.system().lower(), os_version=platform.release(), arch=machine_arch()
     )
 
 
@@ -205,49 +184,28 @@ def _boot_id() -> str:
     raise ProviderCapabilityError("cannot read this machine's boot identity")
 
 
-def profiles(name: str, provider: Provider, *, gpus: bool) -> tuple[SandboxProfile, ...]:
-    """One profile per operating system a Provider's own capabilities name."""
-    kind, arch = KINDS[name]
-    capabilities = provider.capabilities()
-    return tuple(
-        SandboxProfile(
-            provider=name,
-            kind=kind,
-            os=system,
-            arch=arch or _machine_arch(),
-            gui=capabilities.gui,
-            network_modes=capabilities.network_modes,
-            snapshot=capabilities.snapshot,
-            gpus=gpus and name == "docker",
-            max_cpus=capabilities.max_cpus,
-            max_memory_mb=capabilities.max_memory_mb,
-            macos_vm_slots=1 if system is OperatingSystem.MACOS else 0,
-        )
-        for system in sorted(capabilities.operating_systems)
-    )
-
-
 async def probe(
     settings: NodeSettings,
     *,
     make: Callable[[str], Provider] = _provider,
 ) -> tuple[NodeDeclaration, dict[str, Provider]]:
-    """What this machine offers, from each Provider's own preflight and capabilities.
+    """What this machine offers, from each leaf's own preflight and profiles.
 
-    A Provider named in ``settings.providers`` that fails its preflight stops the agent; when
-    none is named, every one that passes is lent and the rest are logged.
+    A leaf named in ``settings.providers`` that fails its preflight stops the agent; when
+    none is named, every default one that passes is lent and the rest are logged. The
+    profiles keep the order the leaves were named in, which placement prefers them in.
     """
-    names = settings.providers or tuple(KINDS)
+    machine = machine_arch()
     lent: dict[str, Provider] = {}
-    for name in names:
-        if name not in KINDS:
-            raise ProviderCapabilityError(f"a node agent cannot drive a {name!r} Provider")
-        _, arch = KINDS[name]
-        if arch is not None and arch is not _machine_arch():
-            if settings.providers:
-                raise ProviderCapabilityError(f"{name} runs only on {arch} machines")
-            continue
+    offered: list[CapabilityProfile] = []
+    for name in settings.providers or DEFAULT_LEAVES:
         provider = make(name)
+        profiles = await provider.profiles()
+        foreign = {profile.arch for profile in profiles} - {machine}
+        if foreign:
+            if settings.providers:
+                raise ProviderCapabilityError(f"{name} runs only on {foreign.pop()} machines")
+            continue
         try:
             await provider.preflight()
         except AleError as error:
@@ -255,16 +213,25 @@ async def probe(
                 raise
             _log.info("not lending %s: %s", name, error)
             continue
-        lent[name] = provider
+        lent[provider.id] = provider
+        offered.extend(profiles)
     if not lent:
         raise ProviderCapabilityError("no Provider passed its preflight on this machine")
-    gpus = _gpus() if "docker" in lent else ()
-    offered = tuple(
-        profile
-        for name, provider in lent.items()
-        for profile in profiles(name, provider, gpus=bool(gpus))
-    )
-    macos = any(profile.macos_vm_slots for profile in offered)
+    gpus = _gpus() if any(profile.gpus for profile in offered) else ()
+    cpus = max((os.cpu_count() or 1) - settings.reserve_cpus, 0)
+    memory_mb = max(_memory_mb() - settings.reserve_memory_mb, 0)
+    # No leaf here starts a Sandbox larger than all the Node lends.
+    most_cpus, most_memory_mb = max(cpus, 1), max(memory_mb, 1)
+    offered = [
+        profile.model_copy(
+            update={
+                "max_cpus": min(profile.max_cpus or most_cpus, most_cpus),
+                "max_memory_mb": min(profile.max_memory_mb or most_memory_mb, most_memory_mb),
+            }
+        )
+        for profile in offered
+    ]
+    macos = any(profile.os is OperatingSystem.MACOS for profile in offered)
     framework = framework_provenance()
     declaration = NodeDeclaration(
         protocol=PROTOCOL_VERSION,
@@ -277,13 +244,13 @@ async def probe(
         platform=_platform(),
         labels=settings.labels,
         resources=NodeResources(
-            cpus=max((os.cpu_count() or 1) - settings.reserve_cpus, 0),
-            memory_mb=max(_memory_mb() - settings.reserve_memory_mb, 0),
+            cpus=cpus,
+            memory_mb=memory_mb,
             disk_gb=shutil.disk_usage(settings.state_dir).total // 1024**3,
             gpus=gpus,
             macos_vm_slots=min(settings.macos_vm_slots, 2) if macos else 0,
         ),
-        profiles=offered,
+        profiles=tuple(offered),
     )
     return declaration, lent
 
@@ -295,7 +262,7 @@ async def probe(
 class _Held:
     grant: Grant
     provider: Provider
-    profile: SandboxProfile
+    profile: CapabilityProfile
     holds: Holds
     lease_expires_at: float
     state: Literal["creating", "ready", "retained", "destroying"] = "creating"
@@ -699,7 +666,7 @@ class NodeAgent:
         del self._listeners[run_id]
         await listeners.close()
 
-    def admit(self, grant: Grant, request: SandboxRequest) -> tuple[Holds, SandboxProfile]:
+    def admit(self, grant: Grant, request: SandboxRequest) -> tuple[Holds, CapabilityProfile]:
         """Check a grant's demand against this Node's own count, which the ledger estimated."""
         if (difference := _mismatch(grant.demand, request)) is not None:
             raise ProviderCapabilityError(f"the request's {difference} differs from its grant")
@@ -829,7 +796,7 @@ class NodeAgent:
 
     # --- retention ------------------------------------------------------------------
 
-    def _snapshot_handle(self, snapshot_id: str, profile: SandboxProfile) -> str:
+    def _snapshot_handle(self, snapshot_id: str, profile: CapabilityProfile) -> str:
         snapshot = self.snapshots.get(snapshot_id)
         if snapshot is None:
             raise _Refused(f"this Node keeps no snapshot {snapshot_id}")

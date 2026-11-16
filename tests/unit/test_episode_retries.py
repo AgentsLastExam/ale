@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -21,11 +22,21 @@ from ale.core.verdict import Status, Verdict
 from ale.run.cli.tasks import _retained_source_episodes
 from ale.run.episode import EpisodeResult, _Lease, run_episode, run_episode_with_retries
 from ale.run.ledger import Ledger
+from ale.run.providers import ProviderRegistry
 from ale.run.recording import atomic_write_json
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def host_checks(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """These tests fake selection and preparation, so the leaves' checks on the Host go too,
+    and are only counted."""
+    checks = AsyncMock()
+    monkeypatch.setattr(ProviderRegistry, "preflight", checks)
+    return checks
 
 
 def write_result(
@@ -206,6 +217,7 @@ async def test_failed_retry_destroys_even_sanitized_keep_sandboxes() -> None:
     lease = _Lease(
         SimpleNamespace(get=lambda *_: provider),  # type: ignore[arg-type]
         SandboxRetentionConfig(solver="keep", verifier="keep"),
+        solver="docker:runc",
     )
     acquired = await lease.acquire(request)
     lease.mark_sanitized(acquired, succeeded=True)
@@ -233,6 +245,7 @@ async def test_runtime_cleans_sandboxes_for_late_failure_and_cancellation(
         image_source_identity=digest,
     )
     task.prepared_image = task.prepared_verifier_image = image
+    task.provider = "docker:runc"
     sandbox = SimpleNamespace(
         sandbox_id="sandbox",
         destroy=AsyncMock(),
@@ -347,9 +360,17 @@ def test_reverification_source_discovery_accepts_three_levels_without_archived_r
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["shared", "separate"])
 async def test_reverification_retries_only_with_fresh_verifiers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_checks: AsyncMock, mode: str
 ) -> None:
     task_cli = import_module("ale.run.cli.tasks")
+    selections: list[dict[str, object]] = []
+    select = ProviderRegistry.select
+
+    async def selecting(self: ProviderRegistry, tasks: Any, **options: Any) -> None:
+        selections.append(options)
+        await select(self, tasks, **options)
+
+    monkeypatch.setattr(ProviderRegistry, "select", selecting)
     task_path = scaffold_task(tmp_path / "task")
     if mode == "separate":
         config = task_path / "task.toml"
@@ -370,7 +391,7 @@ async def test_reverification_retries_only_with_fresh_verifiers(
     )
     calls = 0
 
-    async def prepare(tasks, _providers):  # type: ignore[no-untyped-def]
+    async def prepare(tasks, _providers, _continued=None):  # type: ignore[no-untyped-def]
         for current in tasks:
             current.prepared_image = PreparedTaskImage(
                 kind="container",
@@ -416,6 +437,12 @@ async def test_reverification_retries_only_with_fresh_verifiers(
     assert calls == (2 if mode == "separate" else 1)
     assert code == (0 if mode == "separate" else 2)
     assert attach.await_count == calls
+    # Each solver is the one its source kept: only verifiers are selected, and checked once
+    # before any episode.
+    assert selections == [{"solvers": False}]
+    ((checked,), options) = host_checks.await_args
+    assert ([task.spec.name for task in checked], options) == ([task.spec.name], {"solvers": False})
+    assert host_checks.await_count == 1
     assert (source.run_dir / "result.json").read_bytes() == original
     assert len(list((tmp_path / "runs").glob("*/*/result.json"))) == 1
 
@@ -429,7 +456,7 @@ async def test_validation_projects_only_final_episode_attempts(
     counts: Counter[str] = Counter()
     lock = make_lock()
 
-    async def prepare(tasks, _providers):  # type: ignore[no-untyped-def]
+    async def prepare(tasks, _providers, _continued=None):  # type: ignore[no-untyped-def]
         for task in tasks:
             task.prepared_image = PreparedTaskImage(
                 kind="container",
@@ -482,7 +509,7 @@ async def test_run_retries_each_episode_independently_and_resumes_only_final_suc
     calls: Counter[str] = Counter()
     digest = "sha256:" + "a" * 64
 
-    async def prepare(tasks, _providers):  # type: ignore[no-untyped-def]
+    async def prepare(tasks, _providers, _continued=None):  # type: ignore[no-untyped-def]
         for task in tasks:
             task.prepared_image = PreparedTaskImage(
                 kind="container",
@@ -533,7 +560,7 @@ async def test_resume_with_new_scheduling_runs_only_missing_episodes(
     digest = "sha256:" + "a" * 64
     executed: list[str] = []
 
-    async def prepare(tasks, _providers):  # type: ignore[no-untyped-def]
+    async def prepare(tasks, _providers, _continued=None):  # type: ignore[no-untyped-def]
         for task in tasks:
             task.prepared_image = PreparedTaskImage(
                 kind="container",

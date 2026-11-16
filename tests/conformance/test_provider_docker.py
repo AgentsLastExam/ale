@@ -8,12 +8,11 @@ import time
 import pytest
 from tests.support import CONTAINER_BASE, skip_without_kata
 
-from ale.core.config import RunConfig
 from ale.core.sandbox import Identity, ImageRef, SandboxRequest
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
 from ale.run.framework import framework_identity
-from ale.run.providers import ProviderRegistry
+from ale.run.providers import missing_features
 from ale.run.providers.docker import kata
 from ale.run.providers.docker.provider import DockerProvider, _docker
 from ale.run.scaffold import scaffold_task
@@ -41,6 +40,7 @@ class TestDockerProvider(ProviderConformance):
     )
     #: The base carries no framework; the Provider adds it.
     framework = framework_identity(user="user", vm=False)
+    missing_features = staticmethod(missing_features)
 
 
 @pytest.mark.needs_kvm
@@ -95,6 +95,35 @@ async def test_a_kata_sandbox_is_a_vm_whose_processes_get_the_declared_memory() 
     # The guest kernel's work for the desktop is not charged to the container in a VM, so
     # Kata leaves somewhat more: 312-320 MiB against 240-288 MiB on runc when measured.
     assert runc - 32 <= in_vm <= runc + 160, f"runc held {runc} MiB, Kata {in_vm} MiB"
+
+
+@pytest.mark.needs_kvm
+@pytest.mark.asyncio
+async def test_a_kata_sandbox_can_mount_only_when_it_asked_to() -> None:
+    """Kata grants ``mount`` with a capability, which a Sandbox that did not ask lacks."""
+    skip_without_kata()
+    provider = DockerProvider(runtime="kata")
+    request = SandboxRequest(
+        episode_id="kata-unmounted",
+        prepared_image=await provider.prepare_image(
+            ImageRef(kind="container", reference=CONTAINER_BASE)
+        ),
+        resources=Resources(cpus=1, memory_mb=512),
+        network=NetworkPolicy(mode=NetworkMode.BLOCK),
+    )
+    async with await provider.create(request) as sandbox:
+        missing = await missing_features(sandbox, {ContainerFeature.MOUNT})
+    assert set(missing) == {ContainerFeature.MOUNT}, missing
+    asked = request.model_copy(
+        update={
+            "episode_id": "kata-mounted",
+            "resources": Resources(
+                cpus=1, memory_mb=512, container_features=(ContainerFeature.MOUNT,)
+            ),
+        }
+    )
+    async with await provider.create(asked) as sandbox:
+        assert await missing_features(sandbox, {ContainerFeature.MOUNT}) == {}
 
 
 @pytest.mark.needs_kvm
@@ -210,7 +239,7 @@ async def test_prepared_task_image_starts_without_remote_resolution(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     task = load_tasks(scaffold_task(tmp_path / "task"))[0]
-    prepared = await prepare_task_image(task, ProviderRegistry(RunConfig()))
+    prepared = await prepare_task_image(task, DockerProvider())
 
     async def remote_resolution_is_forbidden(*args: object, **kwargs: object) -> object:
         raise AssertionError("prepared Task images must not use remote resolution")

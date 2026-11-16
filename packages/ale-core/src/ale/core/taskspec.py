@@ -19,6 +19,7 @@ __all__ = [
     "AgentTable",
     "Artifact",
     "Author",
+    "ContainerFeature",
     "EnvironmentTable",
     "ImageKind",
     "ImageSpec",
@@ -159,6 +160,45 @@ class ImageSpec(BaseModel):
         return self
 
 
+class ContainerFeature(StrEnum):
+    """A kernel feature a container Sandbox is guaranteed only when its Task asks for it.
+
+    A Run gives a Sandbox only a Provider that gives root in it every feature its Task asks
+    for. A leaf may give a feature to every Sandbox, with no grant, as runc gives raw
+    sockets and Kata most of them, so a Sandbox that does not ask for one may have it or
+    not.
+    """
+
+    NESTED_CONTAINERS = "nested_containers"
+    """Running containers inside the Sandbox, with a container engine of its own."""
+    PERF = "perf"
+    """``perf_event_open``, which profilers use."""
+    BPF = "bpf"
+    """Loading eBPF programs and maps."""
+    IO_URING = "io_uring"
+    """The ``io_uring`` interface for asynchronous I/O."""
+    FUSE = "fuse"
+    """``/dev/fuse``, to mount file systems served from user space."""
+    RAW_SOCKETS = "raw_sockets"
+    """Raw and packet sockets, which ``ping`` and packet capture use."""
+    USER_NAMESPACES = "user_namespaces"
+    """Creating user namespaces, as rootless containers and browser sandboxes do."""
+    MOUNT = "mount"
+    """Mounting file systems, and creating mount namespaces, as root."""
+
+
+def _distinct(features: tuple[ContainerFeature, ...]) -> tuple[ContainerFeature, ...]:
+    repeated = sorted({feature for feature in features if features.count(feature) > 1})
+    if repeated:
+        raise ValueError(f"{', '.join(repeated)} listed more than once")
+    return tuple(sorted(features))
+
+
+#: Container features as a Task lists them, each at most once. They are kept sorted, so
+#: the order they were written in changes no comparison or hash.
+_ContainerFeatures = Annotated[tuple[ContainerFeature, ...], AfterValidator(_distinct)]
+
+
 class Resources(BaseModel):
     model_config = _FROZEN
 
@@ -169,6 +209,8 @@ class Resources(BaseModel):
     gpu_types: tuple[str, ...] = ()
     """GPU models the Task accepts, any one of them; empty accepts every model."""
     sudo: bool = False
+    container_features: _ContainerFeatures = ()
+    """What a container Sandbox needs beyond what every container gets."""
 
 
 class NetworkMode(StrEnum):
@@ -319,6 +361,7 @@ class VerifierResources(BaseModel):
     storage_mb: int | None = Field(ge=1)
     gpus: int = Field(ge=0)
     gpu_types: tuple[str, ...] = ()
+    container_features: _ContainerFeatures = ()
 
     def as_resources(self) -> Resources:
         return Resources(
@@ -328,6 +371,7 @@ class VerifierResources(BaseModel):
             gpus=self.gpus,
             gpu_types=self.gpu_types,
             sudo=False,
+            container_features=self.container_features,
         )
 
 
@@ -538,6 +582,20 @@ class TaskSpec(BaseModel):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _container_features_need_a_container(self) -> Self:
+        sandboxes = [("solver", self.image, self.resources)]
+        if self.verify.resources is not None:
+            image = self.verify.image or self.image
+            sandboxes.append(("verifier", image, self.verify.resources.as_resources()))
+        for role, image, resources in sandboxes:
+            if resources.container_features and image.kind is ImageKind.VM:
+                raise ValueError(
+                    f"the {role} image is a VM, which takes no container_features: "
+                    "a VM has a kernel of its own"
+                )
+        return self
+
 
 #: The ``task.toml`` format ALE reads, named by the ALE version that last changed it. ALE
 #: accepts exactly this value.
@@ -684,6 +742,8 @@ class EnvironmentTable(BaseModel):
     gpus: int = Field(default=0, ge=0, strict=True)
     gpu_types: tuple[_GpuType, ...] | None = Field(default=None, min_length=1)
     """GPU models any of which will do; ``None`` accepts every model, as in Harbor."""
+    container_features: _ContainerFeatures = ()
+    """What the container needs beyond what every container gets; a VM image takes none."""
     env: TaskEnv = Field(default_factory=dict)
     skills_dir: str | None = Field(default=None, min_length=1)
     mcp_servers: tuple[McpServerTable, ...] = ()
@@ -746,6 +806,7 @@ class VerifierEnvironmentTable(BaseModel):
     storage_mb: int | None = Field(default=None, ge=1, strict=True)
     gpus: int = Field(default=0, ge=0, strict=True)
     gpu_types: tuple[_GpuType, ...] | None = Field(default=None, min_length=1)
+    container_features: _ContainerFeatures = ()
     env: TaskEnv = Field(default_factory=dict)
 
 

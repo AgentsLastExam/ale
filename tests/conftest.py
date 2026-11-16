@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from ale.core.errors import ProviderCapabilityError
 from tests.support import CONTAINER_BASE, write_task
 
 # Typer forces Rich terminal styling whenever GITHUB_ACTIONS is set, which splits option
@@ -29,6 +31,20 @@ def default_ale_repo_path(monkeypatch: pytest.MonkeyPatch) -> None:
 def isolated_git_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in [name for name in os.environ if name.startswith("GIT_")]:
         monkeypatch.delenv(name)
+
+
+@pytest.fixture(autouse=True)
+def x86_host_without_gpus(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A unit test runs as on an x86-64 Host with no GPU, which ALE's Tasks and leaves
+    assume, whatever machine runs it; a test of another Host says so itself."""
+    if request.node.get_closest_marker("unit") is None:
+        return
+
+    async def no_gpus(_provider: object) -> None:
+        raise ProviderCapabilityError("nvidia-smi is not installed on the Docker host")
+
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr("ale.run.providers.docker.provider.DockerProvider._host_gpus", no_gpus)
 
 
 @pytest.fixture

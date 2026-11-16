@@ -11,6 +11,7 @@ from ale.core.errors import TaskDefinitionError
 from ale.core.task import Stage
 from ale.core.taskspec import (
     SCHEMA_VERSION,
+    ContainerFeature,
     ImageKind,
     NetworkMode,
     OperatingSystem,
@@ -153,6 +154,84 @@ def test_gpu_types_are_harbor_s_and_absent_accepts_every_model(tmp_path: Path) -
     edit(task, {"verifier": {"environment": {"gpus": 2, "gpu_types": ["H100"]}}})
     verifier = load_tasks(task)[0].spec.verify.resources
     assert verifier is not None and (verifier.gpus, verifier.gpu_types) == (2, ("H100",))
+
+
+def test_container_features_are_named_from_a_closed_set_each_once(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    assert load_tasks(task)[0].spec.resources.container_features == ()
+    edit(
+        task,
+        {
+            "environment": {"container_features": ["perf", "nested_containers"]},
+            "verifier": {"environment_mode": "separate"},
+        },
+    )
+    spec = load_tasks(task)[0].spec
+    wanted = (ContainerFeature.NESTED_CONTAINERS, ContainerFeature.PERF)
+    assert spec.resources.container_features == wanted
+    # A separate verifier without its own table needs what the solver does, as in Harbor;
+    # with one, only what it names there.
+    assert spec.verify.resources is not None
+    assert spec.verify.resources.as_resources().container_features == wanted
+    edit(task, {"verifier": {"environment": {"cpus": 1}}})
+    verifier = load_tasks(task)[0].spec.verify.resources
+    assert verifier is not None and verifier.container_features == ()
+    edit(task, {"verifier": {"environment": {"container_features": ["fuse"]}}})
+    verifier = load_tasks(task)[0].spec.verify.resources
+    assert verifier is not None and verifier.container_features == (ContainerFeature.FUSE,)
+
+    edit(task, {"environment": {"container_features": ["perf", "kvm"]}})
+    with pytest.raises(
+        TaskDefinitionError,
+        match=r"environment\.container_features\.1: Input should be 'nested_containers', 'perf'",
+    ):
+        load_tasks(task)
+    edit(task, {"environment": {"container_features": ["perf", "mount", "perf"]}})
+    with pytest.raises(
+        TaskDefinitionError, match=r"environment\.container_features: perf listed more than once"
+    ):
+        load_tasks(task)
+
+
+def test_a_vm_image_the_task_folder_decides_takes_no_container_features(
+    tmp_path: Path,
+) -> None:
+    vm = "the solver image is a VM, which takes no container_features"
+    task = _linux_vm_build(scaffold_task(tmp_path / "demo"))
+    edit(task, {"environment": {"container_features": ["perf"]}})
+    with pytest.raises(TaskDefinitionError, match=vm):
+        load_tasks(task)
+    (task / "environment/build.sh").unlink()
+    edit(task, {"environment": {"image": "/images/task.qcow2"}})
+    with pytest.raises(TaskDefinitionError, match=vm):
+        load_tasks(task)
+    # A registry reference alone is either kind: the registry decides it before preparation.
+    edit(task, {"environment": {"image": VM_DISK}})
+    assert load_tasks(task)[0].spec.image.kind is None
+
+    windows = _windows_task(tmp_path)
+    edit(windows, {"environment": {"container_features": ["raw_sockets"]}})
+    with pytest.raises(TaskDefinitionError, match=vm):
+        load_tasks(windows)
+
+    # A separate verifier is checked by its own image and needs.
+    container = scaffold_task(tmp_path / "container")
+    edit(
+        container,
+        {
+            "environment": {"container_features": ["perf"]},
+            "verifier": {
+                "environment": {
+                    "image": "/images/verifier.qcow2",
+                    "container_features": ["mount"],
+                }
+            },
+        },
+    )
+    with pytest.raises(TaskDefinitionError, match="the verifier image is a VM"):
+        load_tasks(container)
+    edit(container, {"verifier": {"environment": {"container_features": None}}})
+    assert load_tasks(container)[0].spec.resources.container_features == (ContainerFeature.PERF,)
 
 
 def test_load_errors_name_the_key(tmp_path: Path) -> None:

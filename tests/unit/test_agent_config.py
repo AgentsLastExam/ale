@@ -71,13 +71,13 @@ def test_resource_collections_are_additive(tmp_path: Path) -> None:
 def test_run_file_selects_agent_when_cli_option_is_absent(tmp_path: Path) -> None:
     run = tmp_path / "run.toml"
     run.write_text(
-        "container.provider='docker'\ncontainer.gpus=[0,1]\n"
-        "vm.provider='qemu'\n[agent]\nname='claude-code'\n"
+        "sandbox.providers=['docker:kata','docker:runc']\nsandbox.docker.gpus=[0,1]\n"
+        "[agent]\nname='claude-code'\n"
     )
     assert select_agent_name(run_path=run) == "claude-code"
     settings = _config(run, None, agent=None, model=None)
-    assert settings.container.gpus == (0, 1)
-    assert settings.vm.provider == "qemu"
+    assert settings.sandbox.docker.gpus == (0, 1)
+    assert settings.sandbox.providers == ("docker:kata", "docker:runc")
 
 
 @pytest.mark.parametrize("command", ["run", "validate", "prepare", "reverify"])

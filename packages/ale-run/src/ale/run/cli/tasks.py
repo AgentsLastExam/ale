@@ -7,6 +7,8 @@ import copy
 import hashlib
 import os
 import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import typer
@@ -17,7 +19,7 @@ from ale.core.fleet import RunPlan
 from ale.core.harness import EffectiveAgentResources, Harness
 from ale.core.ids import content_hash, task_component
 from ale.core.lock import AssetProvenance, ResumedFrom, RunLock
-from ale.core.result import ResultRecord
+from ale.core.result import ResultRecord, SandboxOutcome
 from ale.core.sandbox import (
     ImageKind,
     PreparedTaskImage,
@@ -67,7 +69,7 @@ from ale.run.provenance import (
     framework_provenance,
     gateway_provenance,
 )
-from ale.run.providers import ProviderRegistry, provider_named
+from ale.run.providers import ProviderRegistry
 from ale.run.providers.fleet import FleetClient, FleetProvider
 from ale.run.recording import atomic_write_json
 from ale.run.secrets import host_credentials, provider_credentials, resolve_task_variables
@@ -256,12 +258,16 @@ async def _run_one(
             harness.validate_os(task.spec.os)
         _resolve_variables(tasks, settings, oracle=settings.agent.name == "oracle")
         await preflight_judges(_verify_dirs(tasks), settings.verification)
-        await _prepare_images(tasks, providers)
+        continued = (
+            _continued(continue_from, tasks, settings) if continue_from is not None else None
+        )
+        await _prepare_images(tasks, providers, continued)
         resume = (
-            _continuation(continue_from, tasks, settings, harness, providers)
-            if continue_from is not None
+            _continuation(continued, tasks[0], settings, harness, providers)
+            if continued is not None
             else None
         )
+        await providers.preflight(tasks)
     except AleError as error:
         typer.echo(f"{error}", err=True)
         await providers.close()
@@ -517,7 +523,21 @@ async def _reverify(
                 # The solver is reused, not prepared: its image is of the kind its run read.
                 declared = declared.model_copy(update={"kind": recorded.kind})
                 task.spec = task.spec.model_copy(update={"image": declared})
-        await resolve_image_kinds(matched)
+        # Task by Task: an image no registry answers for fails only the Task that names it.
+        unique = list(dict.fromkeys(matched))
+        outcomes = await asyncio.gather(
+            *(resolve_image_kinds([task]) for task in unique), return_exceptions=True
+        )
+        unclassified: dict[str, BaseException] = {}
+        for task, outcome in zip(unique, outcomes, strict=True):
+            if isinstance(outcome, (AleError, OSError, ValueError)):
+                unclassified[str(task.spec.name)] = outcome
+            elif isinstance(outcome, BaseException):
+                raise outcome
+        # Each solver is the one its source episode kept, on the Provider that kept it.
+        await providers.select(
+            [task for task in unique if str(task.spec.name) not in unclassified], solvers=False
+        )
     except (AleError, OSError, ValueError) as error:
         typer.echo(str(error), err=True)
         return EXIT_BAD_REFERENCE
@@ -527,6 +547,7 @@ async def _reverify(
     try:
         run_dir = runs_dir / f"reverify-{uuid.uuid4().hex[:8]}"
         failures = 0
+        planned: list[tuple[ManifestTask, Callable[[], Awaitable[EpisodeResult]]]] = []
         for source_dir, source_result, source_lock, handle in sources:
             task = by_name.get(str(source_lock.task.name))
             if task is None:
@@ -534,6 +555,10 @@ async def _reverify(
                     f"source episode {source_result.episode_id} does not match the selected Task",
                     err=True,
                 )
+                failures += 1
+                continue
+            if (unread := unclassified.get(str(task.spec.name))) is not None:
+                typer.echo(f"{task.spec.name}: {unread}", err=True)
                 failures += 1
                 continue
             if (
@@ -569,9 +594,14 @@ async def _reverify(
                 )
                 failures += 1
                 continue
+            if source_lock.resources is None:
+                typer.echo(f"{task.spec.name}: source RunLock has no solver allocation", err=True)
+                failures += 1
+                continue
             # Reverification reuses an existing solver, not a freshly rebuilt image.
             # Each source episode owns its exact prepared image and immutable provenance.
             task = copy.copy(task)
+            task.provider = source_lock.resources.effective.provider
             image = source_lock.image
             task.prepared_image = PreparedTaskImage(
                 kind=image.declaration.kind,
@@ -590,14 +620,12 @@ async def _reverify(
             )
             try:
                 task.asset_observation = observed_assets
-                prepared = await prepare_verifier_image_result(task, providers)
+                prepared = await prepare_verifier_image_result(
+                    task, providers.get(task.verifier_provider or task.provider)
+                )
                 task.prepared_verifier_image = prepared.image if prepared is not None else None
             except AleError as error:
                 typer.echo(str(error), err=True)
-                failures += 1
-                continue
-            if source_lock.resources is None:
-                typer.echo(f"{task.spec.name}: source RunLock has no solver allocation", err=True)
                 failures += 1
                 continue
 
@@ -658,6 +686,13 @@ async def _reverify(
                     profile_slot_id=source_lock.agent.authentication.profile_slot_id,
                 )
 
+            planned.append((task, execute))
+        try:
+            await providers.preflight([task for task, _ in planned], solvers=False)
+        except AleError as error:
+            typer.echo(str(error), err=True)
+            return EXIT_BAD_REFERENCE
+        for task, execute in planned:
             # Shared verification mutates its source; only separate verification has a
             # fresh verifier Sandbox on every attempt.
             retries = (
@@ -720,17 +755,41 @@ def _retained_source_episodes(
     return tuple(episodes)
 
 
-def _continuation(
-    episode_dir: Path,
-    tasks: list[ManifestTask],
-    settings: RunConfig,
-    harness: Harness,
-    providers: ProviderRegistry,
-) -> Resume:
-    """The retained solver and native session an earlier episode left for this run."""
+@dataclass(frozen=True)
+class _Continued:
+    """The episode a Run continues, as its records hold it."""
+
+    result: ResultRecord
+    lock: RunLock
+    trajectory: AtifTrajectory | None
+    retained: SandboxOutcome
+    """The solver it kept, or the snapshot of it."""
+    handle: str
+
+    def require(self, name: str, recorded: object, current: object) -> None:
+        if recorded != current:
+            raise TaskDefinitionError(
+                f"episode {self.result.episode_id} cannot be continued here: its {name} differs"
+            )
+
+    def require_keeper(self, task: ManifestTask) -> None:
+        """Refuse a selection that gives the solver another Provider than the one that kept
+        it, which alone holds its Sandbox or snapshot."""
+        resources = self.lock.resources
+        kept = resources.effective.provider if resources else None
+        if kept != task.provider:
+            raise TaskDefinitionError(
+                f"episode {self.result.episode_id} cannot be continued here: "
+                f"{kept or 'no recorded Provider'} kept its solver, and sandbox.providers "
+                f"selects {task.provider} for it"
+            )
+
+
+def _continued(episode_dir: Path, tasks: list[ManifestTask], settings: RunConfig) -> _Continued:
+    """The retained solver and native session an earlier episode left, read before anything
+    is selected or prepared for the Run that continues it."""
     if len(tasks) != 1 or settings.episodes != 1:
         raise ConfigError("--continue-from continues one episode of one Task")
-    task = tasks[0]
     episode_dir = episode_dir.expanduser().resolve()
     trajectory_path = episode_dir / "trajectory.json"
     try:
@@ -751,11 +810,28 @@ def _continuation(
         ),
         None,
     )
-    handle = retained.handle if retained is not None else None
-    if result.continuation is None or retained is None or handle is None:
+    if result.continuation is None or retained is None or retained.handle is None:
         raise TaskDefinitionError(
             f"episode {result.episode_id} left no retained solver and native session"
         )
+    return _Continued(result, lock, trajectory, retained, retained.handle)
+
+
+def _continuation(
+    continued: _Continued,
+    task: ManifestTask,
+    settings: RunConfig,
+    harness: Harness,
+    providers: ProviderRegistry,
+) -> Resume:
+    """How this Run continues ``continued``, once its Task's images are prepared."""
+    result, lock, retained, handle = (
+        continued.result,
+        continued.lock,
+        continued.retained,
+        continued.handle,
+    )
+    assert result.continuation is not None
     kept = retained.outcome == "retained"
     # The native session is read by the same program, and the Sandbox is the Task's image
     # as the earlier agent left it. A running Sandbox also keeps its resources, its role
@@ -786,10 +862,7 @@ def _continuation(
         if desktop is not None:
             recorded_and_current["desktop resolution"] = (desktop, settings.desktop_resolution)
     for name, (recorded, current) in recorded_and_current.items():
-        if recorded != current:
-            raise TaskDefinitionError(
-                f"episode {result.episode_id} cannot be continued here: its {name} differs"
-            )
+        continued.require(name, recorded, current)
     return Resume(
         source=ResumedFrom(
             episode_id=result.episode_id,
@@ -797,7 +870,7 @@ def _continuation(
             handle=handle,
             continuation=result.continuation,
         ),
-        trajectory=trajectory,
+        trajectory=continued.trajectory,
         attach=(
             (lambda request: _attach_retained(handle, request, lock, providers)) if kept else None
         ),
@@ -812,16 +885,10 @@ async def _attach_retained(
 ) -> Sandbox:
     assert lock.resources is not None
     allocation = lock.resources.effective
-    if allocation.provider == "fleet":
-        # Continuing hands the Sandbox to this Run, through the Run's own Fleet connection.
-        provider = providers.get(request.image_kind, request.os)
-        if provider.name != "fleet":
-            raise TaskDefinitionError(
-                f"{handle} is kept on the Fleet; continue it with the Fleet as the Provider"
-            )
-        return await provider.attach_retained(handle, request, allocation, _recorded_image(lock))
     try:
-        provider = provider_named(allocation.provider)
+        # The Provider that kept it, as this Run configures it: the Fleet hands the Sandbox
+        # over through the Run's own connection.
+        provider = providers.get(allocation.provider)
     except ProviderCapabilityError as exc:
         raise TaskDefinitionError(f"unsupported retained sandbox handle: {handle}") from exc
     return await provider.attach_retained(handle, request, allocation, _recorded_image(lock))
@@ -879,6 +946,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
         _resolve_variables(tasks, settings, oracle=True)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
+        await providers.preflight(tasks)
     except AleError as error:
         typer.echo(f"{error}", err=True)
         return EXIT_BAD_REFERENCE
@@ -1034,12 +1102,20 @@ async def _prepare_only(reference: str, settings: RunConfig) -> int:
         typer.echo(str(error), err=True)
         return EXIT_BAD_REFERENCE
 
+    selected = {
+        (str(task.spec.name), role): provider
+        for task in tasks
+        for role, provider in (
+            ("solver", task.provider),
+            ("verifier", task.verifier_provider or task.provider),
+        )
+    }
     for result in results:
         image = result.image
         source = "ref" if image.source == "external-ref" else "local"
         typer.echo(
-            f"{result.task} {result.role} kind={image.kind} source={source} "
-            f"prepared={image.prepared_identity}"
+            f"{result.task} {result.role} provider={selected[result.task, result.role]} "
+            f"kind={image.kind} source={source} prepared={image.prepared_identity}"
         )
         for step in result.steps:
             suffix = " ".join(value for value in (step.identity, step.detail) if value is not None)
@@ -1083,7 +1159,7 @@ def _resolve_variables(tasks: list[ManifestTask], settings: RunConfig, *, oracle
         tasks,
         oracle=oracle,
         protected=host_credentials(
-            (settings.gateway.api_key_env, settings.container.daytona.api_key_env)
+            (settings.gateway.api_key_env, settings.sandbox.daytona.api_key_env)
         ),
     )
 
@@ -1093,73 +1169,80 @@ def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
 
 
 async def _prepare_images(
-    tasks: list[ManifestTask], providers: ProviderRegistry
+    tasks: list[ManifestTask], providers: ProviderRegistry, continued: _Continued | None = None
 ) -> tuple[ImagePreparationResult, ...]:
+    """Select a Provider for every Sandbox, refusing the selection if any is unserved, then
+    prepare each image once for each Provider that runs it.
+
+    A ``continued`` solver that boots from a snapshot needs one, and must be selected to the
+    Provider that kept it, which alone holds its Sandbox or snapshot.
+    """
     await resolve_image_kinds(tasks)
+    await providers.select(
+        tasks,
+        snapshots=providers.settings.sandbox_retention.solver == "snapshot"
+        or (continued is not None and continued.retained.outcome == "snapshotted"),
+    )
+    if continued is not None:
+        continued.require_keeper(tasks[0])
     by_source: dict[str, PreparedTaskImage] = {}
-    by_identity: dict[tuple[ImageKind, str], PreparedTaskImage] = {}
-    results: list[ImagePreparationResult] = []
-    for task in tasks:
-        task.asset_observation = observe_task_assets(task)
-        spec = task.spec.image
+    by_identity: dict[tuple[str, ImageKind, str], PreparedTaskImage] = {}
+
+    async def prepared(task: ManifestTask, role: str, provider: str) -> ImagePreparationResult:
+        own = role == "verifier"
+        spec = task.spec.verify.image if own else task.spec.image
+        assert spec is not None
         key = content_hash(
             {
-                "role": "solver",
+                "image": role,
+                "provider": provider,
                 "os": task.spec.os,
                 "kind": spec.kind,
-                "local": task.image_source_digest,
+                "local": task.verifier_image_source_digest if own else task.image_source_digest,
                 "ref": spec.ref,
                 "base_ref": spec.base_ref,
                 "user": spec.user,
             }
         )
-        base_build = spec.base_ref is not None
-        image = None if base_build else by_source.get(key)
-        if image is None:
-            prepared = await prepare_task_image_result(task, providers)
-            image = prepared.image
-            image = by_identity.setdefault((image.kind, image.prepared_identity), image)
-            by_source[key] = image
-            if image is not prepared.image:
-                prepared = _reused_result(task, "solver", image)
-        else:
-            prepared = _reused_result(task, "solver", image)
-        results.append(prepared)
-        task.prepared_image = image
+        image = None if spec.base_ref is not None else by_source.get(key)
+        if image is not None:
+            return _reused_result(task, role, image)
+        result = await (
+            prepare_verifier_image_result(task, providers.get(provider))
+            if role == "verifier"
+            else prepare_task_image_result(task, providers.get(provider))
+        )
+        assert result is not None
+        image = by_identity.setdefault(
+            (provider, result.image.kind, result.image.prepared_identity), result.image
+        )
+        by_source[key] = image
+        return result if image is result.image else _reused_result(task, role, image)
+
+    results: list[ImagePreparationResult] = []
+    for task in tasks:
+        assert task.provider is not None
+        task.asset_observation = observe_task_assets(task)
+        solver = await prepared(task, "solver", task.provider)
+        results.append(solver)
+        task.prepared_image = solver.image
         verify = task.spec.verify
         if verify.environment_mode is VerificationMode.SHARED:
             task.prepared_verifier_image = None
             continue
+        assert task.verifier_provider is not None
         if verify.image is None:
-            task.prepared_verifier_image = image
-            reused = await prepare_verifier_image_result(task, providers)
-            if reused is not None:
-                results.append(reused)
+            # A verifier without an image of its own runs the very one its solver runs.
+            reused = await prepare_verifier_image_result(
+                task, providers.get(task.verifier_provider)
+            )
+            assert reused is not None
+            results.append(reused)
+            task.prepared_verifier_image = reused.image
             continue
-        verifier_key = content_hash(
-            {
-                "role": "verifier",
-                "os": task.spec.os,
-                "kind": verify.image.kind,
-                "local": task.verifier_image_source_digest,
-                "ref": verify.image.ref,
-                "user": verify.image.user,
-            }
-        )
-        verifier = by_source.get(verifier_key)
-        if verifier is None:
-            prepared_verifier = await prepare_verifier_image_result(task, providers)
-            if prepared_verifier is None:
-                raise TaskDefinitionError("dedicated verifier produced no prepared image")
-            verifier = prepared_verifier.image
-            verifier = by_identity.setdefault((verifier.kind, verifier.prepared_identity), verifier)
-            by_source[verifier_key] = verifier
-            if verifier is not prepared_verifier.image:
-                prepared_verifier = _reused_result(task, "verifier", verifier)
-        else:
-            prepared_verifier = _reused_result(task, "verifier", verifier)
-        results.append(prepared_verifier)
-        task.prepared_verifier_image = verifier
+        verifier = await prepared(task, "verifier", task.verifier_provider)
+        results.append(verifier)
+        task.prepared_verifier_image = verifier.image
     return tuple(results)
 
 
@@ -1266,8 +1349,10 @@ async def _plan_on_fleet(
     """
     items = []
     for task in tasks:
-        provider = providers.get(task.spec.image.kind, task.spec.os)
-        if not isinstance(provider, FleetProvider) or task.prepared_image is None:
+        if task.provider is None or task.prepared_image is None:
+            continue
+        provider = providers.get(task.provider)
+        if not isinstance(provider, FleetProvider):
             continue
         items.append(
             provider.plan_item(

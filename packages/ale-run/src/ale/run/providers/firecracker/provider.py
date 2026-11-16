@@ -42,10 +42,10 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
+from ale.core.capability import Arch, CapabilityProfile
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
-    Capabilities,
     DesktopResolution,
     ExecOutputSink,
     ExecResult,
@@ -63,8 +63,8 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, OperatingSystem
-from ale.run import ale_image, guestd
+from ale.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem
+from ale.run import HELPER_RUNTIME, ale_image, guestd
 from ale.run.framework import with_framework
 from ale.run.images import acquire_lock, resolve_container_image, resolve_prepared_container_image
 from ale.run.process import run
@@ -108,6 +108,18 @@ GUEST_DIR = "/opt/ale/firecracker"
 BOOT_TIMEOUT_SEC = 120
 #: Firecracker's limit on vCPUs.
 MAX_CPUS = 32
+#: What a microVM's root, which holds every capability of its own kernel, has without being
+#: granted anything, as measured (see the Providers README).
+FEATURES = frozenset(
+    {
+        ContainerFeature.PERF,
+        ContainerFeature.BPF,
+        ContainerFeature.IO_URING,
+        ContainerFeature.RAW_SOCKETS,
+        ContainerFeature.USER_NAMESPACES,
+        ContainerFeature.MOUNT,
+    }
+)
 #: The writable disk when a Task names no storage. It is sparse, so its size costs nothing
 #: until the guest writes.
 DEFAULT_STORAGE_MB = 32768
@@ -572,7 +584,7 @@ async def _sparse_copy(source: Path, target: Path) -> None:
 async def _check_filesystem(disk: Path, runner_image: str) -> None:
     """Check a layer before it is kept; a later microVM mounts it read-only, as it is."""
     code, stdout, stderr = await _run(
-        "docker", "run", "--rm", "--network", "none",
+        "docker", "run", "--rm", *HELPER_RUNTIME, "--network", "none",
         "--user", f"{os.getuid()}:{os.getgid()}",
         "--mount", f"type=bind,src={disk.parent.resolve()},dst=/disk",
         "--entrypoint", "e2fsck", runner_image, "-fp", f"/disk/{disk.name}",
@@ -600,24 +612,23 @@ class FirecrackerProvider(Provider):
         self.disk_dir = disk_dir or self.overlay_dir.parent / "firecracker-disks"
         self.runner_image = runner_image
 
-    def capabilities(self) -> Capabilities:
-        return Capabilities(
-            operating_systems=frozenset({OperatingSystem.LINUX}),
-            # A desktop is the image's own X server, as in a container: the microVM has
-            # no display device of its own.
-            gui=True,
-            network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.ALLOWLIST, NetworkMode.OPEN}),
-            max_cpus=MAX_CPUS,
-            reset=False,
-            snapshot=True,
+    async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        return (
+            CapabilityProfile(
+                provider=self.id,
+                kind=ImageKind.CONTAINER,
+                os=OperatingSystem.LINUX,
+                # The runner's kernel is an x86-64 one.
+                arch=Arch.X86_64,
+                # A desktop is the image's own X server, as in a container: the microVM has
+                # no display device of its own.
+                gui=True,
+                network_modes=frozenset(NetworkMode),
+                snapshot=True,
+                max_cpus=MAX_CPUS,
+                container_features=FEATURES,
+            ),
         )
-
-    def accepts(self, request: SandboxRequest) -> None:
-        super().accepts(request)
-        if request.resources.gpus:
-            raise ProviderCapabilityError("a Firecracker microVM has no GPU")
-        if request.image_kind is not ImageKind.CONTAINER:
-            raise ProviderCapabilityError("FirecrackerProvider runs container images")
 
     async def preflight(self) -> None:
         problems: list[str] = []
@@ -641,7 +652,7 @@ class FirecrackerProvider(Provider):
         return prepared
 
     async def create(self, request: SandboxRequest) -> FirecrackerSandbox:
-        self.accepts(request)
+        await self.accepts(request)
         await self.preflight()
         if request.snapshot is not None:
             resolved_image, layers = self._snapshot_image(request.snapshot, request)
@@ -708,7 +719,8 @@ class FirecrackerProvider(Provider):
                 storage_mb=storage_mb,
                 sudo=request.sudo,
                 network_mode=request.network.mode,
-                provider=self.name,
+                provider=self.id,
+                leaf=self.id,
                 desktop_resolution=desktop,
             ),
             agent_user=agent_user,
@@ -798,7 +810,7 @@ class FirecrackerProvider(Provider):
             blocks, entries = await asyncio.to_thread(_inject, partial / "rootfs.tar", run_config)
             size_mb = math.ceil(blocks * 4096 * 1.1 / 2**20) + 256
             code, stdout, stderr = await _run(
-                "docker", "run", "--rm", "--network", "none",
+                "docker", "run", "--rm", *HELPER_RUNTIME, "--network", "none",
                 "--user", f"{os.getuid()}:{os.getgid()}", "--env", "LC_ALL=C.UTF-8",
                 "--mount", f"type=bind,src={partial.resolve()},dst=/disk",
                 "--entrypoint", "sh", self.runner_image, "-c",
@@ -861,7 +873,7 @@ class FirecrackerProvider(Provider):
         """Start the runner, which makes the writable disk and starts the microVM."""
         storage_mb = request.resources.storage_mb or DEFAULT_STORAGE_MB
         argv = [
-            "docker", "run", "--detach", "--name", name,
+            "docker", "run", "--detach", *HELPER_RUNTIME, "--name", name,
             "--label", f"{MANAGED_LABEL}=true",
             "--label", f"{EPISODE_LABEL}={request.episode_id}",
             "--label", f"{ROLE_LABEL}={request.role.value}",

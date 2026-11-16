@@ -34,6 +34,7 @@ __all__ = [
     "TASK_CONFIG",
     "ManifestTask",
     "TaskFolder",
+    "describe",
     "discover_task_folders",
     "load_task_folder",
     "load_tasks",
@@ -70,7 +71,7 @@ def _read_toml(path: Path) -> dict[str, Any]:
         raise TaskDefinitionError(f"invalid TOML in {path}: {exc}") from exc
 
 
-def _describe(error: ValidationError) -> str:
+def describe(error: ValidationError) -> str:
     """One readable line per problem, each naming the ``task.toml`` key it is about."""
     problems = []
     for item in error.errors():
@@ -275,12 +276,12 @@ def _load_folder(folder: TaskFolder) -> ManifestTask:
     try:
         config = TaskConfig.model_validate(_read_toml(path))
     except ValidationError as exc:
-        raise TaskDefinitionError(f"invalid {path}: {_describe(exc)}") from exc
+        raise TaskDefinitionError(f"invalid {path}: {describe(exc)}") from exc
     _require_files(folder, config.environment.os)
     try:
         spec = _spec(config, folder)
     except ValidationError as exc:
-        raise TaskDefinitionError(f"invalid Task {folder.root}: {_describe(exc)}") from exc
+        raise TaskDefinitionError(f"invalid Task {folder.root}: {describe(exc)}") from exc
     except TaskDefinitionError as exc:
         raise TaskDefinitionError(f"invalid Task {folder.root}: {exc}") from exc
     return ManifestTask(spec, folder)
@@ -300,6 +301,7 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
             "gpus": config.environment.gpus,
             "gpu_types": config.environment.gpu_types or (),
             "sudo": config.agent.sudo,
+            "container_features": config.environment.container_features,
         },
         network=config.agent.network,
         workdir=config.agent.workdir,
@@ -415,6 +417,7 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
         storage_mb=sized.storage_mb,
         gpus=sized.gpus,
         gpu_types=sized.gpu_types or (),
+        container_features=sized.container_features,
     )
     return VerifySpec(environment_mode=VerificationMode.SEPARATE, image=image, resources=resources)
 

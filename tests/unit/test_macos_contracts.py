@@ -18,16 +18,12 @@ pytestmark = pytest.mark.unit
 IMAGE = "ghcr.io/example/macos@sha256:" + "a" * 64
 
 
-@pytest.mark.parametrize(
-    "vm",
-    [
-        {"provider": "orchard"},
-        {"orchard": {"endpoint": "https://orchard.example.test"}},
-    ],
-)
-def test_macos_vms_need_no_run_settings(vm: dict) -> None:
+def test_macos_vms_need_no_run_settings() -> None:
+    assert "orchard" in RunConfig().sandbox.providers
     with pytest.raises(ValidationError):
-        RunConfig.model_validate({"vm": vm})
+        RunConfig.model_validate(
+            {"sandbox": {"orchard": {"endpoint": "https://orchard.example.test"}}}
+        )
 
 
 def _macos_task(path: Path, layer: dict | None = None, dockerfile: str | None = None) -> Path:
@@ -98,7 +94,7 @@ def test_a_macos_verifier_image_is_a_vm(tmp_path: Path) -> None:
     assert image is not None and (image.kind, image.ref) == (ImageKind.VM, IMAGE)
 
 
-def test_registry_sends_macos_vms_to_orchard(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_registry_builds_orchard_once_by_its_id(monkeypatch: pytest.MonkeyPatch) -> None:
     from ale.run.providers import orchard, qemu
 
     built = []
@@ -113,7 +109,7 @@ def test_registry_sends_macos_vms_to_orchard(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(orchard, "OrchardProvider", construct("orchard"))
     monkeypatch.setattr(qemu, "QemuProvider", construct("qemu"))
     registry = ProviderRegistry(RunConfig())
-    macos = registry.get(ImageKind.VM, OperatingSystem.MACOS)
-    assert registry.get(ImageKind.VM, OperatingSystem.MACOS) is macos
-    assert registry.get(ImageKind.VM, OperatingSystem.WINDOWS) is not macos
+    macos = registry.get("orchard")
+    assert registry.get("orchard") is macos
+    assert registry.get("qemu") is not macos
     assert built == ["orchard", "qemu"]

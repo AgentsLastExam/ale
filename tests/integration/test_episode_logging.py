@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from ale.core.capability import CapabilityProfile
 from ale.core.episode import EpisodeContext
 from ale.core.lock import (
     AgentProvenance,
@@ -18,7 +19,6 @@ from ale.core.lock import (
 )
 from ale.core.result import PhaseTiming, ResultRecord
 from ale.core.sandbox import (
-    Capabilities,
     ExecResult,
     ImageKind,
     ImageRef,
@@ -67,8 +67,8 @@ class DemoTask(Task):
 class NoSandboxProvider(Provider):
     name = "none"
 
-    def capabilities(self) -> Capabilities:
-        return Capabilities()
+    async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        return ()
 
     async def preflight(self) -> None:
         return None
@@ -105,6 +105,7 @@ class LoggedProtocol:
             sudo=False,
             network_mode=task.spec.network.mode,
             provider="none",
+            leaf="none",
         )
         ctx.agent_version = "1"
         now = datetime.now(UTC)
@@ -249,10 +250,14 @@ async def test_complete_episode_has_one_authoritative_home_per_fact(
         runtime_ref="ale-task:fixture",
         prepared_identity=DIGEST,
     )
+    # As a Run that selected and checked its Providers hands the Task over.
+    task.provider = "docker:runc"
+    providers = provider_registry()
+    providers._instances[task.provider] = NoSandboxProvider()
     episode = await run_episode(
         task,
         LoggedProtocol(),  # type: ignore[arg-type]
-        provider_registry(NoSandboxProvider()),
+        providers,
         run_dir=tmp_path,
         provenance=provenance(),
         episode_id="episode",

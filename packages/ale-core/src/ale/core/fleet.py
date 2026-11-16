@@ -2,8 +2,8 @@
 
 Every message is a strict model, so a peer running another protocol version is refused at
 the boundary rather than half understood. The control plane imports no Provider: a Node
-describes what it can start as Sandbox profiles, and a Run describes what it needs as a
-demand, so placement compares data.
+describes what it can start as capability profiles, and a Run describes what it needs as
+a demand, so placement compares data.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds
 from ale.core.sandbox import (
     ExecResult,
     Identity,
@@ -35,7 +36,6 @@ __all__ = [
     "NODE_NAME",
     "PROTOCOL_VERSION",
     "AcquireRequest",
-    "Arch",
     "AssignedNode",
     "Assignment",
     "CreateSandbox",
@@ -65,7 +65,6 @@ __all__ = [
     "RunPlan",
     "SandboxDemand",
     "SandboxDescription",
-    "SandboxProfile",
     "SandboxStatus",
     "SnapshotHolding",
     "StartReport",
@@ -82,13 +81,6 @@ NODE_NAME = r"^[a-z0-9][a-z0-9-]{0,62}$"
 IDENTIFIER = r"^[a-z0-9][a-z0-9-]{7,63}$"
 
 _STRICT = ConfigDict(frozen=True, extra="forbid")
-
-
-class Arch(StrEnum):
-    """The instruction set a Sandbox runs, which its image fixes."""
-
-    X86_64 = "x86_64"
-    ARM64 = "arm64"
 
 
 class SandboxStatus(StrEnum):
@@ -136,33 +128,6 @@ class SandboxStatus(StrEnum):
 
 
 # --- what a Node declares ---------------------------------------------------------------
-
-
-class SandboxProfile(BaseModel):
-    """One combination of kind, operating system and architecture a Node can start.
-
-    A Node lists real combinations rather than independent lists of systems and
-    architectures: a Mac that runs macOS and arm64 Linux does not run x86-64 Windows.
-    Each profile is one of the Node's Providers' :class:`~ale.core.sandbox.Capabilities`
-    for one operating system, as the Provider's own preflight and capabilities reported.
-    """
-
-    model_config = _STRICT
-
-    provider: str = Field(min_length=1)
-    """The Node's Provider that serves this profile."""
-    kind: ImageKind
-    os: OperatingSystem
-    arch: Arch
-    gui: bool
-    network_modes: frozenset[NetworkMode]
-    snapshot: bool = False
-    gpus: bool = False
-    """Whether the Provider attaches the Node's GPUs."""
-    max_cpus: int | None = Field(default=None, ge=1)
-    max_memory_mb: int | None = Field(default=None, ge=1)
-    macos_vm_slots: int = Field(default=0, ge=0)
-    """The Node's macOS VM slots each Sandbox of this profile holds."""
 
 
 class GpuPool(BaseModel):
@@ -219,7 +184,8 @@ class NodeDeclaration(BaseModel):
     platform: Platform
     labels: dict[str, str] = Field(default_factory=dict)
     resources: NodeResources
-    profiles: tuple[SandboxProfile, ...]
+    profiles: tuple[CapabilityProfile, ...]
+    """One per lent leaf and operating system, in the order the Node prefers its leaves."""
 
 
 class RosterEntry(BaseModel):
@@ -321,6 +287,17 @@ class SandboxDemand(BaseModel):
     saves them."""
     snapshot: str | None = Field(default=None, pattern=IDENTIFIER)
     """The snapshot to boot from, which only the Node that holds it can serve."""
+
+    @property
+    def needs(self) -> SandboxNeeds:
+        return SandboxNeeds(
+            kind=self.kind,
+            os=self.os,
+            arch=self.arch,
+            network_mode=self.network_mode,
+            resources=self.resources,
+            snapshot=self.retention == "snapshot" or self.snapshot is not None,
+        )
 
 
 class AcquireRequest(BaseModel):

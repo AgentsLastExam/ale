@@ -9,7 +9,7 @@ from ale.core.sandbox import SandboxRequest
 from ale.run.providers.docker import DockerProvider
 from ale.run.task_images import prepare_task_image
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import CONTAINER_BASE, provider_registry, write_task
+from tests.support import CONTAINER_BASE, write_task
 
 pytestmark = [pytest.mark.needs_docker]
 
@@ -44,7 +44,7 @@ async def test_fixed_image_context_is_loaded_and_withholds_other_stages(
     task_path = write_asset_task(tmp_path / "ale-tasks-live")
     task = load_tasks(task_path)[0]
     provider = DockerProvider()
-    prepared = await prepare_task_image(task, provider_registry(provider))
+    prepared = await prepare_task_image(task, provider)
     request = SandboxRequest(
         episode_id="live-image-asset",
         prepared_image=prepared,

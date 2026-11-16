@@ -13,10 +13,12 @@ from typing import Any
 
 import pytest
 
-from ale.core.config import RunConfig
+from ale.core.capability import CapabilityProfile
+from ale.core.config import RunConfig, SandboxConfig
 from ale.core.sandbox import ImageRef, PreparedTaskImage, Provider, Sandbox, SandboxRequest
 from ale.core.taskspec import (
     SCHEMA_VERSION,
+    ContainerFeature,
     ImageKind,
     NetworkMode,
     NetworkPolicy,
@@ -24,7 +26,7 @@ from ale.core.taskspec import (
     Resources,
 )
 from ale.run import ale_image
-from ale.run.providers import ProviderRegistry
+from ale.run.providers import ProviderRegistry, machine_arch
 
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
 #: The current ALE bases, for images a test builds or runs.
@@ -55,14 +57,14 @@ def sibling_checkout(name: str) -> Path:
     )
 
 
-def provider_registry(
-    provider: Provider | None = None,
-    *,
-    kind: ImageKind = ImageKind.CONTAINER,
-) -> ProviderRegistry:
-    registry = ProviderRegistry(RunConfig())
-    if provider is not None:
-        registry._instances[(kind, False)] = provider
+def provider_registry(provider: Provider | None = None) -> ProviderRegistry:
+    """A Run's registry, with ``provider`` standing for the Provider its id names, first in
+    ``sandbox.providers``."""
+    if provider is None:
+        return ProviderRegistry(RunConfig())
+    order = [provider.id, *(name for name in SandboxConfig().providers if name != provider.id)]
+    registry = ProviderRegistry(RunConfig.model_validate({"sandbox": {"providers": order}}))
+    registry._instances[provider.id] = provider
     return registry
 
 
@@ -225,7 +227,8 @@ async def cli_sandbox(
         (folder / "environment").mkdir()
         (folder / "environment" / "build.sh").write_text(MACOS_RUNTIME_BUILD)
         subprocess.run(["git", "init", "-q", str(folder)], check=True)
-        image = await prepare_task_image(load_tasks(folder)[0], registry)
+        provider = registry.get("orchard")
+        image = await prepare_task_image(load_tasks(folder)[0], provider)
         request = SandboxRequest(
             episode_id=episode_id,
             os=OperatingSystem.MACOS,
@@ -236,9 +239,8 @@ async def cli_sandbox(
             user="admin",
             sudo=True,
         )
-        provider = registry.get(ImageKind.VM, OperatingSystem.MACOS)
     else:
-        provider = registry.get(ImageKind.CONTAINER, OperatingSystem.LINUX)
+        provider = registry.get("docker:runc")
         request = SandboxRequest(
             episode_id=episode_id,
             prepared_image=await prepare_reference(provider, CONTAINER_BASE),
@@ -380,7 +382,8 @@ class MemorySandbox(Sandbox):
                 memory_mb=request.resources.memory_mb,
                 sudo=request.sudo,
                 network_mode=request.network.mode,
-                provider=provider.name,
+                provider=provider.id,
+                leaf=provider.id,
             ),
             agent_user=request.user,
             agent_home=f"/home/{request.user}",
@@ -486,11 +489,17 @@ class MemoryProvider(Provider):
     """A Provider of :class:`MemorySandbox`, recording what it was asked for."""
 
     def __init__(
-        self, name: str = "docker", *, create_delay: float = 0.0, saves_snapshots: bool = False
+        self,
+        name: str = "docker",
+        *,
+        create_delay: float = 0.0,
+        saves_snapshots: bool = False,
+        container_features: frozenset[ContainerFeature] = frozenset(),
     ) -> None:
         self.name = name
         self.create_delay = create_delay
         self.saves_snapshots = saves_snapshots
+        self.container_features = container_features
         self.requests: list[SandboxRequest] = []
         self.sandboxes: list[MemorySandbox] = []
         self.destroyed: list[str] = []
@@ -503,14 +512,19 @@ class MemoryProvider(Provider):
         #: How long handing a retained Sandbox to a later episode takes.
         self.attach_delay = 0.0
 
-    def capabilities(self):  # type: ignore[no-untyped-def]
-        from ale.core.sandbox import Capabilities
-
-        return Capabilities(
-            operating_systems=frozenset({OperatingSystem.LINUX}),
-            gui=True,
-            network_modes=frozenset(NetworkMode),
-            snapshot=self.saves_snapshots,
+    async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        """Linux containers on this machine's architecture."""
+        return (
+            CapabilityProfile(
+                provider=self.id,
+                kind=ImageKind.CONTAINER,
+                os=OperatingSystem.LINUX,
+                arch=machine_arch(),
+                gui=True,
+                network_modes=frozenset(NetworkMode),
+                snapshot=self.saves_snapshots,
+                container_features=self.container_features,
+            ),
         )
 
     async def preflight(self) -> None:

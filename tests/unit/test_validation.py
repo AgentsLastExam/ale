@@ -8,6 +8,7 @@ import os
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from typer.testing import CliRunner
@@ -27,9 +28,19 @@ from ale.run.cli.tasks import (
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.builtin import NopHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
+from ale.run.providers import ProviderRegistry
 from ale.run.task_images import ImagePreparationResult, ImagePreparationStep
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def host_checks(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """These tests fake selection and preparation, so the leaves' checks on the Host go too,
+    and are only counted."""
+    checks = AsyncMock()
+    monkeypatch.setattr(ProviderRegistry, "preflight", checks)
+    return checks
 
 
 class RewardsSandbox:
@@ -227,8 +238,10 @@ def test_prepare_uses_selection_and_starts_no_runtime_services(
     observed: list[str] = []
     digest = "sha256:" + "a" * 64
 
-    async def fake_prepare(tasks, _providers):  # type: ignore[no-untyped-def]
+    async def fake_prepare(tasks, _providers, _continued=None):  # type: ignore[no-untyped-def]
         observed.extend(str(task.spec.name) for task in tasks)
+        for task in tasks:
+            task.provider = "docker:runc"
         image = PreparedTaskImage(
             kind=ImageKind.CONTAINER,
             source="solver-local",
@@ -258,7 +271,9 @@ def test_prepare_uses_selection_and_starts_no_runtime_services(
 
     assert result.exit_code == 0, result.output
     assert observed == ["agentslastexam/a", "agentslastexam/b"]
-    assert "agentslastexam/a solver kind=container source=local" in result.output
+    assert "agentslastexam/a solver provider=docker:runc kind=container source=local" in (
+        result.output
+    )
     assert "oci-build" in result.output
 
 
@@ -323,7 +338,7 @@ async def test_validation_passes_artifact_policy_to_episodes(
     task_cli = import_module("ale.run.cli.tasks")
     digest = "sha256:" + "a" * 64
 
-    async def fake_prepare(tasks, _providers):  # type: ignore[no-untyped-def]
+    async def fake_prepare(tasks, _providers, _continued=None):  # type: ignore[no-untyped-def]
         for task in tasks:
             task.prepared_image = PreparedTaskImage(
                 kind=ImageKind.CONTAINER,
@@ -356,6 +371,7 @@ async def test_an_oracle_run_gives_an_allowlist_task_its_egress_proxy(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     write_task_repo,  # type: ignore[no-untyped-def]
+    host_checks: AsyncMock,
     command: str,
 ) -> None:
     """An oracle run calls no model, yet the oracle meets the agent's network, allowlist
@@ -367,7 +383,7 @@ async def test_an_oracle_run_gives_an_allowlist_task_its_egress_proxy(
     task_cli = import_module("ale.run.cli.tasks")
     digest = "sha256:" + "a" * 64
 
-    async def fake_prepare(tasks, _providers):  # type: ignore[no-untyped-def]
+    async def fake_prepare(tasks, _providers, _continued=None):  # type: ignore[no-untyped-def]
         for task in tasks:
             task.prepared_image = PreparedTaskImage(
                 kind=ImageKind.CONTAINER,
@@ -412,5 +428,9 @@ async def test_an_oracle_run_gives_an_allowlist_task_its_egress_proxy(
         oracle = RunConfig.model_validate({"agent": {"name": "oracle"}})
         await task_cli._run_one(str(repository), oracle, tmp_path / "runs")
     assert seen["gateway"] is None
+    # Its leaves were checked on this Host, once, before the episode.
+    ((checked,), _) = host_checks.await_args
+    assert [task.spec.name for task in checked] == ["agentslastexam/demo"]
+    assert host_checks.await_count == 1
     # The proxy knows the episode's session, and holds it to the Task's allowlist.
     assert str(seen["status"]).split()[1] == "403", seen["status"]

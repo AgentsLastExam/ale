@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from ale.core.capability import Arch
 from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -26,7 +27,14 @@ from ale.core.sandbox import (
     ResourceAllocation,
     SandboxRequest,
 )
-from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from ale.core.taskspec import (
+    ContainerFeature,
+    ImageKind,
+    NetworkMode,
+    NetworkPolicy,
+    OperatingSystem,
+    Resources,
+)
 from ale.run.providers.firecracker import guest_init
 from ale.run.providers.firecracker.provider import (
     GUEST_TAP,
@@ -120,6 +128,7 @@ def sandbox(
             sudo=False,
             network_mode=req.network.mode,
             provider="firecracker",
+            leaf="firecracker",
         ),
         agent_user="user",
         agent_home="/home/user",
@@ -140,18 +149,32 @@ async def test_kvm_needs_no_access_of_this_accounts_own(monkeypatch: pytest.Monk
     await FirecrackerProvider().preflight()
 
 
-def test_capabilities_are_linux_microvms_with_every_network_mode() -> None:
-    capabilities = FirecrackerProvider().capabilities()
-    assert capabilities.operating_systems == frozenset({OperatingSystem.LINUX})
-    assert capabilities.network_modes == frozenset(NetworkMode)
-    assert capabilities.snapshot is True
-    assert capabilities.max_cpus == 32
+async def test_its_profile_is_x86_64_linux_microvms_with_every_network_mode() -> None:
+    (profile,) = await FirecrackerProvider().profiles()
+    assert (profile.provider, profile.kind, profile.os, profile.arch) == (
+        "firecracker",
+        ImageKind.CONTAINER,
+        OperatingSystem.LINUX,
+        Arch.X86_64,
+    )
+    assert profile.network_modes == frozenset(NetworkMode)
+    assert profile.snapshot is True
+    assert profile.max_cpus == 32
+    assert not profile.gpus
+    assert profile.container_features == {
+        ContainerFeature.PERF,
+        ContainerFeature.BPF,
+        ContainerFeature.IO_URING,
+        ContainerFeature.RAW_SOCKETS,
+        ContainerFeature.USER_NAMESPACES,
+        ContainerFeature.MOUNT,
+    }
 
 
-def test_gpus_vm_images_and_other_systems_are_refused_before_anything_starts() -> None:
+async def test_gpus_vm_images_and_other_systems_are_refused_before_anything_starts() -> None:
     provider = FirecrackerProvider()
-    with pytest.raises(ProviderCapabilityError, match="no GPU"):
-        provider.accepts(request(resources=Resources(gpus=1)))
+    with pytest.raises(ProviderCapabilityError, match="attaches no GPUs"):
+        await provider.accepts(request(resources=Resources(gpus=1)))
     vm = request(
         prepared_image=PreparedTaskImage(
             kind="vm",
@@ -162,12 +185,12 @@ def test_gpus_vm_images_and_other_systems_are_refused_before_anything_starts() -
             resolved_reference="local:///tmp/disk.qcow2",
         )
     )
-    with pytest.raises(ProviderCapabilityError, match="container images"):
-        provider.accepts(vm)
-    with pytest.raises(ProviderCapabilityError, match="operating system"):
-        provider.accepts(request(os=OperatingSystem.WINDOWS))
-    with pytest.raises(ProviderCapabilityError, match="cpus"):
-        provider.accepts(request(resources=Resources(cpus=33)))
+    with pytest.raises(ProviderCapabilityError, match="starts container Sandboxes, not vm"):
+        await provider.accepts(vm)
+    with pytest.raises(ProviderCapabilityError, match="runs linux, not windows"):
+        await provider.accepts(request(os=OperatingSystem.WINDOWS))
+    with pytest.raises(ProviderCapabilityError, match="33 CPUs exceed its 32"):
+        await provider.accepts(request(resources=Resources(cpus=33)))
 
 
 def test_the_machine_boots_the_shared_kernel_on_the_read_only_root() -> None:
@@ -473,13 +496,12 @@ def test_the_init_gives_the_command_dockers_environment() -> None:
     assert defaults["HOME"] == "/root"
 
 
-def test_the_container_slot_can_name_firecracker() -> None:
+def test_a_run_can_name_firecracker() -> None:
     from ale.core.config import RunConfig
-    from ale.core.sandbox import ImageKind
     from ale.run.providers import RETAINING_PROVIDERS, ProviderRegistry, provider_named
 
-    config = RunConfig.model_validate({"container": {"provider": "firecracker"}})
-    chosen = ProviderRegistry(config).get(ImageKind.CONTAINER, OperatingSystem.LINUX)
+    config = RunConfig.model_validate({"sandbox": {"providers": ["firecracker", "qemu"]}})
+    chosen = ProviderRegistry(config).get("firecracker")
     assert isinstance(chosen, FirecrackerProvider)
     assert provider_named("firecracker").name == "firecracker"
     assert "firecracker" in RETAINING_PROVIDERS

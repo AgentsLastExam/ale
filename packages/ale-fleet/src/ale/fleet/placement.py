@@ -22,8 +22,9 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ale.core.fleet import NodeDeclaration, SandboxDemand, SandboxProfile
-from ale.run.gpu import accepts_model
+from ale.core.capability import CapabilityProfile, accepts_model, closest, unmet
+from ale.core.fleet import NodeDeclaration, SandboxDemand
+from ale.core.taskspec import ImageKind, OperatingSystem
 
 __all__ = [
     "Busy",
@@ -117,7 +118,7 @@ class Weights:
 @dataclass(frozen=True)
 class Choice:
     node: str
-    profile: SandboxProfile
+    profile: CapabilityProfile
     holds: Holds
     score: float
     ready_sec: float
@@ -144,23 +145,18 @@ def _free(
     return cpus, memory, slots, gpus
 
 
-def _profile(declaration: NodeDeclaration, demand: SandboxDemand) -> SandboxProfile | None:
+def _profile(declaration: NodeDeclaration, demand: SandboxDemand) -> CapabilityProfile | None:
+    """The Node's first profile, in the order it prefers its leaves, that serves
+    ``demand``."""
     if declaration.framework != demand.framework:
         return None
-    resources = demand.resources
-    for profile in declaration.profiles:
-        if (
-            profile.kind is demand.kind
-            and profile.os is demand.os
-            and profile.arch is demand.arch
-            and demand.network_mode in profile.network_modes
-            and (profile.gpus or not resources.gpus)
-            and (profile.max_cpus is None or resources.cpus <= profile.max_cpus)
-            and (profile.max_memory_mb is None or resources.memory_mb <= profile.max_memory_mb)
-            and (profile.snapshot or (demand.retention != "snapshot" and demand.snapshot is None))
-        ):
-            return profile
-    return None
+    needs = demand.needs
+    return next((p for p in declaration.profiles if not unmet(p, needs)), None)
+
+
+def _slots(profile: CapabilityProfile) -> int:
+    """The Node's macOS VM slots one Sandbox of ``profile`` holds."""
+    return int(profile.kind is ImageKind.VM and profile.os is OperatingSystem.MACOS)
 
 
 def _gpus(available: dict[str, int], demand: SandboxDemand) -> dict[str, int] | None:
@@ -181,7 +177,7 @@ def _shortage(
     name: str,
     free: tuple[int, int, int, dict[str, int]],
     demand: SandboxDemand,
-    profile: SandboxProfile,
+    profile: CapabilityProfile,
 ) -> str | None:
     """Why a Node with ``free`` cannot take the demand, or None when it can."""
     cpus, memory, slots, gpus = free
@@ -190,7 +186,7 @@ def _shortage(
         return f"{name} has {max(cpus, 0)} free CPUs"
     if resources.memory_mb > memory:
         return f"{name} has {max(memory, 0)} MB free memory"
-    if profile.macos_vm_slots > slots:
+    if _slots(profile) > slots:
         return f"{name} has no free macOS VM slot"
     if resources.gpus and _gpus(gpus, demand) is None:
         return f"{name} has too few free GPUs of an accepted model"
@@ -198,7 +194,7 @@ def _shortage(
 
 
 def _wait(
-    node: NodeView, demand: SandboxDemand, profile: SandboxProfile, ahead: Sequence[Waiting]
+    node: NodeView, demand: SandboxDemand, profile: CapabilityProfile, ahead: Sequence[Waiting]
 ) -> tuple[float, tuple[int, int, int, dict[str, int]]] | None:
     """In how many seconds a full Node is expected to have room for ``demand``, after the
     requests already waiting for it, and what is free then; None when no estimate says it
@@ -279,7 +275,7 @@ def choose(
         holds = Holds(
             cpus=demand.resources.cpus,
             memory_mb=demand.resources.memory_mb,
-            macos_vm_slots=profile.macos_vm_slots,
+            macos_vm_slots=_slots(profile),
             gpus=(_gpus(free_gpus, demand) or {}) if demand.resources.gpus else {},
             image=image,
         )
@@ -306,6 +302,7 @@ def unservable(demand: SandboxDemand, nodes: Iterable[NodeView]) -> str | None:
         if (profile := _profile(node.declaration, demand)) is not None
     ]
     resources = demand.resources
+    sandbox = f"{demand.kind} {demand.os}/{demand.arch} Sandbox"
     if not matching:
         elsewhere = [
             node.name
@@ -313,50 +310,46 @@ def unservable(demand: SandboxDemand, nodes: Iterable[NodeView]) -> str | None:
             if _profile(node.declaration.model_copy(update={"framework": demand.framework}), demand)
             is not None
         ]
-        detail = (
-            f" with this engine's framework; {', '.join(elsewhere)} run another engine's "
-            "framework, so update their node agents or this Run's engine"
-            if elsewhere
-            else ""
-        )
-        return (
-            f"no Node offers a {demand.kind} {demand.os}/{demand.arch} Sandbox with "
-            f"network {demand.network_mode}"
-            + (f" and {resources.gpus} GPUs" if resources.gpus else "")
-            + (
-                " that saves snapshots"
-                if demand.retention == "snapshot" or demand.snapshot is not None
-                else ""
+        if elsewhere:
+            return (
+                f"no Node with this engine's framework serves this {sandbox}; "
+                f"{', '.join(elsewhere)} run another engine's framework, so update their node "
+                "agents or this Run's engine"
             )
-            + detail
-        )
+        offered = [
+            profile
+            for node in nodes
+            if node.declaration.framework == demand.framework
+            for profile in node.declaration.profiles
+        ]
+        # In the words a Run's own selection uses for it.
+        return f"no Node serves this {sandbox}: " + "; ".join(closest(offered, demand.needs))
     for node, profile in matching:
         total = node.declaration.resources
         gpus = {pool.model: pool.count for pool in total.gpus}
         if (
             resources.cpus <= total.cpus
             and resources.memory_mb <= total.memory_mb
-            and profile.macos_vm_slots <= total.macos_vm_slots
+            and _slots(profile) <= total.macos_vm_slots
             and (not resources.gpus or _gpus(gpus, demand) is not None)
         ):
             return None
     return (
-        f"no Node that offers a {demand.kind} {demand.os}/{demand.arch} Sandbox has "
-        f"{resources.cpus} CPUs, {resources.memory_mb} MB"
+        f"no Node that offers a {sandbox} has {resources.cpus} CPUs, {resources.memory_mb} MB"
         + (f" and {resources.gpus} accepted GPUs" if resources.gpus else "")
         + " in all"
     )
 
 
-def _capacity(node: NodeView, demand: SandboxDemand, profile: SandboxProfile) -> int:
+def _capacity(node: NodeView, demand: SandboxDemand, profile: CapabilityProfile) -> int:
     """How many Sandboxes of ``demand`` the Node holds when it holds nothing else."""
     total = node.declaration.resources
     limits = [
         total.cpus // max(demand.resources.cpus, 1),
         total.memory_mb // max(demand.resources.memory_mb, 1),
     ]
-    if profile.macos_vm_slots:
-        limits.append(total.macos_vm_slots // profile.macos_vm_slots)
+    if _slots(profile):
+        limits.append(total.macos_vm_slots // _slots(profile))
     if demand.resources.gpus:
         accepted = sum(
             pool.count

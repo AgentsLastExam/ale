@@ -72,14 +72,6 @@ class _Provider:
         )
 
 
-class _Registry:
-    def __init__(self) -> None:
-        self.providers = {kind: _Provider(kind) for kind in ImageKind}
-
-    def get(self, kind: ImageKind, operating_system: object = None) -> _Provider:
-        return self.providers[kind]
-
-
 def task_repository(tmp_path: Path, name: str) -> tuple[Path, Path]:
     repository = tmp_path / "ale-tasks-demo"
     repository.mkdir()
@@ -102,7 +94,7 @@ async def execute(task_path: Path, run_dir: Path, *, collect: bool = True):  # t
 async def test_shared_verification_has_no_second_prepared_image(tmp_path: Path) -> None:
     task = load_tasks(scaffold_task(tmp_path / "shared-image"))[0]
     task.prepared_image = _prepared(ImageKind.CONTAINER)
-    assert await prepare_verifier_image_result(task, _Registry()) is None  # type: ignore[arg-type]
+    assert await prepare_verifier_image_result(task, _Provider(ImageKind.CONTAINER)) is None  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -130,7 +122,7 @@ async def test_separate_verifier_reuses_solver_prepared_kind(
         }
     )
     task.prepared_image = _prepared(kind)
-    result = await prepare_verifier_image_result(task, _Registry())  # type: ignore[arg-type]
+    result = await prepare_verifier_image_result(task, _Provider(kind))  # type: ignore[arg-type]
     assert result is not None
     assert result.image is task.prepared_image
     assert result.image.kind is kind
@@ -160,10 +152,10 @@ async def test_external_separate_verifier_uses_matching_provider(
         }
     )
     task.prepared_image = _prepared(ImageKind.CONTAINER)
-    registry = _Registry()
-    result = await prepare_verifier_image_result(task, registry)  # type: ignore[arg-type]
+    provider = _Provider(kind)
+    result = await prepare_verifier_image_result(task, provider)  # type: ignore[arg-type]
     assert result is not None and result.image.kind is kind
-    assert registry.get(kind).inputs == [ImageRef(kind=kind, reference="ghcr.io/acme/verifier:v1")]
+    assert provider.inputs == [ImageRef(kind=kind, reference="ghcr.io/acme/verifier:v1")]
 
 
 @pytest.mark.asyncio
@@ -195,8 +187,7 @@ async def test_local_separate_verifier_builds_a_container(
         return build
 
     monkeypatch.setattr("ale.run.task_images._build_oci", build_oci)
-    registry = _Registry()
-    result = await prepare_verifier_image_result(task, registry)  # type: ignore[arg-type]
+    result = await prepare_verifier_image_result(task, _Provider(ImageKind.CONTAINER))  # type: ignore[arg-type]
     assert result is not None
     assert result.image.kind is ImageKind.CONTAINER
     assert result.image.source == "verifier-local"

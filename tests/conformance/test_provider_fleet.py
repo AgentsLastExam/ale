@@ -24,6 +24,7 @@ from tests.support import CONTAINER_BASE
 from ale.core.sandbox import ImageRef
 from ale.core.testkit import ProviderConformance
 from ale.run.framework import framework_identity
+from ale.run.providers import missing_features
 from ale.run.providers.fleet import FleetClient, FleetProvider
 
 pytestmark = [pytest.mark.conformance, pytest.mark.needs_docker]
@@ -64,7 +65,7 @@ def fleet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
         subprocess.Popen(
             [ALE_FLEET, "node", "--control-plane", CONTROL,
              "--address", f"http://127.0.0.1:{NODE_PORT}", "--port", str(NODE_PORT),
-             "--name", "conformance", "--provider", "docker"],
+             "--name", "conformance", "--provider", "docker:runc"],
             env=env, stdout=logs[1], stderr=subprocess.STDOUT,
         ),
     ]  # fmt: skip
@@ -112,6 +113,7 @@ class TestFleetProvider(ProviderConformance):
     image = ImageRef(kind="container", reference=CONTAINER_BASE)
     gui_image = ImageRef(kind="container", reference=CONTAINER_BASE)
     framework = framework_identity(user="user", vm=False)
+    missing_features = staticmethod(missing_features)
 
     @pytest.mark.asyncio
     async def test_ready_sandbox_reports_observed_image_and_resources(self) -> None:
@@ -125,5 +127,6 @@ class TestFleetProvider(ProviderConformance):
             assert sandbox.allocation.cpus == request.resources.cpus
             assert sandbox.allocation.memory_mb == request.resources.memory_mb
             assert sandbox.allocation.network_mode is request.network.mode
-            assert sandbox.allocation.provider == self.provider.name
-            assert sandbox.allocation.node == "conformance/docker"
+            assert sandbox.allocation.provider == self.provider.id
+            assert sandbox.allocation.leaf == "docker:runc"
+            assert sandbox.allocation.node == "conformance/docker:runc"

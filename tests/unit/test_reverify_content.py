@@ -198,3 +198,53 @@ async def test_reverify_takes_the_solver_kind_from_its_run_and_reads_only_the_ve
     assert code == 2
     assert read == ["ghcr.io/acme/verifier:1"]
     assert prepared == [(recorded, ImageKind.CONTAINER, ImageKind.VM)]
+
+
+@pytest.mark.asyncio
+async def test_reverify_fails_only_the_task_whose_image_no_registry_answers_for(
+    tmp_path, monkeypatch, capsys
+):
+    """One unreachable image is that Task's failure, not the whole reverification's."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tests.unit.test_runtime_contracts import make_lock
+
+    from ale.core.config import RunConfig
+    from ale.core.errors import ProviderStartError
+    from ale.run.cli import tasks as task_cli
+
+    root = scaffold_task(tmp_path / "task")
+    config = root / "task.toml"
+    config.write_text(
+        config.read_text().replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        + '\n[verifier.environment]\nimage = "ghcr.io/acme/gone:1"\n'
+    )
+    task = load_tasks(root)[0]
+    lock = make_lock()
+    lock = lock.model_copy(
+        update={
+            "task": lock.task.model_copy(
+                update={"name": task.spec.name, "non_verifier_digest": task.non_verifier_digest}
+            ),
+            "image": lock.image.model_copy(update={"declaration": task.spec.image}),
+        }
+    )
+    monkeypatch.setattr(
+        task_cli,
+        "_retained_source_episodes",
+        lambda _: ((tmp_path / "source", SimpleNamespace(episode_id="old"), lock, "docker:old"),),
+    )
+
+    async def unreachable(reference: str) -> object:
+        raise ProviderStartError(f"cannot read the manifest of {reference}")
+
+    monkeypatch.setattr("ale.run.task_images.classify_image", unreachable)
+    prepare = AsyncMock(side_effect=AssertionError("its verifier was prepared"))
+    monkeypatch.setattr(task_cli, "prepare_verifier_image_result", prepare)
+    code = await task_cli._reverify(str(root), tmp_path / "source", RunConfig(), tmp_path / "runs")
+    assert code == task_cli.EXIT_SOME_FAILED
+    prepare.assert_not_called()
+    (refusal,) = capsys.readouterr().err.splitlines()
+    assert refusal.startswith(f"{task.spec.name}: ")
+    assert refusal.endswith("cannot read the manifest of ghcr.io/acme/gone:1")

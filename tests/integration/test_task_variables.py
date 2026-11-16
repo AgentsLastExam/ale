@@ -17,7 +17,6 @@ import pytest
 
 from ale.core.config import RunConfig
 from ale.core.lock import RunLock, TaskSource
-from ale.core.taskspec import ImageKind
 from ale.core.trace import read_jsonl
 from ale.core.verdict import Status
 from ale.run.episode import EpisodeResult, run_episode
@@ -138,9 +137,7 @@ def _registry(kind: str, tmp_path: Path) -> ProviderRegistry:
     image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
         pytest.skip("set ALE_TEST_WINDOWS_IMAGE to an ALE Windows base disk")
-    return provider_registry(
-        QemuProvider(image=image, overlay_dir=tmp_path / "qemu"), kind=ImageKind.VM
-    )
+    return provider_registry(QemuProvider(image=image, overlay_dir=tmp_path / "qemu"))
 
 
 @pytest.mark.asyncio

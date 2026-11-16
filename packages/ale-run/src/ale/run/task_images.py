@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import fcntl
 import hashlib
@@ -15,6 +16,8 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+from pydantic import ValidationError
 
 from ale.core.errors import (
     AleError,
@@ -32,6 +35,7 @@ from ale.core.taskspec import (
     NetworkPolicy,
     OperatingSystem,
     Resources,
+    TaskSpec,
     VerificationMode,
 )
 from ale.run.content import tree_digest
@@ -52,7 +56,6 @@ from ale.run.images import (
     resolve_loaded_image,
 )
 from ale.run.process import run
-from ale.run.providers import ProviderRegistry
 from ale.run.providers.fleet import FleetProvider
 from ale.run.providers.orchard import OrchardProvider, OrchardSandbox
 from ale.run.providers.orchard.client import CONTROL_ACCOUNT
@@ -63,7 +66,7 @@ from ale.run.providers.qemu.provider import (
     QemuProvider,
 )
 from ale.run.sources import cache_root
-from ale.run.tasksets.manifest import BUILD_SCRIPTS, SETUP_DIR
+from ale.run.tasksets.manifest import BUILD_SCRIPTS, SETUP_DIR, describe
 
 __all__ = [
     "ImagePreparationResult",
@@ -131,7 +134,8 @@ async def resolve_image_kinds(tasks: Iterable[Task]) -> None:
 
     Every other image's kind follows from the Task folder and was decided as the Task was
     loaded. A Task whose image this decides continues with a specification carrying the
-    kind; each reference is read once, however many Tasks name it.
+    kind, checked again as a whole, so a VM image with container features is refused;
+    each reference is read once, however many Tasks name it.
     """
     tasks = list(tasks)
     references = sorted(
@@ -164,7 +168,12 @@ async def resolve_image_kinds(tasks: Iterable[Task]) -> None:
         image, verifier = decided(spec.image), decided(spec.verify.image)
         if image is not spec.image or verifier is not spec.verify.image:
             verify = spec.verify.model_copy(update={"image": verifier})
-            task.spec = spec.model_copy(update={"image": image, "verify": verify})
+            try:
+                task.spec = TaskSpec.model_validate(
+                    {**dict(spec), "image": image, "verify": verify}
+                )
+            except ValidationError as error:
+                raise TaskDefinitionError(f"invalid Task {spec.name}: {describe(error)}") from None
 
 
 def _kind(image: ImageSpec) -> ImageKind:
@@ -174,16 +183,15 @@ def _kind(image: ImageSpec) -> ImageKind:
     return image.kind
 
 
-async def prepare_task_image(task: Task, providers: ProviderRegistry) -> PreparedTaskImage:
-    return (await prepare_task_image_result(task, providers)).image
+async def prepare_task_image(task: Task, provider: Provider) -> PreparedTaskImage:
+    return (await prepare_task_image_result(task, provider)).image
 
 
-async def prepare_task_image_result(
-    task: Task, providers: ProviderRegistry
-) -> ImagePreparationResult:
+async def prepare_task_image_result(task: Task, provider: Provider) -> ImagePreparationResult:
+    """The solver's image, prepared for ``provider``: prepared images are
+    Provider-specific."""
     spec = task.spec.image
     kind = _kind(spec)
-    provider = providers.get(kind, task.spec.os)
     folder = _task_folder(task)
     if isinstance(provider, FleetProvider):
         return _on_fleet(task, "solver", provider)
@@ -282,16 +290,16 @@ async def prepare_task_image_result(
     return _result(task, "solver", image, *steps)
 
 
-async def prepare_verifier_image(
-    task: Task, providers: ProviderRegistry
-) -> PreparedTaskImage | None:
-    result = await prepare_verifier_image_result(task, providers)
+async def prepare_verifier_image(task: Task, provider: Provider) -> PreparedTaskImage | None:
+    result = await prepare_verifier_image_result(task, provider)
     return result.image if result is not None else None
 
 
 async def prepare_verifier_image_result(
-    task: Task, providers: ProviderRegistry
+    task: Task, provider: Provider
 ) -> ImagePreparationResult | None:
+    """A separate verifier's image, prepared for ``provider``; none for shared
+    verification."""
     verify = task.spec.verify
     if verify.environment_mode is VerificationMode.SHARED:
         return None
@@ -300,6 +308,22 @@ async def prepare_verifier_image_result(
         image = task.prepared_image
         if image is None:
             raise TaskDefinitionError("solver image must be prepared before verifier image")
+        if task.verifier_provider != task.provider:
+            # The solver's image, for the Provider the verifier's own needs selected: the
+            # very image the solver ran, checked by that Provider, unless either is the
+            # Fleet, which prepares an image on its Nodes from what the Task declares.
+            if isinstance(provider, FleetProvider) or task.provider == FleetProvider.name:
+                result = await prepare_task_image_result(_pinned(task, image), provider)
+                return dataclasses.replace(result, role="verifier")
+            image = await _stage("artifact-check", provider.prepare_image(image))
+            return _result(
+                task,
+                "verifier",
+                image,
+                ImagePreparationStep(
+                    "artifact-check", "executed", image.prepared_identity, image.runtime_ref
+                ),
+            )
         return _result(
             task,
             "verifier",
@@ -310,7 +334,6 @@ async def prepare_verifier_image_result(
         )
 
     kind = _kind(verify.image)
-    provider = providers.get(kind, task.spec.os)
     if isinstance(provider, FleetProvider):
         return _on_fleet(task, "verifier", provider)
     if verify.image.ref is not None:
@@ -375,6 +398,21 @@ async def prepare_verifier_image_result(
         )
     )
     return _result(task, "verifier", image, *steps)
+
+
+def _pinned(task: Task, solver: PreparedTaskImage) -> Task:
+    """``task`` with its named solver image pinned to the digest it resolved to here, so
+    that another Provider prepares the very image the solver ran rather than what its tag
+    names now. A solver on the Fleet resolves its tag on its Node, after this Run prepared
+    its images, so its image is left as declared."""
+    declared = task.spec.image
+    if declared.ref is None or task.provider == FleetProvider.name:
+        return task
+    assert solver.resolved_reference is not None, "a named image is resolved as it is prepared"
+    pinned = copy.copy(task)
+    image = declared.model_copy(update={"ref": solver.resolved_reference})
+    pinned.spec = task.spec.model_copy(update={"image": image})
+    return pinned
 
 
 def _on_fleet(

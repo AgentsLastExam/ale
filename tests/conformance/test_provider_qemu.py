@@ -75,7 +75,9 @@ class TestQemuProvider(ProviderConformance):
 
     @pytest.mark.asyncio
     async def test_ubuntu_gnome_session_and_fresh_overlay(self) -> None:
-        assert self.provider.capabilities().network_modes == frozenset(NetworkMode)
+        assert all(
+            p.network_modes == frozenset(NetworkMode) for p in await self.provider.profiles()
+        )
         first = await self.provider.create(await self.request())
         try:
             release = await first.exec(["sh", "-c", ". /etc/os-release; echo $VERSION_ID"])

@@ -63,7 +63,7 @@ from ale.core.errors import ProviderStartError, TaskDefinitionError
 from ale.core.ids import content_hash
 from ale.core.sandbox import PreparedTaskImage
 from ale.core.taskspec import OperatingSystem
-from ale.run import ale_image, guestd
+from ale.run import HELPER_RUNTIME, ale_image, guestd
 from ale.run.images import (
     acquire_lock,
     base_layer,
@@ -707,7 +707,9 @@ async def _in_container(*argv: str, timeout: float) -> tuple[int, str, str]:
     the container running, still writing into files this process has given up."""
     name = f"ale-framework-{uuid.uuid4().hex[:12]}"
     try:
-        return await _run("docker", "run", "--rm", "--name", name, *argv, timeout=timeout)
+        return await _run(
+            "docker", "run", "--rm", *HELPER_RUNTIME, "--name", name, *argv, timeout=timeout
+        )
     except BaseException:
         with contextlib.suppress(Exception):
             await asyncio.shield(_run("docker", "rm", "--force", name, timeout=60))

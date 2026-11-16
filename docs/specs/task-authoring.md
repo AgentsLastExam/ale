@@ -84,6 +84,7 @@ memory_mb = 4096                            # default 4096
 storage_mb = 8192                           # writable storage; default the Provider's
 gpus = 0                                    # GPU count, not indices; default 0
 # gpu_types = ["RTX-PRO-6000", "L40S"]      # models any of which will do; default any
+container_features = []                     # ALE; such as ["perf", "mount"]; default none
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # see Variables
 skills_dir = "/skills"                      # absolute; the Task's Skills in the image
 
@@ -116,6 +117,7 @@ memory_mb = 4096                            # default [environment].memory_mb
 storage_mb = 8192                           # default the Provider's
 gpus = 0                                    # default 0
 # gpu_types = ["H100"]                      # default any
+container_features = []                     # ALE; default none
 env = {}                                    # replaces [environment].env
 
 [solution]
@@ -187,12 +189,10 @@ shared verification.
 Verification is shared unless `environment_mode = "separate"` or `[verifier.environment]`
 says otherwise, as in Harbor. Separate verification runs in an independent sandbox with the
 `[verifier.environment]` resources, or the solver's without sudo when that table is absent.
-Its image is `[verifier.environment].image` used directly, a Linux container built from
-`tests/Dockerfile`, or else the solver image. A named verifier image is a container or a VM
-as the solver's would be under the Task's `os`; a verifier never builds on a base, and
-naming an image beside `tests/Dockerfile` fails, since the Dockerfile names its base in
-`FROM`. `tests/Dockerfile` requires separate verification, and on Windows and macOS it
-fails. The Verification APIs and records are defined only in [Verification](verification.md).
+Its image is `[verifier.environment].image`, a Linux container built from
+`tests/Dockerfile`, or else the solver's, as
+[Verifier images](sandbox-image.md#verifier-images) says. The Verification APIs and records
+are defined only in [Verification](verification.md).
 
 ### Resources and network
 
@@ -234,6 +234,36 @@ runs: a Task that names models would fail on others, and that failure would be s
 the agent's. The RunLock records the requested names beside the models observed in the
 Sandbox. How each Provider chooses is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-models).
+
+### Container features
+
+A container Sandbox lacks some kernel features, as containers do, because each widens what
+its code can reach of the kernel it runs on. `container_features` names the ones a Task
+needs, each at most once. Each name guarantees what root in the Sandbox can do; setup and
+verification run as root, and the agent becomes root with `[agent].sudo`:
+
+| Name | Root in the Sandbox can |
+|---|---|
+| `nested_containers` | run a container engine installed in the Sandbox, such as Docker, and start containers with it |
+| `perf` | open software performance events on its own processes with `perf_event_open`; hardware counters depend on the machine |
+| `bpf` | create eBPF maps and load eBPF programs with `bpf`; which program types load depends on the kernel |
+| `io_uring` | set up and use `io_uring` instances |
+| `fuse` | open `/dev/fuse`, through which a program serves a file system; mounting that file system takes `mount` too |
+| `raw_sockets` | open raw and packet sockets, as `ping` and packet capture do |
+| `user_namespaces` | create user namespaces, as rootless container engines and browser sandboxes do |
+| `mount` | mount file systems, such as a tmpfs, and create mount namespaces |
+
+A Task names what it needs and never a Provider or runtime. A Run gives each Sandbox only a
+Provider that gives every feature it names, and refuses to start when none it may use does
+([Provider selection](sandbox-image.md#provider-selection)). A Provider widens a Sandbox
+only for the features it names, so a Task that names none runs as isolated as its Provider
+runs any container. A separate verifier names its own in `[verifier.environment]`, and
+takes the solver's when that table is absent, as it takes its size.
+
+A VM has a kernel of its own, so a VM image takes none: naming one fails as the Task loads
+when its folder makes it a VM, and before anything is prepared when its registry does. Which
+Provider gives which feature, and how, is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#container-features).
 
 ### Variables
 

@@ -26,10 +26,10 @@ from ale.core.config import RunConfig, SandboxRetentionConfig
 from ale.core.harness import Harness
 from ale.core.lock import RunLock, TaskSource
 from ale.core.sandbox import SandboxRequest, SandboxRole
-from ale.core.taskspec import ImageKind, OperatingSystem
+from ale.core.taskspec import OperatingSystem
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status
-from ale.run.cli.tasks import _attach_retained, _continuation
+from ale.run.cli.tasks import _attach_retained, _continuation, _continued
 from ale.run.episode import EpisodeResult, run_episode
 from ale.run.gateway.server import Gateway
 from ale.run.harnesses.pi_cli import PiCliHarness
@@ -192,7 +192,9 @@ class _Chain:
         return result
 
     def continuing(self, result: EpisodeResult) -> Resume:
-        return _continuation(result.run_dir, [self.task], RunConfig(), self.harness, self.registry)
+        continued = _continued(result.run_dir, [self.task], RunConfig())
+        continued.require_keeper(self.task)
+        return _continuation(continued, self.task, RunConfig(), self.harness, self.registry)
 
 
 @asynccontextmanager
@@ -206,7 +208,7 @@ async def _chain(
     provider: DockerProvider | QemuProvider = DockerProvider()
     if kind == "vm":
         provider = QemuProvider(overlay_dir=tmp_path / "qemu", snapshot_dir=tmp_path / "snapshots")
-        registry = provider_registry(provider, kind=ImageKind.VM)
+        registry = provider_registry(provider)
     if kind == "windows":
         image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
         if not image.is_file():
@@ -215,7 +217,7 @@ async def _chain(
         provider = QemuProvider(
             image=image, overlay_dir=tmp_path / "qemu", snapshot_dir=tmp_path / "snapshots"
         )
-        registry = provider_registry(provider, kind=ImageKind.VM)
+        registry = provider_registry(provider)
     turns = f"{OUTPUT[kind]}/turns.txt"
     model = ScriptedModel(
         command=f"mkdir -p {OUTPUT[kind]} && echo turn >> {turns} && wc -l < {turns}"

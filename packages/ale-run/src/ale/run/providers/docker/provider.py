@@ -21,18 +21,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import shutil
 import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import urlsplit
 
+from ale.core.capability import CapabilityProfile, accepts_model
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
-    Capabilities,
     DesktopResolution,
     ExecOutputSink,
     ExecResult,
@@ -52,13 +54,13 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, OperatingSystem, Resources
-from ale.run import ale_image, guestd
+from ale.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem, Resources
+from ale.run import HELPER_RUNTIME, ale_image, guestd
 from ale.run.framework import with_framework
-from ale.run.gpu import GpuLease, accepts_model, parse_nvidia_smi
+from ale.run.gpu import GpuLease, parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
 from ale.run.process import run
-from ale.run.providers import relay
+from ale.run.providers import machine_arch, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.docker import kata
 from ale.run.providers.privileges import set_elevation, verify_identities
@@ -96,6 +98,47 @@ HOST_ALIAS = "ale-gateway.internal"
 #: The nat chain, in a sandbox's own network namespace, that sends the fixed Gateway port
 #: to the port the Host serves the Gateway on.
 GATEWAY_CHAIN = "ALE_GATEWAY"
+
+
+@dataclass(frozen=True)
+class Runtime:
+    """An OCI runtime a Docker leaf starts every one of its Sandboxes with."""
+
+    registered: str
+    """The name Docker's daemon knows it by, which ``--runtime`` takes and ``docker inspect``
+    reports as the container's. A containerd shim's name, ``io.containerd.<shim>.<version>``,
+    Docker also runs from its PATH as ``containerd-shim-<shim>-<version>``."""
+    features: frozenset[ContainerFeature]
+    """What it gives a Sandbox that asks for them, as measured (see the Providers README)."""
+    gpus: bool
+    """Whether Docker's GPU injection reaches its Sandboxes."""
+    devices: tuple[str, ...] = ()
+    """The Host devices it needs."""
+
+
+#: Each Docker leaf's runtime, by the part of its provider id after ``docker:``. runc gives
+#: raw sockets to every container, as Docker does by default; Kata's microVM runs no seccomp
+#: filter, and ``mount`` adds ``CAP_SYS_ADMIN``. Docker's GPU injection does not reach a
+#: Kata microVM.
+RUNTIMES: dict[str, Runtime] = {
+    "runc": Runtime("runc", frozenset({ContainerFeature.RAW_SOCKETS}), gpus=True),
+    "kata": Runtime(
+        kata.RUNTIME,
+        frozenset(
+            {
+                ContainerFeature.PERF,
+                ContainerFeature.BPF,
+                ContainerFeature.IO_URING,
+                ContainerFeature.RAW_SOCKETS,
+                ContainerFeature.USER_NAMESPACES,
+                ContainerFeature.MOUNT,
+            }
+        ),
+        gpus=False,
+        devices=("/dev/kvm",),
+    ),
+}
+_SHIM = re.compile(r"io\.containerd\.(\w+)\.(v\d+)")
 
 _NVIDIA_QUERY = "uuid,name,pci.bus_id,driver_version"
 _HOST_NVIDIA_QUERY = f"index,{_NVIDIA_QUERY}"
@@ -191,8 +234,8 @@ async def _in_namespace(container: str, script: str) -> tuple[int, str, str]:
     """Run a shell script with NET_ADMIN in the sandbox's network namespace on the Host,
     where the sandbox has none."""
     return await _docker(
-        "run", "--rm", "--network", f"container:{container}", "--cap-add", "NET_ADMIN",
-        "--entrypoint", "sh", NETFILTER_IMAGE, "-c", script,
+        "run", "--rm", *HELPER_RUNTIME, "--network", f"container:{container}",
+        "--cap-add", "NET_ADMIN", "--entrypoint", "sh", NETFILTER_IMAGE, "-c", script,
         timeout=300,
     )  # fmt: skip
 
@@ -610,32 +653,72 @@ class DockerProvider(Provider):
         *,
         gpus: tuple[int, ...] = (),
         gpu_lock_dir: Path | None = None,
-        runtime: Literal["runc", "kata"] = "runc",
+        runtime: str = "runc",
     ) -> None:
         self.gpus = gpus
         self.gpu_lock_dir = gpu_lock_dir or cache_root() / "gpu-locks" / self.name
-        #: ``runc`` leaves the runtime to the daemon's default; ``kata`` starts each
-        #: sandbox in a microVM of its own.
+        #: A key of :data:`RUNTIMES`: ``kata`` starts each sandbox in a microVM of its own.
         self.runtime = runtime
         # An image's conformance cannot change while it is pinned to a digest, and the
         # check costs a container start — so a sweep of ten thousand episodes pays for it
         # once rather than ten thousand times.
         self._checked: dict[str, list[str]] = {}
+        self._gpu_models: tuple[str, ...] | None = None
 
-    def capabilities(self) -> Capabilities:
-        return Capabilities(
-            operating_systems=frozenset({OperatingSystem.LINUX}),
-            gui=True,  # depends on the image; the GUI base image provides a desktop
-            network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.ALLOWLIST, NetworkMode.OPEN}),
-            snapshot=True,
+    @property
+    def id(self) -> str:
+        return f"{self.name}:{self.runtime}"
+
+    async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        models = await self._models() if RUNTIMES[self.runtime].gpus else ()
+        return (
+            CapabilityProfile(
+                provider=self.id,
+                kind=ImageKind.CONTAINER,
+                os=OperatingSystem.LINUX,
+                arch=machine_arch(),
+                gui=True,  # depends on the image; the GUI base image provides a desktop
+                network_modes=frozenset(NetworkMode),
+                snapshot=True,
+                gpus=bool(models),
+                gpu_models=models,
+                container_features=RUNTIMES[self.runtime].features,
+            ),
         )
+
+    async def _models(self) -> tuple[str, ...]:
+        """The models of the Host GPUs it may lease, read once: a Host's GPUs are a fact of
+        it, which a Run selects by. None where nvidia-smi finds no GPU."""
+        if self._gpu_models is None:
+            try:
+                devices = await self._host_gpus()
+            except ProviderCapabilityError:
+                devices = {}
+            indices = self.gpus or tuple(devices)
+            self._gpu_models = tuple(
+                dict.fromkeys(devices[index].model for index in indices if index in devices)
+            )
+        return self._gpu_models
 
     async def preflight(self) -> None:
         if shutil.which("docker") is None:
             raise ProviderStartError("docker is not installed — see `just doctor`")
-        code, _, stderr = await _docker("info", "--format", "{{.ServerVersion}}", timeout=30)
+        code, names, stderr = await _docker(
+            "info", "--format", "{{range $name, $_ := .Runtimes}}{{$name}} {{end}}", timeout=30
+        )
         if code != 0:
             raise ProviderStartError(f"docker daemon unreachable: {stderr.strip()}")
+        runtime = RUNTIMES[self.runtime]
+        shim = _SHIM.fullmatch(runtime.registered)
+        if runtime.registered not in names.split() and not (
+            shim and shutil.which(f"containerd-shim-{shim[1]}-{shim[2]}")
+        ):
+            raise ProviderStartError(
+                f"{self.id} needs the {runtime.registered} runtime, which Docker does not have "
+                "here; see the Providers README"
+            )
+        if missing := [device for device in runtime.devices if not Path(device).exists()]:
+            raise ProviderStartError(f"{self.id} needs {', '.join(missing)}, which is missing")
 
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
         if image.kind is not ImageKind.CONTAINER:
@@ -650,14 +733,8 @@ class DockerProvider(Provider):
         return prepared
 
     async def create(self, request: SandboxRequest) -> Sandbox:
-        self.accepts(request)
-        if request.image_kind is not ImageKind.CONTAINER:
-            raise ProviderCapabilityError("DockerProvider requires a container image")
+        await self.accepts(request)
         in_kata = self.runtime == "kata"
-        if in_kata and request.resources.gpus:
-            raise ProviderCapabilityError(
-                "Docker's GPU injection does not reach a Kata microVM; run GPU Tasks on runc"
-            )
         lease: GpuLease | None = None
         selected: tuple[str, ...] = ()
         candidates: tuple[str, ...] = ()
@@ -697,12 +774,16 @@ class DockerProvider(Provider):
             "--memory", f"{kata.memory_mb(memory_mb) if in_kata else memory_mb}m",
         ]  # fmt: skip
         isolated = request.network.mode is not NetworkMode.OPEN
+        # Named even for runc: a Host whose default runtime is another would run it there.
+        registered = RUNTIMES[self.runtime].registered
+        argv += ["--runtime", registered]
         if in_kata:
-            argv += ["--runtime", kata.RUNTIME]
             if isolated:
                 # Only to drop the guest's default route while it is sealed: what seals it
                 # is outside the VM, where the capability does not reach.
                 argv += ["--cap-add", "NET_ADMIN"]
+            if ContainerFeature.MOUNT in request.resources.container_features:
+                argv += ["--cap-add", "SYS_ADMIN"]
         if network:
             argv += ["--network", network]
         for key, value in request.env.items():
@@ -764,6 +845,10 @@ class DockerProvider(Provider):
                 raise ProviderStartError(
                     "started container image identity does not match the resolved image: "
                     f"{stderr.strip() or started_content}"
+                )
+            if runtime != registered:
+                raise ProviderStartError(
+                    f"Docker started {container} under runtime {runtime!r}, not {registered!r}"
                 )
 
             runtime_identity = None
@@ -836,8 +921,9 @@ class DockerProvider(Provider):
                 ),
                 sudo=request.sudo,
                 network_mode=request.network.mode,
-                provider=self.name,
-                runtime=runtime or None,
+                provider=self.id,
+                leaf=self.id,
+                runtime=runtime,
                 desktop_resolution=desktop,
             ),
             resource_lease=lease,

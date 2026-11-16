@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from ale.core.capability import Arch, SandboxNeeds
 from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     DesktopResolution,
@@ -702,7 +703,12 @@ async def test_file_contract_and_streamed_upload_with_unprivileged_guestd(
         uid="uid-1",
         agent_home=str(tmp_path),
         allocation=ResourceAllocation(
-            cpus=1, memory_mb=1024, sudo=False, network_mode=NetworkMode.OPEN, provider="orchard"
+            cpus=1,
+            memory_mb=1024,
+            sudo=False,
+            network_mode=NetworkMode.OPEN,
+            provider="orchard",
+            leaf="orchard",
         ),
         resolved_image=ResolvedImage(
             kind=ImageKind.VM,
@@ -961,7 +967,7 @@ def softnet(monkeypatch):
     return checked
 
 
-def test_restricted_modes_are_declared_only_where_softnet_is_the_workers(monkeypatch) -> None:
+async def test_restricted_modes_are_declared_only_where_softnet_is_the_workers(monkeypatch) -> None:
     """A Fleet places Tasks by the declared modes; a Mac without Softnet refuses them early,
     saying what to run."""
 
@@ -970,9 +976,22 @@ def test_restricted_modes_are_declared_only_where_softnet_is_the_workers(monkeyp
 
     monkeypatch.setattr(orchard, "check_softnet", missing)
     provider = orchard.OrchardProvider(SimpleNamespace())  # type: ignore[arg-type]
-    assert provider.capabilities().network_modes == {NetworkMode.OPEN}
+    (profile,) = await provider.profiles()
+    assert profile.network_modes == {NetworkMode.OPEN}
+    needs = SandboxNeeds(
+        kind=ImageKind.VM,
+        os=OperatingSystem.MACOS,
+        arch=Arch.ARM64,
+        network_mode=NetworkMode.BLOCK,
+        resources=Resources(),
+    )
+    assert await provider.unserved(needs, user="user", role=SandboxRole.SOLVER) == (
+        "network block is not one it applies (open)",
+        "restricted macOS networking needs Softnet; run setup",
+    )
     monkeypatch.setattr(orchard, "check_softnet", lambda: None)
-    assert provider.capabilities().network_modes == set(NetworkMode)
+    (profile,) = await provider.profiles()
+    assert profile.network_modes == set(NetworkMode)
 
 
 BLOCK = NetworkPolicy(mode=NetworkMode.BLOCK)
@@ -1410,10 +1429,10 @@ async def test_the_control_account_cannot_run_a_task_without_sudo(backend):
     with pytest.raises(ProviderCapabilityError, match=r"must declare \[agent\]\.sudo = true"):
         await provider.create(await request(provider, user=orchard.CONTROL_ACCOUNT))
     assert not api.created
-    provider.accepts(
+    await provider.accepts(
         await request(provider, user=orchard.CONTROL_ACCOUNT, role=SandboxRole.VERIFIER)
     )
-    provider.accepts(await request(provider, user=orchard.CONTROL_ACCOUNT, sudo=True))
+    await provider.accepts(await request(provider, user=orchard.CONTROL_ACCOUNT, sudo=True))
 
 
 async def test_a_build_vm_changes_nothing_for_the_agent_and_keeps_its_disk(backend, monkeypatch):

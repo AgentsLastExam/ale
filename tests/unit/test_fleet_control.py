@@ -11,9 +11,9 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, unused_port
 
+from ale.core.capability import Arch, CapabilityProfile
 from ale.core.fleet import (
     AcquireRequest,
-    Arch,
     GpuPool,
     Grant,
     Heartbeat,
@@ -26,13 +26,12 @@ from ale.core.fleet import (
     Retention,
     RosterEntry,
     SandboxDemand,
-    SandboxProfile,
     SandboxStatus,
     SnapshotHolding,
     sign_grant,
     verify_grant,
 )
-from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, Resources
+from ale.core.taskspec import ContainerFeature, ImageKind, NetworkMode, OperatingSystem, Resources
 from ale.fleet.control import ControlPlane, FleetError, Timing
 from ale.fleet.placement import Busy, Holds, NodeView, choose, remaining_sec
 from ale.fleet.server import control_app
@@ -46,24 +45,23 @@ OTHER_FRAMEWORK = "sha256:" + "b" * 64
 IMAGE = "sha256:" + "1" * 64
 OTHER_IMAGE = "sha256:" + "2" * 64
 
-MACOS = SandboxProfile(
+MACOS = CapabilityProfile(
     provider="orchard",
     kind=ImageKind.VM,
     os=OperatingSystem.MACOS,
     arch=Arch.ARM64,
     gui=True,
     network_modes=frozenset({NetworkMode.OPEN}),
-    macos_vm_slots=1,
 )
-DOCKER = SandboxProfile(
-    provider="docker",
+DOCKER = CapabilityProfile(
+    provider="docker:runc",
     kind=ImageKind.CONTAINER,
     os=OperatingSystem.LINUX,
     arch=Arch.X86_64,
     gui=True,
     network_modes=frozenset(NetworkMode),
 )
-WINDOWS = SandboxProfile(
+WINDOWS = CapabilityProfile(
     provider="qemu",
     kind=ImageKind.VM,
     os=OperatingSystem.WINDOWS,
@@ -194,7 +192,10 @@ class TestPlacement:
         control.register(mac("mac-a"))
         placement = ask(control, 1, demand(os=OperatingSystem.WINDOWS, arch=Arch.X86_64))
         assert placement.status is SandboxStatus.FAILED
-        assert "no Node offers a vm windows/x86_64 Sandbox" in placement.reason
+        assert placement.reason == (
+            "no Node serves this vm windows/x86_64 Sandbox: runs macos, not windows; "
+            "runs arm64, not x86_64"
+        )
 
     def test_an_unsupported_network_mode_fails_at_once(self, control: ControlPlane) -> None:
         control.register(mac("mac-a"))
@@ -210,6 +211,66 @@ class TestPlacement:
     def test_a_demand_larger_than_any_node_fails(self, control: ControlPlane) -> None:
         control.register(linux("small", cpus=4))
         assert ask(control, 1, container(cpus=8)).status is SandboxStatus.FAILED
+
+    def test_a_node_s_profiles_are_taken_in_the_order_it_prefers_its_leaves(
+        self, control: ControlPlane
+    ) -> None:
+        """A plain container goes to the Node's first leaf; one that needs ``perf`` to the
+        first that gives it; one no leaf gives it to fails, naming what it needs."""
+        kata = DOCKER.model_copy(
+            update={
+                "provider": "docker:kata",
+                "container_features": frozenset({ContainerFeature.PERF, ContainerFeature.MOUNT}),
+            }
+        )
+        control.register(linux("box").model_copy(update={"profiles": (DOCKER, kata)}))
+        assert ask(control, 1, container(cpus=1)).status is SandboxStatus.PLACED
+        assert control.sandboxes["sandbox-0001"].provider == "docker:runc"
+        perf = container(cpus=1).model_copy(
+            update={
+                "resources": Resources(
+                    cpus=1, memory_mb=8192, container_features=(ContainerFeature.PERF,)
+                )
+            }
+        )
+        assert ask(control, 2, perf).status is SandboxStatus.PLACED
+        assert control.sandboxes["sandbox-0002"].provider == "docker:kata"
+        fuse = perf.model_copy(
+            update={
+                "resources": perf.resources.model_copy(
+                    update={"container_features": (ContainerFeature.FUSE,)}
+                )
+            }
+        )
+        placement = ask(control, 3, fuse)
+        assert placement.status is SandboxStatus.FAILED
+        # In the words a Run's selection uses: the closest profile, the Node's first.
+        assert placement.reason == (
+            "no Node serves this container linux/x86_64 Sandbox: "
+            "gives no container features fuse (gives none)"
+        )
+
+    def test_a_node_s_gpu_models_must_include_one_the_task_accepts(
+        self, control: ControlPlane
+    ) -> None:
+        gpus = NodeResources(
+            cpus=16, memory_mb=65536, disk_gb=1000, gpus=(GpuPool(model=H100, count=2),)
+        )
+        attaching = DOCKER.model_copy(update={"gpus": True, "gpu_models": (H100,)})
+        control.register(
+            linux("gpu").model_copy(update={"resources": gpus, "profiles": (attaching,)})
+        )
+        wanted = container().model_copy(
+            update={"resources": Resources(cpus=2, memory_mb=8192, gpus=1, gpu_types=("A100",))}
+        )
+        placement = ask(control, 1, wanted)
+        assert placement.status is SandboxStatus.FAILED
+        # Not that the Node has no GPU: that none it has is one the Task accepts.
+        assert placement.reason.endswith(f"attaches {H100}, none of gpu_types ['A100']")
+        h100 = wanted.resources.model_copy(update={"gpu_types": ("A100", "h100")})
+        assert ask(control, 2, wanted.model_copy(update={"resources": h100})).status is (
+            SandboxStatus.PLACED
+        )
 
     def test_macos_slots_are_counted_per_machine(self, control: ControlPlane) -> None:
         """Two Macs take two macOS VMs each; the fifth waits for a slot to be confirmed free."""
@@ -678,7 +739,7 @@ def holding(snapshot_id: str, created_at: float) -> SnapshotHolding:
     """A snapshot as its Node reports it."""
     return SnapshotHolding(
         snapshot_id=snapshot_id,
-        provider="docker",
+        provider="docker:runc",
         demand=container(retention="snapshot"),
         episode_id="episode",
         roles=("solver",),
@@ -959,7 +1020,7 @@ class TestRetention:
         control.register(linux("plain"))
         placement = ask(control, 1, container(retention="snapshot"))
         assert placement.status is SandboxStatus.FAILED
-        assert "that saves snapshots" in placement.reason
+        assert placement.reason.endswith("saves and boots no snapshots")
 
     def test_snapshots_follow_what_their_node_reports(
         self, control: ControlPlane, clock: Clock

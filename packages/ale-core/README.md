@@ -15,6 +15,7 @@ Important modules:
 |---|---|
 | `taskspec.py` | authored and effective Task schemas |
 | `sandbox.py` | Provider and Sandbox contracts |
+| `capability.py` | capability profiles, a Sandbox's needs, and the one rule that compares them |
 | `harness.py` | Harness families, sessions and native continuation |
 | `episode.py` | Episode lifecycle contracts and context |
 | `trace.py`, `trajectory.py` | execution evidence and ATIF trajectory |

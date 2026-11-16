@@ -4,10 +4,6 @@ A sandbox is an isolated execution instance; a provider supplies them. Everythin
 happens inside a sandbox — commands, files, screenshots, input — goes through the guest
 service, so this interface is identical for containers and virtual machines and there
 is no provider-specific path for callers to special-case.
-
-One capability is declared but unimplemented on purpose: ``reset``. Fresh-per-episode is
-correct for Phase 0, and pretending otherwise would invite callers to depend on semantics
-we have not designed.
 """
 
 from __future__ import annotations
@@ -19,12 +15,12 @@ from typing import Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, closest
 from ale.core.errors import ProviderCapabilityError
 from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 
 __all__ = [
     "SANDBOX_GATEWAY_PORT",
-    "Capabilities",
     "DesktopResolution",
     "ExecOutputSink",
     "ExecResult",
@@ -152,52 +148,6 @@ class ExecResult(BaseModel):
         return self.exit_code == 0 and not self.timed_out
 
 
-class Capabilities(BaseModel):
-    """What a provider can actually deliver.
-
-    Declared up front so a mismatch fails before anything is provisioned, rather than
-    halfway through an episode.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    operating_systems: frozenset[OperatingSystem] = frozenset({OperatingSystem.LINUX})
-    gui: bool = False
-    network_modes: frozenset[NetworkMode] = frozenset({NetworkMode.OPEN})
-    max_cpus: int | None = None
-    max_memory_mb: int | None = None
-    reset: bool = False
-    snapshot: bool = False
-
-    def check(
-        self,
-        resources: Resources,
-        network: NetworkPolicy,
-        operating_system: OperatingSystem = OperatingSystem.LINUX,
-    ) -> None:
-        """Raise :class:`ProviderCapabilityError` if this provider cannot serve a task.
-
-        A desktop is not among the things checked. Whether one exists is a property of the
-        image, not of the backend, and it is answered where it is needed — an agent that
-        asks for a screenshot in a sandbox without one is told so by the screenshot.
-        """
-        problems: list[str] = []
-        if operating_system not in self.operating_systems:
-            offered = ", ".join(sorted(self.operating_systems))
-            problems.append(f"operating system {operating_system} unsupported (offers: {offered})")
-        if network.mode not in self.network_modes:
-            offered = ", ".join(sorted(self.network_modes))
-            problems.append(f"network mode {network.mode} unsupported (offers: {offered})")
-        if self.max_cpus is not None and resources.cpus > self.max_cpus:
-            problems.append(f"task needs {resources.cpus} cpus, provider caps at {self.max_cpus}")
-        if self.max_memory_mb is not None and resources.memory_mb > self.max_memory_mb:
-            problems.append(
-                f"task needs {resources.memory_mb} MB, provider caps at {self.max_memory_mb} MB"
-            )
-        if problems:
-            raise ProviderCapabilityError("; ".join(problems))
-
-
 class Identity(StrEnum):
     """Who an operation acts as inside a sandbox.
 
@@ -287,6 +237,19 @@ class SandboxRequest(BaseModel):
     def image_kind(self) -> ImageKind:
         return self.prepared_image.kind
 
+    @property
+    def needs(self) -> SandboxNeeds:
+        return SandboxNeeds(
+            kind=self.image_kind,
+            os=self.os,
+            arch=Arch.of(self.os),
+            network_mode=self.network.mode,
+            # The elevation it gets, which an image builder's request grants beyond its
+            # size.
+            resources=self.resources.model_copy(update={"sudo": self.sudo}),
+            snapshot=self.retention == "snapshot" or self.snapshot is not None,
+        )
+
 
 class ResolvedImage(BaseModel):
     """Immutable image identity observed by the Provider."""
@@ -335,11 +298,16 @@ class ResourceAllocation(BaseModel):
     sudo: bool
     network_mode: NetworkMode
     provider: str = Field(min_length=1)
+    """The provider id of the Provider the Run had start it, which its configuration
+    selected."""
+    leaf: str = Field(min_length=1)
+    """The provider id of the profile that served it: the Provider's own for a leaf, the
+    Node's leaf under the Fleet, and Daytona's own, which names no machine of its."""
     runtime: str | None = None
     """The runtime that ran a container Sandbox, as Docker reports it: ``runc``, or
     ``io.containerd.kata.v2`` for a Kata microVM. None where the Provider has no choice."""
     node: str | None = None
-    """For a Sandbox a Fleet ran, the Node and the Node's Provider, as ``<node>/<provider>``."""
+    """For a Sandbox a Fleet ran, the Node and the Node's leaf, as ``<node>/<leaf>``."""
     desktop_resolution: DesktopResolution | None = None
     """The desktop's size as the guest reported it when the Provider started and checked the
     desktop; None for a sandbox whose desktop it did not start."""
@@ -351,6 +319,7 @@ class RetainedSandbox(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     provider: str
+    """The Provider's name, such as ``docker``, which prefixes its handles; not its id."""
     handle: str
     episode_id: str
     roles: tuple[Literal["solver", "verifier"], ...]
@@ -467,7 +436,7 @@ class Sandbox(ABC):
         Abstract rather than a no-op default: a sandbox that silently stayed open through
         the agent phase would make every isolation claim in a run's provenance false. A
         backend that cannot change policy at runtime raises here, and one that cannot
-        apply a policy at all rejects it in :meth:`Provider.accepts`.
+        apply a policy at all leaves its mode out of :meth:`Provider.profiles`.
         """
 
     @abstractmethod
@@ -518,12 +487,53 @@ class Sandbox(ABC):
 
 
 class Provider(ABC):
-    """Supplies sandboxes of one kind."""
+    """Supplies Sandboxes.
+
+    A leaf starts them on the machine it runs on; a scheduler places them on machines it
+    manages, which start them with the leaves there. Both declare what they can start as
+    capability profiles, which every check of a request compares through
+    :func:`~ale.core.capability.unmet`.
+    """
 
     name: str
+    """What its handles, records and GPU locks are named by."""
+
+    @property
+    def id(self) -> str:
+        """The provider id a Run's configuration and a Fleet's Nodes know it by."""
+        return self.name
 
     @abstractmethod
-    def capabilities(self) -> Capabilities: ...
+    async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        """Every combination it can start: a scheduler's are those of its leaves."""
+
+    def refusals(self, needs: SandboxNeeds, *, user: str, role: SandboxRole) -> tuple[str, ...]:
+        """Why it refuses a Sandbox its profiles would serve, by rules no profile states,
+        such as the units it allocates in; ``user`` is the agent account.
+
+        They hold wherever the leaf runs, so a scheduler asks them of the leaves it would
+        start the Sandbox with.
+        """
+        return ()
+
+    async def unserved(
+        self, needs: SandboxNeeds, *, user: str, role: SandboxRole
+    ) -> tuple[str, ...]:
+        """Why it cannot serve a Sandbox, one reason each; none when it can.
+
+        The reasons of its profile that misses the fewest needs, then its own refusals. A
+        Run selects its Providers this way before anything starts, and :meth:`accepts` asks
+        it as a leaf creates a Sandbox, so a request refused then is refused up front.
+        """
+        return closest(await self.profiles(), needs) + self.refusals(needs, user=user, role=role)
+
+    async def accepts(self, request: SandboxRequest) -> None:
+        """Raise unless it can serve ``request``."""
+        reasons = await self.unserved(request.needs, user=request.user, role=request.role)
+        if reasons:
+            raise ProviderCapabilityError(
+                f"{self.id} cannot serve this Sandbox: {'; '.join(reasons)}"
+            )
 
     @abstractmethod
     async def preflight(self) -> None:
@@ -534,13 +544,6 @@ class Provider(ABC):
 
     @abstractmethod
     async def create(self, request: SandboxRequest) -> Sandbox: ...
-
-    def accepts(self, request: SandboxRequest) -> None:
-        """Raise unless this provider can serve ``request``."""
-        capabilities = self.capabilities()
-        capabilities.check(request.resources, request.network, request.os)
-        if (request.retention == "snapshot" or request.snapshot) and not capabilities.snapshot:
-            raise ProviderCapabilityError(f"{self.name} does not save or boot snapshots")
 
     async def list_retained(self) -> list[dict[str, object]]:
         """The sandboxes and snapshots this provider kept after their episodes."""

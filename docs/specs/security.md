@@ -285,13 +285,15 @@ a Judge failure according to its own scoring policy.
 
 ## 7. A result carries what produced it
 
-`RunLock` records the explicit Task name, complete
-Task-folder source digest, source and commit when available, exact locally built image
-content, concrete Provider and container runtime, requested and effective resources, GPU
-allocation and sandbox observations, agent version and integrity, harness family, one
-optional Task-asset repository/path/commit/dirty observation, the name and value source of
-each Task variable, verification topology and image/resources, sandbox lifecycle outcomes,
-config hash, seed, and the engine's own commit.
+`RunLock` records the explicit Task name, complete Task-folder source digest, source and
+commit when available, exact locally built image content, for the solver and a separate
+verifier the Provider selected and the leaf that started the Sandbox with its container
+runtime, requested and effective resources, GPU allocation and sandbox observations, agent
+version and integrity, harness family, one optional Task-asset repository/path/commit/dirty
+observation, the name and value source of each Task variable, verification topology and
+image/resources, sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
+Leaves of one kind isolate a Task differently and give it different kernel features, so a
+result names the one that ran it, under a scheduler too.
 
 A reportable result is one that can be published, such as on a leaderboard, because it can
 be reproduced exactly. Its Task must be committed in a git repository with no uncommitted
@@ -377,11 +379,16 @@ are reviewed content, not untrusted input; the identity model protects a result 
 aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host Gateway; a
 malicious verifier can only spend its episode's Judge session while that episode runs.
 
-**Container escape.** A container sandbox uses Docker's default isolation. A kernel
-exploit reaches the host. Use the VM backend, or Docker's Kata runtime, whose sandboxes each
-have a kernel of their own, for stronger isolation, and still do not put anything on that
-host you would mind losing. On Daytona, Daytona itself sees everything in the sandbox and
-in the image pushed to its registry.
+**Container escape.** A container sandbox on `docker:runc` uses Docker's default
+isolation, and a kernel exploit reaches the host. For stronger isolation, name a leaf whose
+Sandboxes each have a kernel of their own, such as `docker:kata` or `firecracker`, ahead of
+it in `sandbox.providers`, and still do not put anything on that host you would mind
+losing. Neither attaches a GPU, so a GPU Task still goes to `docker:runc` while it is
+listed; leave it out to keep every Task on a kernel of its own. Each
+[container feature](task-authoring.md#container-features) a Task names exposes
+more of the kernel its Sandbox runs on; no Provider widens a Sandbox for a feature it did
+not name. On Daytona, Daytona itself sees everything in the sandbox and in the image pushed
+to its registry.
 
 **Traffic analysis, or what is said over an allowlisted tunnel.** Once `CONNECT`
 succeeds the tunnel is opaque by design — the point is to reach a declared host, not to

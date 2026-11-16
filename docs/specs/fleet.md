@@ -3,7 +3,7 @@
 A Run drives every Sandbox from the one machine that runs it, and a machine can hold only
 so many: a Mac starts at most two macOS VMs, and a Linux machine is bounded by its CPUs,
 memory and disk. The Fleet pools many machines behind one control plane. Each machine is a
-**Node**; its **node agent** drives the machine's own Providers, and the control plane
+**Node**; its **node agent** drives the machine's own leaves, and the control plane
 keeps the ledger of what every Node holds, places each Sandbox, queues what does not fit
 and reconciles its ledger with what the Nodes report.
 
@@ -16,7 +16,7 @@ One control plane serves the Fleet, with its ledger in one SQLite file (`ale-fle
 Every peer authenticates with the one Fleet token, `ALE_FLEET_TOKEN`.
 
 The control plane and the node agent are the `ale-fleet` package, which builds on the engine:
-a node agent lends the engine's Providers and prepares images with the engine's own code. The
+a node agent lends the engine's leaves and prepares images with the engine's own code. The
 engine never imports it. A Run reaches the Fleet through the FleetProvider, one of its
 Providers, so the Fleet can grow without the engine knowing more than one Provider; all three
 speak the protocol in `ale.core.fleet`.
@@ -45,14 +45,16 @@ A Run that cannot connect to a Node it was placed on treats it as that Node refu
 ## Nodes
 
 A node agent registers by sending its **declaration** and then sends a heartbeat every
-few seconds. The declaration is probed, never configured: it holds what each Provider's
-own `preflight` and `capabilities` reported on the machine, and an operator can only narrow
-it (labels, resources kept for the machine itself, fewer Providers).
+few seconds. The declaration is probed, never configured: it holds what each lent leaf's
+own `preflight` and profiles reported on the machine, and an operator can only narrow it
+(labels, resources kept for the machine itself, fewer leaves, their order). The operator
+names the leaves a Node lends by provider id, most preferred first, as a Run names its
+Providers; a Node lends no scheduler, since it is itself where Sandboxes start.
 
 | Part | Holds |
 |---|---|
 | `resources` | CPUs, memory, disk, GPUs by model, and `macos_vm_slots` |
-| `profiles` | One **Sandbox profile** per combination the Node can start: Provider, kind, operating system, architecture, desktop, network modes, snapshots, GPUs, CPU and memory limits, and the macOS VM slots each Sandbox holds |
+| `profiles` | One **capability profile** per lent leaf and operating system, in the order the Node prefers its leaves: provider id, kind, operating system, architecture, desktop, network modes, snapshots, GPUs and their models, CPU and memory limits (never more than the Node lends in all), and container features |
 | `framework` | The identity of the framework its engine installs into every Sandbox |
 | `boot_id` | The machine's boot: it changes when the machine restarts, which ends every Sandbox on it, and a restarted node agent keeps it |
 
@@ -69,24 +71,27 @@ it took, the snapshots it keeps, and its free disk. A Node silent for 30 seconds
 ## Placement
 
 A Run asks for each Sandbox with a **demand**: kind, operating system, architecture,
-network mode, resources, the image's key, the Run's framework identity, the episode's
-retention, and any snapshot it boots from. A Sandbox runs the framework of the engine
-driving it, so only a Node with the same framework identity serves it. Every Node prepares
-the images it serves itself, and Nodes never copy images from one another; an image's
-**key** is the identity of what it is prepared from, which the Run knows before any Node
-prepares it, and a Node keeps each image it prepared under its key.
+network mode, resources with their container features, the image's key, the Run's
+framework identity, the episode's retention, and any snapshot it boots from. A Sandbox runs
+the framework of the engine driving it, so only a Node with the same framework identity
+serves it. Every Node prepares the images it serves itself, and Nodes never copy images
+from one another; an image's **key** is the identity of what it is prepared from, which the
+Run knows before any Node prepares it, and a Node keeps each image it prepared under its
+key.
 
 1. **Filter.** A Node is a candidate when it is online and not draining, has a profile that
-   matches the demand, has not refused this Sandbox, and can be reached by its Run. A profile
-   matches a snapshot's demand only if its Provider saves snapshots, and a boot from a
+   serves the demand, has not refused this Sandbox, and can be reached by its Run. Profiles
+   serve demands by the one rule a Run uses to choose a Provider, and placement takes the
+   Node's first that serves it, so a Node prefers its leaves in its own order. A boot from a
    snapshot is served only by the Node that keeps the snapshot. A demand that no registered
-   Node could serve even when idle fails at once, as does a boot from a snapshot whose Node
-   refused it or cannot be reached by its Run.
+   Node could serve even when idle fails at once, naming what the closest profile misses in
+   the words of a Run's own selection, as does a boot from a snapshot whose Node refused it
+   or cannot be reached by its Run.
 2. **Score** each candidate by the estimated time to a ready Sandbox there, and take the
    lowest; ties go to a fixed per-image order of Nodes (rendezvous hashing), which keeps each
    image on the same few Nodes.
    - A Node with the resources free now (CPUs, memory, macOS VM slots and GPUs of an
-     accepted model) scores its measured create time for that Provider.
+     accepted model) scores its measured create time for that leaf.
    - A free Node that lacks the image first prepares it. Its score adds the time preparing it
      took the Nodes that did (five minutes while none has), and 10 s per GB of the copy it
      adds to its disk: one more copy is worth that much waiting, enough to settle close calls
@@ -168,7 +173,7 @@ macOS VM that is shutting down still counts against its Mac.
 
 ## Node agent
 
-`ale-fleet node` lends a machine's Providers to the Fleet. It drives the very Provider and
+`ale-fleet node` lends a machine's leaves to the Fleet. It drives the very Provider and
 Sandbox objects a local Run would, so every guarantee of the
 [Provider contract](sandbox-image.md#provider-contract) holds on a Node as it does on the
 Run's own machine; the agent only carries the calls.
@@ -226,11 +231,11 @@ Run's own machine; the agent only carries the calls.
 
 ## FleetProvider
 
-A Run uses the Fleet through one Provider, `fleet`, selected per image kind with
-`container.provider = "fleet"` and `vm.provider = "fleet"` (the second sends macOS VMs to the
-Fleet too) and the control plane's `fleet.url`. To a Run the Fleet is a Provider as Daytona
-is, a remote service that schedules across many machines, so neither the Harness nor the
-episode protocol knows it is there.
+A Run uses the Fleet through one Provider, `fleet`, a scheduler that `sandbox.providers`
+names with the control plane's `sandbox.fleet.url`, and that a Sandbox gets when no
+Provider before it serves it ([Provider selection](sandbox-image.md#provider-selection)).
+To a Run the Fleet is a Provider as Daytona is, a remote service that schedules across many
+machines, so neither the Harness nor the episode protocol knows it is there.
 
 - **Images** are prepared on the Nodes, never on the Run's machine. Preparing one of a
   Task's images for the Fleet names it by its key, over everything that preparation reads:
@@ -241,15 +246,18 @@ episode protocol knows it is there.
   Node would keep it under the old key; the Run fails the Sandbox instead. A Sandbox runs the image its Node prepared; a Run resumes episodes by the key,
   which every Node shares. Every kind goes this way, so a macOS Task whose `build.sh` builds
   its image builds it on its Mac Node.
-- **Capabilities** are what the Fleet can carry. Which Node serves a request is placement's
-  decision, and a request no registered Node could serve fails when the control plane
-  receives it, before anything is created. A Task names no architecture, so a container or
-  a Linux or Windows VM asks for an x86-64 Node and a macOS VM for an arm64 one.
+- **Profiles** are those of the leaves lent by its registered Nodes that run the Run's
+  framework, online or not, as they were when the Run first asked; the Run also asks those
+  leaves' own rules, which a Node's leaf applies as it creates the Sandbox. Which Node
+  serves a request is placement's decision, and a request no registered Node could serve
+  fails when the control plane receives it, before anything is created. A Task names no
+  architecture, so a container or a Linux or Windows VM asks for an x86-64 Node and a macOS
+  VM for an arm64 one.
 - **Retention** happens on the Sandbox's Node and in the ledger ([Lifecycle](#lifecycle),
   [Node agent](#node-agent)). The handle is `fleet:<sandbox>` or `fleet:snapshot:<sandbox>`.
   - `--continue-from` continues in a kept Sandbox through the Run's own Fleet connection, so
-    the Fleet must be this Run's Provider for that kind. The Run knows the image only by its
-    key until a Node prepares it, so the control plane checks that the key is the same one.
+    the Run must select the Fleet for that Task. The Run knows the image only by its key
+    until a Node prepares it, so the control plane checks that the key is the same one.
   - `ale sandbox list` and `ale sandbox destroy` reach the Fleet whose control plane
     `$ALE_FLEET_URL` names. A destroy waits until the Node confirms the Sandbox or snapshot
     gone.
@@ -264,11 +272,11 @@ episode protocol knows it is there.
   error, so an episode maps it as it would locally; a Node that cannot be reached, or no
   longer holds the Sandbox, raises `GuestUnreachableError`, an infrastructure failure the
   Run's retry policy may run again elsewhere.
-- **The RunLock** records `fleet` as the Provider, the Node and the Node's Provider in the
-  allocation's `node`, and the image as its Node prepared it.
+- **The RunLock** records `fleet` as the Provider, the Node's leaf as the allocation's
+  `leaf`, the Node and that leaf in its `node`, and the image as its Node prepared it.
 - **Instrumentation.** The ledger keeps, per Sandbox, its time in the queue, the time its
   Node took to get the image ready (preparing it, or checking the one it holds), and its
-  Node's Provider's time to a ready Sandbox.
+  Node's leaf's time to a ready Sandbox.
 
 ## Run plan and progress
 

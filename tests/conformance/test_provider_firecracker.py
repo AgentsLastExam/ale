@@ -21,6 +21,7 @@ from ale.core.sandbox import Identity, ImageRef, PreparedTaskImage, SandboxReque
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
 from ale.run.framework import framework_identity
+from ale.run.providers import missing_features
 from ale.run.providers.firecracker import FirecrackerProvider
 
 pytestmark = [pytest.mark.conformance, pytest.mark.needs_kvm, pytest.mark.needs_docker]
@@ -39,6 +40,7 @@ class TestFirecrackerProvider(ProviderConformance):
     #: The base starts its own desktop under Xvnc, which runs in a microVM unchanged.
     gui_image = image
     framework = framework_identity(user="user", vm=False)
+    missing_features = staticmethod(missing_features)
 
     @pytest.fixture(autouse=True)
     def _provider(self) -> None:

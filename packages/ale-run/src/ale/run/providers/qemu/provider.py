@@ -34,10 +34,10 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
+from ale.core.capability import Arch, CapabilityProfile, accepts_model
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
-    Capabilities,
     DesktopResolution,
     ExecOutputSink,
     ExecResult,
@@ -58,9 +58,9 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem, Resources
-from ale.run import ale_image, guestd
+from ale.run import HELPER_RUNTIME, ale_image, guestd
 from ale.run.framework import MATERIALIZER_IMAGE, frame_disk, framed_disk
-from ale.run.gpu import GpuLease, accepts_model, normalize_pci_bdf, parse_nvidia_smi
+from ale.run.gpu import GpuLease, normalize_pci_bdf, parse_nvidia_smi
 from ale.run.images import (
     base_layer,
     chain_mounts,
@@ -677,15 +677,22 @@ class QemuProvider(Provider):
         self.gpu_devices = gpu_devices
         self.gpu_lock_dir = gpu_lock_dir or cache_root() / "gpu-locks" / self.name
 
-    def capabilities(self) -> Capabilities:
-        return Capabilities(
-            operating_systems=frozenset({OperatingSystem.LINUX, OperatingSystem.WINDOWS}),
-            # Whether there is a screen is a property of the disk that was built, not of
-            # this backend; a guest with no desktop refuses the request when asked.
-            gui=True,
-            network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.ALLOWLIST, NetworkMode.OPEN}),
-            reset=False,
-            snapshot=True,
+    async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        return tuple(
+            CapabilityProfile(
+                provider=self.id,
+                kind=ImageKind.VM,
+                os=system,
+                arch=Arch.X86_64,
+                # Whether there is a screen is a property of the disk that was built, not of
+                # this backend; a guest with no desktop refuses the request when asked.
+                gui=True,
+                network_modes=frozenset(NetworkMode),
+                snapshot=True,
+                # The models of a VFIO pool are known once a guest sees them.
+                gpus=bool(self.gpu_devices),
+            )
+            for system in (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
         )
 
     async def preflight(self) -> None:
@@ -738,17 +745,13 @@ class QemuProvider(Provider):
         return await self._create(request, build_vm=True)
 
     async def _create(self, request: SandboxRequest, *, build_vm: bool) -> QemuSandbox:
-        self.accepts(request)
-        if request.image_kind is not ImageKind.VM:
-            raise ProviderCapabilityError("QemuProvider requires a VM image")
+        await self.accepts(request)
         await self.preflight()
         lease: GpuLease | None = None
         selected: tuple[_VfioGpu, ...] = ()
         by_group: dict[str, _VfioGpu] = {}
         if request.resources.gpus:
             candidates = tuple(_inspect_vfio_gpu(value) for value in self.gpu_devices)
-            if not candidates:
-                raise ProviderCapabilityError("no QEMU VFIO GPU pool is configured")
             by_group = _index_vfio_gpus(candidates)
             used = await _managed_gpu_ids()
             by_group = {group: gpu for group, gpu in by_group.items() if gpu.bdf not in used}
@@ -871,7 +874,8 @@ class QemuProvider(Provider):
                 ),
                 sudo=request.sudo,
                 network_mode=request.network.mode,
-                provider=self.name,
+                provider=self.id,
+                leaf=self.id,
                 desktop_resolution=desktop,
             ),
             resource_lease=lease,
@@ -947,7 +951,7 @@ class QemuProvider(Provider):
         name = f"ale-qemu-{uuid.uuid4().hex[:10]}"
         layers = await chain_mounts(base_image)
         argv = [
-            "docker", "run", "--detach", "--name", name,
+            "docker", "run", "--detach", *HELPER_RUNTIME, "--name", name,
             "--label", f"{MANAGED_LABEL}=true",
             "--label", f"{EPISODE_LABEL}={request.episode_id}",
             "--label", f"{ROLE_LABEL}={request.role.value}",
@@ -1569,7 +1573,8 @@ async def _discard_free_space(disk: Path, operating_system: OperatingSystem) -> 
             *LINUX_DISCARD[1:], "--quiet", "--format", "qcow2", str(disk.resolve()),
         ]  # fmt: skip
     argv = [
-        "docker", "run", "--rm", "--name", name, "--device=/dev/kvm", "--network=none",
+        "docker", "run", "--rm", *HELPER_RUNTIME, "--name", name, "--device=/dev/kvm",
+        "--network=none",
         *await chain_mounts(disk, writable=True),
         *tool,
     ]  # fmt: skip
