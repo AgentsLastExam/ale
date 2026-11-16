@@ -258,3 +258,72 @@ isolated too.
   chosen: `docker exec --workdir /`, `cd /` over Daytona's SSH, `os.chdir('/')` in Orchard's
   start, `WorkingDirectory=/` in the VM unit; Firecracker's init and the Windows service
   already start it in `/` and the framework's own folder.
+
+## Sharing a GPU by memory
+
+**Problem.** A Task that needs a few GiB of device memory took a whole 80 GB H100, and on a
+Host whose GPUs other users' jobs share, a GPU an ALE Sandbox took could still be full: its
+exclusive flock said nothing of what others use.
+
+**Context.** The Host's `nvidia-smi` reports each GPU's `memory.free` and, to an
+unprivileged user, every user's compute processes by Host PID (driver 570, November 2026); a
+PID's cgroup names its container. Under runc each CUDA process is a row; under gVisor the
+whole sandbox is one, its Sentry, whose memory is nvproxy's count. Other tenants allocate up
+front, grow in steps and start or stop in larger ones (the README's admission has the
+measures). Under rootful Docker ALE's user cannot signal a container's processes. runsc with
+patch 0004 limits a sandbox's device memory on each GPU by an annotation; nothing limits a
+runc container's.
+
+**Solution.** [GPU memory](../README.md#gpu-memory): `gpu_memory_mb` shares a GPU among the
+Sandboxes that name it, admitted by headroom plus a margin under one lock until `docker run`
+returns, limited by the annotation under gVisor, and, under either runtime, watched every 5 s
+by the leaf's watchdog. Past its share, a runc Sandbox loses its largest process on that GPU
+and its episode goes on; a gVisor Sandbox is stopped, and its episode ends in an environment
+error.
+
+**Decisions.**
+- One lock for the Host's GPUs rather than one per GPU: admitting a shared Sandbox reads
+  every GPU's headroom, and the lock must cover the read and `docker run` both. It is named
+  by the Docker daemon's ID in `/tmp`, not kept in ALE's cache, so that every user and cache
+  that admits through one daemon takes the same lock. The running containers' labels stay
+  the record, so a crashed process holds nothing; what one daemon's Sandboxes reserved and
+  do not use yet is invisible through another daemon.
+- Every Sandbox gets both GPU labels, empty when unused: `docker run --label` overrides an
+  image's label of the same name, so a Task image cannot pose as ALE's record, and the
+  labels need no defensive parsing.
+- Headroom subtracts only what ALE's Sandboxes reserved and do not use yet: what they use is
+  already missing from `memory.free`, and counting it twice would refuse Sandboxes that fit.
+- Among the GPUs that can take a Sandbox, the one with the most headroom does: spreading
+  keeps Sandboxes away from GPUs other tenants keep busy, and from the growth of their jobs.
+  The price is that a Sandbox that takes its GPU whole can be refused where packing the
+  shared ones would have left a GPU empty; `[sandbox.docker] gpus` pins the GPUs a leaf may
+  take, for a Host that wants some kept for whole-GPU Sandboxes.
+- The margin protects against growth, not arrivals: admission is a snapshot, and a tenant
+  that starts later can fill the GPU anyway. A refusal is a capacity miss: "not now", which
+  a Fleet Node answers so that the Sandbox may come back to it, not "never here".
+- Under runc the watchdog kills one process, the largest on that GPU, so the memory others
+  were admitted with comes back at once, and the episode goes on, as after the OOM killer
+  took a process past a memory limit. Going past a share is the Sandbox's own doing: ending
+  its episode as an environment error let an agent turn a failing episode into a rerun or
+  an unscored one, and gave runc and gVisor different outcomes for the same thing.
+- The kill runs in a helper container that joins the Sandbox's PID namespace, never in the
+  Sandbox: an agent with `sudo` can replace the Sandbox's own Python, and so could make a
+  kill run there a silent no-op. The watchdog re-checks the PID's container and start time
+  on the Host and the helper the start time again in that namespace, so a reused PID is
+  never killed; the process's name may change and does not count. A runc Sandbox cannot
+  nest a PID namespace, so `NSpid`'s last field is its PID there.
+- The kill is logged in the context of the Sandbox's latest command when the watchdog
+  found the overrun, so it lands in its episode's execution trace, in the phase that ran
+  it, rather than in the trace of whichever episode started the one watchdog task, or in
+  the next phase, which may have begun by the time the helper's container is removed.
+- Under gVisor the watchdog stops the whole Sandbox and its episode ends in an environment
+  error: the Sentry is its one process, and memory past the limit means nvproxy's accounting
+  failed, which is ALE's failure, not the agent's.
+- One watchdog task per Docker leaf of a process, which ends when it watches nothing,
+  rather than one per Sandbox: each look reads the whole Host once.
+- Polling, every 5 s: NVML has no event for memory use. A Sandbox's rows are compared with
+  its share as they are: a share holds every CUDA context, and the driver's own memory for
+  a context is in no row. The watchdog acts on several Sandboxes at once, and warns once per
+  streak of failed looks rather than at every look.
+- Managed memory is seen by neither the limit nor the watchdog (it appears in no process's
+  row); admission sees it as memory no longer free.

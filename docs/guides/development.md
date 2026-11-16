@@ -66,7 +66,7 @@ even before `uv sync`.
 |---|---|---|
 | container (`docker:runc`, default) | Docker Engine reachable, with its `runc` runtime | `just doctor` |
 | container in a Kata microVM (`docker:kata`) | Docker, `/dev/kvm`, Kata's shim on the daemon's PATH and `vhost_vsock` ([Kata](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers)) | `just doctor` for KVM; the Run's preflight names a missing shim or `/dev/kvm` |
-| container on gVisor (`docker:gvisor`) | Docker with ALE's `runsc` registered as `runsc` and `runsc-net-raw` ([install](../../images/runtimes/gvisor/README.md#install-on-a-host)) | the Run's preflight names a missing runtime or argument, another build of `runsc`, or a GPU driver nvproxy does not support |
+| container on gVisor (`docker:gvisor`) | Docker with ALE's `runsc` registered as `runsc` and `runsc-net-raw` ([install](../../images/runtimes/gvisor/README.md#install-on-a-host)) | the Run's preflight names a missing runtime or argument, another build of `runsc` or one without the GPU memory limit, or a GPU driver nvproxy does not support |
 | virtual machine (`qemu`, default) | `/dev/kvm` plus `qemu-system-x86_64`, `qemu-img` | `just doctor` |
 | microVM (`firecracker`) | Docker, `/dev/kvm` and `/dev/net/tun`; `images/build.sh ale-firecracker-runner` until the runner is published | `just doctor` for KVM; the Provider names anything else missing |
 | macOS VM (`orchard`, default) | an Apple Silicon Mac running the local Orchard of `scripts/setup_macos.py` | `uv run scripts/setup_macos.py --check` |
@@ -90,7 +90,14 @@ providers = ["docker:runc", "qemu", "orchard"]  # the default
 
 [sandbox.docker]
 gpus = [0, 1]  # the Host GPU indices a Docker leaf may lease; default all
+gpu_memory_margin_mb = 4096  # free beyond a shared Sandbox's gpu_memory_mb; default 4096
 ```
+
+A Task that names `gpu_memory_mb` shares each of its GPUs with other such Sandboxes under
+`docker:gvisor`, which limits each to its share, and under `docker:runc`, which only watches
+it and kills a process past it; the Run names each Task it watches at its start. On a Host
+whose GPUs other users' jobs share, raise the margin to what their jobs grow by after they
+start ([GPU memory](../../packages/ale-run/src/ale/run/providers/README.md#gpu-memory)).
 
 | Provider id | Starts |
 |---|---|

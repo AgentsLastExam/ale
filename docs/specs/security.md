@@ -416,9 +416,14 @@ strict boundary uses separate verification, which restores only the declared art
 a fresh Sandbox.
 
 **Resource exhaustion by a co-tenant.** CPU, memory, writable storage, and ALE-managed
-physical GPUs are admitted per sandbox or rejected. Network bandwidth and resources
-consumed by processes outside ALE are not reserved; concurrent workloads can still starve
-each other.
+physical GPUs, whole or by device memory, are admitted per sandbox or rejected. Network
+bandwidth and resources consumed by processes outside ALE are not reserved; concurrent
+workloads can still starve each other. On a GPU that Sandboxes share, one can take another's
+device memory: where nothing limits it, for the seconds until its Provider's watchdog kills
+the process while a Run holds the Sandbox, and for as long as it likes once the Sandbox is
+kept after its Run, since nothing watches it then; and, under any runtime, through managed
+memory, which neither gVisor's limit nor any process's row in `nvidia-smi`, and so no
+watchdog, sees.
 
 **Side channels between concurrent episodes.** Sandboxes are separate containers on
 separate bridges, but they share a kernel, a page cache and a clock.

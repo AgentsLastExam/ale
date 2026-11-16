@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import hashlib
 import io
+import subprocess
 import tarfile
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
@@ -15,8 +16,9 @@ from aiohttp import ClientSession, WSMsgType
 from aiohttp.test_utils import TestClient, TestServer, unused_port
 from tests.support import MemoryProvider
 
-from ale.core.capability import SandboxNeeds
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.core.capability import GpuHold, GpuModel, SandboxNeeds
+from ale.core.config import DockerProviderConfig
+from ale.core.errors import ProviderCapabilityError, ProviderCapacityError, ProviderStartError
 from ale.core.fleet import (
     AcquireRequest,
     CreateSandbox,
@@ -249,21 +251,38 @@ class TestDeclaration:
 
         async def host_gpus(_self: DockerProvider) -> dict[int, GpuDevice]:
             return {
-                index: GpuDevice(id=f"GPU-{index}", model=H100, driver_version="570.1")
+                index: GpuDevice(
+                    id=f"GPU-{index}",
+                    model=H100,
+                    driver_version="570.1",
+                    memory_total_mb=81559,
+                    memory_reserved_mb=470,
+                )
                 for index in (0, 1)
             }
 
         monkeypatch.setattr(DockerProvider, "preflight", works)
         monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
-        monkeypatch.setattr(node_module, "_gpus", lambda: (GpuPool(model=H100, count=2),))
+        monkeypatch.setattr(node_module.shutil, "which", lambda _: "/usr/bin/nvidia-smi")
+        listing = f"0, {H100}\n1, {H100}\n2, {H100}\n3, NVIDIA A100-SXM4-80GB\n"
+        monkeypatch.setattr(
+            node_module.subprocess,
+            "run",
+            lambda *_, **__: subprocess.CompletedProcess([], 0, stdout=listing, stderr=""),
+        )
         settings = NodeSettings(
             name="box",
             control_url="",
             address="http://box:7471",
             providers=("docker:runc", "docker:kata", "docker:gvisor"),
             state_dir=tmp_path,
+            docker=DockerProviderConfig(gpus=(0, 1), gpu_memory_margin_mb=2048),
         )
         declaration, lent = await probe(settings)
+        # Its Docker leaves take the Node's settings, as a Run's take its [sandbox.docker].
+        for leaf in lent.values():
+            assert isinstance(leaf, DockerProvider)
+            assert (leaf.gpus, leaf.gpu_memory_margin_mb) == ((0, 1), 2048)
         runc, kata, gvisor = declaration.profiles
         assert (runc.provider, kata.provider, gvisor.provider) == (
             "docker:runc",
@@ -273,9 +292,19 @@ class TestDeclaration:
         assert ContainerFeature.MOUNT in kata.container_features
         assert ContainerFeature.RAW_SOCKETS in gvisor.container_features
         assert runc.container_features == {ContainerFeature.RAW_SOCKETS}
-        # Only a leaf that attaches GPUs offers the Node's, by their models.
-        assert (runc.gpus, runc.gpu_models) == (gvisor.gpus, gvisor.gpu_models) == (True, (H100,))
+        # Only a leaf that attaches GPUs offers the Node's, by their models and memory, and
+        # says how a Sandbox that shares one is held to its share.
+        # 81559 MiB less the driver's 470 and the Node's margin of 2048.
+        h100 = (GpuModel(name=H100, memory_mb=79041),)
+        assert (runc.gpus, runc.gpu_models) == (gvisor.gpus, gvisor.gpu_models) == (True, h100)
         assert (kata.gpus, kata.gpu_models) == (False, ())
+        assert [p.gpu_hold for p in (runc, kata, gvisor)] == [
+            GpuHold.WATCHED,
+            GpuHold.WHOLE,
+            GpuHold.LIMIT,
+        ]
+        # It lends the two GPUs its Docker leaves may lease, not every GPU of the Host.
+        assert declaration.resources.gpus == (GpuPool(model=H100, count=2),)
         # And none starts a Sandbox larger than the Node lends in all.
         resources = declaration.resources
         assert {(p.max_cpus, p.max_memory_mb) for p in declaration.profiles} == {
@@ -385,6 +414,22 @@ class TestCreation:
         assert (await response.json()) == {"error": "ProviderStartError", "message": "boot failed"}
         assert agent.held == {}
 
+    async def test_a_leafs_capacity_refusal_is_the_node_refusing_its_grant(
+        self, client: TestClient, agent: NodeAgent, provider: MemoryProvider
+    ) -> None:
+        """What only the leaf sees, such as the memory free on a GPU Sandboxes share, refuses
+        the grant as the Node's own count does, so the Run asks for another Node."""
+
+        async def full(_request: SandboxRequest):  # type: ignore[no-untyped-def]
+            raise ProviderCapacityError("the Sandbox needs 8192 MiB on each of 1 GPU")
+
+        provider.create = full  # type: ignore[method-assign]
+        response = await create(client, agent)
+        # Not 409, a refusal for good: the Run asks again later.
+        assert response.status == 503
+        assert (await response.json())["message"] == "the Sandbox needs 8192 MiB on each of 1 GPU"
+        assert agent.held == {}
+
 
 class TestSandboxApi:
     async def test_commands_stream_and_files_round_trip(
@@ -393,7 +438,9 @@ class TestSandboxApi:
         assert (await create(client, agent)).status == 200
         path = "/v1/sandboxes/sandbox-0001"
         async with client.ws_connect(f"{path}/exec", headers=HEADERS) as socket:
-            await socket.send_str(ExecCall(argv=("echo", "hi"), stream=True).model_dump_json())
+            await socket.send_str(
+                ExecCall(argv=("echo", "hi"), stream=True, call=0).model_dump_json()
+            )
             frames = []
             async for message in socket:
                 if message.type is WSMsgType.BINARY:
@@ -493,7 +540,7 @@ class TestSandboxApi:
     ) -> None:
         assert (await create(client, agent)).status == 200
         socket = await client.ws_connect("/v1/sandboxes/sandbox-0001/exec", headers=HEADERS)
-        await socket.send_str(ExecCall(argv=("sleep", "30")).model_dump_json())
+        await socket.send_str(ExecCall(argv=("sleep", "30"), call=0).model_dump_json())
         await asyncio.sleep(0.1)
         await socket.close()
         await asyncio.sleep(0.1)

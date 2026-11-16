@@ -17,7 +17,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ale.core.taskspec import ContainerFeature, ImageKind, NetworkMode, OperatingSystem, Resources
 
-__all__ = ["Arch", "CapabilityProfile", "SandboxNeeds", "accepts_model", "closest", "unmet"]
+__all__ = [
+    "Arch",
+    "CapabilityProfile",
+    "GpuHold",
+    "GpuModel",
+    "SandboxNeeds",
+    "accepts_model",
+    "closest",
+    "unmet",
+]
 
 _STRICT = ConfigDict(frozen=True, extra="forbid")
 
@@ -33,6 +42,32 @@ class Arch(StrEnum):
         """What a Task's Sandbox runs. A Task names no architecture: ALE's images and the
         Tasks built on them are x86-64, apart from macOS, which only Apple silicon runs."""
         return cls.ARM64 if operating_system is OperatingSystem.MACOS else cls.X86_64
+
+
+class GpuHold(StrEnum):
+    """How a Sandbox holds a GPU."""
+
+    WHOLE = "whole"
+    """To itself: no other Sandbox shares it."""
+    LIMIT = "limit"
+    """Shared by ``gpu_memory_mb``, which a limit on the device memory it allocates enforces."""
+    WATCHED = "watched"
+    """Shared by ``gpu_memory_mb``, which nothing enforces as it allocates: its Provider watches
+    what it uses, and acts once it uses more."""
+
+
+class GpuModel(BaseModel):
+    """A GPU model a leaf attaches."""
+
+    model_config = _STRICT
+
+    name: str = Field(min_length=1)
+    """As ``nvidia-smi`` names it, which a Task's ``gpu_types`` accept."""
+    memory_mb: int | None = Field(default=None, ge=1)
+    """The most device memory, in MiB, a Sandbox may need on one GPU of this model: on a leaf
+    that shares GPUs, the most it admits on an empty one, its ``memory.total`` less what the
+    driver reserves and the leaf's margin; on one that gives them whole, its memory. None
+    where the leaf does not know it."""
 
 
 class CapabilityProfile(BaseModel):
@@ -58,9 +93,12 @@ class CapabilityProfile(BaseModel):
     """Whether it saves snapshots and boots Sandboxes from them."""
     gpus: bool = False
     """Whether it attaches NVIDIA GPUs."""
-    gpu_models: tuple[str, ...] = ()
-    """The models of the GPUs it attaches, as ``nvidia-smi`` names them; empty when it
-    learns them only as it attaches them."""
+    gpu_models: tuple[GpuModel, ...] = ()
+    """The models of the GPUs it attaches; empty when it learns them only as it attaches them."""
+    gpu_hold: GpuHold = GpuHold.WHOLE
+    """How a Sandbox that names ``gpu_memory_mb`` holds its GPUs: shared with others, limited
+    or watched, where the leaf shares them; whole where it does not. A Sandbox that names none
+    always holds them whole."""
     max_cpus: int | None = Field(default=None, ge=1)
     max_memory_mb: int | None = Field(default=None, ge=1)
     container_features: frozenset[ContainerFeature] = frozenset()
@@ -114,6 +152,20 @@ def _listed(values: Iterable[str]) -> str:
     return ", ".join(sorted(values)) or "none"
 
 
+def _holds(model: GpuModel, resources: Resources) -> bool:
+    """Whether a GPU of ``model`` serves a Sandbox of ``resources``: of a model it accepts, with
+    the memory it needs on it, unless the leaf does not know the model's memory."""
+    return accepts_model(resources.gpu_types, model.name) and (
+        resources.gpu_memory_mb is None
+        or model.memory_mb is None
+        or model.memory_mb >= resources.gpu_memory_mb
+    )
+
+
+def _model(model: GpuModel) -> str:
+    return model.name if model.memory_mb is None else f"{model.name} ({model.memory_mb} MiB)"
+
+
 def unmet(profile: CapabilityProfile, needs: SandboxNeeds) -> tuple[str, ...]:
     """Why ``profile`` does not serve ``needs``, one reason each; none when it does.
 
@@ -141,10 +193,13 @@ def unmet(profile: CapabilityProfile, needs: SandboxNeeds) -> tuple[str, ...]:
     elif (
         resources.gpus
         and profile.gpu_models
-        and not any(accepts_model(resources.gpu_types, model) for model in profile.gpu_models)
+        and not any(_holds(model, resources) for model in profile.gpu_models)
     ):
+        wanted = [f"of gpu_types {list(resources.gpu_types)}"] if resources.gpu_types else []
+        if resources.gpu_memory_mb is not None:
+            wanted.append(f"with gpu_memory_mb {resources.gpu_memory_mb}")
         reasons.append(
-            f"attaches {_listed(profile.gpu_models)}, none of gpu_types {list(resources.gpu_types)}"
+            f"attaches {_listed(map(_model, profile.gpu_models))}, none {' '.join(wanted)}"
         )
     if missing := set(resources.container_features) - profile.container_features:
         reasons.append(

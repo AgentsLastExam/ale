@@ -300,6 +300,7 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
             "storage_mb": config.environment.storage_mb,
             "gpus": config.environment.gpus,
             "gpu_types": config.environment.gpu_types or (),
+            "gpu_memory_mb": config.environment.gpu_memory_mb,
             "sudo": config.agent.sudo,
             "container_features": config.environment.container_features,
         },
@@ -417,6 +418,7 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
         storage_mb=sized.storage_mb,
         gpus=sized.gpus,
         gpu_types=sized.gpu_types or (),
+        gpu_memory_mb=sized.gpu_memory_mb,
         container_features=sized.container_features,
     )
     return VerifySpec(environment_mode=VerificationMode.SEPARATE, image=image, resources=resources)

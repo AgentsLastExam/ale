@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextvars
 import json
 import re
 import time
@@ -16,6 +17,7 @@ import pytest
 
 import ale.run
 import ale.run.providers.docker.provider as docker_provider
+from ale.core.capability import GpuHold, GpuModel
 from ale.core.config import ProviderId
 from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
@@ -32,7 +34,7 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.run import guestd, iptables
-from ale.run.providers.docker import gvisor, kata, tc
+from ale.run.providers.docker import gpu_sharing, gvisor, kata, tc
 from ale.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
@@ -51,6 +53,7 @@ from ale.run.transport import GuestClient
 pytestmark = pytest.mark.unit
 
 DIGEST = "sha256:" + "0" * 64
+H100 = "NVIDIA H100 80GB HBM3"
 
 
 def request(**overrides: object) -> SandboxRequest:
@@ -198,6 +201,10 @@ def _sandbox() -> DockerSandbox:
     )
     sandbox._client = SimpleNamespace(close=close)  # type: ignore[assignment]
     sandbox._file_client = SimpleNamespace(close=close)  # type: ignore[assignment]
+    sandbox._sessions = ()  # type: ignore[assignment]
+    sandbox._watchdog = gpu_sharing.Watchdog()
+    sandbox._context = contextvars.copy_context()
+    sandbox.container_id = "f" * 64
     sandbox._relay = None
     return sandbox
 
@@ -232,6 +239,7 @@ async def test_a_sealed_snapshot_gives_the_account_its_settings_back_first(
 async def test_a_snapshot_commits_the_stopped_container_without_its_gpus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A Sandbox booted from it, whose labels the image's are, holds and reserves nothing."""
     calls = _scripted(monkeypatch)
     retained = await _sandbox().snapshot(roles=("solver",), reason="kept")
     assert calls == [
@@ -242,6 +250,8 @@ async def test_a_snapshot_commits_the_stopped_container_without_its_gpus(
             "LABEL ale.retention=snapshot",
             "--change",
             'LABEL ale.gpus=""',
+            "--change",
+            'LABEL ale.gpu_memory_mb=""',
             "--change",
             f"LABEL ale.prepared={DIGEST}",
             "ale-e1-abcdef",
@@ -430,7 +440,6 @@ async def test_a_kata_or_gvisor_sandbox_boots_on_a_network_of_its_own(
     sandbox = _sandbox()
     sandbox.confinement = confinement
     sandbox.state = SandboxState.READY
-    sandbox._resource_lease = None
     calls.clear()
     await sandbox.destroy()
     assert calls == [("rm", "-f", "-v", "ale-e1-abcdef"), ("network", "rm", network)]
@@ -991,9 +1000,8 @@ async def test_guestd_is_reached_isolated_in_the_root_directory_through_a_sessio
 
     monkeypatch.setattr(_Session, "start", started)
     monkeypatch.setattr("ale.run.transport.GuestClient.health", healthy)
-    client = await DockerProvider()._connect("ale-e1", "user")
-    transport = client._transport
-    assert isinstance(transport, _Session) and transport.container == "ale-e1"
+    transport = await DockerProvider()._connect("ale-e1", "user")
+    assert transport.client._transport is transport and transport.container == "ale-e1"
     assert transport._argv == [
         "docker", "exec", "-i", "--user", "0", "--env", "ALE_AGENT_USER=user",
         "--workdir", "/", "ale-e1",
@@ -1134,8 +1142,10 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
         relays.append(proxy)
         return "127.0.0.1:41999" if proxy else None
 
-    async def connect(_provider: DockerProvider, _container: str, _user: str) -> object:
-        return SimpleNamespace(exec=guest_exec, close=close, egress_relay=egress_relay)
+    async def connect(_provider: DockerProvider, _container: str, _user: str) -> _Session:
+        session = _Session([], "ale-e1")
+        session.client = SimpleNamespace(exec=guest_exec, close=close, egress_relay=egress_relay)  # type: ignore[assignment]
+        return session
 
     async def contract(_provider: DockerProvider, _client: object) -> tuple[str, bool]:
         return "/home/user", False
@@ -1255,31 +1265,59 @@ async def test_a_leaf_offers_the_gpus_of_this_host_that_it_may_lease(
 
     async def host_gpus(_provider: DockerProvider) -> dict[int, GpuDevice]:
         found.append(1)
-        models = {0: a100, 1: "NVIDIA H100 80GB HBM3", 2: a100}
+        models = {0: (a100, 81920), 1: (H100, 81559), 2: (a100, 81920)}
         return {
-            index: GpuDevice(id=f"GPU-{index}", model=model, driver_version="570.1")
-            for index, model in models.items()
+            index: GpuDevice(
+                id=f"GPU-{index}",
+                model=model,
+                driver_version="570.1",
+                memory_total_mb=memory,
+                memory_reserved_mb=470,
+            )
+            for index, (model, memory) in models.items()
         }
 
     (none,) = await DockerProvider().profiles()
-    assert (none.gpus, none.gpu_models) == (False, ())
+    assert (none.gpus, none.gpu_models, none.gpu_hold) == (False, (), GpuHold.WHOLE)
     monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
     every = DockerProvider()
     (runc,) = await every.profiles()
-    assert (runc.gpus, runc.gpu_models) == (True, (a100, "NVIDIA H100 80GB HBM3"))
+    # Each model's memory is the most a shared Sandbox is admitted with on an empty GPU of it:
+    # its total less what the driver reserves and the default margin of 4096 MiB.
+    models = (GpuModel(name=a100, memory_mb=77354), GpuModel(name=H100, memory_mb=76993))
+    assert (runc.gpus, runc.gpu_models) == (True, models)
+    # runc holds no process to its share of a GPU: the watchdog watches it.
+    assert runc.gpu_hold is GpuHold.WATCHED
     await every.profiles()
     assert found == [1]  # read once
     (configured,) = await DockerProvider(gpus=(0, 2)).profiles()
-    assert configured.gpu_models == (a100,)
+    assert configured.gpu_models == models[:1]
     h100 = Resources(gpus=1, gpu_types=("H100",))
     assert await DockerProvider(gpus=(0, 2)).unserved(
         request(resources=h100).needs, user="user", role=SandboxRole.SHARED
-    ) == (f"attaches {a100}, none of gpu_types ['H100']",)
-    # Docker's GPU injection does not reach a Kata microVM; gVisor proxies the driver.
+    ) == (f"attaches {a100} (77354 MiB), none of gpu_types ['H100']",)
+    # A need admission could never admit is refused before anything starts, though the GPU
+    # has that much memory; one it could admit is not.
+    big = Resources(gpus=1, gpu_memory_mb=77000)
+    assert (
+        await every.unserved(request(resources=big).needs, user="user", role=SandboxRole.SHARED)
+        == ()
+    )
+    assert await DockerProvider(gpus=(1,)).unserved(
+        request(resources=big).needs, user="user", role=SandboxRole.SHARED
+    ) == (f"attaches {H100} (76993 MiB), none with gpu_memory_mb 77000",)
+    tighter = DockerProvider(gpus=(1,), gpu_memory_margin_mb=8192)
+    smaller = request(resources=big.model_copy(update={"gpu_memory_mb": 73000}))
+    assert await tighter.unserved(smaller.needs, user="user", role=SandboxRole.SHARED) == (
+        f"attaches {H100} (72897 MiB), none with gpu_memory_mb 73000",
+    )
+    # Docker's GPU injection does not reach a Kata microVM; gVisor proxies the driver and
+    # limits a shared Sandbox's memory.
     (in_kata,) = await DockerProvider(runtime="kata").profiles()
-    assert (in_kata.gpus, in_kata.gpu_models) == (False, ())
+    assert (in_kata.gpus, in_kata.gpu_models, in_kata.gpu_hold) == (False, (), GpuHold.WHOLE)
     (in_gvisor,) = await DockerProvider(runtime="gvisor").profiles()
-    assert (in_gvisor.gpus, in_gvisor.gpu_models) == (True, (a100, "NVIDIA H100 80GB HBM3"))
+    assert (in_gvisor.gpus, in_gvisor.gpu_models) == (True, models)
+    assert in_gvisor.gpu_hold is GpuHold.LIMIT
 
 
 async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
@@ -1295,6 +1333,12 @@ async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
 
 _RUNSC = "/usr/local/lib/ale-gvisor/0.1.0/runsc"
 _REGISTERED = dict(gvisor.ARGUMENTS)
+#: Part of what ``runsc flags`` of ALE's build lists.
+_FLAGS = (
+    "  -nvproxy-driver-version string\n"
+    "  -nvproxy-gpu-memory-limit uint\n"
+    "    \tthe most device memory, in bytes, that the sandbox may allocate through nvproxy\n"
+)
 
 
 def _known(*names: str, arguments: dict[str, tuple[str, ...]] | None = None) -> str:
@@ -1313,6 +1357,8 @@ def _preflight_host(
     devices: tuple[str, ...] = (),
     version: str = "runsc version release-20261109.0+ale.0.1.0\nspec: 1.2.1\n",
     drivers: str = "570.124.06\n580.95.05\n",
+    flags: str = _FLAGS,
+    flags_code: int = 0,
     gpus: bool = True,
 ) -> list[tuple[str, ...]]:
     """A Host whose daemon knows ``known``; what it ran of a runtime's own commands."""
@@ -1324,6 +1370,8 @@ def _preflight_host(
 
     async def run(*argv: str, timeout: float) -> tuple[int, str, str]:
         ran.append(argv)
+        if argv[1] == "flags":
+            return flags_code, "", flags  # Go's flag package writes them to stderr
         return 0, version if argv[1] == "--version" else drivers, ""
 
     async def host_gpus(_provider: DockerProvider) -> dict[int, GpuDevice]:
@@ -1460,6 +1508,48 @@ async def test_a_gvisor_leaf_runs_the_build_of_ale_which_must_support_the_gpu_dr
         assert ran[-1] == (_RUNSC, "nvproxy", "list-supported-drivers")
     else:
         assert all(argv[1] == "--version" for argv in ran)
+
+
+@pytest.mark.parametrize(
+    ("memory", "flags", "code", "refused"),
+    [
+        (None, "", 0, None),  # a Sandbox that takes whole GPUs needs no limit
+        (8192, _FLAGS, 0, None),
+        (8192, "  -nvproxy-driver-version string\n", 0, "lists no -nvproxy-gpu-memory-limit"),
+        # A runsc whose flags cannot be listed is refused as one that lacks the flag.
+        (8192, "flag provided but not defined", 2, "lists no -nvproxy-gpu-memory-limit"),
+        # A Node lends the leaf to any Sandbox, shared ones too.
+        ("node", "", 0, "lists no -nvproxy-gpu-memory-limit"),
+    ],
+)
+async def test_a_gvisor_leaf_whose_sandboxes_share_gpus_runs_a_runsc_that_limits_them(
+    monkeypatch: pytest.MonkeyPatch,
+    memory: int | str | None,
+    flags: str,
+    code: int,
+    refused: str | None,
+) -> None:
+    """``runsc flags`` lists the flag patch 0004 adds, which a shared Sandbox's annotation
+    sets."""
+    ran = _preflight_host(
+        monkeypatch,
+        _known("runc", arguments=_REGISTERED),
+        drivers="570.124.06\n",
+        flags=flags,
+        flags_code=code,
+    )
+    needs = (
+        []
+        if memory == "node"
+        else [request(resources=Resources(gpus=1, gpu_memory_mb=memory)).needs]
+    )
+    preflight = DockerProvider(runtime="gvisor").preflight(needs)
+    if refused is not None:
+        with pytest.raises(ProviderStartError, match=refused):
+            await preflight
+    else:
+        await preflight
+    assert ((_RUNSC, "flags") in ran) is (memory is not None)
 
 
 @pytest.mark.asyncio
@@ -1628,6 +1718,8 @@ async def test_a_gvisor_sandbox_gets_its_gpus_as_a_runc_one_does(
         calls.append(argv)
         if argv[:2] == ("run", "-d"):
             return 1, "", "stopped after the flags were read"
+        if argv[0] == "info":
+            return 0, "DAEMON-1\n", ""
         return _scripted_reply(argv)
 
     async def host_gpus(_provider: DockerProvider) -> dict[int, GpuDevice]:
@@ -1683,7 +1775,9 @@ async def test_a_sandbox_whose_gpus_cannot_be_leased_leaves_no_network_behind(
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
         calls.append(argv)
         if argv[0] == "ps":
-            return 0, "GPU-0,GPU-1\n", ""  # both held by other sandboxes
+            return 0, "c0 ale-other GPU-0,GPU-1/\n", ""  # both held whole by another sandbox
+        if argv[:3] == ("info", "--format", "{{.ID}}"):
+            return 0, "DAEMON-1\n", ""
         return _scripted_reply(argv)
 
     async def host_gpus(_provider: DockerProvider) -> dict[int, GpuDevice]:

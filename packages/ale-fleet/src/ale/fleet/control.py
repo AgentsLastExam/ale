@@ -106,6 +106,10 @@ class Timing:
     """How long a Node may report a Sandbox the ledger never heard of before it is destroyed."""
     history_sec: float = 24 * 3600.0
     """How long finished Sandboxes stay in memory, for status pages."""
+    full_retry_sec: float = 10.0
+    """How long a Sandbox waits before it is placed again on a Node whose leaf had no room
+    for it; the wait doubles at each such refusal, up to ``full_retry_max_sec``."""
+    full_retry_max_sec: float = 300.0
 
 
 class ControlPlane:
@@ -603,7 +607,30 @@ class ControlPlane:
                 sandbox=sandbox_id,
                 detail=f"{record.run_id} cannot reach it: {refusal.reason}",
             )
-        if record.node == refusal.node and record.status is SandboxStatus.PLACED:
+        # A Node lists a Sandbox as creating while its leaf decides, so the Node's own refusal
+        # can find it starting there; that answer still says the Node created nothing.
+        asked = record.node == refusal.node and (
+            record.status is SandboxStatus.PLACED
+            or (record.status is SandboxStatus.STARTING and not refusal.unreachable)
+        )
+        if asked and refusal.capacity:
+            # Not now rather than never here: it goes elsewhere, or there again later.
+            now = self._clock()
+            _, waited = record.full.get(refusal.node, (now, 0.0))
+            wait = min(max(waited * 2, self.timing.full_retry_sec), self.timing.full_retry_max_sec)
+            record.full[refusal.node] = (now + wait, wait)
+            self._event(
+                "sandbox.no_room", node=refusal.node, sandbox=sandbox_id, detail=refusal.reason
+            )
+            record.node = record.provider = record.holds = None
+            record.placed_at = None
+            self._set(
+                record,
+                SandboxStatus.QUEUED,
+                f"{refusal.node} has no room for it now: {refusal.reason}",
+            )
+            self.schedule()
+        elif asked:
             if not refusal.unreachable:
                 self._event(
                     "sandbox.refused", node=refusal.node, sandbox=sandbox_id, detail=refusal.reason
@@ -849,6 +876,7 @@ class ControlPlane:
         )
         if not queued:
             return
+        now = self._clock()
         prepare_sec = self._prepare_sec()
         lifetimes = self._lifetimes()
         views = {view.name: view for view in self.views(lifetimes, prepare_sec)}
@@ -866,10 +894,11 @@ class ControlPlane:
                 for record in by_run[run_id]:
                     if record.status is not SandboxStatus.QUEUED:
                         continue
+                    full = sorted(node for node, (until, _) in record.full.items() if until > now)
                     choice, reason = choose(
                         record.demand,
                         views.values(),
-                        refused=self._avoided(record),
+                        refused=(*self._avoided(record), *full),
                         assigned=self.runs[run_id].assignments.get(record.demand.image, ()),
                         prepare_sec=prepare_sec,
                         image_bytes=image_bytes,
@@ -886,6 +915,8 @@ class ControlPlane:
                             (choice.wait_sec, choice.ready_sec + lifetime, choice.holds)
                         )
                         choice = None
+                    if choice is None and full and reason.startswith("waiting for a Node"):
+                        reason = f"waiting for room on {', '.join(full)}, which had none for it"
                     if choice is None:
                         if record.reason != reason:
                             record.reason = reason

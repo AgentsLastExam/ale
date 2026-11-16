@@ -233,6 +233,16 @@ def test_task_config_rejects_unknown_keys() -> None:
             {"verifier": {"environment": {"gpu_types": ["H100"]}}},
             r"\[verifier\.environment\]\.gpu_types requires gpus",
         ),
+        (
+            {"environment": {"gpu_memory_mb": 8192}},
+            r"\[environment\]\.gpu_memory_mb requires gpus",
+        ),
+        (
+            {"verifier": {"environment": {"gpu_memory_mb": 8192}}},
+            r"\[verifier\.environment\]\.gpu_memory_mb requires gpus",
+        ),
+        ({"environment": {"gpus": 1, "gpu_memory_mb": 0}}, "greater than or equal to 1"),
+        ({"environment": {"gpus": 1, "gpu_memory_mb": 1.5}}, "valid integer"),
         ({"environment": {"gpus": 1, "gpu_types": []}}, "at least 1 item"),
         ({"environment": {"gpus": 1, "gpu_types": [" - "]}}, "should match pattern"),
         ({"agent": {"sudo": "yes"}}, "valid boolean"),

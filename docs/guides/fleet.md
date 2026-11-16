@@ -54,6 +54,11 @@ uv run ale-fleet node --control-plane http://CONTROL:7470 --address http://NODE:
   --provider docker:runc --provider docker:kata --provider qemu
 ```
 
+Its Docker leaves take the settings a Run's `[sandbox.docker]` gives a local Run's:
+`--gpu INDEX` (repeat) names the Host GPUs they may lease, all of them by default, and
+`--gpu-memory-margin-mb` the memory a GPU must keep free beyond a shared Sandbox's
+`gpu_memory_mb` ([GPU memory](../../packages/ale-run/src/ale/run/providers/README.md#gpu-memory)).
+
 Stopping the agent destroys every Sandbox it holds, apart from retained ones. If the agent
 crashes instead, start it again with the same options: it drives again the Sandboxes whose
 Runs still hold them, keeps the retained ones and the snapshots, and destroys the rest, from

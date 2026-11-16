@@ -15,7 +15,7 @@ from typing import Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, closest
+from ale.core.capability import Arch, CapabilityProfile, GpuHold, SandboxNeeds, closest
 from ale.core.errors import ProviderCapabilityError
 from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 
@@ -264,7 +264,8 @@ class ResolvedImage(BaseModel):
 
 
 class GpuDevice(BaseModel):
-    """One physical NVIDIA GPU observed inside the ready sandbox."""
+    """One physical NVIDIA GPU observed inside the ready sandbox, or on the Host that attached
+    it."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -273,6 +274,13 @@ class GpuDevice(BaseModel):
     model: str = Field(min_length=1)
     pci_address: str | None = None
     driver_version: str = Field(min_length=1)
+    memory_total_mb: int | None = None
+    """``memory.total`` in MiB, as the Host's ``nvidia-smi`` reported it when the Provider
+    admitted the Sandbox; None where it was not read or not reported."""
+    memory_reserved_mb: int | None = None
+    """``memory.reserved``, what the driver keeps of it, read with ``memory_total_mb``."""
+    memory_free_mb: int | None = None
+    """``memory.free`` in MiB, read with ``memory_total_mb``."""
 
 
 class GpuAllocation(BaseModel):
@@ -285,6 +293,19 @@ class GpuAllocation(BaseModel):
     lease_keys: tuple[str, ...]
     observed_devices: tuple[GpuDevice, ...]
     runtime_identity: str | None = None
+    hold: GpuHold = GpuHold.WHOLE
+    """How the Sandbox holds its GPUs: whole, or shared with others under a limit or watched."""
+    memory_mb: int | None = Field(default=None, ge=1)
+    """The device memory reserved for a Sandbox that shares its GPUs, in MiB on each; None for
+    one that holds them whole."""
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _memory_only_when_shared(self) -> Self:
+        if (self.memory_mb is None) != (self.hold is GpuHold.WHOLE):
+            raise ValueError("a GPU allocation reserves memory exactly when it is shared")
+        return self
 
 
 class ResourceAllocation(BaseModel):

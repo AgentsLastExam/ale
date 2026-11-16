@@ -26,6 +26,7 @@ __all__ = [
     "BUILD",
     "DRIVERS",
     "FLAGS",
+    "GPU_MEMORY_FLAG",
     "NET_RAW",
     "RUNTIME",
     "SEAL_PROBE",
@@ -63,6 +64,10 @@ BUILD = f"+ale.{VERSION}"
 DRIVERS = ("nvproxy", "list-supported-drivers")
 #: What the kernel log of every gVisor sandbox starts with.
 BANNER = "Starting gVisor"
+#: The flag of ALE's runsc (patch 0004) that limits the device memory a sandbox allocates
+#: through nvproxy on each of its GPUs, which ``runsc flags`` lists. A sandbox's annotation
+#: sets it for that sandbox alone.
+GPU_MEMORY_FLAG = "nvproxy-gpu-memory-limit"
 #: Every runsc process is charged to the container's memory, so an application's process,
 #: run in a stub, must be the one the OOM killer takes rather than the Sentry, which holds
 #: the whole sandbox; under rootless Docker the default ties them.

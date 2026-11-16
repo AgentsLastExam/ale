@@ -535,8 +535,11 @@ async def _reverify(
             elif isinstance(outcome, BaseException):
                 raise outcome
         # Each solver is the one its source episode kept, on the Provider that kept it.
-        await providers.select(
-            [task for task in unique if str(task.spec.name) not in unclassified], solvers=False
+        _note(
+            await providers.select(
+                [task for task in unique if str(task.spec.name) not in unclassified],
+                solvers=False,
+            )
         )
     except (AleError, OSError, ValueError) as error:
         typer.echo(str(error), err=True)
@@ -1168,6 +1171,12 @@ def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
     return [task.folder.root / Stage.TESTS for task in tasks]
 
 
+def _note(notices: tuple[str, ...]) -> None:
+    """Say what a selection notes once, at the start of the Run it serves."""
+    for notice in notices:
+        typer.echo(f"note  {notice}", err=True)
+
+
 async def _prepare_images(
     tasks: list[ManifestTask], providers: ProviderRegistry, continued: _Continued | None = None
 ) -> tuple[ImagePreparationResult, ...]:
@@ -1178,10 +1187,12 @@ async def _prepare_images(
     Provider that kept it, which alone holds its Sandbox or snapshot.
     """
     await resolve_image_kinds(tasks)
-    await providers.select(
-        tasks,
-        snapshots=providers.settings.sandbox_retention.solver == "snapshot"
-        or (continued is not None and continued.retained.outcome == "snapshotted"),
+    _note(
+        await providers.select(
+            tasks,
+            snapshots=providers.settings.sandbox_retention.solver == "snapshot"
+            or (continued is not None and continued.retained.outcome == "snapshotted"),
+        )
     )
     if continued is not None:
         continued.require_keeper(tasks[0])

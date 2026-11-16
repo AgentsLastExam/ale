@@ -8,7 +8,7 @@ import pytest
 from tests.unit.test_fleet_control import linux as linux_node
 from tests.unit.test_fleet_control import mac as mac_node
 
-from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, unmet
+from ale.core.capability import Arch, CapabilityProfile, GpuModel, SandboxNeeds, unmet
 from ale.core.errors import ProviderCapabilityError
 from ale.core.fleet import NodeDeclaration, SandboxDemand
 from ale.core.sandbox import PreparedTaskImage, SandboxRequest, SandboxRole
@@ -108,11 +108,33 @@ class TestUnmet:
         assert unmet(PROFILE.model_copy(update={"gpus": False}), gpu) == ("attaches no GPUs",)
         # Models a profile learns only as it attaches them are checked then.
         assert unmet(PROFILE, gpu) == ()
-        known = PROFILE.model_copy(update={"gpu_models": ("NVIDIA A100-SXM4-80GB",)})
+        known = PROFILE.model_copy(update={"gpu_models": (GpuModel(name="NVIDIA A100-SXM4-80GB"),)})
         assert unmet(known, gpu) == ("attaches NVIDIA A100-SXM4-80GB, none of gpu_types ['H100']",)
         harbor = needs(resources=Resources(gpus=1, gpu_types=("H100", "a100-80gb")))
         assert unmet(known, harbor) == ()
         assert unmet(known, needs(resources=Resources(gpus=1))) == ()
+
+    def test_a_gpu_memory_need_is_refused_only_where_no_accepted_model_has_that_much(
+        self,
+    ) -> None:
+        """A whole-GPU leaf serves it with a GPU that has the memory; a model whose memory
+        the leaf does not know may have it."""
+        a100 = GpuModel(name="NVIDIA A100-SXM4-80GB", memory_mb=81920)
+        l4 = GpuModel(name="NVIDIA L4", memory_mb=23034)
+        known = PROFILE.model_copy(update={"gpu_models": (l4, a100)})
+        assert unmet(known, needs(resources=Resources(gpus=1, gpu_memory_mb=81920))) == ()
+        assert unmet(known, needs(resources=Resources(gpus=1, gpu_memory_mb=81921))) == (
+            "attaches NVIDIA A100-SXM4-80GB (81920 MiB), NVIDIA L4 (23034 MiB), "
+            "none with gpu_memory_mb 81921",
+        )
+        # Every model it accepts counts, and only those.
+        l4_only = needs(resources=Resources(gpus=1, gpu_types=("L4",), gpu_memory_mb=40000))
+        assert unmet(known, l4_only) == (
+            "attaches NVIDIA A100-SXM4-80GB (81920 MiB), NVIDIA L4 (23034 MiB), "
+            "none of gpu_types ['L4'] with gpu_memory_mb 40000",
+        )
+        unknown = PROFILE.model_copy(update={"gpu_models": (l4, GpuModel(name="NVIDIA H200"))})
+        assert unmet(unknown, needs(resources=Resources(gpus=1, gpu_memory_mb=100000))) == ()
 
     def test_every_need_a_profile_misses_is_named(self) -> None:
         macos = needs(

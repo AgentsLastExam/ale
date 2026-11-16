@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -58,6 +59,7 @@ from ale.core.fleet import (
     LeaseRenewal,
     Listing,
     NodeDeclaration,
+    Notices,
     Placement,
     PlanItem,
     PlanReply,
@@ -67,6 +69,7 @@ from ale.core.fleet import (
     RunPlan,
     SandboxDemand,
     SandboxDescription,
+    SandboxNotice,
     SandboxStatus,
 )
 from ale.core.ids import content_hash
@@ -142,6 +145,10 @@ def _failure(body: ErrorBody) -> AleError:
 
 class _Refused(Exception):
     """The Node's own admission refused the grant before creating anything."""
+
+
+class _Full(_Refused):
+    """The Node's leaf has no room for the grant now; it may have later."""
 
 
 class _Unreachable(GuestUnreachableError):
@@ -307,6 +314,8 @@ class FleetClient:
             raise ProviderStartError(f"the Fleet answered {status}: {text}") from None
         if status == 409 and node:
             raise _Refused(failure.message)
+        if status == 503 and node:
+            raise _Full(failure.message)
         raise _failure(failure)
 
     # --- the control plane --------------------------------------------------------------
@@ -340,10 +349,19 @@ class FleetClient:
         return Placement.model_validate_json(body)
 
     async def refused(
-        self, sandbox_id: str, node: str, reason: str, *, unreachable: bool = False
+        self,
+        sandbox_id: str,
+        node: str,
+        reason: str,
+        *,
+        unreachable: bool = False,
+        capacity: bool = False,
     ) -> Placement:
         refusal = RefusedRequest(
-            node=node, reason=reason[:2000] or "refused", unreachable=unreachable
+            node=node,
+            reason=reason[:2000] or "refused",
+            unreachable=unreachable,
+            capacity=capacity,
         )
         body = await self._request(
             "POST",
@@ -895,7 +913,9 @@ class FleetProvider(Provider):
                         await asyncio.shield(client.node_delete(node, sandbox_id))
                     raise
             except _Refused as refusal:
-                placement = await client.refused(sandbox_id, node.name, str(refusal))
+                placement = await client.refused(
+                    sandbox_id, node.name, str(refusal), capacity=isinstance(refusal, _Full)
+                )
                 continue
             except _Unreachable as error:
                 _log.warning("this Run uses Node %s no more: %s", node.name, error)
@@ -969,6 +989,8 @@ class FleetSandbox(Sandbox):
         self.node = node
         self._gateway = description.gateway_url
         self._url = f"{node.address}/v1/sandboxes/{description.sandbox_id}"
+        #: The context each command ran in, by the number the Node's notices name it by.
+        self._contexts: list[contextvars.Context] = []
         self.state = SandboxState.READY
 
     @property
@@ -1001,7 +1023,9 @@ class FleetSandbox(Sandbox):
             timeout_sec=timeout_sec,
             identity=identity,
             stream=output_sink is not None,
+            call=len(self._contexts),
         )
+        self._contexts.append(contextvars.copy_context())
         session = self._client._state().session
         deadline = time.monotonic() + RECONNECT_SEC
         while True:
@@ -1044,10 +1068,32 @@ class FleetSandbox(Sandbox):
             raise GuestUnreachableError(f"Node {self.node.name} is unreachable: {error}") from None
         if done is None:
             raise GuestUnreachableError(f"Node {self.node.name} ended the command's connection")
+        self._record(done.notices)
         if done.error is not None:
             raise _failure(done.error)
         assert done.result is not None
         return done.result
+
+    def _record(self, notices: Sequence[SandboxNotice]) -> None:
+        """Log what the Node's leaf logged about the Sandbox in the context of the command it
+        logged for, as a leaf of this process logs: the episode's execution trace records it
+        in the phase that ran the command."""
+        logger = logging.getLogger("ale.execution")
+        for notice in notices:
+            context = self._contexts[notice.call]
+            context.run(logger.log, notice.level, notice.message, extra={"ale_data": notice.data})
+
+    async def _take_notices(self) -> None:
+        """Record the notices the Node still holds, before this Run lets go of the Sandbox;
+        a Node it cannot ask keeps them in its own log."""
+        try:
+            body = await self._call("GET", "/notices")
+        except Exception as error:
+            _log.warning(
+                "could not read %s's notices on %s: %s", self.sandbox_id, self.node.name, error
+            )
+            return
+        self._record(Notices.model_validate_json(body).notices)
 
     async def write_file(
         self, path: str, data: bytes, *, identity: Identity = Identity.FRAMEWORK
@@ -1104,6 +1150,7 @@ class FleetSandbox(Sandbox):
         """Keep the Sandbox on its Node past its episode; the Fleet's ledger holds it now, and
         no lease ends it."""
         retention = Retention(roles=roles, reason=reason)
+        await self._take_notices()
         kept = RetainedSandbox.model_validate_json(
             await self._call("POST", "/retain", body=retention.model_dump_json)
         )
@@ -1144,6 +1191,7 @@ class FleetSandbox(Sandbox):
             return
         self.state = SandboxState.DESTROYED
         try:
+            await self._take_notices()
             await self._client.release(self.sandbox_id)
             try:
                 await self._client.node_delete(self.node, self.sandbox_id)

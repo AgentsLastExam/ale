@@ -14,7 +14,7 @@ import hmac
 import json
 import time
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -54,6 +54,7 @@ __all__ = [
     "Listing",
     "NodeDeclaration",
     "NodeResources",
+    "Notices",
     "Placement",
     "PlanItem",
     "PlanReply",
@@ -65,6 +66,7 @@ __all__ = [
     "RunPlan",
     "SandboxDemand",
     "SandboxDescription",
+    "SandboxNotice",
     "SandboxStatus",
     "SnapshotHolding",
     "StartReport",
@@ -410,6 +412,9 @@ class RefusedRequest(BaseModel):
     reason: str = Field(min_length=1)
     unreachable: bool = False
     """The Run could not reach the Node at all, so none of its Sandboxes goes there again."""
+    capacity: bool = False
+    """The Node's leaf has no room for it now, which only the Node sees, such as the memory
+    free on a GPU Sandboxes share: it may go there again later."""
 
 
 # --- grants ------------------------------------------------------------------------------
@@ -583,6 +588,30 @@ class ExecCall(BaseModel):
     identity: Identity = Identity.FRAMEWORK
     stream: bool = False
     """Send output as it is produced, for a caller that watches it."""
+    call: int = Field(ge=0)
+    """The Run's number for the command, which the notices logged while it ran name."""
+
+
+class SandboxNotice(BaseModel):
+    """What the Node's leaf logged to the execution trace about its Sandbox: for the Run to
+    record in the phase of the command that ran then, as its own trace records a leaf of
+    its own process."""
+
+    model_config = _STRICT
+
+    call: int = Field(ge=0)
+    level: int
+    """A ``logging`` level."""
+    message: str
+    data: dict[str, Any] = {}
+
+
+class Notices(BaseModel):
+    """The notices a Node holds for a Sandbox and has not handed to its Run yet."""
+
+    model_config = _STRICT
+
+    notices: tuple[SandboxNotice, ...] = ()
 
 
 class ErrorBody(BaseModel):
@@ -599,6 +628,9 @@ class ExecDone(BaseModel):
 
     result: ExecResult | None = None
     error: ErrorBody | None = None
+    notices: tuple[SandboxNotice, ...] = ()
+    """Each notice of the Sandbox's the Node held when the command ended, this one's and
+    those an earlier command's left after it ended."""
 
 
 class Listing(BaseModel):

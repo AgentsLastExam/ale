@@ -13,8 +13,9 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 
 Each package keeps its Provider and Sandbox in `provider.py` and exports both. Beside it,
 `docker/kata.py` builds the tc filters and VM size a sandbox in a Kata microVM needs,
-`docker/gvisor.py` the tc filters, netstack chains and size of one on gVisor, and
-`docker/tc.py` the tc commands both use;
+`docker/gvisor.py` the tc filters, netstack chains, size and GPU memory limit of one on
+gVisor, `docker/tc.py` the tc commands both use, and `docker/gpu_sharing.py` decides which
+GPUs a Docker Sandbox takes and watches what a shared one uses;
 `daytona/api.py` is Daytona's REST client and `daytona/image.py` adapts and publishes
 images; `orchard/client.py` drives Orchard and Tart, `orchard/framing.py` frames images
 and `orchard/desktop.py` waits for the desktop; `fleet/tunnel.py` carries a Run's Gateway
@@ -49,23 +50,23 @@ leaves its profiles name:
 
 | Provider id | Starts | GPUs | Snapshots | Container features | Also refuses |
 |---|---|---|---|---|---|
-| `docker:runc` | Linux containers, on the machine's architecture | the Host's NVIDIA GPUs that `sandbox.docker.gpus` allows, by the models nvidia-smi names; none without a working nvidia-smi | yes | `raw_sockets` | — |
+| `docker:runc` | Linux containers, on the machine's architecture | the Host's NVIDIA GPUs that `sandbox.docker.gpus` allows, by the models and memory nvidia-smi reports, shared by `gpu_memory_mb` and watched ([GPU memory](#gpu-memory)); none without a working nvidia-smi | yes | `raw_sockets` | — |
 | `docker:kata` | Linux containers, on the machine's architecture | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
-| `docker:gvisor` | Linux containers, on the machine's architecture | as `docker:runc`'s | yes | `user_namespaces`, `fuse`, `mount`, `raw_sockets` | — |
+| `docker:gvisor` | Linux containers, on the machine's architecture | as `docker:runc`'s, shared under a limit | yes | `user_namespaces`, `fuse`, `mount`, `raw_sockets` | — |
 | `firecracker` | Linux containers on x86-64, up to 32 CPUs | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
-| `qemu` | Linux and Windows VMs on x86-64 | those of its VFIO pool, when it is given one; no Run or Node setting gives it one | yes | none: a VM takes none | — |
+| `qemu` | Linux and Windows VMs on x86-64 | those of its VFIO pool, whole, when it is given one; no Run or Node setting gives it one | yes | none: a VM takes none | — |
 | `orchard` | macOS VMs on arm64 | none | yes | none: a VM takes none | storage that is not whole GiB; an agent account that is root, or `admin` for an agent without `[agent].sudo` |
-| `daytona` (scheduler) | Linux containers on x86-64 | Daytona's | no | `nested_containers`, `fuse`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | memory or storage that is not whole GiB; `gpu_types` naming no Daytona GPU type |
+| `daytona` (scheduler) | Linux containers on x86-64 | Daytona's, whole | no | `nested_containers`, `fuse`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | memory or storage that is not whole GiB; `gpu_types` naming no Daytona GPU type |
 | `fleet` (scheduler) | what the leaves lent by its registered Nodes that run this engine's framework start, online or not, read once per Run | as those leaves | as those leaves | as those leaves | as those leaves |
 
 Every profile applies `open`, `block` and `allowlist`, apart from Orchard's, which applies
 `block` and `allowlist` only where setup's Softnet is the worker's; a macOS Sandbox refused
 for that names the setup that installs it. A Linux Task's container is x86-64, so a Docker
-leaf on an arm64 machine serves none. A Docker leaf reads its GPUs' models once, from
-nvidia-smi, so a GPU Task goes to the next listed Provider on a Host whose GPUs it does not
-accept. A Node's profiles are its leaves', each limited to the CPUs and memory the Node
-lends in all. A Node lends Docker under any of its runtimes, QEMU and Orchard, but not
-Firecracker.
+leaf on an arm64 machine serves none. A Docker leaf reads its GPUs' models and memory once,
+from nvidia-smi, so a GPU Task goes to the next listed Provider on a Host whose GPUs it does
+not accept or have the memory it needs on each. A Node's profiles are its leaves', each
+limited to the CPUs and memory the Node lends in all. A Node lends Docker under any of its
+runtimes, QEMU and Orchard, but not Firecracker.
 
 `docker:runc` shares the Host's kernel with its Sandboxes, so a kernel exploit in one
 reaches the Host. `docker:kata` and `firecracker` give each Sandbox a VM's kernel and attach
@@ -158,11 +159,119 @@ models it got with `ale.core.capability.accepts_model`, which applies that rule.
 
 | Provider | How it gives only the models the Task accepts |
 |---|---|
-| Docker | Reads the Host's GPUs with `nvidia-smi` and leases only those among `sandbox.docker.gpus`, or among all when it is unset, of an accepted model. Too few refuses the Sandbox before it starts, and the container must then show exactly the leased UUIDs. `docker:kata` attaches none: `--gpus` does not reach the microVM; `docker:gvisor` attaches them as runc does ([gVisor](#docker-on-gvisor)). The allocation records each GPU as the Host's `nvidia-smi` reports it |
+| Docker | Reads the Host's GPUs with `nvidia-smi` and leases only those among `sandbox.docker.gpus`, or among all when it is unset, of an accepted model, whole or by memory ([GPU memory](#gpu-memory)). Too few refuses the Sandbox before it starts, and the container must then show exactly the leased UUIDs. `docker:kata` attaches none: `--gpus` does not reach the microVM; `docker:gvisor` attaches them as runc does ([gVisor](#docker-on-gvisor)). The allocation records each GPU as the Host's `nvidia-smi` reports it |
 | QEMU | A device bound to `vfio-pci` has no Host driver to name its model, so the guest's `nvidia-smi` is read once it boots; a model the Task does not accept destroys the Sandbox before any Task code runs. The pool is leased without regard to model, so a pool of several models can refuse a Task while an accepted GPU is free |
 | Daytona | Maps the names to Daytona's GPU types as Harbor does: `h100` and `nvidia-h100-80gb` to `H100`, `h200` and `nvidia-h200-141gb` to `H200`, `rtx-pro-6000` and `nvidia-rtx-pro-6000` to `RTX-PRO-6000`, `rtx-4090` and `rtx-5090` to themselves, ignoring case. It asks for them in the Task's order, which Daytona tries in turn, and leaves out names with no type; a Task left with none is refused before anything is created. The models attached are then checked against the Task's own names, as on every Provider. `MI355X` is never asked for, as `nvidia-smi` cannot see it to record it. A Task naming no model sends no type, so Daytona chooses |
 | Firecracker | Attaches none: Firecracker passes no GPU through |
 | Orchard | Attaches none |
+
+## GPU memory
+
+A Task's `gpu_memory_mb` is what its Sandbox needs on each GPU
+([GPUs](../../../../../../docs/specs/task-authoring.md#gpus)), each process's CUDA context
+included: a context took 516 MiB with the bare driver API and 608 MiB under PyTorch 2.7 on
+an H100 with driver 570, so a Task of two PyTorch processes needs 1216 MiB before its first
+tensor. `docker:runc` and `docker:gvisor` share a GPU among Sandboxes that name it; QEMU's
+VFIO pool and Daytona give whole GPUs, and know no model's memory before they attach it (a
+GPU bound to `vfio-pci` has no Host driver to report it, and Daytona's GPU types state
+none), so they refuse no such Sandbox for its memory. A Docker profile gives, as each
+model's memory, the most it admits a shared Sandbox with on an empty GPU of it:
+`memory.total` less `memory.reserved` less the margin (76993 MiB of an H100 with driver 570
+and the default margin), so that a Sandbox that needs more on every model it accepts goes to
+the next listed Provider rather than to a leaf that could never admit it.
+
+**Admission.** A Docker leaf admits a Sandbox to the Host's GPUs under one lock for its
+Docker daemon, `/tmp/ale-gpu-<daemon ID>.lock` (`docker info --format {{.ID}}`), which every
+ALE process of every user that admits through that daemon takes, whatever its cache, from
+reading the GPUs until `docker run` returns. It is opened read-only, which `flock` needs no
+more than: `fs.protected_regular` refuses `O_CREAT` on another user's file in the sticky
+`/tmp`, so the first process creates it with `O_EXCL`, readable by all whatever its umask,
+and the others open it as it is. The running containers' labels are the record of what ALE
+holds: every Sandbox carries `ale.gpus`, the GPUs it holds, and `ale.gpu_memory_mb`, what it
+reserved on each when it shares them, both empty when unused, so an image's labels never
+stand in for them. The record is per daemon: Runs on one Host through different daemons,
+such as each user's rootless one, see what each other's Sandboxes use, through nvidia-smi,
+but not what they reserved and do not use yet. Under the lock it reads `nvidia-smi
+--query-gpu=...,memory.total,memory.reserved,memory.free`, the labels of the running ALE
+containers (`docker ps`), and, when one shares a GPU, what each process uses (`nvidia-smi
+--query-compute-apps=pid,used_memory,gpu_uuid`), which it assigns to a container by the
+process's cgroup (`docker-<id>.scope` with the systemd driver, rootful or rootless;
+`/docker/<id>` with cgroupfs). nvidia-smi lists every user's processes, by their PIDs in the
+Host's namespace: under runc one row for each CUDA process, under gVisor one for the whole
+Sandbox, its Sentry, whose memory is nvproxy's count (measured).
+
+| Sandbox | May take a GPU | Of those, takes |
+|---|---|---|
+| without `gpu_memory_mb` | that no ALE Sandbox holds | the one with the most free memory |
+| with `gpu_memory_mb` | that no ALE Sandbox holds whole, and whose headroom is at least `gpu_memory_mb` plus `sandbox.docker.gpu_memory_margin_mb` (4096 by default) | the one with the most headroom |
+
+Headroom is `memory.free` less, for each ALE Sandbox sharing the GPU, what it reserved and
+does not use yet; what it uses already is not free, so it counts once, and one that uses
+more than it reserved adds nothing. `memory.free` excludes what the driver reserves (470 MiB
+of an H100's 81559 with driver 570). The margin is for other tenants' jobs, which grow after
+they start: one on a shared Host of eight H100s grew by 4.2 GB within 10 s. It cannot cover
+a tenant that starts after admission, as jobs there did, in steps of 19 to 31 GB. Too little
+refuses the Sandbox with `ProviderCapacityError`, naming each GPU and its free memory, what
+ALE reserved there and the headroom left; a Fleet Node answers with it that it has no room
+for now, and the Fleet asks it again later. The allocation records how the Sandbox holds its
+GPUs (`whole`, `limit` or `watched`), what it reserved on each, and each GPU's
+`memory.total`, `memory.reserved` and `memory.free` when it was admitted.
+
+**Enforcement.** Under `docker:gvisor` a shared Sandbox gets the annotation
+`dev.gvisor.flag.nvproxy-gpu-memory-limit=<gpu_memory_mb in bytes>`: an allocation past it
+fails as CUDA out of memory (`cudaErrorMemoryAllocation`, `torch.OutOfMemoryError`), a
+context that does not fit fails to be created, and the Sandbox goes on
+([runtime](../../../../../../images/runtimes/gvisor/README.md#gpu-memory-limit)). Its
+preflight, whenever a Sandbox may share GPUs, checks that `runsc flags` lists
+`-nvproxy-gpu-memory-limit`, which only ALE's build has. Under `docker:runc` nothing holds a
+process to a device memory limit, so every selection (`ale run`, `ale validate`, a
+reverification) says once, for the leaf and how many Sandboxes it serves so: `note
+docker:runc watches the gpu_memory_mb of N Sandboxes rather than enforcing it: a process
+past its share is killed`.
+
+**Watchdog.** Each Docker leaf of a process, the Run's or a Node agent's, watches its shared
+Sandboxes while that process holds them, from `create` or reattaching until it destroys,
+keeps or snapshots them: a kept Sandbox is watched again only when a later Run reattaches to
+it. Every 5 s (NVML has no event for memory use) it reads what each process uses and
+compares the sum of a Sandbox's rows on each GPU with its share, which holds every CUDA
+context; acting on several Sandboxes, it acts on all at once.
+
+Under runc a Sandbox past its share loses its largest process on that GPU, and only that
+one, as the OOM killer kills a process past a memory limit: the episode goes on, and the
+agent sees its process killed (signal 9, exit code -9 through `exec`). What the Sandbox did,
+the Sandbox's own process pays for; nothing turns it into an environment error that would
+rerun or unscore the episode. The kill runs in a helper container (the runner image under
+`runc`) that joins the Sandbox's PID namespace (`--pid container:<id>`), since under rootful
+Docker ALE's user cannot signal a container's processes and nothing the Sandbox holds, its
+Python included, may decide whether the kill happens. The watchdog first checks that the
+PID's cgroup still names the container and its start time (`/proc/<pid>/stat` field 22) is
+the one it read; the helper checks the start time again through that namespace's `/proc` and
+then kills. The Sandbox stays watched, and is killed again if it goes past its share again.
+The kill is logged to the episode's `trace.execution.jsonl` as a warning naming the process,
+what it held, the GPU, what the Sandbox used and its share, in the phase of the command
+the Sandbox ran when the watchdog found it, by a Fleet Node's leaf as by a Run's. Until
+the watchdog acts, up to 5 s later, a runc Sandbox past its share holds memory others on the
+GPU were admitted with.
+
+Under gVisor nvproxy should have refused the memory, so a Sentry's row past its share is a
+failure of nvproxy's accounting for memory the driver attributes to the Sentry, which is
+ALE's failure: `docker kill` stops the whole Sandbox, its episode ends in an environment
+error (`the sandbox itself died: ALE's GPU memory watchdog stopped it: ...`), and it is no
+longer watched.
+
+What blinds the watchdog: `nvidia-smi` failing, which it logs once per streak of failed
+looks and once when it looks again; a row whose memory reads `[N/A]`; a Host `/proc` mounted
+with `hidepid`, which hides other users' processes, a rootful Docker's containers among
+them; and ALE running in a PID namespace of its own, as in a container: nvidia-smi gives
+each process's PID in the caller's namespace, where the Sandboxes' processes have none.
+
+Not counted by gVisor's limit, nor in nvidia-smi's rows: the memory the driver allocates for
+itself, 6 MiB per CUDA context on an H100 with driver 570, which makes the rows of a GPU sum
+9 to 15 MiB below its `memory.used`; and managed memory (`cudaMallocManaged`), which the
+driver moves to the GPU on use and evicts when it is full: 3 GiB of it raised the GPU's
+`memory.used` and no process's row (measured), so the watchdog does not see it either, while
+admission sees it as memory no longer free. A Sandbox sees the whole GPU in `nvidia-smi` and
+`cudaMemGetInfo`, what other tenants use included, not its share.
 
 ## Container features
 
@@ -285,12 +394,13 @@ A Docker leaf is Docker under one runtime, `docker:<runtime>`. Each entry of `RU
 `docker/provider.py` holds all a leaf knows of its runtime: its name in the daemon, the
 container features it gives and what a Sandbox that asks for each gets (capabilities, or
 another name the runtime is registered under), whether GPUs reach its Sandboxes, how they
-are confined, the Host devices it needs, the memory it adds to a Sandbox's, the `docker
-run` flags every Sandbox gets, and, for a runtime ALE builds itself, the arguments it must
-be registered with, what its version reports, the command that lists the GPU drivers it
-supports and what a Sandbox's kernel log shows. A runtime is added there and, as a provider
-id a Run may name, to `ProviderId` in `ale.core.config`; a unit test fails while the two
-differ. Every Docker leaf keeps the Provider name `docker` in its handles and GPU locks.
+are confined, the Host devices it needs, the memory it adds to a Sandbox's, the `docker run`
+flags every Sandbox gets, and, for a runtime ALE builds itself, the arguments it must be
+registered with, what its version reports, the command that lists the GPU drivers it
+supports, what a Sandbox's kernel log shows and its flag that limits a shared Sandbox's GPU
+memory. A runtime is added there and, as a provider id a Run may name, to `ProviderId` in
+`ale.core.config`; a unit test fails while the two differ. Every Docker leaf keeps the
+Provider name `docker` in its handles.
 
 Its preflight, given what the Run's Sandboxes of it need (everything its profile declares,
 for a Node), finds each name they run under among those `docker info` lists, registered
@@ -409,10 +519,11 @@ with exactly those arguments, the preflight checks that `runsc --version` report
 this engine runs (`+ale.0.1.0`, `VERSION` in its `build.sh`; a stock `runsc` lacks the
 rootless and out-of-memory fixes) and, whenever GPUs may be attached, a Sandbox needing them
 or a Node whose profile offers the Host's, that `runsc nvproxy list-supported-drivers` lists
-the Host's NVIDIA driver. In the Run's first Sandbox of the leaf, a probe of its container
-features or one started for this alone, and in one Sandbox of the container base a Node
-starts before it lends the leaf, the kernel log must say `Starting gVisor`, and `docker cp`
-must see what the Sandbox wrote, as `--overlay2=none` makes it.
+the Host's NVIDIA driver, and, whenever a Sandbox may share GPUs, that `runsc flags` lists
+the flag that limits its GPU memory. In the Run's first Sandbox of the leaf, a probe of its
+container features or one started for this alone, and in one Sandbox of the container base
+a Node starts before it lends the leaf, the kernel log must say `Starting gVisor`, and
+`docker cp` must see what the Sandbox wrote, as `--overlay2=none` makes it.
 
 | gVisor | What the Provider does |
 |---|---|
@@ -426,7 +537,7 @@ must see what the Sandbox wrote, as `--overlay2=none` makes it.
 | Under the container's memory limit, the OOM killer chooses among the Sentry, the gofer and the stubs that run the application, all charged to the container, and taking the Sentry ends the whole sandbox; under rootless Docker, Docker's default `oom_score_adj` ties them ([Out of memory](../../../../../../images/runtimes/gvisor/README.md#out-of-memory) has the measurements) | `--oom-score-adj 500` ranks every stub above the Sentry and the gofer, under rootful and rootless Docker alike |
 | What a sandbox writes into a tmpfs with `write(2)`, such as `/dev/shm`, is the Sentry's memory, so filling its limit that way ends the whole sandbox | A guestd session that ends then reports that the sandbox exceeded its memory limit |
 | `docker stop` ends a command without a `SIGTERM` handler at once (exit 143), where runc waits out the timeout; `docker cp` into a running sandbox is not reliably seen inside | Snapshots stop and commit as on runc; files go through guestd, never `docker cp` |
-| `docker run --gpus` turns nvproxy, gVisor's proxy of the NVIDIA driver, on for that container alone; `--nvproxy` would turn it on, and probe the driver, for every container; `nvidia-smi` in the sandbox reports no PCI address (`[Unknown Error]`) | GPUs are attached as on runc (`--gpus "device=<uuid>,..."`, `NVIDIA_DRIVER_CAPABILITIES=all`, which `--nvproxy-allowed-driver-capabilities=all` allows), and recorded as the Host sees them; a sandbox sees the whole GPU and what its other tenants use, as under runc. The Provider sets no GPU memory limit |
+| `docker run --gpus` turns nvproxy, gVisor's proxy of the NVIDIA driver, on for that container alone; `--nvproxy` would turn it on, and probe the driver, for every container; `nvidia-smi` in the sandbox reports no PCI address (`[Unknown Error]`) | GPUs are attached as on runc (`--gpus "device=<uuid>,..."`, `NVIDIA_DRIVER_CAPABILITIES=all`, which `--nvproxy-allowed-driver-capabilities=all` allows), and recorded as the Host sees them; a sandbox sees the whole GPU and what its other tenants use, as under runc. A Sandbox that shares its GPUs is limited to its `gpu_memory_mb` on each ([GPU memory](#gpu-memory)) |
 | `runsc` ignores the setuid bit of a program, `sudo` among them, unless it runs with `--allow-suid` | Both registrations pass `--allow-suid`, so the agent elevates through `sudo` as under runc |
 | `perf_event_open`, `bpf` and `io_uring_setup` fail whatever is granted (`ENODEV`, `EPERM` or `EINVAL`, `ENOSYS`) | Its profile gives none of them |
 | netstack has no nf_tables (test-only in this release), so a container engine installed from a distribution, which sets its rules through nf_tables, fails to start | Its profile offers no `nested_containers`: a feature's guarantee holds for any Task, and this one would hold only for a Task that switched its engine to iptables-legacy |

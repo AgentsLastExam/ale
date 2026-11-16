@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import dataclasses
 import hashlib
+import logging
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -20,6 +23,7 @@ from ale.core.errors import (
     ConfigError,
     GuestUnreachableError,
     ProviderCapabilityError,
+    ProviderCapacityError,
     ProviderStartError,
     TaskDefinitionError,
 )
@@ -33,6 +37,7 @@ from ale.core.taskspec import (
     OperatingSystem,
     Resources,
 )
+from ale.core.trace import ExecutionLog
 from ale.fleet import images as images_module
 from ale.fleet.control import ControlPlane
 from ale.fleet.node import NodeAgent, NodeSettings, probe
@@ -40,6 +45,7 @@ from ale.fleet.server import control_app
 from ale.fleet.store import Store
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.fleet.provider import FleetClient, FleetProvider, FleetSandbox, _Unreachable
+from ale.run.recording import execution_logging
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import ImagePreparationResult, prepare_task_image_result
 from ale.run.tasksets.manifest import load_task_folder
@@ -180,7 +186,56 @@ def request(image: PreparedTaskImage, episode: str = "episode-1", **overrides: o
     return SandboxRequest(**(base | overrides))  # type: ignore[arg-type]
 
 
+class _Trace:
+    """An episode's execution trace, as the episode's logging writes it."""
+
+    def __init__(self) -> None:
+        self.events: list[ExecutionLog] = []
+
+    def append(self, event: object, *, durable: bool = False) -> int:
+        assert isinstance(event, ExecutionLog)
+        self.events.append(event)
+        return len(self.events)
+
+
 class TestProvider:
+    async def test_what_the_nodes_leaf_logs_lands_in_the_runs_trace(
+        self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        """A leaf on a Node logs to the execution trace as a Run's own leaf does, also after
+        a command ended, as the GPU watchdog logs a kill: the Run records each such notice in
+        the phase of the command it was logged for."""
+        await fleet.add_node("node-a")
+        await provider.preflight()
+        sandbox = await provider.create(request(image))
+        inner = fleet.providers["node-a"].sandboxes[0]
+        execution = logging.getLogger("ale.execution")
+        kept: list[contextvars.Context] = []
+        plain = inner.exec
+
+        async def logging_exec(argv, **kwargs):  # type: ignore[no-untyped-def]
+            execution.warning("during %s", argv[1], extra={"ale_data": {"gpu": "GPU-0"}})
+            kept.append(contextvars.copy_context())
+            return await plain(argv, **kwargs)
+
+        inner.exec = logging_exec  # type: ignore[method-assign]
+        trace = _Trace()
+        with execution_logging(trace, episode_id="e1", phase="agent", component="test"):
+            await sandbox.exec(["echo", "solve"])
+        kept[0].run(execution.warning, "after solve")
+        with execution_logging(trace, episode_id="e1", phase="verify", component="test"):
+            await sandbox.exec(["echo", "verify"])
+        kept[1].run(execution.warning, "after verify")
+        await sandbox.destroy()
+        assert [
+            (event.phase, event.level, event.message, event.data) for event in trace.events
+        ] == [
+            ("agent", "warning", "during solve", {"gpu": "GPU-0"}),
+            ("agent", "warning", "after solve", {}),
+            ("verify", "warning", "during verify", {"gpu": "GPU-0"}),
+            ("verify", "warning", "after verify", {}),
+        ]
+
     async def test_a_sandbox_runs_on_a_node_and_behaves_as_a_local_one(
         self,
         fleet: Fleet,
@@ -311,6 +366,29 @@ class TestProvider:
         assert {s.allocation.node for s in sandboxes} == {"node-b/memory"}
         for sandbox in sandboxes:
             await sandbox.destroy()
+
+    async def test_a_node_whose_leaf_has_no_room_now_is_asked_again_later(
+        self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        """A leaf's capacity refusal, such as no headroom on a shared GPU, leaves the Sandbox
+        queued for that Node rather than failing it there for good."""
+        await fleet.add_node("node-a")
+        leaf = fleet.providers["node-a"]
+        create = leaf.create
+        refusals = [ProviderCapacityError("no headroom on GPU 2")]
+
+        async def full_once(wanted: SandboxRequest) -> Sandbox:
+            if refusals:
+                raise refusals.pop()
+            return await create(wanted)
+
+        leaf.create = full_once  # type: ignore[method-assign]
+        fleet.control.timing = dataclasses.replace(fleet.control.timing, full_retry_sec=0.0)
+        sandbox = await provider.create(request(image))
+        assert sandbox.allocation.node == "node-a/memory" and not refusals
+        (record,) = fleet.control.sandboxes.values()
+        assert record.refused == () and "node-a" in record.full
+        await sandbox.destroy()
 
     async def test_a_node_this_run_cannot_reach_takes_none_of_its_sandboxes(
         self,

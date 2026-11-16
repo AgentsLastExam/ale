@@ -84,6 +84,7 @@ memory_mb = 4096                            # default 4096
 storage_mb = 8192                           # writable storage; default the Provider's
 gpus = 0                                    # GPU count, not indices; default 0
 # gpu_types = ["RTX-PRO-6000", "L40S"]      # models any of which will do; default any
+# gpu_memory_mb = 8192                      # ALE; MiB needed on each GPU; default whole GPUs
 container_features = []                     # ALE; such as ["perf", "mount"]; default none
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # see Variables
 skills_dir = "/skills"                      # absolute; the Task's Skills in the image
@@ -117,6 +118,7 @@ memory_mb = 4096                            # default [environment].memory_mb
 storage_mb = 8192                           # default the Provider's
 gpus = 0                                    # default 0
 # gpu_types = ["H100"]                      # default any
+# gpu_memory_mb = 4096                      # ALE; default whole GPUs
 container_features = []                     # ALE; default none
 env = {}                                    # replaces [environment].env
 
@@ -234,6 +236,19 @@ runs: a Task that names models would fail on others, and that failure would be s
 the agent's. The RunLock records the requested names beside the models observed in the
 Sandbox. How each Provider chooses is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-models).
+
+`gpu_memory_mb` is the device memory, in MiB, that the Sandbox needs on each of its GPUs,
+and requires `gpus`. It counts everything its processes allocate there, each process's CUDA
+context included, whose size
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-memory) gives.
+Without it the Sandbox takes its GPUs whole. With it, a Provider that shares GPUs may give
+each to several such Sandboxes, holding each to what it named, so a Task that uses a few GiB
+does not take a whole 80 GB GPU; a Provider that does not gives whole GPUs, of a model with
+at least that much memory where the leaf knows the model's memory. A Sandbox that goes past
+it fails as on a full GPU, or loses the process that went past it, as on a memory limit
+([Sandbox image](sandbox-image.md#gpu-memory)). Frameworks that size their memory pool from
+what the GPU reports must be configured to stay within it, since a Sandbox still sees the
+whole GPU.
 
 ### Container features
 

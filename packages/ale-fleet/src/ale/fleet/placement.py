@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ale.core.capability import CapabilityProfile, accepts_model, closest, unmet
+from ale.core.capability import CapabilityProfile, GpuHold, accepts_model, closest, unmet
 from ale.core.fleet import NodeDeclaration, SandboxDemand
 from ale.core.taskspec import ImageKind, OperatingSystem
 
@@ -49,6 +49,8 @@ class Holds(BaseModel):
     memory_mb: int = Field(ge=0)
     macos_vm_slots: int = Field(default=0, ge=0)
     gpus: dict[str, int] = Field(default_factory=dict)
+    """The whole GPUs it holds, by model; none for one that shares its GPUs, which its Node's
+    leaf admits by the memory free on them."""
     image: str = ""
     """The key of the image it boots, which its Node holds or is about to."""
 
@@ -159,8 +161,16 @@ def _slots(profile: CapabilityProfile) -> int:
     return int(profile.kind is ImageKind.VM and profile.os is OperatingSystem.MACOS)
 
 
+def _whole(demand: SandboxDemand, profile: CapabilityProfile) -> bool:
+    """Whether a Sandbox of ``demand`` holds its GPUs whole on a leaf of ``profile``. One that
+    shares them takes none whole: the Node's leaf admits it by the memory free on them, and
+    its refusal there is the Node refusing the grant for now."""
+    return demand.resources.gpu_memory_mb is None or profile.gpu_hold is GpuHold.WHOLE
+
+
 def _gpus(available: dict[str, int], demand: SandboxDemand) -> dict[str, int] | None:
-    """Which of a Node's free GPUs the demand would take, or None when too few fit it."""
+    """Which of a Node's GPUs that no Sandbox holds whole the demand would take, or None when
+    too few fit it."""
     wanted = demand.resources.gpus
     taken: dict[str, int] = {}
     for model, free in available.items():
@@ -272,11 +282,12 @@ def choose(
             copy = weights.copy_sec_per_gb * (image_bytes or {}).get(image, 0) / 1e9
         score = ready + copy
         _, _, _, free_gpus = free
+        whole = demand.resources.gpus and _whole(demand, profile)
         holds = Holds(
             cpus=demand.resources.cpus,
             memory_mb=demand.resources.memory_mb,
             macos_vm_slots=_slots(profile),
-            gpus=(_gpus(free_gpus, demand) or {}) if demand.resources.gpus else {},
+            gpus=(_gpus(free_gpus, demand) or {}) if whole else {},
             image=image,
         )
         key = (score, _rendezvous(image, node.name))
@@ -356,7 +367,10 @@ def _capacity(node: NodeView, demand: SandboxDemand, profile: CapabilityProfile)
             for pool in total.gpus
             if accepts_model(demand.resources.gpu_types, pool.model)
         )
-        limits.append(accepted // demand.resources.gpus)
+        # Sandboxes that share their GPUs are limited by the memory free on them, which only
+        # the Node's leaf sees, not by their count.
+        if _whole(demand, profile) or accepted < demand.resources.gpus:
+            limits.append(accepted // demand.resources.gpus)
     return max(min(limits), 0)
 
 

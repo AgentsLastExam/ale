@@ -55,7 +55,7 @@ Providers; a Node lends no scheduler, since it is itself where Sandboxes start.
 | Part | Holds |
 |---|---|
 | `resources` | CPUs, memory, disk, GPUs by model, and `macos_vm_slots` |
-| `profiles` | One **capability profile** per lent leaf and operating system, in the order the Node prefers its leaves: provider id, kind, operating system, architecture, desktop, network modes, snapshots, GPUs and their models, CPU and memory limits (never more than the Node lends in all), and container features |
+| `profiles` | One **capability profile** per lent leaf and operating system, in the order the Node prefers its leaves: provider id, kind, operating system, architecture, desktop, network modes, snapshots, GPUs, their models and memory and how it shares them, CPU and memory limits (never more than the Node lends in all), and container features |
 | `framework` | The identity of the framework its engine installs into every Sandbox |
 | `boot_id` | The machine's boot: it changes when the machine restarts, which ends every Sandbox on it, and a restarted node agent keeps it |
 
@@ -92,7 +92,10 @@ key.
    lowest; ties go to a fixed per-image order of Nodes (rendezvous hashing), which keeps each
    image on the same few Nodes.
    - A Node with the resources free now (CPUs, memory, macOS VM slots and GPUs of an
-     accepted model) scores its measured create time for that leaf.
+     accepted model) scores its measured create time for that leaf. A Sandbox that shares its
+     GPUs by `gpu_memory_mb` on a leaf that shares them takes none whole: it needs GPUs no
+     Sandbox holds whole, and the leaf admits it by the memory free on them, which only the
+     Node sees.
    - A free Node that lacks the image first prepares it. Its score adds the time preparing it
      took the Nodes that did (five minutes while none has), and 10 s per GB of the copy it
      adds to its disk: one more copy is worth that much waiting, enough to settle close calls
@@ -139,6 +142,10 @@ macOS VM that is shutting down still counts against its Mac.
   terms is refused.
 - **Refusal.** A Node that refuses a grant before creating anything (its own admission
   check disagrees with the ledger) sends the Sandbox back to the queue, never to that Node.
+  A Node whose leaf has no room for it now, which the ledger cannot see, such as the memory
+  free on a GPU Sandboxes share, answers differently: the Sandbox goes back to the queue,
+  to another Node or, after a wait that doubles at each such answer, to that one again,
+  since its room may free.
   A Run that cannot reach the Node it was placed on refuses it the same way; that Run's
   Sandboxes then go there no more, and the control plane records it as an event.
 - **Leases belong to the Node.** Every Sandbox but a retained one has a lease its Run renews
@@ -187,7 +194,10 @@ Run's own machine; the agent only carries the calls.
 - **The Sandbox API** mirrors the Sandbox contract. A command streams its output while it
   runs and is cancelled in the Sandbox when its caller goes away. A Run's directory arrives
   as a tar stream that keeps its links, and the Node's Sandbox uploads it, so upload
-  semantics stay the guest service's.
+  semantics stay the guest service's. What the Node's leaf logs to the execution trace for a
+  command, during it or after it ended, comes back to the Run with a later command's reply,
+  or before the Run lets go of the Sandbox, and the Run records it in the phase that ran the
+  command, as it records a leaf of its own.
 - **Leases.** Each Run renews its Sandboxes' leases with the agent. A Sandbox whose lease ran
   out is destroyed, and a stopping agent destroys every Sandbox it holds apart from retained
   ones: an operator stops an agent to take its Node out of service, so it leaves nothing

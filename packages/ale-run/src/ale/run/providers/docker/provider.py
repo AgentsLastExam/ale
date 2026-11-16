@@ -16,13 +16,18 @@ its own that is not internal, and tc filters in its network namespace, outside t
 seal it instead (``kata.py``, ``gvisor.py``). Each runtime's entry in :data:`RUNTIMES`
 holds all that differs between them: its grants, GPUs, size, ``docker run`` flags and
 confinement.
+
+A Sandbox takes its GPUs whole, or shares each with others by the device memory its Task
+names, admitted by what is free and watched while it lives (``gpu_sharing.py``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
+import logging
 import re
 import shutil
 import uuid
@@ -33,7 +38,8 @@ from pathlib import Path, PurePosixPath
 from typing import Literal, Self
 from urllib.parse import urlsplit
 
-from ale.core.capability import CapabilityProfile, SandboxNeeds, accepts_model
+from ale.core.capability import CapabilityProfile, GpuHold, GpuModel, SandboxNeeds, accepts_model
+from ale.core.config import GPU_MEMORY_MARGIN_MB
 from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -60,21 +66,22 @@ from ale.core.sandbox import (
 from ale.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem, Resources
 from ale.run import HELPER_RUNTIME, ale_image, guestd
 from ale.run.framework import with_framework
-from ale.run.gpu import GpuLease, parse_nvidia_smi
+from ale.run.gpu import parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
 from ale.run.iptables import GATEWAY_CHAIN
 from ale.run.process import run
 from ale.run.providers import machine_arch, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.docker import gvisor, kata, tc
+from ale.run.providers.docker import gpu_sharing, gvisor, kata, tc
 from ale.run.providers.privileges import set_elevation, verify_identities
-from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, StdioTransport
 
 __all__ = [
     "DockerProvider",
     "DockerSandbox",
 ]
+
+_log = logging.getLogger(__name__)
 
 GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
 #: Any image with iptables, and tc for a Kata or gVisor sandbox, can apply a sandbox's host
@@ -91,6 +98,8 @@ NETWORK_LABEL = "ale.network"
 #: filters match: read before the sandbox starts, and kept for a reattaching run.
 BRIDGE_MAC_LABEL = "ale.bridge-mac"
 GPU_LABEL = "ale.gpus"
+#: What a Sandbox that shares its GPUs reserved on each, in MiB.
+GPU_MEMORY_LABEL = "ale.gpu_memory_mb"
 PREPARED_LABEL = "ale.prepared"
 HANDLE_PREFIX = "docker:"
 #: A snapshot is a local image in this repository, tagged with its Sandbox's ID.
@@ -117,21 +126,42 @@ print(log.raw[: max(size, 0)].decode("utf-8", "replace"))
 """
 
 _NVIDIA_QUERY = "uuid,name,pci.bus_id,driver_version"
-_HOST_NVIDIA_QUERY = f"index,{_NVIDIA_QUERY}"
+_HOST_NVIDIA_QUERY = f"index,{_NVIDIA_QUERY},memory.total,memory.reserved,memory.free"
 
 
-async def _managed_gpu_ids() -> set[str]:
-    code, output, _ = await _docker(
+async def _gpu_holders() -> list[gpu_sharing.Holder]:
+    """Every running ALE Sandbox that holds GPUs, by its labels, which are the record of what
+    ALE holds through this Docker daemon.
+
+    Each line is ``<id> <name> <gpus label>/<gpu memory label>``. Every Sandbox is started with
+    both labels, empty when it holds no GPU or holds them whole, so an image's labels never
+    stand in for them; ALE's helpers have neither, and hold nothing.
+    """
+    code, output, stderr = await _docker(
         "ps",
+        "--no-trunc",
         "--filter",
         f"label={MANAGED_LABEL}=true",
         "--format",
-        f'{{{{.Label "{GPU_LABEL}"}}}}',
+        f'{{{{.ID}}}} {{{{.Names}}}} {{{{.Label "{GPU_LABEL}"}}}}/'
+        f'{{{{.Label "{GPU_MEMORY_LABEL}"}}}}',
         timeout=30,
     )
     if code != 0:
-        return set()
-    return {device for line in output.splitlines() for device in line.split(",") if device}
+        raise ProviderStartError(f"could not list ALE's Sandboxes: {stderr.strip()}")
+    found: list[gpu_sharing.Holder] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        container, name, labels = line.split()
+        gpus, _, memory = labels.partition("/")
+        if gpus:
+            found.append(
+                gpu_sharing.Holder(
+                    container, name, tuple(gpus.split(",")), int(memory) if memory else None
+                )
+            )
+    return found
 
 
 #: How long ``docker run`` may take to start a container, a sandbox or a helper: on a Host
@@ -150,6 +180,12 @@ def _parse_nvidia_smi(output: str) -> tuple[GpuDevice, ...]:
     return parse_nvidia_smi(output)
 
 
+def _mib(value: str) -> int | None:
+    """A memory column of nvidia-smi's, which says ``[N/A]`` where it is not supported."""
+    value = value.strip()
+    return int(value) if value.isdigit() else None
+
+
 def _parse_host_nvidia_smi(output: str) -> dict[int, GpuDevice]:
     devices: dict[int, GpuDevice] = {}
     for line in output.splitlines():
@@ -158,13 +194,20 @@ def _parse_host_nvidia_smi(output: str) -> dict[int, GpuDevice]:
         try:
             raw_index, device_row = line.split(",", 1)
             index = int(raw_index.strip())
+            device_row, total, reserved, free = device_row.rsplit(",", 3)
         except ValueError as exc:
             raise ProviderCapabilityError(
-                f"could not parse nvidia-smi GPU index: {line!r}"
+                f"could not parse nvidia-smi's GPU row: {line!r}"
             ) from exc
         if index < 0 or index in devices:
             raise ProviderCapabilityError(f"invalid or duplicate nvidia-smi GPU index: {index}")
-        devices[index] = parse_nvidia_smi(device_row)[0]
+        devices[index] = parse_nvidia_smi(device_row)[0].model_copy(
+            update={
+                "memory_total_mb": _mib(total),
+                "memory_reserved_mb": _mib(reserved),
+                "memory_free_mb": _mib(free),
+            }
+        )
     if not devices:
         raise ProviderCapabilityError("nvidia-smi reported no physical GPUs")
     return devices
@@ -736,10 +779,22 @@ class Runtime:
     banner: str = ""
     """What the kernel log of each of its Sandboxes starts with, which shows a Sandbox runs
     on it, together with Docker seeing what the Sandbox writes."""
+    gpu_memory_flag: str = ""
+    """For a runtime that can hold a Sandbox to so many bytes of device memory on each of its
+    GPUs, its flag that does, which ``<runtime> flags`` lists and a Sandbox's annotation
+    ``dev.gvisor.flag.<flag>`` sets for it alone; a shared Sandbox of one without is only
+    watched."""
 
     @property
     def features(self) -> frozenset[ContainerFeature]:
         return frozenset(self.grants)
+
+    @property
+    def gpu_hold(self) -> GpuHold:
+        """How a Sandbox of it that names ``gpu_memory_mb`` holds its GPUs."""
+        if not self.gpus:
+            return GpuHold.WHOLE
+        return GpuHold.LIMIT if self.gpu_memory_flag else GpuHold.WATCHED
 
     def granted(self, features: Sequence[ContainerFeature]) -> tuple[str, tuple[str, ...]]:
         """The registered runtime and the capabilities of a Sandbox that asks for
@@ -803,6 +858,7 @@ RUNTIMES: dict[str, Runtime] = {
         build=gvisor.BUILD,
         drivers=gvisor.DRIVERS,
         banner=gvisor.BANNER,
+        gpu_memory_flag=gvisor.GPU_MEMORY_FLAG,
     ),
 }
 
@@ -822,14 +878,17 @@ _DEATH_SEC = 30.0
 
 
 class _Session(StdioTransport):
-    """guestd over ``docker exec -i``, whose stream ending unasked, once guestd has
-    answered, says whether the sandbox died."""
+    """guestd over ``docker exec -i``, with the client that speaks to it, whose stream ending
+    unasked, once guestd has answered, says whether the sandbox died."""
 
     def __init__(self, argv: Sequence[str], container: str) -> None:
         super().__init__(argv)
         self.container = container
+        self.client = GuestClient(self)
         self._answered = False
         self._closing = False
+        #: Why ALE itself stopped the Sandbox, which the end of the stream then reports.
+        self.stopped_for: str | None = None
 
     async def recv(self) -> str:
         line = await super().recv()
@@ -844,7 +903,10 @@ class _Session(StdioTransport):
 
     async def explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
         """A guestd that never answered failed to start, which its stderr, in ``error``,
-        says at once; a session that did and ended unasked may have lost its sandbox."""
+        says at once; a session that did and ended unasked may have lost its sandbox, or ALE
+        stopped it."""
+        if self.stopped_for is not None:
+            return GuestUnreachableError(f"the sandbox itself died: {self.stopped_for}")
         if self._closing or not self._answered or not (died := await _death(self.container)):
             return error
         explained = GuestUnreachableError(f"the sandbox itself died: {died} ({error})")
@@ -879,18 +941,18 @@ async def _death(container: str) -> str | None:
 
 
 def _verify_docker_gpu(
-    selected: tuple[str, ...], observed: tuple[GpuDevice, ...], host: dict[int, GpuDevice]
+    selected: tuple[GpuDevice, ...], observed: tuple[GpuDevice, ...]
 ) -> tuple[GpuDevice, ...]:
-    """The selected GPUs as the Host records them, once the sandbox shows exactly those:
-    gVisor's nvproxy reports no PCI address to nvidia-smi in the sandbox."""
+    """The selected GPUs as the Host reported them when it admitted the Sandbox, once the
+    sandbox shows exactly those: gVisor's nvproxy reports no PCI address to nvidia-smi in the
+    sandbox."""
     actual = tuple(sorted(device.id for device in observed))
-    expected = tuple(sorted(selected))
+    expected = tuple(sorted(device.id for device in selected))
     if actual != expected:
         raise ProviderCapabilityError(
             f"Docker GPU identity mismatch: selected {expected}, observed {actual}"
         )
-    recorded = {device.id: device for device in host.values()}
-    return tuple(recorded[key] for key in selected)
+    return selected
 
 
 class DockerSandbox(Sandbox):
@@ -902,15 +964,16 @@ class DockerSandbox(Sandbox):
         sandbox_id: str,
         request: SandboxRequest,
         container: str,
+        container_id: str,
         confinement: _Confinement,
-        client: GuestClient,
-        file_client: GuestClient,
+        session: _Session,
+        file_session: _Session,
         resolved_image: ResolvedImage,
         allocation: ResourceAllocation,
-        resource_lease: GpuLease | None = None,
         agent_user: str,
         agent_home: str,
         sealed: bool = False,
+        watchdog: gpu_sharing.Watchdog,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -919,14 +982,23 @@ class DockerSandbox(Sandbox):
             allocation=allocation,
             agent_user=agent_user,
             agent_home=agent_home,
-            resource_lease=resource_lease,
         )
         self.container = container
+        #: The container's full ID, by which the Host's cgroups name it.
+        self.container_id = container_id
         #: How the sandbox is kept to the Host's address while it is sealed: an internal
         #: network under runc, tc filters outside it under Kata and gVisor.
         self.confinement = confinement
-        self._client = client
-        self._file_client = file_client
+        self._client = session.client
+        self._file_client = file_session.client
+        #: The guestd sessions of both clients, whose end says why ALE stopped the Sandbox.
+        self._sessions = (session, file_session)
+        #: The watchdog of its Provider, which watches it while it shares GPUs and this
+        #: process drives it.
+        self._watchdog = watchdog
+        #: The context of the phase that last ran a command in it, in which what the watchdog
+        #: does to it is logged, so that the episode's execution trace records it.
+        self._context = contextvars.copy_context()
         self._sealed = sealed
         #: The loopback address guestd relays the agent to the egress proxy from, while sealed.
         self._relay: str | None = None
@@ -967,6 +1039,7 @@ class DockerSandbox(Sandbox):
     ) -> ExecResult:
         if identity is Identity.AGENT and self._sealed and self._relay:
             env = relay.variables(self._relay, HOST_ALIAS) | (env or {})
+        self._context = contextvars.copy_context()
         loop = asyncio.get_running_loop()
         started = loop.time()
         exit_code, stdout, stderr, timed_out = await self._client.exec(
@@ -1048,23 +1121,98 @@ class DockerSandbox(Sandbox):
             host=HOST_ALIAS,
         )
 
+    def watch(self) -> None:
+        """Have the watchdog watch what it uses of its GPUs, when it shares them."""
+        gpu = self.allocation.gpu
+        if gpu is not None and gpu.memory_mb is not None:
+            self._watchdog.watch(
+                gpu_sharing.Watched(self.container_id, gpu.memory_mb, self.overran)
+            )
+
+    def _unwatch(self) -> None:
+        self._watchdog.unwatch(self.container_id)
+
+    async def overran(self, overrun: gpu_sharing.Overrun) -> None:
+        """Act on the watchdog's finding that it uses more device memory on a GPU than it
+        reserved.
+
+        Where nothing limits the memory, its largest process on that GPU is killed, and only
+        that one, as the OOM killer kills a process past a memory limit: the episode goes on
+        and the agent sees its process killed. The kill joins the Sandbox's PID namespace
+        from a helper container, once the PID's container and start time show it is still the
+        process that used the memory, and the Sandbox stays watched. Where its runtime limits
+        the memory, the limit's accounting failed, which is ALE's failure: the whole Sandbox
+        stops, and its episode ends in an environment error that says what was found.
+        """
+        gpu = self.allocation.gpu
+        assert gpu is not None and gpu.memory_mb is not None
+        found = (
+            f"the Sandbox used {overrun.used_mb} MiB of GPU {overrun.gpu}, more than its "
+            f"gpu_memory_mb of {gpu.memory_mb} MiB"
+        )
+        if gpu.hold is GpuHold.LIMIT:
+            self._unwatch()
+            for session in self._sessions:
+                session.stopped_for = (
+                    f"ALE's GPU memory watchdog stopped it: {found}, past "
+                    f"{self.allocation.leaf}'s limit"
+                )
+            await _docker("kill", self.container, timeout=60)
+            return
+        # Logged in the phase of the command that ran when the watchdog found it: the helper
+        # returns once its container is removed, by when the episode may have gone on.
+        context = self._context
+        largest = max(overrun.processes, key=lambda process: process.used_mb)
+        now = gpu_sharing.host_process(largest.pid, largest.gpu, largest.used_mb)
+        if now is None or (now.container, now.started) != (largest.container, largest.started):
+            return  # it ended meanwhile; the next look sees what uses the GPU then
+        code, _, stderr = await _docker(
+            "run", "--rm", *HELPER_RUNTIME, "--pid", f"container:{self.container_id}",
+            "--network", "none", "--entrypoint", "sh", NETFILTER_IMAGE,
+            "-c", gpu_sharing.KILL, "sh", str(largest.inner_pid), largest.started,
+            timeout=_START_SEC,
+        )  # fmt: skip
+        if code != 0:
+            if self.state is not SandboxState.DESTROYED:
+                _log.warning(
+                    "could not kill process %s of %s: %s", largest.pid, self.container, stderr
+                )
+            return
+        message = (
+            f"ALE's GPU memory watchdog killed process {largest.inner_pid} ({largest.name}), "
+            f"which held {largest.used_mb} MiB: {found}, which {self.allocation.leaf} does not "
+            "enforce"
+        )
+        data = {
+            "process": largest.inner_pid,
+            "name": largest.name,
+            "process_mb": largest.used_mb,
+            "gpu": overrun.gpu,
+            "sandbox_mb": overrun.used_mb,
+            "gpu_memory_mb": gpu.memory_mb,
+        }
+        _log.info("%s: %s", self.container, message)
+        context.run(logging.getLogger("ale.execution").warning, message, extra={"ale_data": data})
+
     async def destroy(self) -> None:
         """Idempotent: teardown also runs on failure paths, sometimes twice."""
         if self.state is SandboxState.DESTROYED:
             return
         self.state = SandboxState.DESTROYED
-        try:
-            await asyncio.gather(
-                self._client.close(), self._file_client.close(), return_exceptions=True
-            )
-            await _docker("rm", "-f", "-v", self.container, timeout=60)
-            await self.confinement.remove()
-        finally:
-            self.release_resources()
+        self._unwatch()
+        await asyncio.gather(
+            self._client.close(), self._file_client.close(), return_exceptions=True
+        )
+        code, _, stderr = await _docker("rm", "-f", "-v", self.container, timeout=_REMOVE_SEC)
+        if code != 0:
+            # Its container keeps its disk until removed: say so where the operator looks.
+            _log.warning("could not remove %s: %s", self.container, stderr.strip())
+        await self.confinement.remove()
 
     async def retain(
         self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
     ) -> RetainedSandbox:
+        self._unwatch()
         await asyncio.gather(
             self._client.close(), self._file_client.close(), return_exceptions=True
         )
@@ -1087,11 +1235,12 @@ class DockerSandbox(Sandbox):
         """Stop the container and commit its filesystem as a labelled local image.
 
         A sandbox mounts no volumes, so the commit holds all of its files. The image keeps
-        the container's labels and command; a snapshot holds no GPU.
+        the container's labels and command; a snapshot holds no GPU and reserves no memory.
         """
         # The relay ends with this container; the image keeps the account's own settings.
         await relay.stop(self._client, self.request)
         self._relay = None
+        self._unwatch()
         await asyncio.gather(
             self._client.close(), self._file_client.close(), return_exceptions=True
         )
@@ -1102,6 +1251,7 @@ class DockerSandbox(Sandbox):
             "commit",
             "--change", f"LABEL {RETENTION_LABEL}=snapshot",
             "--change", f'LABEL {GPU_LABEL}=""',
+            "--change", f'LABEL {GPU_MEMORY_LABEL}=""',
             "--change", f"LABEL {PREPARED_LABEL}={self.request.prepared_image.prepared_identity}",
             self.container,
             f"{SNAPSHOT_REPOSITORY}:{self.sandbox_id}",
@@ -1129,26 +1279,34 @@ class DockerProvider(Provider):
         self,
         *,
         gpus: tuple[int, ...] = (),
-        gpu_lock_dir: Path | None = None,
+        gpu_memory_margin_mb: int = GPU_MEMORY_MARGIN_MB,
+        gpu_lock_dir: Path = Path("/tmp"),
         runtime: str = "runc",
     ) -> None:
         self.gpus = gpus
-        self.gpu_lock_dir = gpu_lock_dir or cache_root() / "gpu-locks" / self.name
+        #: What a GPU must have free beyond a shared Sandbox's need to admit it.
+        self.gpu_memory_margin_mb = gpu_memory_margin_mb
+        #: Where the lock file of each Docker daemon's GPU admission is, which every user of
+        #: the Host can lock.
+        self.gpu_lock_dir = gpu_lock_dir
         #: A key of :data:`RUNTIMES`: ``kata`` starts each sandbox in a microVM of its own.
         self.runtime = runtime
         # An image's conformance cannot change while it is pinned to a digest, and the
         # check costs a container start — so a sweep of ten thousand episodes pays for it
         # once rather than ten thousand times.
         self._checked: dict[str, list[str]] = {}
-        self._gpu_models: tuple[str, ...] | None = None
+        self._gpu_models: tuple[GpuModel, ...] | None = None
+        self._daemon: str | None = None
         self._bridge = _DefaultBridge()
+        self._watchdog = gpu_sharing.Watchdog()
 
     @property
     def id(self) -> str:
         return f"{self.name}:{self.runtime}"
 
     async def profiles(self) -> tuple[CapabilityProfile, ...]:
-        models = await self._models() if RUNTIMES[self.runtime].gpus else ()
+        runtime = RUNTIMES[self.runtime]
+        models = await self._models() if runtime.gpus else ()
         return (
             CapabilityProfile(
                 provider=self.id,
@@ -1160,13 +1318,17 @@ class DockerProvider(Provider):
                 snapshot=True,
                 gpus=bool(models),
                 gpu_models=models,
-                container_features=RUNTIMES[self.runtime].features,
+                gpu_hold=runtime.gpu_hold if models else GpuHold.WHOLE,
+                container_features=runtime.features,
             ),
         )
 
-    async def _models(self) -> tuple[str, ...]:
+    async def _models(self) -> tuple[GpuModel, ...]:
         """The models of the Host GPUs it may lease, read once: a Host's GPUs are a fact of
-        it, which a Run selects by. None where nvidia-smi finds no GPU."""
+        it, which a Run selects by. None where nvidia-smi finds no GPU. Each model's memory is
+        the most a shared Sandbox is admitted with on an empty GPU of it: its total less what
+        the driver reserves and the margin, so that selection accepts no need admission never
+        could."""
         if self._gpu_models is None:
             try:
                 devices = await self._host_gpus()
@@ -1174,17 +1336,30 @@ class DockerProvider(Provider):
                 devices = {}
             indices = self.gpus or tuple(devices)
             self._gpu_models = tuple(
-                dict.fromkeys(devices[index].model for index in indices if index in devices)
+                dict.fromkeys(
+                    GpuModel(name=devices[index].model, memory_mb=self._most(devices[index]))
+                    for index in indices
+                    if index in devices
+                )
             )
         return self._gpu_models
+
+    def _most(self, device: GpuDevice) -> int | None:
+        """The most a shared Sandbox is admitted with on ``device`` when nothing else uses it;
+        None where nvidia-smi does not report its memory."""
+        total, reserved = device.memory_total_mb, device.memory_reserved_mb
+        if total is None or reserved is None:
+            return None
+        return max(total - reserved - self.gpu_memory_margin_mb, 1)
 
     async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> SandboxCheck | None:
         """Find each registered name the Sandboxes of ``needs`` run under, every one its
         profile declares when none are given, registered with exactly the arguments the
         runtime takes, and the leaf's devices. A runtime ALE builds must be this engine's
         build, and one that proxies the NVIDIA driver must support the Host's when GPUs may
-        be attached: a Sandbox needs them, or, with no needs, its profile offers them. What
-        a Sandbox of it must show is returned as a check."""
+        be attached: a Sandbox needs them, or, with no needs, its profile offers them. One
+        that limits a shared Sandbox's GPU memory must list the flag that does when a Sandbox
+        may share GPUs. What a Sandbox of it must show is returned as a check."""
         if shutil.which("docker") is None:
             raise ProviderStartError("docker is not installed — see `just doctor`")
         code, raw, stderr = await _docker("info", "--format", "{{json .Runtimes}}", timeout=30)
@@ -1212,12 +1387,15 @@ class DockerProvider(Provider):
                 )
         if missing := [device for device in runtime.devices if not Path(device).exists()]:
             raise ProviderStartError(f"{self.id} needs {', '.join(missing)}, which is missing")
-        if runtime.build or runtime.drivers:
-            gpus = (
-                any(need.resources.gpus for need in needs) if needs else bool(await self._models())
+        if runtime.build or runtime.drivers or runtime.gpu_memory_flag:
+            offered = bool(await self._models()) if not needs else False
+            gpus = any(need.resources.gpus for need in needs) or offered
+            shares = (
+                any(need.resources.gpus and need.resources.gpu_memory_mb for need in needs)
+                or offered
             )
             for path in sorted({str(known[name]["path"]) for name in names}):
-                await self._check_build(path, runtime, gpus=gpus)
+                await self._check_build(path, runtime, gpus=gpus, shares=shares)
         return self._shows_runtime if runtime.banner else None
 
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
@@ -1232,9 +1410,10 @@ class DockerProvider(Provider):
             )
         return prepared
 
-    async def _check_build(self, path: str, runtime: Runtime, *, gpus: bool) -> None:
-        """Check that the runtime Docker runs from ``path`` is ALE's build of it, and, when
-        Sandboxes need GPUs, that it supports the Host's NVIDIA driver."""
+    async def _check_build(self, path: str, runtime: Runtime, *, gpus: bool, shares: bool) -> None:
+        """Check that the runtime Docker runs from ``path`` is ALE's build of it, that it has
+        the flag that limits GPU memory when Sandboxes share GPUs, and, when they need GPUs,
+        that it supports the Host's NVIDIA driver."""
         if runtime.build:
             try:
                 code, version, stderr = await run(path, "--version", timeout=30)
@@ -1247,6 +1426,14 @@ class DockerProvider(Provider):
                 raise ProviderStartError(
                     f"{self.id} needs ALE's build {runtime.build} of {path}, not "
                     f"{reported[0] if reported else 'what it reports'}; see the Providers README"
+                )
+        if shares and runtime.gpu_memory_flag:
+            # Go's flag package writes the list to stderr.
+            code, out, err = await run(path, "flags", timeout=30)
+            if code != 0 or f"-{runtime.gpu_memory_flag}" not in (out + err).split():
+                raise ProviderStartError(
+                    f"{self.id} cannot hold a Sandbox to its gpu_memory_mb: `{path} flags` "
+                    f"lists no -{runtime.gpu_memory_flag}; see the Providers README"
                 )
         if not gpus or not runtime.drivers:
             return
@@ -1287,13 +1474,12 @@ class DockerProvider(Provider):
     async def create(self, request: SandboxRequest) -> Sandbox:
         await self.accepts(request)
         runtime = RUNTIMES[self.runtime]
-        lease: GpuLease | None = None
-        selected: tuple[str, ...] = ()
+        resources = request.resources
         candidates: tuple[str, ...] = ()
-        host_gpus: dict[int, GpuDevice] = {}
-        if request.resources.gpus:
-            host_gpus = await self._host_gpus()
-            candidates = _eligible_gpus(host_gpus, self.gpus, request.resources)
+        if resources.gpus:
+            candidates = _eligible_gpus(await self._host_gpus(), self.gpus, resources)
+        #: What it reserves on each GPU, which it shares; None when it takes them whole.
+        shared = resources.gpu_memory_mb if resources.gpus else None
         if request.snapshot is not None:
             resolved_image = await self._snapshot_image(request.snapshot, request)
         else:
@@ -1310,7 +1496,7 @@ class DockerProvider(Provider):
         container = f"ale-{sandbox_id}"
         isolated = request.network.mode is not NetworkMode.OPEN
         # Named even for runc: a Host whose default runtime is another would run it there.
-        registered, capabilities = runtime.granted(request.resources.container_features)
+        registered, capabilities = runtime.granted(resources.container_features)
         argv = [
             "run", "-d", "--name", container,
             "--label", f"{LABEL}={request.episode_id}",
@@ -1318,8 +1504,8 @@ class DockerProvider(Provider):
             "--label", f"{ROLE_LABEL}={request.role.value}",
             "--label", f"{RETENTION_LABEL}={request.retention}",
             "--label", f"{NETWORK_LABEL}={request.network.mode.value}",
-            "--cpus", str(request.resources.cpus),
-            "--memory", f"{runtime.memory_mb(request.resources.memory_mb)}m",
+            "--cpus", str(resources.cpus),
+            "--memory", f"{runtime.memory_mb(resources.memory_mb)}m",
             "--runtime", registered,
             *runtime.flags,
         ]  # fmt: skip
@@ -1328,25 +1514,12 @@ class DockerProvider(Provider):
         for key, value in request.env.items():
             argv += ["-e", f"{key}={value}"]
         argv += ["-e", f"{CONTAINER_VARIABLE}={request.desktop_resolution}"]
-        if request.resources.storage_mb is not None:
-            argv += _storage_run_args(request.resources.storage_mb)
-        if request.resources.gpus:
-            used = await _managed_gpu_ids()
-            available = tuple(key for key in candidates if key not in used)
-            lease = GpuLease.acquire(available, request.resources.gpus, self.gpu_lock_dir)
-            selected = lease.device_keys
-            used_after_lock = await _managed_gpu_ids()
-            if set(selected) & used_after_lock:
-                lease.release()
-                lease = None
-                available = tuple(key for key in candidates if key not in used_after_lock)
-                lease = GpuLease.acquire(available, request.resources.gpus, self.gpu_lock_dir)
-                selected = lease.device_keys
-            argv += _gpu_run_args(selected)
-            argv += ["--label", f"{GPU_LABEL}={','.join(selected)}"]
+        if resources.storage_mb is not None:
+            argv += _storage_run_args(resources.storage_mb)
 
         confinement: _Confinement | None = None
-        clients: list[GuestClient] = []
+        admitted: tuple[GpuDevice, ...] = ()
+        sessions: list[_Session] = []
         try:
             # Its network, if it has one of its own, is created here, so that every failure
             # from now on removes it.
@@ -1361,20 +1534,40 @@ class DockerProvider(Provider):
                     request = request.model_copy(
                         update={"proxy_url": _reachable(request.proxy_url, host=host_ip)}
                     )
-            # The image's own command, always. A container lives exactly as long as its
-            # command, and substituting one replaces whatever the image starts for itself —
-            # for a desktop image, the entire graphical session. Images that have nothing to
-            # do declare a command that waits; that is part of the image contract, so there
-            # is nothing left here to decide.
-            argv += [resolved_image.observed_ref]
-            code, _, stderr = await _docker(*argv, timeout=_START_SEC)
+            # One lock for every GPU this daemon's Sandboxes may take, held from reading what
+            # is free until Docker has started the Sandbox, whose labels then record what it
+            # took.
+            async with (
+                gpu_sharing.locked(await self._lock_path())
+                if resources.gpus
+                else contextlib.nullcontext()
+            ):
+                if resources.gpus:
+                    admitted = await self._admit(resources, candidates)
+                    argv += _gpu_run_args(tuple(device.id for device in admitted))
+                    if shared is not None and runtime.gpu_memory_flag:
+                        # An allocation past it fails as CUDA out of memory; the Sandbox goes on.
+                        limit = f"dev.gvisor.flag.{runtime.gpu_memory_flag}={shared << 20}"
+                        argv += ["--annotation", limit]
+                argv += [
+                    "--label", f"{GPU_LABEL}={','.join(device.id for device in admitted)}",
+                    "--label", f"{GPU_MEMORY_LABEL}={shared or ''}",
+                ]  # fmt: skip
+                # The image's own command, always. A container lives exactly as long as its
+                # command, and substituting one replaces whatever the image starts for
+                # itself — for a desktop image, the entire graphical session. Images that
+                # have nothing to do declare a command that waits; that is part of the image
+                # contract, so there is nothing left here to decide.
+                code, started_id, stderr = await _docker(
+                    *argv, resolved_image.observed_ref, timeout=_START_SEC
+                )
             if code != 0:
-                if request.resources.storage_mb is not None:
+                if resources.storage_mb is not None:
                     raise ProviderCapabilityError(
                         "Docker could not enforce the requested writable-layer quota "
-                        f"({request.resources.storage_mb} MB): {stderr.strip()}"
+                        f"({resources.storage_mb} MB): {stderr.strip()}"
                     )
-                if request.resources.gpus:
+                if resources.gpus:
                     raise ProviderCapabilityError(
                         "Docker could not inject the selected NVIDIA GPUs through its "
                         f"runtime/CDI path: {stderr.strip()}"
@@ -1396,7 +1589,7 @@ class DockerProvider(Provider):
                 )
 
             runtime_identity = None
-            if lease:
+            if admitted:
                 code, version, stderr = await _docker(
                     "info", "--format", "{{.ServerVersion}}", timeout=30
                 )
@@ -1408,8 +1601,9 @@ class DockerProvider(Provider):
 
             await confinement.wire(container, request)
             agent_user = request.user
-            client = await self._connect(container, agent_user)
-            clients.append(client)
+            session = await self._connect(container, agent_user)
+            sessions.append(session)
+            client = session.client
             if isolated:
                 await confinement.seal_guest(client)
             agent_home, has_desktop = await self._guest_contract(client)
@@ -1418,51 +1612,51 @@ class DockerProvider(Provider):
             )
             await verify_identities(client, agent_user, sudo=request.sudo)
             observed_gpu: tuple[GpuDevice, ...] = ()
-            if selected:
-                inside = await self._container_gpus(client)
-                observed_gpu = _verify_docker_gpu(selected, inside, host_gpus)
+            if admitted:
+                observed_gpu = _verify_docker_gpu(admitted, await self._container_gpus(client))
             desktop: DesktopResolution | None = None
             if has_desktop:
                 await self._await_desktop(client)
                 desktop = await require_resolution(
                     client, request.desktop_resolution, container=True
                 )
-            file_client = await self._connect(container, agent_user)
-            clients.append(file_client)
+            sessions.append(await self._connect(container, agent_user))
         except BaseException:
-            await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
+            await asyncio.gather(
+                *(session.client.close() for session in sessions), return_exceptions=True
+            )
             with contextlib.suppress(BaseException):
                 await asyncio.shield(_docker("rm", "-f", "-v", container, timeout=_REMOVE_SEC))
             if confinement is not None:
                 with contextlib.suppress(BaseException):
                     await asyncio.shield(confinement.remove())
-            if lease:
-                lease.release()
             raise
 
-        if lease:
-            lease.attach()
-        return DockerSandbox(
+        selected = tuple(device.id for device in admitted)
+        sandbox = DockerSandbox(
             sandbox_id=sandbox_id,
             request=request,
             container=container,
+            container_id=started_id.strip(),
             confinement=confinement,
-            client=client,
-            file_client=file_client,
+            session=sessions[0],
+            file_session=sessions[1],
             resolved_image=resolved_image,
             allocation=ResourceAllocation(
-                cpus=request.resources.cpus,
-                memory_mb=request.resources.memory_mb,
-                storage_mb=request.resources.storage_mb,
+                cpus=resources.cpus,
+                memory_mb=resources.memory_mb,
+                storage_mb=resources.storage_mb,
                 gpu=(
                     GpuAllocation(
-                        requested_count=request.resources.gpus,
+                        requested_count=resources.gpus,
                         provider_addresses=selected,
-                        lease_keys=lease.device_keys,
+                        lease_keys=selected,
                         observed_devices=observed_gpu,
                         runtime_identity=runtime_identity,
+                        hold=GpuHold.WHOLE if shared is None else runtime.gpu_hold,
+                        memory_mb=shared,
                     )
-                    if lease
+                    if admitted
                     else None
                 ),
                 sudo=request.sudo,
@@ -1472,9 +1666,47 @@ class DockerProvider(Provider):
                 runtime=ran_under,
                 desktop_resolution=desktop,
             ),
-            resource_lease=lease,
             agent_user=agent_user,
             agent_home=agent_home,
+            watchdog=self._watchdog,
+        )
+        sandbox.watch()
+        return sandbox
+
+    async def _lock_path(self) -> Path:
+        """The lock file of this Docker daemon's GPU admission, by the daemon's ID, which
+        every ALE process that admits through the daemon takes, whatever its user or cache."""
+        if self._daemon is None:
+            code, out, stderr = await _docker("info", "--format", "{{.ID}}", timeout=30)
+            if code != 0 or not out.strip():
+                raise ProviderStartError(f"could not identify the Docker daemon: {stderr.strip()}")
+            self._daemon = out.strip()
+        return self.gpu_lock_dir / f"ale-gpu-{self._daemon}.lock"
+
+    async def _admit(
+        self, resources: Resources, candidates: tuple[str, ...]
+    ) -> tuple[GpuDevice, ...]:
+        """The GPUs among ``candidates`` a Sandbox of ``resources`` takes, as nvidia-smi
+        reports them now. Called with the admission lock held."""
+        host = await self._host_gpus()
+        holders = await _gpu_holders()
+        sharing = {holder.container for holder in holders if holder.memory_mb is not None}
+        processes = (
+            [
+                process
+                for process in await gpu_sharing.read_processes()
+                if process.container in sharing
+            ]
+            if sharing
+            else []
+        )
+        return gpu_sharing.admit(
+            [(index, device) for index, device in sorted(host.items()) if device.id in candidates],
+            holders,
+            processes,
+            count=resources.gpus,
+            memory_mb=resources.gpu_memory_mb,
+            margin_mb=self.gpu_memory_margin_mb,
         )
 
     async def _host_gpus(self) -> dict[int, GpuDevice]:
@@ -1580,8 +1812,8 @@ class DockerProvider(Provider):
             f"the desktop did not come up within {timeout_sec:g}s; last attempt: {last}"
         )
 
-    async def _connect(self, container: str, agent_user: str) -> GuestClient:
-        transport = _Session(
+    async def _connect(self, container: str, agent_user: str) -> _Session:
+        session = _Session(
             [
                 "docker",
                 "exec",
@@ -1605,16 +1837,15 @@ class DockerProvider(Provider):
             ],
             container,
         )
-        client = GuestClient(transport)
         try:
-            await transport.start()
-            await asyncio.wait_for(client.health(), timeout=60)
+            await session.start()
+            await asyncio.wait_for(session.client.health(), timeout=60)
         except BaseException as exc:
-            await client.close()
+            await session.client.close()
             if not isinstance(exc, Exception):
                 raise
             raise ProviderStartError(f"guest service did not answer: {exc}") from exc
-        return client
+        return session
 
     async def list_retained(self) -> list[dict[str, object]]:
         if shutil.which("docker") is None:
@@ -1819,33 +2050,39 @@ class DockerProvider(Provider):
         await confinement.wire(container, request, reattached=True)
         sealed = isolated and await confinement.sealed(container, attached)
         agent_user = request.user
-        client = await self._connect(container, agent_user)
+        session = await self._connect(container, agent_user)
         try:
-            agent_home, _ = await self._guest_contract(client)
-            file_client = await self._connect(container, agent_user)
+            agent_home, _ = await self._guest_contract(session.client)
+            file_session = await self._connect(container, agent_user)
         except BaseException:
-            await client.close()
+            await session.client.close()
             raise
         sandbox = DockerSandbox(
             sandbox_id=container.removeprefix("ale-"),
             request=request.model_copy(update={"role": SandboxRole(role)}),
             container=container,
+            container_id=str(record.get("Id", "")),
             confinement=confinement,
-            client=client,
-            file_client=file_client,
+            session=session,
+            file_session=file_session,
             resolved_image=image,
             allocation=allocation,
             agent_user=agent_user,
             agent_home=agent_home,
             sealed=sealed,
+            watchdog=self._watchdog,
         )
         if sealed:
             try:
                 # This run's proxy and token, through a guestd of this run's own.
                 await sandbox._start_relay()
             except BaseException:
-                await asyncio.gather(client.close(), file_client.close(), return_exceptions=True)
+                await asyncio.gather(
+                    session.client.close(), file_session.client.close(), return_exceptions=True
+                )
                 raise
+        # The allocation its first run recorded says what it reserved.
+        sandbox.watch()
         return sandbox
 
 

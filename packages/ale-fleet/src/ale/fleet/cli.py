@@ -9,6 +9,7 @@ from typing import Annotated
 
 import typer
 
+from ale.core.config import GPU_MEMORY_MARGIN_MB
 from ale.run.secrets import load_env
 
 app = typer.Typer(
@@ -107,6 +108,14 @@ def node(
     macos_vm_slots: Annotated[
         int, typer.Option(help="macOS VMs to run at most, when the machine runs them.")
     ] = 2,
+    gpu: Annotated[
+        list[int] | None,
+        typer.Option(help="A Host GPU index Docker leaves may lease (repeat). Default: all."),
+    ] = None,
+    gpu_memory_margin_mb: Annotated[
+        int,
+        typer.Option(help="Memory a GPU must have free beyond a shared Sandbox's gpu_memory_mb."),
+    ] = GPU_MEMORY_MARGIN_MB,
 ) -> None:
     """Lend this machine's Providers to the Fleet until stopped.
 
@@ -116,6 +125,7 @@ def node(
     import socket
     from urllib.parse import urlsplit
 
+    from ale.core.config import DockerProviderConfig
     from ale.core.errors import AleError
     from ale.fleet.node import NodeAgent, NodeSettings, probe
     from ale.run.cli.main import run_async
@@ -139,6 +149,9 @@ def node(
         reserve_memory_mb=reserve_memory_mb,
         macos_vm_slots=macos_vm_slots,
         state_dir=state,
+        docker=DockerProviderConfig(
+            gpus=tuple(gpu or ()), gpu_memory_margin_mb=gpu_memory_margin_mb
+        ),
     )
 
     async def main() -> None:

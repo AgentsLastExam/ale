@@ -208,6 +208,9 @@ class Resources(BaseModel):
     gpus: int = Field(default=0, ge=0)
     gpu_types: tuple[str, ...] = ()
     """GPU models the Task accepts, any one of them; empty accepts every model."""
+    gpu_memory_mb: int | None = Field(default=None, ge=1)
+    """The device memory, in MiB, the Sandbox needs on each of its GPUs, its CUDA contexts
+    included; None takes whole GPUs."""
     sudo: bool = False
     container_features: _ContainerFeatures = ()
     """What a container Sandbox needs beyond what every container gets."""
@@ -361,6 +364,7 @@ class VerifierResources(BaseModel):
     storage_mb: int | None = Field(ge=1)
     gpus: int = Field(ge=0)
     gpu_types: tuple[str, ...] = ()
+    gpu_memory_mb: int | None = Field(default=None, ge=1)
     container_features: _ContainerFeatures = ()
 
     def as_resources(self) -> Resources:
@@ -370,6 +374,7 @@ class VerifierResources(BaseModel):
             storage_mb=self.storage_mb,
             gpus=self.gpus,
             gpu_types=self.gpu_types,
+            gpu_memory_mb=self.gpu_memory_mb,
             sudo=False,
             container_features=self.container_features,
         )
@@ -742,6 +747,8 @@ class EnvironmentTable(BaseModel):
     gpus: int = Field(default=0, ge=0, strict=True)
     gpu_types: tuple[_GpuType, ...] | None = Field(default=None, min_length=1)
     """GPU models any of which will do; ``None`` accepts every model, as in Harbor."""
+    gpu_memory_mb: int | None = Field(default=None, ge=1, strict=True)
+    """The device memory the Sandbox needs on each GPU; ``None`` takes whole GPUs."""
     container_features: _ContainerFeatures = ()
     """What the container needs beyond what every container gets; a VM image takes none."""
     env: TaskEnv = Field(default_factory=dict)
@@ -806,6 +813,7 @@ class VerifierEnvironmentTable(BaseModel):
     storage_mb: int | None = Field(default=None, ge=1, strict=True)
     gpus: int = Field(default=0, ge=0, strict=True)
     gpu_types: tuple[_GpuType, ...] | None = Field(default=None, min_length=1)
+    gpu_memory_mb: int | None = Field(default=None, ge=1, strict=True)
     container_features: _ContainerFeatures = ()
     env: TaskEnv = Field(default_factory=dict)
 
@@ -906,7 +914,11 @@ class TaskConfig(BaseModel):
             ("environment", environment),
             ("verifier.environment", verifier.environment),
         ):
-            if sized is not None and sized.gpu_types is not None and not sized.gpus:
+            if sized is None or sized.gpus:
+                continue
+            if sized.gpu_types is not None:
                 raise ValueError(f"[{table}].gpu_types requires gpus")
+            if sized.gpu_memory_mb is not None:
+                raise ValueError(f"[{table}].gpu_memory_mb requires gpus")
         _validate_artifact_paths(self.artifacts, environment.os)
         return self

@@ -398,8 +398,8 @@ Given a conforming image, the Docker Provider:
   that ran otherwise than its leaf asked, so a Host's defaults never stand in for what the
   RunLock records
   ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#docker-runtimes));
-- labels every ALE container with episode, physical role, requested retention, and GPU
-  identity;
+- labels every ALE container with episode, physical role, requested retention, GPU
+  identity and, on a GPU it shares, the memory it reserved there;
 - destroys by default, or after framework sanitation returns a retained handle or saves a
   snapshot.
 
@@ -446,6 +446,39 @@ so a Task finds the same driver whichever backend runs it. The Provider, not the
 decides which Host driver files enter the sandbox, because an image would otherwise choose
 what of the Host reaches it. How each Provider does it is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-driver-capabilities).
+
+### GPU memory
+
+A Sandbox whose Task names `gpu_memory_mb` ([GPUs](task-authoring.md#gpus)) may share each
+of its GPUs with other such Sandboxes; one that names none takes its GPUs whole. A
+capability profile says how a leaf holds such a Sandbox: shared under a limit, shared and
+watched, or whole, and gives each GPU model's memory where the leaf knows it: for a leaf
+that shares GPUs, the most it admits a Sandbox with on an empty GPU of that model, so that
+selection never chooses a leaf whose admission could not. A leaf serves such a Sandbox only
+with a model whose memory, where it knows it, is at least the need; a leaf that gives it
+whole GPUs gives it only such a model. A leaf that shares a GPU:
+
+- admits a Sandbox to it only while no Sandbox holds it whole and its headroom, the memory
+  free there less what the Sandboxes sharing it reserved and do not use yet, leaves the
+  need and a margin, and decides under one lock, which every process admitting through the
+  same container daemon takes, until the Sandbox has started, so that two never take the
+  same memory. The margin is for other tenants' jobs,
+  which grow after they start; a refusal names each GPU it considered and why;
+- holds a Sandbox to its share with a limit where its runtime has one, under which an
+  allocation past it fails as on a full GPU and the Sandbox goes on. Where none does, it
+  watches what the Sandbox uses while a Run holds it and kills the Sandbox's largest process
+  on a GPU past its share, as the OOM killer kills a process past a memory limit: memory
+  past a share is memory another Sandbox was admitted with, and going past it is the
+  Sandbox's own doing, so the episode goes on with what the agent makes of it rather than
+  ending in an environment error that would rerun or unscore it. Where a limit's
+  accounting fails, which is ALE's failure, it stops the Sandbox and the episode ends in an
+  environment error that says what used how much. Every selection says which leaves only
+  watch, and for how many Sandboxes;
+- records in the RunLock what it reserved on each GPU, how the Sandbox is held to it, and
+  each GPU's total and free memory when it admitted the Sandbox.
+
+How each leaf does it is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-memory).
 
 ## Permissions
 
@@ -494,19 +527,20 @@ A Task states what its Sandboxes need and never names a Provider or runtime, so 
 unchanged wherever a Provider serves it. A Provider is one of two classes. A
 [leaf](lexicon.md) starts Sandboxes on the machine it runs on, and declares each real
 combination it can start as a [capability profile](lexicon.md): kind, operating system,
-architecture, desktop, network modes, snapshots, GPUs and their models, CPU and memory
-limits, and container features. A scheduler places Sandboxes on machines it manages, which
-start them with the leaves there, and offers what those leaves do: the Fleet those of the
-leaves its registered Nodes lend, Daytona the one of its own Sandboxes. Which leaves a
-scheduler uses, and in which order, is its own configuration, never a Run's.
+architecture, desktop, network modes, snapshots, GPUs, their models and memory and how it
+shares them, CPU and memory limits, and container features. A scheduler places Sandboxes on
+machines it manages, which start them with the leaves there, and offers what those leaves
+do: the Fleet those of the leaves its registered Nodes lend, Daytona the one of its own
+Sandboxes. Which leaves a scheduler uses, and in which order, is its own configuration,
+never a Run's.
 
 A Sandbox needs its image's kind and operating system, the architecture that system implies
-(arm64 for macOS, x86-64 otherwise), its network mode, its resources (CPUs, memory, GPUs and
-the models it accepts, container features), and snapshots when it saves or boots from one.
-One rule compares needs with a profile, naming each need the profile misses, wherever a
-Provider or Node is chosen: in a Run's selection, in every leaf's `create`, and in the
-Fleet's placement, so a Sandbox is accepted or refused the same way wherever it is asked
-for. A leaf may also refuse by rules no profile states
+(arm64 for macOS, x86-64 otherwise), its network mode, its resources (CPUs, memory, GPUs,
+the models it accepts and the memory it needs on each, container features), and snapshots
+when it saves or boots from one. One rule compares needs with a profile, naming each need
+the profile misses, wherever a Provider or Node is chosen: in a Run's selection, in every
+leaf's `create`, and in the Fleet's placement, so a Sandbox is accepted or refused the same
+way wherever it is asked for. A leaf may also refuse by rules no profile states
 ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles)
 lists them); they hold wherever it runs, so selection asks them of a leaf, and of the
 leaves a scheduler would use, by the method `create` asks. A request that `create` would

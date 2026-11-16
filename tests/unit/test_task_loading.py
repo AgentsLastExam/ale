@@ -156,6 +156,22 @@ def test_gpu_types_are_harbor_s_and_absent_accepts_every_model(tmp_path: Path) -
     assert verifier is not None and (verifier.gpus, verifier.gpu_types) == (2, ("H100",))
 
 
+def test_gpu_memory_is_each_sandboxs_own_and_absent_takes_whole_gpus(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    edit(task, {"environment": {"gpus": 2}, "verifier": {"environment_mode": "separate"}})
+    spec = load_tasks(task)[0].spec
+    assert spec.resources.gpu_memory_mb is None
+    edit(task, {"environment": {"gpu_memory_mb": 8192}})
+    spec = load_tasks(task)[0].spec
+    assert spec.resources.gpu_memory_mb == 8192
+    # A separate verifier without its own table is sized as the solver; with one, by its own.
+    assert spec.verify.resources is not None
+    assert spec.verify.resources.as_resources().gpu_memory_mb == 8192
+    edit(task, {"verifier": {"environment": {"gpus": 1, "gpu_memory_mb": 1024}}})
+    verifier = load_tasks(task)[0].spec.verify.resources
+    assert verifier is not None and verifier.as_resources().gpu_memory_mb == 1024
+
+
 def test_container_features_are_named_from_a_closed_set_each_once(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     assert load_tasks(task)[0].spec.resources.container_features == ()

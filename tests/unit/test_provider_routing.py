@@ -21,6 +21,7 @@ from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     DesktopResolution,
     ExecResult,
+    GpuDevice,
     ImageKind,
     PreparedTaskImage,
     Sandbox,
@@ -138,6 +139,50 @@ async def test_each_sandbox_goes_to_the_first_provider_that_serves_it(tmp_path: 
     # Of two that serve a Sandbox, the one named first takes it, whatever either's load.
     await ProviderRegistry(_settings("docker:kata", "docker:runc")).select([plain])
     assert plain.provider == "docker:kata"
+
+
+@pytest.mark.asyncio
+async def test_a_run_says_which_sandboxes_that_share_a_gpu_are_only_watched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """docker:runc holds no process to its share of a GPU, which the Run says once at its
+    start; docker:gvisor limits it, and a Sandbox that takes its GPUs whole shares nothing."""
+
+    async def host_gpus(_provider: DockerProvider) -> dict[int, GpuDevice]:
+        h100 = GpuDevice(
+            id="GPU-0",
+            model="NVIDIA H100 80GB HBM3",
+            driver_version="570.1",
+            memory_total_mb=81559,
+            memory_reserved_mb=470,
+        )
+        return {0: h100}
+
+    monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
+    shared = _task(
+        tmp_path / "shared",
+        {
+            "environment": {"gpus": 1, "gpu_memory_mb": 8192},
+            "verifier": {"environment": {"gpus": 1, "gpu_memory_mb": 4096}},
+        },
+    )
+    whole = _task(tmp_path / "whole", {"environment": {"gpus": 1}})
+    notices = await ProviderRegistry(_settings("docker:runc", "docker:gvisor")).select(
+        [shared, whole]
+    )
+    # One line for the leaf, counting its solver and its verifier.
+    assert notices == (
+        "docker:runc watches the gpu_memory_mb of 2 Sandboxes rather than enforcing it: a "
+        "process past its share is killed",
+    )
+    assert (
+        await ProviderRegistry(_settings("docker:gvisor", "docker:runc")).select([shared, whole])
+        == ()
+    )
+    # More than any GPU here has is refused before anything starts.
+    big = _task(tmp_path / "big", {"environment": {"gpus": 1, "gpu_memory_mb": 90000}})
+    with pytest.raises(ProviderCapabilityError, match=r"\(76993 MiB\), none with gpu_memory_mb"):
+        await ProviderRegistry(_settings("docker:runc")).select([big])
 
 
 @pytest.mark.asyncio
@@ -533,7 +578,7 @@ def test_ale_run_refuses_to_start_when_a_leaf_lacks_a_feature_here(
     async def episode(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("an episode started")
 
-    monkeypatch.setattr("ale.run.providers.leaf", lambda _id, gpus=(): kata)
+    monkeypatch.setattr("ale.run.providers.leaf", lambda _id, docker=None: kata)
     monkeypatch.setattr("ale.run.cli.tasks.prepare_task_image_result", prepare)
     monkeypatch.setattr("ale.run.providers.missing_features", lacking)
     monkeypatch.setattr("ale.run.cli.tasks.run_episode", episode)

@@ -29,6 +29,7 @@ __all__ = [
     "PhaseTimeoutError",
     "ProvenanceIncompleteError",
     "ProviderCapabilityError",
+    "ProviderCapacityError",
     "ProviderStartError",
     "RegistryError",
     "RetentionFinalizationError",
@@ -110,6 +111,12 @@ class RetentionFinalizationError(EnvironmentError_):
 
 class ProviderCapabilityError(EnvironmentError_):
     """The task requires a capability the selected provider does not offer."""
+
+
+class ProviderCapacityError(ProviderCapabilityError):
+    """The provider serves the task, but not now: what it needs is in use. A Fleet Node answers
+    that it has no room for its grant now, and the Sandbox is placed again, there or
+    elsewhere."""
 
 
 class ProviderStartError(EnvironmentError_):

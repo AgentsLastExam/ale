@@ -11,12 +11,13 @@ import json
 import os
 import platform
 import uuid
+from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ale.core.capability import Arch, SandboxNeeds
-from ale.core.config import RunConfig
+from ale.core.capability import Arch, GpuHold, SandboxNeeds, unmet
+from ale.core.config import DockerProviderConfig, RunConfig
 from ale.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import Provider, Sandbox, SandboxCheck, SandboxRequest, SandboxRole
 from ale.core.task import Task
@@ -56,16 +57,20 @@ def machine_arch() -> Arch:
     raise ProviderCapabilityError(f"unsupported machine architecture {machine}")
 
 
-def leaf(provider_id: str, *, gpus: tuple[int, ...] = ()) -> Provider:
+def leaf(provider_id: str, *, docker: DockerProviderConfig = DockerProviderConfig()) -> Provider:
     """The leaf a provider id names: ``docker:<runtime>`` for each runtime Docker's table
-    holds, ``qemu``, ``firecracker`` or ``orchard``. ``gpus`` are the Host GPUs a Docker
-    leaf may lease, all of them when empty."""
+    holds, ``qemu``, ``firecracker`` or ``orchard``. ``docker`` holds a Docker leaf's
+    settings: the Host GPUs it may lease and the margin it admits a shared one with."""
     if provider_id.startswith("docker:"):
         from ale.run.providers.docker import RUNTIMES, DockerProvider
 
         runtime = provider_id.removeprefix("docker:")
         if runtime in RUNTIMES:
-            return DockerProvider(gpus=gpus, runtime=runtime)
+            return DockerProvider(
+                gpus=docker.gpus,
+                gpu_memory_margin_mb=docker.gpu_memory_margin_mb,
+                runtime=runtime,
+            )
     elif provider_id == "qemu":
         from ale.run.providers.qemu import QemuProvider
 
@@ -191,11 +196,11 @@ class ProviderRegistry:
             from ale.run.providers.daytona import DaytonaProvider
 
             return DaytonaProvider(settings.daytona)
-        return leaf(provider_id, gpus=settings.docker.gpus)
+        return leaf(provider_id, docker=settings.docker)
 
     async def select(
         self, tasks: Sequence[Task], *, solvers: bool = True, snapshots: bool = False
-    ) -> None:
+    ) -> tuple[str, ...]:
         """Choose, for each Task's solver and separate verifier, the first Provider in
         ``sandbox.providers`` that serves its Sandbox, before anything is prepared or
         started.
@@ -204,24 +209,31 @@ class ProviderRegistry:
         and why each Provider does not serve it. ``solvers=False`` leaves the solvers to
         their Tasks, for a Run that reuses solvers kept earlier; ``snapshots`` says the
         solvers save snapshots or boot from them.
+
+        Returns what the Run says of its selection once at its start: for each leaf that may
+        start Sandboxes sharing a GPU and only watches their ``gpu_memory_mb``, how many.
         """
         order = self.settings.sandbox.providers
         refused: list[str] = []
+        watched: Counter[str] = Counter()
         for task in tasks:
             for role, user, needs in _sandboxes(task, snapshot=snapshots, solver=solvers):
                 reasons: list[str] = []
                 verifier = role is SandboxRole.VERIFIER
+                label = "verifier" if verifier else "solver"
                 for provider_id in order:
-                    why = await self.get(provider_id).unserved(needs, user=user, role=role)
+                    provider = self.get(provider_id)
+                    why = await provider.unserved(needs, user=user, role=role)
                     if not why:
                         if verifier:
                             task.verifier_provider = provider_id
                         else:
                             task.provider = provider_id
+                        if needs.resources.gpus and needs.resources.gpu_memory_mb is not None:
+                            watched.update(await _watching(provider, needs))
                         break
                     reasons.append(f"    {provider_id}: {'; '.join(why)}")
                 else:
-                    label = "verifier" if verifier else "solver"
                     refused.append(f"  {task.spec.name} {label}:\n" + "\n".join(reasons))
         if refused:
             raise ProviderCapabilityError(
@@ -230,6 +242,11 @@ class ProviderRegistry:
                 + ":\n"
                 + "\n".join(refused)
             )
+        return tuple(
+            f"{leaf} watches the gpu_memory_mb of {count} Sandbox{'es' if count > 1 else ''} "
+            "rather than enforcing it: a process past its share is killed"
+            for leaf, count in watched.items()
+        )
 
     async def preflight(self, tasks: Sequence[Task], *, solvers: bool = True) -> None:
         """Check, before any of their episodes starts, that each leaf selected for ``tasks``
@@ -267,7 +284,9 @@ class ProviderRegistry:
                         os=needs.os,
                         role=role,
                         prepared_image=image,
-                        resources=needs.resources.model_copy(update={"gpus": 0, "gpu_types": ()}),
+                        resources=needs.resources.model_copy(
+                            update={"gpus": 0, "gpu_types": (), "gpu_memory_mb": None}
+                        ),
                         network=NetworkPolicy(mode=NetworkMode.BLOCK),
                         sudo=needs.resources.sudo,
                         user=user,
@@ -316,6 +335,18 @@ class ProviderRegistry:
         # the check it returns, to run again when the registry is used again.
         for provider_id, fresh in preflighted.items():
             self._checked[provider_id].update(fresh)
+
+
+async def _watching(provider: Provider, needs: SandboxNeeds) -> list[str]:
+    """The leaves of ``provider``'s profiles that serve ``needs`` and only watch the memory a
+    Sandbox that shares a GPU uses: ``provider`` itself for a leaf, any of a scheduler's."""
+    return list(
+        dict.fromkeys(
+            profile.provider
+            for profile in await provider.profiles()
+            if profile.gpu_hold is GpuHold.WATCHED and not unmet(profile, needs)
+        )
+    )
 
 
 def provider_named(name: str) -> Provider:

@@ -30,6 +30,7 @@ from ale.core.sandbox import DesktopResolution
 from ale.core.taskspec import McpSource, SkillSource
 
 __all__ = [
+    "GPU_MEMORY_MARGIN_MB",
     "AgentConfig",
     "AgentJudgeConfig",
     "ArtifactPolicy",
@@ -260,6 +261,10 @@ ProviderId = Literal[
 ]
 
 
+#: The device memory, in MiB, a GPU must have free beyond a shared Sandbox's need by default.
+GPU_MEMORY_MARGIN_MB = 4096
+
+
 class DockerProviderConfig(BaseModel):
     """Settings for every Docker leaf."""
 
@@ -267,6 +272,9 @@ class DockerProviderConfig(BaseModel):
 
     gpus: tuple[Annotated[int, Field(ge=0, strict=True)], ...] = ()
     """The Host's GPU indices Docker may lease; empty leases any of them."""
+    gpu_memory_margin_mb: int = Field(default=GPU_MEMORY_MARGIN_MB, ge=0, strict=True)
+    """The device memory, in MiB, a GPU must have free beyond a shared Sandbox's
+    ``gpu_memory_mb`` to admit it: other tenants' jobs grow after they start."""
 
     # --- validation ---
 

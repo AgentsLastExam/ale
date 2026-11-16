@@ -366,9 +366,9 @@ async def test_reverification_retries_only_with_fresh_verifiers(
     selections: list[dict[str, object]] = []
     select = ProviderRegistry.select
 
-    async def selecting(self: ProviderRegistry, tasks: Any, **options: Any) -> None:
+    async def selecting(self: ProviderRegistry, tasks: Any, **options: Any) -> tuple[str, ...]:
         selections.append(options)
-        await select(self, tasks, **options)
+        return await select(self, tasks, **options)
 
     monkeypatch.setattr(ProviderRegistry, "select", selecting)
     task_path = scaffold_task(tmp_path / "task")
