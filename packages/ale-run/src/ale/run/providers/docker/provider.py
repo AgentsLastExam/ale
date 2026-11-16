@@ -10,10 +10,11 @@ network's shape — there are no firewall rules to survive a daemon restart, and
 inside the sandbox can lift them.
 
 Under the Kata runtime each container is a microVM, which sees no network attached after
-it boots. There the sandbox stays on the default bridge, and tc filters in its network
-namespace, outside the VM, seal it instead (``kata.py``). A sandbox's confinement object
-holds which of the two it gets; nothing else in this module depends on the runtime but
-the ``docker run`` flags.
+it boots, nor lets the namespace's netfilter see its packets. There the sandbox boots on a
+bridge of its own that is not internal, and tc filters in its network namespace, outside
+the VM, seal it instead (``kata.py``). A sandbox's confinement object holds which of the
+two it gets; nothing else in this module depends on the runtime but the ``docker run``
+flags.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Literal, Self
 from urllib.parse import urlsplit
 
 from ale.core.capability import CapabilityProfile, accepts_model
@@ -62,7 +63,7 @@ from ale.run.images import resolve_container_image, resolve_prepared_container_i
 from ale.run.process import run
 from ale.run.providers import machine_arch, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.docker import kata
+from ale.run.providers.docker import kata, tc
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, StdioTransport
@@ -81,6 +82,11 @@ LABEL = "ale.episode"
 MANAGED_LABEL = "ale.managed"
 ROLE_LABEL = "ale.role"
 RETENTION_LABEL = "ale.retention"
+#: The network mode a container was started with, which reattaching confines it by.
+NETWORK_LABEL = "ale.network"
+#: The MAC of the Host's end of a Kata sandbox's own network, which its seal's filters
+#: match: read before the sandbox starts, and kept for a reattaching run.
+BRIDGE_MAC_LABEL = "ale.bridge-mac"
 GPU_LABEL = "ale.gpus"
 PREPARED_LABEL = "ale.prepared"
 HANDLE_PREFIX = "docker:"
@@ -156,6 +162,14 @@ async def _managed_gpu_ids() -> set[str]:
     if code != 0:
         return set()
     return {device for line in output.splitlines() for device in line.split(",") if device}
+
+
+#: How long ``docker run`` may take to start a container, a sandbox or a helper: on a Host
+#: under a load of about 200, creating one and attaching it to its network took 65 s.
+_START_SEC = 300.0
+#: How long Docker may take to remove a container or a network, under such a load: removing
+#: a killed sandbox took 31 s there.
+_REMOVE_SEC = 300.0
 
 
 async def _docker(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
@@ -236,7 +250,7 @@ async def _in_namespace(container: str, script: str) -> tuple[int, str, str]:
     return await _docker(
         "run", "--rm", *HELPER_RUNTIME, "--network", f"container:{container}",
         "--cap-add", "NET_ADMIN", "--entrypoint", "sh", NETFILTER_IMAGE, "-c", script,
-        timeout=300,
+        timeout=_START_SEC,
     )  # fmt: skip
 
 
@@ -244,6 +258,13 @@ async def _netfilter_helper(container: str, commands: list[str], purpose: str) -
     code, _, stderr = await _in_namespace(container, " && ".join(commands))
     if code != 0:
         raise ProviderStartError(f"could not {purpose}: {stderr.strip()}")
+
+
+async def _discard_network(network: str) -> None:
+    """Remove a network ALE created for a sandbox that did not start, even while the task
+    that created it is cancelled."""
+    with contextlib.suppress(BaseException):
+        await asyncio.shield(_docker("network", "rm", network, timeout=_REMOVE_SEC))
 
 
 async def _bridge_host_ip(network: str | None) -> str:
@@ -261,6 +282,78 @@ async def _bridge_host_ip(network: str | None) -> str:
     return out.strip()
 
 
+#: Run by bash in a helper on a network: sends one datagram to the Host's address, ``$1``,
+#: and prints the MAC its neighbour entry resolves to.
+_NEIGHBOUR_MAC = r"""
+echo > "/dev/udp/$1/9" || exit 1
+for _ in $(seq 50); do
+    while read -r address _ flags mac _; do
+        [ "$address" = "$1" ] && [ "$flags" = 0x2 ] && { echo "$mac"; exit 0; }
+    done < /proc/net/arp
+    sleep 0.1
+done
+echo "no neighbour entry for $1" >&2
+exit 1
+"""
+_MAC = re.compile(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}")
+
+
+async def _bridge_mac(network: str, host_ip: str) -> str:
+    """The MAC of the Host's end of ``network``, as a container on it resolves ``host_ip``.
+
+    Read by a helper on the network itself, removed before the caller goes on, so that it is
+    never a neighbour of the sandbox started there next. It needs no view of the bridge's
+    device, which a helper on ``--network host`` lacks under rootless Docker whose network
+    namespace rootlesskit detaches (``--detach-netns``).
+    """
+    helper = f"ale-mac-{uuid.uuid4().hex[:12]}"
+    try:
+        code, out, stderr = await _docker(
+            "run", "--rm", "--name", helper, *HELPER_RUNTIME, "--network", network,
+            "--entrypoint", "bash", NETFILTER_IMAGE, "-c", _NEIGHBOUR_MAC, "bash", host_ip,
+            timeout=_START_SEC,
+        )  # fmt: skip
+    finally:
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(_docker("rm", "-f", helper, timeout=_REMOVE_SEC))
+    mac = out.strip()
+    if code != 0 or not _MAC.fullmatch(mac):
+        raise ProviderStartError(
+            f"could not read the MAC of {network}'s bridge: {stderr.strip() or mac}"
+        )
+    return mac
+
+
+class _DefaultBridge:
+    """Docker's default bridge, each fact read once: the Host's address on it, at which an
+    ``open`` runc sandbox reaches its Gateway, and the ``resolv.conf`` Docker writes a
+    container there, which names the Host's upstream servers."""
+
+    def __init__(self) -> None:
+        self._host_ip: str | None = None
+        self._resolv_conf: str | None = None
+
+    async def host_ip(self) -> str:
+        if self._host_ip is None:
+            self._host_ip = await _bridge_host_ip(None)
+        return self._host_ip
+
+    async def resolv_conf(self) -> str:
+        """As Docker wrote it for a helper on the default bridge."""
+        if self._resolv_conf is None:
+            code, out, stderr = await _docker(
+                "run", "--rm", *HELPER_RUNTIME, "--network", "bridge",
+                "--entrypoint", "cat", NETFILTER_IMAGE, "/etc/resolv.conf",
+                timeout=_START_SEC,
+            )  # fmt: skip
+            if code != 0 or "nameserver" not in out:
+                raise ProviderStartError(
+                    f"could not read the default bridge's resolv.conf: {stderr.strip()}"
+                )
+            self._resolv_conf = out
+        return self._resolv_conf
+
+
 class _RuncConfinement:
     """A runc sandbox, sealed by an internal network of its own while it is isolated.
 
@@ -269,9 +362,45 @@ class _RuncConfinement:
     bridge again.
     """
 
-    def __init__(self, network: str | None) -> None:
+    def __init__(self, network: str | None, host_ip: str) -> None:
         #: The sandbox's internal network; None for an ``open`` Task, on the default bridge.
         self.network = network
+        #: The Host's address on that network, at which it reaches its Gateway.
+        self.host_ip = host_ip
+
+    @classmethod
+    async def start(cls, sandbox_id: str, request: SandboxRequest, bridge: _DefaultBridge) -> Self:
+        """The per-episode network.
+
+        ``block`` and ``allowlist`` both use ``--internal``: the bridge has no route off
+        the host, so the only reachable thing is the gateway. They differ in what the
+        gateway will then forward, not in what the sandbox can dial — which is why
+        allowlisting needs no privileged host rules and no tooling inside an image we do
+        not control. ``open`` uses the default bridge.
+        """
+        if request.network.mode is NetworkMode.OPEN:
+            return cls(None, await bridge.host_ip())
+        network = f"ale-net-{sandbox_id}"
+        code, _, stderr = await _docker("network", "create", "--internal", network, timeout=60)
+        if code != 0:
+            raise ProviderStartError(f"could not create isolated network: {stderr.strip()}")
+        try:
+            return cls(network, await _bridge_host_ip(network))
+        except BaseException:
+            await _discard_network(network)
+            raise
+
+    @classmethod
+    async def found(
+        cls, networks: tuple[str, ...], bridge: _DefaultBridge, labels: Mapping[str, str]
+    ) -> Self:
+        """A running sandbox's, from the ALE networks it is attached to."""
+        if not networks:
+            return cls(None, await bridge.host_ip())
+        return cls(networks[0], await _bridge_host_ip(networks[0]))
+
+    def run_args(self, isolated: bool) -> list[str]:
+        return ["--network", self.network] if self.network else []
 
     async def wire(
         self, container: str, request: SandboxRequest, *, reattached: bool = False
@@ -295,7 +424,7 @@ class _RuncConfinement:
         routed = bool(port) and _sandbox_gateway(request.gateway_url) != request.gateway_url
         if not routed and not self.network:
             return
-        host_ip = await _bridge_host_ip(self.network)
+        host_ip = self.host_ip
         rules: list[str] = []
         if routed:
             rules += [
@@ -347,20 +476,112 @@ class _RuncConfinement:
 
     async def remove(self) -> None:
         if self.network:
-            await _docker("network", "rm", self.network, timeout=60)
+            await _docker("network", "rm", self.network, timeout=_REMOVE_SEC)
 
 
-class _KataConfinement:
-    """A sandbox in a Kata microVM, sealed by tc filters outside the VM while it is isolated.
+#: Run as root on the framework's Python: replaces ``/etc/resolv.conf`` with ``argv[1]``.
+_WRITE_RESOLV_CONF = "import sys; open('/etc/resolv.conf', 'w').write(sys.argv[1])"
 
-    The VM sees no network attached after it boots, so it lives on the default bridge, and
-    the filters in its namespace drop every frame but the Host's. Its default route goes
-    while it is sealed, so what they drop fails at once.
+
+class _OnOwnBridge:
+    """A sandbox whose runtime takes its network at boot and keeps its packets from the
+    namespace's netfilter, so it boots on a bridge network of its own, which no other
+    container joins, and is sealed by tc filters outside it.
+
+    The network is not internal: the runtime never sees a network attached later, so opening
+    egress removes the seal and the sandbox leaves through this network's NAT.
     """
 
-    def __init__(self, host_ip: str) -> None:
-        #: The Host's address on the default bridge, the one address the seal admits.
+    def __init__(self, bridge: _DefaultBridge, network: str, host_ip: str, host_mac: str) -> None:
+        self.bridge = bridge
+        #: The sandbox's network, ``ale-net-<sandbox id>``.
+        self.network = network
+        #: The Host's address on it, the one address the seal admits, and its bridge's MAC.
         self.host_ip = host_ip
+        self.host_mac = host_mac
+        self._peers: tc.Peers | None = None
+
+    @classmethod
+    async def start(cls, sandbox_id: str, request: SandboxRequest, bridge: _DefaultBridge) -> Self:
+        """Its network, whatever its Task's network mode, with what the seal needs of it
+        read before the sandbox starts: only the seal's own helper runs between the two."""
+        network = f"ale-net-{sandbox_id}"
+        code, _, stderr = await _docker("network", "create", network, timeout=60)
+        if code != 0:
+            raise ProviderStartError(f"could not create the sandbox's network: {stderr.strip()}")
+        try:
+            host_ip = await _bridge_host_ip(network)
+            return cls(bridge, network, host_ip, await _bridge_mac(network, host_ip))
+        except BaseException:
+            await _discard_network(network)
+            raise
+
+    @classmethod
+    async def found(
+        cls, networks: tuple[str, ...], bridge: _DefaultBridge, labels: Mapping[str, str]
+    ) -> Self:
+        """A running sandbox's, from the ALE network it is attached to and the bridge's MAC
+        it was started with: a helper on its network now would be its neighbour."""
+        if len(networks) != 1:
+            raise ProviderCapabilityError("the container is on no network of its own")
+        if not _MAC.fullmatch(host_mac := labels.get(BRIDGE_MAC_LABEL, "")):
+            raise ProviderCapabilityError("the container records no MAC of its network's bridge")
+        network = networks[0]
+        return cls(bridge, network, await _bridge_host_ip(network), host_mac)
+
+    def run_args(self, isolated: bool) -> list[str]:
+        return ["--network", self.network, "--label", f"{BRIDGE_MAC_LABEL}={self.host_mac}"]
+
+    async def remove(self) -> None:
+        await _docker("network", "rm", self.network, timeout=_REMOVE_SEC)
+
+    async def peers(self, container: str) -> tc.Peers:
+        """The sandbox's addresses on its network, which Docker gave it, and the Host's."""
+        if self._peers is None:
+            on = f'(index .NetworkSettings.Networks "{self.network}")'
+            code, out, stderr = await _docker(
+                "inspect", "--format", f"{{{{{on}.IPAddress}}}} {{{{{on}.MacAddress}}}}",
+                container, timeout=30,
+            )  # fmt: skip
+            fields = out.split()
+            if code != 0 or len(fields) != 2:
+                raise ProviderStartError(f"could not read {container}'s address: {stderr}")
+            self._peers = tc.Peers(
+                host_ip=self.host_ip, host_mac=self.host_mac, ip=fields[0], mac=fields[1]
+            )
+        return self._peers
+
+    async def _resolve(self, container: str) -> None:
+        """Give a sandbox that has just started, and been sealed if it is isolated, the
+        default bridge's ``resolv.conf``; writing it needs no network.
+
+        On any other network Docker names its embedded DNS server, ``127.0.0.11``, which it
+        serves through netfilter in the sandbox's namespace, out of reach of a VM's guest.
+        Written in place, the file stays the container's own, as Docker's is.
+        """
+        resolv_conf = await self.bridge.resolv_conf()
+        code, _, stderr = await _docker(
+            "exec", "-u", "0", container,
+            guestd.PYTHON["linux"], "-I", "-c", _WRITE_RESOLV_CONF, resolv_conf,
+            timeout=60,
+        )  # fmt: skip
+        if code != 0:
+            raise ProviderStartError(f"could not write the sandbox's resolv.conf: {stderr}")
+
+
+class _KataConfinement(_OnOwnBridge):
+    """A sandbox in a Kata microVM, sealed by tc filters outside the VM while it is
+    isolated.
+
+    The filters in its namespace drop every frame but its own to the Host's address and the
+    Host's to it. Its default route goes while it is sealed, so what they drop fails at
+    once.
+    """
+
+    def run_args(self, isolated: bool) -> list[str]:
+        # NET_ADMIN only to drop the guest's default route while it is sealed: what seals it
+        # is outside the VM, where the capability does not reach.
+        return super().run_args(isolated) + (["--cap-add", "NET_ADMIN"] if isolated else [])
 
     async def wire(
         self, container: str, request: SandboxRequest, *, reattached: bool = False
@@ -368,40 +589,44 @@ class _KataConfinement:
         """Route the fixed Gateway port to the Host and start an isolated sandbox sealed."""
         routed = _sandbox_gateway(request.gateway_url) != request.gateway_url
         commands = kata.filters(
-            self.host_ip,
+            await self.peers(container),
             gateway_port=_url_port(request.gateway_url) if routed else "",
             proxy_port=_url_port(request.proxy_url),
             isolated=request.network.mode is not NetworkMode.OPEN,
             reattached=reattached,
         )
         await _netfilter_helper(container, commands, "confine the Kata sandbox's network")
+        if not reattached:
+            await self._resolve(container)
 
     async def sealed(self, container: str, attached: Mapping[str, object]) -> bool:
         """Whether a sandbox found running is sealed: whether the seal's drop filter is on
         the VM's tap."""
-        code, shown, stderr = await _in_namespace(container, kata.SEAL_PROBE)
-        if code != 0:
-            raise ProviderStartError(f"could not read the Kata sandbox's seal: {stderr.strip()}")
-        return "action drop" in shown
+        return await _shows_drop(container, kata.SEAL_PROBE)
 
     async def seal_guest(self, client: GuestClient) -> None:
         await kata.set_route(client, self.host_ip, present=False)
 
     async def open(self, container: str, client: GuestClient) -> None:
-        await _netfilter_helper(container, kata.unseal(self.host_ip), "open egress")
+        peers = await self.peers(container)
+        await _netfilter_helper(container, kata.unseal(peers), "open egress")
         await kata.set_route(client, self.host_ip, present=True)
 
     async def close(self, container: str, client: GuestClient) -> None:
-        # Replaced rather than added, so sealing twice leaves one set of filters.
-        commands = kata.unseal(self.host_ip) + kata.seal(self.host_ip)
-        await _netfilter_helper(container, commands, "close egress")
+        peers = await self.peers(container)
+        await _netfilter_helper(container, kata.seal(peers), "close egress")
         await kata.set_route(client, self.host_ip, present=False)
-
-    async def remove(self) -> None:
-        """Nothing: a Kata sandbox has no network of its own."""
 
 
 _Confinement = _RuncConfinement | _KataConfinement
+
+
+async def _shows_drop(container: str, probe: str) -> bool:
+    """Whether the seal's drop filter that ``probe`` shows is in a sandbox's namespace."""
+    code, shown, stderr = await _in_namespace(container, probe)
+    if code != 0:
+        raise ProviderStartError(f"could not read the sandbox's seal: {stderr.strip()}")
+    return "action drop" in shown
 
 
 #: How long an ended guestd session waits for its container to stop. A container whose
@@ -610,7 +835,7 @@ class DockerSandbox(Sandbox):
         an episode must not find it stale halfway through.
         """
         if self.request.network.mode is NetworkMode.OPEN:
-            return  # the task declared `open`; it is already on the bridge
+            return  # the task declared `open`; it already goes out
         # Open, the account's programs go straight out again.
         await relay.stop(self._client, self.request)
         self._relay = None
@@ -727,6 +952,7 @@ class DockerProvider(Provider):
         # once rather than ten thousand times.
         self._checked: dict[str, list[str]] = {}
         self._gpu_models: tuple[str, ...] | None = None
+        self._bridge = _DefaultBridge()
 
     @property
     def id(self) -> str:
@@ -817,15 +1043,9 @@ class DockerProvider(Provider):
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         container = f"ale-{sandbox_id}"
-        # A Kata VM takes its networks at boot and sees none attached later, so it stays
-        # on the bridge and is confined by tc filters instead of an internal network.
-        confinement: _Confinement
-        if in_kata:
-            network = None
-            confinement = _KataConfinement(await _bridge_host_ip(None))
-        else:
-            network = await self._ensure_network(sandbox_id, request)
-            confinement = _RuncConfinement(network)
+        isolated = request.network.mode is not NetworkMode.OPEN
+        # Named even for runc: a Host whose default runtime is another would run it there.
+        registered = RUNTIMES[self.runtime].registered
         memory_mb = request.resources.memory_mb
         argv = [
             "run", "-d", "--name", container,
@@ -833,34 +1053,16 @@ class DockerProvider(Provider):
             "--label", f"{MANAGED_LABEL}=true",
             "--label", f"{ROLE_LABEL}={request.role.value}",
             "--label", f"{RETENTION_LABEL}={request.retention}",
+            "--label", f"{NETWORK_LABEL}={request.network.mode.value}",
             "--cpus", str(request.resources.cpus),
             "--memory", f"{kata.memory_mb(memory_mb) if in_kata else memory_mb}m",
+            "--runtime", registered,
         ]  # fmt: skip
-        isolated = request.network.mode is not NetworkMode.OPEN
-        # Named even for runc: a Host whose default runtime is another would run it there.
-        registered = RUNTIMES[self.runtime].registered
-        argv += ["--runtime", registered]
-        if in_kata:
-            if isolated:
-                # Only to drop the guest's default route while it is sealed: what seals it
-                # is outside the VM, where the capability does not reach.
-                argv += ["--cap-add", "NET_ADMIN"]
-            if ContainerFeature.MOUNT in request.resources.container_features:
-                argv += ["--cap-add", "SYS_ADMIN"]
-        if network:
-            argv += ["--network", network]
+        if in_kata and ContainerFeature.MOUNT in request.resources.container_features:
+            argv += ["--cap-add", "SYS_ADMIN"]
         for key, value in request.env.items():
             argv += ["-e", f"{key}={value}"]
         argv += ["-e", f"{CONTAINER_VARIABLE}={request.desktop_resolution}"]
-        if request.gateway_url or request.proxy_url:
-            host_ip = await _bridge_host_ip(network)
-            argv += ["--add-host", f"{HOST_ALIAS}:{host_ip}"]
-            if request.gateway_url:
-                argv += ["-e", f"ALE_GATEWAY_URL={_sandbox_gateway(request.gateway_url)}"]
-            if request.proxy_url:
-                request = request.model_copy(
-                    update={"proxy_url": _reachable(request.proxy_url, host=host_ip)}
-                )
         if request.resources.storage_mb is not None:
             argv += _storage_run_args(request.resources.storage_mb)
         if request.resources.gpus:
@@ -877,16 +1079,31 @@ class DockerProvider(Provider):
                 selected = lease.device_keys
             argv += _gpu_run_args(selected)
             argv += ["--label", f"{GPU_LABEL}={','.join(selected)}"]
-        # The image's own command, always. A container lives exactly as long as its
-        # command, and substituting one replaces whatever the image starts for itself —
-        # for a desktop image, the entire graphical session. Images that have nothing to
-        # do declare a command that waits; that is part of the image contract, so there
-        # is nothing left here to decide.
-        argv += [resolved_image.observed_ref]
 
+        confinement: _Confinement | None = None
         clients: list[GuestClient] = []
         try:
-            code, _, stderr = await _docker(*argv, timeout=300)
+            # Its network, if it has one of its own, is created here, so that every failure
+            # from now on removes it.
+            kind = _KataConfinement if in_kata else _RuncConfinement
+            confinement = await kind.start(sandbox_id, request, self._bridge)
+            argv += confinement.run_args(isolated)
+            if request.gateway_url or request.proxy_url:
+                host_ip = confinement.host_ip
+                argv += ["--add-host", f"{HOST_ALIAS}:{host_ip}"]
+                if request.gateway_url:
+                    argv += ["-e", f"ALE_GATEWAY_URL={_sandbox_gateway(request.gateway_url)}"]
+                if request.proxy_url:
+                    request = request.model_copy(
+                        update={"proxy_url": _reachable(request.proxy_url, host=host_ip)}
+                    )
+            # The image's own command, always. A container lives exactly as long as its
+            # command, and substituting one replaces whatever the image starts for itself —
+            # for a desktop image, the entire graphical session. Images that have nothing to
+            # do declare a command that waits; that is part of the image contract, so there
+            # is nothing left here to decide.
+            argv += [resolved_image.observed_ref]
+            code, _, stderr = await _docker(*argv, timeout=_START_SEC)
             if code != 0:
                 if request.resources.storage_mb is not None:
                     raise ProviderCapabilityError(
@@ -950,9 +1167,10 @@ class DockerProvider(Provider):
         except BaseException:
             await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
             with contextlib.suppress(BaseException):
-                await asyncio.shield(_docker("rm", "-f", "-v", container))
-            with contextlib.suppress(BaseException):
-                await asyncio.shield(confinement.remove())
+                await asyncio.shield(_docker("rm", "-f", "-v", container, timeout=_REMOVE_SEC))
+            if confinement is not None:
+                with contextlib.suppress(BaseException):
+                    await asyncio.shield(confinement.remove())
             if lease:
                 lease.release()
             raise
@@ -1021,23 +1239,6 @@ class DockerProvider(Provider):
                 f"Docker started the GPU sandbox but its nvidia-smi path failed: {stderr.strip()}"
             )
         return _parse_nvidia_smi(stdout)
-
-    async def _ensure_network(self, sandbox_id: str, request: SandboxRequest) -> str | None:
-        """Create the per-episode network.
-
-        ``block`` and ``allowlist`` both use ``--internal``: the bridge has no route off
-        the host, so the only reachable thing is the gateway. They differ in what the
-        gateway will then forward, not in what the sandbox can dial — which is why
-        allowlisting needs no privileged host rules and no tooling inside an image we do
-        not control. ``open`` uses the default bridge.
-        """
-        if request.network.mode is NetworkMode.OPEN:
-            return None
-        network = f"ale-net-{sandbox_id}"
-        code, _, stderr = await _docker("network", "create", "--internal", network, timeout=60)
-        if code != 0:
-            raise ProviderStartError(f"could not create isolated network: {stderr.strip()}")
-        return network
 
     async def check_image(self, reference: str) -> list[str]:
         """What this image is missing from the sandbox contract, if anything.
@@ -1278,11 +1479,11 @@ class DockerProvider(Provider):
             for name in (record.get("NetworkSettings", {}).get("Networks", {}) or {})
             if name.startswith("ale-net-")
         )
-        code, _, stderr = await _docker("rm", "-f", "-v", container, timeout=60)
+        code, _, stderr = await _docker("rm", "-f", "-v", container, timeout=_REMOVE_SEC)
         if code != 0:
             raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
         for network in networks:
-            await _docker("network", "rm", network, timeout=30)
+            await _docker("network", "rm", network, timeout=_REMOVE_SEC)
 
     async def attach_retained(
         self,
@@ -1340,12 +1541,17 @@ class DockerProvider(Provider):
             raise ProviderCapabilityError(f"{handle!r} has more than one ALE network")
         # The container, not this run's configuration, says how it was isolated, and whether
         # it is sealed now: an allowlist agent's commands need the proxy only then.
-        isolated = request.network.mode is not NetworkMode.OPEN
-        confinement: _Confinement
-        if record.get("HostConfig", {}).get("Runtime") == kata.RUNTIME:
-            confinement = _KataConfinement(await _bridge_host_ip(None))
-        else:
-            confinement = _RuncConfinement(networks[0] if networks else None)
+        try:
+            mode = NetworkMode(labels.get(NETWORK_LABEL, ""))
+        except ValueError:
+            raise ProviderCapabilityError(f"{handle!r} records no network mode") from None
+        request = request.model_copy(
+            update={"network": request.network.model_copy(update={"mode": mode})}
+        )
+        isolated = mode is not NetworkMode.OPEN
+        in_kata = record.get("HostConfig", {}).get("Runtime") == kata.RUNTIME
+        kind = _KataConfinement if in_kata else _RuncConfinement
+        confinement = await kind.found(networks, self._bridge, labels)
         await confinement.wire(container, request, reattached=True)
         sealed = isolated and await confinement.sealed(container, attached)
         agent_user = request.user

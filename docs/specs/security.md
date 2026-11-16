@@ -22,7 +22,9 @@ framework-owned service ports.
 No route off the host is not the same as no way out: the host's own address on the
 bridge answers on every port a host service binds to all interfaces, such as sshd, a
 database, or another run's Gateway. Both backends therefore admit only the episode's own
-Gateway and proxy ports on that address. Docker applies the rule in the sandbox's network
+Gateway and proxy ports on that address, sealed or not; a sealed sandbox reaches nothing
+else, and one whose egress is open for a framework phase reaches the Host's other addresses
+as it reaches any other host. Docker applies the rule in the sandbox's network
 namespace from a short-lived helper container holding `NET_ADMIN`, a capability a runc
 sandbox never has, so not even root inside it can lift the rule; provisioning fails
 if the rule cannot be applied. QEMU drops forwarded guest traffic in the runner while the
@@ -33,8 +35,9 @@ guest.
 
 A Docker sandbox in a Kata microVM is outside the reach of netfilter rules and of networks
 attached after it boots, so the same helper confines it with tc filters on the frames
-between the VM and its veth: they seal it on the default bridge and admit only the
-episode's ports on the Host's address. Such a sandbox holds `NET_ADMIN` inside its VM, so
+between the VM and its veth: they seal it on a network of its own and admit only the
+episode's ports on the Host's address, and only from the sandbox's own addresses, since root
+in the VM may write any frame. Such a sandbox holds `NET_ADMIN` inside its VM, so
 the framework can remove its default route while it is sealed and blocked traffic fails at
 once as on runc; the filters stay outside the VM, where that capability does not reach
 ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers)).

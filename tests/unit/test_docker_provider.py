@@ -13,6 +13,7 @@ from typing import Literal, get_args
 import pytest
 
 import ale.run
+import ale.run.providers.docker.provider as docker_provider
 from ale.core.config import ProviderId
 from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
@@ -25,16 +26,18 @@ from ale.core.sandbox import (
     ResourceAllocation,
     SandboxRequest,
     SandboxRole,
+    SandboxState,
 )
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
-from ale.run.providers.docker import kata
+from ale.run import guestd
+from ale.run.providers.docker import kata, tc
 from ale.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
     RUNTIMES,
     DockerProvider,
     DockerSandbox,
-    _bridge_host_ip,
+    _DefaultBridge,
     _KataConfinement,
     _RuncConfinement,
     _sandbox_gateway,
@@ -73,17 +76,40 @@ def test_every_container_dials_the_gateway_at_the_fixed_port() -> None:
     assert _sandbox_gateway(None) is None
 
 
+#: A sandbox's addresses on its own network, ``ale-net-e1``, whose bridge holds the Host at
+#: 172.18.0.1, as a scripted docker CLI reports them.
+SANDBOX_IP, SANDBOX_MAC, BRIDGE_MAC = "172.18.0.5", "02:42:ac:12:00:05", "02:42:aa:bb:cc:01"
+PEERS = tc.Peers(host_ip="172.18.0.1", host_mac=BRIDGE_MAC, ip=SANDBOX_IP, mac=SANDBOX_MAC)
+RESOLV_CONF = "nameserver 192.0.2.53\n"
+
+
+def _scripted_reply(argv: tuple[str, ...]) -> tuple[int, str, str]:
+    """What the scripted docker CLI answers about networks, addresses and resolv.conf."""
+    if argv[:2] == ("network", "inspect"):
+        return 0, "172.18.0.1\n", ""
+    if argv[:2] == ("inspect", "--format") and "MacAddress" in argv[2]:
+        return 0, f"{SANDBOX_IP} {SANDBOX_MAC}\n", ""
+    if argv[:3] == ("run", "--rm", "--name") and argv[3].startswith("ale-mac-"):
+        return 0, f"{BRIDGE_MAC}\n", ""
+    if argv[-1] == "/etc/resolv.conf":
+        return 0, RESOLV_CONF, ""
+    return 0, "", ""
+
+
 def _scripted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
     calls: list[tuple[str, ...]] = []
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
         calls.append(argv)
-        if argv[:2] == ("network", "inspect"):
-            return 0, "172.18.0.1\n", ""
-        return 0, "", ""
+        return _scripted_reply(argv)
 
     monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     return calls
+
+
+def _helpers(calls: list[tuple[str, ...]]) -> list[list[str]]:
+    """The commands of each run of the network helper in the sandbox's namespace."""
+    return [call[-1].split(" && ") for call in calls if "container:ale-e1" in call]
 
 
 @pytest.mark.asyncio
@@ -92,10 +118,9 @@ async def test_the_fixed_port_is_routed_to_the_gateway_and_an_isolated_sandbox_c
     monkeypatch: pytest.MonkeyPatch, network: str | None
 ) -> None:
     calls = _scripted(monkeypatch)
-    await _RuncConfinement(network).wire("ale-e1", request())
-    (inspect, helper) = calls
-    assert inspect[-3] == (network or "bridge")
-    rules = helper[-1].split(" && ")
+    await _RuncConfinement(network, "172.18.0.1").wire("ale-e1", request())
+    (rules,) = _helpers(calls)
+    assert len(calls) == 1  # the Host's address was read as the sandbox started
     assert rules[2] == (
         f"iptables -w -t nat -A {GATEWAY_CHAIN} -d 172.18.0.1 -p tcp "
         f"--dport {SANDBOX_GATEWAY_PORT} -j DNAT --to-destination 172.18.0.1:41000"
@@ -112,12 +137,26 @@ async def test_the_fixed_port_is_routed_to_the_gateway_and_an_isolated_sandbox_c
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [NetworkMode.BLOCK, NetworkMode.OPEN])
+async def test_a_runc_sandbox_reads_the_hosts_address_on_its_own_network(
+    monkeypatch: pytest.MonkeyPatch, mode: NetworkMode
+) -> None:
+    calls = _scripted(monkeypatch)
+    started = await _RuncConfinement.start(
+        "e1-abcdef", request(network=NetworkPolicy(mode=mode)), _DefaultBridge()
+    )
+    assert started.host_ip == "172.18.0.1"
+    inspected = [call[2] for call in calls if call[:2] == ("network", "inspect")]
+    assert inspected == (["ale-net-e1-abcdef"] if mode is NetworkMode.BLOCK else ["bridge"])
+
+
+@pytest.mark.asyncio
 async def test_a_reattaching_run_replaces_the_gateway_route_and_adds_its_port(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _scripted(monkeypatch)
     later = request(gateway_url="http://0.0.0.0:42000")
-    await _RuncConfinement("ale-net-e1").wire("ale-e1", later, reattached=True)
+    await _RuncConfinement("ale-net-e1", "172.18.0.1").wire("ale-e1", later, reattached=True)
     rules = calls[-1][-1].split(" && ")
     assert rules[0] == (
         f"{{ iptables -w -t nat -N {GATEWAY_CHAIN} || iptables -w -t nat -F {GATEWAY_CHAIN}; }}"
@@ -133,7 +172,7 @@ async def test_an_open_sandbox_without_a_gateway_needs_no_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _scripted(monkeypatch)
-    await _RuncConfinement(None).wire("ale-e1", request(gateway_url=None))
+    await _RuncConfinement(None, "172.18.0.1").wire("ale-e1", request(gateway_url=None))
     assert calls == []
 
 
@@ -327,42 +366,167 @@ def _helper_commands(call: tuple[str, ...]) -> list[str]:
     return call[-1].split(" && ")
 
 
+def _on_own_bridge(kind: type[_KataConfinement]) -> _KataConfinement:
+    return kind(_DefaultBridge(), "ale-net-e1", "172.18.0.1", BRIDGE_MAC)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [NetworkMode.OPEN, NetworkMode.BLOCK])
+async def test_a_kata_sandbox_boots_on_a_network_of_its_own(
+    monkeypatch: pytest.MonkeyPatch, mode: NetworkMode
+) -> None:
+    """No other container shares its segment. The network is not internal, whatever the
+    Task's mode: the runtime never sees a network attached later, so egress opens through
+    this one's NAT. The Host is its gateway, whose MAC a helper on the network reads before
+    the sandbox starts, the default bridge's resolv.conf replaces Docker's embedded DNS
+    server, out of the sandbox's reach, once the sandbox is sealed, and destroying the
+    sandbox removes the network."""
+    calls = _scripted(monkeypatch)
+    wanted = request(network=NetworkPolicy(mode=mode))
+    confinement = await _KataConfinement.start("e1-abcdef", wanted, _DefaultBridge())
+    network = "ale-net-e1-abcdef"
+    assert calls[:2] == [
+        ("network", "create", network),
+        ("network", "inspect", network, "--format", "{{(index .IPAM.Config 0).Gateway}}"),
+    ]
+    # On the network itself, removed by name before the sandbox starts there.
+    (helper,) = [call for call in calls if call[0] == "run"]
+    name = helper[helper.index("--name") + 1]
+    assert helper[helper.index("--network") + 1] == network and helper[-1] == "172.18.0.1"
+    assert calls[-1] == ("rm", "-f", name)
+    assert confinement.host_ip == "172.18.0.1" and confinement.host_mac == BRIDGE_MAC
+    assert confinement.run_args(mode is not NetworkMode.OPEN)[:4] == [
+        "--network", network, "--label", f"ale.bridge-mac={BRIDGE_MAC}"
+    ]  # fmt: skip
+    calls.clear()
+    await confinement.wire("ale-e1", wanted)
+    assert await confinement.peers("ale-e1") == PEERS
+    (address,) = [call for call in calls if call[0] == "inspect"]
+    assert f'index .NetworkSettings.Networks "{network}"' in address[2]
+    assert not [call for call in calls if call[:2] == ("run", "--rm") and "--name" in call]
+    (resolved,) = [call for call in calls if call[:3] == ("exec", "-u", "0")]
+    assert resolved[3:7] == ("ale-e1", guestd.PYTHON["linux"], "-I", "-c")
+    assert resolved[-1] == RESOLV_CONF
+    if mode is not NetworkMode.OPEN:
+        # Sealed first: nothing but the seal's own helper runs between the start and it.
+        sealing = [index for index, call in enumerate(calls) if "container:ale-e1" in call]
+        assert sealing and sealing[0] < calls.index(resolved)
+    read = [call for call in calls if call[-1] == "/etc/resolv.conf"]
+    assert read == [
+        (
+            "run", "--rm", "--runtime", "runc", "--network", "bridge", "--entrypoint", "cat",
+            docker_provider.NETFILTER_IMAGE, "/etc/resolv.conf",
+        )
+    ]  # fmt: skip
+    calls.clear()
+    await confinement.wire("ale-e1", wanted, reattached=True)
+    assert not [call for call in calls if call[:3] == ("exec", "-u", "0")]
+    sandbox = _sandbox()
+    sandbox.confinement = confinement
+    sandbox.state = SandboxState.READY
+    sandbox._resource_lease = None
+    calls.clear()
+    await sandbox.destroy()
+    assert calls == [("rm", "-f", "-v", "ale-e1-abcdef"), ("network", "rm", network)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "read"),
+    [
+        ((0, f"{BRIDGE_MAC}\n", ""), BRIDGE_MAC),
+        ((0, "\n", ""), None),
+        ((1, "", "no neighbour entry for 172.18.0.1"), None),
+        (ProviderStartError("docker run timed out after 60s"), None),
+    ],
+)
+async def test_the_bridges_mac_is_read_on_the_network_by_a_helper_gone_before_it_returns(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: tuple[int, str, str] | ProviderStartError,
+    read: str | None,
+) -> None:
+    """Not from the bridge's device, which a helper on ``--network host`` cannot see under
+    rootless Docker with a detached network namespace: a runc helper on the network resolves
+    the Host's address there, and is removed by name whatever came of it."""
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[0] == "run":
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+        return 1, "", "No such container"
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    if read is None:
+        with pytest.raises(ProviderStartError, match=r"ale-net-e1's bridge|timed out"):
+            await docker_provider._bridge_mac("ale-net-e1", "172.18.0.1")
+    else:
+        assert await docker_provider._bridge_mac("ale-net-e1", "172.18.0.1") == read
+    run, removed = calls
+    name = run[run.index("--name") + 1]
+    assert run[:4] == ("run", "--rm", "--name", name) and name.startswith("ale-mac-")
+    assert run[4:12] == (
+        "--runtime", "runc", "--network", "ale-net-e1", "--entrypoint", "bash",
+        docker_provider.NETFILTER_IMAGE, "-c",
+    )  # fmt: skip
+    assert run[12:] == (docker_provider._NEIGHBOUR_MAC, "bash", "172.18.0.1")
+    assert removed == ("rm", "-f", name)
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_that_records_no_bridge_mac_is_not_reattached() -> None:
+    """A helper on its network would be its neighbour, so the MAC comes from its label."""
+    with pytest.raises(ProviderCapabilityError, match="records no MAC"):
+        await _KataConfinement.found(("ale-net-e1",), _DefaultBridge(), {})
+
+
+REPLACE = "tc filter replace dev"
+
+
 @pytest.mark.asyncio
 async def test_a_kata_sandbox_is_confined_by_tc_filters_outside_its_vm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Kata passes frames between the VM and its veth with tc, past netfilter, so the
-    Gateway port is rewritten both ways and an isolated sandbox starts sealed in tc."""
+    Gateway port is rewritten both ways and an isolated sandbox starts sealed in tc. Root in
+    the VM writes any frame, so a frame passes to the Host only from the sandbox's own
+    addresses to the bridge's, and one passes to the VM only from the bridge's MAC and
+    address to the sandbox's."""
     calls = _scripted(monkeypatch)
-    proxied = request(network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("a.b",)))
-    proxied = proxied.model_copy(update={"proxy_url": "http://172.18.0.1:9443"})
-    host = await _bridge_host_ip(None)
-    await _KataConfinement(host).wire("ale-e1", proxied)
-    assert host == "172.18.0.1"
-    (inspect, helper) = calls
-    assert inspect[-3] == "bridge"
-    filters = _helper_commands(helper)
-    tap, veth = kata.TAP, kata.VETH
-    assert (
-        f"tc filter add dev {tap} ingress pref 10 protocol ip flower dst_ip {host} ip_proto tcp "
+    proxied = request(
+        network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("a.b",)),
+        proxy_url="http://172.18.0.1:9443",
+    )
+    await _on_own_bridge(_KataConfinement).wire("ale-e1", proxied)
+    (filters,) = _helpers(calls)
+    tap, veth, host = kata.TAP, kata.VETH, "172.18.0.1"
+    assert filters == [
+        f"test -e /sys/class/net/{tap}",
+        f"test -e /sys/class/net/{veth}",
+        f"{REPLACE} {tap} ingress pref 12 handle 1 protocol ip flower dst_ip {host} action drop",
+        f"{REPLACE} {tap} ingress pref 20 handle 1 protocol arp flower src_mac {SANDBOX_MAC} "
+        f"arp_sip {SANDBOX_IP} arp_sha {SANDBOX_MAC} arp_tip {host} "
+        f"action mirred egress redirect dev {veth}",
+        f"{REPLACE} {tap} ingress pref 21 handle 1 protocol all flower action drop",
+        f"{REPLACE} {veth} ingress pref 20 handle 1 protocol ip flower src_mac {BRIDGE_MAC} "
+        f"dst_mac {SANDBOX_MAC} src_ip {host} action mirred egress redirect dev {tap}",
+        f"{REPLACE} {veth} ingress pref 21 handle 1 protocol arp flower src_mac {BRIDGE_MAC} "
+        f"arp_sip {host} arp_sha {BRIDGE_MAC} action mirred egress redirect dev {tap}",
+        f"{REPLACE} {veth} ingress pref 22 handle 1 protocol all flower action drop",
+        f"{REPLACE} {tap} ingress pref 10 handle 1 protocol ip flower src_mac {SANDBOX_MAC} "
+        f"dst_mac {BRIDGE_MAC} src_ip {SANDBOX_IP} dst_ip {host} ip_proto tcp "
         f"dst_port {SANDBOX_GATEWAY_PORT} action pedit ex munge tcp dport set 41000 pipe "
-        f"action csum tcp pipe action mirred egress redirect dev {veth}"
-    ) in filters
-    assert (
-        f"tc filter add dev {veth} ingress pref 10 protocol ip flower src_ip {host} ip_proto tcp "
-        f"src_port 41000 action pedit ex munge tcp sport set {SANDBOX_GATEWAY_PORT} pipe "
-        f"action csum tcp pipe action mirred egress redirect dev {tap}"
-    ) in filters
-    assert any("pref 11" in item and "dst_port 9443" in item for item in filters)
-    # The Host's other ports and everything else are dropped, the seal before the Gateway.
-    host_drop = filters.index(
-        f"tc filter add dev {tap} ingress pref 12 protocol ip flower dst_ip {host} action drop"
-    )
-    seal = filters.index(
-        f"tc filter add dev {tap} ingress pref 21 protocol all matchall action drop"
-    )
-    assert host_drop < seal < next(i for i, item in enumerate(filters) if "pref 10" in item)
-    assert f"tc filter add dev {veth} ingress pref 22 protocol all matchall action drop" in filters
+        f"action csum tcp pipe action mirred egress redirect dev {veth}",
+        f"{REPLACE} {veth} ingress pref 10 handle 1 protocol ip flower src_mac {BRIDGE_MAC} "
+        f"dst_mac {SANDBOX_MAC} src_ip {host} ip_proto tcp src_port 41000 "
+        f"action pedit ex munge tcp sport set {SANDBOX_GATEWAY_PORT} pipe "
+        f"action csum tcp pipe action mirred egress redirect dev {tap}",
+        f"{REPLACE} {tap} ingress pref 11 handle 1 protocol ip flower src_mac {SANDBOX_MAC} "
+        f"dst_mac {BRIDGE_MAC} src_ip {SANDBOX_IP} dst_ip {host} ip_proto tcp dst_port 9443 "
+        f"action mirred egress redirect dev {veth}",
+    ]
 
 
 @pytest.mark.asyncio
@@ -370,29 +534,30 @@ async def test_an_open_kata_sandbox_gets_only_the_gateway_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _scripted(monkeypatch)
-    await _KataConfinement("172.18.0.1").wire(
+    await _on_own_bridge(_KataConfinement).wire(
         "ale-e1", request(network=NetworkPolicy(mode=NetworkMode.OPEN))
     )
-    filters = _helper_commands(calls[-1])
-    assert [item for item in filters if " add " in item] == [
-        item for item in filters if " add " in item and "pref 10" in item
-    ]
-    assert len([item for item in filters if " add " in item]) == 2
+    (filters,) = _helpers(calls)
+    put = [item for item in filters if item.startswith(REPLACE)]
+    assert len(put) == 2 and all(" pref 10 " in item for item in put)
 
 
 @pytest.mark.asyncio
 async def test_a_reattaching_run_replaces_only_the_kata_gateway_filters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The seal and the Host's drop stay as the container has them; a proxy filter the
+    blocked sandbox no longer has goes."""
     calls = _scripted(monkeypatch)
     later = request(gateway_url="http://0.0.0.0:42000")
-    await _KataConfinement("172.18.0.1").wire("ale-e1", later, reattached=True)
-    filters = _helper_commands(calls[-1])
-    added = [item for item in filters if " add " in item]
-    assert all("pref 10" in item for item in added) and len(added) == 2
-    assert any("dport set 42000" in item for item in added)
-    removed = [item for item in filters if " del " in item]
-    assert {item.split(" pref ")[1].split()[0] for item in removed} == {"10", "11"}
+    await _on_own_bridge(_KataConfinement).wire("ale-e1", later, reattached=True)
+    (filters,) = _helpers(calls)
+    put = [item for item in filters if item.startswith(REPLACE)]
+    assert all(" pref 10 " in item for item in put) and len(put) == 2
+    assert any("dport set 42000" in item for item in put)
+    assert [item for item in filters if " del " in item] == [
+        f"{{ tc filter del dev {kata.TAP} ingress pref 11 2>/dev/null || true; }}"
+    ]
 
 
 @pytest.mark.asyncio
@@ -400,7 +565,8 @@ async def test_a_kata_sandbox_opens_and_seals_egress_with_its_tc_filters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The filters seal it; the guest's default route goes too, so what they drop fails at
-    once rather than after a timeout, and comes back only once the filters are gone."""
+    once rather than after a timeout, and comes back only once the filters are gone.
+    Sealing again replaces the filters in place, never taking the drop away first."""
     calls = _scripted(monkeypatch)
     order: list[str] = []
 
@@ -410,20 +576,27 @@ async def test_a_kata_sandbox_opens_and_seals_egress_with_its_tc_filters(
 
     sandbox = _sandbox()
     sandbox.container = "ale-e1"
-    sandbox.confinement = _KataConfinement("172.17.0.1")
+    sandbox.confinement = _on_own_bridge(_KataConfinement)
     sandbox._sealed = False
     sandbox._client = SimpleNamespace(exec=guest_exec)  # type: ignore[assignment]
     await sandbox.open_egress()
     opened = _helper_commands(calls[-1])
-    assert not [item for item in opened if " add " in item]
+    assert not [item for item in opened if item.startswith(REPLACE)]
     assert opened[-1] == f'test -z "$(tc filter show dev {kata.VETH} ingress pref 22)"'
     order.append("helper")
     await sandbox.close_egress()
     sealed = _helper_commands(calls[-1])
-    assert sealed[-1].endswith("pref 22 protocol all matchall action drop")
+    assert sealed == kata.seal(PEERS)
     assert sandbox._sealed
     assert order == ["route add", "helper", "route del"]
-    assert not [call for call in calls if call[0] == "network"]
+    assert not [call for call in calls if call[:2] == ("network", "connect")]
+
+
+def test_the_seal_probe_reads_the_drop_the_seal_puts_in_place() -> None:
+    first_drop = next(item for item in kata.seal(PEERS) if item.endswith(tc.DROP_ALL))
+    words = first_drop.split()
+    device, hook, pref = words[words.index("dev") + 1], words[5], words[words.index("pref") + 1]
+    assert f"tc filter show dev {device} {hook} pref {pref}" == kata.SEAL_PROBE
 
 
 @pytest.mark.asyncio
@@ -620,7 +793,7 @@ async def test_an_allowlist_seal_relays_the_agent_once_the_container_is_confined
     sandbox.allocation = sandbox.allocation.model_copy(
         update={"desktop_resolution": DesktopResolution() if desktop else None}
     )
-    sandbox.confinement = _RuncConfinement("ale-net-e1")
+    sandbox.confinement = _RuncConfinement("ale-net-e1", "172.18.0.1")
     sandbox._sealed = False
     sandbox._client = SimpleNamespace(exec=guest_exec, egress_relay=egress_relay)  # type: ignore[assignment]
 
@@ -643,38 +816,48 @@ async def test_an_allowlist_seal_relays_the_agent_once_the_container_is_confined
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("mode", "in_kata", "networks", "drop", "sealed"),
+    ("mode", "runtime", "networks", "drop", "sealed"),
     [
-        (NetworkMode.ALLOWLIST, False, ("ale-net-e1",), False, True),
-        (NetworkMode.ALLOWLIST, False, ("ale-net-e1", "bridge"), False, False),
-        (NetworkMode.OPEN, False, ("bridge",), False, False),
-        (NetworkMode.ALLOWLIST, True, ("bridge",), True, True),
-        (NetworkMode.ALLOWLIST, True, ("bridge",), False, False),
-        (NetworkMode.OPEN, True, ("bridge",), True, False),
+        (NetworkMode.ALLOWLIST, "runc", ("ale-net-e1",), False, True),
+        (NetworkMode.ALLOWLIST, "runc", ("ale-net-e1", "bridge"), False, False),
+        (NetworkMode.OPEN, "runc", ("bridge",), False, False),
+        (NetworkMode.ALLOWLIST, kata.RUNTIME, ("ale-net-e1",), True, True),
+        (NetworkMode.ALLOWLIST, kata.RUNTIME, ("ale-net-e1",), False, False),
+        (NetworkMode.OPEN, kata.RUNTIME, ("ale-net-e1",), True, False),
     ],
 )
+@pytest.mark.parametrize("asked", ["same", "open"])
 async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     monkeypatch: pytest.MonkeyPatch,
     mode: NetworkMode,
-    in_kata: bool,
+    runtime: str,
     networks: tuple[str, ...],
     drop: bool,
     sealed: bool,
+    asked: str,
 ) -> None:
     """An allowlist agent's commands get the proxy only while the Sandbox is sealed, which
     the container says, not the process driving it again: off the default bridge under runc,
-    with the seal's drop filter on the VM's tap under Kata."""
+    with the seal's drop filter on the VM's tap under Kata. Its own network mode, which it
+    was started with, decides how it is confined, whatever the reattaching run asks."""
     record = {
         "Name": "/ale-e1",
         "Image": DIGEST,
-        "Config": {"Labels": {"ale.managed": "true", "ale.role": "solver"}},
+        "Config": {
+            "Labels": {
+                "ale.managed": "true",
+                "ale.role": "solver",
+                "ale.network": mode.value,
+                "ale.bridge-mac": BRIDGE_MAC,
+            }
+        },
         "State": {"Running": True},
-        "HostConfig": {"Runtime": kata.RUNTIME if in_kata else "runc"},
+        "HostConfig": {"Runtime": runtime},
         "NetworkSettings": {"Networks": {name: {} for name in networks}},
     }
     dropping = (  # as the helper image's tc (iproute2 6.15) shows it
-        "filter protocol all matchall chain 0 \n"
-        "filter protocol all matchall chain 0 handle 0x1 \n"
+        "filter protocol all flower chain 0 \n"
+        "filter protocol all flower chain 0 handle 0x1 \n"
         "  not_in_hw\n"
         "\taction order 1: gact action drop\n"
     )
@@ -683,13 +866,17 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
         calls.append(argv)
-        if argv[0] == "inspect":
+        if argv[0] == "inspect" and "MacAddress" not in " ".join(argv):
             return 0, json.dumps([record]), ""
-        if argv[:2] == ("network", "inspect"):
-            return 0, "172.17.0.1\n", ""
+        if (
+            argv[0] == "run"
+            and "--network" in argv
+            and argv[argv.index("--network") + 1] != ("container:ale-e1")
+        ):
+            raise AssertionError(f"a helper joined the running sandbox's network: {argv}")
         if argv[-1].startswith("tc filter show"):
             return 0, dropping if drop else "", ""
-        return 0, "", ""
+        return _scripted_reply(argv)
 
     async def guest_exec(argv: list[str], **kwargs: object) -> tuple[int, str, str, bool]:
         seen.append(kwargs.get("env"))  # type: ignore[arg-type]
@@ -718,6 +905,8 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
         if mode is NetworkMode.ALLOWLIST
         else NetworkPolicy(mode=mode)
     )
+    if asked == "open":
+        network = NetworkPolicy(mode=NetworkMode.OPEN)
     wanted = request(network=network, proxy_url="http://0.0.0.0:9443")
     allocation = ResourceAllocation(
         cpus=1,
@@ -736,11 +925,38 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     # The guestd that relayed the run which sealed it is gone; this run relays from its own.
     assert relays == ([f"http://{HOST_ALIAS}:9443"] if sealed else [])
     assert seen[-1] is None or seen[-1]["HTTPS_PROXY"] == "http://127.0.0.1:41999"
+    # The seal is read once, by the helper.
     read = [call[-1] for call in calls if call[-1].startswith("tc filter show")]
     isolated = mode is not NetworkMode.OPEN
-    assert read == (
-        [f"tc filter show dev {kata.TAP} ingress pref 21"] if in_kata and isolated else []
+    assert read == ([kata.SEAL_PROBE] if isolated and runtime == kata.RUNTIME else [])
+
+
+@pytest.mark.asyncio
+async def test_a_container_that_records_no_network_mode_is_not_reattached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = {
+        "Name": "/ale-e1",
+        "Image": DIGEST,
+        "Config": {"Labels": {"ale.managed": "true", "ale.role": "solver"}},
+        "State": {"Running": True},
+        "HostConfig": {"Runtime": "runc"},
+        "NetworkSettings": {"Networks": {"bridge": {}}},
+    }
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        return 0, json.dumps([record]), ""
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    allocation = ResourceAllocation(
+        cpus=1, memory_mb=1024, sudo=False, network_mode=NetworkMode.BLOCK,
+        provider="docker:runc", leaf="docker:runc",
+    )  # fmt: skip
+    image = ResolvedImage(
+        kind="container", prepared_identity=DIGEST, observed_identity=DIGEST, observed_ref=DIGEST
     )
+    with pytest.raises(ProviderCapabilityError, match="records no network mode"):
+        await DockerProvider().reattach("docker:ale-e1", request(), allocation, image)
 
 
 @pytest.mark.asyncio
@@ -886,15 +1102,15 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     features: tuple[ContainerFeature, ...],
     granted: list[str],
 ) -> None:
+    """Its network mode recorded, and, under Kata, a network of its own, which goes again
+    when the Sandbox does not start."""
     calls: list[tuple[str, ...]] = []
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
         calls.append(argv)
-        if argv[:2] == ("network", "inspect"):
-            return 0, "172.17.0.1\n", ""
-        if argv[0] == "run":
+        if argv[:2] == ("run", "-d"):
             return 1, "", "stopped after the flags were read"
-        return 0, "", ""
+        return _scripted_reply(argv)
 
     image = ResolvedImage(
         kind="container",
@@ -925,11 +1141,103 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     )
     with pytest.raises(ProviderStartError, match="stopped after the flags were read"):
         await provider.create(asked)
-    (run,) = [call for call in calls if call[0] == "run"]
+    (run,) = [call for call in calls if call[:2] == ("run", "-d")]
     assert [run[index + 1] for index, flag in enumerate(run) if flag == "--cap-add"] == granted
     # Named even for runc, so a Host's default runtime never stands in for the leaf's.
     pinned = [run[index + 1] for index, flag in enumerate(run) if flag == "--runtime"]
     assert pinned == ["runc" if runtime == "runc" else kata.RUNTIME]
+    created = [call[2:] for call in calls if call[:2] == ("network", "create")]
+    if runtime == "runc":
+        assert "--network" not in run and created == []
+    else:
+        (network,) = [run[index + 1] for index, flag in enumerate(run) if flag == "--network"]
+        assert network.startswith("ale-net-e1-") and created == [(network,)]
+        assert calls[-1] == ("network", "rm", network)
+    assert "ale.network=open" in run
+    # The Host's address is read once, for the sandbox's confinement and its Gateway alias.
+    gateway = [call for call in calls if call[:2] == ("network", "inspect") and "IPAM" in call[-1]]
+    assert len(gateway) == 1
+    assert run[run.index("--add-host") + 1] == f"{HOST_ALIAS}:172.18.0.1"
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_whose_gpus_cannot_be_leased_leaves_no_network_behind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Docker's default address pools hold about 31 networks, so a failed start must not
+    keep the one it made."""
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[0] == "ps":
+            return 0, "GPU-0,GPU-1\n", ""  # both held by other sandboxes
+        return _scripted_reply(argv)
+
+    async def host_gpus(_provider: DockerProvider) -> dict[int, GpuDevice]:
+        return {
+            index: GpuDevice(id=f"GPU-{index}", model="NVIDIA H100", driver_version="570.1")
+            for index in (0, 1)
+        }
+
+    async def resolved(_prepared: PreparedTaskImage) -> ResolvedImage:
+        return ResolvedImage(
+            kind="container",
+            prepared_identity=DIGEST,
+            observed_identity=DIGEST,
+            observed_ref="image@" + DIGEST,
+        )
+
+    async def no_problems(_reference: str) -> list[str]:
+        return []
+
+    async def framed(found: ResolvedImage, _request: SandboxRequest) -> ResolvedImage:
+        return found
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr(
+        "ale.run.providers.docker.provider.resolve_prepared_container_image", resolved
+    )
+    monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
+    provider = DockerProvider(gpu_lock_dir=tmp_path)
+    monkeypatch.setattr(provider, "check_image", no_problems)
+    monkeypatch.setattr(provider, "_framed", framed)
+    with pytest.raises(ProviderCapabilityError, match="GPUs"):
+        await provider.create(request(resources=Resources(gpus=1)))
+    created = [call[-1] for call in calls if call[:2] == ("network", "create")]
+    removed = [call[-1] for call in calls if call[:2] == ("network", "rm")]
+    assert created == removed
+    assert not [call for call in calls if call[:2] == ("run", "-d")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "unread"),
+    [
+        (_RuncConfinement, "Gateway"),
+        (_KataConfinement, "Gateway"),
+        (_KataConfinement, "172.18.0.1"),
+    ],
+)
+async def test_a_network_whose_facts_cannot_be_read_is_removed_again(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: type[_RuncConfinement] | type[_KataConfinement],
+    unread: str,
+) -> None:
+    """The Host's address on it, or its bridge's MAC."""
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if unread in argv[-1]:
+            return 1, "", "the daemon went away"
+        return _scripted_reply(argv)
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    with pytest.raises(ProviderStartError, match="the daemon went away"):
+        await kind.start("e1-abcdef", request(), _DefaultBridge())
+    assert calls[0][:2] == ("network", "create")
+    assert calls[-1] == ("network", "rm", "ale-net-e1-abcdef")
 
 
 @pytest.mark.asyncio

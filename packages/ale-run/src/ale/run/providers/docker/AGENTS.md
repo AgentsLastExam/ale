@@ -80,6 +80,54 @@ that capability stays inside the guest.
 - Kata grants `CAP_SYS_ADMIN` only on request, so a Sandbox has no privilege its Task did
   not name, even inside its own VM.
 
+## A Kata sandbox's neighbours and DNS
+
+**Problem.** On Docker's default bridge, a container with raw sockets wrote frames as the
+Host, from the bridge's MAC and the Host's address, that reached a Kata sandbox's veth, 20
+of 20, and a sealed Kata VM's filters passed them (November 2026). On any network but the
+default bridge, a name lookup in the VM failed.
+
+**Context.** A Linux bridge forwards a frame from any port whatever its source MAC, so in
+a sandbox's namespace nothing tells such a frame from the Host's. A Kata VM sees no network
+attached after it boots, so it cannot move from an internal network to one with a route off
+the Host when its egress opens, as a runc sandbox does. Off the default bridge, Docker
+names its embedded DNS server, `127.0.0.11`, which it serves through netfilter in the
+sandbox's namespace, out of reach of a VM's guest.
+
+**Solution.** Every Kata Sandbox, an `open` Task's included, boots on a bridge network of
+its own, `ale-net-<sandbox id>`, which no other container joins and which goes with the
+Sandbox: frames another container writes as the Host never reach it (measured). As the
+Sandbox starts, the Provider writes over its `/etc/resolv.conf` the one Docker gives a
+container on the default bridge, which names the Host's upstream servers.
+
+**Decisions.**
+- Not internal: opening egress removes the seal, so the sandbox leaves through this
+  network's NAT; while sealed, the filters drop everything but the Host's ports.
+- No rules on the Host's bridge instead: dropping what the bridge forwards between its
+  ports needs `NET_ADMIN` in the Host's namespace, or the rootless daemon's, and leaves
+  state there that a crashed run does not remove; a network of its own needs only Docker.
+- The filters still pin both directions to the sandbox's and the Host's addresses: root in
+  the sandbox forges nothing toward the Host.
+- The filters that pass frames to the Host match the sandbox's own MAC and address and the
+  bridge's MAC, and the ARP filter the sandbox's own ARP for the Host: in a Kata VM, whose
+  root writes any frame, a frame to another MAC and an ARP reply claiming another address
+  passed filters matching only the Host's address and port (measured, November 2026).
+  `tc.py` builds them.
+- Kata's filters toward the VM match the bridge's MAC and the Host's address, IP frames the
+  sandbox's MAC too, which the guest takes from the veth; ARP's destination stays open,
+  since the Host's requests are broadcast.
+- Each filter is put with `tc filter replace`, the drops as flower filters with no key,
+  which tc replaces in place where it cannot replace a matchall: sealing a sealed sandbox
+  never takes its drop away first.
+- `resolv.conf` is written in place by `docker exec` rather than bind-mounted: the file
+  stays the container's own and writable, as Docker's is, with nothing to keep on the Host.
+- The bridge's MAC, which the filters match, is read by a runc helper on the new network,
+  which resolves the Host's address there and is removed before the sandbox starts, and is
+  kept in a label for a reattaching run. A helper on `--network host` sees no bridge device
+  under rootless Docker whose network namespace rootlesskit detaches (`--detach-netns`,
+  `dockerd-rootless.sh`'s default; November 2026), and a helper on a running sandbox's
+  network would be its neighbour.
+
 ## A Docker sandbox's death
 
 **Problem.** When a sandbox died, its guestd session ended as a lost session, which said

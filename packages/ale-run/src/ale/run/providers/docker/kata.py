@@ -3,9 +3,9 @@
 Kata starts each container as a QEMU microVM with a guest kernel of its own. The VM takes
 its networks at boot and sees none attached later, and Kata passes every frame between
 the VM's tap and the container's veth with tc filters, past the namespace's netfilter. So
-a Kata sandbox stays on the default bridge, and tc filters in its network namespace,
-outside the VM, route its Gateway and seal it. This module builds those filters and the
-VM's size; the Provider applies them.
+a Kata sandbox boots on a bridge network of its own, which is not internal, and tc filters
+in its network namespace, outside the VM, route its Gateway and seal it. This module builds
+those filters and the VM's size; the Provider applies them.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 from ale.core.errors import ProviderStartError
 from ale.core.sandbox import SANDBOX_GATEWAY_PORT
 from ale.run import guestd
+from ale.run.providers.docker import tc
 from ale.run.transport import GuestClient
 
 __all__ = [
@@ -42,7 +43,7 @@ _HOST_PREF = 12
 #: The seal's drop filter on the VM's tap, whose presence says a sandbox is sealed, and
 #: the tc command that shows it.
 _SEAL_DROP_PREF = 21
-SEAL_PROBE = f"tc filter show dev {TAP} ingress pref {_SEAL_DROP_PREF}"
+SEAL_PROBE = tc.show(TAP, "ingress", _SEAL_DROP_PREF)
 
 
 def memory_mb(memory_mb: int) -> int:
@@ -55,7 +56,7 @@ def memory_mb(memory_mb: int) -> int:
 
 
 def filters(
-    host_ip: str,
+    peers: tc.Peers,
     *,
     gateway_port: str,
     proxy_port: str,
@@ -65,84 +66,85 @@ def filters(
     """The tc commands that give a Kata sandbox what netfilter gives a runc one.
 
     They act on frames between the VM and its veth, in the namespace the helper joins,
-    outside the guest: root in the VM cannot lift them. The fixed Gateway port is
-    rewritten to the Host's in both directions. An isolated sandbox reaches no other port
-    of the Host's address and starts sealed. A reattaching run replaces only the Gateway
-    and proxy filters, so the Host stays confined while it does.
+    outside the guest: root in the VM, which can write any frame, cannot lift them, and only
+    frames between the sandbox's own addresses and the Host's pass them. The fixed Gateway
+    port is rewritten to the Host's in both directions. An isolated sandbox reaches no other
+    port of the Host's address and starts sealed. A reattaching run replaces only the
+    Gateway and proxy filters, so the Host stays confined while it does.
     """
+    host_ip = peers.host_ip
     commands = [f"test -e /sys/class/net/{TAP}", f"test -e /sys/class/net/{VETH}"]
-    if reattached:
-        commands += [
-            f"{{ tc filter del dev {device} ingress pref {pref} 2>/dev/null || true; }}"
-            for device in (TAP, VETH)
-            for pref in (_GATEWAY_PREF, _PROXY_PREF)
-        ]
-    elif isolated:
-        commands += [
-            f"tc filter add dev {TAP} ingress pref {_HOST_PREF} protocol ip "
-            f"flower dst_ip {host_ip} action drop",
-            *seal(host_ip),
-        ]
+    if isolated and not reattached:
+        drop = f"protocol ip flower dst_ip {host_ip} action drop"
+        commands += [*tc.replace([(TAP, "ingress", _HOST_PREF, drop)]), *seal(peers)]
+    passed: list[tc.Filter] = []
+    gone: list[tc.Filter] = []
     if gateway_port:
         rewrite = "action pedit ex munge tcp {field} set {port} pipe action csum tcp pipe"
-        commands += [
-            f"tc filter add dev {TAP} ingress pref {_GATEWAY_PREF} protocol ip flower "
-            f"dst_ip {host_ip} ip_proto tcp dst_port {SANDBOX_GATEWAY_PORT} "
-            + rewrite.format(field="dport", port=gateway_port)
-            + f" action mirred egress redirect dev {VETH}",
-            f"tc filter add dev {VETH} ingress pref {_GATEWAY_PREF} protocol ip flower "
-            f"src_ip {host_ip} ip_proto tcp src_port {gateway_port} "
-            + rewrite.format(field="sport", port=SANDBOX_GATEWAY_PORT)
-            + f" action mirred egress redirect dev {TAP}",
+        passed += [
+            (
+                TAP,
+                "ingress",
+                _GATEWAY_PREF,
+                f"protocol ip flower {peers.to_host} ip_proto tcp "
+                f"dst_port {SANDBOX_GATEWAY_PORT} "
+                + rewrite.format(field="dport", port=gateway_port)
+                + f" action mirred egress redirect dev {VETH}",
+            ),
+            (
+                VETH,
+                "ingress",
+                _GATEWAY_PREF,
+                f"protocol ip flower {peers.from_host} ip_proto tcp src_port {gateway_port} "
+                + rewrite.format(field="sport", port=SANDBOX_GATEWAY_PORT)
+                + f" action mirred egress redirect dev {TAP}",
+            ),
         ]
+    else:
+        gone += [(device, "ingress", _GATEWAY_PREF, "") for device in (TAP, VETH)]
     if proxy_port and isolated:
-        commands.append(
-            f"tc filter add dev {TAP} ingress pref {_PROXY_PREF} protocol ip flower "
-            f"dst_ip {host_ip} ip_proto tcp dst_port {proxy_port} "
-            f"action mirred egress redirect dev {VETH}"
+        passed.append(
+            (
+                TAP,
+                "ingress",
+                _PROXY_PREF,
+                f"protocol ip flower {peers.to_host} ip_proto tcp dst_port {proxy_port} "
+                f"action mirred egress redirect dev {VETH}",
+            )
         )
-    return commands
+    else:
+        gone.append((TAP, "ingress", _PROXY_PREF, ""))
+    return commands + (tc.delete(gone) if reattached else []) + tc.replace(passed)
 
 
-def _seal_filters(host_ip: str) -> list[tuple[str, int, str]]:
-    """Device, preference and filter that pass a sealed Kata sandbox only the Host's frames.
+def _seal_filters(peers: tc.Peers) -> list[tc.Filter]:
+    """The filters that pass a sealed Kata sandbox only its own frames to the Host's
+    address and the Host's frames to it, from the bridge's MAC and address.
 
-    The Host's ARP passes too, so the guest keeps resolving its address; nothing else does,
-    IPv6 included. The Gateway and proxy filters run first and take their own frames.
+    Its own ARP for the Host's address passes too, so the guest keeps resolving it, and the
+    Host's own ARP; nothing else does, IPv6 included. The Gateway and proxy filters run
+    first and take their own frames.
     """
     to_veth = f"action mirred egress redirect dev {VETH}"
     to_tap = f"action mirred egress redirect dev {TAP}"
     return [
-        (TAP, 20, f"protocol arp flower arp_tip {host_ip} {to_veth}"),
-        (TAP, _SEAL_DROP_PREF, "protocol all matchall action drop"),
-        (VETH, 20, f"protocol ip flower src_ip {host_ip} {to_tap}"),
-        (VETH, 21, f"protocol arp flower arp_sip {host_ip} {to_tap}"),
-        (VETH, 22, "protocol all matchall action drop"),
+        (TAP, "ingress", 20, f"protocol arp flower {peers.arp} {to_veth}"),
+        (TAP, "ingress", _SEAL_DROP_PREF, tc.DROP_ALL),
+        (VETH, "ingress", 20, f"protocol ip flower {peers.from_host} {to_tap}"),
+        (VETH, "ingress", 21, f"protocol arp flower {peers.host_arp} {to_tap}"),
+        (VETH, "ingress", 22, tc.DROP_ALL),
     ]
 
 
-def seal(host_ip: str) -> list[str]:
-    return [
-        f"tc filter add dev {device} ingress pref {pref} {spec}"
-        for device, pref, spec in _seal_filters(host_ip)
-    ]
+def seal(peers: tc.Peers) -> list[str]:
+    """Seal it, or keep it sealed: each filter replaces its like, so sealing a sandbox that
+    is sealed never leaves it without its drops."""
+    return tc.replace(_seal_filters(peers))
 
 
-def unseal(host_ip: str) -> list[str]:
-    """Remove the seal, then check that no drop filter is left: an unsealed sandbox that
-    still had one would fail its framework phase for want of a network it was promised."""
-    sealing = _seal_filters(host_ip)
-    return [
-        *(
-            f"{{ tc filter del dev {device} ingress pref {pref} 2>/dev/null || true; }}"
-            for device, pref, _ in sealing
-        ),
-        *(
-            f'test -z "$(tc filter show dev {device} ingress pref {pref})"'
-            for device, pref, spec in sealing
-            if spec.endswith("action drop")
-        ),
-    ]
+def unseal(peers: tc.Peers) -> list[str]:
+    """Remove the seal, then check that no drop filter is left."""
+    return tc.remove(_seal_filters(peers))
 
 
 #: Run as root on the framework's Python in a Kata guest: ``del`` removes its default route,

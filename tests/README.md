@@ -17,10 +17,12 @@ just lint             # formatting, lint and import boundaries
 
 `just test-int` and CI's container backend run four test files at a time
 (`pytest -n 4 --dist loadfile`), so an integration test neither relies on what another file
-leaves behind nor assumes it is the only run on the host. Every runc Docker sandbox whose
-network is not `open` gets a network of its own, and Docker's default address pools hold
-about 31; a host that runs several suites at once configures smaller
-`default-address-pools`. The Kata tests run only where Kata is installed
+leaves behind nor assumes it is the only run on the host. Every Kata sandbox, an `open`
+one's included, and every runc one whose network is not `open` gets a network of its own, so
+a host that runs several suites at once may need more networks than Docker's default address
+pools hold
+([Docker runtimes](../packages/ale-run/src/ale/run/providers/README.md#docker-runtimes)).
+The Kata tests run only where Kata is installed
 ([Providers](../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers)).
 
 Run `just test-harnesses` after changing a Harness, a Gateway dialect or a CLI pin, and

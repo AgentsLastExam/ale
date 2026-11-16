@@ -12,7 +12,8 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 | `fleet/` | a Sandbox of any of these on a Fleet Node ([Fleet](../../../../../../docs/specs/fleet.md)) | what the Node's leaf takes; each Node prepares its own images |
 
 Each package keeps its Provider and Sandbox in `provider.py` and exports both. Beside it,
-`docker/kata.py` builds the tc filters and VM size a sandbox in a Kata microVM needs;
+`docker/kata.py` builds the tc filters and VM size a sandbox in a Kata microVM needs, and
+`docker/tc.py` the tc commands it uses;
 `daytona/api.py` is Daytona's REST client and `daytona/image.py` adapts and publishes
 images; `orchard/client.py` drives Orchard and Tart, `orchard/framing.py` frames images
 and `orchard/desktop.py` waits for the desktop; `fleet/tunnel.py` carries a Run's Gateway
@@ -134,7 +135,7 @@ same machine, such as a restarted Fleet node agent, drives it again or destroys 
 
 | Provider | How `reattach` and `discard` find a Sandbox by its handle |
 |---|---|
-| Docker | `docker:<container>`: `docker inspect` finds the container, whose labels must name it ALE's, and it must be running the recorded image. Reattaching re-applies the [Gateway route](#gateway-address) as a reattaching run does and reads the seal back from the container: a runc one is sealed when it is off the default bridge, a Kata one when the seal's drop filter is on `tap0_kata`. `discard` removes the container and its network; one that is already gone needs nothing |
+| Docker | `docker:<container>`: `docker inspect` finds the container, whose labels must name it ALE's, and it must be running the recorded image. Reattaching confines it by the network mode its `ale.network` label records, which it was started with, whatever the reattaching run asks, re-applies the [Gateway route](#gateway-address) as a reattaching run does and reads the seal back from the container: a runc one is sealed when it is off the default bridge, a Kata one when the seal's drop filter is on `tap0_kata`. `discard` removes the container and its network; one that is already gone needs nothing |
 | QEMU | `qemu:<runner>`: the same for the runner container, whose labels must name it ALE's and whose overlay must sit on the recorded disk. Reattaching refills the runner's `ALE_GATEWAY` chain and reads the seal back from its `FORWARD` drop rule. `discard` removes the runner and its overlay |
 | Orchard | `orchard:<name>:<uid>`: the VM by its name, which must still have that UID and run the image that framing, a snapshot, or a kept VM's record names on this Mac. Reattaching opens new guest sessions; the Gateway relay started at boot outlives the old ones. `discard` deletes the VM unless Orchard replaced it |
 | Daytona, Firecracker, Fleet | None: their Sandboxes have no handle, and `reattach` refuses |
@@ -296,6 +297,24 @@ session that never answered failed to start, and its stderr is reported at once.
 session itself before it destroys, keeps or snapshots the Sandbox, and that end asks nothing
 of Docker.
 
+On every Docker leaf a sandbox runs its image's command before the Provider confines it,
+until the network helper's first run returns: 0.35 to 0.45 s after `docker run` did, most of
+it the helper's own container (measured with the container base, `block`, on a 112-core Host
+under a load of about 35: three runc and four Kata sandboxes). A runc sandbox's internal
+network has no route off the Host meanwhile, but the Host's ports answer it; a Kata sandbox
+is on its own network unsealed, for which the Provider reads what the seal needs of that
+network before the sandbox starts and writes its `resolv.conf` after the seal. Only a
+Sandbox booted from a snapshot runs code an agent wrote in that time, and its setup phase
+has the network anyway.
+
+Every Kata Sandbox, and every runc one whose network is not `open`, takes a bridge network
+of its own while it lives. Docker's default address pools give out 31 networks,
+`172.17.0.0/16` to `172.31.0.0/16` and `192.168.0.0/16` in /20s, and the default bridge
+holds one, so a Host that runs more than about 30 such Sandboxes at once, several Runs' or
+test suites' together, needs smaller ones:
+`"default-address-pools": [{"base": "10.200.0.0/16", "size": 24}]` in `daemon.json` gives
+256 networks of 254 addresses, from the daemon's next start.
+
 ## Docker on Kata Containers
 
 The `docker:kata` leaf starts each of its sandboxes with `--runtime
@@ -314,9 +333,9 @@ configuration is used as it ships.
 
 | Kata | What the Provider does |
 |---|---|
-| Moves every frame between the VM's tap (`tap0_kata`) and the container's veth with tc filters, at preference 49152, so netfilter in the sandbox's namespace never sees the guest's traffic: the runc helper's rules would neither route the Gateway nor confine the Host | The same helper puts tc filters ahead of Kata's, in that namespace, outside the VM. Port 7412 to the Host's address is rewritten to the Gateway's port, and replies back (`pedit` and `csum`; 64 MiB each way came through intact). A sandbox that is not `open` reaches no other port of that address, and its proxy port only under `allowlist`. A reattaching run replaces only the Gateway and proxy filters |
-| Hands the VM its networks at boot: `docker network connect` succeeds and the VM never sees the network | No internal network: the sandbox stays on the default bridge, and sealing adds filters that drop every frame but those to and from the Host's address, ARP included, so it reaches neither the Internet nor another container on the bridge. A sandbox that is not `open` starts sealed: the filters are in place before guestd connects, though the image's own command starts before them. Opening egress removes them and checks that no drop filter is left |
-| Docker's embedded DNS server, `127.0.0.11` on a user-defined network, is in the namespace and out of the guest's reach | The default bridge's `resolv.conf` names the Host's upstream servers, which the guest reaches |
+| Moves every frame between the VM's tap (`tap0_kata`) and the container's veth with tc filters, at preference 49152, so netfilter in the sandbox's namespace never sees the guest's traffic: the runc helper's rules would neither route the Gateway nor confine the Host | The same helper puts tc filters ahead of Kata's, in that namespace, outside the VM. Port 7412 to the Host's address is rewritten to the Gateway's port, and replies back (`pedit` and `csum`; 64 MiB each way came through intact). A sandbox that is not `open` reaches no other port of that address, and its proxy port only under `allowlist`. Root in the VM writes any frame, so these filters pass only a frame from the sandbox's own MAC and address to the bridge's MAC: one with another source, one to another MAC and an ARP reply claiming another address are dropped (measured). Toward the VM they pass only a frame from the bridge's MAC and the Host's address to the sandbox's MAC, which the guest takes from the veth (measured), and the Host's own ARP. A reattaching run replaces only the Gateway and proxy filters |
+| Hands the VM its networks at boot: `docker network connect` succeeds and the VM never sees the network | The sandbox boots on a bridge network of its own, `ale-net-<sandbox id>`, which no other container joins, so frames another container writes as the Host never reach it (measured). The network is not internal, an `open` Task's included: egress opens by removing the seal and leaves through the network's NAT. Sealing adds filters that drop every frame but those to and from the Host's address, ARP included, so it reaches neither the Internet nor another container; while it is open, the Host's other addresses are reached as any other host is. A sandbox that is not `open` starts sealed: the filters are in place before guestd connects, though the image's own command starts before them. Sealing again replaces each filter in place, so a drop is never missing; opening egress removes them and checks that no drop filter is left. Destroying the sandbox removes its network |
+| Docker's embedded DNS server, `127.0.0.11` on any network but the default bridge, is served through netfilter in the namespace and out of the guest's reach: a lookup failed | As the sandbox starts, the Provider writes over its `/etc/resolv.conf` the one Docker gives a container on the default bridge, which names the Host's upstream servers, read once by a helper there, so the daemon needs its default bridge; the file stays the container's own and writable |
 | Makes the VM exactly the container's memory limit; the guest kernel and agent take about 96 MiB plus 2.5 % of it (512 MiB declared left 395 MiB usable, against 504 MiB on runc) | Starts the VM with `memory_mb + 96 + memory_mb / 40` MiB, which leaves the Task's processes at least what runc gives them; the allocation records `memory_mb`. With the base image's desktop running in 512 MiB, one process then held 312–320 MiB against 240–288 MiB on runc: in a VM the kernel's own work for the desktop is not charged to the container |
 | Gives the VM one vCPU more than `--cpus` and applies the quota in the guest's cgroup | Nothing: the quota holds, and `nproc` reports `cpus + 1` rather than the Host's count |
 | Cannot take Docker's `--gpus` | Its profile attaches no GPUs |
