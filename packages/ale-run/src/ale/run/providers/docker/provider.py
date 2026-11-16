@@ -32,7 +32,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from ale.core.capability import CapabilityProfile, accepts_model
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
@@ -402,6 +402,69 @@ class _KataConfinement:
 
 
 _Confinement = _RuncConfinement | _KataConfinement
+
+
+#: How long an ended guestd session waits for its container to stop. A container whose
+#: sandbox died has stopped, or stops within seconds: under rootless Docker ``docker wait``
+#: returned up to 10.5 s after the session ended. One still running lost only the session.
+_DEATH_SEC = 30.0
+
+
+class _Session(StdioTransport):
+    """guestd over ``docker exec -i``, whose stream ending unasked, once guestd has
+    answered, says whether the sandbox died."""
+
+    def __init__(self, argv: Sequence[str], container: str) -> None:
+        super().__init__(argv)
+        self.container = container
+        self._answered = False
+        self._closing = False
+
+    async def recv(self) -> str:
+        line = await super().recv()
+        self._answered = True
+        return line
+
+    async def close(self) -> None:
+        # ALE ends the session before it destroys, keeps or snapshots the Sandbox, so an end
+        # it causes is never taken for a death.
+        self._closing = True
+        await super().close()
+
+    async def explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
+        """A guestd that never answered failed to start, which its stderr, in ``error``,
+        says at once; a session that did and ended unasked may have lost its sandbox."""
+        if self._closing or not self._answered or not (died := await _death(self.container)):
+            return error
+        explained = GuestUnreachableError(f"the sandbox itself died: {died} ({error})")
+        explained.__cause__ = error
+        return explained
+
+
+async def _death(container: str) -> str | None:
+    """Why ``container`` stopped, once it has; None while it runs.
+
+    ``docker wait`` returns once it has stopped, while its state, read when the session
+    ended, could still say it runs. ``OOMKilled`` alone is no death: Docker keeps it once
+    the OOM killer has taken any process of the container.
+    """
+    try:
+        code, _, _ = await _docker("wait", container, timeout=_DEATH_SEC)
+    except ProviderStartError:
+        return None
+    if code != 0:
+        return None
+    code, raw, _ = await _docker("inspect", "--format", "{{json .State}}", container, timeout=30)
+    if code != 0:
+        return None
+    state = json.loads(raw)
+    if state.get("Running"):
+        return None
+    exited, oom = state.get("ExitCode"), state.get("OOMKilled")
+    if exited == 137:
+        return "it exceeded its memory limit" if oom else "it was killed from outside"
+    earlier = "; the OOM killer had taken a process of it earlier" if oom else ""
+    return f"its main process exited with code {exited}{earlier}"
 
 
 def _verify_docker_gpu(
@@ -1052,7 +1115,7 @@ class DockerProvider(Provider):
         )
 
     async def _connect(self, container: str, agent_user: str) -> GuestClient:
-        transport = StdioTransport(
+        transport = _Session(
             [
                 "docker",
                 "exec",
@@ -1073,7 +1136,8 @@ class DockerProvider(Provider):
                 "-I",
                 str(GUESTD_DIR / "main.py"),
                 "--stdio",
-            ]
+            ],
+            container,
         )
         client = GuestClient(transport)
         try:

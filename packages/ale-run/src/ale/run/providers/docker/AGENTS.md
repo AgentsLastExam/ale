@@ -80,6 +80,29 @@ that capability stays inside the guest.
 - Kata grants `CAP_SYS_ADMIN` only on request, so a Sandbox has no privilege its Task did
   not name, even inside its own VM.
 
+## A Docker sandbox's death
+
+**Problem.** When a sandbox died, its guestd session ended as a lost session, which said
+nothing of why: under runc, `docker exec` exited with 137 and printed nothing. The
+container's state read at that moment could still say it was running.
+
+**Context.** `docker wait` returns once the container has stopped: up to 10.5 s after the
+session ended under rootless Docker on a loaded Host.
+
+**Solution.** For every Docker leaf, the Provider waits on a container whose guestd
+session's stream ended unasked and reports from its state why the sandbox died.
+
+**Decisions.**
+- `docker wait` with a 30 s deadline, not polling: a container that stopped answers as soon
+  as Docker has stopped it, and one that runs past it lost only its session.
+- Waited on outside the timeout of the call whose session ended: that timeout bounds
+  guestd's answer, and a short one would otherwise leave the death unexplained.
+- Only an end of the stream ALE did not cause, of a session guestd answered on: ALE closes
+  a session before it destroys, keeps or snapshots the Sandbox, and that end is no death; a
+  guestd that never answered failed to start, which its stderr says at once.
+- `OOMKilled` alone is no death: Docker keeps it once the OOM killer has taken any process
+  of the container. Memory is blamed only with exit code 137.
+
 ## guestd's replies under gVisor
 
 **Problem.** A screenshot of 1.1 MB never arrived from a gVisor sandbox whose image set

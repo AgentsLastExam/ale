@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, get_args
@@ -12,7 +14,7 @@ import pytest
 
 import ale.run
 from ale.core.config import ProviderId
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
@@ -36,8 +38,9 @@ from ale.run.providers.docker.provider import (
     _KataConfinement,
     _RuncConfinement,
     _sandbox_gateway,
+    _Session,
 )
-from ale.run.transport import StdioTransport
+from ale.run.transport import GuestClient
 
 pytestmark = pytest.mark.unit
 
@@ -424,7 +427,149 @@ async def test_a_kata_sandbox_opens_and_seals_egress_with_its_tc_filters(
 
 
 @pytest.mark.asyncio
-async def test_guestd_is_reached_isolated_in_the_root_directory(
+@pytest.mark.parametrize(
+    ("waited", "state", "died"),
+    [
+        (0, {"Running": False, "OOMKilled": True, "ExitCode": 137}, "exceeded its memory limit"),
+        (0, {"Running": False, "OOMKilled": False, "ExitCode": 137}, "killed from outside"),
+        (0, {"Running": False, "OOMKilled": False, "ExitCode": 3}, "exited with code 3"),
+        # Docker keeps OOMKilled once the OOM killer took any process; the main process
+        # exited later of its own.
+        (
+            0,
+            {"Running": False, "OOMKilled": True, "ExitCode": 3},
+            "exited with code 3; the OOM killer had taken a process of it earlier",
+        ),
+        # The OOM killer took a process and the container lives on: no death.
+        (0, {"Running": True, "OOMKilled": True, "ExitCode": 0}, None),
+        (None, None, None),  # still running when the wait gave up
+        (1, None, None),  # docker wait failed: the container is gone, ALE's to explain
+    ],
+)
+async def test_a_sandbox_that_died_says_why_when_its_session_ends(
+    monkeypatch: pytest.MonkeyPatch,
+    waited: int | None,
+    state: dict[str, object] | None,
+    died: str | None,
+) -> None:
+    """One wait, which returns at once for a stopped container, then its state; no polling.
+    It runs when the stream of a session that answered ends, as the client asks the session
+    to explain the end: a real process answers and ends it here."""
+    calls: list[tuple[str, ...]] = []
+    deadlines: list[float] = []
+
+    async def docker(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[0] == "wait":
+            deadlines.append(timeout)
+            if waited is None:
+                raise ProviderStartError(f"docker wait ale-e1 timed out after {timeout:g}s")
+            return (
+                waited,
+                "137\n" if waited == 0 else "",
+                "" if waited == 0 else "No such container",
+            )
+        assert argv == ("inspect", "--format", "{{json .State}}", "ale-e1")
+        return 0, json.dumps(state), ""
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    session = _Session(["sh", "-c", "echo {}; sleep 0.2; echo urpc EOF >&2"], "ale-e1")
+    await session.start()
+    assert await session.recv() == "{}"
+    with pytest.raises(GuestUnreachableError) as ended:
+        await session.recv()
+    assert calls == []
+    message = str(await session.explain(ended.value))
+    assert ("the sandbox itself died" in message) is (died is not None)
+    assert died is None or died in message
+    assert "guest session closed: urpc EOF" in message
+    assert [call[0] for call in calls] == (["wait", "inspect"] if waited == 0 else ["wait"])
+    assert deadlines == [30.0]
+
+
+@pytest.mark.asyncio
+async def test_a_death_is_explained_whatever_the_timeout_of_the_call_it_ended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The call's timeout bounds guestd's answer; finding out why there is none runs after
+    it, so a death that takes longer to read than the call allows still says why."""
+
+    async def docker(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
+        if argv[0] == "wait":
+            await asyncio.sleep(0.5)
+            return 0, "137\n", ""
+        return 0, json.dumps({"Running": False, "OOMKilled": False, "ExitCode": 137}), ""
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    reply = json.dumps({"id": 1, "ok": True, "data": {}})
+    guestd = f"read request; echo '{reply}'; read request; echo urpc EOF >&2"
+    session = _Session(["sh", "-c", guestd], "ale-e1")
+    client = GuestClient(session)
+    await session.start()
+    try:
+        await client.call("health", timeout_sec=10)
+        with pytest.raises(GuestUnreachableError) as ended:
+            await client.call("health", timeout_sec=0.2)
+    finally:
+        await client.close()
+    assert str(ended.value) == (
+        "the sandbox itself died: it was killed from outside (guest session closed: urpc EOF)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_guestd_that_fails_to_start_says_why_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its session ends before it ever answers while the container runs on: its stderr is
+    the reason, at once, with no wait on the container."""
+    asked: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
+        asked.append(argv)
+        await asyncio.sleep(timeout)  # the container runs on
+        raise ProviderStartError(f"docker {argv[0]} timed out after {timeout:g}s")
+
+    class Failing(_Session):
+        def __init__(self, _argv: list[str], container: str) -> None:
+            super().__init__(["sh", "-c", "echo 'guestd: bad interpreter' >&2; exit 1"], container)
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("ale.run.providers.docker.provider._Session", Failing)
+    started = time.monotonic()
+    with pytest.raises(ProviderStartError) as failed:
+        await DockerProvider()._connect("ale-e1", "user")
+    assert str(failed.value) == (
+        "guest service did not answer: guest session closed: guestd: bad interpreter"
+    )
+    assert time.monotonic() - started < 5 and asked == []
+
+
+@pytest.mark.asyncio
+async def test_a_session_ale_ends_or_that_never_answered_is_no_death(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing it, as ALE does before it destroys, keeps or snapshots a Sandbox, or using it
+    unstarted asks nothing of Docker."""
+    calls = _scripted(monkeypatch)
+    unstarted = _Session(["cat"], "ale-e1")
+    with pytest.raises(GuestUnreachableError, match="transport is not started") as raised:
+        await unstarted.recv()
+    assert await unstarted.explain(raised.value) is raised.value
+    session = _Session(["sh", "-c", "echo {}; cat"], "ale-e1")
+    await session.start()
+    assert await session.recv() == "{}"
+    pending = asyncio.ensure_future(session.recv())
+    await asyncio.sleep(0.1)
+    await session.close()
+    with pytest.raises(GuestUnreachableError, match="guest session closed") as raised:
+        await pending
+    assert await session.explain(raised.value) is raised.value
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_guestd_is_reached_isolated_in_the_root_directory_through_a_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def started(_self: object) -> None:
@@ -433,11 +578,11 @@ async def test_guestd_is_reached_isolated_in_the_root_directory(
     async def healthy(_self: object) -> dict[str, object]:
         return {}
 
-    monkeypatch.setattr(StdioTransport, "start", started)
+    monkeypatch.setattr(_Session, "start", started)
     monkeypatch.setattr("ale.run.transport.GuestClient.health", healthy)
     client = await DockerProvider()._connect("ale-e1", "user")
     transport = client._transport
-    assert isinstance(transport, StdioTransport)
+    assert isinstance(transport, _Session) and transport.container == "ale-e1"
     assert transport._argv == [
         "docker", "exec", "-i", "--user", "0", "--env", "ALE_AGENT_USER=user",
         "--workdir", "/", "ale-e1",

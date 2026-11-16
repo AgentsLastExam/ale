@@ -283,6 +283,19 @@ allocation records the runtime Docker reports. ALE's own helper containers, the 
 helper, the QEMU and Firecracker runners and the VM builders, always run under `runc`,
 which Docker always registers.
 
+When the stream of a guestd session that has answered ends unasked, the Provider runs
+`docker wait` on the container for up to 30 s, outside the timeout of the call that was
+waiting, which returns once it has stopped (under rootless Docker up to 10.5 s after the
+session ended), and then reads its state. A stopped container is reported as the sandbox
+itself dying: it exceeded its memory limit when Docker reports `OOMKilled` and exit code
+137, it was killed from outside on 137 alone, and otherwise its main process exited with its
+code, after an OOM kill when `OOMKilled` is set; one still running lost only the session,
+which is reported as a lost guest session, with guestd's stderr. `OOMKilled` alone says
+nothing: Docker keeps it once the OOM killer has taken any process of the container. A
+session that never answered failed to start, and its stderr is reported at once. ALE ends a
+session itself before it destroys, keeps or snapshots the Sandbox, and that end asks nothing
+of Docker.
+
 ## Docker on Kata Containers
 
 The `docker:kata` leaf starts each of its sandboxes with `--runtime

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 
 import pytest
 from tests.support import CONTAINER_BASE, skip_without_kata
 
+from ale.core.errors import GuestUnreachableError
 from ale.core.sandbox import Identity, ImageRef, SandboxRequest
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
@@ -176,6 +178,31 @@ async def test_a_sealed_kata_sandbox_reaches_no_other_container_on_its_bridge() 
             started = time.monotonic()
             lookup = await sandbox.exec(["getent", "hosts", "example.com"], identity=Identity.AGENT)
             assert lookup.exit_code != 0 and time.monotonic() - started < 10
+
+
+async def _plain_request(
+    provider: DockerProvider, episode: str, *features: ContainerFeature
+) -> SandboxRequest:
+    return SandboxRequest(
+        episode_id=episode,
+        prepared_image=await provider.prepare_image(
+            ImageRef(kind="container", reference=CONTAINER_BASE)
+        ),
+        resources=Resources(cpus=1, memory_mb=512, container_features=features),
+        network=NetworkPolicy(mode=NetworkMode.BLOCK),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_docker_sandbox_killed_from_outside_says_so() -> None:
+    provider = DockerProvider()
+    async with await provider.create(await _plain_request(provider, "killed-runc")) as sandbox:
+        running = asyncio.ensure_future(sandbox.exec(["sleep", "60"], timeout_sec=120))
+        await asyncio.sleep(2)
+        code, _, stderr = await _docker("kill", sandbox.container)
+        assert code == 0, stderr
+        with pytest.raises(GuestUnreachableError, match="itself died: it was killed from outside"):
+            await running
 
 
 @pytest.mark.asyncio
