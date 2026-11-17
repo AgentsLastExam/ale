@@ -247,3 +247,19 @@ def test_screenshot_can_return_a_private_file_instead_of_inline_data(monkeypatch
     else:
         assert base64.b64decode(result["png_b64"]) == png
         assert not path.exists()
+
+
+def test_the_variables_of_the_desktop_session_are_read_by_an_isolated_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It runs as root among the agent's processes and files."""
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="null")
+
+    monkeypatch.setattr(gui.subprocess, "run", run)
+    gui._session_environment(type("Account", (), {"pw_name": "user"})())
+    ((python, isolated, code, *_),) = seen
+    assert (python, isolated, code) == (gui.sys.executable, "-I", "-c")

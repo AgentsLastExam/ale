@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import io
+import subprocess
 import tarfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -14,12 +16,15 @@ from aiohttp import ClientSession, WSMsgType
 from aiohttp.test_utils import TestClient, TestServer, unused_port
 from tests.support import MemoryProvider
 
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.core.capability import GpuHold, GpuModel, SandboxNeeds
+from ale.core.config import DockerProviderConfig
+from ale.core.errors import ProviderCapabilityError, ProviderCapacityError, ProviderStartError
 from ale.core.fleet import (
     AcquireRequest,
     CreateSandbox,
     ExecCall,
     ExecDone,
+    GpuPool,
     Grant,
     ImageInputs,
     SandboxDemand,
@@ -27,8 +32,22 @@ from ale.core.fleet import (
     sign_grant,
     verify_grant,
 )
-from ale.core.sandbox import ImageRef, PreparedTaskImage, SandboxRequest
-from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from ale.core.sandbox import (
+    GpuDevice,
+    ImageRef,
+    PreparedTaskImage,
+    Sandbox,
+    SandboxCheck,
+    SandboxRequest,
+)
+from ale.core.taskspec import (
+    ContainerFeature,
+    ImageKind,
+    NetworkMode,
+    NetworkPolicy,
+    OperatingSystem,
+    Resources,
+)
 from ale.fleet import images as images_module
 from ale.fleet import node as node_module
 from ale.fleet.control import ControlPlane, Timing
@@ -38,7 +57,10 @@ from ale.fleet.server import control_app
 from ale.fleet.store import Store
 from ale.run.framework import fleet_framework_identity
 from ale.run.guestd.tunnel import Mux
+from ale.run.providers.docker import DockerProvider
 from ale.run.providers.fleet.tunnel import NodeListeners, RunTunnel
+from ale.run.providers.orchard import OrchardProvider
+from ale.run.providers.qemu import QemuProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import ImagePreparationResult
 from ale.run.tasksets.manifest import load_task_folder
@@ -50,6 +72,7 @@ HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 KEY = "sha256:" + "5" * 64
 REFERENCE = ImageRef(kind=ImageKind.CONTAINER, reference="example.org/task@sha256:" + "1" * 64)
 RUN = "run-aaaaaaaa"
+H100 = "NVIDIA H100 80GB HBM3"
 INPUTS = ImageInputs(key=KEY, run_id=RUN, os=OperatingSystem.LINUX, reference=REFERENCE)
 #: What the memory Provider prepares ``REFERENCE`` as.
 IMAGE = PreparedTaskImage(
@@ -68,12 +91,6 @@ class Clock:
 
     def __call__(self) -> float:
         return self.now
-
-
-@pytest.fixture(autouse=True)
-def memory_kind(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A Provider named ``memory`` starts Linux containers on this machine's architecture."""
-    monkeypatch.setitem(node_module.KINDS, "memory", (ImageKind.CONTAINER, None))
 
 
 @pytest.fixture
@@ -178,7 +195,7 @@ class TestDeclaration:
         self, tmp_path: Path
     ) -> None:
         class Broken(MemoryProvider):
-            async def preflight(self) -> None:
+            async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
                 raise ProviderStartError("no daemon")
 
         settings = NodeSettings(
@@ -191,6 +208,139 @@ class TestDeclaration:
         with pytest.raises(ProviderStartError, match="no daemon"):
             await probe(settings, make=lambda _name: Broken("memory"))
 
+    async def test_a_leaf_lent_only_once_a_sandbox_of_it_shows_what_its_preflight_left(
+        self, tmp_path: Path
+    ) -> None:
+        """One Sandbox of the container base, which a failing check keeps from being
+        lent."""
+        checked: list[SandboxRequest] = []
+
+        class Checked(MemoryProvider):
+            failing = False
+
+            async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> SandboxCheck:
+                async def check(sandbox: Sandbox) -> None:
+                    checked.append(sandbox.request)
+                    if self.failing:
+                        raise ProviderStartError("its kernel log does not say 'Starting gVisor'")
+
+                return check
+
+        settings = NodeSettings(
+            name="box", control_url="", address="http://box:7471", state_dir=tmp_path
+        )
+        leaf = Checked("memory")
+        _, lent = await probe(
+            dataclasses.replace(settings, providers=("memory",)), make=lambda _: leaf
+        )
+        assert list(lent) == ["memory"]
+        (request,) = checked
+        assert request.prepared_image.runtime_ref == node_module.CHECK_IMAGE
+        assert request.network.mode is NetworkMode.BLOCK and leaf.destroyed
+        leaf.failing = True
+        with pytest.raises(ProviderStartError, match="Starting gVisor"):
+            await probe(dataclasses.replace(settings, providers=("memory",)), make=lambda _: leaf)
+        assert len(leaf.sandboxes) == 2
+        assert leaf.destroyed == [sandbox.sandbox_id for sandbox in leaf.sandboxes]
+
+    async def test_a_node_lends_its_leaves_in_the_order_named_with_what_each_gives(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def works(_self: DockerProvider) -> None:
+            return None
+
+        async def host_gpus(_self: DockerProvider) -> dict[int, GpuDevice]:
+            return {
+                index: GpuDevice(
+                    id=f"GPU-{index}",
+                    model=H100,
+                    driver_version="570.1",
+                    memory_total_mb=81559,
+                    memory_reserved_mb=470,
+                )
+                for index in (0, 1)
+            }
+
+        monkeypatch.setattr(DockerProvider, "preflight", works)
+        monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
+        monkeypatch.setattr(node_module.shutil, "which", lambda _: "/usr/bin/nvidia-smi")
+        listing = f"0, {H100}\n1, {H100}\n2, {H100}\n3, NVIDIA A100-SXM4-80GB\n"
+        monkeypatch.setattr(
+            node_module.subprocess,
+            "run",
+            lambda *_, **__: subprocess.CompletedProcess([], 0, stdout=listing, stderr=""),
+        )
+        settings = NodeSettings(
+            name="box",
+            control_url="",
+            address="http://box:7471",
+            providers=("docker:runc", "docker:kata", "docker:gvisor"),
+            state_dir=tmp_path,
+            docker=DockerProviderConfig(gpus=(0, 1), gpu_memory_margin_mb=2048),
+        )
+        declaration, lent = await probe(settings)
+        # Its Docker leaves take the Node's settings, as a Run's take its [sandbox.docker].
+        for leaf in lent.values():
+            assert isinstance(leaf, DockerProvider)
+            assert (leaf.gpus, leaf.gpu_memory_margin_mb) == ((0, 1), 2048)
+        runc, kata, gvisor = declaration.profiles
+        assert (runc.provider, kata.provider, gvisor.provider) == (
+            "docker:runc",
+            "docker:kata",
+            "docker:gvisor",
+        )
+        assert ContainerFeature.MOUNT in kata.container_features
+        assert ContainerFeature.RAW_SOCKETS in gvisor.container_features
+        assert runc.container_features == {ContainerFeature.RAW_SOCKETS}
+        # Only a leaf that attaches GPUs offers the Node's, by their models and memory, and
+        # says how a Sandbox that shares one is held to its share.
+        # 81559 MiB less the driver's 470 and the Node's margin of 2048.
+        h100 = (GpuModel(name=H100, memory_mb=79041),)
+        assert (runc.gpus, runc.gpu_models) == (gvisor.gpus, gvisor.gpu_models) == (True, h100)
+        assert (kata.gpus, kata.gpu_models) == (False, ())
+        assert [p.gpu_hold for p in (runc, kata, gvisor)] == [
+            GpuHold.WATCHED,
+            GpuHold.WHOLE,
+            GpuHold.LIMIT,
+        ]
+        # It lends the two GPUs its Docker leaves may lease, not every GPU of the Host.
+        assert declaration.resources.gpus == (GpuPool(model=H100, count=2),)
+        # And none starts a Sandbox larger than the Node lends in all.
+        resources = declaration.resources
+        assert {(p.max_cpus, p.max_memory_mb) for p in declaration.profiles} == {
+            (resources.cpus, resources.memory_mb)
+        }
+        assert list(lent) == ["docker:runc", "docker:kata", "docker:gvisor"]
+        with pytest.raises(ProviderCapabilityError, match="cannot drive a 'docker' Provider"):
+            await probe(dataclasses.replace(settings, providers=("docker",)))
+        with pytest.raises(ProviderCapabilityError, match="cannot drive a 'firecracker'"):
+            await probe(dataclasses.replace(settings, providers=("firecracker",)))
+        with pytest.raises(ProviderCapabilityError, match="'docker:runsc' names no leaf"):
+            await probe(dataclasses.replace(settings, providers=("docker:runsc",)))
+
+    async def test_a_node_told_no_leaves_lends_each_default_one_this_machine_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def works(_self: object) -> None:
+            return None
+
+        for leaf in (DockerProvider, QemuProvider, OrchardProvider):
+            monkeypatch.setattr(leaf, "preflight", works)
+        settings = NodeSettings(
+            name="box", control_url="", address="http://box:7471", state_dir=tmp_path
+        )
+        _, lent = await probe(settings)
+        assert list(lent) == ["docker:runc", "qemu"]
+        declaration, _ = await probe(dataclasses.replace(settings, providers=("docker:runc",)))
+        assert {(p.gpus, p.gpu_models) for p in declaration.profiles} == {(False, ())}
+        assert declaration.resources.gpus == ()
+        # A Mac runs Docker's and Orchard's arm64 Sandboxes, and no x86-64 VM.
+        monkeypatch.setattr("platform.machine", lambda: "arm64")
+        _, lent = await probe(settings)
+        assert list(lent) == ["docker:runc", "orchard"]
+        with pytest.raises(ProviderCapabilityError, match="qemu runs only on x86_64 machines"):
+            await probe(dataclasses.replace(settings, providers=("qemu",)))
+
 
 class TestCreation:
     async def test_the_node_creates_only_on_its_own_grant(
@@ -201,11 +351,22 @@ class TestCreation:
         assert (await create(client, agent, grant=elsewhere)).status == 403
         assert provider.requests == []
 
+    @pytest.mark.parametrize(
+        "differs",
+        [
+            Resources(cpus=4, memory_mb=512),
+            Resources(memory_mb=512, container_features=(ContainerFeature.RAW_SOCKETS,)),
+        ],
+    )
     async def test_a_request_that_differs_from_its_grant_is_refused(
-        self, client: TestClient, agent: NodeAgent, provider: MemoryProvider
+        self,
+        client: TestClient,
+        agent: NodeAgent,
+        provider: MemoryProvider,
+        differs: Resources,
     ) -> None:
         granted = grant_for(agent, request(cpus=1), "sandbox-0001")
-        response = await create(client, agent, grant=granted, wanted=request(cpus=4))
+        response = await create(client, agent, grant=granted, wanted=request(resources=differs))
         assert response.status == 422
         assert "resources" in (await response.json())["message"]
         assert provider.requests == []
@@ -253,6 +414,22 @@ class TestCreation:
         assert (await response.json()) == {"error": "ProviderStartError", "message": "boot failed"}
         assert agent.held == {}
 
+    async def test_a_leafs_capacity_refusal_is_the_node_refusing_its_grant(
+        self, client: TestClient, agent: NodeAgent, provider: MemoryProvider
+    ) -> None:
+        """What only the leaf sees, such as the memory free on a GPU Sandboxes share, refuses
+        the grant as the Node's own count does, so the Run asks for another Node."""
+
+        async def full(_request: SandboxRequest):  # type: ignore[no-untyped-def]
+            raise ProviderCapacityError("the Sandbox needs 8192 MiB on each of 1 GPU")
+
+        provider.create = full  # type: ignore[method-assign]
+        response = await create(client, agent)
+        # Not 409, a refusal for good: the Run asks again later.
+        assert response.status == 503
+        assert (await response.json())["message"] == "the Sandbox needs 8192 MiB on each of 1 GPU"
+        assert agent.held == {}
+
 
 class TestSandboxApi:
     async def test_commands_stream_and_files_round_trip(
@@ -261,7 +438,9 @@ class TestSandboxApi:
         assert (await create(client, agent)).status == 200
         path = "/v1/sandboxes/sandbox-0001"
         async with client.ws_connect(f"{path}/exec", headers=HEADERS) as socket:
-            await socket.send_str(ExecCall(argv=("echo", "hi"), stream=True).model_dump_json())
+            await socket.send_str(
+                ExecCall(argv=("echo", "hi"), stream=True, call=0).model_dump_json()
+            )
             frames = []
             async for message in socket:
                 if message.type is WSMsgType.BINARY:
@@ -361,7 +540,7 @@ class TestSandboxApi:
     ) -> None:
         assert (await create(client, agent)).status == 200
         socket = await client.ws_connect("/v1/sandboxes/sandbox-0001/exec", headers=HEADERS)
-        await socket.send_str(ExecCall(argv=("sleep", "30")).model_dump_json())
+        await socket.send_str(ExecCall(argv=("sleep", "30"), call=0).model_dump_json())
         await asyncio.sleep(0.1)
         await socket.close()
         await asyncio.sleep(0.1)
@@ -629,12 +808,13 @@ class TestImages:
         (folder / "environment" / "Dockerfile").unlink()
         text = (folder / "task.toml").read_text()
         (folder / "task.toml").write_text(
-            text.replace(
-                "[environment]\n", f'[environment]\ndocker_image = "{REFERENCE.reference}"\n'
-            )
+            text.replace("[environment]\n", f'[environment]\nimage = "{REFERENCE.reference}"\n')
         )
         task = load_task_folder(folder)
         assert task.spec.image.ref == REFERENCE.reference
+        # The Run reads the kind from the registry before it ships the Task to a Node.
+        image = task.spec.image.model_copy(update={"kind": REFERENCE.kind})
+        task.spec = task.spec.model_copy(update={"image": image})
 
         async def prepared(built, _providers):  # type: ignore[no-untyped-def]
             return ImagePreparationResult(task="referenced", role="solver", image=IMAGE, steps=())
@@ -645,6 +825,23 @@ class TestImages:
         inputs = ImageInputs(key=key, run_id=RUN, os=OperatingSystem.LINUX, task=task.spec)
         assert await images.prepare(inputs) == IMAGE
         assert not images.has_inputs(key)
+
+    async def test_a_task_image_whose_kind_the_run_left_undecided_is_refused(
+        self, tmp_path: Path, provider: MemoryProvider
+    ) -> None:
+        folder = scaffold_task(tmp_path / "referenced")
+        (folder / "environment" / "Dockerfile").unlink()
+        text = (folder / "task.toml").read_text()
+        (folder / "task.toml").write_text(
+            text.replace("[environment]\n", f'[environment]\nimage = "{REFERENCE.reference}"\n')
+        )
+        task = load_task_folder(folder)
+        assert task.spec.image.kind is None
+        images = NodeImages(tmp_path / "images", lambda _kind, _os: provider)
+        key = "sha256:" + "4" * 64
+        inputs = ImageInputs(key=key, run_id=RUN, os=OperatingSystem.LINUX, task=task.spec)
+        with pytest.raises(ProviderCapabilityError, match="before its kind was decided"):
+            await images.prepare(inputs)
 
 
 class TestJournal:

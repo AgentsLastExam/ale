@@ -23,7 +23,7 @@ from ale.core.sandbox import (
     ResourceAllocation,
     SandboxRequest,
 )
-from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, Resources
 from ale.run import guestd
 from ale.run.guestd import tunnel as guest_tunnel
 from ale.run.providers import RETAINING_PROVIDERS, ProviderRegistry, provider_named
@@ -80,30 +80,30 @@ def request(**overrides: Any) -> SandboxRequest:
 # --- admission ------------------------------------------------------------------
 
 
-def test_daytona_allocates_whole_gib_and_the_provider_refuses_to_round() -> None:
+async def test_daytona_allocates_whole_gib_and_the_provider_refuses_to_round() -> None:
     provider = DaytonaProvider()
-    provider.accepts(request())
-    provider.accepts(request(resources=Resources(memory_mb=1024, storage_mb=5120)))
+    await provider.accepts(request())
+    await provider.accepts(request(resources=Resources(memory_mb=1024, storage_mb=5120)))
     with pytest.raises(ProviderCapabilityError, match="whole number of GiB"):
-        provider.accepts(request(resources=Resources(memory_mb=1536)))
+        await provider.accepts(request(resources=Resources(memory_mb=1536)))
     with pytest.raises(ProviderCapabilityError, match="storage_mb=1000"):
-        provider.accepts(request(resources=Resources(memory_mb=1024, storage_mb=1000)))
-    provider.accepts(request(resources=Resources(memory_mb=1024, gpus=1)))
+        await provider.accepts(request(resources=Resources(memory_mb=1024, storage_mb=1000)))
+    await provider.accepts(request(resources=Resources(memory_mb=1024, gpus=1)))
 
 
-def test_the_registry_builds_the_configured_container_provider() -> None:
-    docker = ProviderRegistry(RunConfig()).get(ImageKind.CONTAINER, OperatingSystem.LINUX)
-    assert docker.name == "docker"
-    config = RunConfig.model_validate({"container": {"provider": "daytona"}})
-    chosen = ProviderRegistry(config).get(ImageKind.CONTAINER, OperatingSystem.LINUX)
-    assert chosen.name == "daytona"
+def test_the_registry_builds_daytona_with_its_settings() -> None:
+    config = RunConfig.model_validate(
+        {"sandbox": {"providers": ["daytona"], "daytona": {"target": "eu"}}}
+    )
+    chosen = ProviderRegistry(config).get("daytona")
+    assert isinstance(chosen, DaytonaProvider) and chosen.config.target == "eu"
     assert provider_named("daytona").name == "daytona"
     assert "daytona" in RETAINING_PROVIDERS
 
 
 def test_the_api_key_is_named_not_stored() -> None:
-    config = RunConfig.model_validate({"container": {"provider": "daytona"}})
-    assert config.container.daytona.api_key_env == "ALE_DAYTONA_API_KEY"
+    config = RunConfig.model_validate({"sandbox": {"providers": ["daytona"]}})
+    assert config.sandbox.daytona.api_key_env == "ALE_DAYTONA_API_KEY"
     assert "dtn" not in config.model_dump_json()
 
 
@@ -147,11 +147,11 @@ def test_the_tunnel_carries_the_gateway_and_an_allowlists_proxy_never_a_wildcard
         _tunnel_plan(request(gateway_url="http://host/"))
 
 
-def test_an_allowlist_takes_what_the_egress_proxy_takes() -> None:
+async def test_an_allowlist_takes_what_the_egress_proxy_takes() -> None:
     """Addresses, ranges and any number of hosts, as on every other Provider."""
     hosts = ("10.0.0.1", "10.0.0.0/8", "*.example.com", "one.one.one.one")
-    DaytonaProvider().accepts(request(network=allowlist(*hosts)))
-    DaytonaProvider().accepts(
+    await DaytonaProvider().accepts(request(network=allowlist(*hosts)))
+    await DaytonaProvider().accepts(
         request(network=allowlist(*(f"host{index}.example" for index in range(101))))
     )
 
@@ -208,7 +208,12 @@ def network_sandbox(api: NetworkApi, policy: NetworkPolicy) -> tuple[DaytonaSand
             observed_ref=f"registry/ale-task@{DIGEST}",
         ),
         allocation=ResourceAllocation(
-            cpus=2, memory_mb=2048, sudo=False, network_mode=policy.mode, provider="daytona"
+            cpus=2,
+            memory_mb=2048,
+            sudo=False,
+            network_mode=policy.mode,
+            provider="daytona",
+            leaf="daytona",
         ),
         agent_user="user",
         agent_home="/home/user",
@@ -248,7 +253,9 @@ async def test_an_allowlist_seals_as_block_does_and_relays_the_agent_through_the
 def test_guestd_starts_without_the_runners_proxy_variables() -> None:
     """A GPU runner names its own proxy in every process's environment; a CPU runner none."""
     words = shlex.split(_guestd_command("user", {"PATH": "/usr/bin", "HTTPS_PROXY": "http://p"}))
-    assert words[:2] == ["exec", "env"]
+    # In the root directory, on the framework's Python isolated from the image's variables.
+    assert words[:5] == ["cd", "/", "&&", "exec", "env"]
+    assert words[-4:] == ["/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/main.py", "--stdio"]
     removed = {words[i + 1] for i, word in enumerate(words) if word == "-u"}
     assert removed == {
         "HTTP_PROXY",
@@ -424,23 +431,23 @@ def gpu_request(gpus: int = 1, gpu_types: tuple[str, ...] = ("H100",)) -> Sandbo
     return request(resources=Resources(cpus=2, memory_mb=8192, gpus=gpus, gpu_types=gpu_types))
 
 
-def test_a_gpu_request_names_the_task_s_models_daytona_offers_and_is_never_spot() -> None:
+async def test_a_gpu_request_names_the_task_s_models_daytona_offers_and_is_never_spot() -> None:
     published = PublishedImage(f"registry/ale-task@{DIGEST}", DIGEST, "framed", DIGEST)
     provider = DaytonaProvider()
     body = provider._body(gpu_request(2), published, "s", None)
     assert (body["gpu"], body["gpuType"], body["spot"]) == (2, ["H100"], False)
     # Harbor's names, in the Task's order; a model Daytona does not offer is left out.
     named = gpu_request(gpu_types=("L40S", "rtx-pro-6000", "nvidia-h100-80gb", "H100"))
-    provider.accepts(named)
+    await provider.accepts(named)
     assert provider._body(named, published, "s", None)["gpuType"] == ["RTX-PRO-6000", "H100"]
 
     assert "gpuType" not in provider._body(gpu_request(gpu_types=()), published, "s", None)
     assert "gpu" not in provider._body(request(), published, "s", None)
 
 
-def test_a_task_naming_only_models_daytona_does_not_offer_is_refused() -> None:
+async def test_a_task_naming_only_models_daytona_does_not_offer_is_refused() -> None:
     with pytest.raises(ProviderCapabilityError, match=r"\['A100', 'MI355X'\] is a Daytona GPU"):
-        DaytonaProvider().accepts(gpu_request(gpu_types=("A100", "MI355X")))
+        await DaytonaProvider().accepts(gpu_request(gpu_types=("A100", "MI355X")))
 
 
 async def test_the_lock_records_the_gpus_as_the_agent_sees_them() -> None:
@@ -652,6 +659,13 @@ def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+async def test_the_tunnel_runs_isolated_in_the_root_directory() -> None:
+    tunnel = _Tunnel(LocalRelay(), listeners=[(7412, 0)], targets=[("127.0.0.1", 1)])  # type: ignore[arg-type]
+    assert shlex.split(tunnel._command)[:7] == [
+        "cd", "/", "&&", "exec", "/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/tunnel.py"
+    ]  # fmt: skip
 
 
 async def test_the_host_tunnel_serves_the_sandbox_and_reconnects_when_ssh_drops() -> None:

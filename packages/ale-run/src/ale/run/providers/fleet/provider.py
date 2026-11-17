@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -35,6 +36,7 @@ import aiohttp
 from aiohttp import ClientSession, ClientTimeout, WSMsgType
 
 import ale.core.errors as errors
+from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, closest, unmet
 from ale.core.errors import (
     AleError,
     GuestUnreachableError,
@@ -47,7 +49,6 @@ from ale.core.fleet import (
     PROTOCOL_VERSION,
     STDOUT,
     AcquireRequest,
-    Arch,
     CreateSandbox,
     EpisodeReport,
     ErrorBody,
@@ -57,6 +58,8 @@ from ale.core.fleet import (
     ImageState,
     LeaseRenewal,
     Listing,
+    NodeDeclaration,
+    Notices,
     Placement,
     PlanItem,
     PlanReply,
@@ -66,11 +69,11 @@ from ale.core.fleet import (
     RunPlan,
     SandboxDemand,
     SandboxDescription,
+    SandboxNotice,
     SandboxStatus,
 )
 from ale.core.ids import content_hash
 from ale.core.sandbox import (
-    Capabilities,
     ExecOutputSink,
     ExecResult,
     Identity,
@@ -84,10 +87,12 @@ from ale.core.sandbox import (
     Sandbox,
     SandboxFile,
     SandboxRequest,
+    SandboxRole,
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources, TaskSpec
 from ale.run.framework import fleet_framework_identity
+from ale.run.providers import leaf
 from ale.run.providers.fleet.tunnel import RunTunnel
 from ale.run.sources import cache_root
 
@@ -140,6 +145,10 @@ def _failure(body: ErrorBody) -> AleError:
 
 class _Refused(Exception):
     """The Node's own admission refused the grant before creating anything."""
+
+
+class _Full(_Refused):
+    """The Node's leaf has no room for the grant now; it may have later."""
 
 
 class _Unreachable(GuestUnreachableError):
@@ -305,9 +314,16 @@ class FleetClient:
             raise ProviderStartError(f"the Fleet answered {status}: {text}") from None
         if status == 409 and node:
             raise _Refused(failure.message)
+        if status == 503 and node:
+            raise _Full(failure.message)
         raise _failure(failure)
 
     # --- the control plane --------------------------------------------------------------
+
+    async def nodes(self) -> list[NodeDeclaration]:
+        """Every Node registered with the control plane, as it declared itself."""
+        body = await self._request("GET", f"{self.url}/v1/nodes", timeout=30)
+        return [NodeDeclaration.model_validate(node["declaration"]) for node in json.loads(body)]
 
     async def check(self) -> None:
         info = json.loads(await self._request("GET", f"{self.url}/v1/fleet", timeout=30))
@@ -333,10 +349,19 @@ class FleetClient:
         return Placement.model_validate_json(body)
 
     async def refused(
-        self, sandbox_id: str, node: str, reason: str, *, unreachable: bool = False
+        self,
+        sandbox_id: str,
+        node: str,
+        reason: str,
+        *,
+        unreachable: bool = False,
+        capacity: bool = False,
     ) -> Placement:
         refusal = RefusedRequest(
-            node=node, reason=reason[:2000] or "refused", unreachable=unreachable
+            node=node,
+            reason=reason[:2000] or "refused",
+            unreachable=unreachable,
+            capacity=capacity,
         )
         body = await self._request(
             "POST",
@@ -612,27 +637,53 @@ def _stand_in(kind: ImageKind, key: str) -> PreparedTaskImage:
 
 
 class FleetProvider(Provider):
-    """Sandboxes of one image kind, on the Fleet."""
+    """Sandboxes on the Fleet's Nodes, started by the leaves they lend."""
 
     name = "fleet"
 
     def __init__(self, client: FleetClient) -> None:
         self.client = client
+        self._profiles: tuple[CapabilityProfile, ...] | None = None
 
-    def capabilities(self) -> Capabilities:
-        """What the Fleet can carry; which Node serves a request is placement's to decide.
+    async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        """Those of the leaves lent by its registered Nodes that run this engine's
+        framework, online or not, as they were when first asked for; which Node serves a
+        request, and when, is placement's to decide.
 
         A request no registered Node could serve fails when the control plane receives it,
-        before anything is created.
+        by the same rule, before anything is created.
         """
-        return Capabilities(
-            operating_systems=frozenset(OperatingSystem),
-            gui=True,
-            network_modes=frozenset(NetworkMode),
-            snapshot=True,
+        if self._profiles is None:
+            framework = fleet_framework_identity()
+            nodes = await self.client.nodes()
+            self._profiles = tuple(
+                dict.fromkeys(
+                    profile
+                    for node in nodes
+                    if node.framework == framework
+                    for profile in node.profiles
+                )
+            )
+        return self._profiles
+
+    async def unserved(
+        self, needs: SandboxNeeds, *, user: str, role: SandboxRole
+    ) -> tuple[str, ...]:
+        """Its leaves' reasons, by their profiles and then by their own rules, which a
+        Node's leaf applies as it creates the Sandbox."""
+        profiles = await self.profiles()
+        if reasons := closest(profiles, needs):
+            return reasons
+        return min(
+            (
+                leaf(profile.provider).refusals(needs, user=user, role=role)
+                for profile in profiles
+                if not unmet(profile, needs)
+            ),
+            key=len,
         )
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
         await self.client.check()
 
     def defer(
@@ -688,13 +739,10 @@ class FleetProvider(Provider):
         network_mode: NetworkMode,
         resources: Resources,
     ) -> SandboxDemand:
-        # A Task names no architecture: ALE's images and the Tasks built on them are x86-64,
-        # apart from macOS, which only Apple silicon runs.
-        arch = Arch.ARM64 if operating_system is OperatingSystem.MACOS else Arch.X86_64
         return SandboxDemand(
             kind=image.kind,
             os=operating_system,
-            arch=arch,
+            arch=Arch.of(operating_system),
             network_mode=network_mode,
             resources=resources,
             image=image.prepared_identity,
@@ -715,7 +763,6 @@ class FleetProvider(Provider):
         return PlanItem(task=task, demand=demand, episodes=episodes)
 
     async def create(self, request: SandboxRequest) -> Sandbox:
-        self.accepts(request)
         client = self.client
         await self.prepare_image(request.prepared_image)
         if request.snapshot is not None:
@@ -753,7 +800,6 @@ class FleetProvider(Provider):
         """Continue in a Sandbox an earlier episode kept on the Fleet: its Node hands it to
         this Run, whose lease and retention then govern it."""
         sandbox_id = _named(handle, HANDLE_PREFIX)
-        self.accepts(request)
         client = self.client
         await self.prepare_image(request.prepared_image)
         demand = self._demand(
@@ -867,7 +913,9 @@ class FleetProvider(Provider):
                         await asyncio.shield(client.node_delete(node, sandbox_id))
                     raise
             except _Refused as refusal:
-                placement = await client.refused(sandbox_id, node.name, str(refusal))
+                placement = await client.refused(
+                    sandbox_id, node.name, str(refusal), capacity=isinstance(refusal, _Full)
+                )
                 continue
             except _Unreachable as error:
                 _log.warning("this Run uses Node %s no more: %s", node.name, error)
@@ -941,6 +989,8 @@ class FleetSandbox(Sandbox):
         self.node = node
         self._gateway = description.gateway_url
         self._url = f"{node.address}/v1/sandboxes/{description.sandbox_id}"
+        #: The context each command ran in, by the number the Node's notices name it by.
+        self._contexts: list[contextvars.Context] = []
         self.state = SandboxState.READY
 
     @property
@@ -973,7 +1023,9 @@ class FleetSandbox(Sandbox):
             timeout_sec=timeout_sec,
             identity=identity,
             stream=output_sink is not None,
+            call=len(self._contexts),
         )
+        self._contexts.append(contextvars.copy_context())
         session = self._client._state().session
         deadline = time.monotonic() + RECONNECT_SEC
         while True:
@@ -1016,10 +1068,32 @@ class FleetSandbox(Sandbox):
             raise GuestUnreachableError(f"Node {self.node.name} is unreachable: {error}") from None
         if done is None:
             raise GuestUnreachableError(f"Node {self.node.name} ended the command's connection")
+        self._record(done.notices)
         if done.error is not None:
             raise _failure(done.error)
         assert done.result is not None
         return done.result
+
+    def _record(self, notices: Sequence[SandboxNotice]) -> None:
+        """Log what the Node's leaf logged about the Sandbox in the context of the command it
+        logged for, as a leaf of this process logs: the episode's execution trace records it
+        in the phase that ran the command."""
+        logger = logging.getLogger("ale.execution")
+        for notice in notices:
+            context = self._contexts[notice.call]
+            context.run(logger.log, notice.level, notice.message, extra={"ale_data": notice.data})
+
+    async def _take_notices(self) -> None:
+        """Record the notices the Node still holds, before this Run lets go of the Sandbox;
+        a Node it cannot ask keeps them in its own log."""
+        try:
+            body = await self._call("GET", "/notices")
+        except Exception as error:
+            _log.warning(
+                "could not read %s's notices on %s: %s", self.sandbox_id, self.node.name, error
+            )
+            return
+        self._record(Notices.model_validate_json(body).notices)
 
     async def write_file(
         self, path: str, data: bytes, *, identity: Identity = Identity.FRAMEWORK
@@ -1076,6 +1150,7 @@ class FleetSandbox(Sandbox):
         """Keep the Sandbox on its Node past its episode; the Fleet's ledger holds it now, and
         no lease ends it."""
         retention = Retention(roles=roles, reason=reason)
+        await self._take_notices()
         kept = RetainedSandbox.model_validate_json(
             await self._call("POST", "/retain", body=retention.model_dump_json)
         )
@@ -1116,6 +1191,7 @@ class FleetSandbox(Sandbox):
             return
         self.state = SandboxState.DESTROYED
         try:
+            await self._take_notices()
             await self._client.release(self.sandbox_id)
             try:
                 await self._client.node_delete(self.node, self.sandbox_id)

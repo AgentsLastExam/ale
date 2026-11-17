@@ -1,7 +1,8 @@
-# Builds Linux VM disks: turns a Task's OCI rootfs into a bootable qcow2 (mkosi), and
-# installs the ALE framework into a qcow2 named by reference (libguestfs, whose small
-# appliance VM runs the disk's own programs instead of the Host; linux-image-kvm is its
-# kernel).
+# ALE's VM builder. It makes the Linux VM base disk from the base's root filesystem, once
+# per base version (mkosi, materialize.sh), and edits VM disks offline: it installs the
+# ALE framework into a Linux or Windows disk and discards a build layer's free space
+# (libguestfs, whose small appliance VM runs the disk's own programs instead of the Host;
+# linux-image-kvm is its kernel).
 FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 ARG DEBIAN_FRONTEND=noninteractive

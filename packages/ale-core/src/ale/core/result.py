@@ -49,6 +49,7 @@ class SandboxOutcome(BaseModel):
     outcome: Literal["destroyed", "retained", "snapshotted", "retention-failed"]
     """``snapshotted``: the Sandbox was destroyed after its disk was saved as ``handle``."""
     provider: str
+    """The Provider's name, such as ``docker``, which prefixes its handles; not its id."""
     handle: str | None = None
     reason: str | None = None
     cleanup_command: str | None = None

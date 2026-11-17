@@ -4,7 +4,7 @@
 contract is [the Fleet spec](../../docs/specs/fleet.md); [the Fleet guide](../../docs/guides/fleet.md)
 sets one up.
 
-It builds on `ale-run`: a node agent lends the engine's own Providers and prepares Task
+It builds on `ale-run`: a node agent lends the engine's own leaves and prepares Task
 images with the engine's code. `ale-run` never imports this package; a Run reaches the
 Fleet through its FleetProvider (`ale.run.providers.fleet.provider`), and the three speak the
 protocol in `ale.core.fleet`.

@@ -39,3 +39,23 @@ HTTP, which the CONNECT-only proxy does not carry.
 
 **Decision.** Left to Tasks, which pass `--ssl-revoke-best-effort`: letting plain HTTP to
 revocation endpoints through would widen every allowlist.
+
+## A Linux build layer keeps the space its build freed
+
+**Problem.** A qcow2 overlay copies a whole cluster up on the first write to it and keeps
+it after the guest deletes the file there, so a Linux Task layer would carry every
+download, archive and temporary file its `build.sh` wrote and removed.
+
+**Context.** A build that wrote a 300 MiB file, synced it and deleted it left an overlay
+whose file reached 711 MB. The runner passes the guest's discards through
+(`DISK_DISCARD=on`, virtio-scsi), and a discard on an overlay leaves a cluster that reads
+as zeros rather than as the base below it.
+
+**Solution.** `save_image` runs `virt-sparsify --in-place` in the VM builder on the stopped
+overlay, the layers below mounted read-only. It trims each filesystem it can mount; the
+layer above kept 343 MiB, as much as without the file, in 3 s.
+
+**Decisions.**
+- Offline in the VM builder, as for NTFS, rather than `fstrim` in the guest before it shuts
+  down: it needs no program in the Task's base and no runner setting.
+- The method is part of a Linux build's builder identity, so changing it builds again.

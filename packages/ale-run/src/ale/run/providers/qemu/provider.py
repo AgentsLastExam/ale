@@ -14,7 +14,7 @@ Three choices are worth stating, because each has a plausible alternative:
   outliving it. It also means the host needs nothing installed but Docker and ``/dev/kvm``.
 * **Overlays, not copies.** Each episode gets a qcow2 whose backing file is the golden
   image, so a pristine guest costs milliseconds and no disk. It is also the primitive a
-  future ``reset()`` would use. A Windows build and a snapshot keep that overlay as a
+  future ``reset()`` would use. An image build and a snapshot keep that overlay as a
   layer of its own rather than flattening it into a standalone disk.
 * **The guest service over a forwarded port.** One codebase, two transports: the same
   ``ale-guestd`` that Docker drives over exec-stdio is reached here over TCP.
@@ -34,10 +34,10 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
+from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
-    Capabilities,
     DesktopResolution,
     ExecOutputSink,
     ExecResult,
@@ -58,9 +58,9 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, OperatingSystem, Resources
-from ale.run import ale_image, guestd
+from ale.run import HELPER_RUNTIME, ale_image, guestd
 from ale.run.framework import MATERIALIZER_IMAGE, frame_disk, framed_disk
-from ale.run.gpu import GpuLease, accepts_model, normalize_pci_bdf, parse_nvidia_smi
+from ale.run.gpu import GpuLease, normalize_pci_bdf, parse_nvidia_smi
 from ale.run.images import (
     base_layer,
     chain_mounts,
@@ -112,6 +112,10 @@ RUNNER_DISK = "/storage/data.qcow2"
 
 #: Run in the VM builder to discard a Windows layer's free clusters.
 NTFS_DISCARD = Path(__file__).with_name("ntfs_discard.py")
+#: Run in the VM builder to discard a Linux layer's free space: libguestfs mounts each of
+#: the disk's filesystems and trims it, and the overlay turns every trimmed cluster it
+#: holds into one that reads as zeros.
+LINUX_DISCARD = ("virt-sparsify", "--in-place")
 #: Video memory of the guest's display: Linux's driver keeps two frames of the screen, and
 #: two 3200x1800 frames at 32 bits per pixel need 46 MB.
 VGA_MEMORY_MB = 64
@@ -508,16 +512,14 @@ class QemuSandbox(Sandbox):
         self._sealed = True
 
     async def save_image(self, destination: Path) -> str:
-        """Shut down a Windows build VM and keep its overlay as a layer at ``destination``.
+        """Shut down a build VM and keep its overlay as a layer at ``destination``.
 
         The overlay holds the framework and everything the build wrote, on the base the VM
-        booted from; the clusters it holds that are only NTFS free space are discarded
-        first. Returns the layer's identity.
+        booted from; the clusters it holds that are only free space of the guest's
+        filesystems are discarded first. Returns the layer's identity.
         """
-        if self.request.os is not OperatingSystem.WINDOWS:
-            raise ProviderCapabilityError("image scripts require a Windows VM")
         await self._power_off()
-        await _discard_free_clusters(self.storage / "data.qcow2")
+        await _discard_free_space(self.storage / "data.qcow2", self.request.os)
         return await self._keep(destination)
 
     async def snapshot(
@@ -675,18 +677,25 @@ class QemuProvider(Provider):
         self.gpu_devices = gpu_devices
         self.gpu_lock_dir = gpu_lock_dir or cache_root() / "gpu-locks" / self.name
 
-    def capabilities(self) -> Capabilities:
-        return Capabilities(
-            operating_systems=frozenset({OperatingSystem.LINUX, OperatingSystem.WINDOWS}),
-            # Whether there is a screen is a property of the disk that was built, not of
-            # this backend; a guest with no desktop refuses the request when asked.
-            gui=True,
-            network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.ALLOWLIST, NetworkMode.OPEN}),
-            reset=False,
-            snapshot=True,
+    async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        return tuple(
+            CapabilityProfile(
+                provider=self.id,
+                kind=ImageKind.VM,
+                os=system,
+                arch=Arch.X86_64,
+                # Whether there is a screen is a property of the disk that was built, not of
+                # this backend; a guest with no desktop refuses the request when asked.
+                gui=True,
+                network_modes=frozenset(NetworkMode),
+                snapshot=True,
+                # The models of a VFIO pool are known once a guest sees them.
+                gpus=bool(self.gpu_devices),
+            )
+            for system in (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
         )
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
         """Fail early and specifically, before anything is provisioned."""
         problems: list[str] = []
 
@@ -694,7 +703,7 @@ class QemuProvider(Provider):
             problems.append("docker is not on PATH; the runner image is what holds qemu")
         if shutil.which("qemu-img") is None:
             problems.append("qemu-img is not on PATH (apt install qemu-utils)")
-        # Only Docker's daemon opens /dev/kvm, for the runner, framer and materializer
+        # Only Docker's daemon opens /dev/kvm, for the runner and the VM builder
         # containers, so the account running ALE needs no access to it of its own.
         if not Path("/dev/kvm").exists():
             problems.append(
@@ -736,17 +745,13 @@ class QemuProvider(Provider):
         return await self._create(request, build_vm=True)
 
     async def _create(self, request: SandboxRequest, *, build_vm: bool) -> QemuSandbox:
-        self.accepts(request)
-        if request.image_kind is not ImageKind.VM:
-            raise ProviderCapabilityError("QemuProvider requires a VM image")
+        await self.accepts(request)
         await self.preflight()
         lease: GpuLease | None = None
         selected: tuple[_VfioGpu, ...] = ()
         by_group: dict[str, _VfioGpu] = {}
         if request.resources.gpus:
             candidates = tuple(_inspect_vfio_gpu(value) for value in self.gpu_devices)
-            if not candidates:
-                raise ProviderCapabilityError("no QEMU VFIO GPU pool is configured")
             by_group = _index_vfio_gpus(candidates)
             used = await _managed_gpu_ids()
             by_group = {group: gpu for group, gpu in by_group.items() if gpu.bdf not in used}
@@ -869,7 +874,8 @@ class QemuProvider(Provider):
                 ),
                 sudo=request.sudo,
                 network_mode=request.network.mode,
-                provider=self.name,
+                provider=self.id,
+                leaf=self.id,
                 desktop_resolution=desktop,
             ),
             resource_lease=lease,
@@ -945,7 +951,7 @@ class QemuProvider(Provider):
         name = f"ale-qemu-{uuid.uuid4().hex[:10]}"
         layers = await chain_mounts(base_image)
         argv = [
-            "docker", "run", "--detach", "--name", name,
+            "docker", "run", "--detach", *HELPER_RUNTIME, "--name", name,
             "--label", f"{MANAGED_LABEL}=true",
             "--label", f"{EPISODE_LABEL}={request.episode_id}",
             "--label", f"{ROLE_LABEL}={request.role.value}",
@@ -1550,16 +1556,27 @@ def _is_snapshot(disk: Path) -> bool:
     return disk.name == SNAPSHOT_DISK and (disk.parent / SNAPSHOT_RECORD).is_file()
 
 
-async def _discard_free_clusters(disk: Path) -> None:
-    """Discard the clusters of a stopped Windows overlay that are only NTFS free space,
-    with ``ntfs_discard.py`` in the VM builder, which reads the guest's own free bitmap."""
+async def _discard_free_space(disk: Path, operating_system: OperatingSystem) -> None:
+    """Discard the clusters of a stopped VM's overlay that hold only free space, in the VM
+    builder: on Windows ``ntfs_discard.py``, which reads NTFS's own free bitmap, and on
+    Linux ``LINUX_DISCARD``. Its layers below are only read."""
     name = f"ale-discard-{uuid.uuid4().hex[:12]}"
+    if operating_system is OperatingSystem.WINDOWS:
+        tool = [
+            "--mount", f"type=bind,src={NTFS_DISCARD},dst=/ale/ntfs_discard.py,readonly",
+            "--entrypoint", "python3", MATERIALIZER_IMAGE,
+            "/ale/ntfs_discard.py", str(disk.resolve()),
+        ]  # fmt: skip
+    else:
+        tool = [
+            "--entrypoint", LINUX_DISCARD[0], MATERIALIZER_IMAGE,
+            *LINUX_DISCARD[1:], "--quiet", "--format", "qcow2", str(disk.resolve()),
+        ]  # fmt: skip
     argv = [
-        "docker", "run", "--rm", "--name", name, "--device=/dev/kvm", "--network=none",
+        "docker", "run", "--rm", *HELPER_RUNTIME, "--name", name, "--device=/dev/kvm",
+        "--network=none",
         *await chain_mounts(disk, writable=True),
-        "--mount", f"type=bind,src={NTFS_DISCARD},dst=/ale/ntfs_discard.py,readonly",
-        "--entrypoint", "python3", MATERIALIZER_IMAGE,
-        "/ale/ntfs_discard.py", str(disk.resolve()),
+        *tool,
     ]  # fmt: skip
     try:
         code, _, stderr = await _run(*argv, timeout=900)
@@ -1568,4 +1585,4 @@ async def _discard_free_clusters(disk: Path) -> None:
             await asyncio.shield(_run("docker", "rm", "--force", name, timeout=60))
         raise
     if code != 0:
-        raise ProviderStartError(f"could not discard the free clusters of {disk}: {stderr[-2000:]}")
+        raise ProviderStartError(f"could not discard the free space of {disk}: {stderr[-2000:]}")

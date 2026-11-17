@@ -21,7 +21,7 @@ from ale.core.config import (
     parse_override,
     resolve_asset_collection,
 )
-from ale.core.errors import ConfigError, ProvenanceIncompleteError, ProviderCapabilityError
+from ale.core.errors import ConfigError, ProvenanceIncompleteError
 from ale.core.lock import (
     AgentProvenance,
     FrameworkProvenance,
@@ -33,7 +33,6 @@ from ale.core.lock import (
     TaskSource,
 )
 from ale.core.sandbox import (
-    Capabilities,
     DesktopResolution,
     ImageRef,
     PreparedTaskImage,
@@ -41,10 +40,9 @@ from ale.core.sandbox import (
     ResourceAllocation,
 )
 from ale.core.taskspec import (
+    SCHEMA_VERSION,
     ImageKind,
     ImageSpec,
-    NetworkMode,
-    NetworkPolicy,
     Resources,
     TaskSpec,
 )
@@ -79,7 +77,7 @@ def make_lock(**overrides: object) -> RunLock:
             image_source_identity=DIGEST,
             prepared_identity=DIGEST,
             runtime_ref="ale-task:fixture",
-            provider="docker",
+            provider="docker:runc",
             observed_identity=DIGEST,
             observed_ref="ale-task:fixture",
         ),
@@ -90,7 +88,8 @@ def make_lock(**overrides: object) -> RunLock:
                 memory_mb=1024,
                 sudo=False,
                 network_mode="block",
-                provider="docker",
+                provider="docker:runc",
+                leaf="docker:runc",
             ),
         ),
         "agent": AgentProvenance(
@@ -147,10 +146,10 @@ class TestRunLock:
         with pytest.raises(ProvenanceIncompleteError, match="commit"):
             lock.require_reportable()
 
-    def test_pre_release_schema_version_does_not_change(self) -> None:
-        assert make_lock().framework.schema_version == 2
+    def test_runlock_schema_version_is_pinned(self) -> None:
+        assert make_lock().framework.schema_version == 3
 
-    def test_windows_build_identity_survives_provenance_and_rejects_mixed_builders(self) -> None:
+    def test_vm_build_identity_survives_provenance_and_is_required(self) -> None:
         prepared = PreparedTaskImage(
             kind="vm",
             source="solver-local",
@@ -191,18 +190,81 @@ class TestRunLock:
         assert restored.image.declaration.ref is None
         assert restored.image.builder_identity == DIGEST
         assert restored.image.base_materials == (DIGEST,)
-        assert restored.image.oci_identity is None
-        assert restored.image.materializer_identity is None
 
         for model in (prepared, restored.image):
             values = model.model_dump(mode="json")
-            for invalid in (
-                {"base_materials": []},
-                {"builder_identity": None},
-                {"oci_identity": DIGEST, "materializer_identity": DIGEST},
-            ):
+            for invalid in ({"base_materials": []}, {"builder_identity": None}):
                 with pytest.raises(ValidationError):
                     type(model).model_validate(values | invalid)
+        # A RunLock records what the image turned out to be, never a kind left open.
+        undecided = restored.image.model_dump(mode="json")
+        undecided["declaration"] = {"kind": None, "ref": "ghcr.io/acme/vm:1"}
+        with pytest.raises(ValidationError, match="decided kind"):
+            ImageProvenance.model_validate(undecided)
+
+    def test_the_provider_and_leaf_of_each_sandbox_are_recorded(self) -> None:
+        """The solver's and a separate verifier's: their isolation, which a result's
+        comparability rests on, depends on both."""
+        existing = make_lock()
+        assert existing.resources is not None
+        solver = existing.resources.effective.model_copy(
+            update={"provider": "fleet", "leaf": "docker:kata", "node": "gpu-1/docker:kata"}
+        )
+        verifier = solver.model_copy(
+            update={"provider": "docker:runc", "leaf": "docker:runc", "node": None}
+        )
+        image = ResolvedImage(
+            kind="container",
+            prepared_identity=DIGEST,
+            observed_identity=DIGEST,
+            observed_ref="ale-task:fixture",
+        )
+        prepared = PreparedTaskImage(
+            kind="container",
+            source="solver-local",
+            input_identity=DIGEST,
+            image_source_identity=DIGEST,
+            runtime_ref="ale-task:fixture",
+            prepared_identity=DIGEST,
+        )
+        lock = build_lock(
+            ProvenanceInputs(
+                source=existing.task.source,
+                agent=existing.agent,
+                gateway=existing.gateway,
+                config_hash=DIGEST,
+                framework=existing.framework,
+            ),
+            TaskSpec(
+                name="agentslastexam/separate",
+                image={"kind": "container", "ref": "ghcr.io/acme/tool:1"},
+                instruction="Complete the task.",
+                verify={
+                    "environment_mode": "separate",
+                    "resources": {"cpus": 1, "memory_mb": 512, "storage_mb": None, "gpus": 0},
+                },
+            ),
+            resolved_image=image,
+            allocation=solver,
+            task_digest=DIGEST,
+            prepared_image=prepared,
+            verifier_resolved_image=image,
+            verifier_allocation=verifier,
+            prepared_verifier_image=prepared,
+        )
+        restored = RunLock.model_validate_json(lock.model_dump_json())
+        assert restored.resources is not None and restored.verification.resources is not None
+        effective = restored.resources.effective
+        assert (effective.provider, effective.leaf, effective.node) == (
+            "fleet",
+            "docker:kata",
+            "gpu-1/docker:kata",
+        )
+        checked = restored.verification.resources.effective
+        assert (checked.provider, checked.leaf) == ("docker:runc", "docker:runc")
+        assert restored.image.provider == "fleet"
+        assert restored.verification.image is not None
+        assert restored.verification.image.provider == "docker:runc"
 
 
 class TestConfigLayering:
@@ -327,19 +389,6 @@ class TestConfigLayering:
             LoggingPolicy.model_validate({"unknown": True})
 
 
-class TestCapabilities:
-    def test_rejects_unsupported_network_mode(self) -> None:
-        caps = Capabilities(network_modes=frozenset({NetworkMode.OPEN}))
-        with pytest.raises(ProviderCapabilityError, match="network mode"):
-            caps.check(Resources(), NetworkPolicy(mode=NetworkMode.BLOCK))
-
-    def test_accepts_a_satisfiable_request(self) -> None:
-        caps = Capabilities(
-            gui=True, network_modes=frozenset({NetworkMode.BLOCK}), max_cpus=4, max_memory_mb=8192
-        )
-        caps.check(Resources(cpus=2, memory_mb=2048), NetworkPolicy())
-
-
 class TestGuestProtocol:
     """The guest service is exercised as a subprocess: that is how it really runs."""
 
@@ -452,7 +501,7 @@ def test_a_task_source_is_read_from_its_git_checkout(tmp_path: Path) -> None:
 
     task = tmp_path / "tasks" / "demo"
     task.mkdir(parents=True)
-    (task / "task.toml").write_text('schema_version = "1.4+ale.1"\n')
+    (task / "task.toml").write_text(f'schema_version = "{SCHEMA_VERSION}"\n')
     assert resolve(str(task)).source.kind == "local"
     git("init", "-q")
     git("remote", "add", "origin", "https://example.invalid/tasks.git")
@@ -486,7 +535,7 @@ def test_a_task_source_records_no_credentials_and_needs_no_git(
 
     task = tmp_path / "tasks" / "demo"
     task.mkdir(parents=True)
-    (task / "task.toml").write_text('schema_version = "1.4+ale.1"\n')
+    (task / "task.toml").write_text(f'schema_version = "{SCHEMA_VERSION}"\n')
     git("init", "-q")
     git("remote", "add", "origin", "https://user:ghp_secret@example.invalid/tasks.git")
     git("add", "-A")

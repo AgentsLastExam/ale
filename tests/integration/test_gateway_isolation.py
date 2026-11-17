@@ -17,18 +17,25 @@ from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, SessionRegistry
 from ale.run.providers.docker import DockerProvider
-from tests.support import CONTAINER_BASE, prepare_reference, skip_without_kata
+from tests.support import (
+    CONTAINER_BASE,
+    prepare_reference,
+    skip_without_gvisor,
+    skip_without_kata,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 IMAGE = CONTAINER_BASE
 
 
-@pytest.fixture(params=["runc", pytest.param("kata", marks=pytest.mark.needs_kvm)])
+@pytest.fixture(params=["runc", pytest.param("kata", marks=pytest.mark.needs_kvm), "gvisor"])
 def provider(request: pytest.FixtureRequest) -> DockerProvider:
     """Each Docker runtime, since each confines the sandbox its own way."""
     if request.param == "kata":
         skip_without_kata()
+    if request.param == "gvisor":
+        skip_without_gvisor()
     return DockerProvider(runtime=request.param)
 
 

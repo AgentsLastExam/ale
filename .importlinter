@@ -67,6 +67,22 @@ forbidden_modules =
     typer
     yaml
 
+[importlinter:contract:in-sandbox-scripts-stdlib-only]
+name = the container feature probe and the iptables writer run in the guest and import neither engine code nor third-party packages
+type = forbidden
+source_modules =
+    ale.run.capprobe
+    ale.run.iptables
+forbidden_modules =
+    ale.core
+    ale.run.gateway
+    ale.run.guestd
+    ale.run.providers
+    aiohttp
+    pydantic
+    typer
+    yaml
+
 [importlinter:contract:harness-provider-decoupling]
 name = harnesses talk to sandboxes through the contract, not through a provider
 type = forbidden

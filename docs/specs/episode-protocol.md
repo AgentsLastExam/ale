@@ -9,7 +9,12 @@ Before the protocol starts, the engine has already:
 
 - loaded the Task folder into `TaskSpec` and resolved its
   [variables](task-authoring.md#variables);
-- linted the Task and prepared the solver image and any dedicated verifier image;
+- linted the Task, decided any image kind its folder leaves open
+  ([Source selection](sandbox-image.md#source-selection-and-identity)), selected the
+  Provider of each of its Sandboxes
+  ([Provider selection](sandbox-image.md#provider-selection)), and prepared the solver
+  image and any dedicated verifier image for those Providers;
+- run each selected leaf's preflight, and probed the container features its Sandboxes need;
 - resolved the Harness and the effective Skill/MCP resources;
 - resolved the Harness authentication path, created its episode capabilities and
   evidence sinks, and prepared the Provider registry, run policy, and RunLock inputs.
@@ -39,11 +44,11 @@ lets it destroy every Sandbox it created.
 
 ### Provision
 
-The prepared image kind and the Task OS select the Provider: the configured one for a
-container or a Linux or Windows VM, the local Orchard for a macOS VM. The Provider admits
-the requested resources, creates the sandbox, and returns the image and resource
-allocation it actually started. Those observations, rather than the request alone, enter
-RunLock.
+Each Sandbox comes from the Provider the Run selected for its Task and role before the
+episode began ([Provider selection](sandbox-image.md#provider-selection)); a continuation
+continues on the Provider that kept its solver. The Provider admits the requested
+resources, creates the sandbox, and returns the image and resource allocation it actually
+started. Those observations, rather than the request alone, enter RunLock.
 
 Shared verification provisions one physical sandbox with role `shared`. Separate
 verification provisions a `solver` sandbox first and a `verifier` sandbox only after
@@ -135,8 +140,9 @@ Solver and verifier retention are independent run policies and default to `destr
 `keep` leaves the Sandbox running. The solver may instead request `snapshot`: once the
 episode is scored its disk is saved and the Sandbox destroyed, and any number of later
 Sandboxes boot from the snapshot. A snapshot holds no processes, memory or desktop session,
-so follow-ups that need them keep the Sandbox. A Provider that cannot save snapshots
-refuses the request before anything is provisioned.
+so follow-ups that need them keep the Sandbox. A solver to be snapshotted needs a Provider
+that saves snapshots, so selection gives it none that cannot, before anything is
+provisioned.
 Before either, ALE removes every stage of the Task (setup, tests with their Judge state,
 the solution), the verifier directory and known credentials, so a kept solver or a
 snapshot holds only the agent's own state.

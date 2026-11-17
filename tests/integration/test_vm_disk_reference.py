@@ -7,18 +7,18 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import RunConfig
 from ale.core.taskspec import OperatingSystem
 from ale.core.verdict import Status
-from ale.run import task_images
+from ale.run import HELPER_RUNTIME, task_images
 from ale.run.episode import run_episode
 from ale.run.framework import MATERIALIZER_IMAGE, framework_identity, framework_on_disk
 from ale.run.harnesses.builtin import OracleHarness
+from ale.run.images import pull_vm_image
 from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers import ProviderRegistry
+from ale.run.providers.qemu import QemuProvider
 from ale.run.task_images import prepare_task_image_result
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import VM_BASE, VM_RESOURCES
+from tests.support import VM_BASE, VM_RESOURCES, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_kvm]
 
@@ -35,24 +35,19 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     docker_buildx: None,
     kvm_host: None,
 ) -> None:
-    # A disk ALE did not prepare: the VM base and the Task's layer, without the framework.
-    context = tmp_path / "context"
-    context.mkdir()
-    (context / "Dockerfile").write_text(
-        f"FROM {VM_BASE}\n"
-        "RUN mkdir -p /home/user/input /home/user/output \\\n"
-        " && printf 'world' > /home/user/input/word.txt \\\n"
-        " && chown -R user:user /home/user/input /home/user/output\n"
-    )
-    # Named by tag: the ID `-q` prints is not one the containerd image store resolves.
-    built = "ale-test-bare-vm:latest"
+    # A disk ALE did not prepare: the VM base and the Task's files, without the framework.
+    bare = tmp_path / "bare.qcow2"
+    await pull_vm_image(VM_BASE, bare)
     subprocess.run(
-        ["docker", "buildx", "build", "--load", "--provenance=false", "-q", "-t", built,
-         str(context)],
+        ["docker", "run", "--rm", *HELPER_RUNTIME, "--device=/dev/kvm", "--network=none",
+         "--mount", f"type=bind,src={bare},dst=/disk.qcow2",
+         "--entrypoint", "virt-customize", MATERIALIZER_IMAGE,
+         "--format", "qcow2", "--add", "/disk.qcow2", "--no-logfile", "--run-command",
+         "mkdir -p /home/user/input /home/user/output"
+         " && printf world > /home/user/input/word.txt"
+         " && chown -R user:user /home/user/input /home/user/output"],
         capture_output=True, text=True, check=True,
     )  # fmt: skip
-    bare = tmp_path / "bare.qcow2"
-    await task_images._materialize(built, bare)
     builder = MATERIALIZER_IMAGE
     linux = OperatingSystem.LINUX
     assert await framework_on_disk(bare, operating_system=linux, builder=builder) is None
@@ -60,13 +55,13 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     def task_with_ref(name: str, disk: Path) -> Path:
         return write_repo(
             tmp_path / name,
-            config={"environment": {"vm_image": str(disk), **VM_RESOURCES}},
+            config={"environment": {"image": str(disk), **VM_RESOURCES}},
             dockerfile=None,
         )
 
-    registry = ProviderRegistry(RunConfig())
+    provider = QemuProvider()
     task_path = task_with_ref("bare-ref", bare)
-    first = await prepare_task_image_result(load_tasks(task_path)[0], registry)
+    first = await prepare_task_image_result(load_tasks(task_path)[0], provider)
     assert _steps(first)["framework-layer"] == "executed"
     framed = Path(first.image.runtime_ref)
     assert framed != bare and first.image.resolved_reference == bare.as_uri()
@@ -81,7 +76,7 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     )  # fmt: skip
     assert Path(info["full-backing-filename"]).parent == framed.parent
 
-    second = await prepare_task_image_result(load_tasks(task_path)[0], registry)
+    second = await prepare_task_image_result(load_tasks(task_path)[0], provider)
     assert _steps(second)["framework-layer"] == "reused"
     assert second.image == first.image
 
@@ -90,7 +85,7 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     standalone = tmp_path / "framed.qcow2"
     subprocess.run(["qemu-img", "convert", "-O", "qcow2", str(framed), str(standalone)], check=True)
     carried = await prepare_task_image_result(
-        load_tasks(task_with_ref("framed-ref", standalone))[0], registry
+        load_tasks(task_with_ref("framed-ref", standalone))[0], provider
     )
     assert _steps(carried)["framework-layer"] == "reused"
     assert carried.image.runtime_ref == str(standalone)
@@ -98,6 +93,9 @@ async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     task = load_tasks(task_path)[0]
     task.prepared_image = first.image
     result = await run_episode(
-        task, EpisodeProtocol(OracleHarness()), registry, run_dir=tmp_path / "runs"
+        task,
+        EpisodeProtocol(OracleHarness()),
+        provider_registry(provider),
+        run_dir=tmp_path / "runs",
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure

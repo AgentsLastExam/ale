@@ -21,7 +21,6 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from ale.core.config import RunConfig
 from ale.core.episode import EpisodeContext
 from ale.core.errors import AleError, ProviderCapabilityError
 from ale.core.fleet import ImageHolding, ImageInputs
@@ -30,7 +29,6 @@ from ale.core.task import Task
 from ale.core.taskspec import ImageKind, OperatingSystem
 from ale.core.verdict import Rewards
 from ale.run.process import run
-from ale.run.providers import ProviderRegistry
 from ale.run.task_images import prepare_task_image_result, prepare_verifier_image_result
 from ale.run.tasksets.manifest import TaskFolder
 
@@ -46,17 +44,6 @@ class _Record(BaseModel):
     image: PreparedTaskImage
     bytes: int
     prepare_sec: float
-
-
-class _Lent(ProviderRegistry):
-    """The Node's own Providers, where preparation asks a Run's configuration for them."""
-
-    def __init__(self, lend: Lend) -> None:
-        super().__init__(RunConfig())
-        self._lend = lend
-
-    def get(self, kind: ImageKind, operating_system: OperatingSystem) -> Provider:
-        return self._lend(kind, operating_system)
 
 
 class _BuildTask(Task):
@@ -105,7 +92,6 @@ class NodeImages:
         self.root = root
         root.mkdir(parents=True, exist_ok=True)
         self._lend = lend
-        self._providers = _Lent(lend)
         self._locks: dict[str, asyncio.Lock] = {}
         self._records: dict[str, _Record] = {}
         self._runs: dict[str, set[str]] = {}
@@ -181,11 +167,18 @@ class NodeImages:
             )
         # Off the event loop, as is all hashing of build inputs: heartbeats and leases go on.
         task = await asyncio.to_thread(_BuildTask, inputs, self._folder(inputs.key) / "task")
-        if inputs.role == "solver":
-            return (await prepare_task_image_result(task, self._providers)).image
-        result = await prepare_verifier_image_result(task, self._providers)
-        if result is None:
+        spec = task.spec
+        image = spec.image if inputs.role == "solver" else spec.verify.image
+        if image is None:
             raise ProviderCapabilityError("this Task's verifier has no image of its own")
+        if image.kind is None:
+            # A Run names an image by its key only once its kind is decided.
+            raise ProviderCapabilityError(f"the Run sent {inputs.key} before its kind was decided")
+        provider = self._lend(image.kind, spec.os)
+        if inputs.role == "solver":
+            return (await prepare_task_image_result(task, provider)).image
+        result = await prepare_verifier_image_result(task, provider)
+        assert result is not None
         return result.image
 
     def _forget(self, key: str) -> None:

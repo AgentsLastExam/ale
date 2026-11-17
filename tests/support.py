@@ -6,18 +6,27 @@ import os
 import shutil
 import subprocess
 import tomllib
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ale.core.config import RunConfig
+from ale.core.capability import CapabilityProfile, SandboxNeeds
+from ale.core.config import RunConfig, SandboxConfig
 from ale.core.sandbox import ImageRef, PreparedTaskImage, Provider, Sandbox, SandboxRequest
-from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from ale.core.taskspec import (
+    SCHEMA_VERSION,
+    ContainerFeature,
+    ImageKind,
+    NetworkMode,
+    NetworkPolicy,
+    OperatingSystem,
+    Resources,
+)
 from ale.run import ale_image
-from ale.run.providers import ProviderRegistry
+from ale.run.providers import ProviderRegistry, machine_arch
 
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
 #: The current ALE bases, for images a test builds or runs.
@@ -40,6 +49,33 @@ def skip_without_kata() -> None:
         pytest.skip("Kata Containers is not installed (containerd-shim-kata-v2 not on PATH)")
 
 
+def skip_without_gvisor() -> None:
+    """Skip unless Docker here registers ALE's build of gVisor's runtime, as ``runsc`` and
+    ``runsc-net-raw`` ([Providers](../packages/ale-run/src/ale/run/providers/README.md))."""
+    from ale.run.providers.docker import gvisor
+
+    try:
+        shown = subprocess.run(
+            ["docker", "info", "--format", "{{json .Runtimes}}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        pytest.skip(f"docker is not reachable: {error}")
+    runtimes = json.loads(shown.stdout or "{}")
+    missing = {gvisor.RUNTIME, gvisor.NET_RAW} - set(runtimes)
+    if missing:
+        pytest.skip(f"gVisor is not registered with Docker: {', '.join(sorted(missing))}")
+    path = runtimes[gvisor.RUNTIME].get("path", gvisor.RUNTIME)
+    try:
+        version = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        pytest.skip(f"{path} does not run here: {error}")
+    if gvisor.BUILD not in version.stdout:
+        pytest.skip(f"{path} is not ALE's build {gvisor.BUILD}: {version.stdout.strip()}")
+
+
 def sibling_checkout(name: str) -> Path:
     """Locate a sibling repository from main or any linked worktree."""
     return next(
@@ -48,14 +84,14 @@ def sibling_checkout(name: str) -> Path:
     )
 
 
-def provider_registry(
-    provider: Provider | None = None,
-    *,
-    kind: ImageKind = ImageKind.CONTAINER,
-) -> ProviderRegistry:
-    registry = ProviderRegistry(RunConfig())
-    if provider is not None:
-        registry._instances[(kind, False)] = provider
+def provider_registry(provider: Provider | None = None) -> ProviderRegistry:
+    """A Run's registry, with ``provider`` standing for the Provider its id names, first in
+    ``sandbox.providers``."""
+    if provider is None:
+        return ProviderRegistry(RunConfig())
+    order = [provider.id, *(name for name in SandboxConfig().providers if name != provider.id)]
+    registry = ProviderRegistry(RunConfig.model_validate({"sandbox": {"providers": order}}))
+    registry._instances[provider.id] = provider
     return registry
 
 
@@ -70,7 +106,7 @@ async def prepare_reference(
 
 #: The smallest valid ``task.toml``: a container Task with no network.
 MINIMAL_TASK_CONFIG: dict[str, Any] = {
-    "schema_version": "1.4+ale.1",
+    "schema_version": SCHEMA_VERSION,
     "task": {"name": "agentslastexam/demo"},
     "environment": {"cpus": 1, "memory_mb": 512},
     "agent": {"user": "user", "timeout_sec": 120, "network_mode": "no-network"},
@@ -210,7 +246,7 @@ async def cli_sandbox(
             folder,
             name="agentslastexam/cli-runtime",
             config={
-                "environment": {"os": "macos", "vm_base": MACOS_BASE},
+                "environment": {"os": "macos", "image": MACOS_BASE},
                 "agent": {"user": "admin", "sudo": True, "network_mode": "public"},
             },
             dockerfile=None,
@@ -218,7 +254,8 @@ async def cli_sandbox(
         (folder / "environment").mkdir()
         (folder / "environment" / "build.sh").write_text(MACOS_RUNTIME_BUILD)
         subprocess.run(["git", "init", "-q", str(folder)], check=True)
-        image = await prepare_task_image(load_tasks(folder)[0], registry)
+        provider = registry.get("orchard")
+        image = await prepare_task_image(load_tasks(folder)[0], provider)
         request = SandboxRequest(
             episode_id=episode_id,
             os=OperatingSystem.MACOS,
@@ -229,9 +266,8 @@ async def cli_sandbox(
             user="admin",
             sudo=True,
         )
-        provider = registry.get(ImageKind.VM, OperatingSystem.MACOS)
     else:
-        provider = registry.get(ImageKind.CONTAINER, OperatingSystem.LINUX)
+        provider = registry.get("docker:runc")
         request = SandboxRequest(
             episode_id=episode_id,
             prepared_image=await prepare_reference(provider, CONTAINER_BASE),
@@ -373,7 +409,8 @@ class MemorySandbox(Sandbox):
                 memory_mb=request.resources.memory_mb,
                 sudo=request.sudo,
                 network_mode=request.network.mode,
-                provider=provider.name,
+                provider=provider.id,
+                leaf=provider.id,
             ),
             agent_user=request.user,
             agent_home=f"/home/{request.user}",
@@ -479,11 +516,17 @@ class MemoryProvider(Provider):
     """A Provider of :class:`MemorySandbox`, recording what it was asked for."""
 
     def __init__(
-        self, name: str = "docker", *, create_delay: float = 0.0, saves_snapshots: bool = False
+        self,
+        name: str = "docker",
+        *,
+        create_delay: float = 0.0,
+        saves_snapshots: bool = False,
+        container_features: frozenset[ContainerFeature] = frozenset(),
     ) -> None:
         self.name = name
         self.create_delay = create_delay
         self.saves_snapshots = saves_snapshots
+        self.container_features = container_features
         self.requests: list[SandboxRequest] = []
         self.sandboxes: list[MemorySandbox] = []
         self.destroyed: list[str] = []
@@ -496,17 +539,22 @@ class MemoryProvider(Provider):
         #: How long handing a retained Sandbox to a later episode takes.
         self.attach_delay = 0.0
 
-    def capabilities(self):  # type: ignore[no-untyped-def]
-        from ale.core.sandbox import Capabilities
-
-        return Capabilities(
-            operating_systems=frozenset({OperatingSystem.LINUX}),
-            gui=True,
-            network_modes=frozenset(NetworkMode),
-            snapshot=self.saves_snapshots,
+    async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        """Linux containers on this machine's architecture."""
+        return (
+            CapabilityProfile(
+                provider=self.id,
+                kind=ImageKind.CONTAINER,
+                os=OperatingSystem.LINUX,
+                arch=machine_arch(),
+                gui=True,
+                network_modes=frozenset(NetworkMode),
+                snapshot=self.saves_snapshots,
+                container_features=self.container_features,
+            ),
         )
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
         return None
 
     async def list_retained(self) -> list[dict[str, object]]:

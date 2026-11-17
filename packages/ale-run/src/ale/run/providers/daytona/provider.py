@@ -45,11 +45,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import SplitResult, urlsplit
 
+from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model
 from ale.core.config import DaytonaProviderConfig
 from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
-    Capabilities,
     ExecOutputSink,
     ExecResult,
     GpuAllocation,
@@ -67,10 +67,10 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, OperatingSystem
+from ale.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem
 from ale.run import guestd
 from ale.run.framework import MARKER, framework_identity, with_framework
-from ale.run.gpu import accepts_model, parse_nvidia_smi
+from ale.run.gpu import parse_nvidia_smi
 from ale.run.guestd.tunnel import Mux
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
 from ale.run.providers import relay
@@ -122,6 +122,19 @@ _CREATE_REPLY_SEC = 30
 _EGRESS_PROBE = ("1.1.1.1:443", "one.one.one.one")
 #: Where the tunnel delivers the Host's egress proxy on a sealed allowlist sandbox's loopback.
 PROXY_PORT = SANDBOX_GATEWAY_PORT + 1
+#: What root in a Daytona sandbox has without being granted anything, as measured (see the
+#: Providers README): sandboxes run in a user namespace that holds every capability, with
+#: ``/dev/fuse``, and a container engine runs inside one.
+FEATURES = frozenset(
+    {
+        ContainerFeature.NESTED_CONTAINERS,
+        ContainerFeature.IO_URING,
+        ContainerFeature.FUSE,
+        ContainerFeature.RAW_SOCKETS,
+        ContainerFeature.USER_NAMESPACES,
+        ContainerFeature.MOUNT,
+    }
+)
 #: What the RunLock records of each GPU, read as the Docker Provider reads it.
 _NVIDIA_QUERY = "uuid,name,pci.bus_id,driver_version"
 #: Daytona's GPU types by the ``gpu_types`` names that select them, as Harbor maps them. Not
@@ -313,7 +326,7 @@ class _Tunnel:
     ) -> None:
         self._ssh = ssh
         self._targets = targets
-        self._command = "exec {} {} {}".format(
+        self._command = "cd / && exec {} -I {} {}".format(
             PYTHON,
             GUESTD_DIR / "tunnel.py",
             " ".join(f"--listen {port}:{target}" for port, target in listeners),
@@ -628,34 +641,39 @@ class DaytonaProvider(Provider):
             self._images_client = ImagePublisher(self._api)
         return self._images_client
 
-    def capabilities(self) -> Capabilities:
-        return Capabilities(
-            operating_systems=frozenset({OperatingSystem.LINUX}),
-            gui=True,  # depends on the image, as for Docker
-            network_modes=frozenset({NetworkMode.BLOCK, NetworkMode.ALLOWLIST, NetworkMode.OPEN}),
+    async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        return (
+            CapabilityProfile(
+                provider=self.id,
+                kind=ImageKind.CONTAINER,
+                os=OperatingSystem.LINUX,
+                arch=Arch.X86_64,
+                gui=True,  # depends on the image, as for Docker
+                network_modes=frozenset(NetworkMode),
+                gpus=True,
+                container_features=FEATURES,
+            ),
         )
 
-    def accepts(self, request: SandboxRequest) -> None:
-        super().accepts(request)
+    def refusals(self, needs: SandboxNeeds, *, user: str, role: SandboxRole) -> tuple[str, ...]:
+        resources = needs.resources
         problems: list[str] = []
-        if request.resources.memory_mb % 1024:
+        if resources.memory_mb % 1024:
             problems.append(
-                f"memory_mb={request.resources.memory_mb} is not a whole number of GiB, "
+                f"memory_mb={resources.memory_mb} is not a whole number of GiB, "
                 "which is the unit Daytona allocates"
             )
-        storage = request.resources.storage_mb
-        if storage is not None and storage % 1024:
-            problems.append(f"storage_mb={storage} is not a whole number of GiB")
-        gpu_types = request.resources.gpu_types
-        if request.resources.gpus and gpu_types and not _daytona_gpu_types(gpu_types):
+        if resources.storage_mb is not None and resources.storage_mb % 1024:
+            problems.append(f"storage_mb={resources.storage_mb} is not a whole number of GiB")
+        gpu_types = resources.gpu_types
+        if resources.gpus and gpu_types and not _daytona_gpu_types(gpu_types):
             usable = ", ".join(sorted(set(_GPU_TYPES.values())))
             problems.append(
                 f"none of gpu_types {list(gpu_types)} is a Daytona GPU ALE can use ({usable})"
             )
-        if problems:
-            raise ProviderCapabilityError("; ".join(problems))
+        return tuple(problems)
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
         for tool, why in (("docker", "builds and pushes the image"), ("ssh", "reaches guestd")):
             if shutil.which(tool) is None:
                 raise ProviderStartError(f"{tool} is not installed; Daytona needs it, it {why}")
@@ -686,9 +704,7 @@ class DaytonaProvider(Provider):
     # --- create ----------------------------------------------------------------
 
     async def create(self, request: SandboxRequest) -> Sandbox:
-        self.accepts(request)
-        if request.image_kind is not ImageKind.CONTAINER:
-            raise ProviderCapabilityError("DaytonaProvider requires a container image")
+        await self.accepts(request)
         local = await resolve_prepared_container_image(request.prepared_image)
         framed = await with_framework(local.observed_identity, user=request.user)
         await self._require_usable(request.prepared_image.runtime_ref, framed)
@@ -983,7 +999,7 @@ def _guestd_command(agent_user: str, environment: dict[str, str]) -> str:
         shlex.quote(f"{name}={value}")
         for name, value in {**environment, "ALE_AGENT_USER": agent_user}.items()
     )
-    return f"exec env {removed} {assignments} {PYTHON} {GUESTD_DIR / 'main.py'} --stdio"
+    return f"cd / && exec env {removed} {assignments} {PYTHON} -I {GUESTD_DIR / 'main.py'} --stdio"
 
 
 async def _guest_contract(client: GuestClient) -> tuple[str, bool]:
@@ -1281,6 +1297,7 @@ def _observed_allocation(request: SandboxRequest, data: dict[str, Any]) -> Resou
         sudo=request.sudo,
         network_mode=request.network.mode,
         provider="daytona",
+        leaf="daytona",
     )
 
 

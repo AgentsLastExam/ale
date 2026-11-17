@@ -19,31 +19,38 @@ with the local Orchard. How the backend holds ALE's guarantees on Daytona is in
   ```
 
   The key stays on the Host. To use another variable, set
-  `container.daytona.api_key_env` to its name.
+  `sandbox.daytona.api_key_env` to its name.
 - **`docker` and `ssh` on the Host.** `ssh` is the OpenSSH client: guestd and the Gateway
   tunnel run over it. Daytona's gateway host key is recorded in
   `~/.cache/ale/daytona/known_hosts` on first use; delete that file if Daytona rotates it.
 
 ## Select the backend
 
-In a run TOML, or with `--set` on the command line:
+Name `daytona` in the Run's Providers, in a run TOML or with `--set` on the command line.
+This list sends every container Task to Daytona and every VM Task to QEMU or Orchard
+([Provider selection](../specs/sandbox-image.md#provider-selection)):
 
 ```toml
-[container]
-provider = "daytona"
+[sandbox]
+providers = ["daytona", "qemu", "orchard"]
 
-[container.daytona]
+[sandbox.daytona]
 target = "us"                # Daytona region
 lifetime_hours = 24          # Daytona deletes a sandbox this long after creation
 retained_lifetime_hours = 72 # the same, for sandboxes kept with sandbox_retention
 ```
 
 ```bash
-uv run ale run TASK --agent claude-code --set container.provider=daytona
+uv run ale run TASK --agent claude-code \
+  --set 'sandbox.providers=["daytona", "qemu", "orchard"]'
 ```
 
-`container.gpus` and `container.runtime` select Docker devices and runtimes and are
-rejected with Daytona.
+A Sandbox Daytona cannot serve, such as one whose memory is not a whole number of GiB or
+that needs the `perf` container feature, goes to the next Provider listed that serves it;
+when none does, the Run is refused before anything starts, with each Provider's reason.
+Every Daytona sandbox has the same container features, whether its Task names them or not;
+which they are is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#container-features).
 
 ## GPU Tasks
 
@@ -86,13 +93,15 @@ ALE_TEST_DAYTONA_GPU=1 uv run pytest -m needs_daytona tests/conformance/test_pro
   the images it pushes; leave it in place. Daytona removes pushed images on its own
   schedule, and ALE pushes again when one is gone.
 
-Nothing else is created: no snapshots, so Daytona's snapshot quota is not used, and
-`sandbox_retention.solver = "snapshot"` is refused before a sandbox is made.
+Nothing else is created: no snapshots, so Daytona's snapshot quota is not used. Under
+`sandbox_retention.solver = "snapshot"` no solver goes to Daytona, and a Run whose list
+names no other Provider for it is refused before a sandbox is made.
 
 ## Limits to know
 
-- **Resources are whole GiB.** A Task with `memory_mb: 1536` is refused rather than rounded.
-  Without `storage_mb`, Daytona gives its default disk: 3 GiB, or 512 GiB with a GPU.
+- **Resources are whole GiB.** A Task with `memory_mb = 1536` is not rounded: Daytona does
+  not serve it. Without `storage_mb`, Daytona gives its default disk: 3 GiB, or 512 GiB
+  with a GPU.
 - **Quotas.** A create Daytona rate-limits waits for up to five minutes; a quota or
   capacity refusal fails the episode with Daytona's message.
 - **Cold start.** The first episode of an image pushes it to Daytona, which is minutes for

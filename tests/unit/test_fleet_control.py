@@ -11,9 +11,9 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, unused_port
 
+from ale.core.capability import Arch, CapabilityProfile, GpuHold, GpuModel
 from ale.core.fleet import (
     AcquireRequest,
-    Arch,
     GpuPool,
     Grant,
     Heartbeat,
@@ -26,15 +26,14 @@ from ale.core.fleet import (
     Retention,
     RosterEntry,
     SandboxDemand,
-    SandboxProfile,
     SandboxStatus,
     SnapshotHolding,
     sign_grant,
     verify_grant,
 )
-from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, Resources
+from ale.core.taskspec import ContainerFeature, ImageKind, NetworkMode, OperatingSystem, Resources
 from ale.fleet.control import ControlPlane, FleetError, Timing
-from ale.fleet.placement import Busy, Holds, NodeView, choose, remaining_sec
+from ale.fleet.placement import Busy, Holds, NodeView, assign, choose, remaining_sec
 from ale.fleet.server import control_app
 from ale.fleet.store import Store
 
@@ -46,24 +45,23 @@ OTHER_FRAMEWORK = "sha256:" + "b" * 64
 IMAGE = "sha256:" + "1" * 64
 OTHER_IMAGE = "sha256:" + "2" * 64
 
-MACOS = SandboxProfile(
+MACOS = CapabilityProfile(
     provider="orchard",
     kind=ImageKind.VM,
     os=OperatingSystem.MACOS,
     arch=Arch.ARM64,
     gui=True,
     network_modes=frozenset({NetworkMode.OPEN}),
-    macos_vm_slots=1,
 )
-DOCKER = SandboxProfile(
-    provider="docker",
+DOCKER = CapabilityProfile(
+    provider="docker:runc",
     kind=ImageKind.CONTAINER,
     os=OperatingSystem.LINUX,
     arch=Arch.X86_64,
     gui=True,
     network_modes=frozenset(NetworkMode),
 )
-WINDOWS = SandboxProfile(
+WINDOWS = CapabilityProfile(
     provider="qemu",
     kind=ImageKind.VM,
     os=OperatingSystem.WINDOWS,
@@ -194,7 +192,10 @@ class TestPlacement:
         control.register(mac("mac-a"))
         placement = ask(control, 1, demand(os=OperatingSystem.WINDOWS, arch=Arch.X86_64))
         assert placement.status is SandboxStatus.FAILED
-        assert "no Node offers a vm windows/x86_64 Sandbox" in placement.reason
+        assert placement.reason == (
+            "no Node serves this vm windows/x86_64 Sandbox: runs macos, not windows; "
+            "runs arm64, not x86_64"
+        )
 
     def test_an_unsupported_network_mode_fails_at_once(self, control: ControlPlane) -> None:
         control.register(mac("mac-a"))
@@ -210,6 +211,66 @@ class TestPlacement:
     def test_a_demand_larger_than_any_node_fails(self, control: ControlPlane) -> None:
         control.register(linux("small", cpus=4))
         assert ask(control, 1, container(cpus=8)).status is SandboxStatus.FAILED
+
+    def test_a_node_s_profiles_are_taken_in_the_order_it_prefers_its_leaves(
+        self, control: ControlPlane
+    ) -> None:
+        """A plain container goes to the Node's first leaf; one that needs ``perf`` to the
+        first that gives it; one no leaf gives it to fails, naming what it needs."""
+        kata = DOCKER.model_copy(
+            update={
+                "provider": "docker:kata",
+                "container_features": frozenset({ContainerFeature.PERF, ContainerFeature.MOUNT}),
+            }
+        )
+        control.register(linux("box").model_copy(update={"profiles": (DOCKER, kata)}))
+        assert ask(control, 1, container(cpus=1)).status is SandboxStatus.PLACED
+        assert control.sandboxes["sandbox-0001"].provider == "docker:runc"
+        perf = container(cpus=1).model_copy(
+            update={
+                "resources": Resources(
+                    cpus=1, memory_mb=8192, container_features=(ContainerFeature.PERF,)
+                )
+            }
+        )
+        assert ask(control, 2, perf).status is SandboxStatus.PLACED
+        assert control.sandboxes["sandbox-0002"].provider == "docker:kata"
+        fuse = perf.model_copy(
+            update={
+                "resources": perf.resources.model_copy(
+                    update={"container_features": (ContainerFeature.FUSE,)}
+                )
+            }
+        )
+        placement = ask(control, 3, fuse)
+        assert placement.status is SandboxStatus.FAILED
+        # In the words a Run's selection uses: the closest profile, the Node's first.
+        assert placement.reason == (
+            "no Node serves this container linux/x86_64 Sandbox: "
+            "gives no container features fuse (gives none)"
+        )
+
+    def test_a_node_s_gpu_models_must_include_one_the_task_accepts(
+        self, control: ControlPlane
+    ) -> None:
+        gpus = NodeResources(
+            cpus=16, memory_mb=65536, disk_gb=1000, gpus=(GpuPool(model=H100, count=2),)
+        )
+        attaching = DOCKER.model_copy(update={"gpus": True, "gpu_models": (GpuModel(name=H100),)})
+        control.register(
+            linux("gpu").model_copy(update={"resources": gpus, "profiles": (attaching,)})
+        )
+        wanted = container().model_copy(
+            update={"resources": Resources(cpus=2, memory_mb=8192, gpus=1, gpu_types=("A100",))}
+        )
+        placement = ask(control, 1, wanted)
+        assert placement.status is SandboxStatus.FAILED
+        # Not that the Node has no GPU: that none it has is one the Task accepts.
+        assert placement.reason.endswith(f"attaches {H100}, none of gpu_types ['A100']")
+        h100 = wanted.resources.model_copy(update={"gpu_types": ("A100", "h100")})
+        assert ask(control, 2, wanted.model_copy(update={"resources": h100})).status is (
+            SandboxStatus.PLACED
+        )
 
     def test_macos_slots_are_counted_per_machine(self, control: ControlPlane) -> None:
         """Two Macs take two macOS VMs each; the fifth waits for a slot to be confirmed free."""
@@ -353,6 +414,62 @@ class TestIdempotence:
         assert moved.node not in {placed.node, None}
         last = control.refused(placed.sandbox_id, RefusedRequest(node=moved.node, reason="busy"))  # type: ignore[arg-type]
         assert last.status is SandboxStatus.FAILED
+
+    def test_a_node_whose_leaf_has_no_room_now_takes_the_sandbox_later(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        """Not now rather than never here: the Sandbox stays queued, rather than failing as it
+        would once its only Node refused it, and is placed there again after a wait that
+        doubles at each such refusal."""
+        control.register(linux("a"))
+        placed = ask(control, 1, container())
+        assert placed.node == "a"
+        full = RefusedRequest(node="a", reason="no headroom on GPU 2", capacity=True)
+        waiting = control.refused(placed.sandbox_id, full)
+        assert waiting.status is SandboxStatus.QUEUED
+        assert waiting.reason == "waiting for room on a, which had none for it"
+        for wait in (10.0, 20.0, 40.0):
+            clock.now += wait - 1
+            beat(control, "a")
+            control.tick()
+            assert control.placement(placed.sandbox_id).status is SandboxStatus.QUEUED
+            clock.now += 1
+            beat(control, "a")
+            control.tick()
+            again = control.placement(placed.sandbox_id)
+            assert (again.status, again.node) == (SandboxStatus.PLACED, "a")
+            assert control.refused(placed.sandbox_id, full).status is SandboxStatus.QUEUED
+        # Meanwhile it goes to any other Node that can take it.
+        control.register(linux("b"))
+        control.tick()
+        assert control.placement(placed.sandbox_id).node == "b"
+
+    def test_a_refusal_after_its_node_listed_the_sandbox_as_creating_still_counts(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        """A leaf can take seconds before it answers that it has no room, while its Node's
+        heartbeat already lists the Sandbox as creating: the refusal queues it all the same,
+        and a later heartbeat neither loses it nor keeps it starting."""
+        control.register(linux("a"))
+        placed = ask(control, 1, container())
+        beat(control, "a", (placed.sandbox_id, "creating"))
+        assert control.placement(placed.sandbox_id).status is SandboxStatus.STARTING
+        full = RefusedRequest(node="a", reason="no headroom on GPU 2", capacity=True)
+        waiting = control.refused(placed.sandbox_id, full)
+        assert (waiting.status, waiting.node) == (SandboxStatus.QUEUED, None)
+        assert any(
+            event.kind == "sandbox.no_room" and event.sandbox == placed.sandbox_id
+            for event in control.events()
+        )
+        # A heartbeat sent before the refusal asks the Node to drop what it no longer holds.
+        assert placed.sandbox_id in beat(control, "a", (placed.sandbox_id, "creating")).destroy
+        beat(control, "a")
+        assert control.placement(placed.sandbox_id).status is SandboxStatus.QUEUED
+        clock.now += 10
+        beat(control, "a")
+        control.tick()
+        again = control.placement(placed.sandbox_id)
+        assert (again.status, again.node) == (SandboxStatus.PLACED, "a")
 
     def test_a_node_its_run_cannot_reach_takes_none_of_that_runs_sandboxes(
         self, control: ControlPlane
@@ -678,7 +795,7 @@ def holding(snapshot_id: str, created_at: float) -> SnapshotHolding:
     """A snapshot as its Node reports it."""
     return SnapshotHolding(
         snapshot_id=snapshot_id,
-        provider="docker",
+        provider="docker:runc",
         demand=container(retention="snapshot"),
         episode_id="episode",
         roles=("solver",),
@@ -959,7 +1076,7 @@ class TestRetention:
         control.register(linux("plain"))
         placement = ask(control, 1, container(retention="snapshot"))
         assert placement.status is SandboxStatus.FAILED
-        assert "that saves snapshots" in placement.reason
+        assert placement.reason.endswith("saves and boots no snapshots")
 
     def test_snapshots_follow_what_their_node_reports(
         self, control: ControlPlane, clock: Clock
@@ -1098,6 +1215,59 @@ class TestWaitOrBuild:
         ahead = {"gpu": [(40.0, first.ready_sec + 100.0, first.holds)]}
         second, _ = choose(wanted, [node], ahead=ahead)
         assert second is not None and second.wait_sec == 170.0
+
+    @pytest.mark.parametrize("hold", [GpuHold.WATCHED, GpuHold.LIMIT, GpuHold.WHOLE])
+    def test_a_sandbox_that_shares_its_gpu_holds_none_of_it_whole(self, hold: GpuHold) -> None:
+        """Its Node's leaf admits it by the memory free on the GPU, and refuses the grant when
+        there is too little. On a leaf that shares no GPU it takes one whole all the same."""
+        gpus = NodeResources(
+            cpus=16, memory_mb=65536, disk_gb=1000, gpus=(GpuPool(model=H100, count=1),)
+        )
+        profile = DOCKER.model_copy(update={"gpus": True, "gpu_hold": hold})
+        node = NodeView(
+            declaration=linux("gpu").model_copy(update={"resources": gpus, "profiles": (profile,)}),
+            images=frozenset({IMAGE}),
+        )
+        shared = container().model_copy(
+            update={"resources": Resources(cpus=2, memory_mb=8192, gpus=1, gpu_memory_mb=8192)}
+        )
+        first, _ = choose(shared, [node])
+        assert first is not None
+        assert first.holds.gpus == ({H100: 1} if hold is GpuHold.WHOLE else {})
+        second, _ = choose(shared, [dataclasses.replace(node, holds=(first.holds,))])
+        assert (second is not None) is (hold is not GpuHold.WHOLE)
+        # One that holds the GPU whole leaves it to no other, shared or not.
+        whole = container().model_copy(
+            update={"resources": Resources(cpus=2, memory_mb=8192, gpus=1)}
+        )
+        taken, _ = choose(whole, [node])
+        assert taken is not None and taken.holds.gpus == {H100: 1}
+        third, why = choose(shared, [dataclasses.replace(node, holds=(taken.holds,))])
+        assert third is None and "too few free GPUs" in why
+
+    @pytest.mark.parametrize("memory", [None, 8192])
+    def test_a_plan_counts_sandboxes_that_share_a_gpu_by_what_else_they_need(
+        self, memory: int | None
+    ) -> None:
+        """Two episodes at once of a Task that takes a GPU whole need both one-GPU Nodes; of one
+        that shares it, one Node holds both, as far as its CPUs go."""
+        gpus = NodeResources(
+            cpus=16, memory_mb=65536, disk_gb=1000, gpus=(GpuPool(model=H100, count=1),)
+        )
+        profile = DOCKER.model_copy(update={"gpus": True, "gpu_hold": GpuHold.WATCHED})
+        nodes = [
+            NodeView(
+                declaration=linux(name).model_copy(
+                    update={"resources": gpus, "profiles": (profile,)}
+                )
+            )
+            for name in ("one", "two")
+        ]
+        wanted = container().model_copy(
+            update={"resources": Resources(cpus=2, memory_mb=8192, gpus=1, gpu_memory_mb=memory)}
+        )
+        (planned,) = assign([(wanted, 2)], nodes, concurrency=2).values()
+        assert len(planned) == (2 if memory is None else 1)
 
     @pytest.mark.parametrize(
         ("lifetime", "node"), [(60.0, "cold"), (200.0, None)], ids=["outlived", "expected"]

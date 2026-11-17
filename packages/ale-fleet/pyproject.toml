@@ -1,6 +1,6 @@
 [project]
 name = "ale-fleet"
-version = "0.1.1"
+version = "0.2.0"
 description = "ALE Fleet: the control plane that pools Sandbox capacity across machines, and the node agent that lends a machine to it"
 requires-python = ">=3.12"
 dependencies = [

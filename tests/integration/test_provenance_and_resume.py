@@ -81,7 +81,7 @@ async def test_every_provenance_field_is_populated(
     lock = result.lock
     assert lock is not None
 
-    assert lock.framework.schema_version == 2
+    assert lock.framework.schema_version == 3
     assert lock.image.declaration.kind == "container"
     assert lock.image.source == "local"
     assert lock.image.input_identity.startswith("sha256:")
@@ -140,7 +140,7 @@ async def test_resume_skips_completed_work_and_loses_nothing(
     run_dir = tmp_path / "runs" / "fixed"
     inputs = inputs_for(OracleHarness())
     task = load_tasks(task_root)[0]
-    task.prepared_image = await prepare_task_image(task, provider_registry(DockerProvider()))
+    task.prepared_image = await prepare_task_image(task, DockerProvider())
     identity = episode_identity(
         task.spec,
         task_digest=task.task_digest,

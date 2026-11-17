@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from ale.core.fleet import (
     AcquireRequest,
@@ -73,6 +73,9 @@ class SandboxRecord(BaseModel):
     holds: Holds | None = None
     refused: tuple[str, ...] = ()
     """Nodes that refused it before creating anything; it is not placed there again."""
+    full: dict[str, tuple[float, float]] = Field(default_factory=dict)
+    """Nodes whose leaf had no room for it, each with when it may be placed there again and
+    how long it last waited, which doubles at each such refusal."""
     released: bool = False
     """Its Run released it, so any copy a Node still holds is to be destroyed."""
     roles: tuple[Literal["solver", "verifier"], ...] = ()

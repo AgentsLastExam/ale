@@ -1,0 +1,3231 @@
+nvproxy: per-sandbox GPU memory limit
+
+What: a runsc flag, --nvproxy-gpu-memory-limit=<bytes>, limits the device
+memory that a sandbox's applications may allocate through nvproxy on each of
+its GPUs. The flag is on runsc's annotation allowlist, so a container can set
+it with the annotation dev.gvisor.flag.nvproxy-gpu-memory-limit, which may set
+a limit or lower one set on the runtime, but not raise or remove it. Without
+a limit, from the flag or the annotation, nvproxy charges nothing and behaves
+as before except where the driver reuses a handle that nvproxy still tracks
+(nvproxy logs "handle ... already in use"): nvproxy then unlinks the old
+object from the objects it depended on, so that freeing one of them no longer
+frees the old object again and untracks the new one under its handle. The old
+object, and what depended on it, is then never released. Releasing an object
+does nothing without a limit, except an OS descriptor's
+(NV01_MEMORY_SYSTEM_OS_DESCRIPTOR), so such a descriptor keeps the application
+memory it pinned pinned and mapped in the Sentry.
+
+nvproxy charges each allocation of device memory (NV01_MEMORY_LOCAL_USER, by
+NV_ESC_RM_ALLOC or NV_ESC_RM_VID_HEAP_CONTROL) to its GPU, by device instance,
+and keeps the sandbox's total on each GPU within the limit:
+- Before calling the driver, with the client locked, it charges the requested
+  size rounded up to 64 KiB, and fails the allocation with NV_ERR_NO_MEMORY
+  (in the parameters, errno 0), as the driver fails an allocation when the GPU
+  is full, if that exceeds the limit or nvproxy does not know the GPU. It
+  knows the GPU only of a device, or its subdevice, that the client allocated
+  itself, not of one it duplicated or imported.
+- The driver rounds the size up to the allocation's page size (64 KiB, 2 MiB
+  or 512 MiB; mem_mgr_gm107.c:memmgrAllocDetermineAlignment_GM107()) and
+  returns it (video_mem.c:vidmemConstruct_IMPL()), and PMA takes 4 KiB pages
+  as 64 KiB ones (video_mem.c:_vidmemPmaAllocate()), so the memory taken is
+  the returned size rounded up to 64 KiB. nvproxy charges that; when it would
+  exceed the limit, nvproxy frees the new object with NV_ESC_RM_FREE, as the
+  application's client, and fails the allocation instead.
+- It fails NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE with NV_ERR_NOT_SUPPORTED,
+  since the driver then takes the size rounded up to the requested alignment,
+  which can be far more than the size it returns (_vidmemPmaAllocate()).
+The total thus never exceeds the limit when an allocation returns; only if the
+driver fails that free does the memory stay allocated and charged beyond it.
+
+A charge lasts while anything nvproxy tracks keeps the memory allocated: a
+handle (the one allocated, a duplicate from NV_ESC_RM_DUP_OBJECT, or an import
+by NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECT(S)_FROM_FD); an export by
+NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT(S)_TO_FD, until its file is closed or
+its slot is overwritten, as the driver keeps a duplicate in its export client
+(rmobjexportimport.c:RmExportObject(), osapi.c:rm_cleanup_file_private()); an
+object that the driver makes with duplicates of the memory, which are an
+NV_MEMORY_FABRIC object made from it (map.hVidMem;
+mem_fabric.c:memoryfabricConstruct_IMPL()), an NV_SEMAPHORE_SURFACE on it
+(sem_surf.c:_semsurfDupMemory()) and an NV_MEMORY_MAPPER on such a surface
+(mem_mapper.c:memmapperConstruct_IMPL()); and a UVM external mapping
+(UVM_MAP_EXTERNAL_ALLOCATION), which UVM backs with a duplicate per GPU
+(uvm_map_external.c:uvm_map_external_allocation_on_gpu()). nvproxy keeps the
+client locked while UVM maps the memory, so that the handle cannot be freed
+and reused meanwhile, and mirrors how UVM splits and removes these mappings: a
+later mapping or UVM_UNMAP_EXTERNAL on the same GPU removes the part it
+covers, UVM_FREE of the external range, UVM_UNREGISTER_GPU_VASPACE or
+UVM_UNREGISTER_GPU of the GPU, and the destruction of the VA space remove the
+rest. Handles are released by NV_ESC_RM_FREE, with a freed parent, or in the
+teardown of their client when its file is closed; when the driver reuses a
+handle nvproxy still tracks, the object it named and the objects that
+depended on it release their charges. Where the driver keeps one file's
+objects alive for another file, nvproxy keeps the first file's host file open
+as long: a file registered with NV_ESC_REGISTER_FD holds the file of its
+ctl_fd, with its clients and exports (escape.c:RmIoctl(),
+osapi.c:rm_cleanup_file_private()), and a UVM MM file holds the VA space file
+it was initialized with (uvm.c:uvm_api_mm_initialize(), uvm_mm_release()).
+NV00F8_CTRL_CMD_ATTACH_MEM and NV00FD_CTRL_CMD_ATTACH_MEM need nothing: the
+driver removes such an attachment when the memory is freed
+(rs_client.c:clientFreeResource_IMPL() => _clientUnmapInterBackRefMappings()).
+With a limit, NV_ESC_EXPORT_TO_DMABUF_FD (GPUDirect RDMA, only with the rdma
+driver capability) fails with NV_ERR_NOT_SUPPORTED, since its dma-buf keeps
+duplicates while the kernel holds it (nv-dmabuf.c), which nvproxy cannot see.
+NV_MEMORY_EXPORT duplicates memory only in NV00E0_CTRL_CMD_EXPORT_MEM, which
+nvproxy does not support.
+
+The limit and the charges are saved with the sandbox. A restored sandbox keeps
+the limit it was saved with, since nvproxy.Register is not called on restore
+and the flag given to the restore is ignored, and its charges move to the
+device instances that its devices are remapped to. nvproxy does not recreate
+exports and UVM mappings on restore; their charges remain until their files
+are closed. As for any object nvproxy cannot restore, a checkpoint fails while
+a handle holds a charge that NV_ESC_RM_ALLOC did not make: an allocation by
+NV_ESC_RM_VID_HEAP_CONTROL, or a duplicate or an import of charged memory.
+Only the import is new, since nvproxy did not track imports before.
+
+Not counted: memory the driver allocates for itself (channels, context
+buffers, page tables), which grows with the number of contexts, channels and
+mappings the application creates; and managed memory, whose pages UVM
+allocates on fault and evicts when the GPU is full. Overcounted until their
+range is freed or the VA space destroyed: UVM mappings that UVM also removes
+in UVM_DISABLE_PEER_ACCESS, or in UVM_UNREGISTER_GPU of the GPU that owns
+memory mapped on another GPU. Not modelled: on GPUs whose memory is onlined as
+a NUMA node (Grace Hopper), PMA takes contiguous allocations from the kernel
+in power-of-two blocks (_vidmemPmaAllocate()), which can exceed the rounded
+size. Driver sources cited are open-gpu-kernel-modules 570.195.03.
+
+Why: ALE admits a sandbox to a GPU that other jobs share when the GPU has the
+memory its Task declares free. Without a limit the sandbox can take the
+others' memory and make their allocations fail; with it, the sandbox's own
+allocation fails instead, as an ordinary out-of-memory error, and the sandbox
+goes on.
+
+Verified:
+- gVisor's unit tests in its builder container, also under the race
+  detector (--config=race): nvproxy_test's vidmem tests (the footprint;
+  charging and refusal on several GPUs; fixed-address allocations; an unknown
+  GPU; a driver that fails an allocation; NV_ESC_RM_VID_HEAP_CONTROL; an
+  allocation the driver rounded beyond the limit, freed and refused, and kept
+  when the free fails; duplicates; release by free, by a freed parent and by
+  client teardown; a reused handle, also of a device with memory under it;
+  exports to numbered slots holding memory until closed or overwritten, and
+  imports holding it after; fabric objects, semaphore surfaces and memory
+  mappers; the client locked while UVM maps memory; UVM mappings split,
+  unmapped, replaced, freed with their range, removed with their GPU and
+  released with their VA space, also by a racing close; a registered file and
+  a UVM MM file holding the other file; the serialization of the export and
+  import controls; remapping on restore; concurrent charges), and
+  config_test's TestOverrideNVProxyGPUMemoryLimit (an annotation may set,
+  match or lower the limit, not raise or remove it without
+  --allow-flag-override). Breaking any one of these rules in the code, one at
+  a time, fails a test, or for a racing close a race report. The ioctl
+  handlers' copying of parameters from and to the application, and the
+  dma-buf refusal, need a task and are not unit-tested.
+- On an H100 80GB (driver 570.195.03, CUDA 12.8, rootless Docker 29.9.3,
+  kernel 5.15), with a limit of 2 GiB set by annotation:
+  - A CUDA context took 516 MiB of the limit (541065216 bytes in 16
+    allocations; 608 MiB under PyTorch 2.7.1). nvproxy's total equalled
+    NVML's used_memory for the Sentry at every check; the GPU's memory.used
+    was 6 MiB higher per context.
+  - cuMemAlloc beyond the limit returned CUDA_ERROR_OUT_OF_MEMORY, cudaMalloc
+    cudaErrorMemoryAllocation, and PyTorch raised torch.OutOfMemoryError, with
+    and without expandable_segments, which filled the limit to the byte. Each
+    process went on using the memory it had, later allocations within the
+    limit succeeded, and the container kept running. A process whose context
+    did not fit failed cuCtxCreate with CUDA_ERROR_OUT_OF_MEMORY.
+  - Allocations of odd sizes, from 1 byte to 3 MiB + 1, filled the limit
+    exactly and never took NVML's used_memory for the Sentry past 2048 MiB.
+    Under limits that are not a multiple of 2 MiB, allocations that the
+    driver rounded beyond the limit were freed and refused, and every free
+    succeeded.
+  - Freeing, exit without freeing, SIGKILL and docker rm -f returned the
+    memory, and repeated fill and free cycles ended at the same totals. Two
+    processes in one sandbox shared the limit. Memory stayed charged while a
+    cuMemMap mapping held it, also with its handle released while mapped,
+    until cuMemUnmap; while an exported file descriptor held it, until the
+    last process holding the descriptor closed it; while an import held it;
+    and while a handle from cuIpcOpenMemHandle held it after the owner freed
+    it. Every CUDA process registered its device files with
+    NV_ESC_REGISTER_FD and initialized a UVM MM file, so both file holds were
+    taken in every test.
+  - An annotation of 1 GiB lowered a runtime limit of 2 GiB; 4 GiB and 0
+    were refused at create. Without a limit, 6 GiB was allocated as before
+    and nvproxy logged no charge.
+  - cuMemGetInfo, torch.cuda.mem_get_info, NVML and nvidia-smi in the
+    container reported the whole GPU, as under runc.
+  CUDA 12.8 and PyTorch 2.7 used neither NV_ESC_RM_VID_HEAP_CONTROL nor
+  fixed-address allocations, and freed a VMM allocation's handle only at
+  cuMemUnmap, so the UVM-mapping holder was not reached on the GPU. Neither
+  were fabric objects, semaphore surfaces, memory mappers, the dma-buf
+  refusal, nor checkpoint and restore.
+
+diff --git a/pkg/abi/nvgpu/classes.go b/pkg/abi/nvgpu/classes.go
+index 81c3167..994073a 100644
+--- a/pkg/abi/nvgpu/classes.go
++++ b/pkg/abi/nvgpu/classes.go
+@@ -292,6 +292,16 @@ type NV_MEMORY_ALLOCATION_PARAMS struct {
+ 	Tag           uint32
+ }
+ 
++// GetSize returns the size of the allocation in bytes.
++func (p *NV_MEMORY_ALLOCATION_PARAMS) GetSize() uint64 {
++	return p.Size
++}
++
++// GetFlags returns the allocation's NVOS32_ALLOC_FLAGS_*.
++func (p *NV_MEMORY_ALLOCATION_PARAMS) GetFlags() uint32 {
++	return p.Flags
++}
++
+ // NV_MEMORY_ALLOCATION_PARAMS_V545 is the updated version of
+ // NV_MEMORY_ALLOCATION_PARAMS since 545.23.06.
+ //
+@@ -724,6 +734,12 @@ type NV00F8_ALLOCATION_PARAMETERS struct {
+ 	Map        nv00f8Map
+ }
+ 
++// GetHVidMem returns the handle of the physical memory that the fabric
++// object maps, or NV01_NULL_OBJECT.
++func (p *NV00F8_ALLOCATION_PARAMETERS) GetHVidMem() Handle {
++	return p.Map.hVidMem
++}
++
+ // NV00FB_ALLOCATION_PARAMETERS is the alloc param type for
+ // NV_MEMORY_FABRIC_IMPORTED_REF, from
+ // src/common/sdk/nvidia/inc/class/cl00fb.h.
+diff --git a/pkg/abi/nvgpu/frontend.go b/pkg/abi/nvgpu/frontend.go
+index 58b963a..237d712 100644
+--- a/pkg/abi/nvgpu/frontend.go
++++ b/pkg/abi/nvgpu/frontend.go
+@@ -625,9 +625,10 @@ type NVOS32AllocOsDesc struct {
+ 	Pad1           [4]byte
+ }
+ 
+-// Flags in NVOS32AllocSize.Flags:
++// Flags in NVOS32AllocSize.Flags and NV_MEMORY_ALLOCATION_PARAMS.Flags:
+ const (
+-	NVOS32_ALLOC_FLAGS_VIRTUAL = 0x00080000
++	NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE = 0x00000010
++	NVOS32_ALLOC_FLAGS_VIRTUAL                = 0x00080000
+ )
+ 
+ // Bitfields in NVOS32AllocSize.Attr:
+diff --git a/pkg/abi/nvgpu/status.go b/pkg/abi/nvgpu/status.go
+index 31d347e..2e17601 100644
+--- a/pkg/abi/nvgpu/status.go
++++ b/pkg/abi/nvgpu/status.go
+@@ -24,5 +24,6 @@ const (
+ 	NV_ERR_INVALID_CLIENT           = 0x00000023
+ 	NV_ERR_INVALID_LIMIT            = 0x0000002e
+ 	NV_ERR_INVALID_OBJECT_HANDLE    = 0x00000033
++	NV_ERR_NO_MEMORY                = 0x00000051
+ 	NV_ERR_NOT_SUPPORTED            = 0x00000056
+ )
+diff --git a/pkg/sentry/devices/nvproxy/BUILD b/pkg/sentry/devices/nvproxy/BUILD
+index d8c09da..8f94568 100644
+--- a/pkg/sentry/devices/nvproxy/BUILD
++++ b/pkg/sentry/devices/nvproxy/BUILD
+@@ -64,6 +64,8 @@ go_library(
+         "uvm_tools.go",
+         "uvm_unsafe.go",
+         "version.go",
++        "vidmem.go",
++        "vidmem_uvm.go",
+     ],
+     visibility = [
+         "//pkg/sentry:internal",
+@@ -103,12 +105,19 @@ go_library(
+ 
+ go_test(
+     name = "nvproxy_test",
+-    srcs = ["nvproxy_test.go"],
++    srcs = [
++        "nvproxy_test.go",
++        "vidmem_test.go",
++    ],
+     embed = [":nvproxy"],
+     deps = [
+         "//pkg/abi/nvgpu",
++        "//pkg/context",
++        "//pkg/hostarch",
+         "//pkg/seccomp",
+         "//pkg/sentry/devices/nvproxy/nvconf",
++        "//pkg/sentry/memmap",
++        "//pkg/sync",
+         "@org_golang_x_sys//unix:go_default_library",
+     ],
+ )
+diff --git a/pkg/sentry/devices/nvproxy/frontend.go b/pkg/sentry/devices/nvproxy/frontend.go
+index 2152b3c..2ce28de 100644
+--- a/pkg/sentry/devices/nvproxy/frontend.go
++++ b/pkg/sentry/devices/nvproxy/frontend.go
+@@ -368,7 +368,12 @@ func frontendRegisterFD(fi *frontendIoctlState) (uintptr, error) {
+ 	}
+ 	ioctlParams.CtlFD = ctlFile.hostFD
+ 	// The returned ctl_fd can't change, so skip copying out.
+-	return frontendIoctlInvokeNoStatus(fi, &ioctlParams)
++	n, err := frontendIoctlInvokeNoStatus(fi, &ioctlParams)
++	if err == nil && fi.fd.dev.nvp.vidmemLimit != 0 {
++		// fi.fd's file now holds ctlFile's (vidmem.go).
++		fi.fd.memmapFile.vidmemHold(&ctlFile.memmapFile)
++	}
++	return n, err
+ }
+ 
+ // frontendExportToDMABufFD handles NV_ESC_EXPORT_TO_DMABUF_FD. CUDA uses this
+@@ -382,6 +387,11 @@ func frontendExportToDMABufFD[Params any, PtrParams hasFrontendFDAndStatusPtr[Pa
+ 	if _, err := ioctlParams.CopyIn(fi.t, fi.ioctlParamsAddr); err != nil {
+ 		return 0, err
+ 	}
++	if fi.fd.dev.nvp.vidmemLimit != 0 {
++		// The dma-buf would keep the memory it exports allocated while the
++		// kernel holds it, beyond the GPU memory limit (vidmem.go).
++		return 0, frontendFailWithStatus(fi, ioctlParams, nvgpu.NV_ERR_NOT_SUPPORTED)
++	}
+ 
+ 	// The FD field is both input and output (see nv_dma_buf_export() in
+ 	// kernel-open/nvidia/nv-dmabuf.c):
+diff --git a/pkg/sentry/devices/nvproxy/frontend_mmap.go b/pkg/sentry/devices/nvproxy/frontend_mmap.go
+index d149fd6..f5f791c 100644
+--- a/pkg/sentry/devices/nvproxy/frontend_mmap.go
++++ b/pkg/sentry/devices/nvproxy/frontend_mmap.go
+@@ -60,6 +60,14 @@ type frontendFDMemmapFile struct {
+ 	nvp     *nvproxy
+ 	clients map[*rootClient]struct{}
+ 
++	// vidmemExports holds, by export slot, the GPU memory charges of objects
++	// exported to this file (vidmem.go). It is protected by nvproxy.vidmemMu.
++	vidmemExports map[uint32]vidmemExport
++	// vidmemCtl is the file of the ctl_fd that this file was registered with
++	// under a GPU memory limit, which it holds (vidmem.go), or nil. It is set
++	// by NV_ESC_REGISTER_FD and used by Close.
++	vidmemCtl *frontendFDMemmapFile
++
+ 	hostFD int32 // immutable after SetFD
+ 
+ 	// mmapMu protects the following fields.
+@@ -104,6 +112,15 @@ func (mf *frontendFDMemmapFile) Close() error {
+ 		}
+ 	}
+ 	mf.clients = nil
++	// rm_cleanup_file_private() also frees the objects exported to the file,
++	// and then drops the file that NV_ESC_REGISTER_FD made this one hold.
++	if mf.nvp.vidmemLimit != 0 {
++		mf.nvp.vidmemReleaseExports(ctx, mf)
++	}
++	if ctl := mf.vidmemCtl; ctl != nil {
++		mf.vidmemCtl = nil
++		ctl.DecRef(vidmemHoldRange)
++	}
+ 	return errors.Join(munmapErr, closeErr)
+ }
+ 
+diff --git a/pkg/sentry/devices/nvproxy/frontend_unsafe.go b/pkg/sentry/devices/nvproxy/frontend_unsafe.go
+index 03b9ba7..86a9c25 100644
+--- a/pkg/sentry/devices/nvproxy/frontend_unsafe.go
++++ b/pkg/sentry/devices/nvproxy/frontend_unsafe.go
+@@ -410,6 +410,14 @@ func ctrlClientSystemGetP2PCapsV550(fi *frontendIoctlState, ioctlParams *nvgpu.N
+ }
+ 
+ func rmAllocInvoke[Params any](fi *frontendIoctlState, ioctlParams *nvgpu.NVOS64_PARAMETERS, allocParams *Params, isNVOS64 bool, addObjLocked func(fi *frontendIoctlState, client *rootClient, ioctlParams *nvgpu.NVOS64_PARAMETERS, rightsRequested nvgpu.RS_ACCESS_MASK, allocParams *Params)) (uintptr, error) {
++	return rmAllocInvokeChecked(fi, ioctlParams, allocParams, isNVOS64, nil /* checkLocked */, addObjLocked)
++}
++
++// rmAllocInvokeChecked is rmAllocInvoke, except that if checkLocked is not
++// nil, it is called first with the client locked, and the allocation fails
++// with the status it returns, without calling the driver, unless that is
++// NV_OK.
++func rmAllocInvokeChecked[Params any](fi *frontendIoctlState, ioctlParams *nvgpu.NVOS64_PARAMETERS, allocParams *Params, isNVOS64 bool, checkLocked func(fi *frontendIoctlState, client *rootClient, ioctlParams *nvgpu.NVOS64_PARAMETERS, allocParams *Params) uint32, addObjLocked func(fi *frontendIoctlState, client *rootClient, ioctlParams *nvgpu.NVOS64_PARAMETERS, rightsRequested nvgpu.RS_ACCESS_MASK, allocParams *Params)) (uintptr, error) {
+ 	defer runtime.KeepAlive(allocParams) // since we convert to non-pointer-typed P64
+ 
+ 	// Temporarily replace application pointers with sentry pointers.
+@@ -434,6 +442,14 @@ func rmAllocInvoke[Params any](fi *frontendIoctlState, ioctlParams *nvgpu.NVOS64
+ 			return 0, frontendFailWithStatus(fi, ioctlParams, nvgpu.NV_ERR_INVALID_CLIENT)
+ 		}
+ 	}
++	if checkLocked != nil {
++		if status := checkLocked(fi, client, ioctlParams, allocParams); status != nvgpu.NV_OK {
++			unlock()
++			ioctlParams.PAllocParms = origPAllocParms
++			ioctlParams.PRightsRequested = origPRightsRequested
++			return 0, rmAllocFailWithStatus(fi, ioctlParams, isNVOS64, status)
++		}
++	}
+ 	// Invoke the driver ioctl and restore application pointers. We always pass
+ 	// NVOS64Parameters to the driver even if !isNVOS64, as this is handled
+ 	// identically to the equivalent NVOS21Parameters; compare
+@@ -467,6 +483,22 @@ func rmAllocInvoke[Params any](fi *frontendIoctlState, ioctlParams *nvgpu.NVOS64
+ 	return n, nil
+ }
+ 
++// frontendRMFree frees the object with handle h and parent hParent in the
++// client with handle hClient, through fd's host file, as the application's
++// NV_ESC_RM_FREE would. It returns the driver's status.
++func frontendRMFree(fd *frontendFD, hClient, hParent, h nvgpu.Handle) (uint32, error) {
++	ioctlParams := nvgpu.NVOS00_PARAMETERS{
++		HRoot:         hClient,
++		HObjectParent: hParent,
++		HObjectOld:    h,
++	}
++	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd.hostFD), frontendIoctlCmd(nvgpu.NV_ESC_RM_FREE, nvgpu.SizeofNVOS00Parameters), uintptr(unsafe.Pointer(&ioctlParams)))
++	if errno != 0 {
++		return 0, errno
++	}
++	return ioctlParams.Status, nil
++}
++
+ func rmIdleChannelsInvoke(fi *frontendIoctlState, ioctlParams *nvgpu.NVOS30_PARAMETERS, clientsBuf, devicesBuf, channelsBuf *byte) (uintptr, error) {
+ 	origClients := ioctlParams.Clients
+ 	origDevices := ioctlParams.Devices
+@@ -502,6 +534,14 @@ func rmVidHeapControlAllocSize(fi *frontendIoctlState, ioctlParams *nvgpu.NVOS32
+ 	if client == nil {
+ 		return 0, frontendFailWithStatus(fi, ioctlParams, nvgpu.NV_ERR_INVALID_CLIENT)
+ 	}
++	// With a GPU memory limit, charge device memory against it (vidmem.go).
++	nvp := fi.fd.dev.nvp
++	a := vidmemAlloc{nvp: nvp}
++	if status := a.checkHeapLocked(fi.ctx, client, ioctlParams.HObjectParent, allocSizeParams); status != nvgpu.NV_OK {
++		unlock()
++		allocSizeParams.Address = origAddress
++		return 0, frontendFailWithStatus(fi, ioctlParams, status)
++	}
+ 	n, err := frontendIoctlInvoke(fi, ioctlParams)
+ 	if err == nil && ioctlParams.Status == nvgpu.NV_OK {
+ 		// src/nvidia/interface/deprecated/rmapi_deprecated_vidheapctrl.c:_rmVidHeapControlAllocCommon()
+@@ -515,9 +555,14 @@ func rmVidHeapControlAllocSize(fi *frontendIoctlState, ioctlParams *nvgpu.NVOS32
+ 			} else if (allocSizeParams.Attr>>nvgpu.NVOS32_ATTR_LOCATION_SHIFT)&nvgpu.NVOS32_ATTR_LOCATION_MASK == nvgpu.NVOS32_ATTR_LOCATION_VIDMEM {
+ 				classID = nvgpu.NV01_MEMORY_LOCAL_USER
+ 			}
+-			fi.fd.dev.nvp.objAdd(fi.ctx, client, allocSizeParams.HMemory, classID, &miscObject{}, ioctlParams.HObjectParent)
++			if a.charge == nil {
++				nvp.objAdd(fi.ctx, client, allocSizeParams.HMemory, classID, &miscObject{}, ioctlParams.HObjectParent)
++			} else {
++				ioctlParams.Status = a.addHeapLocked(fi, client, ioctlParams.HObjectParent, classID, allocSizeParams)
++			}
+ 		}
+ 	}
++	a.done(fi.ctx)
+ 	unlock()
+ 	allocSizeParams.Address = origAddress
+ 	if err != nil {
+diff --git a/pkg/sentry/devices/nvproxy/nvproxy.go b/pkg/sentry/devices/nvproxy/nvproxy.go
+index 4990e36..54ea692 100644
+--- a/pkg/sentry/devices/nvproxy/nvproxy.go
++++ b/pkg/sentry/devices/nvproxy/nvproxy.go
+@@ -20,8 +20,10 @@
+ // Lock ordering:
+ //
+ // - nvproxy.fdsMu
++// - nvproxy.vidmemFDMu or uvmFDMemmapFile.vidmemOpMu, before rootClient.objsMu
+ // - rootClient.objsMu
+ //   - nvproxy.clientsMu
++//   - nvproxy.vidmemMu
+ package nvproxy
+ 
+ import (
+@@ -58,6 +60,10 @@ type Options struct {
+ 
+ 	// If UseDevGofer is true, open device files via gofer.
+ 	UseDevGofer bool
++
++	// GPUMemoryLimit is the most device memory, in bytes, that the sandbox
++	// may allocate on each GPU; see vidmem.go. 0 means no limit.
++	GPUMemoryLimit uint64
+ }
+ 
+ // Register registers all devices implemented by this package, and specified by
+@@ -88,6 +94,12 @@ func Register(vfsObj *vfs.VirtualFilesystem, opts *Options) (*DeviceInfo, error)
+ 		procDriverNvidiaParams: opts.HostSettings.ProcDriverNvidiaParams,
+ 		frontendFDs:            make(map[*frontendFD]struct{}),
+ 		clients:                make(map[nvgpu.Handle]*rootClient),
++		vidmemLimit:            opts.GPUMemoryLimit,
++		vidmemUsed:             make(map[uint32]uint64),
++		vidmemCharges:          make(map[*vidmemCharge]struct{}),
++	}
++	if nvp.vidmemLimit != 0 {
++		log.Infof("nvproxy: GPU memory limit: %d bytes per GPU", nvp.vidmemLimit)
+ 	}
+ 	// Force ModifyDeviceFiles in /proc/driver/nvidia/params to 0. This is
+ 	// consistent with libnvidia-container's src/nvc_mount.c:mount_procfs().
+@@ -250,6 +262,16 @@ type nvproxy struct {
+ 
+ 	clientsMu sync.RWMutex `state:"nosave"`
+ 	clients   map[nvgpu.Handle]*rootClient
++
++	// vidmemLimit is Options.GPUMemoryLimit. vidmemUsed is the device memory
++	// charged against it, in bytes, by device instance, and vidmemCharges are
++	// the charges; see vidmem.go. vidmemFDMu serializes the exports of objects
++	// to files and their imports.
++	vidmemLimit   uint64
++	vidmemFDMu    sync.Mutex `state:"nosave"`
++	vidmemMu      sync.Mutex `state:"nosave"`
++	vidmemUsed    map[uint32]uint64
++	vidmemCharges map[*vidmemCharge]struct{}
+ }
+ 
+ func nvproxyFromVFS(vfsObj *vfs.VirtualFilesystem) *nvproxy {
+diff --git a/pkg/sentry/devices/nvproxy/object.go b/pkg/sentry/devices/nvproxy/object.go
+index 13264cc..facf735 100644
+--- a/pkg/sentry/devices/nvproxy/object.go
++++ b/pkg/sentry/devices/nvproxy/object.go
+@@ -62,13 +62,14 @@ func (o *object) Object() *object {
+ // objAdd records the allocation of a driver object with class c and handle h,
+ // in the given client, represented by oi. Each non-zero handle in parentH and
+ // deps is a dependency of the created object, such that the freeing of any of
+-// those objects also results in the freeing of the recorded object.
++// those objects also results in the freeing of the recorded object. It returns
++// false, recording nothing, if h is invalid.
+ //
+ // Precondition: client.objsMu must be locked.
+-func (nvp *nvproxy) objAdd(ctx context.Context, client *rootClient, h nvgpu.Handle, c nvgpu.ClassID, oi objectImpl, parentH nvgpu.Handle, deps ...nvgpu.Handle) {
++func (nvp *nvproxy) objAdd(ctx context.Context, client *rootClient, h nvgpu.Handle, c nvgpu.ClassID, oi objectImpl, parentH nvgpu.Handle, deps ...nvgpu.Handle) bool {
+ 	if h.Val == nvgpu.NV01_NULL_OBJECT {
+ 		log.Traceback("nvproxy: new object (class %v) has invalid handle %v", c, h)
+-		return
++		return false
+ 	}
+ 
+ 	o := oi.Object()
+@@ -78,8 +79,17 @@ func (nvp *nvproxy) objAdd(ctx context.Context, client *rootClient, h nvgpu.Hand
+ 	o.handle = h
+ 	o.parent = parentH
+ 	o.impl = oi
+-	if _, ok := client.resources[h]; ok {
++	if old, ok := client.resources[h]; ok {
+ 		ctx.Warningf("nvproxy: handle %v:%v already in use", client.handle, h)
++		// The driver reused h, so the object tracked under it no longer
++		// exists, nor do the objects that depended on it: release the GPU
++		// memory they charged (vidmem.go), and stop the freeing of the old
++		// object's former dependencies from freeing it again, which would
++		// untrack o.
++		nvp.vidmemForgetFreedLocked(ctx, old)
++		for dep := range old.deps {
++			delete(dep.rdeps, old)
++		}
+ 	}
+ 	client.resources[h] = o
+ 
+@@ -106,6 +116,7 @@ func (nvp *nvproxy) objAdd(ctx context.Context, client *rootClient, h nvgpu.Hand
+ 	if ctx.IsLogging(log.Debug) {
+ 		ctx.Debugf("nvproxy: added object %v:%v (class %v) with parent %v, dependencies %v", client.handle, h, c, parentH, deps)
+ 	}
++	return true
+ }
+ 
+ // objAddDep records a dependency between the existing object with handle h1 on
+@@ -157,8 +168,16 @@ func (nvp *nvproxy) objDup(ctx context.Context, clientDst, clientSrc *rootClient
+ 	if oSrc == nil {
+ 		return
+ 	}
+-	oDst := &miscObject{}
+-	nvp.objAdd(ctx, clientDst, dstH, oSrc.class, oDst, parentDstH)
++	var oDst objectImpl = &miscObject{}
++	// A duplicate of charged device memory keeps it allocated, and so holds
++	// the charge too (vidmem.go).
++	charge := vidmemChargeOf(oSrc.impl)
++	if charge != nil {
++		oDst = &vidmemRef{charge: charge}
++	}
++	if nvp.objAdd(ctx, clientDst, dstH, oSrc.class, oDst, parentDstH) && charge != nil {
++		nvp.vidmemIncRef(charge)
++	}
+ }
+ 
+ // getClientWithLock returns the rootClient with the given handle.
+diff --git a/pkg/sentry/devices/nvproxy/save_restore.go b/pkg/sentry/devices/nvproxy/save_restore.go
+index c58aacc..846d7ae 100644
+--- a/pkg/sentry/devices/nvproxy/save_restore.go
++++ b/pkg/sentry/devices/nvproxy/save_restore.go
+@@ -193,7 +193,8 @@ func (nvp *nvproxy) afterLoad(ctx goContext.Context) {
+ 		panic(fmt.Sprintf("driver version %q not found in abis map", nvp.version))
+ 	}
+ 	nvp.abi = abiEntry.cons()
+-	if dr := DeviceRemappingFromContext(ctx); dr != nil {
++	dr := DeviceRemappingFromContext(ctx)
++	if dr != nil {
+ 		// Remap frontendFDs to their new frontendDevices.
+ 		// frontendFD.vfsfd.VirtualDentry() will still point to the original
+ 		// dentry, so e.g. /proc/[pid]/fd/ will be incorrect, but we don't have
+@@ -243,6 +244,8 @@ func (nvp *nvproxy) afterLoad(ctx goContext.Context) {
+ 			}
+ 		}
+ 	}
++	// Remap GPU memory charges likewise (vidmem.go).
++	nvp.vidmemAfterLoad(dr)
+ 
+ 	// Ensure that frontendFDs have host FDs before restoring objects that may
+ 	// use them.
+diff --git a/pkg/sentry/devices/nvproxy/uvm.go b/pkg/sentry/devices/nvproxy/uvm.go
+index d9088a3..fd8a870 100644
+--- a/pkg/sentry/devices/nvproxy/uvm.go
++++ b/pkg/sentry/devices/nvproxy/uvm.go
+@@ -64,6 +64,7 @@ func (dev *uvmDevice) Open(ctx context.Context, mnt *vfs.Mount, vfsd *vfs.Dentry
+ 	}
+ 	fd.memmapFile.SetFD(int(fd.hostFD))
+ 	fd.memmapFile.RequireAddrEqualsFileOffset()
++	fd.memmapFile.nvp = dev.nvp
+ 	return &fd.vfsfd, nil
+ }
+ 
+@@ -123,10 +124,10 @@ func (fd *uvmFD) Epollable() bool {
+ 
+ // Ioctl implements vfs.FileDescriptionImpl.Ioctl.
+ func (fd *uvmFD) Ioctl(ctx context.Context, uio usermem.IO, sysno uintptr, args arch.SyscallArguments) (uintptr, error) {
+-	return uvmIoctl(ctx, fd.dev.nvp, fd.hostFD, nil /* toolsFD */, args)
++	return uvmIoctl(ctx, fd.dev.nvp, fd.hostFD, fd, nil /* toolsFD */, args)
+ }
+ 
+-func uvmIoctl(ctx context.Context, nvp *nvproxy, hostFD int32, toolsFD *uvmToolsFD, args arch.SyscallArguments) (uintptr, error) {
++func uvmIoctl(ctx context.Context, nvp *nvproxy, hostFD int32, fd *uvmFD, toolsFD *uvmToolsFD, args arch.SyscallArguments) (uintptr, error) {
+ 	cmd := args[1].Uint()
+ 	argPtr := args[2].Pointer()
+ 
+@@ -142,6 +143,7 @@ func uvmIoctl(ctx context.Context, nvp *nvproxy, hostFD int32, toolsFD *uvmTools
+ 	ui := uvmIoctlState{
+ 		nvp:             nvp,
+ 		hostFD:          hostFD,
++		fd:              fd,
+ 		toolsFD:         toolsFD,
+ 		ctx:             ctx,
+ 		t:               t,
+@@ -165,6 +167,9 @@ func (fd *uvmFD) IsNvidiaDeviceFD() {}
+ type uvmIoctlState struct {
+ 	nvp    *nvproxy
+ 	hostFD int32
++	// fd is the /dev/nvidia-uvm FD the ioctl was issued on, or nil if it was
++	// issued on /dev/nvidia-uvm-tools.
++	fd *uvmFD
+ 	// toolsFD is the /dev/nvidia-uvm-tools FD the ioctl was issued on, or
+ 	// nil if it was issued on /dev/nvidia-uvm.
+ 	toolsFD         *uvmToolsFD
+@@ -242,6 +247,10 @@ func uvmMMInitialize(ui *uvmIoctlState) (uintptr, error) {
+ 	if err != nil {
+ 		return n, err
+ 	}
++	if ioctlParams.RMStatus == nvgpu.NV_OK && ui.fd != nil && ui.fd.memmapFile.vidmemTracked() {
++		// The MM file now holds the VA space's file (vidmem_uvm.go).
++		ui.fd.memmapFile.vidmemHold(&uvmFile.memmapFile)
++	}
+ 	if _, err := ioctlParams.CopyOut(ui.t, ui.ioctlParamsAddr); err != nil {
+ 		return n, err
+ 	}
+diff --git a/pkg/sentry/devices/nvproxy/uvm_mmap.go b/pkg/sentry/devices/nvproxy/uvm_mmap.go
+index 666b195..ba70641 100644
+--- a/pkg/sentry/devices/nvproxy/uvm_mmap.go
++++ b/pkg/sentry/devices/nvproxy/uvm_mmap.go
+@@ -22,6 +22,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/sentry/fsutil"
+ 	"gvisor.dev/gvisor/pkg/sentry/memmap"
+ 	"gvisor.dev/gvisor/pkg/sentry/vfs"
++	"gvisor.dev/gvisor/pkg/sync"
+ )
+ 
+ // ConfigureMMap implements vfs.FileDescriptionImpl.ConfigureMMap.
+@@ -50,6 +51,39 @@ func (fd *uvmFD) Translate(ctx context.Context, required, optional memmap.Mappab
+ // +stateify savable
+ type uvmFDMemmapFile struct {
+ 	fsutil.MmapPreciseFile
++
++	// nvp and the following fields are used by the GPU memory limit; see
++	// vidmem_uvm.go. vidmemOpMu serializes the ioctls that change vidmem,
++	// which is protected by nvp.vidmemMu.
++	nvp        *nvproxy
++	vidmemOpMu sync.Mutex `state:"nosave"`
++	vidmem     vidmemUVM
++
++	// vidmemCloseMu serializes MappableRelease and DecRef under a GPU memory
++	// limit, and protects the following fields. vidmemClosed is true once the
++	// host file is closed. vidmemHeld is the VA space file that this file
++	// holds as a UVM MM file, or nil.
++	vidmemCloseMu sync.Mutex `state:"nosave"`
++	vidmemClosed  bool
++	vidmemHeld    *uvmFDMemmapFile
++}
++
++// MappableRelease implements fsutil.MmapFile.MappableRelease.
++func (mf *uvmFDMemmapFile) MappableRelease() {
++	if !mf.vidmemTracked() {
++		mf.MmapPreciseFile.MappableRelease()
++		return
++	}
++	mf.vidmemUnref(mf.MmapPreciseFile.MappableRelease)
++}
++
++// DecRef implements memmap.File.DecRef.
++func (mf *uvmFDMemmapFile) DecRef(fr memmap.FileRange) {
++	if !mf.vidmemTracked() {
++		mf.MmapPreciseFile.DecRef(fr)
++		return
++	}
++	mf.vidmemUnref(func() { mf.MmapPreciseFile.DecRef(fr) })
+ }
+ 
+ // MapInternal implements memmap.File.MapInternal.
+diff --git a/pkg/sentry/devices/nvproxy/uvm_tools.go b/pkg/sentry/devices/nvproxy/uvm_tools.go
+index 63a56e5..828c5cb 100644
+--- a/pkg/sentry/devices/nvproxy/uvm_tools.go
++++ b/pkg/sentry/devices/nvproxy/uvm_tools.go
+@@ -133,7 +133,7 @@ func (fd *uvmToolsFD) IsNvidiaDeviceFD() {}
+ 
+ // Ioctl implements vfs.FileDescriptionImpl.Ioctl.
+ func (fd *uvmToolsFD) Ioctl(ctx context.Context, uio usermem.IO, sysno uintptr, args arch.SyscallArguments) (uintptr, error) {
+-	return uvmIoctl(ctx, fd.dev.nvp, fd.hostFD, fd, args)
++	return uvmIoctl(ctx, fd.dev.nvp, fd.hostFD, nil /* fd */, fd, args)
+ }
+ 
+ // uvmToolsInitEventTracker handles UVM_TOOLS_INIT_EVENT_TRACKER(_V2). The host
+diff --git a/pkg/sentry/devices/nvproxy/version.go b/pkg/sentry/devices/nvproxy/version.go
+index d28d81e..a85f2da 100644
+--- a/pkg/sentry/devices/nvproxy/version.go
++++ b/pkg/sentry/devices/nvproxy/version.go
+@@ -219,16 +219,16 @@ func Init() {
+ 					nvgpu.UVM_CREATE_RANGE_GROUP:             uvmHandler(uvmIoctlSimple[nvgpu.UVM_CREATE_RANGE_GROUP_PARAMS], compUtil),
+ 					nvgpu.UVM_DESTROY_RANGE_GROUP:            uvmHandler(uvmIoctlSimple[nvgpu.UVM_DESTROY_RANGE_GROUP_PARAMS], compUtil),
+ 					nvgpu.UVM_REGISTER_GPU_VASPACE:           uvmHandler(uvmIoctlHasFrontendFD[nvgpu.UVM_REGISTER_GPU_VASPACE_PARAMS], compUtil),
+-					nvgpu.UVM_UNREGISTER_GPU_VASPACE:         uvmHandler(uvmIoctlSimple[nvgpu.UVM_UNREGISTER_GPU_VASPACE_PARAMS], compUtil),
++					nvgpu.UVM_UNREGISTER_GPU_VASPACE:         uvmHandler(uvmIoctlVidmem[nvgpu.UVM_UNREGISTER_GPU_VASPACE_PARAMS](vidmemUVMUnregisterGPUVASpace), compUtil),
+ 					nvgpu.UVM_REGISTER_CHANNEL:               uvmHandler(uvmIoctlHasFrontendFD[nvgpu.UVM_REGISTER_CHANNEL_PARAMS], compUtil),
+ 					nvgpu.UVM_UNREGISTER_CHANNEL:             uvmHandler(uvmIoctlSimple[nvgpu.UVM_UNREGISTER_CHANNEL_PARAMS], compUtil),
+ 					nvgpu.UVM_ENABLE_PEER_ACCESS:             uvmHandler(uvmIoctlSimple[nvgpu.UVM_ENABLE_PEER_ACCESS_PARAMS], compUtil),
+ 					nvgpu.UVM_DISABLE_PEER_ACCESS:            uvmHandler(uvmIoctlSimple[nvgpu.UVM_DISABLE_PEER_ACCESS_PARAMS], compUtil),
+ 					nvgpu.UVM_SET_RANGE_GROUP:                uvmHandler(uvmIoctlSimple[nvgpu.UVM_SET_RANGE_GROUP_PARAMS], compUtil),
+-					nvgpu.UVM_MAP_EXTERNAL_ALLOCATION:        uvmHandler(uvmIoctlHasFrontendFD[nvgpu.UVM_MAP_EXTERNAL_ALLOCATION_PARAMS], compUtil),
+-					nvgpu.UVM_FREE:                           uvmHandler(uvmIoctlSimple[nvgpu.UVM_FREE_PARAMS], compUtil),
++					nvgpu.UVM_MAP_EXTERNAL_ALLOCATION:        uvmHandler(uvmMapExternalAllocation[nvgpu.UVM_MAP_EXTERNAL_ALLOCATION_PARAMS], compUtil),
++					nvgpu.UVM_FREE:                           uvmHandler(uvmIoctlVidmem[nvgpu.UVM_FREE_PARAMS](vidmemUVMFree), compUtil),
+ 					nvgpu.UVM_REGISTER_GPU:                   uvmHandler(uvmIoctlHasFrontendFD[nvgpu.UVM_REGISTER_GPU_PARAMS], compUtil),
+-					nvgpu.UVM_UNREGISTER_GPU:                 uvmHandler(uvmIoctlSimple[nvgpu.UVM_UNREGISTER_GPU_PARAMS], compUtil),
++					nvgpu.UVM_UNREGISTER_GPU:                 uvmHandler(uvmIoctlVidmem[nvgpu.UVM_UNREGISTER_GPU_PARAMS](vidmemUVMUnregisterGPU), compUtil),
+ 					nvgpu.UVM_PAGEABLE_MEM_ACCESS:            uvmHandler(uvmIoctlSimple[nvgpu.UVM_PAGEABLE_MEM_ACCESS_PARAMS], compUtil),
+ 					nvgpu.UVM_SET_PREFERRED_LOCATION:         uvmHandler(uvmIoctlSimple[nvgpu.UVM_SET_PREFERRED_LOCATION_PARAMS], compUtil),
+ 					nvgpu.UVM_UNSET_PREFERRED_LOCATION:       uvmHandler(uvmIoctlSimple[nvgpu.UVM_UNSET_PREFERRED_LOCATION_PARAMS], compUtil),
+@@ -239,11 +239,11 @@ func Init() {
+ 					nvgpu.UVM_MIGRATE:                        uvmHandler(uvmIoctlSimple[nvgpu.UVM_MIGRATE_PARAMS], compUtil),
+ 					nvgpu.UVM_MIGRATE_RANGE_GROUP:            uvmHandler(uvmIoctlSimple[nvgpu.UVM_MIGRATE_RANGE_GROUP_PARAMS], compUtil),
+ 					nvgpu.UVM_MAP_DYNAMIC_PARALLELISM_REGION: uvmHandler(uvmIoctlSimple[nvgpu.UVM_MAP_DYNAMIC_PARALLELISM_REGION_PARAMS], compUtil),
+-					nvgpu.UVM_UNMAP_EXTERNAL:                 uvmHandler(uvmIoctlSimple[nvgpu.UVM_UNMAP_EXTERNAL_PARAMS], compUtil),
++					nvgpu.UVM_UNMAP_EXTERNAL:                 uvmHandler(uvmIoctlVidmem[nvgpu.UVM_UNMAP_EXTERNAL_PARAMS](vidmemUVMUnmapExternal), compUtil),
+ 					nvgpu.UVM_ALLOC_SEMAPHORE_POOL:           uvmHandler(uvmIoctlSimple[nvgpu.UVM_ALLOC_SEMAPHORE_POOL_PARAMS], compUtil),
+ 					nvgpu.UVM_PAGEABLE_MEM_ACCESS_ON_GPU:     uvmHandler(uvmIoctlSimple[nvgpu.UVM_PAGEABLE_MEM_ACCESS_ON_GPU_PARAMS], nvconf.CapVideo),
+ 					nvgpu.UVM_VALIDATE_VA_RANGE:              uvmHandler(uvmIoctlSimple[nvgpu.UVM_VALIDATE_VA_RANGE_PARAMS], compUtil),
+-					nvgpu.UVM_CREATE_EXTERNAL_RANGE:          uvmHandler(uvmIoctlSimple[nvgpu.UVM_CREATE_EXTERNAL_RANGE_PARAMS], compUtil),
++					nvgpu.UVM_CREATE_EXTERNAL_RANGE:          uvmHandler(uvmIoctlVidmem[nvgpu.UVM_CREATE_EXTERNAL_RANGE_PARAMS](vidmemUVMCreateExternalRange), compUtil),
+ 					nvgpu.UVM_MM_INITIALIZE:                  uvmHandler(uvmMMInitialize, compUtil),
+ 				},
+ 				controlCmd: map[uint32]controlCmdHandler{
+@@ -431,11 +431,11 @@ func Init() {
+ 					nvgpu.NV0080_CTRL_CMD_FIFO_GET_CHANNELLIST:                             ctrlHandler(ctrlDevFIFOGetChannelList, compUtil),
+ 					nvgpu.NV0080_CTRL_CMD_MSENC_GET_CAPS:                                   ctrlHandler(ctrlDevGetCaps, nvconf.CapGraphics|nvconf.CapVideo),
+ 					nvgpu.NV0000_CTRL_CMD_SYSTEM_GET_P2P_CAPS:                              ctrlHandler(ctrlClientSystemGetP2PCaps, compUtil),
+-					nvgpu.NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT_TO_FD:                      ctrlHandler(ctrlHasFrontendFD[nvgpu.NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TO_FD_PARAMS], compUtil),
+-					nvgpu.NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECT_FROM_FD:                    ctrlHandler(ctrlHasFrontendFD[nvgpu.NV0000_CTRL_OS_UNIX_IMPORT_OBJECT_FROM_FD_PARAMS], compUtil),
++					nvgpu.NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT_TO_FD:                      ctrlHandler(ctrlVidmemFD[nvgpu.NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TO_FD_PARAMS](vidmemExportObjectToFD), compUtil),
++					nvgpu.NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECT_FROM_FD:                    ctrlHandler(ctrlVidmemFD[nvgpu.NV0000_CTRL_OS_UNIX_IMPORT_OBJECT_FROM_FD_PARAMS](vidmemImportObjectFromFD), compUtil),
+ 					nvgpu.NV0000_CTRL_CMD_OS_UNIX_GET_EXPORT_OBJECT_INFO:                   ctrlHandler(ctrlHasFrontendFD[nvgpu.NV0000_CTRL_OS_UNIX_GET_EXPORT_OBJECT_INFO_PARAMS], compUtil),
+-					nvgpu.NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECTS_TO_FD:                     ctrlHandler(ctrlHasFrontendFD[nvgpu.NV0000_CTRL_OS_UNIX_EXPORT_OBJECTS_TO_FD_PARAMS], compUtil),
+-					nvgpu.NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECTS_FROM_FD:                   ctrlHandler(ctrlHasFrontendFD[nvgpu.NV0000_CTRL_OS_UNIX_IMPORT_OBJECTS_FROM_FD_PARAMS], compUtil),
++					nvgpu.NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECTS_TO_FD:                     ctrlHandler(ctrlVidmemFD[nvgpu.NV0000_CTRL_OS_UNIX_EXPORT_OBJECTS_TO_FD_PARAMS](vidmemExportObjectsToFD), compUtil),
++					nvgpu.NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECTS_FROM_FD:                   ctrlHandler(ctrlVidmemFD[nvgpu.NV0000_CTRL_OS_UNIX_IMPORT_OBJECTS_FROM_FD_PARAMS](vidmemImportObjectsFromFD), compUtil),
+ 					nvgpu.NV0041_CTRL_CMD_GET_SURFACE_INFO:                                 ctrlHandler(ctrlIoctlHasInfoList[nvgpu.NvxxxCtrlXxxGetInfoParams], compUtil),
+ 					nvgpu.NV0041_CTRL_CMD_GET_MEM_PAGE_SIZE:                                ctrlHandler(rmControlSimple, compUtil),
+ 					nvgpu.NV00FD_CTRL_CMD_ATTACH_GPU:                                       ctrlHandler(ctrlMemoryMulticastFabricAttachGPU, compUtil),
+@@ -457,16 +457,16 @@ func Init() {
+ 					nvgpu.NV01_ROOT_NON_PRIV:         allocHandler(rmAllocRootClient, compUtil),
+ 					nvgpu.NV01_CONTEXT_DMA:           allocHandler(rmAllocContextDMA, nvconf.CapVideo),
+ 					nvgpu.NV01_MEMORY_SYSTEM:         allocHandler(rmAllocSimple[nvgpu.NV_MEMORY_ALLOCATION_PARAMS], compUtil),
+-					nvgpu.NV01_MEMORY_LOCAL_USER:     allocHandler(rmAllocSimple[nvgpu.NV_MEMORY_ALLOCATION_PARAMS], compUtil),
++					nvgpu.NV01_MEMORY_LOCAL_USER:     allocHandler(rmAllocLocalUser[nvgpu.NV_MEMORY_ALLOCATION_PARAMS], compUtil),
+ 					nvgpu.NV01_MEMORY_DEVICELESS:     allocHandler(rmAllocSimple[nvgpu.NV_MEMORY_ALLOCATION_PARAMS], compUtil),
+ 					nvgpu.NV01_ROOT_CLIENT:           allocHandler(rmAllocRootClient, compUtil),
+ 					nvgpu.NV01_EVENT_OS_EVENT:        allocHandler(rmAllocEventOSEvent, compUtil),
+ 					nvgpu.NV_EVENT_BUFFER:            allocHandler(rmAllocEventBuffer, nvconf.CapProfiling),
+ 					nvgpu.NV01_MEMORY_VIRTUAL:        allocHandler(rmAllocMemoryVirtual, nvconf.CapGraphics|nvconf.CapVideo),
+ 					nvgpu.NV01_DEVICE_0:              allocHandler(rmAllocSimple[nvgpu.NV0080_ALLOC_PARAMETERS], compUtil),
+-					nvgpu.NV_SEMAPHORE_SURFACE:       allocHandler(rmAllocSimple[nvgpu.NV_SEMAPHORE_SURFACE_ALLOC_PARAMETERS], nvconf.CapGraphics),
++					nvgpu.NV_SEMAPHORE_SURFACE:       allocHandler(rmAllocVidmemHolder(vidmemSemaphoreSurfaceMemory), nvconf.CapGraphics),
+ 					nvgpu.RM_USER_SHARED_DATA:        allocHandler(rmAllocSimple[nvgpu.NV00DE_ALLOC_PARAMETERS], compUtil),
+-					nvgpu.NV_MEMORY_FABRIC:           allocHandler(rmAllocSimple[nvgpu.NV00F8_ALLOCATION_PARAMETERS], compUtil),
++					nvgpu.NV_MEMORY_FABRIC:           allocHandler(rmAllocVidmemHolder(vidmemFabricMemory), compUtil),
+ 					nvgpu.NV_MEMORY_MULTICAST_FABRIC: allocHandler(rmAllocMulticastFabric[nvgpu.NV00FD_ALLOCATION_PARAMETERS], compUtil),
+ 					nvgpu.NV_MEMORY_MAPPER:           allocHandler(rmAllocSimple[nvgpu.NV_MEMORY_MAPPER_ALLOCATION_PARAMS], nvconf.CapGraphics),
+ 					nvgpu.NV20_SUBDEVICE_0:           allocHandler(rmAllocSimple[nvgpu.NV2080_ALLOC_PARAMETERS], compUtil),
+@@ -900,7 +900,7 @@ func Init() {
+ 			abi.allocationClass[nvgpu.NV_MEMORY_EXPORT] = allocHandler(rmAllocSimple[nvgpu.NV00E0_ALLOCATION_PARAMETERS], nvconf.CapFabricIMEXManagement)
+ 			abi.allocationClass[nvgpu.NV_MEMORY_MULTICAST_FABRIC] = allocHandler(rmAllocMulticastFabric[nvgpu.NV00FD_ALLOCATION_PARAMETERS_V545], compUtil)
+ 			abi.allocationClass[nvgpu.NV01_MEMORY_SYSTEM] = allocHandler(rmAllocSimple[nvgpu.NV_MEMORY_ALLOCATION_PARAMS_V545], compUtil)
+-			abi.allocationClass[nvgpu.NV01_MEMORY_LOCAL_USER] = allocHandler(rmAllocSimple[nvgpu.NV_MEMORY_ALLOCATION_PARAMS_V545], compUtil)
++			abi.allocationClass[nvgpu.NV01_MEMORY_LOCAL_USER] = allocHandler(rmAllocLocalUser[nvgpu.NV_MEMORY_ALLOCATION_PARAMS_V545], compUtil)
+ 			abi.allocationClass[nvgpu.NV01_MEMORY_DEVICELESS] = allocHandler(rmAllocSimple[nvgpu.NV_MEMORY_ALLOCATION_PARAMS_V545], compUtil)
+ 			abi.allocationClass[nvgpu.NV50_MEMORY_VIRTUAL] = allocHandler(rmAllocSimple[nvgpu.NV_MEMORY_ALLOCATION_PARAMS_V545], compUtil)
+ 			abi.allocationClass[nvgpu.NVB8FA_VIDEO_OFA] = allocHandler(rmAllocSimple[nvgpu.NV_OFA_ALLOCATION_PARAMETERS_V545], nvconf.CapVideo)
+@@ -954,7 +954,7 @@ func Init() {
+ 			abi.allocationClass[nvgpu.NV_IMEX_SESSION] = allocHandler(rmAllocIMEXSession, nvconf.CapFabricIMEXManagement)
+ 			abi.allocationClass[nvgpu.NV_MEMORY_FABRIC_IMPORTED_REF] = allocHandler(rmAllocSimple[nvgpu.NV00FB_ALLOCATION_PARAMETERS], nvconf.CapFabricIMEXManagement)
+ 			abi.allocationClass[nvgpu.NVENC_SW_SESSION] = allocHandler(rmAllocSimple[nvgpu.NVA0BC_ALLOC_PARAMETERS], nvconf.CapVideo)
+-			abi.allocationClass[nvgpu.NV_MEMORY_MAPPER] = allocHandler(rmAllocSimple[nvgpu.NV_MEMORY_MAPPER_ALLOCATION_PARAMS_V550], nvconf.CapVideo)
++			abi.allocationClass[nvgpu.NV_MEMORY_MAPPER] = allocHandler(rmAllocVidmemHolder(vidmemMemoryMapperSurface), nvconf.CapVideo)
+ 
+ 			prevGetInfo := abi.getInfo
+ 			abi.getInfo = func() *DriverABIInfo {
+@@ -989,7 +989,7 @@ func Init() {
+ 		v550_54_14 := addUnsupportedDriverABI(550, 54, 14, func() *driverABI {
+ 			abi := v550_40_07()
+ 			abi.uvmIoctl[nvgpu.UVM_ALLOC_SEMAPHORE_POOL] = uvmHandler(uvmIoctlSimple[nvgpu.UVM_ALLOC_SEMAPHORE_POOL_PARAMS_V550], compUtil)
+-			abi.uvmIoctl[nvgpu.UVM_MAP_EXTERNAL_ALLOCATION] = uvmHandler(uvmIoctlHasFrontendFD[nvgpu.UVM_MAP_EXTERNAL_ALLOCATION_PARAMS_V550], compUtil)
++			abi.uvmIoctl[nvgpu.UVM_MAP_EXTERNAL_ALLOCATION] = uvmHandler(uvmMapExternalAllocation[nvgpu.UVM_MAP_EXTERNAL_ALLOCATION_PARAMS_V550], compUtil)
+ 
+ 			prevGetInfo := abi.getInfo
+ 			abi.getInfo = func() *DriverABIInfo {
+@@ -1022,7 +1022,7 @@ func Init() {
+ 		// 555.42.02 is an intermediate unqualified version.
+ 		v555_42_02 := addUnsupportedDriverABI(555, 42, 02, func() *driverABI {
+ 			abi := v550_90_07()
+-			abi.allocationClass[nvgpu.NV_MEMORY_MAPPER] = allocHandler(rmAllocSimple[nvgpu.NV_MEMORY_MAPPER_ALLOCATION_PARAMS_V555], nvconf.CapVideo)
++			abi.allocationClass[nvgpu.NV_MEMORY_MAPPER] = allocHandler(rmAllocVidmemHolder(vidmemMemoryMapperSurfaceV555), nvconf.CapVideo)
+ 			abi.controlCmd[nvgpu.NV90E7_CTRL_CMD_BBX_GET_LAST_FLUSH_TIME] = ctrlHandler(rmControlSimple, nvconf.CapGraphics)
+ 			abi.controlCmd[nvgpu.NV00FE_CTRL_CMD_RESIZE_QUEUE] = ctrlHandler(rmControlSimple, compUtil)
+ 			delete(abi.controlCmd, nvgpu.NVC36F_CTRL_GET_CLASS_ENGINEID)
+@@ -1266,7 +1266,7 @@ func Init() {
+ 		v590_44_01 := addUnsupportedDriverABI(590, 44, 01, func() *driverABI {
+ 			abi := v580_105_08()
+ 			abi.uvmIoctl[nvgpu.UVM_UNREGISTER_CHANNEL] = uvmHandler(uvmIoctlSimple[nvgpu.UVM_UNREGISTER_CHANNEL_PARAMS_V590], compUtil)
+-			abi.uvmIoctl[nvgpu.UVM_FREE] = uvmHandler(uvmIoctlSimple[nvgpu.UVM_FREE_PARAMS_V590], compUtil)
++			abi.uvmIoctl[nvgpu.UVM_FREE] = uvmHandler(uvmIoctlVidmem[nvgpu.UVM_FREE_PARAMS_V590](vidmemUVMFreeV590), compUtil)
+ 			abi.allocationClass[nvgpu.NV50_P2P] = allocHandler(rmAllocSimple[nvgpu.NV503B_ALLOC_PARAMETERS_V590], compUtil)
+ 			abi.allocationClass[nvgpu.NV_MEMORY_MULTICAST_FABRIC] = allocHandler(rmAllocMulticastFabric[nvgpu.NV00FD_ALLOCATION_PARAMETERS_V590], compUtil)
+ 			abi.controlCmd[nvgpu.NV2080_CTRL_CMD_FB_GET_UGPU_MEMORY_INFO] = ctrlHandler(rmControlSimple, compUtil)
+diff --git a/pkg/sentry/devices/nvproxy/vidmem.go b/pkg/sentry/devices/nvproxy/vidmem.go
+new file mode 100644
+index 0000000..48351dd
+--- /dev/null
++++ b/pkg/sentry/devices/nvproxy/vidmem.go
+@@ -0,0 +1,883 @@
++// Copyright 2026 The gVisor Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package nvproxy
++
++// GPU memory limit
++//
++// With Options.GPUMemoryLimit set, nvproxy charges every allocation of device
++// memory for the application (class NV01_MEMORY_LOCAL_USER, by NV_ESC_RM_ALLOC
++// or by NV_ESC_RM_VID_HEAP_CONTROL) to the GPU it is made on, by device
++// instance, and keeps the sandbox's total on each GPU within the limit:
++//
++//   - Before calling the driver, nvproxy charges the requested size rounded up
++//     as in vidmemFootprint, and fails the allocation with NV_ERR_NO_MEMORY, as
++//     the driver does when the GPU is full, if that exceeds the limit or the
++//     GPU is unknown. The GPU is unknown unless the parent is a device, or a
++//     subdevice of one, that the client allocated itself, rather than
++//     duplicated or imported.
++//   - The driver returns the size it allocated, a whole number of pages. If
++//     its footprint exceeds the limit, nvproxy frees the new object with
++//     NV_ESC_RM_FREE, as the application's client, and fails the allocation
++//     in the same way; otherwise it charges that footprint.
++//   - nvproxy refuses NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE with
++//     NV_ERR_NOT_SUPPORTED: the driver then takes the requested size rounded
++//     up to the requested alignment, but returns the size rounded up to the
++//     page size only (src/nvidia/src/kernel/mem_mgr/video_mem.c:
++//     _vidmemPmaAllocate()).
++//
++// A charge lasts while anything that nvproxy tracks keeps the memory
++// allocated:
++//
++//   - a handle to it: the one allocated, a duplicate (NV_ESC_RM_DUP_OBJECT), or
++//     an import from a file (NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECT(S)_FROM_FD);
++//     handles are released by NV_ESC_RM_FREE, with a freed parent, or in the
++//     teardown of their client when the client's file is closed;
++//   - an export to a file (NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT(S)_TO_FD),
++//     until the file is closed or the export's slot is overwritten: the driver
++//     holds a duplicate in its export client until then
++//     (src/nvidia/arch/nvalloc/unix/src/rmobjexportimport.c:RmExportObject(),
++//     osapi.c:rm_cleanup_file_private() => RmFreeObjExportHandle());
++//   - an object that the driver made with duplicates of the memory, which
++//     holds the memory's charge: a fabric object (NV_MEMORY_FABRIC with
++//     map.hVidMem; src/nvidia/src/kernel/mem_mgr/mem_fabric.c:
++//     memoryfabricConstruct_IMPL()), a semaphore surface (NV_SEMAPHORE_SURFACE;
++//     src/nvidia/src/kernel/gpu/mem_mgr/sem_surf.c:_semsurfDupMemory()), and a
++//     memory mapper made with a semaphore surface (NV_MEMORY_MAPPER;
++//     src/nvidia/src/kernel/gpu/mem_mgr/mem_mapper.c:
++//     memmapperConstruct_IMPL());
++//   - a UVM external mapping (UVM_MAP_EXTERNAL_ALLOCATION), which holds a
++//     duplicate until it is unmapped or its VA space is destroyed; see
++//     vidmem_uvm.go.
++//
++// Closing a file does not release what the driver keeps of it while another
++// file holds it: a file registered with NV_ESC_REGISTER_FD holds the file of
++// its ctl_fd, with its clients and exports, until it is closed itself
++// (src/nvidia/arch/nvalloc/unix/src/escape.c:RmIoctl(),
++// osapi.c:rm_cleanup_file_private() => nv_put_file_private()), and a UVM MM
++// file holds its VA space (vidmem_uvm.go). nvproxy keeps the other file's host
++// file open as long; see vidmemHoldRange.
++//
++// NV00F8_CTRL_CMD_ATTACH_MEM and NV00FD_CTRL_CMD_ATTACH_MEM need nothing: they
++// record inter-mappings, which the driver removes when the memory is freed
++// (src/nvidia/src/libraries/resserv/src/rs_client.c:clientFreeResource_IMPL()
++// => _clientUnmapInterBackRefMappings()). NV_ESC_EXPORT_TO_DMABUF_FD is
++// refused with NV_ERR_NOT_SUPPORTED, since its dma-buf keeps duplicates while
++// the kernel holds it (kernel-open/nvidia/nv-dmabuf.c), which nvproxy cannot
++// see. NV_MEMORY_EXPORT duplicates memory only in
++// NV00E0_CTRL_CMD_EXPORT_MEM, which nvproxy does not support.
++//
++// Not charged: memory the driver allocates for itself (channels, contexts,
++// page tables), whose amount grows with the number of contexts, channels and
++// mappings the application creates; and managed memory, whose pages UVM
++// allocates on fault and evicts when the GPU is full.
++//
++// The limit and the charges are saved with the sandbox. A restored sandbox
++// keeps the limit it was saved with, since Register is not called on restore,
++// and its charges move to the device instances its devices are remapped to.
++// nvproxy does not recreate exports and UVM mappings on restore; their charges
++// remain until their files are closed.
++
++import (
++	"fmt"
++	"slices"
++
++	"gvisor.dev/gvisor/pkg/abi/nvgpu"
++	"gvisor.dev/gvisor/pkg/context"
++	"gvisor.dev/gvisor/pkg/errors/linuxerr"
++	"gvisor.dev/gvisor/pkg/hostarch"
++	"gvisor.dev/gvisor/pkg/log"
++	"gvisor.dev/gvisor/pkg/sentry/memmap"
++)
++
++// vidmemPageSize is the granularity in which the driver takes device memory
++// for an application's allocation; see vidmemFootprint.
++const vidmemPageSize = 64 << 10
++
++// vidmemFootprint returns the device memory that an NV01_MEMORY_LOCAL_USER
++// allocation of size bytes takes, or false if that overflows. The driver
++// rounds the size up to the allocation's page size
++// (src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/mem_mgr_gm107.c:
++// memmgrAllocDetermineAlignment_GM107()), returns the rounded size
++// (src/nvidia/src/kernel/mem_mgr/video_mem.c:vidmemConstruct_IMPL()), and
++// takes it from PMA in pages of that size, except that PMA allocates 4 KiB
++// pages as 64 KiB ones (video_mem.c:_vidmemPmaAllocate()). The footprint of a
++// size the driver returned is therefore that size rounded up to 64 KiB, and
++// the requested size rounded up to 64 KiB is never more than the footprint.
++// This does not hold for NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE, which
++// nvproxy refuses.
++func vidmemFootprint(size uint64) (uint64, bool) {
++	const mask = vidmemPageSize - 1
++	if size > ^uint64(0)-mask {
++		return 0, false
++	}
++	return (size + mask) &^ mask, true
++}
++
++// vidmemCharge is device memory charged against the GPU memory limit. Its
++// fields are protected by nvproxy.vidmemMu.
++//
++// +stateify savable
++type vidmemCharge struct {
++	// gpu is the device instance of the GPU that the memory is on.
++	gpu uint32
++	// size is the memory's footprint in bytes.
++	size uint64
++	// refs is the number of holders of the charge.
++	refs int
++	// parts, if not nil, are the charges that this charge holds, instead of
++	// charging memory itself: those of an object that holds several, such as
++	// a semaphore surface. Such a charge is not in nvproxy.vidmemCharges.
++	parts []*vidmemCharge
++}
++
++// vidmemTryCharge charges the footprint of size bytes on the GPU with device
++// instance gpu. It returns nil, charging nothing, if that would exceed the
++// limit.
++func (nvp *nvproxy) vidmemTryCharge(ctx context.Context, gpu uint32, size uint64) *vidmemCharge {
++	footprint, ok := vidmemFootprint(size)
++	nvp.vidmemMu.Lock()
++	defer nvp.vidmemMu.Unlock()
++	used := nvp.vidmemUsed[gpu]
++	if !ok || footprint > nvp.vidmemLimit || used > nvp.vidmemLimit-footprint {
++		ctx.Infof("nvproxy: GPU memory limit: refused %d bytes on device instance %d, %d of %d in use", size, gpu, used, nvp.vidmemLimit)
++		return nil
++	}
++	nvp.vidmemUsed[gpu] = used + footprint
++	c := &vidmemCharge{gpu: gpu, size: footprint, refs: 1}
++	nvp.vidmemCharges[c] = struct{}{}
++	if ctx.IsLogging(log.Debug) {
++		ctx.Debugf("nvproxy: GPU memory limit: charged %d bytes on device instance %d, %d of %d in use", footprint, gpu, used+footprint, nvp.vidmemLimit)
++	}
++	return c
++}
++
++// vidmemSettle sets c's size to the footprint of size bytes, the size that the
++// driver allocated. If that would exceed the limit, it returns false and
++// leaves c unchanged, unless force is true.
++func (nvp *nvproxy) vidmemSettle(ctx context.Context, c *vidmemCharge, size uint64, force bool) bool {
++	footprint, ok := vidmemFootprint(size)
++	if !ok {
++		footprint = size
++	}
++	nvp.vidmemMu.Lock()
++	defer nvp.vidmemMu.Unlock()
++	others := nvp.vidmemUsed[c.gpu] - c.size
++	if !force && (!ok || footprint > nvp.vidmemLimit || others > nvp.vidmemLimit-footprint) {
++		return false
++	}
++	nvp.vidmemUsed[c.gpu] = others + footprint
++	if footprint != c.size && ctx.IsLogging(log.Debug) {
++		ctx.Debugf("nvproxy: GPU memory limit: the driver allocated %d bytes for %d on device instance %d, %d of %d in use", footprint, c.size, c.gpu, others+footprint, nvp.vidmemLimit)
++	}
++	c.size = footprint
++	return true
++}
++
++// vidmemIncRef adds a holder of c.
++func (nvp *nvproxy) vidmemIncRef(c *vidmemCharge) {
++	nvp.vidmemMu.Lock()
++	defer nvp.vidmemMu.Unlock()
++	nvp.vidmemIncRefLocked(c)
++}
++
++// Preconditions: nvp.vidmemMu must be locked.
++func (nvp *nvproxy) vidmemIncRefLocked(c *vidmemCharge) {
++	if c.refs <= 0 {
++		log.Traceback("nvproxy: GPU memory limit: reference to a released charge")
++	}
++	c.refs++
++}
++
++// vidmemDecRef removes a holder of c, and releases c when it was the last.
++func (nvp *nvproxy) vidmemDecRef(ctx context.Context, c *vidmemCharge) {
++	nvp.vidmemMu.Lock()
++	defer nvp.vidmemMu.Unlock()
++	nvp.vidmemDecRefLocked(ctx, c)
++}
++
++// Preconditions: nvp.vidmemMu must be locked.
++func (nvp *nvproxy) vidmemDecRefLocked(ctx context.Context, c *vidmemCharge) {
++	c.refs--
++	if c.refs > 0 {
++		return
++	}
++	if c.refs < 0 {
++		log.Traceback("nvproxy: GPU memory limit: charge released twice")
++		return
++	}
++	if c.parts != nil {
++		for _, p := range c.parts {
++			nvp.vidmemDecRefLocked(ctx, p)
++		}
++		return
++	}
++	used := nvp.vidmemUsed[c.gpu] - c.size
++	if used == 0 {
++		delete(nvp.vidmemUsed, c.gpu)
++	} else {
++		nvp.vidmemUsed[c.gpu] = used
++	}
++	delete(nvp.vidmemCharges, c)
++	if ctx.IsLogging(log.Debug) {
++		ctx.Debugf("nvproxy: GPU memory limit: released %d bytes on device instance %d, %d of %d in use", c.size, c.gpu, used, nvp.vidmemLimit)
++	}
++}
++
++// vidmemRelease releases a holder's reference to c once; *released records
++// that it has.
++func (nvp *nvproxy) vidmemRelease(ctx context.Context, released *bool, c *vidmemCharge) {
++	if *released {
++		return
++	}
++	*released = true
++	nvp.vidmemDecRef(ctx, c)
++}
++
++// vidmemAfterLoad moves the charges of a restored sandbox from the device
++// instances of its saved devices to those of the devices that dr maps them
++// to.
++func (nvp *nvproxy) vidmemAfterLoad(dr *DeviceRemapping) {
++	if nvp.vidmemUsed == nil {
++		nvp.vidmemUsed = make(map[uint32]uint64)
++	}
++	if nvp.vidmemCharges == nil {
++		nvp.vidmemCharges = make(map[*vidmemCharge]struct{})
++	}
++	if dr == nil || len(nvp.vidmemCharges) == 0 {
++		return
++	}
++	used := make(map[uint32]uint64)
++	for c := range nvp.vidmemCharges {
++		oldDev, ok := dr.OldDeviceByDeviceInstance[c.gpu]
++		if !ok {
++			panic(fmt.Sprintf("nvproxy: remapping does not contain a saved device with device instance %d, which has GPU memory charges: %+v", c.gpu, dr))
++		}
++		c.gpu = dr.NewDeviceByOld[oldDev].DeviceInstance
++		used[c.gpu] += c.size
++	}
++	nvp.vidmemUsed = used
++}
++
++// vidmemObject is an rmAllocObject that holds a charge: device memory
++// allocated by NV_ESC_RM_ALLOC, or an object made with duplicates of charged
++// memory (vidmemAddHolderLocked).
++//
++// +stateify savable
++type vidmemObject struct {
++	rmAllocObject
++
++	charge   *vidmemCharge
++	released bool // protected by client.objsMu
++}
++
++// Release implements objectImpl.Release.
++func (o *vidmemObject) Release(ctx context.Context) func() {
++	o.nvp.vidmemRelease(ctx, &o.released, o.charge)
++	return nil
++}
++
++// vidmemRef is a handle that holds a charge and was not created by
++// NV_ESC_RM_ALLOC: device memory allocated by NV_ESC_RM_VID_HEAP_CONTROL, a
++// duplicate, or an import.
++type vidmemRef struct {
++	object
++
++	charge   *vidmemCharge
++	released bool // protected by client.objsMu
++}
++
++// Release implements objectImpl.Release.
++func (o *vidmemRef) Release(ctx context.Context) func() {
++	o.nvp.vidmemRelease(ctx, &o.released, o.charge)
++	return nil
++}
++
++// vidmemChargeOf returns the charge that impl holds, or nil.
++//
++// Precondition: the client of impl must be locked.
++func vidmemChargeOf(impl objectImpl) *vidmemCharge {
++	switch o := impl.(type) {
++	case *vidmemObject:
++		if !o.released {
++			return o.charge
++		}
++	case *vidmemRef:
++		if !o.released {
++			return o.charge
++		}
++	}
++	return nil
++}
++
++// vidmemForget releases the charge that impl holds, if any, when nvproxy stops
++// tracking impl without freeing it.
++//
++// Precondition: the client of impl must be locked.
++func (nvp *nvproxy) vidmemForget(ctx context.Context, impl objectImpl) {
++	switch o := impl.(type) {
++	case *vidmemObject:
++		nvp.vidmemRelease(ctx, &o.released, o.charge)
++	case *vidmemRef:
++		nvp.vidmemRelease(ctx, &o.released, o.charge)
++	}
++}
++
++// vidmemForgetFreedLocked releases the charges that o and the objects that
++// depend on it hold, when the driver has freed o, and with it those objects,
++// without nvproxy seeing it.
++//
++// Precondition: o.client.objsMu must be locked.
++func (nvp *nvproxy) vidmemForgetFreedLocked(ctx context.Context, o *object) {
++	if nvp.vidmemLimit == 0 {
++		return
++	}
++	seen := make(map[*object]struct{})
++	var forget func(o *object)
++	forget = func(o *object) {
++		if _, ok := seen[o]; ok {
++			return
++		}
++		seen[o] = struct{}{}
++		nvp.vidmemForget(ctx, o.impl)
++		for r := range o.rdeps {
++			forget(r)
++		}
++	}
++	forget(o)
++}
++
++// vidmemGPULocked returns the device instance of the GPU that memory allocated
++// with parent h, a device or a subdevice, is on, or false if nvproxy does not
++// know it.
++//
++// Precondition: client.objsMu must be locked.
++func vidmemGPULocked(client *rootClient, h nvgpu.Handle) (uint32, bool) {
++	o := client.resources[h]
++	if o != nil && o.class == nvgpu.NV20_SUBDEVICE_0 {
++		o = client.resources[o.parent]
++	}
++	if o == nil || o.class != nvgpu.NV01_DEVICE_0 {
++		return 0, false
++	}
++	dev, ok := o.impl.(*rmAllocObject)
++	if !ok {
++		return 0, false
++	}
++	var allocParams nvgpu.NV0080_ALLOC_PARAMETERS
++	// src/nvidia/src/kernel/gpu/device.c:deviceConstruct_IMPL() treats NULL
++	// allocParams as the zero value.
++	if len(dev.params.allocParams) >= allocParams.SizeBytes() {
++		allocParams.UnmarshalBytes(dev.params.allocParams)
++	}
++	return allocParams.DeviceID, true
++}
++
++// vidmemChargeNewLocked charges an allocation of size bytes of device memory
++// with parent hParent in client. It returns nil, charging nothing, if that
++// would exceed the limit or nvproxy does not know the GPU.
++//
++// Precondition: client.objsMu must be locked.
++func (nvp *nvproxy) vidmemChargeNewLocked(ctx context.Context, client *rootClient, hParent nvgpu.Handle, size uint64) *vidmemCharge {
++	gpu, ok := vidmemGPULocked(client, hParent)
++	if !ok {
++		ctx.Warningf("nvproxy: GPU memory limit: refused %d bytes with parent %v:%v, whose GPU is unknown", size, client.handle, hParent)
++		return nil
++	}
++	return nvp.vidmemTryCharge(ctx, gpu, size)
++}
++
++// vidmemAlloc charges an allocation of device memory against the GPU memory
++// limit: checkLocked before the driver allocates the memory, addLocked once it
++// has, and done at the end, which releases the charge unless the memory holds
++// it.
++type vidmemAlloc struct {
++	nvp    *nvproxy
++	charge *vidmemCharge
++}
++
++// checkLocked charges an allocation of size bytes with the given
++// NVOS32_ALLOC_FLAGS_* and parent hParent in client. It returns the status
++// with which to fail the allocation, without calling the driver, or NV_OK.
++//
++// Precondition: client.objsMu must be locked.
++func (a *vidmemAlloc) checkLocked(ctx context.Context, client *rootClient, hParent nvgpu.Handle, flags uint32, size uint64) uint32 {
++	if flags&nvgpu.NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE != 0 {
++		ctx.Warningf("nvproxy: GPU memory limit: refused %d bytes at a fixed address with parent %v:%v", size, client.handle, hParent)
++		return nvgpu.NV_ERR_NOT_SUPPORTED
++	}
++	a.charge = a.nvp.vidmemChargeNewLocked(ctx, client, hParent, size)
++	if a.charge == nil {
++		return nvgpu.NV_ERR_NO_MEMORY
++	}
++	return nvgpu.NV_OK
++}
++
++// addLocked records the device memory that the driver allocated as size bytes
++// with handle h, class c and parent hParent in client, as the object that
++// newImpl returns for the charge, unless its footprint exceeds the limit. It
++// returns the status with which the allocation ends.
++//
++// Precondition: client.objsMu must be locked.
++func (a *vidmemAlloc) addLocked(fi *frontendIoctlState, client *rootClient, h nvgpu.Handle, c nvgpu.ClassID, hParent nvgpu.Handle, size uint64, newImpl func(*vidmemCharge) objectImpl) uint32 {
++	if !a.nvp.vidmemSettleAllocLocked(fi, client, a.charge, hParent, h, size) {
++		return nvgpu.NV_ERR_NO_MEMORY
++	}
++	if a.nvp.objAdd(fi.ctx, client, h, c, newImpl(a.charge), hParent) {
++		a.charge = nil // the object holds it
++	}
++	return nvgpu.NV_OK
++}
++
++// done releases the charge unless the memory holds it.
++func (a *vidmemAlloc) done(ctx context.Context) {
++	if a.charge != nil {
++		a.nvp.vidmemDecRef(ctx, a.charge)
++		a.charge = nil
++	}
++}
++
++// vidmemSettleAllocLocked charges c with the footprint of device memory that
++// the driver allocated as size bytes, with handle h and parent hParent in
++// client. If that exceeds the limit, it frees the memory and returns false,
++// leaving c unchanged; the caller then fails the allocation with
++// NV_ERR_NO_MEMORY. If the driver fails to free it, the memory stays allocated
++// and charged beyond the limit, and the allocation succeeds.
++//
++// Precondition: client.objsMu must be locked.
++func (nvp *nvproxy) vidmemSettleAllocLocked(fi *frontendIoctlState, client *rootClient, c *vidmemCharge, hParent, h nvgpu.Handle, size uint64) bool {
++	if nvp.vidmemSettle(fi.ctx, c, size, false /* force */) {
++		return true
++	}
++	status, err := vidmemRMFree(fi.fd, client.handle, hParent, h)
++	if err == nil && status == nvgpu.NV_OK {
++		fi.ctx.Infof("nvproxy: GPU memory limit: refused %v:%v, which the driver allocated as %d bytes on device instance %d", client.handle, h, size, c.gpu)
++		return false
++	}
++	fi.ctx.Warningf("nvproxy: GPU memory limit: failed to free %v:%v beyond the limit (status %#x, %v); charging its %d bytes", client.handle, h, status, err, size)
++	nvp.vidmemSettle(fi.ctx, c, size, true /* force */)
++	return true
++}
++
++// vidmemRMFree is frontendRMFree; tests replace it.
++var vidmemRMFree = frontendRMFree
++
++type vidmemAllocParamsPtr[T any] interface {
++	marshalPtr[T]
++	GetSize() uint64
++	GetFlags() uint32
++}
++
++// rmAllocLocalUser implements NV_ESC_RM_ALLOC for NV01_MEMORY_LOCAL_USER. With
++// a GPU memory limit, it charges the memory against the limit and fails the
++// allocation with NV_ERR_NO_MEMORY if it would exceed it.
++func rmAllocLocalUser[Params any, PtrParams vidmemAllocParamsPtr[Params]](fi *frontendIoctlState, ioctlParams *nvgpu.NVOS64_PARAMETERS, isNVOS64 bool) (uintptr, error) {
++	nvp := fi.fd.dev.nvp
++	// The driver refuses an allocation without parameters.
++	if nvp.vidmemLimit == 0 || ioctlParams.PAllocParms == 0 {
++		return rmAllocSimple[Params, PtrParams](fi, ioctlParams, isNVOS64)
++	}
++
++	var allocParamsValue Params
++	allocParams := PtrParams(&allocParamsValue)
++	if _, err := allocParams.CopyIn(fi.t, addrFromP64(ioctlParams.PAllocParms)); err != nil {
++		return 0, err
++	}
++	a := vidmemAlloc{nvp: nvp}
++	checkLocked, addObjLocked := vidmemLocalUserCallbacks[Params, PtrParams](&a)
++	n, err := rmAllocInvokeChecked(fi, ioctlParams, &allocParamsValue, isNVOS64, checkLocked, addObjLocked)
++	a.done(fi.ctx)
++	if err != nil {
++		return n, err
++	}
++	if _, err := allocParams.CopyOut(fi.t, addrFromP64(ioctlParams.PAllocParms)); err != nil {
++		return n, err
++	}
++	return n, nil
++}
++
++// vidmemLocalUserCallbacks returns the checkLocked and addObjLocked functions
++// of rmAllocInvokeChecked for rmAllocLocalUser, which charge through a.
++func vidmemLocalUserCallbacks[Params any, PtrParams vidmemAllocParamsPtr[Params]](a *vidmemAlloc) (
++	func(*frontendIoctlState, *rootClient, *nvgpu.NVOS64_PARAMETERS, *Params) uint32,
++	func(*frontendIoctlState, *rootClient, *nvgpu.NVOS64_PARAMETERS, nvgpu.RS_ACCESS_MASK, *Params),
++) {
++	checkLocked := func(fi *frontendIoctlState, client *rootClient, ioctlParams *nvgpu.NVOS64_PARAMETERS, allocParams *Params) uint32 {
++		p := PtrParams(allocParams)
++		return a.checkLocked(fi.ctx, client, ioctlParams.HObjectParent, p.GetFlags(), p.GetSize())
++	}
++	addObjLocked := func(fi *frontendIoctlState, client *rootClient, ioctlParams *nvgpu.NVOS64_PARAMETERS, rightsRequested nvgpu.RS_ACCESS_MASK, allocParams *Params) {
++		ioctlParams.Status = a.addLocked(fi, client, ioctlParams.HObjectNew, ioctlParams.HClass, ioctlParams.HObjectParent, PtrParams(allocParams).GetSize(), func(c *vidmemCharge) objectImpl {
++			o := &vidmemObject{charge: c}
++			o.params = captureRmAllocParams(fi.fd, ioctlParams, rightsRequested, allocParams)
++			return o
++		})
++	}
++	return checkLocked, addObjLocked
++}
++
++// checkHeapLocked is checkLocked for NV_ESC_RM_VID_HEAP_CONTROL's
++// NVOS32_FUNCTION_ALLOC_SIZE with parameters p and parent hParent in client,
++// which charges only device memory, and only with a GPU memory limit.
++//
++// Precondition: client.objsMu must be locked.
++func (a *vidmemAlloc) checkHeapLocked(ctx context.Context, client *rootClient, hParent nvgpu.Handle, p *nvgpu.NVOS32AllocSize) uint32 {
++	if a.nvp.vidmemLimit == 0 || !vidmemHeapAllocatesLocalUser(p) {
++		return nvgpu.NV_OK
++	}
++	return a.checkLocked(ctx, client, hParent, p.Flags, p.Size)
++}
++
++// addHeapLocked is addLocked for the device memory with class c that
++// NVOS32_FUNCTION_ALLOC_SIZE allocated with parameters p, as they are after
++// the driver's return, and parent hParent in client.
++//
++// Precondition: client.objsMu must be locked.
++func (a *vidmemAlloc) addHeapLocked(fi *frontendIoctlState, client *rootClient, hParent nvgpu.Handle, c nvgpu.ClassID, p *nvgpu.NVOS32AllocSize) uint32 {
++	return a.addLocked(fi, client, p.HMemory, c, hParent, p.Size, func(c *vidmemCharge) objectImpl {
++		return &vidmemRef{charge: c}
++	})
++}
++
++// vidmemHeapAllocatesLocalUser returns true if NV_ESC_RM_VID_HEAP_CONTROL's
++// NVOS32_FUNCTION_ALLOC_SIZE allocates NV01_MEMORY_LOCAL_USER, device memory,
++// for p; see
++// src/nvidia/interface/deprecated/rmapi_deprecated_vidheapctrl.c:
++// _rmVidHeapControlAllocCommon().
++func vidmemHeapAllocatesLocalUser(p *nvgpu.NVOS32AllocSize) bool {
++	return p.Flags&nvgpu.NVOS32_ALLOC_FLAGS_VIRTUAL == 0 &&
++		(p.Attr2>>nvgpu.NVOS32_ATTR2_USE_EGM_SHIFT)&nvgpu.NVOS32_ATTR2_USE_EGM_MASK != nvgpu.NVOS32_ATTR2_USE_EGM_TRUE &&
++		(p.Attr>>nvgpu.NVOS32_ATTR_LOCATION_SHIFT)&nvgpu.NVOS32_ATTR_LOCATION_MASK == nvgpu.NVOS32_ATTR_LOCATION_VIDMEM
++}
++
++// rmAllocFailWithStatus fails NV_ESC_RM_ALLOC with the given status without
++// calling the driver, copying out the parameter type that the application
++// passed.
++func rmAllocFailWithStatus(fi *frontendIoctlState, ioctlParams *nvgpu.NVOS64_PARAMETERS, isNVOS64 bool, status uint32) error {
++	if fi.ctx.IsLogging(log.Debug) {
++		fi.ctx.Debugf("nvproxy: ioctl internally failed: status=%#x", status)
++	}
++	ioctlParams.Status = status
++	outIoctlParams := nvgpu.GetRmAllocParamObj(isNVOS64)
++	outIoctlParams.FromOS64(*ioctlParams)
++	_, err := outIoctlParams.CopyOut(fi.t, fi.ioctlParamsAddr)
++	return err
++}
++
++// rmAllocVidmemHolder returns an implementation of NV_ESC_RM_ALLOC for a class
++// whose objects the driver makes with duplicates of the objects whose handles
++// handles returns from the allocation parameters: with a GPU memory limit,
++// such an object holds their charges.
++func rmAllocVidmemHolder[Params any, PtrParams marshalPtr[Params]](handles func(*Params) []nvgpu.Handle) func(*frontendIoctlState, *nvgpu.NVOS64_PARAMETERS, bool) (uintptr, error) {
++	return func(fi *frontendIoctlState, ioctlParams *nvgpu.NVOS64_PARAMETERS, isNVOS64 bool) (uintptr, error) {
++		return rmAllocSimpleParams[Params, PtrParams](fi, ioctlParams, isNVOS64, vidmemAddHolderObjLocked(handles))
++	}
++}
++
++// vidmemAddHolderObjLocked returns the addObjLocked function of rmAllocInvoke
++// for rmAllocVidmemHolder.
++func vidmemAddHolderObjLocked[Params any](handles func(*Params) []nvgpu.Handle) func(*frontendIoctlState, *rootClient, *nvgpu.NVOS64_PARAMETERS, nvgpu.RS_ACCESS_MASK, *Params) {
++	return func(fi *frontendIoctlState, client *rootClient, ioctlParams *nvgpu.NVOS64_PARAMETERS, rightsRequested nvgpu.RS_ACCESS_MASK, allocParams *Params) {
++		var hs []nvgpu.Handle
++		if allocParams != nil {
++			hs = handles(allocParams)
++		}
++		fi.fd.dev.nvp.vidmemAddHolderLocked(fi.ctx, client, ioctlParams.HObjectNew, ioctlParams.HClass, newRmAllocObject(fi.fd, ioctlParams, rightsRequested, allocParams), ioctlParams.HObjectParent, hs...)
++	}
++}
++
++// vidmemFabricMemory returns the memory that the driver duplicates for a
++// fabric object (NV_MEMORY_FABRIC), if any; see
++// src/nvidia/src/kernel/mem_mgr/mem_fabric.c:memoryfabricConstruct_IMPL().
++func vidmemFabricMemory(p *nvgpu.NV00F8_ALLOCATION_PARAMETERS) []nvgpu.Handle {
++	return []nvgpu.Handle{p.GetHVidMem()}
++}
++
++// vidmemSemaphoreSurfaceMemory returns the memory that the driver duplicates
++// for a semaphore surface (NV_SEMAPHORE_SURFACE); see
++// src/nvidia/src/kernel/gpu/mem_mgr/sem_surf.c:_semsurfDupMemory().
++func vidmemSemaphoreSurfaceMemory(p *nvgpu.NV_SEMAPHORE_SURFACE_ALLOC_PARAMETERS) []nvgpu.Handle {
++	return []nvgpu.Handle{p.HSemaphoreMem, p.HMaxSubmittedMem}
++}
++
++// vidmemMemoryMapperSurface returns the semaphore surface that the driver
++// duplicates for a memory mapper (NV_MEMORY_MAPPER); see
++// src/nvidia/src/kernel/gpu/mem_mgr/mem_mapper.c:memmapperConstruct_IMPL().
++func vidmemMemoryMapperSurface(p *nvgpu.NV_MEMORY_MAPPER_ALLOCATION_PARAMS_V550) []nvgpu.Handle {
++	return []nvgpu.Handle{p.HSemaphoreSurface}
++}
++
++// vidmemMemoryMapperSurfaceV555 is vidmemMemoryMapperSurface for
++// NV_MEMORY_MAPPER_ALLOCATION_PARAMS_V555.
++func vidmemMemoryMapperSurfaceV555(p *nvgpu.NV_MEMORY_MAPPER_ALLOCATION_PARAMS_V555) []nvgpu.Handle {
++	return vidmemMemoryMapperSurface(&p.NV_MEMORY_MAPPER_ALLOCATION_PARAMS_V550)
++}
++
++// vidmemHoldLocked returns a charge that holds the charges of the objects with
++// handles hs in client, with a reference for the caller, or nil if none of
++// them holds a charge.
++//
++// Precondition: client.objsMu must be locked.
++func (nvp *nvproxy) vidmemHoldLocked(client *rootClient, hs ...nvgpu.Handle) *vidmemCharge {
++	var parts []*vidmemCharge
++	for _, h := range hs {
++		if h.Val == nvgpu.NV01_NULL_OBJECT {
++			continue
++		}
++		if o := client.resources[h]; o != nil {
++			if c := vidmemChargeOf(o.impl); c != nil && !slices.Contains(parts, c) {
++				parts = append(parts, c)
++			}
++		}
++	}
++	if len(parts) == 0 {
++		return nil
++	}
++	nvp.vidmemMu.Lock()
++	defer nvp.vidmemMu.Unlock()
++	for _, c := range parts {
++		nvp.vidmemIncRefLocked(c)
++	}
++	if len(parts) == 1 {
++		return parts[0]
++	}
++	return &vidmemCharge{refs: 1, parts: parts}
++}
++
++// vidmemAddHolderLocked records the object o with handle h, class c and parent
++// hParent in client, which the driver made with duplicates of the objects with
++// handles hs in client. If any of those holds a charge, o holds it too.
++//
++// Precondition: client.objsMu must be locked.
++func (nvp *nvproxy) vidmemAddHolderLocked(ctx context.Context, client *rootClient, h nvgpu.Handle, c nvgpu.ClassID, o *rmAllocObject, hParent nvgpu.Handle, hs ...nvgpu.Handle) {
++	charge := nvp.vidmemHoldLocked(client, hs...)
++	if charge == nil {
++		nvp.objAdd(ctx, client, h, c, o, hParent)
++		return
++	}
++	if !nvp.objAdd(ctx, client, h, c, &vidmemObject{rmAllocObject: *o, charge: charge}, hParent) {
++		nvp.vidmemDecRef(ctx, charge)
++	}
++}
++
++// vidmemExport is an object exported to a file that holds a charge.
++//
++// +stateify savable
++type vidmemExport struct {
++	charge *vidmemCharge
++	class  nvgpu.ClassID
++}
++
++// vidmemExportLocked records that the object with handle h in client, if any,
++// was exported to slot of the file whose memmap file is mf, replacing what the
++// slot held. The slot holds the object's charge until it is replaced or the
++// file is closed.
++//
++// Precondition: client.objsMu must be locked.
++func (nvp *nvproxy) vidmemExportLocked(ctx context.Context, client *rootClient, mf *frontendFDMemmapFile, slot uint32, h nvgpu.Handle) {
++	var e vidmemExport
++	if h.Val != nvgpu.NV01_NULL_OBJECT {
++		if o := client.resources[h]; o != nil {
++			e = vidmemExport{charge: vidmemChargeOf(o.impl), class: o.class}
++		}
++	}
++	nvp.vidmemMu.Lock()
++	defer nvp.vidmemMu.Unlock()
++	if old, ok := mf.vidmemExports[slot]; ok {
++		delete(mf.vidmemExports, slot)
++		nvp.vidmemDecRefLocked(ctx, old.charge)
++	}
++	if e.charge == nil {
++		return
++	}
++	nvp.vidmemIncRefLocked(e.charge)
++	if mf.vidmemExports == nil {
++		mf.vidmemExports = make(map[uint32]vidmemExport)
++	}
++	mf.vidmemExports[slot] = e
++}
++
++// vidmemImportLocked records that the object in slot of the file whose memmap
++// file is mf was imported with handle h and parent hParent in client. If the
++// slot holds a charge, the new handle holds it too.
++//
++// Precondition: client.objsMu must be locked.
++func (nvp *nvproxy) vidmemImportLocked(ctx context.Context, client *rootClient, mf *frontendFDMemmapFile, slot uint32, hParent, h nvgpu.Handle) {
++	nvp.vidmemMu.Lock()
++	e, ok := mf.vidmemExports[slot]
++	if ok {
++		nvp.vidmemIncRefLocked(e.charge) // for the new handle
++	}
++	nvp.vidmemMu.Unlock()
++	if !ok {
++		return
++	}
++	if hParent.Val == nvgpu.NV01_NULL_OBJECT {
++		// Free the new handle with its client at least.
++		hParent = client.handle
++	}
++	if !nvp.objAdd(ctx, client, h, e.class, &vidmemRef{charge: e.charge}, hParent) {
++		nvp.vidmemDecRef(ctx, e.charge)
++	}
++}
++
++// vidmemReleaseExports releases the charges that objects exported to the file
++// whose memmap file is mf hold, once the file is closed.
++func (nvp *nvproxy) vidmemReleaseExports(ctx context.Context, mf *frontendFDMemmapFile) {
++	nvp.vidmemMu.Lock()
++	defer nvp.vidmemMu.Unlock()
++	for slot, e := range mf.vidmemExports {
++		delete(mf.vidmemExports, slot)
++		nvp.vidmemDecRefLocked(ctx, e.charge)
++	}
++}
++
++// exportObjectHandles returns the handles in an
++// NV0000_CTRL_OS_UNIX_EXPORT_OBJECT of type
++// NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TYPE_RM; see
++// src/common/sdk/nvidia/inc/ctrl/ctrl0000/ctrl0000unix.h.
++func exportObjectHandles(o *nvgpu.NV0000_CTRL_OS_UNIX_EXPORT_OBJECT) (hDevice, hParent, hObject nvgpu.Handle) {
++	hDevice.Val = hostarch.ByteOrder.Uint32(o.Data[0:4])
++	hParent.Val = hostarch.ByteOrder.Uint32(o.Data[4:8])
++	hObject.Val = hostarch.ByteOrder.Uint32(o.Data[8:12])
++	return
++}
++
++// ctrlVidmemFD implements a control that exports objects to a file or imports
++// them from one, as ctrlHasFrontendFD does; with a GPU memory limit, it also
++// calls update, with the client locked, when the driver succeeds (see
++// vidmemFDControl).
++func ctrlVidmemFD[Params any, PtrParams hasFrontendFDPtr[Params]](update func(fi *frontendIoctlState, client *rootClient, mf *frontendFDMemmapFile, ctrlParams PtrParams)) func(*frontendIoctlState, *nvgpu.NVOS54_PARAMETERS) (uintptr, error) {
++	return func(fi *frontendIoctlState, ioctlParams *nvgpu.NVOS54_PARAMETERS) (uintptr, error) {
++		nvp := fi.fd.dev.nvp
++		if nvp.vidmemLimit == 0 {
++			return ctrlHasFrontendFD[Params, PtrParams](fi, ioctlParams)
++		}
++		var ctrlParamsValue Params
++		ctrlParams := PtrParams(&ctrlParamsValue)
++		if ctrlParams.SizeBytes() != int(ioctlParams.ParamsSize) {
++			return 0, linuxerr.EINVAL
++		}
++		if _, err := ctrlParams.CopyIn(fi.t, addrFromP64(ioctlParams.Params)); err != nil {
++			return 0, err
++		}
++		origFD := ctrlParams.GetFrontendFD()
++		fileGeneric, _ := fi.t.FDTable().Get(origFD)
++		if fileGeneric == nil {
++			return 0, linuxerr.EINVAL
++		}
++		// Released after the locks below, since the release may close the
++		// file.
++		defer fileGeneric.DecRef(fi.ctx)
++		file, ok := fileGeneric.Impl().(*frontendFD)
++		if !ok {
++			return 0, linuxerr.EINVAL
++		}
++
++		var (
++			n   uintptr
++			err error
++		)
++		if !nvp.vidmemFDControl(fi.ctx, ioctlParams.HClient, func() bool {
++			ctrlParams.SetFrontendFD(file.hostFD)
++			n, err = rmControlInvoke(fi, ioctlParams, ctrlParams)
++			ctrlParams.SetFrontendFD(origFD)
++			return err == nil && ioctlParams.Status == nvgpu.NV_OK
++		}, func(client *rootClient) {
++			update(fi, client, &file.memmapFile, ctrlParams)
++		}) {
++			return 0, frontendFailWithStatus(fi, ioctlParams, nvgpu.NV_ERR_INVALID_CLIENT)
++		}
++		if err != nil {
++			return n, err
++		}
++		if _, err := ctrlParams.CopyOut(fi.t, addrFromP64(ioctlParams.Params)); err != nil {
++			return n, err
++		}
++		return n, nil
++	}
++}
++
++// vidmemFDControl runs invoke, which calls a control that exports objects to
++// a file or imports them from one in the client with handle hClient, and if it
++// returns true, update, both with the client locked. These controls are
++// serialized, so that the slots nvproxy records change in the driver's order.
++// vidmemFDControl returns false, running neither, if nvproxy does not know the
++// client.
++func (nvp *nvproxy) vidmemFDControl(ctx context.Context, hClient nvgpu.Handle, invoke func() bool, update func(client *rootClient)) bool {
++	nvp.vidmemFDMu.Lock()
++	defer nvp.vidmemFDMu.Unlock()
++	client, unlock := nvp.getClientWithLock(ctx, hClient)
++	if client == nil {
++		return false
++	}
++	defer unlock()
++	if invoke() {
++		update(client)
++	}
++	return true
++}
++
++// vidmemExportObjectToFD updates slot 0 after
++// NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT_TO_FD; see
++// src/nvidia/arch/nvalloc/unix/src/os.c:cliresCtrlCmdOsUnixExportObjectToFd_IMPL().
++func vidmemExportObjectToFD(fi *frontendIoctlState, client *rootClient, mf *frontendFDMemmapFile, p *nvgpu.NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TO_FD_PARAMS) {
++	_, _, hObject := exportObjectHandles(&p.Object)
++	fi.fd.dev.nvp.vidmemExportLocked(fi.ctx, client, mf, 0, hObject)
++}
++
++// vidmemExportObjectsToFD updates the slots that
++// NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECTS_TO_FD replaced; see
++// src/nvidia/arch/nvalloc/unix/src/os.c:cliresCtrlCmdOsUnixExportObjectsToFd_IMPL().
++func vidmemExportObjectsToFD(fi *frontendIoctlState, client *rootClient, mf *frontendFDMemmapFile, p *nvgpu.NV0000_CTRL_OS_UNIX_EXPORT_OBJECTS_TO_FD_PARAMS) {
++	for i := 0; i < int(p.NumObjects) && i < len(p.Objects); i++ {
++		fi.fd.dev.nvp.vidmemExportLocked(fi.ctx, client, mf, uint32(p.Index)+uint32(i), p.Objects[i])
++	}
++}
++
++// vidmemImportObjectFromFD records the handle that
++// NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECT_FROM_FD imported from slot 0; see
++// src/nvidia/arch/nvalloc/unix/src/os.c:cliresCtrlCmdOsUnixImportObjectFromFd_IMPL().
++func vidmemImportObjectFromFD(fi *frontendIoctlState, client *rootClient, mf *frontendFDMemmapFile, p *nvgpu.NV0000_CTRL_OS_UNIX_IMPORT_OBJECT_FROM_FD_PARAMS) {
++	_, hParent, hObject := exportObjectHandles(&p.Object)
++	fi.fd.dev.nvp.vidmemImportLocked(fi.ctx, client, mf, 0, hParent, hObject)
++}
++
++// vidmemImportObjectsFromFD records the handles that
++// NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECTS_FROM_FD imported; see
++// src/nvidia/arch/nvalloc/unix/src/os.c:cliresCtrlCmdOsUnixImportObjectsFromFd_IMPL().
++func vidmemImportObjectsFromFD(fi *frontendIoctlState, client *rootClient, mf *frontendFDMemmapFile, p *nvgpu.NV0000_CTRL_OS_UNIX_IMPORT_OBJECTS_FROM_FD_PARAMS) {
++	for i := 0; i < int(p.NumObjects) && i < len(p.Objects); i++ {
++		if p.Objects[i].Val != nvgpu.NV01_NULL_OBJECT {
++			fi.fd.dev.nvp.vidmemImportLocked(fi.ctx, client, mf, uint32(p.Index)+uint32(i), p.HParent, p.Objects[i])
++		}
++	}
++}
++
++// vidmemHoldRange is the range of the page reference by which an nvproxy file
++// holds another's host file open, while the driver holds the other's file
++// (NV_ESC_REGISTER_FD, UVM_MM_INITIALIZE). No mapping uses it: nvproxy's files
++// are mapped at offsets below 2^63.
++var vidmemHoldRange = memmap.FileRange{Start: ^uint64(0) - 2*hostarch.PageSize + 1, End: ^uint64(0) - hostarch.PageSize + 1}
++
++// vidmemHold makes mf hold the host file of ctl open until mf's own host file
++// is closed, as NV_ESC_REGISTER_FD makes the registering file hold the file of
++// its ctl_fd, with the clients allocated through it and the objects exported
++// to it (src/nvidia/arch/nvalloc/unix/src/escape.c:RmIoctl() =>
++// nv_get_file_private(), osapi.c:rm_cleanup_file_private() =>
++// nv_put_file_private()). mf's Close releases the hold.
++func (mf *frontendFDMemmapFile) vidmemHold(ctl *frontendFDMemmapFile) {
++	ctl.IncRef(vidmemHoldRange, 0 /* memCgID */)
++	mf.vidmemCtl = ctl
++}
+diff --git a/pkg/sentry/devices/nvproxy/vidmem_test.go b/pkg/sentry/devices/nvproxy/vidmem_test.go
+new file mode 100644
+index 0000000..41d9e25
+--- /dev/null
++++ b/pkg/sentry/devices/nvproxy/vidmem_test.go
+@@ -0,0 +1,1014 @@
++// Copyright 2026 The gVisor Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package nvproxy
++
++import (
++	"math"
++	"testing"
++
++	"golang.org/x/sys/unix"
++	"gvisor.dev/gvisor/pkg/abi/nvgpu"
++	"gvisor.dev/gvisor/pkg/context"
++	"gvisor.dev/gvisor/pkg/hostarch"
++	"gvisor.dev/gvisor/pkg/sentry/memmap"
++	"gvisor.dev/gvisor/pkg/sync"
++)
++
++const (
++	kib = uint64(1) << 10
++	mib = uint64(1) << 20
++)
++
++func h(v uint32) nvgpu.Handle {
++	return nvgpu.Handle{Val: v}
++}
++
++func newVidmemNVP(limit uint64) *nvproxy {
++	return &nvproxy{
++		clients:       make(map[nvgpu.Handle]*rootClient),
++		vidmemLimit:   limit,
++		vidmemUsed:    make(map[uint32]uint64),
++		vidmemCharges: make(map[*vidmemCharge]struct{}),
++	}
++}
++
++func newVidmemFI(nvp *nvproxy) *frontendIoctlState {
++	return &frontendIoctlState{
++		fd:  &frontendFD{dev: &frontendDevice{nvp: nvp}, hostFD: -1},
++		ctx: context.Background(),
++	}
++}
++
++// addClient adds a client with handle hClient and, for each device instance
++// in gpus, a device with handle hClient+1+i and a subdevice with handle
++// hClient+0x100+i.
++func addClient(nvp *nvproxy, hClient uint32, gpus ...uint32) *rootClient {
++	ctx := context.Background()
++	client := &rootClient{
++		resources: make(map[nvgpu.Handle]*object),
++		params:    capturedRmAllocParams{fd: &frontendFD{}},
++	}
++	nvp.clients[h(hClient)] = client
++	client.objsMu.Lock()
++	defer client.objsMu.Unlock()
++	nvp.objAdd(ctx, client, h(hClient), nvgpu.NV01_ROOT_CLIENT, client, h(0))
++	for i, gpu := range gpus {
++		hDev := h(hClient + 1 + uint32(i))
++		addDevice(nvp, client, hDev, gpu)
++		nvp.objAdd(ctx, client, h(hClient+0x100+uint32(i)), nvgpu.NV20_SUBDEVICE_0, &rmAllocObject{}, hDev)
++	}
++	return client
++}
++
++// addDevice adds a device with handle hDev and device instance gpu to client.
++//
++// Precondition: client.objsMu must be locked.
++func addDevice(nvp *nvproxy, client *rootClient, hDev nvgpu.Handle, gpu uint32) {
++	params := nvgpu.NV0080_ALLOC_PARAMETERS{DeviceID: gpu}
++	buf := make([]byte, params.SizeBytes())
++	params.MarshalBytes(buf)
++	nvp.objAdd(context.Background(), client, hDev, nvgpu.NV01_DEVICE_0, &rmAllocObject{params: capturedRmAllocParams{allocParams: buf}}, client.handle)
++}
++
++// allocFlags allocates device memory with handle hMem, parent hParent and the
++// given flags in client as rmAllocLocalUser does, for a request of requested
++// bytes that the driver allocates as allocated bytes, or fails if allocated is
++// 0. It returns the status of the allocation.
++func allocFlags(nvp *nvproxy, client *rootClient, hParent, hMem nvgpu.Handle, flags uint32, requested, allocated uint64) uint32 {
++	fi := newVidmemFI(nvp)
++	a := vidmemAlloc{nvp: nvp}
++	checkLocked, addObjLocked := vidmemLocalUserCallbacks[nvgpu.NV_MEMORY_ALLOCATION_PARAMS](&a)
++	ioctlParams := nvgpu.NVOS64_PARAMETERS{
++		HRoot:         client.handle,
++		HObjectParent: hParent,
++		HObjectNew:    hMem,
++		HClass:        nvgpu.NV01_MEMORY_LOCAL_USER,
++	}
++	params := nvgpu.NV_MEMORY_ALLOCATION_PARAMS{Flags: flags, Size: requested}
++	// As rmAllocInvokeChecked does.
++	client.objsMu.Lock()
++	ioctlParams.Status = checkLocked(fi, client, &ioctlParams, &params)
++	if ioctlParams.Status == nvgpu.NV_OK {
++		// The driver allocates.
++		if allocated == 0 {
++			ioctlParams.Status = nvgpu.NV_ERR_NO_MEMORY
++		} else {
++			params.Size = allocated
++			addObjLocked(fi, client, &ioctlParams, nvgpu.RS_ACCESS_MASK{}, &params)
++		}
++	}
++	client.objsMu.Unlock()
++	a.done(fi.ctx)
++	return ioctlParams.Status
++}
++
++// alloc is allocFlags without flags. It returns false if the allocation
++// failed.
++func alloc(t *testing.T, nvp *nvproxy, client *rootClient, hParent, hMem nvgpu.Handle, requested, allocated uint64) bool {
++	t.Helper()
++	return allocFlags(nvp, client, hParent, hMem, 0, requested, allocated) == nvgpu.NV_OK
++}
++
++func free(nvp *nvproxy, client *rootClient, hObj nvgpu.Handle) {
++	client.objsMu.Lock()
++	releases := nvp.objFree(context.Background(), client, hObj)
++	client.objsMu.Unlock()
++	for _, release := range releases {
++		release()
++	}
++}
++
++func dup(nvp *nvproxy, dst, src *rootClient, hDst, hParentDst, hSrc nvgpu.Handle) {
++	src.objsMu.Lock()
++	dst.objsMu.Lock()
++	nvp.objDup(context.Background(), dst, src, hDst, hParentDst, hSrc)
++	dst.objsMu.Unlock()
++	src.objsMu.Unlock()
++}
++
++func tracked(client *rootClient, hObj nvgpu.Handle) *object {
++	client.objsMu.Lock()
++	defer client.objsMu.Unlock()
++	return client.resources[hObj]
++}
++
++// checkUsed checks the charges on each GPU, and that they add up.
++func checkUsed(t *testing.T, nvp *nvproxy, want map[uint32]uint64) {
++	t.Helper()
++	nvp.vidmemMu.Lock()
++	defer nvp.vidmemMu.Unlock()
++	sums := make(map[uint32]uint64)
++	for c := range nvp.vidmemCharges {
++		if c.refs <= 0 {
++			t.Errorf("charge %+v is registered without holders", *c)
++		}
++		if c.parts != nil {
++			t.Errorf("charge %+v that holds others is registered", *c)
++		}
++		sums[c.gpu] += c.size
++	}
++	for gpu, used := range nvp.vidmemUsed {
++		if sums[gpu] != used {
++			t.Errorf("device instance %d: charges add up to %d, but %d is used", gpu, sums[gpu], used)
++		}
++		if used > nvp.vidmemLimit {
++			t.Errorf("device instance %d: %d used beyond the limit %d", gpu, used, nvp.vidmemLimit)
++		}
++	}
++	for gpu := range sums {
++		if _, ok := nvp.vidmemUsed[gpu]; !ok {
++			t.Errorf("device instance %d: charges add up to %d, but none is used", gpu, sums[gpu])
++		}
++	}
++	for gpu, w := range want {
++		if got := nvp.vidmemUsed[gpu]; got != w {
++			t.Errorf("device instance %d: %d used, want %d", gpu, got, w)
++		}
++	}
++	for gpu, got := range nvp.vidmemUsed {
++		if _, ok := want[gpu]; !ok {
++			t.Errorf("device instance %d: %d used, want 0", gpu, got)
++		}
++	}
++}
++
++// fakeRMFree replaces the driver's NV_ESC_RM_FREE for the duration of a test
++// and returns the handles it frees.
++func fakeRMFree(t *testing.T, status uint32) *[]nvgpu.Handle {
++	var freed []nvgpu.Handle
++	orig := vidmemRMFree
++	vidmemRMFree = func(fd *frontendFD, hClient, hParent, h nvgpu.Handle) (uint32, error) {
++		freed = append(freed, h)
++		return status, nil
++	}
++	t.Cleanup(func() { vidmemRMFree = orig })
++	return &freed
++}
++
++// openHostFD returns a host file descriptor for a memmap file to close.
++func openHostFD(t *testing.T) int {
++	t.Helper()
++	fd, err := unix.Open("/dev/null", unix.O_RDONLY|unix.O_CLOEXEC, 0)
++	if err != nil {
++		t.Fatalf("open /dev/null: %v", err)
++	}
++	return fd
++}
++
++// newUVMFile returns the memmap file of an open UVM file.
++func newUVMFile(t *testing.T, nvp *nvproxy) *uvmFDMemmapFile {
++	t.Helper()
++	mf := &uvmFDMemmapFile{nvp: nvp}
++	mf.SetFD(openHostFD(t))
++	mf.RequireAddrEqualsFileOffset()
++	return mf
++}
++
++// newFrontendFile returns the memmap file of an open frontend file.
++func newFrontendFile(t *testing.T) *frontendFDMemmapFile {
++	t.Helper()
++	mf := &frontendFDMemmapFile{}
++	mf.SetFD(openHostFD(t))
++	return mf
++}
++
++// releaseFrontendFile does what frontendFD.Release does to the memmap file of
++// a frontend file through which clients were allocated.
++func releaseFrontendFile(nvp *nvproxy, mf *frontendFDMemmapFile, clients ...*rootClient) {
++	mf.MmapFileRefs.Closer = mf
++	mf.nvp = nvp
++	mf.clients = make(map[*rootClient]struct{})
++	for _, c := range clients {
++		mf.clients[c] = struct{}{}
++	}
++	mf.MappableRelease()
++}
++
++// mapUVM records a mapping of the memory with handle hMem in client at
++// [start, start+size) on gpus in the VA space of mf, as
++// UVM_MAP_EXTERNAL_ALLOCATION does when the driver succeeds.
++func mapUVM(nvp *nvproxy, mf *uvmFDMemmapFile, client *rootClient, hMem nvgpu.Handle, start, size uint64, gpus ...nvgpu.NvUUID) {
++	attrs := make([]nvgpu.UvmGpuMappingAttributes, len(gpus))
++	for i, gpu := range gpus {
++		attrs[i].GPUUUID = gpu
++	}
++	nvp.vidmemUVMMapExternal(context.Background(), mf, client.handle, hMem, start, size, attrs, func() bool { return true })
++}
++
++func TestVidmemFootprint(t *testing.T) {
++	for _, tc := range []struct {
++		size uint64
++		want uint64
++		ok   bool
++	}{
++		{0, 0, true},
++		{1, 64 * kib, true},
++		{4 * kib, 64 * kib, true},
++		{64 * kib, 64 * kib, true},
++		{64*kib + 1, 128 * kib, true},
++		{2 * mib, 2 * mib, true},
++		{512 * mib, 512 * mib, true},
++		{^uint64(0) - 64*kib + 1, ^uint64(0) - 64*kib + 1, true},
++		{^uint64(0) - 64*kib + 2, 0, false},
++		{^uint64(0), 0, false},
++	} {
++		got, ok := vidmemFootprint(tc.size)
++		if got != tc.want || ok != tc.ok {
++			t.Errorf("vidmemFootprint(%#x) = %#x, %t; want %#x, %t", tc.size, got, ok, tc.want, tc.ok)
++		}
++	}
++}
++
++func TestVidmemChargeAndRefuse(t *testing.T) {
++	nvp := newVidmemNVP(2 * mib)
++	client := addClient(nvp, 0x1000, 3, 5)
++	dev3, subdev5 := h(0x1001), h(0x1101)
++
++	// A 4 KiB allocation takes 64 KiB.
++	if !alloc(t, nvp, client, dev3, h(0x2000), 4*kib, 4*kib) {
++		t.Fatal("4 KiB refused")
++	}
++	checkUsed(t, nvp, map[uint32]uint64{3: 64 * kib})
++	// Up to the limit, by subdevice too, and on another GPU.
++	if !alloc(t, nvp, client, dev3, h(0x2001), 2*mib-64*kib, 2*mib-64*kib) {
++		t.Fatal("allocation up to the limit refused")
++	}
++	if !alloc(t, nvp, client, subdev5, h(0x2002), 2*mib, 2*mib) {
++		t.Fatal("allocation on another GPU refused")
++	}
++	checkUsed(t, nvp, map[uint32]uint64{3: 2 * mib, 5: 2 * mib})
++	// Beyond it, refused before calling the driver.
++	freed := fakeRMFree(t, nvgpu.NV_OK)
++	if status := allocFlags(nvp, client, dev3, h(0x2003), 0, 1, 1); status != nvgpu.NV_ERR_NO_MEMORY {
++		t.Errorf("allocation beyond the limit: status %#x, want NV_ERR_NO_MEMORY", status)
++	}
++	if alloc(t, nvp, client, dev3, h(0x2003), ^uint64(0), ^uint64(0)) {
++		t.Error("allocation of 2^64-1 bytes succeeded")
++	}
++	if len(*freed) != 0 {
++		t.Errorf("freed %v, want nothing", *freed)
++	}
++	if tracked(client, h(0x2003)) != nil {
++		t.Error("refused allocation is tracked")
++	}
++	checkUsed(t, nvp, map[uint32]uint64{3: 2 * mib, 5: 2 * mib})
++	// Freeing returns the memory.
++	free(nvp, client, h(0x2001))
++	checkUsed(t, nvp, map[uint32]uint64{3: 64 * kib, 5: 2 * mib})
++	if !alloc(t, nvp, client, dev3, h(0x2003), mib, mib) {
++		t.Error("allocation after a free refused")
++	}
++	checkUsed(t, nvp, map[uint32]uint64{3: mib + 64*kib, 5: 2 * mib})
++}
++
++func TestVidmemDriverFailure(t *testing.T) {
++	nvp := newVidmemNVP(2 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), mib, mib) {
++		t.Fatal("1 MiB refused")
++	}
++	// The driver fails an allocation that nvproxy charged beforehand: the
++	// charge is released.
++	if status := allocFlags(nvp, client, h(0x1001), h(0x2001), 0, mib, 0); status != nvgpu.NV_ERR_NO_MEMORY {
++		t.Errorf("status %#x, want the driver's NV_ERR_NO_MEMORY", status)
++	}
++	if tracked(client, h(0x2001)) != nil {
++		t.Error("failed allocation is tracked")
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: mib})
++}
++
++func TestVidmemFixedAddressRefused(t *testing.T) {
++	nvp := newVidmemNVP(2 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	if status := allocFlags(nvp, client, h(0x1001), h(0x2000), nvgpu.NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE, 64*kib, 64*kib); status != nvgpu.NV_ERR_NOT_SUPPORTED {
++		t.Errorf("fixed-address allocation: status %#x, want NV_ERR_NOT_SUPPORTED", status)
++	}
++	if tracked(client, h(0x2000)) != nil {
++		t.Error("refused allocation is tracked")
++	}
++	// Likewise by NV_ESC_RM_VID_HEAP_CONTROL.
++	a := vidmemAlloc{nvp: nvp}
++	client.objsMu.Lock()
++	status := a.checkHeapLocked(context.Background(), client, h(0x1001), &nvgpu.NVOS32AllocSize{Flags: nvgpu.NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE, Size: 64 * kib})
++	client.objsMu.Unlock()
++	a.done(context.Background())
++	if status != nvgpu.NV_ERR_NOT_SUPPORTED {
++		t.Errorf("fixed-address NVOS32_FUNCTION_ALLOC_SIZE: status %#x, want NV_ERR_NOT_SUPPORTED", status)
++	}
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemHeapAlloc(t *testing.T) {
++	nvp := newVidmemNVP(2 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	ctx := context.Background()
++	const (
++		sysmem = nvgpu.NVOS32_ATTR_LOCATION_MASK << nvgpu.NVOS32_ATTR_LOCATION_SHIFT // not vidmem
++		egm    = nvgpu.NVOS32_ATTR2_USE_EGM_TRUE << nvgpu.NVOS32_ATTR2_USE_EGM_SHIFT
++	)
++	// heapAlloc allocates as rmVidHeapControlAllocSize does, as size bytes
++	// that the driver allocates as allocated bytes.
++	heapAlloc := func(p nvgpu.NVOS32AllocSize, allocated uint64) uint32 {
++		fi := newVidmemFI(nvp)
++		a := vidmemAlloc{nvp: nvp}
++		client.objsMu.Lock()
++		defer func() {
++			client.objsMu.Unlock()
++			a.done(ctx)
++		}()
++		if status := a.checkHeapLocked(ctx, client, h(0x1001), &p); status != nvgpu.NV_OK {
++			return status
++		}
++		p.Size = allocated
++		if a.charge == nil {
++			nvp.objAdd(ctx, client, p.HMemory, nvgpu.NV01_MEMORY_SYSTEM, &miscObject{}, h(0x1001))
++			return nvgpu.NV_OK
++		}
++		return a.addHeapLocked(fi, client, h(0x1001), nvgpu.NV01_MEMORY_LOCAL_USER, &p)
++	}
++	// Virtual, system and EGM memory are not charged.
++	for _, p := range []nvgpu.NVOS32AllocSize{
++		{HMemory: h(0x2000), Flags: nvgpu.NVOS32_ALLOC_FLAGS_VIRTUAL, Size: 4 * mib},
++		{HMemory: h(0x2001), Attr: sysmem, Size: 4 * mib},
++		{HMemory: h(0x2002), Attr2: egm, Size: 4 * mib},
++	} {
++		if status := heapAlloc(p, p.Size); status != nvgpu.NV_OK {
++			t.Errorf("%+v: status %#x", p, status)
++		}
++	}
++	checkUsed(t, nvp, nil)
++	// Device memory is, as the driver sizes it.
++	if status := heapAlloc(nvgpu.NVOS32AllocSize{HMemory: h(0x2003), Size: 100 * kib}, 128*kib); status != nvgpu.NV_OK {
++		t.Fatalf("100 KiB: status %#x", status)
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: 128 * kib})
++	if status := heapAlloc(nvgpu.NVOS32AllocSize{HMemory: h(0x2004), Size: 2 * mib}, 2*mib); status != nvgpu.NV_ERR_NO_MEMORY {
++		t.Errorf("2 MiB beyond the limit: status %#x, want NV_ERR_NO_MEMORY", status)
++	}
++	freed := fakeRMFree(t, nvgpu.NV_OK)
++	if status := heapAlloc(nvgpu.NVOS32AllocSize{HMemory: h(0x2004), Size: 64 * kib}, 2*mib); status != nvgpu.NV_ERR_NO_MEMORY {
++		t.Errorf("allocation the driver rounded beyond the limit: status %#x, want NV_ERR_NO_MEMORY", status)
++	}
++	if len(*freed) != 1 || (*freed)[0] != h(0x2004) {
++		t.Errorf("freed %v, want [%v]", *freed, h(0x2004))
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: 128 * kib})
++	free(nvp, client, h(0x2003))
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemUnknownGPU(t *testing.T) {
++	nvp := newVidmemNVP(2 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	ctx := context.Background()
++	client.objsMu.Lock()
++	// A duplicated device is tracked without its device instance.
++	nvp.objAdd(ctx, client, h(0x1800), nvgpu.NV01_DEVICE_0, &miscObject{}, h(0x1000))
++	// Memory is not a device.
++	nvp.objAdd(ctx, client, h(0x1801), nvgpu.NV01_MEMORY_SYSTEM, &rmAllocObject{}, h(0x1001))
++	client.objsMu.Unlock()
++	for _, parent := range []nvgpu.Handle{h(0x1800), h(0x1801), h(0x1000), h(0x9999)} {
++		if alloc(t, nvp, client, parent, h(0x2000), 4*kib, 4*kib) {
++			t.Errorf("allocation with parent %v succeeded", parent)
++		}
++	}
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemSettleBeyondLimit(t *testing.T) {
++	nvp := newVidmemNVP(2 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	dev := h(0x1001)
++	if !alloc(t, nvp, client, dev, h(0x2000), mib, mib) {
++		t.Fatal("1 MiB refused")
++	}
++
++	// The driver rounds 768 KiB up to a 2 MiB page: freed and refused.
++	freed := fakeRMFree(t, nvgpu.NV_OK)
++	if alloc(t, nvp, client, dev, h(0x2001), 768*kib, 2*mib) {
++		t.Error("allocation that the driver rounded beyond the limit succeeded")
++	}
++	if len(*freed) != 1 || (*freed)[0] != h(0x2001) {
++		t.Errorf("freed %v, want [%v]", *freed, h(0x2001))
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: mib})
++	if tracked(client, h(0x2001)) != nil {
++		t.Error("refused allocation is tracked")
++	}
++
++	// Rounding within the limit is charged.
++	if !alloc(t, nvp, client, dev, h(0x2002), 100*kib, 512*kib) {
++		t.Error("allocation rounded within the limit refused")
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: mib + 512*kib})
++
++	// If the driver cannot free it, the memory stays charged.
++	fakeRMFree(t, nvgpu.NV_ERR_INVALID_OBJECT_HANDLE)
++	if !alloc(t, nvp, client, dev, h(0x2003), 64*kib, 2*mib) {
++		t.Error("allocation the driver failed to free was refused")
++	}
++	nvp.vidmemMu.Lock()
++	if got, want := nvp.vidmemUsed[0], 3*mib+512*kib; got != want {
++		t.Errorf("%d used, want %d", got, want)
++	}
++	nvp.vidmemMu.Unlock()
++	free(nvp, client, h(0x2003))
++	checkUsed(t, nvp, map[uint32]uint64{0: mib + 512*kib})
++}
++
++func TestVidmemDuplicate(t *testing.T) {
++	nvp := newVidmemNVP(4 * mib)
++	src := addClient(nvp, 0x1000, 0)
++	dst := addClient(nvp, 0x3000, 0)
++	if !alloc(t, nvp, src, h(0x1001), h(0x2000), mib, mib) {
++		t.Fatal("1 MiB refused")
++	}
++	dup(nvp, dst, src, h(0x4000), h(0x3001), h(0x2000))
++	dup(nvp, dst, src, h(0x4001), h(0x3001), h(0x2000))
++	// A duplicate with a null handle takes no reference.
++	dup(nvp, dst, src, h(nvgpu.NV01_NULL_OBJECT), h(0x3001), h(0x2000))
++	free(nvp, src, h(0x2000))
++	checkUsed(t, nvp, map[uint32]uint64{0: mib})
++	free(nvp, dst, h(0x4000))
++	checkUsed(t, nvp, map[uint32]uint64{0: mib})
++	free(nvp, dst, h(0x4001))
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemReleaseWithParentAndClient(t *testing.T) {
++	nvp := newVidmemNVP(4 * mib)
++	client := addClient(nvp, 0x1000, 0, 1)
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), mib, mib) ||
++		!alloc(t, nvp, client, h(0x1100), h(0x2001), mib, mib) ||
++		!alloc(t, nvp, client, h(0x1002), h(0x2002), mib, mib) {
++		t.Fatal("allocation refused")
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: 2 * mib, 1: mib})
++	// Freeing a device frees the memory under it and its subdevice.
++	free(nvp, client, h(0x1001))
++	checkUsed(t, nvp, map[uint32]uint64{1: mib})
++	// Freeing the client, as when its file is closed, frees the rest.
++	free(nvp, client, h(0x1000))
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemHandleReused(t *testing.T) {
++	nvp := newVidmemNVP(4 * mib)
++	client := addClient(nvp, 0x1000, 0, 0)
++	ctx := context.Background()
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), mib, mib) {
++		t.Fatal("1 MiB refused")
++	}
++	// The driver reuses the handle of memory that nvproxy did not see freed.
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), 2*mib, 2*mib) {
++		t.Fatal("2 MiB refused")
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: 2 * mib})
++	client.objsMu.Lock()
++	nvp.objAdd(ctx, client, h(0x2000), nvgpu.NV01_MEMORY_SYSTEM, &miscObject{}, h(0x1001))
++	client.objsMu.Unlock()
++	checkUsed(t, nvp, nil)
++	// Reused again, under another device.
++	if !alloc(t, nvp, client, h(0x1002), h(0x2000), mib, mib) {
++		t.Fatal("1 MiB refused")
++	}
++	// Freeing the former parent leaves the new object alone.
++	free(nvp, client, h(0x1001))
++	if o := tracked(client, h(0x2000)); o == nil || o.parent != h(0x1002) {
++		t.Fatalf("object under the other device untracked by freeing the former parent: %+v", o)
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: mib})
++	free(nvp, client, h(0x1002))
++	checkUsed(t, nvp, nil)
++	client.objsMu.Lock()
++	n := len(client.resources)
++	client.objsMu.Unlock()
++	if n != 1 {
++		t.Errorf("%d objects tracked after freeing the devices, want 1 (the client)", n)
++	}
++}
++
++func TestVidmemHandleReusedFreesDependents(t *testing.T) {
++	nvp := newVidmemNVP(4 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	other := addClient(nvp, 0x3000, 0)
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), mib, mib) ||
++		!alloc(t, nvp, client, h(0x1100), h(0x2001), 2*mib, 2*mib) {
++		t.Fatal("allocation refused")
++	}
++	dup(nvp, other, client, h(0x4000), h(0x3001), h(0x2000))
++	// The driver reuses the device's handle: it freed the device, and the
++	// subdevice and memory under it, of which only the duplicate keeps
++	// memory.
++	client.objsMu.Lock()
++	addDevice(nvp, client, h(0x1001), 0)
++	client.objsMu.Unlock()
++	checkUsed(t, nvp, map[uint32]uint64{0: mib})
++	// It reuses the memory's handle too: the charge that the duplicate holds
++	// is not released again.
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), 64*kib, 64*kib) {
++		t.Fatal("64 KiB refused")
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: mib + 64*kib})
++	free(nvp, other, h(0x4000))
++	checkUsed(t, nvp, map[uint32]uint64{0: 64 * kib})
++	free(nvp, client, h(0x1000))
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemExportImport(t *testing.T) {
++	nvp := newVidmemNVP(4 * mib)
++	exporter := addClient(nvp, 0x1000, 0)
++	importer := addClient(nvp, 0x3000, 0)
++	fi := newVidmemFI(nvp)
++	mf := &frontendFDMemmapFile{nvp: nvp, hostFD: -1}
++	if !alloc(t, nvp, exporter, h(0x1001), h(0x2000), mib, mib) ||
++		!alloc(t, nvp, exporter, h(0x1001), h(0x2001), 2*mib, 2*mib) {
++		t.Fatal("allocation refused")
++	}
++	// Export to slots 3 and 4, and 0, as the controls record it.
++	p := nvgpu.NV0000_CTRL_OS_UNIX_EXPORT_OBJECTS_TO_FD_PARAMS{NumObjects: 2, Index: 3}
++	p.Objects[0], p.Objects[1] = h(0x2000), h(0x2001)
++	exporter.objsMu.Lock()
++	vidmemExportObjectsToFD(fi, exporter, mf, &p)
++	exporter.objsMu.Unlock()
++	if len(mf.vidmemExports) != 2 || mf.vidmemExports[3].charge == nil || mf.vidmemExports[4].charge == nil {
++		t.Fatalf("exports %v, want slots 3 and 4", mf.vidmemExports)
++	}
++	exporter.objsMu.Lock()
++	nvp.vidmemExportLocked(fi.ctx, exporter, mf, 0, h(0x1001)) // not memory
++	exporter.objsMu.Unlock()
++	// The exporter frees its handles: the export keeps the memory.
++	free(nvp, exporter, h(0x2000))
++	free(nvp, exporter, h(0x2001))
++	checkUsed(t, nvp, map[uint32]uint64{0: 3 * mib})
++	// Import slots 3 and 0.
++	ip := nvgpu.NV0000_CTRL_OS_UNIX_IMPORT_OBJECTS_FROM_FD_PARAMS{NumObjects: 2, Index: 3, HParent: h(0x3001)}
++	ip.Objects[0] = h(0x4003)
++	importer.objsMu.Lock()
++	vidmemImportObjectsFromFD(fi, importer, mf, &ip)
++	nvp.vidmemImportLocked(fi.ctx, importer, mf, 0, h(0x3001), h(0x4000))
++	importer.objsMu.Unlock()
++	// Overwriting slot 4 releases its memory.
++	exporter.objsMu.Lock()
++	nvp.vidmemExportLocked(fi.ctx, exporter, mf, 4, h(nvgpu.NV01_NULL_OBJECT))
++	exporter.objsMu.Unlock()
++	checkUsed(t, nvp, map[uint32]uint64{0: mib})
++	// Closing the export keeps the import's memory.
++	if err := mf.Close(); err != nil {
++		t.Fatalf("Close: %v", err)
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: mib})
++	if tracked(importer, h(0x4000)) != nil {
++		t.Error("import of an uncharged object is tracked")
++	}
++	free(nvp, importer, h(0x4003))
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemFDControl(t *testing.T) {
++	nvp := newVidmemNVP(4 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	ctx := context.Background()
++	for _, ok := range []bool{true, false} {
++		updated := false
++		if !nvp.vidmemFDControl(ctx, h(0x1000), func() bool {
++			// The control runs serialized, with the client locked.
++			if nvp.vidmemFDMu.TryLock() {
++				nvp.vidmemFDMu.Unlock()
++				t.Error("control invoked without vidmemFDMu")
++			}
++			if client.objsMu.mu.TryLock() {
++				client.objsMu.mu.Unlock()
++				t.Error("control invoked with the client unlocked")
++			}
++			return ok
++		}, func(c *rootClient) {
++			if c != client {
++				t.Errorf("updated client %p, want %p", c, client)
++			}
++			updated = true
++		}) {
++			t.Error("known client refused")
++		}
++		if updated != ok {
++			t.Errorf("control returned %t, but update ran: %t", ok, updated)
++		}
++	}
++	if nvp.vidmemFDControl(ctx, h(0x9999), func() bool {
++		t.Error("control invoked for an unknown client")
++		return true
++	}, func(*rootClient) {}) {
++		t.Error("unknown client accepted")
++	}
++}
++
++func TestVidmemRegisterFDHold(t *testing.T) {
++	nvp := newVidmemNVP(4 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	ctl, dev := newFrontendFile(t), newFrontendFile(t)
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), 2*mib, 2*mib) {
++		t.Fatal("2 MiB refused")
++	}
++	exporter := addClient(nvp, 0x3000, 0)
++	if !alloc(t, nvp, exporter, h(0x3001), h(0x4000), mib, mib) {
++		t.Fatal("1 MiB refused")
++	}
++	exporter.objsMu.Lock()
++	nvp.vidmemExportLocked(context.Background(), exporter, ctl, 0, h(0x4000))
++	exporter.objsMu.Unlock()
++	free(nvp, exporter, h(0x4000))
++	// NV_ESC_REGISTER_FD registers dev with ctl, through which the client
++	// was allocated and to which the memory was exported.
++	dev.vidmemHold(ctl)
++	// Closing ctl keeps its host file, clients and exports while dev holds
++	// it.
++	releaseFrontendFile(nvp, ctl, client)
++	if ctl.hostFD < 0 {
++		t.Error("held file closed")
++	}
++	if tracked(client, h(0x2000)) == nil {
++		t.Error("client of the held file untracked")
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: 3 * mib})
++	// Closing dev releases them.
++	releaseFrontendFile(nvp, dev)
++	if dev.hostFD >= 0 || ctl.hostFD >= 0 {
++		t.Errorf("host files %d and %d still open", dev.hostFD, ctl.hostFD)
++	}
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemHolders(t *testing.T) {
++	nvp := newVidmemNVP(8 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	other := addClient(nvp, 0x3000, 0)
++	fi := newVidmemFI(nvp)
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), mib, mib) ||
++		!alloc(t, nvp, client, h(0x1001), h(0x2001), 2*mib, 2*mib) ||
++		!alloc(t, nvp, client, h(0x1001), h(0x2002), 4*mib, 4*mib) {
++		t.Fatal("allocation refused")
++	}
++	addObj := func(hNew nvgpu.Handle, class nvgpu.ClassID, f func(*nvgpu.NVOS64_PARAMETERS)) {
++		ioctlParams := nvgpu.NVOS64_PARAMETERS{HRoot: h(0x1000), HObjectParent: h(0x1100), HObjectNew: hNew, HClass: class}
++		client.objsMu.Lock()
++		f(&ioctlParams)
++		client.objsMu.Unlock()
++	}
++	// A semaphore surface on two memory objects, one on a single one twice,
++	// and a memory mapper on the first surface.
++	addObj(h(0x5000), nvgpu.NV_SEMAPHORE_SURFACE, func(ioctlParams *nvgpu.NVOS64_PARAMETERS) {
++		vidmemAddHolderObjLocked(vidmemSemaphoreSurfaceMemory)(fi, client, ioctlParams, nvgpu.RS_ACCESS_MASK{}, &nvgpu.NV_SEMAPHORE_SURFACE_ALLOC_PARAMETERS{HSemaphoreMem: h(0x2000), HMaxSubmittedMem: h(0x2001)})
++	})
++	addObj(h(0x5001), nvgpu.NV_SEMAPHORE_SURFACE, func(ioctlParams *nvgpu.NVOS64_PARAMETERS) {
++		vidmemAddHolderObjLocked(vidmemSemaphoreSurfaceMemory)(fi, client, ioctlParams, nvgpu.RS_ACCESS_MASK{}, &nvgpu.NV_SEMAPHORE_SURFACE_ALLOC_PARAMETERS{HSemaphoreMem: h(0x2002), HMaxSubmittedMem: h(0x2002)})
++	})
++	addObj(h(0x5002), nvgpu.NV_MEMORY_MAPPER, func(ioctlParams *nvgpu.NVOS64_PARAMETERS) {
++		p := nvgpu.NV_MEMORY_MAPPER_ALLOCATION_PARAMS_V555{}
++		p.HSemaphoreSurface = h(0x5000)
++		vidmemAddHolderObjLocked(vidmemMemoryMapperSurfaceV555)(fi, client, ioctlParams, nvgpu.RS_ACCESS_MASK{}, &p)
++	})
++	// A duplicate of the second surface.
++	dup(nvp, other, client, h(0x6000), h(0x3001), h(0x5001))
++	// The memory stays while the surfaces hold it.
++	for _, hMem := range []nvgpu.Handle{h(0x2000), h(0x2001), h(0x2002)} {
++		free(nvp, client, hMem)
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: 7 * mib})
++	free(nvp, client, h(0x5001))
++	checkUsed(t, nvp, map[uint32]uint64{0: 7 * mib})
++	free(nvp, other, h(0x6000))
++	checkUsed(t, nvp, map[uint32]uint64{0: 3 * mib})
++	// The mapper keeps the first surface's memory after the surface is freed.
++	free(nvp, client, h(0x5000))
++	checkUsed(t, nvp, map[uint32]uint64{0: 3 * mib})
++	free(nvp, client, h(0x5002))
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemFabric(t *testing.T) {
++	nvp := newVidmemNVP(4 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	fi := newVidmemFI(nvp)
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), 2*mib, 2*mib) {
++		t.Fatal("2 MiB refused")
++	}
++	fabric := func(hNew, hVidMem nvgpu.Handle) {
++		// map.hVidMem follows alignment, allocSize, pageSize, allocFlags and
++		// map.offset.
++		var p nvgpu.NV00F8_ALLOCATION_PARAMETERS
++		buf := make([]byte, p.SizeBytes())
++		hostarch.ByteOrder.PutUint32(buf[40:], hVidMem.Val)
++		p.UnmarshalBytes(buf)
++		if p.GetHVidMem() != hVidMem {
++			t.Fatalf("hVidMem %v, want %v", p.GetHVidMem(), hVidMem)
++		}
++		ioctlParams := nvgpu.NVOS64_PARAMETERS{HRoot: h(0x1000), HObjectParent: h(0x1001), HObjectNew: hNew, HClass: nvgpu.NV_MEMORY_FABRIC}
++		client.objsMu.Lock()
++		vidmemAddHolderObjLocked(vidmemFabricMemory)(fi, client, &ioctlParams, nvgpu.RS_ACCESS_MASK{}, &p)
++		client.objsMu.Unlock()
++	}
++	fabric(h(0x2100), h(0x2000))
++	// A flexible fabric object has no memory of its own.
++	fabric(h(0x2101), h(nvgpu.NV01_NULL_OBJECT))
++	free(nvp, client, h(0x2000))
++	checkUsed(t, nvp, map[uint32]uint64{0: 2 * mib})
++	free(nvp, client, h(0x2101))
++	checkUsed(t, nvp, map[uint32]uint64{0: 2 * mib})
++	free(nvp, client, h(0x2100))
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemUVMMappings(t *testing.T) {
++	nvp := newVidmemNVP(8 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	ctx := context.Background()
++	gpu0, gpu1 := nvgpu.NvUUID{0: 1}, nvgpu.NvUUID{0: 2}
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), 2*mib, 2*mib) ||
++		!alloc(t, nvp, client, h(0x1001), h(0x2001), mib, mib) {
++		t.Fatal("allocation refused")
++	}
++	mf := newUVMFile(t, nvp)
++	v := &mf.vidmem
++	do := func(f func()) {
++		nvp.vidmemMu.Lock()
++		defer nvp.vidmemMu.Unlock()
++		f()
++	}
++	const base = 0x7f0000000000
++	do(func() { v.createRangeLocked(base, base+16*mib-1) })
++	// Map the 2 MiB memory on both GPUs and the 1 MiB memory on gpu0, then
++	// free their handles.
++	mapUVM(nvp, mf, client, h(0x2000), base, 2*mib, gpu0, gpu1)
++	mapUVM(nvp, mf, client, h(0x2001), base+4*mib, mib, gpu0)
++	free(nvp, client, h(0x2000))
++	free(nvp, client, h(0x2001))
++	checkUsed(t, nvp, map[uint32]uint64{0: 3 * mib})
++	// Unmapping the middle of a mapping splits it; the memory stays.
++	do(func() { nvp.vidmemUVMUnmapLocked(ctx, v, gpu0, base+mib-64*kib, base+mib+64*kib-1) })
++	if got := len(v.mappings[gpu0]); got != 3 {
++		t.Errorf("%d mappings on gpu0 after a split, want 3", got)
++	}
++	// Unmapping on gpu0 leaves the mapping on gpu1.
++	do(func() { nvp.vidmemUVMUnmapLocked(ctx, v, gpu0, base, base+2*mib-1) })
++	checkUsed(t, nvp, map[uint32]uint64{0: 3 * mib})
++	// UVM_UNREGISTER_GPU_VASPACE removes the mappings on its GPU.
++	do(func() { nvp.vidmemUVMRemoveGPULocked(ctx, v, gpu1) })
++	checkUsed(t, nvp, map[uint32]uint64{0: mib})
++	// A mapping over it, of uncharged memory, replaces it.
++	do(func() { nvp.vidmemUVMMapLocked(ctx, v, gpu0, base+4*mib-64*kib, base+4*mib+64*kib-1, nil) })
++	checkUsed(t, nvp, map[uint32]uint64{0: mib})
++	do(func() { nvp.vidmemUVMMapLocked(ctx, v, gpu0, base+4*mib, base+5*mib-1, nil) })
++	checkUsed(t, nvp, nil)
++
++	// UVM_FREE of an external range removes the mappings in it, and the
++	// release of the VA space the rest.
++	if !alloc(t, nvp, client, h(0x1001), h(0x2002), mib, mib) ||
++		!alloc(t, nvp, client, h(0x1001), h(0x2003), 2*mib, 2*mib) {
++		t.Fatal("allocation refused")
++	}
++	do(func() { v.createRangeLocked(base+32*mib, base+48*mib-1) })
++	mapUVM(nvp, mf, client, h(0x2002), base, mib, gpu0)
++	mapUVM(nvp, mf, client, h(0x2003), base+32*mib, 2*mib, gpu0)
++	free(nvp, client, h(0x2002))
++	free(nvp, client, h(0x2003))
++	checkUsed(t, nvp, map[uint32]uint64{0: 3 * mib})
++	do(func() { nvp.vidmemUVMFreeLocked(ctx, v, base) })
++	checkUsed(t, nvp, map[uint32]uint64{0: 2 * mib})
++	// The host file closes when the file is released and its last page
++	// reference is dropped.
++	fr := memmap.FileRange{Start: base + 32*mib, End: base + 32*mib + hostarch.PageSize}
++	mf.IncRef(fr, 0)
++	mf.MappableRelease()
++	checkUsed(t, nvp, map[uint32]uint64{0: 2 * mib})
++	mf.DecRef(fr)
++	if mf.FD() >= 0 {
++		t.Error("host file still open")
++	}
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemUVMMapExternalLocksClient(t *testing.T) {
++	nvp := newVidmemNVP(4 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	mf := newUVMFile(t, nvp)
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), mib, mib) {
++		t.Fatal("1 MiB refused")
++	}
++	gpus := []nvgpu.UvmGpuMappingAttributes{{GPUUUID: nvgpu.NvUUID{0: 1}}}
++	invoked := false
++	nvp.vidmemUVMMapExternal(context.Background(), mf, h(0x1000), h(0x2000), 0x7f0000000000, mib, gpus, func() bool {
++		// UVM duplicates the memory with the client locked, so that its
++		// handle cannot be freed and reused meanwhile.
++		if client.objsMu.mu.TryLock() {
++			client.objsMu.mu.Unlock()
++			t.Error("UVM_MAP_EXTERNAL_ALLOCATION invoked with the client unlocked")
++		}
++		invoked = true
++		return true
++	})
++	if !invoked {
++		t.Fatal("UVM_MAP_EXTERNAL_ALLOCATION not invoked")
++	}
++	free(nvp, client, h(0x2000))
++	checkUsed(t, nvp, map[uint32]uint64{0: mib})
++	// A failed mapping records nothing.
++	if !alloc(t, nvp, client, h(0x1001), h(0x2001), mib, mib) {
++		t.Fatal("1 MiB refused")
++	}
++	nvp.vidmemUVMMapExternal(context.Background(), mf, h(0x1000), h(0x2001), 0x7f0010000000, mib, gpus, func() bool { return false })
++	free(nvp, client, h(0x2001))
++	checkUsed(t, nvp, map[uint32]uint64{0: mib})
++	mf.MappableRelease()
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemUVMMMHold(t *testing.T) {
++	nvp := newVidmemNVP(4 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	va, mm := newUVMFile(t, nvp), newUVMFile(t, nvp)
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), 2*mib, 2*mib) {
++		t.Fatal("2 MiB refused")
++	}
++	mapUVM(nvp, va, client, h(0x2000), 0x7f0000000000, 2*mib, nvgpu.NvUUID{0: 1})
++	free(nvp, client, h(0x2000))
++	// UVM_MM_INITIALIZE makes mm hold va: closing va keeps its VA space and
++	// mappings.
++	mm.vidmemHold(va)
++	va.MappableRelease()
++	if va.FD() < 0 {
++		t.Error("held VA space file closed")
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: 2 * mib})
++	// Closing mm releases them.
++	mm.MappableRelease()
++	if mm.FD() >= 0 || va.FD() >= 0 {
++		t.Errorf("host files %d and %d still open", mm.FD(), va.FD())
++	}
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemUVMConcurrentClose(t *testing.T) {
++	nvp := newVidmemNVP(4 * mib)
++	client := addClient(nvp, 0x1000, 0)
++	for i := 0; i < 20; i++ {
++		mf := newUVMFile(t, nvp)
++		if !alloc(t, nvp, client, h(0x1001), h(0x2000), mib, mib) {
++			t.Fatal("1 MiB refused")
++		}
++		mapUVM(nvp, mf, client, h(0x2000), 0x7f0000000000, mib, nvgpu.NvUUID{0: 1})
++		free(nvp, client, h(0x2000))
++		// The last page references and the release race to close the host
++		// file; the mappings are released once.
++		var frs []memmap.FileRange
++		for j := uint64(0); j < 8; j++ {
++			fr := memmap.FileRange{Start: 0x7f0000000000 + j*hostarch.PageSize, End: 0x7f0000000000 + (j+1)*hostarch.PageSize}
++			mf.IncRef(fr, 0)
++			frs = append(frs, fr)
++		}
++		var wg sync.WaitGroup
++		for _, fr := range frs {
++			wg.Add(1)
++			go func() {
++				defer wg.Done()
++				mf.DecRef(fr)
++			}()
++		}
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			mf.MappableRelease()
++		}()
++		wg.Wait()
++		if mf.FD() >= 0 {
++			t.Fatal("host file still open")
++		}
++		checkUsed(t, nvp, nil)
++	}
++}
++
++func TestVidmemAfterLoad(t *testing.T) {
++	nvp := newVidmemNVP(4 * mib)
++	client := addClient(nvp, 0x1000, 0, 1)
++	if !alloc(t, nvp, client, h(0x1001), h(0x2000), mib, mib) ||
++		!alloc(t, nvp, client, h(0x1002), h(0x2001), 2*mib, 2*mib) {
++		t.Fatal("allocation refused")
++	}
++	oldIDs := []DeviceRemapID{{Minor: 0, DeviceInstance: 0}, {Minor: 1, DeviceInstance: 1}}
++	newIDs := []DeviceRemapID{{Minor: 4, DeviceInstance: 1}, {Minor: 5, DeviceInstance: 7}}
++	dr, err := MakeDeviceRemapping(oldIDs, newIDs)
++	if err != nil {
++		t.Fatal(err)
++	}
++	nvp.vidmemAfterLoad(dr)
++	checkUsed(t, nvp, map[uint32]uint64{1: mib, 7: 2 * mib})
++	free(nvp, client, h(0x2001))
++	checkUsed(t, nvp, map[uint32]uint64{1: mib})
++
++	// A restored nvproxy without charges gets usable maps.
++	empty := &nvproxy{vidmemLimit: mib}
++	empty.vidmemAfterLoad(nil)
++	if empty.vidmemTryCharge(context.Background(), 0, mib) == nil {
++		t.Error("charge after restore refused")
++	}
++}
++
++func TestVidmemConcurrentCharges(t *testing.T) {
++	const limit = 64 * mib
++	nvp := newVidmemNVP(limit)
++	ctx := context.Background()
++	var (
++		wg      sync.WaitGroup
++		mu      sync.Mutex
++		charges []*vidmemCharge
++	)
++	for i := 0; i < 16; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			for j := 0; j < 100; j++ {
++				c := nvp.vidmemTryCharge(ctx, 0, 3*mib/2)
++				if c == nil {
++					continue
++				}
++				if !nvp.vidmemSettle(ctx, c, 2*mib, false) {
++					nvp.vidmemDecRef(ctx, c)
++					continue
++				}
++				mu.Lock()
++				charges = append(charges, c)
++				mu.Unlock()
++			}
++		}()
++	}
++	wg.Wait()
++	charged := uint64(len(charges)) * 2 * mib
++	if charged == 0 || charged > limit {
++		t.Errorf("%d bytes charged, want up to %d", charged, uint64(limit))
++	}
++	checkUsed(t, nvp, map[uint32]uint64{0: charged})
++	for _, c := range charges {
++		nvp.vidmemDecRef(ctx, c)
++	}
++	checkUsed(t, nvp, nil)
++}
++
++func TestVidmemHoldRange(t *testing.T) {
++	// The hold's page reference is a whole page that no mapping can use.
++	if vidmemHoldRange.Length() != hostarch.PageSize || vidmemHoldRange.Start%hostarch.PageSize != 0 || vidmemHoldRange.Start < math.MaxInt64 {
++		t.Errorf("vidmemHoldRange %v", vidmemHoldRange)
++	}
++}
+diff --git a/pkg/sentry/devices/nvproxy/vidmem_uvm.go b/pkg/sentry/devices/nvproxy/vidmem_uvm.go
+new file mode 100644
+index 0000000..ec8e1b4
+--- /dev/null
++++ b/pkg/sentry/devices/nvproxy/vidmem_uvm.go
+@@ -0,0 +1,371 @@
++// Copyright 2026 The gVisor Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package nvproxy
++
++// UVM external mappings under the GPU memory limit (vidmem.go)
++//
++// UVM_MAP_EXTERNAL_ALLOCATION maps device memory, named by its RM client and
++// handle, into a UVM VA space on each of the given GPUs. For each GPU, UVM
++// duplicates the memory and keeps the duplicate while any part of the mapping
++// remains, its pieces sharing it after an unmap splits it
++// (kernel-open/nvidia-uvm/uvm_map_external.c:
++// uvm_map_external_allocation_on_gpu() => nvUvmInterfaceDupMemory(),
++// uvm_ext_gpu_map_split(), uvm_release_rm_handle()). A mapping on a GPU loses
++// the part of its range that a later UVM_MAP_EXTERNAL_ALLOCATION or a
++// UVM_UNMAP_EXTERNAL on the same GPU covers (uvm_unmap_external_in_range()),
++// and all of itself when UVM_FREE frees its external range (uvm_free()), when
++// UVM_UNREGISTER_GPU_VASPACE or UVM_UNREGISTER_GPU removes the GPU's VA space
++// (uvm_va_space.c:remove_gpu_va_space()), or when the VA space is destroyed
++// as its file is released. A UVM MM file, initialized with UVM_MM_INITIALIZE,
++// holds the VA space's file until it is released itself
++// (kernel-open/nvidia-uvm/uvm.c:uvm_api_mm_initialize() => fget(),
++// uvm_mm_release() => fput()).
++//
++// With a GPU memory limit, nvproxy mirrors this for mappings of charged
++// memory: each mapping holds the memory's charge on each GPU, and is split and
++// removed as above. Mappings that UVM also removes in UVM_DISABLE_PEER_ACCESS,
++// in UVM_UNREGISTER_GPU of the GPU that owns memory mapped on another GPU, and
++// in an UVM_MAP_EXTERNAL_ALLOCATION that fails after unmapping what its range
++// held, keep their charge until one of the above, which can only overcount.
++// nvproxy serializes these ioctls on each VA space, so that it records them in
++// the driver's order, and keeps the host file of a VA space open while a UVM
++// MM file holds it, as UVM does.
++
++import (
++	"fmt"
++	"slices"
++	"sort"
++
++	"gvisor.dev/gvisor/pkg/abi/nvgpu"
++	"gvisor.dev/gvisor/pkg/context"
++	"gvisor.dev/gvisor/pkg/errors/linuxerr"
++)
++
++// vidmemUVM holds the external ranges of a UVM VA space and its external
++// mappings of charged memory. It is protected by nvproxy.vidmemMu.
++//
++// +stateify savable
++type vidmemUVM struct {
++	// ranges maps the first address of each external range
++	// (UVM_CREATE_EXTERNAL_RANGE) to its last.
++	ranges map[uint64]uint64
++	// mappings holds, for each GPU, its mappings of charged memory, disjoint
++	// and sorted by address.
++	mappings map[nvgpu.NvUUID][]vidmemUVMMapping
++}
++
++// vidmemUVMMapping is all or part of an external mapping of charged memory on
++// one GPU. It holds a reference on charge.
++//
++// +stateify savable
++type vidmemUVMMapping struct {
++	start  uint64 // first address
++	last   uint64 // last address
++	charge *vidmemCharge
++}
++
++// vidmemUVMUnmapLocked removes [start, last] from the mappings of v on gpu.
++//
++// Precondition: nvp.vidmemMu must be locked.
++func (nvp *nvproxy) vidmemUVMUnmapLocked(ctx context.Context, v *vidmemUVM, gpu nvgpu.NvUUID, start, last uint64) {
++	ms := v.mappings[gpu]
++	i := sort.Search(len(ms), func(i int) bool { return ms[i].last >= start })
++	j := i
++	var rest []vidmemUVMMapping
++	for ; j < len(ms) && ms[j].start <= last; j++ {
++		m := ms[j]
++		if m.start < start {
++			rest = append(rest, vidmemUVMMapping{start: m.start, last: start - 1, charge: m.charge})
++			nvp.vidmemIncRefLocked(m.charge)
++		}
++		if m.last > last {
++			rest = append(rest, vidmemUVMMapping{start: last + 1, last: m.last, charge: m.charge})
++			nvp.vidmemIncRefLocked(m.charge)
++		}
++		nvp.vidmemDecRefLocked(ctx, m.charge)
++	}
++	if i == j {
++		return
++	}
++	v.setMappings(gpu, slices.Replace(ms, i, j, rest...))
++}
++
++// vidmemUVMMapLocked records a mapping of [start, last] on gpu, which replaces
++// what the range held there, of the memory that c charges, if not nil.
++//
++// Precondition: nvp.vidmemMu must be locked.
++func (nvp *nvproxy) vidmemUVMMapLocked(ctx context.Context, v *vidmemUVM, gpu nvgpu.NvUUID, start, last uint64, c *vidmemCharge) {
++	nvp.vidmemUVMUnmapLocked(ctx, v, gpu, start, last)
++	if c == nil {
++		return
++	}
++	nvp.vidmemIncRefLocked(c)
++	ms := v.mappings[gpu]
++	i := sort.Search(len(ms), func(i int) bool { return ms[i].start > start })
++	v.setMappings(gpu, slices.Insert(ms, i, vidmemUVMMapping{start: start, last: last, charge: c}))
++}
++
++// createRangeLocked records the external range [start, last].
++//
++// Precondition: nvp.vidmemMu must be locked.
++func (v *vidmemUVM) createRangeLocked(start, last uint64) {
++	if v.ranges == nil {
++		v.ranges = make(map[uint64]uint64)
++	}
++	v.ranges[start] = last
++}
++
++// vidmemUVMFreeLocked removes the external range that starts at start, and the
++// mappings in it.
++//
++// Precondition: nvp.vidmemMu must be locked.
++func (nvp *nvproxy) vidmemUVMFreeLocked(ctx context.Context, v *vidmemUVM, start uint64) {
++	last, ok := v.ranges[start]
++	if !ok {
++		return
++	}
++	delete(v.ranges, start)
++	for gpu, ms := range v.mappings {
++		i := sort.Search(len(ms), func(i int) bool { return ms[i].start >= start })
++		j := i
++		for ; j < len(ms) && ms[j].start <= last; j++ {
++			nvp.vidmemDecRefLocked(ctx, ms[j].charge)
++		}
++		if i != j {
++			v.setMappings(gpu, slices.Delete(ms, i, j))
++		}
++	}
++}
++
++// vidmemUVMRemoveGPULocked removes the mappings of v on gpu.
++//
++// Precondition: nvp.vidmemMu must be locked.
++func (nvp *nvproxy) vidmemUVMRemoveGPULocked(ctx context.Context, v *vidmemUVM, gpu nvgpu.NvUUID) {
++	for _, m := range v.mappings[gpu] {
++		nvp.vidmemDecRefLocked(ctx, m.charge)
++	}
++	delete(v.mappings, gpu)
++}
++
++// vidmemUVMReleaseLocked removes all ranges and mappings of v, whose VA space
++// was destroyed.
++//
++// Precondition: nvp.vidmemMu must be locked.
++func (nvp *nvproxy) vidmemUVMReleaseLocked(ctx context.Context, v *vidmemUVM) {
++	for gpu := range v.mappings {
++		nvp.vidmemUVMRemoveGPULocked(ctx, v, gpu)
++	}
++	v.ranges = nil
++}
++
++func (v *vidmemUVM) setMappings(gpu nvgpu.NvUUID, ms []vidmemUVMMapping) {
++	if len(ms) == 0 {
++		delete(v.mappings, gpu)
++		return
++	}
++	if v.mappings == nil {
++		v.mappings = make(map[nvgpu.NvUUID][]vidmemUVMMapping)
++	}
++	v.mappings[gpu] = ms
++}
++
++// vidmemTracked returns true if the VA space of mf is tracked under a GPU
++// memory limit.
++func (mf *uvmFDMemmapFile) vidmemTracked() bool {
++	return mf.nvp != nil && mf.nvp.vidmemLimit != 0
++}
++
++// vidmemUnref calls unref, which drops a reference to the host file of mf.
++// Once that has closed the host file, which destroys the VA space, since a UVM
++// MM file that holds it keeps it open (vidmemHold), vidmemUnref releases the
++// charges of its mappings, and the VA space file that mf holds as a UVM MM
++// file, if any. mf.vidmemCloseMu serializes these calls, so that the closing
++// of the host file is seen once and without a data race.
++func (mf *uvmFDMemmapFile) vidmemUnref(unref func()) {
++	mf.vidmemCloseMu.Lock()
++	unref()
++	closed := !mf.vidmemClosed && mf.FD() < 0
++	var held *uvmFDMemmapFile
++	if closed {
++		mf.vidmemClosed = true
++		held, mf.vidmemHeld = mf.vidmemHeld, nil
++	}
++	mf.vidmemCloseMu.Unlock()
++	if !closed {
++		return
++	}
++	mf.nvp.vidmemMu.Lock()
++	mf.nvp.vidmemUVMReleaseLocked(context.Background(), &mf.vidmem)
++	mf.nvp.vidmemMu.Unlock()
++	if held != nil {
++		held.DecRef(vidmemHoldRange)
++	}
++}
++
++// vidmemHold makes mf, a UVM MM file, hold the host file of the VA space file
++// va open until mf's own host file is closed, as UVM_MM_INITIALIZE makes the
++// MM file hold the VA space's file.
++func (mf *uvmFDMemmapFile) vidmemHold(va *uvmFDMemmapFile) {
++	va.IncRef(vidmemHoldRange, 0 /* memCgID */)
++	mf.vidmemCloseMu.Lock()
++	mf.vidmemHeld = va
++	mf.vidmemCloseMu.Unlock()
++}
++
++// uvmExternalAllocation returns the fields of UVM_MAP_EXTERNAL_ALLOCATION's
++// parameters that the GPU memory limit uses.
++func uvmExternalAllocation(params any) (base, length uint64, gpus []nvgpu.UvmGpuMappingAttributes, hClient, hMemory nvgpu.Handle) {
++	switch p := params.(type) {
++	case *nvgpu.UVM_MAP_EXTERNAL_ALLOCATION_PARAMS:
++		return p.Base, p.Length, p.PerGPUAttributes[:min(p.GPUAttributesCount, uint64(len(p.PerGPUAttributes)))], nvgpu.Handle{Val: p.HClient}, nvgpu.Handle{Val: p.HMemory}
++	case *nvgpu.UVM_MAP_EXTERNAL_ALLOCATION_PARAMS_V550:
++		return p.Base, p.Length, p.PerGPUAttributes[:min(p.GPUAttributesCount, uint64(len(p.PerGPUAttributes)))], nvgpu.Handle{Val: p.HClient}, nvgpu.Handle{Val: p.HMemory}
++	default:
++		panic(fmt.Sprintf("nvproxy: unknown UVM_MAP_EXTERNAL_ALLOCATION parameters %T", params))
++	}
++}
++
++// uvmMapExternalAllocation implements UVM_MAP_EXTERNAL_ALLOCATION. With a GPU
++// memory limit, the mapping holds the charge of the memory it maps.
++func uvmMapExternalAllocation[Params any, PtrParams hasFrontendFDAndStatusPtr[Params]](ui *uvmIoctlState) (uintptr, error) {
++	nvp := ui.nvp
++	if nvp.vidmemLimit == 0 || ui.fd == nil {
++		return uvmIoctlHasFrontendFD[Params, PtrParams](ui)
++	}
++	var ioctlParamsValue Params
++	ioctlParams := PtrParams(&ioctlParamsValue)
++	if _, err := ioctlParams.CopyIn(ui.t, ui.ioctlParamsAddr); err != nil {
++		return 0, err
++	}
++	base, length, gpus, hClient, hMemory := uvmExternalAllocation(ioctlParams)
++
++	// Translate the frontend FD, if any, before vidmemUVMMapExternal locks the
++	// client, and release it after, since the release may close the file.
++	origFD := ioctlParams.GetFrontendFD()
++	if origFD >= 0 {
++		ctlFileGeneric, _ := ui.t.FDTable().Get(origFD)
++		if ctlFileGeneric == nil {
++			return 0, linuxerr.EINVAL
++		}
++		defer ctlFileGeneric.DecRef(ui.ctx)
++		ctlFile, ok := ctlFileGeneric.Impl().(*frontendFD)
++		if !ok {
++			return 0, linuxerr.EINVAL
++		}
++		ioctlParams.SetFrontendFD(ctlFile.hostFD)
++	}
++	var (
++		n   uintptr
++		err error
++	)
++	nvp.vidmemUVMMapExternal(ui.ctx, &ui.fd.memmapFile, hClient, hMemory, base, length, gpus, func() bool {
++		n, err = uvmIoctlInvoke(ui, ioctlParams)
++		return err == nil && ioctlParams.GetStatus() == nvgpu.NV_OK
++	})
++	ioctlParams.SetFrontendFD(origFD)
++	if err != nil {
++		return n, err
++	}
++	if _, err := ioctlParams.CopyOut(ui.t, ui.ioctlParamsAddr); err != nil {
++		return n, err
++	}
++	return n, nil
++}
++
++// vidmemUVMMapExternal runs invoke, which calls UVM_MAP_EXTERNAL_ALLOCATION to
++// map the memory with handle hMemory in the client with handle hClient at
++// [base, base+length) on gpus in the VA space of mf, and if it returns true,
++// records the mapping. The client stays locked meanwhile, so that the handle
++// cannot be freed, and reused for other memory, before UVM duplicates it.
++func (nvp *nvproxy) vidmemUVMMapExternal(ctx context.Context, mf *uvmFDMemmapFile, hClient, hMemory nvgpu.Handle, base, length uint64, gpus []nvgpu.UvmGpuMappingAttributes, invoke func() bool) {
++	mf.vidmemOpMu.Lock()
++	defer mf.vidmemOpMu.Unlock()
++	var charge *vidmemCharge
++	if client, unlock := nvp.getClientWithLock(ctx, hClient); client != nil {
++		defer unlock()
++		if o := client.resources[hMemory]; o != nil {
++			charge = vidmemChargeOf(o.impl)
++		}
++	}
++	if !invoke() || length == 0 {
++		return
++	}
++	nvp.vidmemMu.Lock()
++	defer nvp.vidmemMu.Unlock()
++	for i := range gpus {
++		nvp.vidmemUVMMapLocked(ctx, &mf.vidmem, gpus[i].GPUUUID, base, base+length-1, charge)
++	}
++}
++
++// uvmIoctlVidmem returns an implementation of a UVM ioctl that removes
++// external ranges or mappings: uvmIoctlSimple, which with a GPU memory limit
++// also calls update when the driver succeeds.
++func uvmIoctlVidmem[Params any, PtrParams hasStatusPtr[Params]](update func(ctx context.Context, nvp *nvproxy, v *vidmemUVM, p PtrParams)) func(*uvmIoctlState) (uintptr, error) {
++	return func(ui *uvmIoctlState) (uintptr, error) {
++		nvp := ui.nvp
++		if nvp.vidmemLimit == 0 || ui.fd == nil {
++			return uvmIoctlSimple[Params, PtrParams](ui)
++		}
++		var ioctlParamsValue Params
++		ioctlParams := PtrParams(&ioctlParamsValue)
++		if _, err := ioctlParams.CopyIn(ui.t, ui.ioctlParamsAddr); err != nil {
++			return 0, err
++		}
++		mf := &ui.fd.memmapFile
++		mf.vidmemOpMu.Lock()
++		n, err := uvmIoctlInvoke(ui, ioctlParams)
++		if err == nil && ioctlParams.GetStatus() == nvgpu.NV_OK {
++			nvp.vidmemMu.Lock()
++			update(ui.ctx, nvp, &mf.vidmem, ioctlParams)
++			nvp.vidmemMu.Unlock()
++		}
++		mf.vidmemOpMu.Unlock()
++		if err != nil {
++			return n, err
++		}
++		if _, err := ioctlParams.CopyOut(ui.t, ui.ioctlParamsAddr); err != nil {
++			return n, err
++		}
++		return n, nil
++	}
++}
++
++func vidmemUVMCreateExternalRange(ctx context.Context, nvp *nvproxy, v *vidmemUVM, p *nvgpu.UVM_CREATE_EXTERNAL_RANGE_PARAMS) {
++	if p.Length != 0 {
++		v.createRangeLocked(p.Base, p.Base+p.Length-1)
++	}
++}
++
++func vidmemUVMUnmapExternal(ctx context.Context, nvp *nvproxy, v *vidmemUVM, p *nvgpu.UVM_UNMAP_EXTERNAL_PARAMS) {
++	if p.Length != 0 {
++		nvp.vidmemUVMUnmapLocked(ctx, v, p.GPUUUID, p.Base, p.Base+p.Length-1)
++	}
++}
++
++func vidmemUVMFree(ctx context.Context, nvp *nvproxy, v *vidmemUVM, p *nvgpu.UVM_FREE_PARAMS) {
++	nvp.vidmemUVMFreeLocked(ctx, v, p.Base)
++}
++
++func vidmemUVMFreeV590(ctx context.Context, nvp *nvproxy, v *vidmemUVM, p *nvgpu.UVM_FREE_PARAMS_V590) {
++	nvp.vidmemUVMFreeLocked(ctx, v, p.Base)
++}
++
++func vidmemUVMUnregisterGPUVASpace(ctx context.Context, nvp *nvproxy, v *vidmemUVM, p *nvgpu.UVM_UNREGISTER_GPU_VASPACE_PARAMS) {
++	nvp.vidmemUVMRemoveGPULocked(ctx, v, p.GPUUUID)
++}
++
++func vidmemUVMUnregisterGPU(ctx context.Context, nvp *nvproxy, v *vidmemUVM, p *nvgpu.UVM_UNREGISTER_GPU_PARAMS) {
++	nvp.vidmemUVMRemoveGPULocked(ctx, v, p.GPUUUID)
++}
+diff --git a/runsc/boot/vfs.go b/runsc/boot/vfs.go
+index 832d03f..7072ba9 100644
+--- a/runsc/boot/vfs.go
++++ b/runsc/boot/vfs.go
+@@ -1956,6 +1956,7 @@ func nvproxyRegisterDevices(info *containerInfo, vfsObj *vfs.VirtualFilesystem,
+ 		DriverVersion:          nvidiaDriverVersion,
+ 		DriverCaps:             driverCaps,
+ 		AllowUnsupportedDriver: info.conf.NVProxyAllowUnsupportedDriver,
++		GPUMemoryLimit:         info.conf.NVProxyGPUMemoryLimit,
+ 		HostSettings:           info.nvidiaHostSettings,
+ 		UseDevGofer:            true,
+ 	})
+diff --git a/runsc/config/config.go b/runsc/config/config.go
+index cb5dacc..eec6c9f 100644
+--- a/runsc/config/config.go
++++ b/runsc/config/config.go
+@@ -418,6 +418,11 @@ type Config struct {
+ 	// unsupported driver version.
+ 	NVProxyAllowUnsupportedDriver bool `flag:"nvproxy-allow-unsupported-driver"`
+ 
++	// NVProxyGPUMemoryLimit is the most device memory, in bytes, that the
++	// sandbox's applications may allocate through nvproxy on each of its
++	// GPUs. 0 means no limit.
++	NVProxyGPUMemoryLimit uint64 `flag:"nvproxy-gpu-memory-limit"`
++
+ 	// TPUProxy enables support for TPUs.
+ 	TPUProxy bool `flag:"tpuproxy"`
+ 
+diff --git a/runsc/config/config_test.go b/runsc/config/config_test.go
+index a773d08..b2feb5e 100644
+--- a/runsc/config/config_test.go
++++ b/runsc/config/config_test.go
+@@ -869,6 +869,65 @@ func TestOverrideAllowlistQDiscTBF(t *testing.T) {
+ 	}
+ }
+ 
++func TestOverrideNVProxyGPUMemoryLimit(t *testing.T) {
++	testFlags := flag.NewFlagSet("test", flag.ContinueOnError)
++	RegisterFlags(testFlags)
++	c, err := NewFromFlags(testFlags)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if c.NVProxyGPUMemoryLimit != 0 {
++		t.Fatalf("default NVProxyGPUMemoryLimit = %d, want 0", c.NVProxyGPUMemoryLimit)
++	}
++	// Order matters: a successful override sets the ceiling for later steps.
++	for _, tc := range []struct {
++		name  string
++		value string
++		force bool
++		error string
++		want  uint64
++	}{
++		{name: "invalid", value: "abc", error: "invalid"},
++		{name: "overflow", value: "18446744073709551616", error: "invalid"},
++		{name: "zero without a limit", value: "0", want: 0},
++		{name: "set without a limit", value: "8589934592", want: 8 << 30},
++		{name: "match", value: "8589934592", want: 8 << 30},
++		{name: "lower", value: "4294967296", want: 4 << 30},
++		{name: "raise", value: "4294967297", error: "would raise or remove", want: 4 << 30},
++		{name: "remove", value: "0", error: "would raise or remove", want: 4 << 30},
++		{name: "hex lower", value: "0x40000000", want: 1 << 30},
++		{name: "forced raise", value: "17179869184", force: true, want: 16 << 30},
++		{name: "forced remove", value: "0", force: true, want: 0},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			err := c.Override(testFlags, "nvproxy-gpu-memory-limit", tc.value, tc.force)
++			if tc.error == "" {
++				if err != nil {
++					t.Errorf("Override(%q) failed: %v", tc.value, err)
++				}
++			} else if err == nil || !strings.Contains(err.Error(), tc.error) {
++				t.Errorf("Override(%q) wrong error: %v", tc.value, err)
++			}
++			if got := c.NVProxyGPUMemoryLimit; got != tc.want {
++				t.Errorf("NVProxyGPUMemoryLimit = %d, want %d", got, tc.want)
++			}
++		})
++	}
++
++	// With allow-flag-override, an annotation may also raise the limit.
++	c.NVProxyGPUMemoryLimit = 1 << 30
++	c.AllowFlagOverride = true
++	if err := c.Override(testFlags, "nvproxy-gpu-memory-limit", "2147483648", false); err != nil {
++		t.Errorf("Override with allow-flag-override failed: %v", err)
++	}
++	if got, want := c.NVProxyGPUMemoryLimit, uint64(2<<30); got != want {
++		t.Errorf("NVProxyGPUMemoryLimit = %d, want %d", got, want)
++	}
++	if flags := c.ToFlags(); !slices.Contains(flags, "--nvproxy-gpu-memory-limit=2147483648") {
++		t.Errorf("ToFlags() = %v, want --nvproxy-gpu-memory-limit=2147483648", flags)
++	}
++}
++
+ func TestOverrideDeferredValidation(t *testing.T) {
+ 	// qdisc=tbf is rejected by Validate while rate or burst is still zero.
+ 	// Override does not validate, so interdependent flags can be applied in
+diff --git a/runsc/config/flags.go b/runsc/config/flags.go
+index 49d2da1..6e95662 100644
+--- a/runsc/config/flags.go
++++ b/runsc/config/flags.go
+@@ -51,6 +51,7 @@ const (
+ 	flagQDisc                   = "qdisc"
+ 	flagQDiscTBFRate            = "qdisc-tbf-rate"
+ 	flagQDiscTBFBurst           = "qdisc-tbf-burst"
++	flagNVProxyGPUMemoryLimit   = "nvproxy-gpu-memory-limit"
+ 	flagInSandboxCgroup         = "in-sandbox-cgroup"
+ 	flagNetworkProxyPath        = "network-proxy-path"
+ 	flagNetgofer                = "netgofer"
+@@ -202,6 +203,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
+ 	flagSet.Bool("nvproxy-docker", false, "LEGACY: Injects nvidia-container-runtime-hook as a prestart hook. Try to use nvidia-container-runtime or `docker run --gpus` instead. Or manually add nvidia-container-runtime-hook as a prestart hook and set up NVIDIA_VISIBLE_DEVICES container environment variable.")
+ 	flagSet.String("nvproxy-driver-version", "", "NVIDIA driver ABI version to use. If empty, autodetect installed driver version. The special value 'latest' may also be used to use the latest ABI.")
+ 	flagSet.Bool("nvproxy-allow-unsupported-driver", false, "allow nvproxy to be initialized with an unsupported driver version.")
++	flagSet.Uint64(flagNVProxyGPUMemoryLimit, 0, "the most device memory, in bytes, that the sandbox may allocate through nvproxy on each of its GPUs; an allocation beyond it fails as out of memory. Memory the driver allocates for itself and managed (unified) memory are not counted. 0 means no limit.")
+ 	flagSet.String("nvproxy-allowed-driver-capabilities", "utility,compute", "Comma separated list of NVIDIA driver capabilities that are allowed to be requested by the container. If 'all' is specified here, it is resolved to all driver capabilities supported in nvproxy. If 'all' is requested by the container, it is resolved to this list.")
+ 	flagSet.Bool("rdmaproxy", false, "WIP: enable RDMA support for containers with /dev/infiniband/uverbs* devices.")
+ 	flagSet.Bool("tpuproxy", false, "LEGACY: enable support for TPU devices. TPU support gets automatically enabled if TPU devices are present in the OCI spec.")
+@@ -239,6 +241,7 @@ var overrideAllowlist = map[string]struct {
+ 	flagQDisc:                   {check: checkQDisc},
+ 	flagQDiscTBFRate:            {check: checkQDiscTBFRate},
+ 	flagQDiscTBFBurst:           {check: checkQDiscTBFBurst},
++	flagNVProxyGPUMemoryLimit:   {check: checkNVProxyGPUMemoryLimit},
+ 	flagInSandboxCgroup:         {},
+ }
+ 
+@@ -313,6 +316,22 @@ func checkQDiscTBFBurst(c *Config, name string, value string) error {
+ 	return nil
+ }
+ 
++// checkNVProxyGPUMemoryLimit ensures an annotation can only set a GPU memory
++// limit or lower (or match) the runtime-configured one; raising or removing
++// (0) it would weaken operator policy. A runtime-configured limit of 0 means
++// the operator hasn't set one, so any pod-supplied limit is accepted.
++func checkNVProxyGPUMemoryLimit(c *Config, name string, value string) error {
++	v, err := strconv.ParseUint(value, 0, 64)
++	if err != nil {
++		return fmt.Errorf("invalid %s annotation %q: %w", name, value, err)
++	}
++	if c.NVProxyGPUMemoryLimit != 0 && (v == 0 || v > c.NVProxyGPUMemoryLimit) {
++		return fmt.Errorf("%s=%d would raise or remove runtime-configured limit %d; that requires flag %q to be enabled",
++			name, v, c.NVProxyGPUMemoryLimit, flagAllowFlagOverride)
++	}
++	return nil
++}
++
+ // isFlagExplicitlySet returns whether the given flag name is explicitly set.
+ // Doesn't check for flag existence; returns `false` for flags that don't exist.
+ func isFlagExplicitlySet(flagSet *flag.FlagSet, name string) bool {

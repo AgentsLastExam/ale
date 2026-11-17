@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 from tests.support import sibling_checkout
 
-from ale.core.taskspec import TaskConfig
+from ale.core import lock
+from ale.core.taskspec import SCHEMA_VERSION, TaskConfig
 
 pytestmark = pytest.mark.unit
 
@@ -59,8 +60,41 @@ def test_living_task_docs_do_not_recommend_removed_contracts(path: Path) -> None
         "image: {build: verify/image}",
         "image: {build: verify}",
         "image: {ref:",
+        "1.4+ale.1",
+        "docker_image =",
+        ".docker_image",
+        "vm_image",
+        "vm_base",
+        "vm = true",
     )
     assert not [snippet for snippet in forbidden if snippet in text]
+
+
+def test_no_doc_names_a_run_setting_that_sandbox_providers_replaced() -> None:
+    docs = [
+        ROOT / "README.md",
+        ROOT / ".env.example",
+        *(ROOT / "docs").rglob("*.md"),
+        *(ROOT / "packages").rglob("*.md"),
+    ]
+    removed = (
+        "container.provider",
+        "container.runtime",
+        "container.gpus",
+        "container.daytona",
+        "vm.provider",
+        "[container]",
+        "[vm]",
+        "[fleet]",
+        " fleet.url",
+        "`fleet.url",
+    )
+    named = {
+        str(path.relative_to(ROOT)): found
+        for path in docs
+        if (found := [key for key in removed if key in path.read_text(encoding="utf-8")])
+    }
+    assert named == {}
 
 
 def test_authoring_contract_names_the_current_task_shape() -> None:
@@ -68,7 +102,9 @@ def test_authoring_contract_names_the_current_task_shape() -> None:
     for required in (
         "task.toml",
         "environment/Dockerfile",
+        "environment/build.sh",
         "environment/build.ps1",
+        "[environment].image",
         "environment/setup/",
         "tests/test.sh",
         "solution/solve.sh",
@@ -134,5 +170,9 @@ def test_maintained_tasks_use_the_current_configuration(repository: Path) -> Non
 
 def test_current_docs_name_prepare_and_current_schema() -> None:
     text = "\n".join(path.read_text(encoding="utf-8") for path in NORMATIVE)
-    for required in ("ale prepare", "RunLock schema 2", "docker_image"):
+    for required in (
+        "ale prepare",
+        f"RunLock schema {lock.SCHEMA_VERSION}",
+        f'schema_version = "{SCHEMA_VERSION}"',
+    ):
         assert required in text

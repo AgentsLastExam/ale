@@ -17,7 +17,6 @@ import pytest
 
 from ale.core.config import RunConfig
 from ale.core.lock import RunLock, TaskSource
-from ale.core.taskspec import ImageKind
 from ale.core.trace import read_jsonl
 from ale.core.verdict import Status
 from ale.run.episode import EpisodeResult, run_episode
@@ -82,13 +81,13 @@ def _task(root: Path, kind: str, verifier: dict[str, Any]) -> ManifestTask:
         "solution": {"env": {"SOLUTION_ONLY": "solution"}},
     }
     if kind == "vm":
-        config |= {"environment": {"env": ENVIRONMENT, **VM_RESOURCES, "vm": True}}
+        config |= {"environment": {"env": ENVIRONMENT, **VM_RESOURCES, "image": VM_BASE}}
     if windows:
         config |= {
             "environment": {
                 "env": ENVIRONMENT,
                 "os": "windows",
-                "vm_image": "local/windows-variables",
+                "image": "local/windows-variables",
                 "cpus": 2,
                 "memory_mb": 8192,
             },
@@ -97,7 +96,7 @@ def _task(root: Path, kind: str, verifier: dict[str, Any]) -> ManifestTask:
         root,
         name="agentslastexam/variables",
         config=config,
-        dockerfile=None if windows else f"FROM {VM_BASE if kind == 'vm' else CONTAINER_BASE}\n",
+        dockerfile=None if kind in ("vm", "windows") else f"FROM {CONTAINER_BASE}\n",
         test=None,
         solve=None,
     )
@@ -138,9 +137,7 @@ def _registry(kind: str, tmp_path: Path) -> ProviderRegistry:
     image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
         pytest.skip("set ALE_TEST_WINDOWS_IMAGE to an ALE Windows base disk")
-    return provider_registry(
-        QemuProvider(image=image, overlay_dir=tmp_path / "qemu"), kind=ImageKind.VM
-    )
+    return provider_registry(QemuProvider(image=image, overlay_dir=tmp_path / "qemu"))
 
 
 @pytest.mark.asyncio

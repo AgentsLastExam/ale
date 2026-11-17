@@ -22,7 +22,9 @@ framework-owned service ports.
 No route off the host is not the same as no way out: the host's own address on the
 bridge answers on every port a host service binds to all interfaces, such as sshd, a
 database, or another run's Gateway. Both backends therefore admit only the episode's own
-Gateway and proxy ports on that address. Docker applies the rule in the sandbox's network
+Gateway and proxy ports on that address, sealed or not; a sealed sandbox reaches nothing
+else, and one whose egress is open for a framework phase reaches the Host's other addresses
+as it reaches any other host. Docker applies the rule in the sandbox's network
 namespace from a short-lived helper container holding `NET_ADMIN`, a capability a runc
 sandbox never has, so not even root inside it can lift the rule; provisioning fails
 if the rule cannot be applied. QEMU drops forwarded guest traffic in the runner while the
@@ -31,13 +33,16 @@ no firewall of its own: enforcement lives where the agent cannot reach it, and t
 framework's `open_egress` for setup and verification is not undone by rules inside the
 guest.
 
-A Docker sandbox in a Kata microVM is outside the reach of netfilter rules and of networks
-attached after it boots, so the same helper confines it with tc filters on the frames
-between the VM and its veth: they seal it on the default bridge and admit only the
-episode's ports on the Host's address. Such a sandbox holds `NET_ADMIN` inside its VM, so
-the framework can remove its default route while it is sealed and blocked traffic fails at
-once as on runc; the filters stay outside the VM, where that capability does not reach
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers)).
+A Docker sandbox whose runtime keeps a network stack of its own, a Kata microVM's kernel or
+gVisor's netstack, is outside the reach of the namespace's netfilter and of networks
+attached after it boots, so the same helper confines it with tc filters on the frames it
+exchanges through its namespace: they seal it on a network of its own and admit only the
+episode's ports on the Host's address, and only from the sandbox's own addresses, since
+root in such a sandbox may write any frame. The filters are the boundary, outside the
+sandbox; what the framework sets inside it only makes blocked traffic fail at once, and
+root in the sandbox that undoes it slows its own failures and still reaches nothing
+([Kata](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers),
+[gVisor](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-gvisor)).
 
 This is why the address is read from the network rather than assumed: Docker's
 `host-gateway` alias does not work on an internal bridge, and a wrong assumption here
@@ -285,13 +290,15 @@ a Judge failure according to its own scoring policy.
 
 ## 7. A result carries what produced it
 
-`RunLock` records the explicit Task name, complete
-Task-folder source digest, source and commit when available, exact locally built image
-content, concrete Provider and container runtime, requested and effective resources, GPU
-allocation and sandbox observations, agent version and integrity, harness family, one
-optional Task-asset repository/path/commit/dirty observation, the name and value source of
-each Task variable, verification topology and image/resources, sandbox lifecycle outcomes,
-config hash, seed, and the engine's own commit.
+`RunLock` records the explicit Task name, complete Task-folder source digest, source and
+commit when available, exact locally built image content, for the solver and a separate
+verifier the Provider selected and the leaf that started the Sandbox with its container
+runtime, requested and effective resources, GPU allocation and sandbox observations, agent
+version and integrity, harness family, one optional Task-asset repository/path/commit/dirty
+observation, the name and value source of each Task variable, verification topology and
+image/resources, sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
+Leaves of one kind isolate a Task differently and give it different kernel features, so a
+result names the one that ran it, under a scheduler too.
 
 A reportable result is one that can be published, such as on a leaderboard, because it can
 be reproduced exactly. Its Task must be committed in a git repository with no uncommitted
@@ -377,11 +384,17 @@ are reviewed content, not untrusted input; the identity model protects a result 
 aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host Gateway; a
 malicious verifier can only spend its episode's Judge session while that episode runs.
 
-**Container escape.** A container sandbox uses Docker's default isolation. A kernel
-exploit reaches the host. Use the VM backend, or Docker's Kata runtime, whose sandboxes each
-have a kernel of their own, for stronger isolation, and still do not put anything on that
-host you would mind losing. On Daytona, Daytona itself sees everything in the sandbox and
-in the image pushed to its registry.
+**Container escape.** A container Sandbox on a leaf that shares the Host's kernel with it
+has a container's isolation, and a kernel exploit reaches the Host. A leaf whose Sandboxes
+each have a kernel of their own, a VM's or one in user space, puts that kernel between an
+exploit and the Host's, so listing such leaves first in `sandbox.providers`, or only them,
+keeps Tasks off the Host's kernel; still put nothing on that Host you would mind losing.
+Which leaf gives which kernel, and how a GPU reaches each, is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles).
+Each [container feature](task-authoring.md#container-features) a Task names exposes more of
+the kernel its Sandbox runs on; no Provider widens a Sandbox for a feature it did not
+name. On Daytona, Daytona itself sees everything in the sandbox and in the image pushed
+to its registry.
 
 **Traffic analysis, or what is said over an allowlisted tunnel.** Once `CONNECT`
 succeeds the tunnel is opaque by design — the point is to reach a declared host, not to
@@ -393,7 +406,7 @@ content. A Transport Trace proves routing and accounting; it is not a content po
 
 **A compromised image.** The exact locally built Task-image content is recorded in
 provenance, so a change is *detectable*. Nothing verifies that its base or authored
-Dockerfile was benign to begin with.
+build was benign to begin with.
 
 **Processes the agent leaves running.** ALE does not stop processes the agent started,
 because a Task may ask the agent to deploy a service that verification then checks. In
@@ -403,9 +416,14 @@ strict boundary uses separate verification, which restores only the declared art
 a fresh Sandbox.
 
 **Resource exhaustion by a co-tenant.** CPU, memory, writable storage, and ALE-managed
-physical GPUs are admitted per sandbox or rejected. Network bandwidth and resources
-consumed by processes outside ALE are not reserved; concurrent workloads can still starve
-each other.
+physical GPUs, whole or by device memory, are admitted per sandbox or rejected. Network
+bandwidth and resources consumed by processes outside ALE are not reserved; concurrent
+workloads can still starve each other. On a GPU that Sandboxes share, one can take another's
+device memory: where nothing limits it, for the seconds until its Provider's watchdog kills
+the process while a Run holds the Sandbox, and for as long as it likes once the Sandbox is
+kept after its Run, since nothing watches it then; and, under any runtime, through managed
+memory, which neither gVisor's limit nor any process's row in `nvidia-smi`, and so no
+watchdog, sees.
 
 **Side channels between concurrent episodes.** Sandboxes are separate containers on
 separate bridges, but they share a kernel, a page cache and a clock.

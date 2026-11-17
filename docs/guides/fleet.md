@@ -36,13 +36,28 @@ uv run ale-fleet node --control-plane http://CONTROL:7470 --address http://NODE:
 `--address` is where every Run's machine reaches this agent. The control plane connects back
 to it before it counts the Node and refuses one it cannot reach there, which stops the agent
 with the reason; a loopback address is refused unless the control plane listens on loopback
-itself. The agent lends every Provider whose preflight passes (`--provider docker --provider
-qemu` names them, and then each must pass) and offers the machine's CPUs and memory less
-`--reserve-cpus` and `--reserve-memory-mb`. It prepares the images it serves itself, as a
-local Run would, so it pulls bases from GHCR and builds Task images with the machine's own
-Docker and KVM. Its images, the build contexts Runs send and its upload scratch space live
-under `$ALE_CACHE_DIR`, which belongs on local SSD for the same reason as
+itself. The agent offers the machine's CPUs and memory less `--reserve-cpus` and
+`--reserve-memory-mb`. It prepares the images it serves itself, as a local Run would, so it
+pulls bases from GHCR and builds Task images with the machine's own Docker and KVM. Its
+images, the build contexts Runs send and its upload scratch space live under
+`$ALE_CACHE_DIR`, which belongs on local SSD for the same reason as
 [VM overlays](../../packages/ale-run/src/ale/run/providers/README.md#qemu).
+
+The agent lends each of `docker:runc`, `qemu` and `orchard` whose preflight passes.
+`--provider` names the leaves to lend instead, by provider id, most preferred first, and
+then each must pass: `docker:runc`, `docker:kata`, `docker:gvisor`, `qemu` or `orchard`.
+Placement takes a Node's first leaf that serves a Sandbox, so this Node keeps Kata for the
+Tasks that need a container feature runc lacks:
+
+```bash
+uv run ale-fleet node --control-plane http://CONTROL:7470 --address http://NODE:7471 \
+  --provider docker:runc --provider docker:kata --provider qemu
+```
+
+Its Docker leaves take the settings a Run's `[sandbox.docker]` gives a local Run's:
+`--gpu INDEX` (repeat) names the Host GPUs they may lease, all of them by default, and
+`--gpu-memory-margin-mb` the memory a GPU must keep free beyond a shared Sandbox's
+`gpu_memory_mb` ([GPU memory](../../packages/ale-run/src/ale/run/providers/README.md#gpu-memory)).
 
 Stopping the agent destroys every Sandbox it holds, apart from retained ones. If the agent
 crashes instead, start it again with the same options: it drives again the Sandboxes whose
@@ -112,30 +127,36 @@ once more, since only then can sudo ask for the password.
 
 ## Run on the Fleet
 
-Select the Fleet for the image kinds it should serve, in a run configuration or with
-`--set`:
+Name the Fleet in the Run's Providers with its control plane, in a run configuration or with
+`--set`. With the Fleet alone, every Sandbox runs there, on a Node whose leaves serve it
+([Provider selection](../specs/sandbox-image.md#provider-selection)):
 
 ```toml
-[container]
-provider = "fleet"
+[sandbox]
+providers = ["fleet"]
 
-[vm]
-provider = "fleet"
-
-[fleet]
+[sandbox.fleet]
 url = "http://CONTROL:7470"
 ```
 
 ```bash
-uv run ale run TASK --agent claude-code --set container.provider=fleet --set fleet.url=http://CONTROL:7470
+uv run ale run TASK --agent claude-code --set 'sandbox.providers=["fleet"]' \
+  --set sandbox.fleet.url=http://CONTROL:7470
 ```
 
+`["docker:runc", "fleet"]` keeps on this machine what its Docker serves and sends the rest,
+such as VMs and Tasks that need a container feature runc lacks, to the Fleet. A Sandbox no
+registered Node's leaves serve refuses the Run before anything starts.
+
 The Run prepares no image itself: each Node prepares the images it runs, so the Run's
-machine needs neither Docker nor KVM for the kinds it sends to the Fleet. It sends a Node a
-Task's build context the first time a Sandbox there needs the image. Its Gateway stays on
-its own machine; Nodes reach it through the tunnel the Run opens to each, so the Run's
-machine accepts no connection from them. A Node the Run cannot reach is refused back to the
-control plane, and the Run uses it no more.
+machine needs neither a Docker daemon nor KVM for the kinds it sends to the Fleet. A Linux
+Task that names its image by a registry reference alone needs the Docker CLI with Buildx
+there, with `docker login` for a private registry, because the Run reads the image's
+manifest to learn whether it is a container or a VM. It sends a Node a Task's build context
+the first time a Sandbox there needs the image. Its Gateway stays on its own machine; Nodes
+reach it through the tunnel the Run opens to each, so the Run's machine accepts no
+connection from them. A Node the Run cannot reach is refused back to the control plane, and
+the Run uses it no more.
 
 A Run sends its plan before its first episode and prints the Nodes chosen for each image;
 its first Sandboxes go there, and those Nodes prepare the image. Progress appears on the
@@ -143,8 +164,8 @@ control plane as episodes start and end.
 
 `sandbox_retention` works as it does locally. A kept Sandbox stays on its Node and keeps
 its resources reserved there. A snapshot stays on the Node that saved it, and Sandboxes that
-boot from it run there. `--continue-from` continues either one, as long as the Fleet is the
-Provider for its image kind. To list or destroy them, name the control plane:
+boot from it run there. `--continue-from` continues either one, as long as the Run selects
+the Fleet for its Task. To list or destroy them, name the control plane:
 
 ```bash
 ALE_FLEET_URL=http://CONTROL:7470 uv run ale sandbox list

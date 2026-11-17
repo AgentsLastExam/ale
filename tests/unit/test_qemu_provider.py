@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from tests.support import FakeQemuImg, write_qcow2
 
+from ale.core.capability import Arch
 from ale.core.errors import (
     GuestUnreachableError,
     ProviderCapabilityError,
@@ -234,19 +235,28 @@ async def test_the_display_announces_the_requested_resolution(
     assert "-global VGA.xres=1366 -global VGA.yres=768" in arguments
 
 
+#: How a build VM's guest is shut down, and how its free space is discarded, by its OS.
+_BUILD_SHUTDOWN = {
+    "windows": (["shutdown.exe", "/s", "/t", "1"],),
+    "linux": (["sync"], ["systemctl", "poweroff", "--no-block"]),
+}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [None, "shutdown", "wait"])
-async def test_a_windows_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdown(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None
+@pytest.mark.parametrize("operating_system", ["windows", "linux"])
+async def test_a_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None, operating_system: str
 ) -> None:
     commands: list[tuple[str, ...]] = []
+    shutdown = list(_BUILD_SHUTDOWN[operating_system])
 
     class Client:
         closed = False
 
         async def exec(self, argv: list[str], **_kwargs: object) -> tuple[int, str, str, bool]:
-            assert argv == ["shutdown.exe", "/s", "/t", "1"]
-            return int(failure == "shutdown"), "", "shutdown result", False
+            assert argv == shutdown.pop(0)
+            return int(failure == "shutdown" and not shutdown), "", "shutdown result", False
 
         async def close(self) -> None:
             self.closed = True
@@ -265,7 +275,7 @@ async def test_a_windows_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdo
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox._client = client  # type: ignore[assignment]
     sandbox._file_client = Client()  # type: ignore[assignment]
-    sandbox.request = request(os="windows")
+    sandbox.request = request(os=operating_system)
     sandbox.container = "ale-qemu-build"
     sandbox.storage = tmp_path / "storage"
     base = write_qcow2(tmp_path / "vm-builds/base.qcow2", data=b"windows")
@@ -284,12 +294,23 @@ async def test_a_windows_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdo
         return
 
     identity = await sandbox.save_image(destination)
-    assert sandbox._file_client.closed
+    assert sandbox._file_client.closed and shutdown == []
     wait, discard = commands
     assert wait == ("docker", "wait", "ale-qemu-build")
-    # The VM builder discards free clusters, with the overlay writable and its base not.
+    # The VM builder discards free space, with the overlay writable and its base not: NTFS
+    # by its own bitmap, any Linux filesystem by trimming it.
     assert discard[:2] == ("docker", "run") and MATERIALIZER_IMAGE in discard
-    assert discard[-2:] == ("/ale/ntfs_discard.py", str(overlay.resolve()))
+    assert discard[-2:] == (
+        "/ale/ntfs_discard.py" if operating_system == "windows" else "qcow2",
+        str(overlay.resolve()),
+    )
+    if operating_system == "linux":
+        entrypoint = discard.index("--entrypoint")
+        assert discard[entrypoint + 1 : entrypoint + 4] == (
+            "virt-sparsify",
+            MATERIALIZER_IMAGE,
+            "--in-place",
+        )
     assert f"type=bind,src={overlay.resolve()},dst={overlay.resolve()}" in discard
     assert f"type=bind,src={base.resolve()},dst={base.resolve()},readonly" in discard
     # Not flattened: the overlay itself, naming its base relative to itself.
@@ -730,6 +751,7 @@ async def test_qemu_retained_solver_can_be_reattached(
         sudo=False,
         network_mode=NetworkMode.BLOCK,
         provider="qemu",
+        leaf="qemu",
     )
     image = ResolvedImage(
         kind="vm",
@@ -828,7 +850,12 @@ class _LeftRunning:
         monkeypatch.setattr("ale.run.providers.runner.GuestClient", lambda _: self.client)
         monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
         self.allocation = ResourceAllocation(
-            cpus=2, memory_mb=2048, sudo=False, network_mode=NetworkMode.BLOCK, provider="qemu"
+            cpus=2,
+            memory_mb=2048,
+            sudo=False,
+            network_mode=NetworkMode.BLOCK,
+            provider="qemu",
+            leaf="qemu",
         )
         self.image = ResolvedImage(
             kind="vm", prepared_identity=DIGEST, observed_identity=DIGEST, observed_ref=str(base)
@@ -1168,32 +1195,43 @@ async def test_vm_reference_uses_provider_acquisition_and_wrong_kind_is_refused(
         )
 
 
-class TestCapabilities:
+class TestProfiles:
     @pytest.mark.asyncio
     async def test_macos_is_rejected_before_vm_creation(self) -> None:
-        with pytest.raises(ProviderCapabilityError, match="macos unsupported"):
+        with pytest.raises(ProviderCapabilityError, match="runs linux, not macos"):
             await QemuProvider().create(request(os="macos"))
 
-    def test_allowlist_is_offered(self) -> None:
+    async def test_allowlist_is_offered(self) -> None:
         provider = QemuProvider()
-        assert NetworkMode.ALLOWLIST in provider.capabilities().network_modes
-        provider.accepts(
+        assert all(NetworkMode.ALLOWLIST in p.network_modes for p in await provider.profiles())
+        await provider.accepts(
             request(
                 network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",))
             )
         )
 
-    def test_block_and_open_are_offered(self) -> None:
-        modes = QemuProvider().capabilities().network_modes
-        assert {NetworkMode.BLOCK, NetworkMode.OPEN} <= modes
+    async def test_linux_and_windows_vms_are_offered_with_every_network_mode(self) -> None:
+        profiles = await QemuProvider().profiles()
+        assert [(p.kind, p.os, p.arch) for p in profiles] == [
+            (ImageKind.VM, OperatingSystem.LINUX, Arch.X86_64),
+            (ImageKind.VM, OperatingSystem.WINDOWS, Arch.X86_64),
+        ]
+        assert all(p.network_modes == frozenset(NetworkMode) for p in profiles)
+        assert not any(p.container_features for p in profiles)
 
-    def test_a_desktop_is_not_something_admission_asks_about(self) -> None:
+    async def test_gpus_are_offered_only_with_a_vfio_pool(self) -> None:
+        gpu = request(resources=Resources(gpus=1))
+        with pytest.raises(ProviderCapabilityError, match="attaches no GPUs"):
+            await QemuProvider().accepts(gpu)
+        await QemuProvider(gpu_devices=("0000:65:00.0",)).accepts(gpu)
+
+    async def test_a_desktop_is_not_something_admission_asks_about(self) -> None:
         """Whether a screen exists belongs to the image, and is answered by asking for one.
 
         Nothing in the request describes it, so nothing here can refuse on it. An agent
         that asks a screenless sandbox for a screenshot is told so by the screenshot.
         """
-        QemuProvider().accepts(request())
+        await QemuProvider().accepts(request())
 
 
 class TestGatewayAddressing:
@@ -1333,6 +1371,7 @@ def _allocation(*, desktop: bool = False) -> ResourceAllocation:
         sudo=False,
         network_mode=NetworkMode.ALLOWLIST,
         provider="qemu",
+        leaf="qemu",
         desktop_resolution=DesktopResolution() if desktop else None,
     )
 

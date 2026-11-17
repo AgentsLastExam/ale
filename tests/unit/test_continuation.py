@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from tests.support import edit_task_config
 from tests.unit.test_runtime_contracts import DIGEST, make_lock
 
 from ale.core.config import RunConfig, SandboxRetentionConfig
@@ -34,7 +35,7 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.core.verdict import Status
-from ale.run.cli.tasks import _continuation
+from ale.run.cli.tasks import _continuation, _continued, _prepare_images
 from ale.run.episode import _Lease
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.protocol.episode_protocol import (
@@ -94,7 +95,12 @@ async def test_an_adopted_sandbox_follows_this_episodes_retention() -> None:
         attached.append(request)
         return sandbox
 
-    lease = _Lease(SimpleNamespace(), SandboxRetentionConfig(solver="destroy"))  # type: ignore[arg-type]
+    qemu = SimpleNamespace(name="qemu")
+    lease = _Lease(
+        SimpleNamespace(get=lambda _: qemu),  # type: ignore[arg-type]
+        SandboxRetentionConfig(solver="destroy"),
+        solver="qemu",
+    )
     assert await lease.adopt(_request(), attach) is sandbox
     assert attached[0].retention == "destroy"
     await lease.finalize()
@@ -107,7 +113,7 @@ async def test_a_refused_attachment_leaves_nothing_to_reap() -> None:
     async def attach(request: SandboxRequest) -> Any:
         raise ProviderCapabilityError("refused")
 
-    lease = _Lease(SimpleNamespace(), SandboxRetentionConfig(solver="keep"))  # type: ignore[arg-type]
+    lease = _Lease(SimpleNamespace(), SandboxRetentionConfig(solver="keep"), solver="qemu")  # type: ignore[arg-type]
     with pytest.raises(ProviderCapabilityError):
         await lease.adopt(_request(), attach)
     await lease.finalize()
@@ -125,12 +131,17 @@ def _retained(handle: str) -> RetainedSandbox:
     )
 
 
-async def _snapshotting_lease(sandbox: SimpleNamespace, providers: object = None) -> _Lease:
+async def _snapshotting_lease(sandbox: SimpleNamespace, provider: object = None) -> _Lease:
     async def attach(request: SandboxRequest) -> Any:
         sandbox.request = request
         return sandbox
 
-    lease = _Lease(providers or SimpleNamespace(), SandboxRetentionConfig(solver="snapshot"))  # type: ignore[arg-type]
+    provider = provider or SimpleNamespace(name="qemu")
+    lease = _Lease(
+        SimpleNamespace(get=lambda _: provider),  # type: ignore[arg-type]
+        SandboxRetentionConfig(solver="snapshot"),
+        solver="qemu",
+    )
     await lease.adopt(_request(), attach)
     lease.mark_sanitized(sandbox, succeeded=True)  # type: ignore[arg-type]
     return lease
@@ -171,8 +182,9 @@ async def test_a_failed_snapshot_destroys_the_solver_and_says_why() -> None:
 async def test_undoing_a_snapshot_removes_it() -> None:
     sandbox = _kept()
     sandbox.snapshot = AsyncMock(return_value=_retained("docker:snapshot:kept"))
-    provider = SimpleNamespace(destroy_retained=AsyncMock())
-    lease = await _snapshotting_lease(sandbox, SimpleNamespace(get=lambda kind, _: provider))
+    # Removed by the Provider that made it, whatever this Run would select now.
+    provider = SimpleNamespace(name="qemu", destroy_retained=AsyncMock())
+    lease = await _snapshotting_lease(sandbox, provider)
     await lease.finalize()
     await lease.destroy_retained()
     provider.destroy_retained.assert_awaited_once_with("docker:snapshot:kept")
@@ -194,6 +206,7 @@ def test_a_shared_sandbox_follows_the_solvers_retention_first(
     lease = _Lease(
         SimpleNamespace(),  # type: ignore[arg-type]
         SandboxRetentionConfig(solver=solver, verifier=verifier),  # type: ignore[arg-type]
+        solver="docker:runc",
     )
     assert lease._policy(_request(SandboxRole.SHARED)) == (("solver", "verifier"), policy)
 
@@ -500,6 +513,7 @@ def test_an_unfound_boundary_keeps_the_whole_session_and_says_so(earlier: str) -
 def _source(tmp_path: Path, **changes: Any) -> tuple[Path, Any]:
     task = load_tasks(scaffold_task(tmp_path / "continued"))[0]
     task.prepared_image = _request().prepared_image
+    task.provider = "docker:runc"
     lock = make_lock(
         resources=ResourceProvenance(
             requested=task.spec.resources, effective=make_lock().resources.effective
@@ -532,8 +546,11 @@ def _source(tmp_path: Path, **changes: Any) -> tuple[Path, Any]:
 
 
 def continuation(episode: Path, tasks: list[Any], settings: RunConfig, harness: Any) -> Resume:
-    """What continuing ``episode`` resumes, for a Run with this module's Providers."""
-    return _continuation(episode, tasks, settings, harness, PROVIDERS)
+    """What continuing ``episode`` resumes, for a Run with this module's Providers that
+    selected each Task's ``provider``."""
+    continued = _continued(episode, tasks, settings)
+    continued.require_keeper(tasks[0])
+    return _continuation(continued, tasks[0], settings, harness, PROVIDERS)
 
 
 def test_the_earlier_episode_names_its_solver_session_and_trajectory(tmp_path: Path) -> None:
@@ -594,6 +611,20 @@ def test_a_snapshot_continues_in_a_new_solver_with_this_tasks_resources(tmp_path
         ),
         (
             {
+                "lock": {
+                    "resources": make_lock().resources.model_copy(
+                        update={
+                            "effective": make_lock().resources.effective.model_copy(
+                                update={"provider": "docker:kata", "leaf": "docker:kata"}
+                            )
+                        }
+                    )
+                }
+            },
+            "docker:kata kept its solver, and sandbox.providers selects docker:runc",
+        ),
+        (
+            {
                 "record": {
                     "sandboxes": (
                         SandboxOutcome(
@@ -636,6 +667,7 @@ def test_the_fleet_checks_a_continued_sandboxs_image_by_its_key(tmp_path: Path) 
             "resources": lock.resources.model_copy(update={"effective": effective}),
         },
     )
+    task.provider = "fleet"
     harness = SimpleNamespace(name="claude-code", version=lambda: "2.1.170")
     assert continuation(episode, [task], RunConfig(), harness).attach is not None
 
@@ -668,6 +700,48 @@ def test_a_kept_desktop_continues_only_at_the_resolution_it_has(tmp_path: Path) 
         record.model_copy(update={"sandboxes": (snapshot,)}).model_dump_json()
     )
     assert continuation(episode, [task], RunConfig(), harness).attach is None
+
+
+@pytest.mark.asyncio
+async def test_a_continued_solver_is_selected_to_its_keeper_before_anything_is_prepared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A solver booting from a snapshot needs a Provider that boots them, and only the one
+    that kept the snapshot holds it."""
+    snapshot = SandboxOutcome(
+        roles=("solver", "verifier"),
+        requested="snapshot",
+        outcome="snapshotted",
+        provider="docker",
+        handle="docker:snapshot:kept",
+    )
+    episode, task = _source(tmp_path, record={"sandboxes": (snapshot,)})
+    edit_task_config(task.folder.root, {"environment": {"memory_mb": 2048}})
+    (task,) = load_tasks(task.folder.root)
+    prepared: list[str] = []
+
+    async def prepare(task: Any, provider: Any) -> Any:
+        prepared.append(provider.id)
+        raise ProviderCapabilityError("stop after selection")
+
+    monkeypatch.setattr("ale.run.cli.tasks.prepare_task_image_result", prepare)
+    monkeypatch.setattr("ale.run.cli.tasks.observe_task_assets", lambda _task: None)
+    continued = _continued(episode, [task], RunConfig())
+    registry = ProviderRegistry(
+        RunConfig.model_validate({"sandbox": {"providers": ["daytona", "docker:runc"]}})
+    )
+    with pytest.raises(ProviderCapabilityError, match="stop after selection"):
+        await _prepare_images([task], registry, continued)
+    assert prepared == ["docker:runc"]
+    registry = ProviderRegistry(
+        RunConfig.model_validate({"sandbox": {"providers": ["docker:kata", "docker:runc"]}})
+    )
+    with pytest.raises(
+        TaskDefinitionError,
+        match=r"docker:runc kept its solver, and sandbox\.providers selects docker:kata",
+    ):
+        await _prepare_images([task], registry, continued)
+    assert prepared == ["docker:runc"]
 
 
 def test_only_one_episode_of_one_task_continues(tmp_path: Path) -> None:

@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.taskspec import ImageKind
 from ale.core.verdict import Status
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
@@ -38,7 +37,7 @@ async def test_windows_framework_copies_protected_artifacts_and_verifies_as_admi
             ],
             "environment": {
                 "os": "windows",
-                "vm_image": "local/windows-privileges",
+                "image": "local/windows-privileges",
                 "cpus": 2,
                 "memory_mb": 8192,
             },
@@ -96,9 +95,7 @@ Set-Content C:\Users\user\Documents\kept\scratch.tmp 'left' -NoNewline
     result = await run_episode(
         load_task_folder(task),
         EpisodeProtocol(OracleHarness()),
-        provider_registry(
-            QemuProvider(image=image, overlay_dir=tmp_path / "qemu"), kind=ImageKind.VM
-        ),
+        provider_registry(QemuProvider(image=image, overlay_dir=tmp_path / "qemu")),
         run_dir=tmp_path / "runs",
         collect_artifacts=True,
     )

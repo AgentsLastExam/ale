@@ -175,6 +175,152 @@ async def test_registry_resolution_reports_safe_actionable_errors(monkeypatch, f
     assert "secret" not in str(error.value)
 
 
+_VM_DISK_MANIFEST = {
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "artifactType": "application/vnd.ale.vm-disk.v1",
+    "config": {"mediaType": "application/vnd.oci.empty.v1+json"},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("manifest", "kind"),
+    [
+        (_VM_DISK_MANIFEST, ImageKind.VM),
+        (
+            {"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": []},
+            ImageKind.CONTAINER,
+        ),
+        (
+            {"mediaType": "application/vnd.docker.distribution.manifest.list.v2+json"},
+            ImageKind.CONTAINER,
+        ),
+        # The OCI index's mediaType is only recommended.
+        ({"schemaVersion": 2, "manifests": []}, ImageKind.CONTAINER),
+        (
+            {
+                "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                "config": {"mediaType": "application/vnd.docker.container.image.v1+json"},
+            },
+            ImageKind.CONTAINER,
+        ),
+        (
+            {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {"mediaType": "application/vnd.oci.image.config.v1+json"},
+                "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip"}],
+            },
+            ImageKind.CONTAINER,
+        ),
+    ],
+)
+async def test_an_image_is_classified_by_its_manifest_alone(
+    monkeypatch: pytest.MonkeyPatch, manifest: dict[str, object], kind: ImageKind
+) -> None:
+    from ale.run import images
+
+    calls: list[tuple[str, ...]] = []
+
+    async def run(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        return 0, json.dumps(manifest), ""
+
+    monkeypatch.setattr(images, "_run", run)
+    assert await images.classify_image("ubuntu:24.04") == kind
+    assert calls == [("docker", "buildx", "imagetools", "inspect", "--raw", "ubuntu:24.04")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "message"),
+    [
+        (
+            (0, json.dumps({**_VM_DISK_MANIFEST, "artifactType": "application/x-other"}), ""),
+            r"neither a container image nor an ALE VM disk \(application/x-other\)",
+        ),
+        (
+            (
+                0,
+                json.dumps(
+                    {
+                        # A Tart VM: an image config, and a VM's config and disk as layers.
+                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "config": {"mediaType": "application/vnd.oci.image.config.v1+json"},
+                        "layers": [
+                            {"mediaType": "application/vnd.cirruslabs.tart.config.v1"},
+                            {"mediaType": "application/vnd.cirruslabs.tart.disk.v2"},
+                        ],
+                    }
+                ),
+                "",
+            ),
+            r"\(application/vnd.cirruslabs.tart.config.v1\)",
+        ),
+        ((0, "not json", ""), "no manifest"),
+        # A tag only the local daemon has, or a registry the Host may not read.
+        ((1, "", "secret-token"), r"docker login.*environment/Dockerfile"),
+    ],
+)
+async def test_an_image_that_is_neither_kind_is_refused_by_its_type(
+    monkeypatch: pytest.MonkeyPatch, answer: tuple[int, str, str], message: str
+) -> None:
+    from ale.run import images
+
+    async def run(*argv: str, **_: object) -> tuple[int, str, str]:
+        return answer
+
+    monkeypatch.setattr(images, "_run", run)
+    with pytest.raises(ProviderStartError, match=message) as error:
+        await images.classify_image("ghcr.io/acme/thing:1")
+    assert "secret" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_image_this_host_holds_is_classified_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ale.run import images
+
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
+    pulled, local = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    calls: list[tuple[str, ...]] = []
+
+    async def finished(disk: Path) -> str | None:
+        expected = tmp_path / "vm-images" / pulled.removeprefix("sha256:") / "disk.qcow2"
+        return pulled if disk == expected else None
+
+    async def run(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        held = argv[:3] == ("docker", "image", "inspect") and argv[-1].endswith(local)
+        return (0, local, "") if held else (1, "", "")
+
+    monkeypatch.setattr(images, "finished_layer", finished)
+    monkeypatch.setattr(images, "_run", run)
+    assert await images.classify_image(f"ghcr.io/acme/vm@{pulled}") is ImageKind.VM
+    assert calls == []
+    assert await images.classify_image(f"ghcr.io/acme/tool@{local}") is ImageKind.CONTAINER
+    assert all(call[:3] != ("docker", "buildx", "imagetools") for call in calls)
+    with pytest.raises(ProviderStartError, match="could not read the manifest"):
+        await images.classify_image("ghcr.io/acme/tool@sha256:" + "c" * 64)
+    assert calls[-1][:3] == ("docker", "buildx", "imagetools")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reference", ["ghcr.io/acme/tool:1", "ghcr.io/acme/tool@sha256:" + "c" * 64]
+)
+async def test_classifying_without_the_docker_cli_says_what_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reference: str
+) -> None:
+    from ale.run import images
+
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    with pytest.raises(ProviderStartError, match="requires Docker CLI with Buildx"):
+        await images.classify_image(reference)
+
+
 def _disk(path: Path, identity: str) -> PreparedTaskImage:
     return PreparedTaskImage(
         kind="vm",

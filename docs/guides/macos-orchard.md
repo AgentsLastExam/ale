@@ -49,10 +49,11 @@ that setting stays after cleanup
 
 ## Choose an image
 
-Name any Tart OCI image in `task.toml`, by tag or SHA-256 digest:
+Name any Tart OCI image in `task.toml` as `[environment].image`, by SHA-256 digest or by a
+tag that does not move (`ale lint` reports `latest`):
 
 ```toml
-schema_version = "1.4+ale.1"
+schema_version = "0.2.0"
 artifacts = ["/Users/admin/output"]
 
 [task]
@@ -60,7 +61,7 @@ name = "acme/macos-example"
 
 [environment]
 os = "macos"
-vm_image = "ghcr.io/cirruslabs/macos-tahoe-base:latest"
+image = "ghcr.io/cirruslabs/macos-tahoe-base@sha256:4aaa751fa7538902d73c767f27a066fc87e83f183069da4e4b5022863abd4c77"
 cpus = 2
 memory_mb = 4096
 
@@ -86,7 +87,7 @@ The image needs:
   done, so no Setup Assistant appears;
 - FileVault off, so its disk can be framed;
 - the applications and licenses the Task uses, with no preexisting model credentials.
-  To install them on a stock image instead, name it as `vm_base` and add
+  To install them on a stock image instead, name it the same way and add
   `environment/build.sh`, which ALE runs once as root in a VM of the base framed for
   `admin`, so the base must sign `admin` in, and keeps; the result is framed for the
   Task's account when a sandbox first uses it, so the build may create that account
@@ -129,9 +130,9 @@ uv run ale prepare /absolute/path/to/task
 uv run ale run /absolute/path/to/task --agent oracle
 ```
 
-`prepare` resolves tags, records image identity and, for a Task with `vm_base`, builds its
-image; the oracle run frames the image if needed, creates a VM and exercises setup, output
-collection and verification.
+`prepare` resolves tags, records image identity and, for a Task with `environment/build.sh`,
+builds its image; the oracle run frames the image if needed, creates a VM and exercises
+setup, output collection and verification.
 
 For Provider conformance tests, run
 `ALE_TEST_ORCHARD=1 uv run pytest tests/conformance/test_provider_orchard.py`. The suite

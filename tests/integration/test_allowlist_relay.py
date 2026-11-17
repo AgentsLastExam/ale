@@ -11,15 +11,13 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import RunConfig
 from ale.core.sandbox import Identity, ImageRef, PreparedTaskImage, Provider, SandboxRequest
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.session import GatewaySession, SessionRegistry
-from ale.run.providers import ProviderRegistry
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.qemu import QemuProvider
-from ale.run.task_images import prepare_task_image
+from ale.run.task_images import prepare_task_image, resolve_image_kinds
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import CONTAINER_BASE, VM_BASE, VM_RESOURCES, prepare_reference
 
@@ -136,10 +134,13 @@ async def test_a_sealed_container_desktop_names_the_relay_in_its_gnome_settings(
 async def test_a_sealed_vm_desktop_names_the_relay_in_its_gnome_settings(
     tmp_path: Path, write_repo: Callable[..., Path], docker_buildx: None
 ) -> None:
-    task = write_repo(tmp_path / "repo", config={"environment": {"vm": True}})
-    (task / "environment" / "Dockerfile").write_text(f"FROM {VM_BASE}\n")
-    image = await prepare_task_image(load_tasks(task)[0], ProviderRegistry(RunConfig()))
+    task = write_repo(
+        tmp_path / "repo", config={"environment": {"image": VM_BASE}}, dockerfile=None
+    )
+    tasks = load_tasks(task)
+    await resolve_image_kinds(tasks)
     provider = QemuProvider(overlay_dir=tmp_path / "overlays")
+    image = await prepare_task_image(tasks[0], provider)
     await _check_linux_desktop(provider, image, Resources(**VM_RESOURCES), "172.30.0.1")
 
 

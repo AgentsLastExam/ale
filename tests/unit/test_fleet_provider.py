@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import dataclasses
 import hashlib
+import logging
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -12,27 +15,37 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientSession
 from aiohttp.test_utils import TestServer, unused_port
-from tests.support import MemoryProvider
+from tests.support import MemoryProvider, edit_task_config
 
 from ale.core.config import RunConfig
 from ale.core.errors import (
     AleError,
+    ConfigError,
     GuestUnreachableError,
     ProviderCapabilityError,
+    ProviderCapacityError,
     ProviderStartError,
     TaskDefinitionError,
 )
 from ale.core.fleet import ImageInputs, RunPlan, SandboxStatus
 from ale.core.sandbox import Identity, ImageRef, PreparedTaskImage, Sandbox, SandboxRequest
-from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from ale.core.taskspec import (
+    ContainerFeature,
+    ImageKind,
+    NetworkMode,
+    NetworkPolicy,
+    OperatingSystem,
+    Resources,
+)
+from ale.core.trace import ExecutionLog
 from ale.fleet import images as images_module
-from ale.fleet import node as node_module
 from ale.fleet.control import ControlPlane
 from ale.fleet.node import NodeAgent, NodeSettings, probe
 from ale.fleet.server import control_app
 from ale.fleet.store import Store
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.fleet.provider import FleetClient, FleetProvider, FleetSandbox, _Unreachable
+from ale.run.recording import execution_logging
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import ImagePreparationResult, prepare_task_image_result
 from ale.run.tasksets.manifest import load_task_folder
@@ -41,11 +54,6 @@ pytestmark = pytest.mark.unit
 
 TOKEN = "fleet-token"
 REFERENCE = ImageRef(kind=ImageKind.CONTAINER, reference="example.org/task@sha256:" + "1" * 64)
-
-
-@pytest.fixture(autouse=True)
-def memory_kind(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(node_module.KINDS, "memory", (ImageKind.CONTAINER, None))
 
 
 class Fleet:
@@ -76,6 +84,7 @@ class Fleet:
         port: int | None = None,
         restart: bool = False,
         saves_snapshots: bool = False,
+        container_features: frozenset[ContainerFeature] = frozenset(),
     ) -> NodeAgent:
         """A node agent on a new Node, or, with ``restart``, the next agent on one whose
         agent crashed: same port, state and Provider."""
@@ -95,7 +104,9 @@ class Fleet:
         provider = (
             self.providers[name]
             if restart
-            else MemoryProvider("memory", saves_snapshots=saves_snapshots)
+            else MemoryProvider(
+                "memory", saves_snapshots=saves_snapshots, container_features=container_features
+            )
         )
         declaration, providers = await probe(settings, make=lambda _name: provider)
         resources = declaration.resources.model_copy(update={"cpus": cpus})
@@ -125,6 +136,14 @@ class Fleet:
             await server.close()
         if self._session is not None:
             await self._session.close()
+
+
+@pytest.fixture(autouse=True)
+def memory_leaves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Nodes here lend memory leaves, whose rules the FleetProvider asks of them too."""
+    monkeypatch.setattr(
+        "ale.run.providers.fleet.provider.leaf", lambda provider_id: MemoryProvider(provider_id)
+    )
 
 
 @pytest.fixture
@@ -167,7 +186,56 @@ def request(image: PreparedTaskImage, episode: str = "episode-1", **overrides: o
     return SandboxRequest(**(base | overrides))  # type: ignore[arg-type]
 
 
+class _Trace:
+    """An episode's execution trace, as the episode's logging writes it."""
+
+    def __init__(self) -> None:
+        self.events: list[ExecutionLog] = []
+
+    def append(self, event: object, *, durable: bool = False) -> int:
+        assert isinstance(event, ExecutionLog)
+        self.events.append(event)
+        return len(self.events)
+
+
 class TestProvider:
+    async def test_what_the_nodes_leaf_logs_lands_in_the_runs_trace(
+        self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        """A leaf on a Node logs to the execution trace as a Run's own leaf does, also after
+        a command ended, as the GPU watchdog logs a kill: the Run records each such notice in
+        the phase of the command it was logged for."""
+        await fleet.add_node("node-a")
+        await provider.preflight()
+        sandbox = await provider.create(request(image))
+        inner = fleet.providers["node-a"].sandboxes[0]
+        execution = logging.getLogger("ale.execution")
+        kept: list[contextvars.Context] = []
+        plain = inner.exec
+
+        async def logging_exec(argv, **kwargs):  # type: ignore[no-untyped-def]
+            execution.warning("during %s", argv[1], extra={"ale_data": {"gpu": "GPU-0"}})
+            kept.append(contextvars.copy_context())
+            return await plain(argv, **kwargs)
+
+        inner.exec = logging_exec  # type: ignore[method-assign]
+        trace = _Trace()
+        with execution_logging(trace, episode_id="e1", phase="agent", component="test"):
+            await sandbox.exec(["echo", "solve"])
+        kept[0].run(execution.warning, "after solve")
+        with execution_logging(trace, episode_id="e1", phase="verify", component="test"):
+            await sandbox.exec(["echo", "verify"])
+        kept[1].run(execution.warning, "after verify")
+        await sandbox.destroy()
+        assert [
+            (event.phase, event.level, event.message, event.data) for event in trace.events
+        ] == [
+            ("agent", "warning", "during solve", {"gpu": "GPU-0"}),
+            ("agent", "warning", "after solve", {}),
+            ("verify", "warning", "during verify", {"gpu": "GPU-0"}),
+            ("verify", "warning", "after verify", {}),
+        ]
+
     async def test_a_sandbox_runs_on_a_node_and_behaves_as_a_local_one(
         self,
         fleet: Fleet,
@@ -181,6 +249,7 @@ class TestProvider:
         assert isinstance(sandbox, FleetSandbox)
         assert sandbox.allocation.provider == "fleet"
         assert sandbox.allocation.node == "node-a/memory"
+        assert sandbox.allocation.leaf == "memory"
         inner = fleet.providers["node-a"].sandboxes[0]
         # The Sandbox runs, and records, the image its Node prepared from the reference.
         prepared = fleet.agents["node-a"].images.prepared(image.prepared_identity)
@@ -231,11 +300,50 @@ class TestProvider:
         self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
     ) -> None:
         await fleet.add_node("node-a")
-        with pytest.raises(ProviderCapabilityError, match="no Node offers a container windows"):
+        with pytest.raises(ProviderCapabilityError, match="no Node serves this container windows"):
             await provider.create(request(image, os=OperatingSystem.WINDOWS))
-        with pytest.raises(ProviderCapabilityError, match="that saves snapshots"):
+        with pytest.raises(ProviderCapabilityError, match="saves and boots no snapshots"):
             await provider.create(request(image, retention="snapshot"))
         assert fleet.providers["node-a"].requests == []
+
+    async def test_it_offers_its_nodes_profiles_and_places_by_their_container_features(
+        self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        perf = frozenset({ContainerFeature.PERF})
+        await fleet.add_node("node-a")
+        await fleet.add_node("node-b", container_features=perf)
+        offered = {profile.container_features for profile in await provider.profiles()}
+        assert offered == {frozenset(), perf}
+        resources = Resources(cpus=1, memory_mb=512, container_features=tuple(perf))
+        sandbox = await provider.create(request(image, resources=resources))
+        assert sandbox.allocation.node == "node-b/memory"
+        assert fleet.providers["node-b"].requests[0].resources == resources
+        await sandbox.destroy()
+        fuse = resources.model_copy(update={"container_features": (ContainerFeature.FUSE,)})
+        with pytest.raises(ProviderCapabilityError, match="gives no container features fuse"):
+            await provider.create(request(image, "episode-2", resources=fuse))
+
+    async def test_a_run_selects_the_fleet_by_what_its_registered_nodes_lend(
+        self, fleet: Fleet, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await fleet.add_node("node-a", container_features=frozenset({ContainerFeature.PERF}))
+        monkeypatch.setenv("ALE_FLEET_TOKEN", TOKEN)
+        settings = RunConfig.model_validate(
+            {"sandbox": {"providers": ["docker:runc", "fleet"], "fleet": {"url": fleet.url}}}
+        )
+        tasks = []
+        for name, features in (("plain", []), ("perf", ["perf"]), ("fuse", ["fuse"])):
+            folder = scaffold_task(tmp_path / name)
+            edit_task_config(folder, {"environment": {"container_features": features}})
+            tasks.append(load_task_folder(folder))
+        registry = ProviderRegistry(settings)
+        try:
+            with pytest.raises(ProviderCapabilityError) as refused:
+                await registry.select(tasks)
+            assert [task.provider for task in tasks] == ["docker:runc", "fleet", None]
+            assert "fleet: gives no container features fuse (gives perf)" in str(refused.value)
+        finally:
+            await registry.close()
 
     async def test_only_images_the_fleet_prepares_run_on_it(
         self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
@@ -258,6 +366,29 @@ class TestProvider:
         assert {s.allocation.node for s in sandboxes} == {"node-b/memory"}
         for sandbox in sandboxes:
             await sandbox.destroy()
+
+    async def test_a_node_whose_leaf_has_no_room_now_is_asked_again_later(
+        self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        """A leaf's capacity refusal, such as no headroom on a shared GPU, leaves the Sandbox
+        queued for that Node rather than failing it there for good."""
+        await fleet.add_node("node-a")
+        leaf = fleet.providers["node-a"]
+        create = leaf.create
+        refusals = [ProviderCapacityError("no headroom on GPU 2")]
+
+        async def full_once(wanted: SandboxRequest) -> Sandbox:
+            if refusals:
+                raise refusals.pop()
+            return await create(wanted)
+
+        leaf.create = full_once  # type: ignore[method-assign]
+        fleet.control.timing = dataclasses.replace(fleet.control.timing, full_retry_sec=0.0)
+        sandbox = await provider.create(request(image))
+        assert sandbox.allocation.node == "node-a/memory" and not refusals
+        (record,) = fleet.control.sandboxes.values()
+        assert record.refused == () and "node-a" in record.full
+        await sandbox.destroy()
 
     async def test_a_node_this_run_cannot_reach_takes_none_of_its_sandboxes(
         self,
@@ -380,7 +511,7 @@ class TestProvider:
         )
         contexts: list[tuple[str | None, bool, bool]] = []
 
-        async def prepared(on_node, _providers):  # type: ignore[no-untyped-def]
+        async def prepared(on_node, _provider):  # type: ignore[no-untyped-def]
             environment = on_node.folder.environment_dir
             contexts.append(
                 (
@@ -395,13 +526,13 @@ class TestProvider:
         monkeypatch.setattr(images_module, "prepare_task_image_result", prepared)
         monkeypatch.setenv("ALE_FLEET_TOKEN", TOKEN)
         settings = RunConfig.model_validate(
-            {"container": {"provider": "fleet"}, "fleet": {"url": fleet.url}}
+            {"sandbox": {"providers": ["fleet"], "fleet": {"url": fleet.url}}}
         )
         registry = ProviderRegistry(settings)
         try:
-            stand_in = (await prepare_task_image_result(task, registry)).image
+            provider = registry.get("fleet")
+            stand_in = (await prepare_task_image_result(task, provider)).image
             assert stand_in.runtime_ref == f"fleet:{stand_in.prepared_identity}"
-            provider = registry.get(ImageKind.CONTAINER, OperatingSystem.LINUX)
             sandboxes = await asyncio.gather(
                 *(provider.create(request(stand_in, f"built-{n}")) for n in range(2))
             )
@@ -448,13 +579,13 @@ class TestProvider:
         task = load_task_folder(scaffold_task(tmp_path / "edited"))
         monkeypatch.setenv("ALE_FLEET_TOKEN", TOKEN)
         settings = RunConfig.model_validate(
-            {"container": {"provider": "fleet"}, "fleet": {"url": fleet.url}}
+            {"sandbox": {"providers": ["fleet"], "fleet": {"url": fleet.url}}}
         )
         registry = ProviderRegistry(settings)
         try:
-            stand_in = (await prepare_task_image_result(task, registry)).image
+            provider = registry.get("fleet")
+            stand_in = (await prepare_task_image_result(task, provider)).image
             (task.folder.environment_dir / "Dockerfile").write_text("FROM busybox\n")
-            provider = registry.get(ImageKind.CONTAINER, OperatingSystem.LINUX)
             with pytest.raises(TaskDefinitionError, match="changed since this Run started"):
                 await provider.create(request(stand_in))
             assert not agent.images.has_inputs(stand_in.prepared_identity)
@@ -508,8 +639,8 @@ class TestProvider:
 
 class TestImageKeys:
     def key(self, folder: Path) -> str:
-        registry = _fleet_registry()
-        result = asyncio.run(prepare_task_image_result(load_task_folder(folder), registry))
+        provider = _fleet_registry().get("fleet")
+        result = asyncio.run(prepare_task_image_result(load_task_folder(folder), provider))
         return result.image.prepared_identity
 
     def test_a_task_image_is_named_by_its_build_context(
@@ -528,39 +659,30 @@ class TestImageKeys:
 
 def _fleet_registry() -> ProviderRegistry:
     settings = RunConfig.model_validate(
-        {"container": {"provider": "fleet"}, "fleet": {"url": "http://control:7470"}}
+        {"sandbox": {"providers": ["fleet"], "fleet": {"url": "http://control:7470"}}}
     )
     return ProviderRegistry(settings)
 
 
 class TestConfiguration:
-    def test_every_fleet_kind_shares_one_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_the_fleet_is_one_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ALE_FLEET_TOKEN", TOKEN)
-        settings = RunConfig.model_validate(
-            {
-                "container": {"provider": "fleet"},
-                "vm": {"provider": "fleet"},
-                "fleet": {"url": "http://control:7470"},
-            }
-        )
-        registry = ProviderRegistry(settings)
-        container = registry.get(ImageKind.CONTAINER, OperatingSystem.LINUX)
-        windows = registry.get(ImageKind.VM, OperatingSystem.WINDOWS)
-        macos = registry.get(ImageKind.VM, OperatingSystem.MACOS)
-        assert all(isinstance(p, FleetProvider) for p in (container, windows, macos))
-        assert container.client is windows.client is macos.client is registry.fleet  # type: ignore[attr-defined]
+        registry = _fleet_registry()
+        fleet = registry.get("fleet")
+        assert isinstance(fleet, FleetProvider) and fleet.client is registry.fleet
+        assert registry.get("fleet") is fleet
 
     def test_a_fleet_needs_its_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ALE_FLEET_TOKEN", raising=False)
-        settings = RunConfig.model_validate(
-            {"container": {"provider": "fleet"}, "fleet": {"url": "http://control:7470"}}
-        )
         with pytest.raises(ProviderStartError, match="ALE_FLEET_TOKEN"):
-            ProviderRegistry(settings).get(ImageKind.CONTAINER, OperatingSystem.LINUX)
+            _fleet_registry().get("fleet")
 
     def test_a_fleet_needs_its_control_plane(self) -> None:
-        with pytest.raises(ValueError, match=r"fleet\.url"):
-            RunConfig.model_validate({"vm": {"provider": "fleet"}})
+        with pytest.raises(ValueError, match=r"sandbox\.fleet\.url"):
+            RunConfig.model_validate({"sandbox": {"providers": ["fleet"]}})
+        # Reaching a Sandbox the Fleet kept needs it too, whatever the Run selects.
+        with pytest.raises(ConfigError, match=r"sandbox\.fleet\.url"):
+            ProviderRegistry(RunConfig()).get("fleet")
 
 
 def image_episode(sandbox: FleetSandbox) -> str:

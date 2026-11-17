@@ -86,21 +86,20 @@ async def test_the_layer_is_built_on_the_task_image(
             built["context"] = argv[argv.index("--build-context") + 1]
             built["dockerfile"] = (context / "Dockerfile").read_text()
             built["files"] = sorted(path.name for path in context.rglob("*"))
-            built["unit"] = (context / "ale-guestd.service").read_text()
             tag = argv[argv.index("--tag") + 1]
-            identity = framework_identity(user="app", vm=True)
+            identity = framework_identity(user="app", vm=False)
             images[tag] = {"Id": "sha256:" + "2" * 64, "Labels": {LABEL: identity}}
         return 0, "", ""
 
     monkeypatch.setattr(framework, "_inspect", inspect)
     monkeypatch.setattr(framework, "_run", run)
-    layered = await with_framework("task", user="app", vm=True)
+    layered = await with_framework("task", user="app")
     assert layered == "sha256:" + "2" * 64
     dockerfile = built["dockerfile"]
     assert dockerfile.startswith("FROM ale-framework-base:" + "1" * 64)
     assert "COPY guestd/ /opt/ale/guestd/" in dockerfile
     assert "COPY --chmod=0755 cua-driver /usr/local/bin/cua-driver" in dockerfile
-    identity = framework_identity(user="app", vm=True)
+    identity = framework_identity(user="app", vm=False)
     setup = ["/bin/sh", "/opt/ale/setup.sh", "app", identity, "/tmp/python"]
     # The Python is mounted for the setup to install, never copied into the layer twice.
     assert (
@@ -109,11 +108,11 @@ async def test_the_layer_is_built_on_the_task_image(
     assert built["context"] == f"python={pythons / 'linux' / 'python'}"
     assert dockerfile.rstrip().splitlines()[-2] == "USER app"
     assert set(guestd.FILES) <= set(built["files"])
-    assert "Environment=ALE_AGENT_USER=app" in built["unit"]
-    assert f"--tcp 0.0.0.0:{guestd.PORT}" in built["unit"]
+    # A container's guestd is started by its Provider; only a VM disk boots it.
+    assert "ale-guestd.service" not in built["files"]
     # The same layer again is a no-op.
     images["task"] = {**images["task"], "Labels": {}}
-    assert await with_framework("task", user="app", vm=True) == layered
+    assert await with_framework("task", user="app") == layered
 
 
 @pytest.mark.asyncio
@@ -155,7 +154,8 @@ async def test_a_vm_disk_gets_the_same_pieces_offline(
     assert "/framework/ale-guestd.service:/etc/systemd/system/ale-guestd.service" in argv
     assert set(guestd.FILES) <= set(seen["files"])  # type: ignore[arg-type]
     assert "Environment=ALE_AGENT_USER=app" in str(seen["unit"])
-    assert f"ExecStart={guestd.PYTHON['linux']} /opt/ale/guestd/main.py" in str(seen["unit"])
+    assert f"ExecStart={guestd.PYTHON['linux']} -I /opt/ale/guestd/main.py" in str(seen["unit"])
+    assert "WorkingDirectory=/\n" in str(seen["unit"])
 
 
 @pytest.mark.asyncio

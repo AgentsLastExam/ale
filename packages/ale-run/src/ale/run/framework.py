@@ -1,8 +1,8 @@
 """What the engine adds to every Task image.
 
 A Task image is whatever its author built, from any base. What the engine itself needs in
-a sandbox is added here, when the image is prepared. A Linux image gets one more image
-layer:
+a sandbox is added here, when the image is prepared. A Linux container image gets one more
+image layer:
 
 - guestd, the guest service every sandbox operation goes through, under root-only
   ``/opt/ale`` so the agent cannot read the protocol driving its sandbox;
@@ -10,28 +10,26 @@ layer:
   runs on whatever Python the image has, and verification falls back to;
 - Cua Driver at a pinned version, which guestd starts inside the desktop session when the
   image has one;
-- for a VM, the systemd unit that starts guestd at boot;
 - a check that the Task's agent account exists in the image;
 - sudo, installed when the image lacks it, so that any sandbox can be granted elevation.
   The grant is never part of the image: the Provider makes or revokes it at every sandbox
   start (``providers/privileges.py``), so one prepared image serves a Task with and
   without ``[agent].sudo``.
 
-The result is an ordinary image built on the Task image, so Docker runs it and VM
-preparation materializes it. A label records what it was built with, which makes adding
-the same layer twice a no-op.
+The result is an ordinary image built on the Task image, which Docker runs. A label
+records what it was built with, which makes adding the same layer twice a no-op.
 
-A VM disk named by reference or handed straight to the QEMU Provider gets the same pieces
+A Linux VM disk gets the same pieces, and the systemd unit that starts guestd at boot,
 installed offline into an overlay on it, inside the VM builder's own small appliance VM,
 so the disk's programs never run on the Host. Both record what they installed in a marker
 file; a disk that already carries this framework is used as it is.
 
 On Windows the pieces are guestd, Cua Driver and a boot service that starts both in the
 agent's session, which replaces the logon tasks only a running Windows could register
-(``framework_windows.py`` installs them). A Windows Task image's build VM boots an overlay
-on its base that is framed first, so the framework is already there when the Task's own
-image script runs, and the overlay becomes the Task's layer with the framework in it.
-There too elevation is not part of the image; the Host grants it per boot.
+(``framework_windows.py`` installs them). A Linux or Windows Task image's build VM boots an
+overlay on its base that is framed first, so the framework is already there when the
+Task's own image script runs, and the overlay becomes the Task's layer with the framework
+in it. There too elevation is not part of the image; the Host grants it per boot.
 
 A macOS disk is APFS, which only macOS reads, so the Orchard Provider frames a copy of it
 offline on the Mac itself with ``framework_macos.sh``. The pieces are guestd, the
@@ -65,7 +63,7 @@ from ale.core.errors import ProviderStartError, TaskDefinitionError
 from ale.core.ids import content_hash
 from ale.core.sandbox import PreparedTaskImage
 from ale.core.taskspec import OperatingSystem
-from ale.run import ale_image, guestd
+from ale.run import HELPER_RUNTIME, ale_image, guestd
 from ale.run.images import (
     acquire_lock,
     base_layer,
@@ -105,8 +103,8 @@ LABEL = "ale.framework"
 MARKER = "/opt/ale/framework"
 #: The same for a Windows disk, as libguestfs names ``C:\ProgramData\ALE\framework``.
 WINDOWS_MARKER = "/ProgramData/ALE/framework"
-#: The VM builder: it materializes Linux VM OCI content into a qcow2, and its libguestfs
-#: installs the framework into a Linux or Windows qcow2.
+#: The VM builder: its libguestfs installs the framework into a Linux or Windows qcow2 and
+#: discards a build layer's free space. ALE's Linux base disk is made with it as well.
 MATERIALIZER_IMAGE = os.environ.get("ALE_VM_MATERIALIZER", ale_image("ale-vm-materializer"))
 CUA_DRIVER_VERSION = "0.38.0"
 #: python-build-standalone release of the framework's own Python, and its build per guest
@@ -161,7 +159,8 @@ After=network.target
 
 [Service]
 Environment=ALE_AGENT_USER={{user}}
-ExecStart={guestd.PYTHON["linux"]} /opt/ale/guestd/main.py --tcp 0.0.0.0:{guestd.PORT}
+WorkingDirectory=/
+ExecStart={guestd.PYTHON["linux"]} -I /opt/ale/guestd/main.py --tcp 0.0.0.0:{guestd.PORT}
 Restart=always
 RestartSec=1
 
@@ -215,7 +214,8 @@ printf '%s\n' "$identity" > /opt/ale/framework
 
 
 def framework_identity(*, user: str, vm: bool) -> str:
-    """Everything the Linux layer is built from, so a change to any of it rebuilds it."""
+    """Everything the Linux framework is built from, for a container image or, with its boot
+    unit, a VM disk, so a change to any of it rebuilds it."""
     return content_hash(
         {
             "guestd": _guestd_digests(),
@@ -298,13 +298,14 @@ def _guestd_digests() -> dict[str, str]:
     }
 
 
-async def with_framework(image: str, *, user: str, vm: bool = False) -> str:
-    """Return the local identity of ``image`` with the framework layer added.
+async def with_framework(image: str, *, user: str) -> str:
+    """Return the local identity of the container image ``image`` with the framework layer
+    added.
 
     ``image`` is a local image ID or reference. Building is serialized per result, and an
     image that already carries this exact layer is returned unchanged.
     """
-    identity = framework_identity(user=user, vm=vm)
+    identity = framework_identity(user=user, vm=False)
     config = await _inspect(image)
     if (config.get("Labels") or {}).get(LABEL) == identity:
         return config["Id"]
@@ -318,7 +319,7 @@ async def with_framework(image: str, *, user: str, vm: bool = False) -> str:
             built = await _inspect(tag, missing_ok=True)
             if built and (built.get("Labels") or {}).get(LABEL) == identity:
                 return built["Id"]
-            await _build(config, tag, identity, user=user, vm=vm)
+            await _build(config, tag, identity, user=user)
             return (await _inspect(tag))["Id"]
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
@@ -514,7 +515,7 @@ def _explained(stderr: str, stdout: str = "") -> str:
     return " ".join(said) if said else stderr.strip()[-2000:]
 
 
-async def _build(base: dict, tag: str, identity: str, *, user: str, vm: bool) -> None:
+async def _build(base: dict, tag: str, identity: str, *, user: str) -> None:
     driver = await asyncio.to_thread(_cua_driver, "linux")
     python = await asyncio.to_thread(_python, "linux")
     base_tag = f"ale-framework-base:{base['Id'].removeprefix('sha256:')}"
@@ -523,7 +524,7 @@ async def _build(base: dict, tag: str, identity: str, *, user: str, vm: bool) ->
         raise ProviderStartError(f"could not reference the Task image: {stderr.strip()}")
     with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
         context = Path(temporary)
-        _stage(context, driver, user=user, vm=vm)
+        _stage(context, driver, user=user, vm=False)
         lines = [
             f"FROM {base_tag}",
             "USER root",
@@ -531,8 +532,6 @@ async def _build(base: dict, tag: str, identity: str, *, user: str, vm: bool) ->
             "COPY --chmod=0755 cua-driver /usr/local/bin/cua-driver",
             "COPY setup.sh /opt/ale/setup.sh",
         ]
-        if vm:
-            lines.append("COPY ale-guestd.service /etc/systemd/system/ale-guestd.service")
         # Mounted, not copied: a copy would land in the layer once more when setup takes it
         # into /opt/ale/python.
         lines.append(
@@ -709,7 +708,9 @@ async def _in_container(*argv: str, timeout: float) -> tuple[int, str, str]:
     the container running, still writing into files this process has given up."""
     name = f"ale-framework-{uuid.uuid4().hex[:12]}"
     try:
-        return await _run("docker", "run", "--rm", "--name", name, *argv, timeout=timeout)
+        return await _run(
+            "docker", "run", "--rm", *HELPER_RUNTIME, "--name", name, *argv, timeout=timeout
+        )
     except BaseException:
         with contextlib.suppress(Exception):
             await asyncio.shield(_run("docker", "rm", "--force", name, timeout=60))

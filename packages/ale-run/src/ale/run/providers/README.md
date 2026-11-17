@@ -4,15 +4,18 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 
 | Package | Backend | Prepared input |
 |---|---|---|
-| `docker/` | local Docker container, or a Kata microVM per container ([Kata](#docker-on-kata-containers)) | immutable OCI image identity |
-| `qemu/` | QEMU/KVM guest runner | materialized qcow2 identity |
+| `docker/` | local Docker container, a Kata microVM per container ([Kata](#docker-on-kata-containers)), or a container on gVisor ([gVisor](#docker-on-gvisor)) | immutable OCI image identity |
+| `qemu/` | QEMU/KVM guest runner | qcow2 disk, or a chain of [layers](#disk-layers) on one |
 | `firecracker/` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
 | `daytona/` | Daytona cloud container | immutable OCI image identity, pushed by digest |
 | `orchard/` | macOS VM on Orchard/Tart | digest-pinned OCI image, or a local image `build.sh` built |
-| `fleet/` | a Sandbox of any of these on a Fleet Node ([Fleet](../../../../../../docs/specs/fleet.md)) | what the Node's Provider takes; each Node prepares its own images |
+| `fleet/` | a Sandbox of any of these on a Fleet Node ([Fleet](../../../../../../docs/specs/fleet.md)) | what the Node's leaf takes; each Node prepares its own images |
 
 Each package keeps its Provider and Sandbox in `provider.py` and exports both. Beside it,
-`docker/kata.py` builds the tc filters and VM size a sandbox in a Kata microVM needs;
+`docker/kata.py` builds the tc filters and VM size a sandbox in a Kata microVM needs,
+`docker/gvisor.py` the tc filters, netstack chains, size and GPU memory limit of one on
+gVisor, `docker/tc.py` the tc commands both use, and `docker/gpu_sharing.py` decides which
+GPUs a Docker Sandbox takes and watches what a shared one uses;
 `daytona/api.py` is Daytona's REST client and `daytona/image.py` adapts and publishes
 images; `orchard/client.py` drives Orchard and Tart, `orchard/framing.py` frames images
 and `orchard/desktop.py` waits for the desktop; `fleet/tunnel.py` carries a Run's Gateway
@@ -25,13 +28,53 @@ container: the guest service's token and connection, the proxy's variables, and 
 check for a desktop that has drawn nothing yet.
 
 They implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
-preflight, image verification, lifecycle, command/file transport, egress changes,
+profiles, preflight, image verification, lifecycle, command/file transport, egress changes,
 observed identity, resource allocation and optional retention. Harness and episode
 protocol code must use those contracts rather than backend-specific methods.
 
 The normative contracts are
 [`../../../../../../docs/specs/sandbox-image.md`](../../../../../../docs/specs/sandbox-image.md)
 and [`../../../../../../docs/specs/security.md`](../../../../../../docs/specs/security.md).
+
+## Provider ids and profiles
+
+A Run's `sandbox.providers` and a Node's `--provider` name Providers by provider id, and a
+Run gives each Sandbox the first one listed that serves it
+([Provider selection](../../../../../../docs/specs/sandbox-image.md#provider-selection)).
+In `__init__.py`, `leaf()` builds a leaf from its id, `SCHEDULERS` names the schedulers,
+and `ProviderRegistry` builds each Provider of the Run's list when first needed, chooses
+among them (`select`) and checks the chosen leaves on the Host (`preflight`). Each Provider
+states its capability profiles in `profiles()`, compared by `ale.core.capability.unmet`,
+and a leaf the rules no profile can state in `refusals()`, which a scheduler asks of the
+leaves its profiles name:
+
+| Provider id | Starts | GPUs | Snapshots | Container features | Also refuses |
+|---|---|---|---|---|---|
+| `docker:runc` | Linux containers, on the machine's architecture | the Host's NVIDIA GPUs that `sandbox.docker.gpus` allows, by the models and memory nvidia-smi reports, shared by `gpu_memory_mb` and watched ([GPU memory](#gpu-memory)); none without a working nvidia-smi | yes | `raw_sockets` | — |
+| `docker:kata` | Linux containers, on the machine's architecture | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
+| `docker:gvisor` | Linux containers, on the machine's architecture | as `docker:runc`'s, shared under a limit | yes | `user_namespaces`, `fuse`, `mount`, `raw_sockets` | — |
+| `firecracker` | Linux containers on x86-64, up to 32 CPUs | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
+| `qemu` | Linux and Windows VMs on x86-64 | those of its VFIO pool, whole, when it is given one; no Run or Node setting gives it one | yes | none: a VM takes none | — |
+| `orchard` | macOS VMs on arm64 | none | yes | none: a VM takes none | storage that is not whole GiB; an agent account that is root, or `admin` for an agent without `[agent].sudo` |
+| `daytona` (scheduler) | Linux containers on x86-64 | Daytona's, whole | no | `nested_containers`, `fuse`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | memory or storage that is not whole GiB; `gpu_types` naming no Daytona GPU type |
+| `fleet` (scheduler) | what the leaves lent by its registered Nodes that run this engine's framework start, online or not, read once per Run | as those leaves | as those leaves | as those leaves | as those leaves |
+
+Every profile applies `open`, `block` and `allowlist`, apart from Orchard's, which applies
+`block` and `allowlist` only where setup's Softnet is the worker's; a macOS Sandbox refused
+for that names the setup that installs it. A Linux Task's container is x86-64, so a Docker
+leaf on an arm64 machine serves none. A Docker leaf reads its GPUs' models and memory once,
+from nvidia-smi, so a GPU Task goes to the next listed Provider on a Host whose GPUs it does
+not accept or have the memory it needs on each. A Node's profiles are its leaves', each
+limited to the CPUs and memory the Node lends in all. A Node lends Docker under any of its
+runtimes, QEMU and Orchard, but not Firecracker.
+
+`docker:runc` shares the Host's kernel with its Sandboxes, so a kernel exploit in one
+reaches the Host. `docker:kata` and `firecracker` give each Sandbox a VM's kernel and attach
+no GPU, so a GPU Task passes them for the next leaf listed; `docker:gvisor` gives each
+gVisor's kernel in user space and attaches GPUs through nvproxy, gVisor's proxy of the
+NVIDIA driver, whose calls still reach the Host's driver. A Run whose `sandbox.providers`
+leaves `docker:runc` out keeps every container Task on a kernel of its own
+([Security](../../../../../../docs/specs/security.md)).
 
 ## Gateway address
 
@@ -40,7 +83,7 @@ serves it on.
 
 | Provider | Where the fixed port leads |
 |---|---|
-| Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone. Under Kata the helper rewrites the port with tc filters instead ([Kata](#docker-on-kata-containers)) |
+| Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone. Under Kata the helper rewrites the port with tc filters instead ([Kata](#docker-on-kata-containers)); under gVisor the same chain is in the sandbox's own network stack, written by a privileged `docker exec` ([gVisor](#docker-on-gvisor)) |
 | QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
 | Firecracker | As QEMU, from the guest's tap device in the runner |
 | Daytona | `guestd/tunnel.py` listens at 7412 on the sandbox's loopback |
@@ -92,7 +135,7 @@ check, which goes over plain HTTP the proxy does not carry, unless it runs with
 | Docker | `docker stop`, then `docker commit` to `ale-snapshot:<sandbox id>`. The image keeps the container's command and labels, with `ale.retention=snapshot`, `ale.prepared` naming the prepared image, and no GPU label. A container boots from its image ID; `docker rmi` destroys it and fails while a container still uses it |
 | QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay itself becomes `qemu-snapshots/<sandbox id>/disk.qcow2` in the ALE cache, a [layer](#disk-layers) on the disk it booted from, beside `snapshot.json` with its episode, role, OS and prepared image; nothing is copied. When a guest booted from a snapshot is saved as one, its overlay first takes in that snapshot's clusters (`qemu-img rebase` onto the snapshot's parent, which reads only what the snapshot holds), so a snapshot never sits on another one. A VM boots from it through a fresh overlay, once the disk below it is the one it was taken on. It needs every disk below it, so snapshots are destroyed before `vm-builds` is cleared. Destroying it fails while a runner mounts it |
 | Firecracker | The Provider has the guest's init (PID 1) stop every process and unmount the writable disk, so the disk needs no journal replay, and waits for the runner to exit. The writable disk then becomes one more read-only layer: `firecracker-snapshots/<sandbox id>/` in the ALE cache holds the root disk, any layers under it and a sparse copy of the new one, hard-linked where the filesystem allows, so it outlives the disk cache without copying it, beside `snapshot.json` with its episode, role, OS, prepared image and digest. A microVM boots from it with the layers stacked under a fresh writable disk, eight at most, since Firecracker's devices are few. Destroying it fails while a runner mounts it |
-| Daytona | None: snapshots count against an organization quota shared with other tools, so `accepts` refuses them |
+| Daytona | None: snapshots count against an organization quota shared with other tools, so its profile saves none |
 | Orchard | The guest shuts down from inside, as for a framed or `build.sh` image; `tart clone` then keeps the stopped VM's disk as the local image `ale-snapshot-<id>`, which copies no data on APFS. A VM boots from its clone at the desktop's resolution, made on first use as for a framed image. Destroying it deletes those clones and then the image, and fails while a VM booted from it remains, since driving that VM again after a crash reads the snapshot's record |
 | Fleet | The Node's Provider saves it on that Node, as in its row, and Sandboxes that boot from it are placed there. The Fleet's handle for it is `fleet:snapshot:<sandbox>`; destroying it has the Node's Provider destroy it at the Node's next heartbeat |
 
@@ -103,7 +146,7 @@ same machine, such as a restarted Fleet node agent, drives it again or destroys 
 
 | Provider | How `reattach` and `discard` find a Sandbox by its handle |
 |---|---|
-| Docker | `docker:<container>`: `docker inspect` finds the container, whose labels must name it ALE's, and it must be running the recorded image. Reattaching re-applies the [Gateway route](#gateway-address) as a reattaching run does and reads the seal back from the container: a runc one is sealed when it is off the default bridge, a Kata one when the seal's drop filter is on `tap0_kata`. `discard` removes the container and its network; one that is already gone needs nothing |
+| Docker | `docker:<container>`: `docker inspect` finds the container, whose labels must name it ALE's, and it must be running the recorded image. Reattaching confines it by the network mode its `ale.network` label records, which it was started with, whatever the reattaching run asks, re-applies the [Gateway route](#gateway-address) as a reattaching run does and reads the seal back from the container: a runc one is sealed when it is off the default bridge, a Kata one when the seal's drop filter is on `tap0_kata`, a gVisor one when it is on `eth0`'s egress, whose netstack chains are then written again to match. `discard` removes the container and its network; one that is already gone needs nothing |
 | QEMU | `qemu:<runner>`: the same for the runner container, whose labels must name it ALE's and whose overlay must sit on the recorded disk. Reattaching refills the runner's `ALE_GATEWAY` chain and reads the seal back from its `FORWARD` drop rule. `discard` removes the runner and its overlay |
 | Orchard | `orchard:<name>:<uid>`: the VM by its name, which must still have that UID and run the image that framing, a snapshot, or a kept VM's record names on this Mac. Reattaching opens new guest sessions; the Gateway relay started at boot outlives the old ones. `discard` deletes the VM unless Orchard replaced it |
 | Daytona, Firecracker, Fleet | None: their Sandboxes have no handle, and `reattach` refuses |
@@ -112,15 +155,154 @@ same machine, such as a restarted Fleet node agent, drives it again or destroys 
 
 A Task's `gpu_types` decides which GPU models a Sandbox may get
 ([GPUs](../../../../../../docs/specs/task-authoring.md#gpus)). Every Provider checks the
-models it got with `ale.run.gpu.accepts_model`, which applies that rule.
+models it got with `ale.core.capability.accepts_model`, which applies that rule.
 
 | Provider | How it gives only the models the Task accepts |
 |---|---|
-| Docker | Reads the Host's GPUs with `nvidia-smi` and leases only those among `container.gpus`, or among all when it is unset, of an accepted model. Too few refuses the Sandbox before it starts, and the container must then show exactly the leased UUIDs. Under Kata every GPU request is refused: `--gpus` does not reach the microVM |
+| Docker | Reads the Host's GPUs with `nvidia-smi` and leases only those among `sandbox.docker.gpus`, or among all when it is unset, of an accepted model, whole or by memory ([GPU memory](#gpu-memory)). Too few refuses the Sandbox before it starts, and the container must then show exactly the leased UUIDs. `docker:kata` attaches none: `--gpus` does not reach the microVM; `docker:gvisor` attaches them as runc does ([gVisor](#docker-on-gvisor)). The allocation records each GPU as the Host's `nvidia-smi` reports it |
 | QEMU | A device bound to `vfio-pci` has no Host driver to name its model, so the guest's `nvidia-smi` is read once it boots; a model the Task does not accept destroys the Sandbox before any Task code runs. The pool is leased without regard to model, so a pool of several models can refuse a Task while an accepted GPU is free |
 | Daytona | Maps the names to Daytona's GPU types as Harbor does: `h100` and `nvidia-h100-80gb` to `H100`, `h200` and `nvidia-h200-141gb` to `H200`, `rtx-pro-6000` and `nvidia-rtx-pro-6000` to `RTX-PRO-6000`, `rtx-4090` and `rtx-5090` to themselves, ignoring case. It asks for them in the Task's order, which Daytona tries in turn, and leaves out names with no type; a Task left with none is refused before anything is created. The models attached are then checked against the Task's own names, as on every Provider. `MI355X` is never asked for, as `nvidia-smi` cannot see it to record it. A Task naming no model sends no type, so Daytona chooses |
-| Firecracker | Refuses every GPU request: Firecracker passes no GPU through |
-| Orchard | Refuses every GPU request |
+| Firecracker | Attaches none: Firecracker passes no GPU through |
+| Orchard | Attaches none |
+
+## GPU memory
+
+A Task's `gpu_memory_mb` is what its Sandbox needs on each GPU
+([GPUs](../../../../../../docs/specs/task-authoring.md#gpus)), each process's CUDA context
+included: a context took 516 MiB with the bare driver API and 608 MiB under PyTorch 2.7 on
+an H100 with driver 570, so a Task of two PyTorch processes needs 1216 MiB before its first
+tensor. `docker:runc` and `docker:gvisor` share a GPU among Sandboxes that name it; QEMU's
+VFIO pool and Daytona give whole GPUs, and know no model's memory before they attach it (a
+GPU bound to `vfio-pci` has no Host driver to report it, and Daytona's GPU types state
+none), so they refuse no such Sandbox for its memory. A Docker profile gives, as each
+model's memory, the most it admits a shared Sandbox with on an empty GPU of it:
+`memory.total` less `memory.reserved` less the margin (76993 MiB of an H100 with driver 570
+and the default margin), so that a Sandbox that needs more on every model it accepts goes to
+the next listed Provider rather than to a leaf that could never admit it.
+
+**Admission.** A Docker leaf admits a Sandbox to the Host's GPUs under one lock for its
+Docker daemon, `/tmp/ale-gpu-<daemon ID>.lock` (`docker info --format {{.ID}}`), which every
+ALE process of every user that admits through that daemon takes, whatever its cache, from
+reading the GPUs until `docker run` returns. It is opened read-only, which `flock` needs no
+more than: `fs.protected_regular` refuses `O_CREAT` on another user's file in the sticky
+`/tmp`, so the first process creates it with `O_EXCL`, readable by all whatever its umask,
+and the others open it as it is. The running containers' labels are the record of what ALE
+holds: every Sandbox carries `ale.gpus`, the GPUs it holds, and `ale.gpu_memory_mb`, what it
+reserved on each when it shares them, both empty when unused, so an image's labels never
+stand in for them. The record is per daemon: Runs on one Host through different daemons,
+such as each user's rootless one, see what each other's Sandboxes use, through nvidia-smi,
+but not what they reserved and do not use yet. Under the lock it reads `nvidia-smi
+--query-gpu=...,memory.total,memory.reserved,memory.free`, the labels of the running ALE
+containers (`docker ps`), and, when one shares a GPU, what each process uses (`nvidia-smi
+--query-compute-apps=pid,used_memory,gpu_uuid`), which it assigns to a container by the
+process's cgroup (`docker-<id>.scope` with the systemd driver, rootful or rootless;
+`/docker/<id>` with cgroupfs). nvidia-smi lists every user's processes, by their PIDs in the
+Host's namespace: under runc one row for each CUDA process, under gVisor one for the whole
+Sandbox, its Sentry, whose memory is nvproxy's count (measured).
+
+| Sandbox | May take a GPU | Of those, takes |
+|---|---|---|
+| without `gpu_memory_mb` | that no ALE Sandbox holds | the one with the most free memory |
+| with `gpu_memory_mb` | that no ALE Sandbox holds whole, and whose headroom is at least `gpu_memory_mb` plus `sandbox.docker.gpu_memory_margin_mb` (4096 by default) | the one with the most headroom |
+
+Headroom is `memory.free` less, for each ALE Sandbox sharing the GPU, what it reserved and
+does not use yet; what it uses already is not free, so it counts once, and one that uses
+more than it reserved adds nothing. `memory.free` excludes what the driver reserves (470 MiB
+of an H100's 81559 with driver 570). The margin is for other tenants' jobs, which grow after
+they start: one on a shared Host of eight H100s grew by 4.2 GB within 10 s. It cannot cover
+a tenant that starts after admission, as jobs there did, in steps of 19 to 31 GB. Too little
+refuses the Sandbox with `ProviderCapacityError`, naming each GPU and its free memory, what
+ALE reserved there and the headroom left; a Fleet Node answers with it that it has no room
+for now, and the Fleet asks it again later. The allocation records how the Sandbox holds its
+GPUs (`whole`, `limit` or `watched`), what it reserved on each, and each GPU's
+`memory.total`, `memory.reserved` and `memory.free` when it was admitted.
+
+**Enforcement.** Under `docker:gvisor` a shared Sandbox gets the annotation
+`dev.gvisor.flag.nvproxy-gpu-memory-limit=<gpu_memory_mb in bytes>`: an allocation past it
+fails as CUDA out of memory (`cudaErrorMemoryAllocation`, `torch.OutOfMemoryError`), a
+context that does not fit fails to be created, and the Sandbox goes on
+([runtime](../../../../../../images/runtimes/gvisor/README.md#gpu-memory-limit)). Its
+preflight, whenever a Sandbox may share GPUs, checks that `runsc flags` lists
+`-nvproxy-gpu-memory-limit`, which only ALE's build has. Under `docker:runc` nothing holds a
+process to a device memory limit, so every selection (`ale run`, `ale validate`, a
+reverification) says once, for the leaf and how many Sandboxes it serves so: `note
+docker:runc watches the gpu_memory_mb of N Sandboxes rather than enforcing it: a process
+past its share is killed`.
+
+**Watchdog.** Each Docker leaf of a process, the Run's or a Node agent's, watches its shared
+Sandboxes while that process holds them, from `create` or reattaching until it destroys,
+keeps or snapshots them: a kept Sandbox is watched again only when a later Run reattaches to
+it. Every 5 s (NVML has no event for memory use) it reads what each process uses and
+compares the sum of a Sandbox's rows on each GPU with its share, which holds every CUDA
+context; acting on several Sandboxes, it acts on all at once.
+
+Under runc a Sandbox past its share loses its largest process on that GPU, and only that
+one, as the OOM killer kills a process past a memory limit: the episode goes on, and the
+agent sees its process killed (signal 9, exit code -9 through `exec`). What the Sandbox did,
+the Sandbox's own process pays for; nothing turns it into an environment error that would
+rerun or unscore the episode. The kill runs in a helper container (the runner image under
+`runc`) that joins the Sandbox's PID namespace (`--pid container:<id>`), since under rootful
+Docker ALE's user cannot signal a container's processes and nothing the Sandbox holds, its
+Python included, may decide whether the kill happens. The watchdog first checks that the
+PID's cgroup still names the container and its start time (`/proc/<pid>/stat` field 22) is
+the one it read; the helper checks the start time again through that namespace's `/proc` and
+then kills. The Sandbox stays watched, and is killed again if it goes past its share again.
+The kill is logged to the episode's `trace.execution.jsonl` as a warning naming the process,
+what it held, the GPU, what the Sandbox used and its share, in the phase of the command
+the Sandbox ran when the watchdog found it, by a Fleet Node's leaf as by a Run's. Until
+the watchdog acts, up to 5 s later, a runc Sandbox past its share holds memory others on the
+GPU were admitted with.
+
+Under gVisor nvproxy should have refused the memory, so a Sentry's row past its share is a
+failure of nvproxy's accounting for memory the driver attributes to the Sentry, which is
+ALE's failure: `docker kill` stops the whole Sandbox, its episode ends in an environment
+error (`the sandbox itself died: ALE's GPU memory watchdog stopped it: ...`), and it is no
+longer watched.
+
+What blinds the watchdog: `nvidia-smi` failing, which it logs once per streak of failed
+looks and once when it looks again; a row whose memory reads `[N/A]`; a Host `/proc` mounted
+with `hidepid`, which hides other users' processes, a rootful Docker's containers among
+them; and ALE running in a PID namespace of its own, as in a container: nvidia-smi gives
+each process's PID in the caller's namespace, where the Sandboxes' processes have none.
+
+Not counted by gVisor's limit, nor in nvidia-smi's rows: the memory the driver allocates for
+itself, 6 MiB per CUDA context on an H100 with driver 570, which makes the rows of a GPU sum
+9 to 15 MiB below its `memory.used`; and managed memory (`cudaMallocManaged`), which the
+driver moves to the GPU on use and evicts when it is full: 3 GiB of it raised the GPU's
+`memory.used` and no process's row (measured), so the watchdog does not see it either, while
+admission sees it as memory no longer free. A Sandbox sees the whole GPU in `nvidia-smi` and
+`cudaMemGetInfo`, what other tenants use included, not its share.
+
+## Container features
+
+A Task's `container_features` name the kernel features its container needs
+([Container features](../../../../../../docs/specs/task-authoring.md#container-features)).
+Each container profile lists those its Provider gives. A Provider adds a grant, such as a
+flag, only to a Sandbox that names the feature; what it gives without one, every Sandbox it
+starts has anyway. QEMU and Orchard start VMs, which take none.
+
+[`capprobe.py`](../capprobe.py) shows them: run as root on the framework's Python, it
+makes, for each feature named, the syscalls that need it (`perf_event_open`; a BPF array
+map; `io_uring_setup`; opening `/dev/fuse`; a raw ICMP socket; `unshare` of a user
+namespace; a tmpfs mount and `unshare` of a mount namespace) and reports each one's errno.
+Starting a container is no syscall, so `nested_containers` is shown by the conformance
+suite, which installs Docker in the Sandbox and runs a container. Before any episode, the
+Run's preflight probes the features a leaf's selected Tasks need in a throwaway Sandbox of
+that leaf for each set they ask for; conformance asks for every feature a profile declares,
+Kata's suite shows a Sandbox that did not ask for `mount` lacks it, and gVisor's that one
+that did not ask for `mount` or `raw_sockets` lacks them. A scheduler's are
+probed only by its conformance suite: a Run does not reach Daytona's runners or a Node's
+leaves, and a Node declares its leaves' features without probing them. Measured on a
+112-core x86-64 Linux Host (kernel 7.0, Docker 29.1.3) and on Daytona's CPU runners;
+Daytona's GPU runners were not probed:
+
+| Provider | Gives | How | Lacks, as probed |
+|---|---|---|---|
+| `docker:runc` | `raw_sockets` | Docker's default capabilities hold `NET_RAW`, so every container has it and none gets a flag | `perf`, `bpf`, `io_uring`, `user_namespaces` and `mount` (`EPERM`, Docker's seccomp filter and capabilities); `fuse` (no `/dev/fuse`) |
+| `docker:kata` | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | The microVM (guest kernel 6.18) runs no seccomp filter, so the first five need no flag; `mount` adds `--cap-add SYS_ADMIN` to the container that asks, without which it fails with `EPERM` | `fuse` (no `/dev/fuse`) |
+| `docker:gvisor` | `user_namespaces`, `fuse`, `mount`, `raw_sockets` | The Sentry implements user namespaces and its own `/dev/fuse` for every container; `mount` adds `--cap-add SYS_ADMIN`; `raw_sockets` runs the container under `runsc-net-raw` (on `runsc`, `--cap-add NET_RAW` does nothing) ([gVisor](#docker-on-gvisor)) | `perf` (`ENODEV`), `bpf` (`EPERM`; `EINVAL` with `CAP_SYS_ADMIN`) and `io_uring` (`ENOSYS`), whatever is granted; `nested_containers`: a distribution's Docker fails on netstack, which has no nf_tables |
+| `firecracker` | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | The guest's root holds every capability of its own kernel (6.1) | `fuse` (no `/dev/fuse`) |
+| `daytona` | `nested_containers`, `fuse`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | A sandbox runs in a user namespace whose root holds every capability, with `/dev/fuse`; Docker installed in it runs containers. Daytona grants nothing per sandbox | `perf` (`EACCES`) and `bpf` (`EPERM`), from the runner's kernel (6.8) |
 
 ## Desktop resolution
 
@@ -206,10 +388,72 @@ fails with `VK_ERROR_INCOMPATIBLE_DRIVER`, as on Docker's hook path without `gra
 Afterwards EGL initializes the GPU and Vulkan lists the H100. The other sonames,
 `libcuda.so.1` among them, exist either way, which is why CUDA worked without it.
 
+## Docker runtimes
+
+A Docker leaf is Docker under one runtime, `docker:<runtime>`. Each entry of `RUNTIMES` in
+`docker/provider.py` holds all a leaf knows of its runtime: its name in the daemon, the
+container features it gives and what a Sandbox that asks for each gets (capabilities, or
+another name the runtime is registered under), whether GPUs reach its Sandboxes, how they
+are confined, the Host devices it needs, the memory it adds to a Sandbox's, the `docker run`
+flags every Sandbox gets, and, for a runtime ALE builds itself, the arguments it must be
+registered with, what its version reports, the command that lists the GPU drivers it
+supports, what a Sandbox's kernel log shows and its flag that limits a shared Sandbox's GPU
+memory. A runtime is added there and, as a provider id a Run may name, to `ProviderId` in
+`ale.core.config`; a unit test fails while the two differ. Every Docker leaf keeps the
+Provider name `docker` in its handles.
+
+Its preflight, given what the Run's Sandboxes of it need (everything its profile declares,
+for a Node), finds each name they run under among those `docker info` lists, registered
+with exactly the arguments the runtime takes when ALE builds it, or, for a containerd shim's
+name such as
+`io.containerd.kata.v2`, the shim `containerd-shim-kata-v2` on the PATH Docker runs it
+from, and checks its devices. It starts every Sandbox with `--runtime` naming the runtime
+its features need, `runc` included, and refuses one for which `docker inspect` reports
+another, so a Host whose daemon defaults to another runtime never runs a Sandbox there
+unnoticed. The allocation records the runtime Docker reports. ALE's own helper
+containers, the network helper, the QEMU and Firecracker runners and the VM builders,
+always run under `runc`, which Docker always registers.
+
+When the stream of a guestd session that has answered ends unasked, the Provider runs
+`docker wait` on the container for up to 30 s, outside the timeout of the call that was
+waiting, which returns once it has stopped (under rootless Docker up to 10.5 s after the
+session ended), and then reads its state. A stopped container is reported as the sandbox
+itself dying: it exceeded its memory limit when Docker reports `OOMKilled` and exit code
+137, it was killed from outside on 137 alone, and otherwise its main process exited with its
+code, after an OOM kill when `OOMKilled` is set; one still running lost only the session,
+which is reported as a lost guest session, with guestd's stderr. `OOMKilled` alone says
+nothing: Docker keeps it once the OOM killer has taken any process of the container, which a
+gVisor sandbox survives. A session that never answered failed to start, and its stderr is
+reported at once. ALE ends a session itself before it destroys, keeps or snapshots the
+Sandbox, and that end asks nothing of Docker.
+
+On every Docker leaf a sandbox runs its image's command before the Provider confines it,
+until the network helper's first run returns: 0.35 to 0.45 s after `docker run` did, most of
+it the helper's own container (measured with the container base, `block`, on a 112-core
+Host under a load of about 35: three runc, four Kata and four gVisor sandboxes). A runc
+sandbox's internal network has no route off the Host meanwhile, but the Host's ports answer
+it; a Kata or gVisor sandbox is on its own network unsealed, for which the Provider reads
+what the seal needs of that network before the sandbox starts and writes its `resolv.conf`
+after the seal. Only a Sandbox booted from a snapshot runs code an agent wrote in that
+time, and its setup phase has the network anyway.
+
+Under rootless Docker whose network namespace rootlesskit detaches (`--detach-netns`) and
+keeps from the Host's loopback (`--disable-host-loopback`), the bridge's address is in that
+namespace, and no Docker leaf's sandbox reaches a Gateway the Host serves there (measured on
+a Host running Docker 29.9.3 so, runc included).
+
+Every Kata or gVisor Sandbox, and every runc one whose network is not `open`, takes a bridge
+network of its own while it lives. Docker's default address pools give out 31 networks,
+`172.17.0.0/16` to `172.31.0.0/16` and `192.168.0.0/16` in /20s, and the default bridge
+holds one, so a Host that runs more than about 30 such Sandboxes at once, several Runs' or
+test suites' together, needs smaller ones:
+`"default-address-pools": [{"base": "10.200.0.0/16", "size": 24}]` in `daemon.json` gives
+256 networks of 254 addresses, from the daemon's next start.
+
 ## Docker on Kata Containers
 
-`container.runtime = "kata"` (`--set container.runtime=kata`) starts every Docker sandbox
-with `--runtime io.containerd.kata.v2`: each container is then a QEMU microVM with a guest
+The `docker:kata` leaf starts each of its sandboxes with `--runtime
+io.containerd.kata.v2`: each container is then a QEMU microVM with a guest
 kernel of its own, so a kernel exploit in the sandbox reaches that kernel and must still
 escape QEMU to reach the Host. The image, guestd over `docker exec`, files, uploads, the
 desktop and snapshots work as on runc, and the allocation records the runtime Docker
@@ -224,13 +468,13 @@ configuration is used as it ships.
 
 | Kata | What the Provider does |
 |---|---|
-| Moves every frame between the VM's tap (`tap0_kata`) and the container's veth with tc filters, at preference 49152, so netfilter in the sandbox's namespace never sees the guest's traffic: the runc helper's rules would neither route the Gateway nor confine the Host | The same helper puts tc filters ahead of Kata's, in that namespace, outside the VM. Port 7412 to the Host's address is rewritten to the Gateway's port, and replies back (`pedit` and `csum`; 64 MiB each way came through intact). A sandbox that is not `open` reaches no other port of that address, and its proxy port only under `allowlist`. A reattaching run replaces only the Gateway and proxy filters |
-| Hands the VM its networks at boot: `docker network connect` succeeds and the VM never sees the network | No internal network: the sandbox stays on the default bridge, and sealing adds filters that drop every frame but those to and from the Host's address, ARP included, so it reaches neither the Internet nor another container on the bridge. A sandbox that is not `open` starts sealed: the filters are in place before guestd connects, though the image's own command starts before them. Opening egress removes them and checks that no drop filter is left |
-| Docker's embedded DNS server, `127.0.0.11` on a user-defined network, is in the namespace and out of the guest's reach | The default bridge's `resolv.conf` names the Host's upstream servers, which the guest reaches |
+| Moves every frame between the VM's tap (`tap0_kata`) and the container's veth with tc filters, at preference 49152, so netfilter in the sandbox's namespace never sees the guest's traffic: the runc helper's rules would neither route the Gateway nor confine the Host | The same helper puts tc filters ahead of Kata's, in that namespace, outside the VM. Port 7412 to the Host's address is rewritten to the Gateway's port, and replies back (`pedit` and `csum`; 64 MiB each way came through intact). A sandbox that is not `open` reaches no other port of that address, and its proxy port only under `allowlist`. Root in the VM writes any frame, so these filters pass only a frame from the sandbox's own MAC and address to the bridge's MAC: one with another source, one to another MAC and an ARP reply claiming another address are dropped (measured). Toward the VM they pass only a frame from the bridge's MAC and the Host's address to the sandbox's MAC, which the guest takes from the veth (measured), and the Host's own ARP. A reattaching run replaces only the Gateway and proxy filters |
+| Hands the VM its networks at boot: `docker network connect` succeeds and the VM never sees the network | The sandbox boots on a bridge network of its own, `ale-net-<sandbox id>`, which no other container joins, so frames another container writes as the Host never reach it (measured). The network is not internal, an `open` Task's included: egress opens by removing the seal and leaves through the network's NAT. Sealing adds filters that drop every frame but those to and from the Host's address, ARP included, so it reaches neither the Internet nor another container; while it is open, the Host's other addresses are reached as any other host is. A sandbox that is not `open` starts sealed: the filters are in place before guestd connects, though the image's own command starts before them. Sealing again replaces each filter in place, so a drop is never missing; opening egress removes them and checks that no drop filter is left. Destroying the sandbox removes its network |
+| Docker's embedded DNS server, `127.0.0.11` on any network but the default bridge, is served through netfilter in the namespace and out of the guest's reach: a lookup failed | As the sandbox starts, the Provider writes over its `/etc/resolv.conf` the one Docker gives a container on the default bridge, which names the Host's upstream servers, read once by a helper there, so the daemon needs its default bridge; the file stays the container's own and writable |
 | Makes the VM exactly the container's memory limit; the guest kernel and agent take about 96 MiB plus 2.5 % of it (512 MiB declared left 395 MiB usable, against 504 MiB on runc) | Starts the VM with `memory_mb + 96 + memory_mb / 40` MiB, which leaves the Task's processes at least what runc gives them; the allocation records `memory_mb`. With the base image's desktop running in 512 MiB, one process then held 312–320 MiB against 240–288 MiB on runc: in a VM the kernel's own work for the desktop is not charged to the container |
 | Gives the VM one vCPU more than `--cpus` and applies the quota in the guest's cgroup | Nothing: the quota holds, and `nproc` reports `cpus + 1` rather than the Host's count |
-| Cannot take Docker's `--gpus` | Refuses GPU requests |
-| Drops what a filter drops: tc cannot answer with a rejection, so a sealed guest's DNS lookup took 112 s to fail, and broke sudo's first use when the guest did not yet list its own host name | A sandbox that can be sealed gets `NET_ADMIN`, and the framework removes the guest's default route while it is sealed and restores it when it opens. What runc's internal network refuses then fails at once here too; only a blocked port of the Host's address, which stays on-link, times out. The capability works inside the VM only: root there that re-adds the route makes failures slow again, and still reaches nothing |
+| Cannot take Docker's `--gpus` | Its profile attaches no GPUs |
+| Drops what a filter drops: tc cannot answer with a rejection, so a sealed guest's DNS lookup took 112 s to fail, and broke sudo's first use when the guest did not yet list its own host name | A sandbox that can be sealed gets `NET_ADMIN`, and the framework removes the guest's default route while it is sealed and restores it when it opens. What runc's internal network refuses then fails at once here too; only a blocked port of the Host's address, which stays on-link, times out. The capability works inside the VM only: root there that re-adds the route makes failures slow again, and still reaches nothing. The framework removes the route through guestd, which holds only the container's own capabilities, so root that replaces the framework's Python gains nothing at its next start |
 | Runs no seccomp filter in the guest (`disable_guest_seccomp`) | Nothing: the VM is the boundary, and the filters are outside it |
 | Writes Docker's `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` into the container's own files, where runc mounts them | A snapshot keeps them; a Sandbox booted from it gets its own, a moment after it starts |
 | Shares the container's root filesystem with the guest over virtio-fs | Nothing; see the costs below |
@@ -255,6 +499,62 @@ work. Medians, with the range:
 Compute runs at native speed; the root filesystem over virtio-fs, with Kata's default
 `virtio_fs_cache = "auto"`, is 5 to 20 times slower than overlayfs, and file-heavy Tasks
 pay for it most.
+
+## Docker on gVisor
+
+The `docker:gvisor` leaf starts each of its sandboxes under ALE's build of gVisor's `runsc`
+([gVisor runtime](../../../../../../images/runtimes/gvisor/README.md)): the container's
+system calls go to the Sentry, a kernel in user space, so an exploit in the sandbox must
+escape the Sentry and then its seccomp filter to reach the Host's kernel. The image, guestd
+over `docker exec`, files, uploads, the desktop, GPUs and snapshots work as on runc, and the
+allocation records the runtime Docker reports. Each row below was measured with runsc
+release-20261109.0+ale.0.1.0 under Docker 29.1.3 (containerd snapshotter) on Linux 7.0.
+
+Every Host registers ALE's `runsc` in Docker twice, the same on every Host, GPUs or not: as
+`runsc`, and as `runsc-net-raw`, which adds `--net-raw`, each with exactly the arguments the
+[runtime's README](../../../../../../images/runtimes/gvisor/README.md#install-on-a-host)
+shows. A Sandbox runs under `runsc` unless it asks for `raw_sockets`, and then entirely
+under `runsc-net-raw`. Besides finding each name the Run's Sandboxes run under, registered
+with exactly those arguments, the preflight checks that `runsc --version` reports the build
+this engine runs (`+ale.0.1.0`, `VERSION` in its `build.sh`; a stock `runsc` lacks the
+rootless and out-of-memory fixes) and, whenever GPUs may be attached, a Sandbox needing them
+or a Node whose profile offers the Host's, that `runsc nvproxy list-supported-drivers` lists
+the Host's NVIDIA driver, and, whenever a Sandbox may share GPUs, that `runsc flags` lists
+the flag that limits its GPU memory. In the Run's first Sandbox of the leaf, a probe of its
+container features or one started for this alone, and in one Sandbox of the container base
+a Node starts before it lends the leaf, the kernel log must say `Starting gVisor`, and
+`docker cp` must see what the Sandbox wrote, as `--overlay2=none` makes it.
+
+| gVisor | What the Provider does |
+|---|---|
+| netstack, gVisor's network stack, takes the container's address and routes at boot and sends and receives every frame through a packet socket on `eth0`, below the namespace's netfilter; it never sees a network attached later, and one detached is lost for good; Docker's embedded DNS server, `127.0.0.11` on any network but the default bridge, answers nothing in netstack | The sandbox boots on a bridge network of its own, `ale-net-<sandbox id>`, which no other container joins and which is not internal, an `open` Task's included, so egress opens by removing the seal; destroying the sandbox removes it. As the sandbox starts, the Provider writes over its `/etc/resolv.conf` the one Docker gives a container on the default bridge, which names the Host's upstream servers, so the daemon needs its default bridge |
+| tc's ingress hook runs after the packet socket has read a frame, so a filter there drops nothing; the egress hook on `eth0` sees every frame the Sentry sends, from any kind of socket | The network helper puts tc filters on `eth0`'s egress (a `clsact` qdisc), in the sandbox's namespace, outside it. A sandbox that is not `open` passes only frames from its own MAC and address to the bridge's MAC and the Host's address, on the Gateway's own port (the wire carries it, since netstack rewrites 7412) and, under `allowlist`, the proxy's, and starts sealed: its own ARP for that address passes and everything else is dropped, IPv6 included. A packet with a forged source, from a sandbox with raw sockets, is dropped (measured). While sealed it reaches nothing but those two ports; while open, the Host's address on its network still answers only on them, and the Host's other addresses are reached as any other host is. Sealing again replaces each filter in place, so the drop is never missing; opening removes the seal and checks that its drop filter is gone |
+| Dropped frames only time out: a sealed DNS lookup took 56 s | ALE's chains in netstack refuse at once what the seal drops (a TCP reset or an ICMP port unreachable; a lookup fails in 0.01 s): `ALE_GATEWAY` sends 7412 to the Gateway's port; `ALE_HOST` refuses every other port of the Host's address, as runc's rules do, the replies to connections the Host opens included; while sealed `ALE_SEAL` refuses everything else the sandbox sends and `ALE_INPUT` drops what it did not ask for. `OUTPUT`, `FORWARD` (for what a sandbox forwards between network namespaces of its own) and `INPUT` jump to them first. Sealing changes the filters and then the chains; opening, the chains and then the filters. An `open` sandbox with no Gateway on this Host gets no chain, and no privileged exec |
+| A privileged `docker exec` holds every capability in the Sentry, `CAP_NET_RAW` only under `runsc-net-raw`, so under `runsc` the image's iptables, if it has one, cannot open its raw socket; the sandbox's own processes never hold `CAP_NET_ADMIN` | [`iptables.py`](../iptables.py), run as root on the framework's Python through `docker exec --privileged`, replaces each table in one `IPT_SO_SET_REPLACE` on a UDP socket, which needs only `CAP_NET_ADMIN`, holding `/run/xtables.lock` as iptables does, and keeps every rule the Task made. That Python is the sandbox's own file: root in the sandbox, an agent granted `sudo`, can replace it and so run with every capability at ALE's next change of egress, mount file systems whether its Task named `mount` or not, and rewrite ALE's chains. Only the filters outside bind the sandbox, and they hold: with its chains flushed, a sealed sandbox reaches neither the Internet nor anything with a raw ICMP echo (measured) |
+| tc cannot drop frames on their way into the sandbox | No other container is on its network, so only the Host's frames arrive: a container with raw sockets on the default bridge that wrote as the Host got none to its veth (measured). `ALE_INPUT` drops what the sandbox did not ask for while it is sealed |
+| `runsc` gives raw sockets only to a whole sandbox, from its registration's `--net-raw`; `--allow-packet-socket-write` would let a packet socket write any frame | A Sandbox that asks for `raw_sockets` runs under `runsc-net-raw`: ping works and a packet socket captures, but its write fails (`ENOTSUP`), and the seal drops what a raw socket forges |
+| The Sentry, the gofer and the stubs are charged to the container: beside the framework's processes alone, the desktop ended, one process got 16 to 32 MiB less than under runc for the same `--memory` with 24 MiB and 1 MiB per GiB added, at 512 MiB, 2, 4 and 8 GiB alike (three runs each); beside the desktop, whose memory the two runtimes account differently, it got 16 to 48 MiB more | Starts it with `memory_mb + 60 + memory_mb / 1024` MiB, which covers the largest gap with 4 MiB to spare; the allocation records `memory_mb` |
+| Under the container's memory limit, the OOM killer chooses among the Sentry, the gofer and the stubs that run the application, all charged to the container, and taking the Sentry ends the whole sandbox; under rootless Docker, Docker's default `oom_score_adj` ties them ([Out of memory](../../../../../../images/runtimes/gvisor/README.md#out-of-memory) has the measurements) | `--oom-score-adj 500` ranks every stub above the Sentry and the gofer, under rootful and rootless Docker alike |
+| What a sandbox writes into a tmpfs with `write(2)`, such as `/dev/shm`, is the Sentry's memory, so filling its limit that way ends the whole sandbox | A guestd session that ends then reports that the sandbox exceeded its memory limit |
+| `docker stop` ends a command without a `SIGTERM` handler at once (exit 143), where runc waits out the timeout; `docker cp` into a running sandbox is not reliably seen inside | Snapshots stop and commit as on runc; files go through guestd, never `docker cp` |
+| `docker run --gpus` turns nvproxy, gVisor's proxy of the NVIDIA driver, on for that container alone; `--nvproxy` would turn it on, and probe the driver, for every container; `nvidia-smi` in the sandbox reports no PCI address (`[Unknown Error]`) | GPUs are attached as on runc (`--gpus "device=<uuid>,..."`, `NVIDIA_DRIVER_CAPABILITIES=all`, which `--nvproxy-allowed-driver-capabilities=all` allows), and recorded as the Host sees them; a sandbox sees the whole GPU and what its other tenants use, as under runc. A Sandbox that shares its GPUs is limited to its `gpu_memory_mb` on each ([GPU memory](#gpu-memory)) |
+| `runsc` ignores the setuid bit of a program, `sudo` among them, unless it runs with `--allow-suid` | Both registrations pass `--allow-suid`, so the agent elevates through `sudo` as under runc |
+| `perf_event_open`, `bpf` and `io_uring_setup` fail whatever is granted (`ENODEV`, `EPERM` or `EINVAL`, `ENOSYS`) | Its profile gives none of them |
+| netstack has no nf_tables (test-only in this release), so a container engine installed from a distribution, which sets its rules through nf_tables, fails to start | Its profile offers no `nested_containers`: a feature's guarantee holds for any Task, and this one would hold only for a Task that switched its engine to iptables-legacy |
+
+The filters and chains confine IPv4. The Provider creates a sandbox's network without IPv6;
+on a daemon that enables IPv6 on every new network, the Host's IPv6 address is outside the
+Host's drop and `ALE_HOST` while egress is open, though the seal drops IPv6 like everything
+else.
+
+What it costs, on a 112-core Host under a load of about 40: starting a bare container until
+`docker exec` works took a median 0.28 s against runc's 0.33 s, and an idle sandbox's
+runtime holds 17 MB of its cgroup. With the container base's desktop (1 CPU, 4096 MB), its
+first screenshot came after 7.6 s against 4.3 s and its cgroup held 541 MB idle against
+485 MB; `create` took 15 s against 8.5 to 10 s, opening or sealing egress 0.9 to 2.0 s
+against 0.07 to 0.13 s, and starting the framework's Python 1.2 to 2.4 s against 0.4 to
+0.9 s. A Run with no Task that asks for a container feature starts one Sandbox more, for
+the preflight's check: about 15 s with that image.
 
 ## Daytona
 
@@ -303,10 +603,9 @@ Measured on a KVM host:
   (`images.base_layer`), once per disk, framework identity and builder image. A disk
   pulled from a registry is that base as it is ([registry disks](#registry-disks)). A local
   disk, which may be compressed and is not ALE's to keep, gets an uncompressed copy once
-  per disk and Host: about 4.5 GB for the 2.3 GB Linux VM base, 17.7 GB for the 10.2 GB
-  Windows base 0.1.2, which took about 30 s. A compressed disk is decompressed on every
-  read: with the zstd-compressed Windows base under a Task layer a guest booted 15% slower
-  and read the base's files 4–5 times slower.
+  per disk and Host: 17.7 GB for the 10.2 GB Windows base 0.1.2, which took about 30 s.
+  A compressed disk is decompressed on every read: with the zstd-compressed Windows base
+  under a Task layer a guest booted 15% slower and read the base's files 4–5 times slower.
 - The resolved image keeps the request's prepared identity and observes the layer that
   boots, which the RunLock records.
 
@@ -319,15 +618,15 @@ and a Windows guest 250–310 s rather than 52 s.
 
 ### Disk layers
 
-A framed disk, a Windows Task image and a snapshot are each a qcow2 overlay on the disk
-below it, never flattened. Beside each, `<name>.json` records the identity of its parent and
-the SHA-256 of its own file, taken once when it is made (`images.record_layer`); the base a
-chain starts from, a pulled disk or the copy of a local one, records the identity the disk
-was resolved under. A layer names its parent by a path relative to itself, so the chain
-stays whole when the ALE cache moves. `images.layer_identity` follows a chain with
-`qemu-img info --backing-chain` and refuses one in which a layer sits on another parent
-than its record names; every prepared disk with a backing file is checked that way before
-it boots.
+A framed disk, a Linux or Windows Task image and a snapshot are each a qcow2 overlay on the
+disk below it, never flattened. Beside each, `<name>.json` records the identity of its
+parent and the SHA-256 of its own file, taken once when it is made (`images.record_layer`);
+the base a chain starts from, a pulled disk or the copy of a local one, records the
+identity the disk was resolved under. A layer names its parent by a path relative to
+itself, so the chain stays whole when the ALE cache moves. `images.layer_identity` follows
+a chain with `qemu-img info --backing-chain` and refuses one in which a layer sits on
+another parent than its record names; every prepared disk with a backing file is checked
+that way before it boots.
 
 The runner and the VM builder are containers, so every layer of a chain is mounted in them
 at its own Host path (`images.chain_mounts`), read-only except the one being written, and
@@ -371,6 +670,14 @@ into `C:\ProgramData\ALE`:
   in it: on Windows base 0.1.2 that was 103 of 749 MiB for a Task that installs nothing and
   90 of 2,417 MiB for a LibreOffice Task, each discarded in about 5 s. Free space is never
   zero-filled instead, which would write every free cluster into the overlay.
+
+A Linux Task image is built the same way: the build VM's overlay is framed by
+`virt-customize` before it boots, `build.sh` runs as root in `/opt/ale/environment`, and
+`save_image` keeps the overlay as the Task's layer. Before it is kept, the VM builder's
+`virt-sparsify --in-place` mounts each filesystem on the disk and trims it; the overlay
+turns every trimmed cluster it holds into one that reads as zeros. A build that installs
+`jq`, writes a 300 MiB file, syncs it and deletes it kept a 343 MiB layer, the same as
+without the file, and the discard took 3 s.
 
 ### Registry disks
 
@@ -425,8 +732,8 @@ Docker CLI or daemon:
 ## Firecracker
 
 `FirecrackerProvider` runs a container Task's prepared image, the one Docker runs, as a
-Firecracker microVM with its own kernel. It is selected with `container.provider =
-"firecracker"`. The Host needs Docker, `/dev/kvm` and `/dev/net/tun`; macOS and Windows
+Firecracker microVM with its own kernel, for a Run whose `sandbox.providers` names
+`firecracker`. The Host needs Docker, `/dev/kvm` and `/dev/net/tun`; macOS and Windows
 Hosts have no KVM, so they cannot run it. Measured on a 112-core Linux Host with
 Firecracker 1.17.0, the guest kernel 6.1.155 its CI publishes, and the ALE container base:
 
@@ -530,8 +837,8 @@ Commands and file reads use separate authenticated WebSocket exec channels. File
 are bounded, screenshot transfers are integrity-checked, and command output is
 acknowledged after Host consumption to avoid overrunning Orchard's exec output queue.
 
-GPU and reset requests are rejected. Orchard credentials remain on the Host; Orchard/Tart
-and the selected image are trusted infrastructure.
+Its profile attaches no GPUs. Orchard credentials remain on the Host; Orchard/Tart and the
+selected image are trusted infrastructure.
 
 A kept VM stays running and holds its VM slot. Orchard keeps no labels on a VM, so each
 kept VM and each snapshot has a record under the local Orchard's state

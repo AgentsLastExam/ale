@@ -15,7 +15,7 @@ CLI → Task loading/image preparation → Episode → EpisodeProtocol
 | `src/ale/run/cli/main.py` | Typer command definitions and presentation |
 | `src/ale/run/cli/tasks.py` | Task run, validation and image-preparation composition |
 | `src/ale/run/protocol/` | the episode protocol: phase ordering for one Task episode |
-| `src/ale/run/providers/` | Docker, QEMU, Daytona and Orchard (macOS) Sandbox implementations; see its local README |
+| `src/ale/run/providers/` | Docker, QEMU, Firecracker, Daytona, Orchard (macOS) and Fleet Sandbox implementations, and the choice among them; see its local README |
 | `src/ale/run/harnesses/` | native agent adapters; see its local README |
 | `src/ale/run/gateway/` | authenticated model routing, limits and Transport Trace; see its local README |
 | `src/ale/run/guestd/` | dependency-free service running inside the Sandbox |
@@ -37,8 +37,9 @@ Configuration is layered as CLI overrides, run TOML, Harness preset and model de
 For `run`, `validate`, `prepare`, and `reverify`, `ALE_RUN_CONFIG` selects the default run
 TOML when `--config` is absent. An explicit `--config` replaces that default file; `--set`
 overrides values from the selected file. Use `--set section.key=value` for any setting
-without a dedicated flag. Provider API-key
-values belong in the checkout's gitignored `.env` under the `ALE_` names in
+without a dedicated flag. `sandbox.providers` lists the Providers that start a Run's
+Sandboxes ([Choose Providers](../../docs/guides/development.md#choose-providers)). Model
+provider API keys belong in the checkout's gitignored `.env` under the `ALE_` names in
 [`../../.env.example`](../../.env.example); subscription setup is documented in
 [`../../docs/guides/subscription-auth.md`](../../docs/guides/subscription-auth.md).
 

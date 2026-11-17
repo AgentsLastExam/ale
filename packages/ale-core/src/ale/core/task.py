@@ -111,6 +111,10 @@ class Task(ABC):
         self.non_verifier_digest = non_verifier_digest
         self.image_source_digest = image_source_digest
         self.verifier_image_source_digest = verifier_image_source_digest
+        self.provider: str | None = None
+        """The provider id the Run selected to start the solver's Sandbox."""
+        self.verifier_provider: str | None = None
+        """The provider id selected for a separate verifier's Sandbox."""
         self.prepared_image: PreparedTaskImage | None = None
         self.prepared_verifier_image: PreparedTaskImage | None = None
         self.asset_observation: TaskAssetObservation | None = None

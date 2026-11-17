@@ -4,7 +4,7 @@ Read [`README.md`](README.md) and `docs/specs/fleet.md` before changing the Flee
 
 - The control plane places data: it never imports a Provider or the node agent, and knows a
   Sandbox only by its demand, profile and lease, never by its episode.
-- The node agent drives the Node's Providers through the Provider contract, and prepares
+- The node agent drives the Node's leaves through the Provider contract, and prepares
   images through the engine's own preparation, as a local Run would.
 - The engine never imports `ale.fleet`. What a Run needs from the Fleet goes through the
   FleetProvider in `ale-run` and the protocol in `ale.core.fleet`.

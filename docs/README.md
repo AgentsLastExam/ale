@@ -20,6 +20,7 @@ This directory is the maintained description of ALE.
 | Results, trajectories, and logs | [specs/trace.md](specs/trace.md) |
 | Trust boundaries and guarantees | [specs/security.md](specs/security.md) |
 | Develop the engine | [guides/development.md](guides/development.md) |
+| Choose which Providers start a Run's Sandboxes | [guides/development.md#choose-providers](guides/development.md#choose-providers) |
 | Configure subscription login | [guides/subscription-auth.md](guides/subscription-auth.md) |
 | Run Sandboxes on a Fleet of machines | [guides/fleet.md](guides/fleet.md) |
 | Run episodes on Daytona | [guides/daytona.md](guides/daytona.md) |

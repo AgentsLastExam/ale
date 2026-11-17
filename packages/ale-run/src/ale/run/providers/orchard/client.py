@@ -446,6 +446,9 @@ class OrchardTransport:
         except UnicodeError:
             raise GuestUnreachableError("Orchard guest output is not UTF-8") from None
 
+    async def explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
+        return error
+
     async def close(self) -> None:
         if self._closed:
             return

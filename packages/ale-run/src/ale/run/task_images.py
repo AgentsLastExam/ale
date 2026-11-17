@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import fcntl
 import hashlib
 import json
 import os
+import shlex
 import shutil
-import tarfile
 import tempfile
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+from pydantic import ValidationError
 
 from ale.core.errors import (
     AleError,
@@ -27,10 +30,12 @@ from ale.core.sandbox import ImageRef, PreparedTaskImage, Provider, SandboxReque
 from ale.core.task import Task, TaskFolder
 from ale.core.taskspec import (
     ImageKind,
+    ImageSpec,
     NetworkMode,
     NetworkPolicy,
     OperatingSystem,
     Resources,
+    TaskSpec,
     VerificationMode,
 )
 from ale.run.content import tree_digest
@@ -45,19 +50,23 @@ from ale.run.framework import (
 )
 from ale.run.images import (
     acquire_lock,
+    classify_image,
     finished_layer,
     remove_disk,
     resolve_loaded_image,
-    valid_qcow2,
 )
 from ale.run.process import run
-from ale.run.providers import ProviderRegistry
 from ale.run.providers.fleet import FleetProvider
 from ale.run.providers.orchard import OrchardProvider, OrchardSandbox
 from ale.run.providers.orchard.client import CONTROL_ACCOUNT
-from ale.run.providers.qemu.provider import NTFS_DISCARD, RUNNER_IMAGE, QemuProvider
+from ale.run.providers.qemu.provider import (
+    LINUX_DISCARD,
+    NTFS_DISCARD,
+    RUNNER_IMAGE,
+    QemuProvider,
+)
 from ale.run.sources import cache_root
-from ale.run.tasksets.manifest import SETUP_DIR
+from ale.run.tasksets.manifest import BUILD_SCRIPTS, SETUP_DIR, describe
 
 __all__ = [
     "ImagePreparationResult",
@@ -66,11 +75,11 @@ __all__ = [
     "prepare_task_image_result",
     "prepare_verifier_image",
     "prepare_verifier_image_result",
-    "vm_materialization_identity",
+    "resolve_image_kinds",
 ]
 
-VM_OUTPUT_CONTRACT = "ale-vm-qcow2/v1"
 WINDOWS_BUILD_CONTRACT = "ale-windows-powershell/v1"
+LINUX_BUILD_CONTRACT = "ale-linux-bash/v1"
 MACOS_BUILD_CONTRACT = "ale-macos-bash/v1"
 
 
@@ -119,29 +128,84 @@ def _task_folder(task: Task) -> TaskFolder:
     return task.folder
 
 
-async def prepare_task_image(task: Task, providers: ProviderRegistry) -> PreparedTaskImage:
-    return (await prepare_task_image_result(task, providers)).image
+async def resolve_image_kinds(tasks: Iterable[Task]) -> None:
+    """Decide the kind of every image a Linux Task names by a registry reference alone, by
+    reading its manifest, before anything prepares, places or records the image.
+
+    Every other image's kind follows from the Task folder and was decided as the Task was
+    loaded. A Task whose image this decides continues with a specification carrying the
+    kind, checked again as a whole, so a VM image with container features is refused;
+    each reference is read once, however many Tasks name it.
+    """
+    tasks = list(tasks)
+    references = sorted(
+        {
+            image.ref
+            for task in tasks
+            for image in (task.spec.image, task.spec.verify.image)
+            if image is not None and image.kind is None and image.ref is not None
+        }
+    )
+    if not references:
+        return
+    found = await asyncio.gather(
+        *(_stage("image-classification", classify_image(ref)) for ref in references),
+        return_exceptions=True,
+    )
+    kinds: dict[str, ImageKind] = {}
+    for reference, outcome in zip(references, found, strict=True):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        kinds[reference] = outcome
+
+    def decided(image: ImageSpec | None) -> ImageSpec | None:
+        if image is None or image.kind is not None or image.ref is None:
+            return image
+        return image.model_copy(update={"kind": kinds[image.ref]})
+
+    for task in tasks:
+        spec = task.spec
+        image, verifier = decided(spec.image), decided(spec.verify.image)
+        if image is not spec.image or verifier is not spec.verify.image:
+            verify = spec.verify.model_copy(update={"image": verifier})
+            try:
+                task.spec = TaskSpec.model_validate(
+                    {**dict(spec), "image": image, "verify": verify}
+                )
+            except ValidationError as error:
+                raise TaskDefinitionError(f"invalid Task {spec.name}: {describe(error)}") from None
 
 
-async def prepare_task_image_result(
-    task: Task, providers: ProviderRegistry
-) -> ImagePreparationResult:
+def _kind(image: ImageSpec) -> ImageKind:
+    """The kind of an image about to be prepared, which ``resolve_image_kinds`` decided."""
+    if image.kind is None:
+        raise TaskDefinitionError(f"the kind of {image.ref} was not decided before its preparation")
+    return image.kind
+
+
+async def prepare_task_image(task: Task, provider: Provider) -> PreparedTaskImage:
+    return (await prepare_task_image_result(task, provider)).image
+
+
+async def prepare_task_image_result(task: Task, provider: Provider) -> ImagePreparationResult:
+    """The solver's image, prepared for ``provider``: prepared images are
+    Provider-specific."""
     spec = task.spec.image
-    provider = providers.get(spec.kind, task.spec.os)
+    kind = _kind(spec)
     folder = _task_folder(task)
     if isinstance(provider, FleetProvider):
         return _on_fleet(task, "solver", provider)
     if spec.base_ref is not None:
         base = await _stage(
             "base-resolution",
-            provider.prepare_image(ImageRef(kind=spec.kind, reference=spec.base_ref)),
+            provider.prepare_image(ImageRef(kind=kind, reference=spec.base_ref)),
         )
-        step = "macos-build" if task.spec.os is OperatingSystem.MACOS else "windows-build"
+        step = f"{task.spec.os.value}-build"
         candidate, reused = await _stage(
             step,
             _prepare_macos_image(task, base, provider)
             if task.spec.os is OperatingSystem.MACOS
-            else _prepare_windows_image(task, base),
+            else _prepare_qemu_image(task, base),
         )
         image = await _stage("artifact-check", provider.prepare_image(candidate))
         return _result(
@@ -160,7 +224,7 @@ async def prepare_task_image_result(
     if spec.ref is not None:
         image = await _stage(
             "reference-resolution",
-            provider.prepare_image(ImageRef(kind=spec.kind, reference=spec.ref)),
+            provider.prepare_image(ImageRef(kind=kind, reference=spec.ref)),
         )
         steps = [
             ImagePreparationStep(
@@ -170,7 +234,7 @@ async def prepare_task_image_result(
                 image.resolved_reference,
             )
         ]
-        if spec.kind is ImageKind.CONTAINER:
+        if kind is ImageKind.CONTAINER:
             image = await _stage(
                 "framework-layer",
                 _framed_reference(image, user=spec.user),
@@ -214,7 +278,6 @@ async def prepare_task_image_result(
         exclude=(SETUP_DIR,),
         source_digest=source_identity,
         source="solver-local",
-        kind=spec.kind,
         user=spec.user,
         build_timeout_sec=spec.build_timeout_sec,
     )
@@ -227,16 +290,16 @@ async def prepare_task_image_result(
     return _result(task, "solver", image, *steps)
 
 
-async def prepare_verifier_image(
-    task: Task, providers: ProviderRegistry
-) -> PreparedTaskImage | None:
-    result = await prepare_verifier_image_result(task, providers)
+async def prepare_verifier_image(task: Task, provider: Provider) -> PreparedTaskImage | None:
+    result = await prepare_verifier_image_result(task, provider)
     return result.image if result is not None else None
 
 
 async def prepare_verifier_image_result(
-    task: Task, providers: ProviderRegistry
+    task: Task, provider: Provider
 ) -> ImagePreparationResult | None:
+    """A separate verifier's image, prepared for ``provider``; none for shared
+    verification."""
     verify = task.spec.verify
     if verify.environment_mode is VerificationMode.SHARED:
         return None
@@ -245,6 +308,22 @@ async def prepare_verifier_image_result(
         image = task.prepared_image
         if image is None:
             raise TaskDefinitionError("solver image must be prepared before verifier image")
+        if task.verifier_provider != task.provider:
+            # The solver's image, for the Provider the verifier's own needs selected: the
+            # very image the solver ran, checked by that Provider, unless either is the
+            # Fleet, which prepares an image on its Nodes from what the Task declares.
+            if isinstance(provider, FleetProvider) or task.provider == FleetProvider.name:
+                result = await prepare_task_image_result(_pinned(task, image), provider)
+                return dataclasses.replace(result, role="verifier")
+            image = await _stage("artifact-check", provider.prepare_image(image))
+            return _result(
+                task,
+                "verifier",
+                image,
+                ImagePreparationStep(
+                    "artifact-check", "executed", image.prepared_identity, image.runtime_ref
+                ),
+            )
         return _result(
             task,
             "verifier",
@@ -254,13 +333,13 @@ async def prepare_verifier_image_result(
             ),
         )
 
-    provider = providers.get(verify.image.kind, task.spec.os)
+    kind = _kind(verify.image)
     if isinstance(provider, FleetProvider):
         return _on_fleet(task, "verifier", provider)
     if verify.image.ref is not None:
         image = await _stage(
             "reference-resolution",
-            provider.prepare_image(ImageRef(kind=verify.image.kind, reference=verify.image.ref)),
+            provider.prepare_image(ImageRef(kind=kind, reference=verify.image.ref)),
         )
         steps = [
             ImagePreparationStep(
@@ -270,7 +349,7 @@ async def prepare_verifier_image_result(
                 image.resolved_reference,
             )
         ]
-        if verify.image.kind is ImageKind.CONTAINER:
+        if kind is ImageKind.CONTAINER:
             image = await _stage(
                 "framework-layer", _framed_reference(image, user=verify.image.user)
             )
@@ -309,7 +388,6 @@ async def prepare_verifier_image_result(
         exclude=(),
         source_digest=source_identity,
         source="verifier-local",
-        kind=verify.image.kind,
         user=verify.image.user,
         build_timeout_sec=verify.image.build_timeout_sec,
     )
@@ -322,6 +400,21 @@ async def prepare_verifier_image_result(
     return _result(task, "verifier", image, *steps)
 
 
+def _pinned(task: Task, solver: PreparedTaskImage) -> Task:
+    """``task`` with its named solver image pinned to the digest it resolved to here, so
+    that another Provider prepares the very image the solver ran rather than what its tag
+    names now. A solver on the Fleet resolves its tag on its Node, after this Run prepared
+    its images, so its image is left as declared."""
+    declared = task.spec.image
+    if declared.ref is None or task.provider == FleetProvider.name:
+        return task
+    assert solver.resolved_reference is not None, "a named image is resolved as it is prepared"
+    pinned = copy.copy(task)
+    image = declared.model_copy(update={"ref": solver.resolved_reference})
+    pinned.spec = task.spec.model_copy(update={"image": image})
+    return pinned
+
+
 def _on_fleet(
     task: Task, role: Literal["solver", "verifier"], provider: FleetProvider
 ) -> ImagePreparationResult:
@@ -329,11 +422,12 @@ def _on_fleet(
     this names, through this same preparation.
 
     Its key covers everything that preparation reads here: the image's declaration, the
-    Task's storage, which a Windows build sizes its disk by, the build context as
+    Task's storage, which a VM build sizes its disk by, the build context as
     ``_context_identity`` observes it, and the framework.
     """
     image = task.spec.image if role == "solver" else task.spec.verify.image
     assert image is not None
+    kind = _kind(image)
     folder = _task_folder(task)
     context: Path | None = None
     exclude: tuple[str, ...] = ()
@@ -355,7 +449,7 @@ def _on_fleet(
     )
     prepared = provider.defer(
         key,
-        kind=image.kind,
+        kind=kind,
         task=task.spec,
         role=role,
         context=context,
@@ -394,23 +488,21 @@ async def _prepare_local(
     exclude: tuple[str, ...],
     source_digest: str,
     source: str,
-    kind: ImageKind,
     user: str,
     build_timeout_sec: float,
 ) -> tuple[PreparedTaskImage, list[ImagePreparationStep]]:
-    """The Task's own build with the framework layer on top, built once per input.
+    """The Task's own container build with the framework layer on top, built once per input.
 
     The result is recorded under everything that goes into it: the build context, its
     asset inventory and the framework. An unchanged Task finds its image there and uses it
     directly, without asking Docker to build or check anything.
     """
-    vm = kind is ImageKind.VM
     context = dockerfile.parent
     key = content_hash(
         {
             "source": source,
             "context": _context_identity(context, exclude=exclude),
-            "framework": framework_identity(user=user, vm=vm),
+            "framework": framework_identity(user=user, vm=False),
         }
     )
     root = cache_root() / "images"
@@ -434,7 +526,7 @@ async def _prepare_local(
                 )
                 layered = await _stage(
                     "framework-layer",
-                    with_framework(build.runtime_ref, user=user, vm=vm),
+                    with_framework(build.runtime_ref, user=user),
                 )
                 found = (
                     build.oci_identity,
@@ -449,20 +541,7 @@ async def _prepare_local(
         ImagePreparationStep("oci-build", outcome, built),
         ImagePreparationStep("framework-layer", outcome, build.oci_identity),
     ]
-    if not vm:
-        return _local_container(build, source=source), steps
-    candidate, materialized = await _stage(
-        "vm-materialization", _materialize_vm_with_status(build, source=source)
-    )
-    steps.append(
-        ImagePreparationStep(
-            "vm-materialization",
-            "reused" if materialized else "executed",
-            candidate.prepared_identity,
-            f"materializer={candidate.materializer_identity} disk={candidate.runtime_ref}",
-        )
-    )
-    return candidate, steps
+    return _local_container(build, source=source), steps
 
 
 def _context_identity(context: Path, *, exclude: tuple[str, ...] = ()) -> str:
@@ -550,27 +629,45 @@ def _local_container(build: _OciBuild, *, source: str) -> PreparedTaskImage:
     )
 
 
-async def _prepare_windows_image(
+async def _prepare_qemu_image(
     task: Task, base: PreparedTaskImage
 ) -> tuple[PreparedTaskImage, bool]:
+    """Run the Task's build script in a QEMU VM of its base and keep the VM's overlay, the
+    framework and the build in it, as the Task's layer on the base.
+
+    Linux and Windows build alike; only the script, where it runs and how its free space is
+    discarded differ. The base must already hold the Task's account.
+    """
+    operating_system = task.spec.os
+    label = "Windows" if operating_system is OperatingSystem.WINDOWS else "Linux"
+    script = BUILD_SCRIPTS[operating_system]
     folder = _task_folder(task)
-    if folder.build_script(OperatingSystem.WINDOWS) is None or task.image_source_digest is None:
-        raise TaskDefinitionError("a Windows image build requires environment/build.ps1")
+    if folder.build_script(operating_system) is None or task.image_source_digest is None:
+        raise TaskDefinitionError(f"a {label} image build requires environment/{script}")
     context = folder.environment_dir
     for entry in _vm_context_entries(context):
         if entry.is_symlink():
-            raise TaskDefinitionError(f"Windows image inputs cannot be symlinks: {entry}")
+            raise TaskDefinitionError(f"{label} image inputs cannot be symlinks: {entry}")
     context_identity = await asyncio.to_thread(_vm_context_identity, context)
     runner_identity = await _docker_image_identity(RUNNER_IMAGE)
     user = task.spec.image.user
+    windows = operating_system is OperatingSystem.WINDOWS
     builder_identity = content_hash(
         {
-            "contract": WINDOWS_BUILD_CONTRACT,
+            "contract": WINDOWS_BUILD_CONTRACT if windows else LINUX_BUILD_CONTRACT,
             "runner": runner_identity,
-            # Frame the build VM's disk and discard its free clusters.
+            # Frame the build VM's disk and discard its free space.
             "vm_builder": await _docker_image_identity(MATERIALIZER_IMAGE),
-            "discard": hashlib.sha256(NTFS_DISCARD.read_bytes()).hexdigest(),
-            "framework": windows_framework_identity(user=user),
+            "discard": (
+                hashlib.sha256(NTFS_DISCARD.read_bytes()).hexdigest()
+                if windows
+                else shlex.join(LINUX_DISCARD)
+            ),
+            "framework": (
+                windows_framework_identity(user=user)
+                if windows
+                else framework_identity(user=user, vm=True)
+            ),
         }
     )
     resources = Resources(cpus=2, memory_mb=4096, storage_mb=task.spec.resources.storage_mb)
@@ -596,12 +693,13 @@ async def _prepare_windows_image(
                 with tempfile.TemporaryDirectory(prefix=f".{layer.stem}-", dir=root) as temporary:
                     staged = Path(temporary) / "context"
                     _stage_vm_context(context, staged)
-                    identity = await _build_windows_image(
+                    identity = await _build_qemu_image(
                         base,
                         staged,
                         layer,
                         resources,
                         runner_identity,
+                        operating_system=operating_system,
                         user=user,
                         timeout_sec=task.spec.image.build_timeout_sec,
                         changed=lambda: _vm_context_identity(context) != context_identity,
@@ -778,25 +876,30 @@ def _stage_vm_context(context: Path, staged: Path) -> None:
     )
 
 
-async def _build_windows_image(
+async def _build_qemu_image(
     base: PreparedTaskImage,
     context: Path,
     layer: Path,
     resources: Resources,
     runner_identity: str,
     *,
+    operating_system: OperatingSystem,
     user: str,
     timeout_sec: float,
     changed: Callable[[], bool],
 ) -> str:
-    """Run ``build.ps1`` in a VM whose overlay on the base is framed before it boots, and
+    """Run the build script in a VM whose overlay on the base is framed before it boots, and
     keep that overlay as ``layer``; the layer's identity. ``changed`` says whether the
-    build's inputs changed meanwhile."""
+    build's inputs changed meanwhile.
+
+    The script runs as the framework's own account (root, or an administrator on Windows)
+    in a copy of ``environment/``, with ``ALE_HOME`` set to the agent's home.
+    """
     provider = QemuProvider(overlay_dir=context.parent / "vm", runner_image=runner_identity)
     sandbox = await provider.create_builder(
         SandboxRequest(
             episode_id=f"image-{context.parent.name}",
-            os=OperatingSystem.WINDOWS,
+            os=operating_system,
             prepared_image=base,
             resources=resources,
             network=NetworkPolicy(mode=NetworkMode.OPEN),
@@ -804,44 +907,50 @@ async def _build_windows_image(
             user=user,
         )
     )
-    target = r"C:\ProgramData\ALE\environment"
+    script = BUILD_SCRIPTS[operating_system]
+    if operating_system is OperatingSystem.WINDOWS:
+        target = r"C:\ProgramData\ALE\environment"
+        build = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "$ErrorActionPreference = 'Stop'; & .\\build.ps1; "
+            "if (-not $?) { exit 1 }; if ($LASTEXITCODE) { exit $LASTEXITCODE }",
+        ]
+        remove = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            f"Remove-Item -LiteralPath '{target}' -Recurse -Force -ErrorAction Stop",
+        ]
+    else:
+        # Under /opt/ale, which only root may read.
+        target = "/opt/ale/environment"
+        build = ["bash", script]
+        remove = ["rm", "-rf", target]
     try:
         await sandbox.upload_dir(str(context), target)
         result = await sandbox.exec(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                "$ErrorActionPreference = 'Stop'; & .\\build.ps1; "
-                "if (-not $?) { exit 1 }; if ($LASTEXITCODE) { exit $LASTEXITCODE }",
-            ],
+            build,
             cwd=target,
             env={"ALE_HOME": sandbox.agent_home},
             timeout_sec=timeout_sec,
         )
         if not result.ok:
             raise TaskDefinitionError(
-                f"environment/build.ps1 failed (exit={result.exit_code}, "
+                f"environment/{script} failed (exit={result.exit_code}, "
                 f"timeout={result.timed_out}): "
                 f"{result.stderr or result.stdout}"
             )
-        result = await sandbox.exec(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                f"Remove-Item -LiteralPath '{target}' -Recurse -Force -ErrorAction Stop",
-            ],
-            timeout_sec=60,
-        )
+        result = await sandbox.exec(remove, timeout_sec=60)
         if not result.ok:
             raise ProviderStartError(f"could not remove image build inputs: {result.stderr}")
         if await asyncio.to_thread(changed):
-            raise TaskDefinitionError("Windows image inputs changed during build")
+            raise TaskDefinitionError("image build inputs changed during the build")
         return await sandbox.save_image(layer)
     finally:
         await asyncio.shield(sandbox.destroy())
@@ -919,66 +1028,6 @@ def _input_identity(source: str, source_digest: str) -> str:
     )
 
 
-def vm_materialization_identity(oci_identity: str, materializer_identity: str) -> str:
-    return content_hash(
-        {
-            "output_contract": VM_OUTPUT_CONTRACT,
-            "final_oci_identity": oci_identity,
-            "materializer_identity": materializer_identity,
-        }
-    )
-
-
-async def _materialize_vm(build: _OciBuild, *, source: str) -> PreparedTaskImage:
-    return (await _materialize_vm_with_status(build, source=source))[0]
-
-
-async def _materialize_vm_with_status(
-    build: _OciBuild, *, source: str
-) -> tuple[PreparedTaskImage, bool]:
-    materializer_identity = await _materializer_identity()
-    identity = vm_materialization_identity(build.oci_identity, materializer_identity)
-    root = cache_root() / "vm-builds"
-    root.mkdir(parents=True, exist_ok=True)
-    disk = root / f"{identity.removeprefix('sha256:')}.qcow2"
-    lock_path = disk.with_suffix(".lock")
-    lock_path.touch(exist_ok=True)
-
-    with lock_path.open("r+") as lock:
-        await acquire_lock(lock)
-        try:
-            reused = await valid_qcow2(disk)
-            if not reused:
-                await remove_disk(disk)
-                await _materialize(build.runtime_ref, disk)
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
-
-    return (
-        PreparedTaskImage(
-            kind=ImageKind.VM,
-            source=source,
-            input_identity=build.input_identity,
-            image_source_identity=build.image_source_identity,
-            runtime_ref=str(disk.resolve()),
-            prepared_identity=identity,
-            base_materials=build.base_materials,
-            oci_identity=build.oci_identity,
-            materializer_identity=materializer_identity,
-        ),
-        reused,
-    )
-
-
-async def _materializer_identity() -> str:
-    return content_hash(
-        {
-            "image_identity": await _docker_image_identity(MATERIALIZER_IMAGE),
-            "output_contract": VM_OUTPUT_CONTRACT,
-        }
-    )
-
-
 async def _docker_image_identity(reference: str) -> str:
     code, image_id, _ = await _run(
         "docker", "image", "inspect", "--format", "{{.Id}}", reference, timeout=30
@@ -996,53 +1045,6 @@ async def _docker_image_identity(reference: str) -> str:
     if not image_id.startswith("sha256:"):
         raise ProviderStartError(f"image {reference} has no immutable local identity")
     return image_id
-
-
-async def _materialize(runtime_ref: str, disk: Path) -> None:
-    temporary = Path(tempfile.mkdtemp(prefix=f".{disk.stem}-", dir=disk.parent))
-    input_dir = temporary / "input"
-    output_dir = temporary / "output"
-    input_dir.mkdir()
-    output_dir.mkdir()
-    container = ""
-    try:
-        code, output, stderr = await _run("docker", "create", runtime_ref, timeout=60)
-        if code != 0:
-            raise ProviderStartError(f"could not export local VM OCI rootfs: {stderr.strip()}")
-        container = output.strip()
-        code, _, stderr = await _run(
-            "docker", "export", "--output", str(input_dir / "rootfs.tar"), container, timeout=900
-        )
-        if code != 0:
-            raise ProviderStartError(f"could not export local VM OCI rootfs: {stderr.strip()}")
-        await asyncio.to_thread(
-            _extract_latest_initrd,
-            input_dir / "rootfs.tar",
-            input_dir / "initrd.img",
-        )
-
-        code, _, stderr = await _run(
-            "docker",
-            "run",
-            "--rm",
-            "--privileged",
-            "--mount",
-            f"type=bind,src={input_dir},dst=/input,readonly",
-            "--mount",
-            f"type=bind,src={output_dir},dst=/output",
-            MATERIALIZER_IMAGE,
-            timeout=1800,
-        )
-        if code != 0:
-            raise ProviderStartError(f"VM materialization failed: {stderr.strip()}")
-        candidate = output_dir / "disk.qcow2"
-        if not await valid_qcow2(candidate):
-            raise ProviderStartError("VM materializer produced no valid qcow2")
-        os.replace(candidate, disk)
-    finally:
-        if container:
-            await _run("docker", "rm", "-f", container, timeout=60)
-        shutil.rmtree(temporary, ignore_errors=True)
 
 
 def _materials(value: object) -> tuple[str, ...]:
@@ -1064,22 +1066,3 @@ def _materials(value: object) -> tuple[str, ...]:
 
     visit(value)
     return tuple(sorted(found))
-
-
-def _extract_latest_initrd(archive: Path, destination: Path) -> None:
-    with tarfile.open(archive) as rootfs:
-        candidates = sorted(
-            (
-                member
-                for member in rootfs.getmembers()
-                if member.isfile() and member.name.lstrip("/").startswith("boot/initrd.img-")
-            ),
-            key=lambda member: member.name,
-        )
-        if not candidates:
-            raise ProviderStartError("local VM OCI image has no initramfs")
-        source = rootfs.extractfile(candidates[-1])
-        if source is None:
-            raise ProviderStartError("could not read local VM initramfs")
-        with source, destination.open("wb") as output:
-            shutil.copyfileobj(source, output)

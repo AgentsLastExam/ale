@@ -9,7 +9,7 @@ import pytest
 from ale.core.config import LoggingPolicy, load_run_config
 from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession
 from ale.core.sandbox import Sandbox
-from ale.core.taskspec import ImageKind, OperatingSystem
+from ale.core.taskspec import OperatingSystem
 from ale.core.verdict import Status
 from ale.run.cli.tasks import PRESET_DIR, _harness
 from ale.run.episode import run_episode
@@ -77,9 +77,7 @@ async def test_windows_native_harness_completes_a_file_task(
         result = await run_episode(
             load_task_folder(task_root),
             EpisodeProtocol(harness),
-            provider_registry(
-                QemuProvider(image=image, overlay_dir=tmp_path / "qemu"), kind=ImageKind.VM
-            ),
+            provider_registry(QemuProvider(image=image, overlay_dir=tmp_path / "qemu")),
             run_dir=tmp_path / "runs",
             gateway_url=gateway.base_url,
             gateway=gateway,

@@ -64,13 +64,65 @@ even before `uv sync`.
 
 | Backend | Requirement | Status check |
 |---|---|---|
-| container (default) | Docker Engine (or Podman) reachable | `just doctor` |
-| virtual machine | `/dev/kvm` plus `qemu-system-x86_64`, `qemu-img` | `just doctor` |
-| microVM (`container.provider = "firecracker"`) | Docker, `/dev/kvm` and `/dev/net/tun`; `images/build.sh ale-firecracker-runner` until the runner is published | `just doctor` for KVM; the Provider names anything else missing |
-| macOS VM | an Apple Silicon Mac running the local Orchard of `scripts/setup_macos.py` | `uv run scripts/setup_macos.py --check` |
+| container (`docker:runc`, default) | Docker Engine reachable, with its `runc` runtime | `just doctor` |
+| container in a Kata microVM (`docker:kata`) | Docker, `/dev/kvm`, Kata's shim on the daemon's PATH and `vhost_vsock` ([Kata](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers)) | `just doctor` for KVM; the Run's preflight names a missing shim or `/dev/kvm` |
+| container on gVisor (`docker:gvisor`) | Docker with ALE's `runsc` registered as `runsc` and `runsc-net-raw` ([install](../../images/runtimes/gvisor/README.md#install-on-a-host)) | the Run's preflight names a missing runtime or argument, another build of `runsc` or one without the GPU memory limit, or a GPU driver nvproxy does not support |
+| virtual machine (`qemu`, default) | `/dev/kvm` plus `qemu-system-x86_64`, `qemu-img` | `just doctor` |
+| microVM (`firecracker`) | Docker, `/dev/kvm` and `/dev/net/tun`; `images/build.sh ale-firecracker-runner` until the runner is published | `just doctor` for KVM; the Provider names anything else missing |
+| macOS VM (`orchard`, default) | an Apple Silicon Mac running the local Orchard of `scripts/setup_macos.py` | `uv run scripts/setup_macos.py --check` |
 
-Machines without KVM can still run every Linux container Task; machines without a
-container runtime cannot run the default path.
+An x86-64 machine without KVM still runs every Linux container Task that `docker:runc` or
+`docker:gvisor` serves, but not one that needs `perf`, `bpf` or `io_uring`, which only Kata
+and Firecracker give here; one without a container runtime cannot run the default path.
+ALE's Linux Tasks are x86-64, so Docker on an arm64 machine, such as an Apple silicon Mac,
+runs none of them.
+
+## Choose Providers
+
+A Run starts its Sandboxes through the Providers its run configuration lists by provider id,
+most preferred first, as [Provider selection](../specs/sandbox-image.md#provider-selection)
+says. The default sends container Tasks to Docker under runc, Linux and Windows VMs to QEMU
+and macOS VMs to the local Orchard:
+
+```toml
+[sandbox]
+providers = ["docker:runc", "qemu", "orchard"]  # the default
+
+[sandbox.docker]
+gpus = [0, 1]  # the Host GPU indices a Docker leaf may lease; default all
+gpu_memory_margin_mb = 4096  # free beyond a shared Sandbox's gpu_memory_mb; default 4096
+```
+
+A Task that names `gpu_memory_mb` shares each of its GPUs with other such Sandboxes under
+`docker:gvisor`, which limits each to its share, and under `docker:runc`, which only watches
+it and kills a process past it; the Run names each Task it watches at its start. On a Host
+whose GPUs other users' jobs share, raise the margin to what their jobs grow by after they
+start ([GPU memory](../../packages/ale-run/src/ale/run/providers/README.md#gpu-memory)).
+
+| Provider id | Starts |
+|---|---|
+| `docker:runc` | Linux containers in local Docker |
+| `docker:kata` | each Linux container in a Kata microVM of its own, in local Docker |
+| `docker:gvisor` | each Linux container on gVisor's kernel in user space, in local Docker |
+| `firecracker` | each Linux container as a Firecracker microVM |
+| `qemu` | Linux and Windows VMs |
+| `orchard` | macOS VMs on this Mac's local Orchard |
+| `daytona` | Linux containers on Daytona's cloud; see [Daytona](daytona.md) |
+| `fleet` | any Sandbox, on the Nodes of a Fleet; see [Fleet](fleet.md) |
+
+What each one gives, [container features](../specs/task-authoring.md#container-features)
+included, is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles).
+With `["docker:runc", "docker:kata", "qemu", "orchard"]`, a Task that needs a feature runc
+lacks, such as `perf`, runs on Kata while every other container Task stays on runc.
+`--set 'sandbox.providers=["docker:kata", "qemu"]'` replaces the list for one command.
+
+A Run with a Sandbox that no listed Provider serves is refused before anything is prepared,
+naming each such Sandbox and each Provider's reason. Before the first episode, each chosen
+leaf runs its preflight, which finds its runtime, and one whose Tasks need container
+features probes them in a throwaway Sandbox for each set they ask for; `docker:gvisor`
+checks in its first such Sandbox, or in one started for that alone, that it runs on gVisor.
+`ale prepare` prints the Provider chosen for each image.
 
 ## Workflow
 

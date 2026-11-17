@@ -22,6 +22,7 @@ its Provider still has, and destroys the rest.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hmac
 import logging
 import os
@@ -32,6 +33,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
@@ -41,16 +43,18 @@ from typing import Literal
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from ale.core.capability import CapabilityProfile
+from ale.core.config import DockerProviderConfig
 from ale.core.errors import (
     AleError,
     ProviderCapabilityError,
+    ProviderCapacityError,
     ProviderStartError,
 )
 from ale.core.fleet import (
     PROTOCOL_VERSION,
     STDERR,
     STDOUT,
-    Arch,
     CreateSandbox,
     ErrorBody,
     ExecCall,
@@ -65,28 +69,32 @@ from ale.core.fleet import (
     Listing,
     NodeDeclaration,
     NodeResources,
+    Notices,
     Platform,
     Retention,
     RosterEntry,
     SandboxDemand,
     SandboxDescription,
-    SandboxProfile,
+    SandboxNotice,
     SnapshotHolding,
     verify_grant,
 )
 from ale.core.sandbox import (
     Identity,
+    ImageRef,
     Provider,
     RetainedSandbox,
     Sandbox,
+    SandboxCheck,
     SandboxRequest,
 )
-from ale.core.taskspec import ImageKind, OperatingSystem
+from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from ale.fleet.images import NodeImages
 from ale.fleet.placement import Holds, NodeView, choose
-from ale.run import __version__
+from ale.run import __version__, ale_image
 from ale.run.framework import fleet_framework_identity
 from ale.run.provenance import framework_provenance
+from ale.run.providers import leaf, machine_arch
 from ale.run.providers.fleet.tunnel import NodeListeners, with_port
 
 __all__ = ["NodeAgent", "NodeSettings", "probe"]
@@ -100,29 +108,19 @@ LEASE_CHECK_SEC = 1.0
 #: instead, well under the 90 seconds a Run waits for its Node to take connections again.
 RECOVER_SEC = 60.0
 
-#: What each Provider a node agent can drive starts, and on which architecture: ``None``
-#: is the machine's own.
-KINDS: dict[str, tuple[ImageKind, Arch | None]] = {
-    "docker": (ImageKind.CONTAINER, None),
-    "qemu": (ImageKind.VM, Arch.X86_64),
-    "orchard": (ImageKind.VM, Arch.ARM64),
-}
+#: The leaves a node agent lends when it is told none, in the order it prefers them.
+DEFAULT_LEAVES = ("docker:runc", "qemu", "orchard")
+#: The image of the one Sandbox a node agent starts of a container leaf whose preflight
+#: leaves a check, the container base the Node's Tasks build on.
+CHECK_IMAGE = ale_image("container-ubuntu22-base")
 
 
-def _provider(name: str) -> Provider:
-    if name == "docker":
-        from ale.run.providers.docker import DockerProvider
-
-        return DockerProvider()
-    if name == "qemu":
-        from ale.run.providers.qemu import QemuProvider
-
-        return QemuProvider()
-    if name == "orchard":
-        from ale.run.providers.orchard import OrchardProvider
-
-        return OrchardProvider()
-    raise ProviderCapabilityError(f"a node agent cannot drive a {name!r} Provider")
+def _provider(leaf_id: str, docker: DockerProviderConfig) -> Provider:
+    """The leaf a node agent drives, by its provider id: Docker under any of its runtimes,
+    with the Node's Docker settings, QEMU or Orchard."""
+    if leaf_id.startswith("docker:") or leaf_id in {"qemu", "orchard"}:
+        return leaf(leaf_id, docker=docker)
+    raise ProviderCapabilityError(f"a node agent cannot drive a {leaf_id!r} Provider")
 
 
 @dataclass(frozen=True)
@@ -134,25 +132,20 @@ class NodeSettings:
     host: str = "0.0.0.0"
     port: int = 7471
     providers: tuple[str, ...] = ()
-    """The Providers to lend; empty lends every one whose preflight passes here."""
+    """The leaves to lend, by provider id, in the order placement prefers them; empty lends
+    every default one whose preflight passes here."""
     labels: dict[str, str] = field(default_factory=dict)
     reserve_cpus: int = 1
     reserve_memory_mb: int = 4096
     macos_vm_slots: int = 2
     """At most this many macOS VMs, when the machine runs them; never more than two."""
     state_dir: Path = Path(".")
+    docker: DockerProviderConfig = field(default_factory=DockerProviderConfig)
+    """Its Docker leaves' settings, a Run's ``[sandbox.docker]``: the GPUs they may lease and
+    the margin they admit a shared Sandbox with."""
 
 
 # --- probing ------------------------------------------------------------------------------
-
-
-def _machine_arch() -> Arch:
-    machine = platform.machine().lower()
-    if machine in {"arm64", "aarch64"}:
-        return Arch.ARM64
-    if machine in {"x86_64", "amd64"}:
-        return Arch.X86_64
-    raise ProviderCapabilityError(f"unsupported machine architecture {machine}")
 
 
 def _memory_mb() -> int:
@@ -167,26 +160,29 @@ def _memory_mb() -> int:
     raise ProviderCapabilityError("cannot read the machine's memory size")
 
 
-def _gpus() -> tuple[GpuPool, ...]:
+def _gpus(indices: tuple[int, ...]) -> tuple[GpuPool, ...]:
+    """The GPUs the Node lends, by model: those at ``indices``, the ones its Docker leaves
+    may lease, or every GPU of the Host when that is empty."""
     if shutil.which("nvidia-smi") is None:
         return ()
     result = subprocess.run(
-        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+        ["nvidia-smi", "--query-gpu=index,name", "--format=csv,noheader"],
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode != 0:
         return ()
-    counts = Counter(line.strip() for line in result.stdout.splitlines() if line.strip())
+    rows = [line.split(",", 1) for line in result.stdout.splitlines() if line.strip()]
+    counts = Counter(name.strip() for index, name in rows if not indices or int(index) in indices)
     return tuple(GpuPool(model=model, count=count) for model, count in sorted(counts.items()))
 
 
 def _platform() -> Platform:
     if platform.system() == "Darwin":
-        return Platform(os="macos", os_version=platform.mac_ver()[0], arch=_machine_arch())
+        return Platform(os="macos", os_version=platform.mac_ver()[0], arch=machine_arch())
     return Platform(
-        os=platform.system().lower(), os_version=platform.release(), arch=_machine_arch()
+        os=platform.system().lower(), os_version=platform.release(), arch=machine_arch()
     )
 
 
@@ -205,66 +201,73 @@ def _boot_id() -> str:
     raise ProviderCapabilityError("cannot read this machine's boot identity")
 
 
-def profiles(name: str, provider: Provider, *, gpus: bool) -> tuple[SandboxProfile, ...]:
-    """One profile per operating system a Provider's own capabilities name."""
-    kind, arch = KINDS[name]
-    capabilities = provider.capabilities()
-    return tuple(
-        SandboxProfile(
-            provider=name,
-            kind=kind,
-            os=system,
-            arch=arch or _machine_arch(),
-            gui=capabilities.gui,
-            network_modes=capabilities.network_modes,
-            snapshot=capabilities.snapshot,
-            gpus=gpus and name == "docker",
-            max_cpus=capabilities.max_cpus,
-            max_memory_mb=capabilities.max_memory_mb,
-            macos_vm_slots=1 if system is OperatingSystem.MACOS else 0,
-        )
-        for system in sorted(capabilities.operating_systems)
+async def _show(
+    provider: Provider, profiles: tuple[CapabilityProfile, ...], check: SandboxCheck
+) -> None:
+    """Run what a leaf's preflight left to check in one Sandbox of it, before it is lent."""
+    if any(profile.kind is not ImageKind.CONTAINER for profile in profiles):
+        raise ProviderCapabilityError(f"{provider.id} leaves a check no container can run")
+    image = await provider.prepare_image(ImageRef(kind=ImageKind.CONTAINER, reference=CHECK_IMAGE))
+    request = SandboxRequest(
+        episode_id=f"node-check-{uuid.uuid4().hex[:8]}",
+        prepared_image=image,
+        resources=Resources(cpus=1, memory_mb=2048),
+        network=NetworkPolicy(mode=NetworkMode.BLOCK),
     )
+    async with await provider.create(request) as sandbox:
+        await check(sandbox)
 
 
 async def probe(
     settings: NodeSettings,
     *,
-    make: Callable[[str], Provider] = _provider,
+    make: Callable[[str], Provider] | None = None,
 ) -> tuple[NodeDeclaration, dict[str, Provider]]:
-    """What this machine offers, from each Provider's own preflight and capabilities.
+    """What this machine offers, from each leaf's own preflight and profiles, and from one
+    Sandbox of a leaf whose preflight leaves a check.
 
-    A Provider named in ``settings.providers`` that fails its preflight stops the agent; when
-    none is named, every one that passes is lent and the rest are logged.
+    A leaf named in ``settings.providers`` that fails its preflight stops the agent; when
+    none is named, every default one that passes is lent and the rest are logged. The
+    profiles keep the order the leaves were named in, which placement prefers them in.
     """
-    names = settings.providers or tuple(KINDS)
+    machine = machine_arch()
     lent: dict[str, Provider] = {}
-    for name in names:
-        if name not in KINDS:
-            raise ProviderCapabilityError(f"a node agent cannot drive a {name!r} Provider")
-        _, arch = KINDS[name]
-        if arch is not None and arch is not _machine_arch():
+    offered: list[CapabilityProfile] = []
+    for name in settings.providers or DEFAULT_LEAVES:
+        provider = make(name) if make else _provider(name, settings.docker)
+        profiles = await provider.profiles()
+        foreign = {profile.arch for profile in profiles} - {machine}
+        if foreign:
             if settings.providers:
-                raise ProviderCapabilityError(f"{name} runs only on {arch} machines")
+                raise ProviderCapabilityError(f"{name} runs only on {foreign.pop()} machines")
             continue
-        provider = make(name)
         try:
-            await provider.preflight()
+            if check := await provider.preflight():
+                await _show(provider, profiles, check)
         except AleError as error:
             if settings.providers:
                 raise
             _log.info("not lending %s: %s", name, error)
             continue
-        lent[name] = provider
+        lent[provider.id] = provider
+        offered.extend(profiles)
     if not lent:
         raise ProviderCapabilityError("no Provider passed its preflight on this machine")
-    gpus = _gpus() if "docker" in lent else ()
-    offered = tuple(
-        profile
-        for name, provider in lent.items()
-        for profile in profiles(name, provider, gpus=bool(gpus))
-    )
-    macos = any(profile.macos_vm_slots for profile in offered)
+    gpus = _gpus(settings.docker.gpus) if any(profile.gpus for profile in offered) else ()
+    cpus = max((os.cpu_count() or 1) - settings.reserve_cpus, 0)
+    memory_mb = max(_memory_mb() - settings.reserve_memory_mb, 0)
+    # No leaf here starts a Sandbox larger than all the Node lends.
+    most_cpus, most_memory_mb = max(cpus, 1), max(memory_mb, 1)
+    offered = [
+        profile.model_copy(
+            update={
+                "max_cpus": min(profile.max_cpus or most_cpus, most_cpus),
+                "max_memory_mb": min(profile.max_memory_mb or most_memory_mb, most_memory_mb),
+            }
+        )
+        for profile in offered
+    ]
+    macos = any(profile.os is OperatingSystem.MACOS for profile in offered)
     framework = framework_provenance()
     declaration = NodeDeclaration(
         protocol=PROTOCOL_VERSION,
@@ -277,13 +280,13 @@ async def probe(
         platform=_platform(),
         labels=settings.labels,
         resources=NodeResources(
-            cpus=max((os.cpu_count() or 1) - settings.reserve_cpus, 0),
-            memory_mb=max(_memory_mb() - settings.reserve_memory_mb, 0),
+            cpus=cpus,
+            memory_mb=memory_mb,
             disk_gb=shutil.disk_usage(settings.state_dir).total // 1024**3,
             gpus=gpus,
             macos_vm_slots=min(settings.macos_vm_slots, 2) if macos else 0,
         ),
-        profiles=offered,
+        profiles=tuple(offered),
     )
     return declaration, lent
 
@@ -295,7 +298,7 @@ async def probe(
 class _Held:
     grant: Grant
     provider: Provider
-    profile: SandboxProfile
+    profile: CapabilityProfile
     holds: Holds
     lease_expires_at: float
     state: Literal["creating", "ready", "retained", "destroying"] = "creating"
@@ -306,6 +309,45 @@ class _Held:
     entry: _Entry | None = None
     retained: RetainedSandbox | None = None
     """How its Provider names it as a retained Sandbox, once the episode kept it."""
+    notices: list[SandboxNotice] = field(default_factory=list)
+    """What its leaf logged to the execution trace in a command's context, which its Run has
+    not taken yet."""
+
+    def drained(self) -> tuple[SandboxNotice, ...]:
+        notices = tuple(self.notices)
+        self.notices.clear()
+        return notices
+
+
+#: The Sandbox and the Run's number of the command a leaf logs in, while the command runs and
+#: in the context it keeps of it.
+_COMMAND: contextvars.ContextVar[tuple[_Held, int] | None] = contextvars.ContextVar(
+    "ale_fleet_command", default=None
+)
+
+
+class _NoticeHandler(logging.Handler):
+    """Keeps what a leaf logs to the execution trace in a command's context for the Run that
+    ran the command; a Run records its own leaves' in its trace the same way."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if (bound := _COMMAND.get()) is None:
+            return
+        held, call = bound
+        held.notices.append(
+            SandboxNotice(
+                call=call,
+                level=record.levelno,
+                message=record.getMessage(),
+                data=getattr(record, "ale_data", {}),
+            )
+        )
+
+
+def _keep_notices() -> None:
+    logger = logging.getLogger("ale.execution")
+    if not any(isinstance(handler, _NoticeHandler) for handler in logger.handlers):
+        logger.addHandler(_NoticeHandler())
 
 
 class _Entry(BaseModel):
@@ -387,6 +429,7 @@ class NodeAgent:
         self.images = NodeImages(settings.state_dir / "images", self._lend)
         self._clock = clock
         self.held: dict[str, _Held] = {}
+        _keep_notices()
         self._listeners: dict[str, NodeListeners] = {}
         self.draining = False
         self._session: ClientSession | None = None
@@ -699,7 +742,7 @@ class NodeAgent:
         del self._listeners[run_id]
         await listeners.close()
 
-    def admit(self, grant: Grant, request: SandboxRequest) -> tuple[Holds, SandboxProfile]:
+    def admit(self, grant: Grant, request: SandboxRequest) -> tuple[Holds, CapabilityProfile]:
         """Check a grant's demand against this Node's own count, which the ledger estimated."""
         if (difference := _mismatch(grant.demand, request)) is not None:
             raise ProviderCapabilityError(f"the request's {difference} differs from its grant")
@@ -778,10 +821,14 @@ class NodeAgent:
                 request = request.model_copy(update={"snapshot": handle})
             entry.request = request
             sandbox = await held.provider.create(entry.request)
-        except BaseException:
+        except BaseException as error:
             self.held.pop(sandbox_id, None)
             self._forget(sandbox_id)
             await self._forget_run(held.grant.run_id)
+            if isinstance(error, ProviderCapacityError):
+                # The leaf's own admission found no room the ledger could not see, such as
+                # the memory free on a GPU Sandboxes share: not now, rather than never here.
+                raise _Full(str(error)) from error
             raise
         held.sandbox = sandbox
         held.create_sec = round(time.monotonic() - started, 3)
@@ -829,7 +876,7 @@ class NodeAgent:
 
     # --- retention ------------------------------------------------------------------
 
-    def _snapshot_handle(self, snapshot_id: str, profile: SandboxProfile) -> str:
+    def _snapshot_handle(self, snapshot_id: str, profile: CapabilityProfile) -> str:
         snapshot = self.snapshots.get(snapshot_id)
         if snapshot is None:
             raise _Refused(f"this Node keeps no snapshot {snapshot_id}")
@@ -914,6 +961,7 @@ class NodeAgent:
         # lease or stopping agent ends, until the later Run has it.
         held.lease_expires_at = self._clock() + body.lease_sec
         held.state = "creating"
+        held.notices.clear()  # logged for commands of the Run that kept it
         ports: dict[int, int] = {}
         try:
             request = await self._tunnelled(grant.run_id, body, ports)
@@ -1003,6 +1051,10 @@ class _Refused(ProviderCapabilityError):
     """This Node's own admission refused a grant; the Run asks for another Node."""
 
 
+class _Full(ProviderCapacityError):
+    """This Node's leaf has no room for a grant now; the Run asks again later."""
+
+
 class _Rejected(ProviderCapabilityError):
     """The control plane refused this Node, with its reason."""
 
@@ -1026,6 +1078,7 @@ class _Api:
                 web.post(f"{sandbox}/snapshot", self.snapshot),
                 web.post(f"{sandbox}/adopt", self.adopt),
                 web.get(f"{sandbox}/exec", self.exec),
+                web.get(f"{sandbox}/notices", self.notices),
                 web.get(f"{sandbox}/files", self.read_file),
                 web.put(f"{sandbox}/files", self.write_file),
                 web.get(f"{sandbox}/listing", self.list_files),
@@ -1054,6 +1107,8 @@ class _Api:
             raise
         except _Refused as error:
             return _json(_error(error), status=409)
+        except _Full as error:
+            return _json(_error(error), status=503)
         except AleError as error:
             return _json(_error(error), status=422)
         except Exception as error:
@@ -1089,6 +1144,7 @@ class _Api:
 
     async def exec(self, request: web.Request) -> web.StreamResponse:
         sandbox = self.agent.ready(request.match_info["id"])
+        held = self.agent.held[request.match_info["id"]]
         socket = web.WebSocketResponse(heartbeat=30)
         await socket.prepare(request)
         call = ExecCall.model_validate_json(await socket.receive_str(timeout=60))
@@ -1096,16 +1152,21 @@ class _Api:
         async def sink(stream: str, data: bytes) -> None:
             await socket.send_bytes(bytes([STDOUT if stream == "stdout" else STDERR]) + data)
 
-        running = asyncio.ensure_future(
-            sandbox.exec(
-                call.argv,
-                cwd=call.cwd,
-                env=call.env,
-                timeout_sec=call.timeout_sec,
-                identity=call.identity,
-                output_sink=sink if call.stream else None,  # type: ignore[arg-type]
+        # The command's task, and any context its leaf keeps of it, log for this command.
+        token = _COMMAND.set((held, call.call))
+        try:
+            running = asyncio.ensure_future(
+                sandbox.exec(
+                    call.argv,
+                    cwd=call.cwd,
+                    env=call.env,
+                    timeout_sec=call.timeout_sec,
+                    identity=call.identity,
+                    output_sink=sink if call.stream else None,  # type: ignore[arg-type]
+                )
             )
-        )
+        finally:
+            _COMMAND.reset(token)
 
         async def caller_left() -> None:
             async for message in socket:
@@ -1120,12 +1181,20 @@ class _Api:
             return socket
         watching.cancel()
         try:
-            done = ExecDone(result=running.result())
+            done = ExecDone(result=running.result(), notices=held.drained())
         except Exception as error:
-            done = ExecDone(error=_error(error))
+            done = ExecDone(error=_error(error), notices=held.drained())
         await socket.send_str(done.model_dump_json())
         await socket.close()
         return socket
+
+    async def notices(self, request: web.Request) -> web.Response:
+        """The Sandbox's notices its Run has not taken yet, which it takes before it lets go
+        of the Sandbox."""
+        held = self.agent.held.get(request.match_info["id"])
+        if held is None:
+            raise web.HTTPNotFound(text=f"this Node holds no Sandbox {request.match_info['id']}")
+        return _json(Notices(notices=held.drained()))
 
     async def read_file(self, request: web.Request) -> web.Response:
         sandbox = self.agent.ready(request.match_info["id"])

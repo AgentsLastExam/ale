@@ -5,16 +5,20 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import socket
+import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+import ale.run.guestd.main as guestd_main
 from ale.core.errors import OutputStreamError
-from ale.run.guestd.main import Handler, _Server, _TCPHandler
+from ale.run.guestd.main import Handler, _Descriptor, _Server, _TCPHandler
 from ale.run.transport import GuestClient
 
 pytestmark = pytest.mark.unit
@@ -449,3 +453,57 @@ async def test_acknowledged_output_rejects_missing_or_wrong_sequence(sequence) -
     )
     with pytest.raises(GuestUnreachableError, match="acknowledgement sequence"):
         await GuestClient(transport, acknowledge_exec_output=True).exec(["demo"])
+
+
+def test_a_stdio_reply_arrives_whole_when_a_pipe_takes_part_of_each_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pipe out of a gVisor sandbox takes at most 64 KiB a write, whatever the
+    interpreter's buffering: the reply goes on until its last byte is taken."""
+    real_write = os.write
+
+    def short(descriptor: int, data: bytes | memoryview) -> int:
+        return real_write(descriptor, bytes(data[: 64 * 1024]))
+
+    monkeypatch.setattr("ale.run.guestd.main.os.write", short)
+    read_end, write_end = os.pipe()
+    received = bytearray()
+
+    def drain() -> None:
+        while block := os.read(read_end, 1 << 20):
+            received.extend(block)
+
+    reader = threading.Thread(target=drain)
+    reader.start()
+    reply = "x" * (1 << 20) + "\n"
+    _Descriptor(write_end).write(reply)
+    os.close(write_end)
+    reader.join(timeout=10)
+    os.close(read_end)
+    assert received.decode() == reply
+
+
+def test_guestd_started_isolated_serves_whatever_python_variables_it_inherits() -> None:
+    """Every Provider starts it with ``-I``: a ``PYTHONHOME`` an image sets, which a
+    container's exec inherits, would otherwise keep its Python from starting at all."""
+    main = Path(guestd_main.__file__)
+    inherited = os.environ | {
+        "PYTHONHOME": "/nonexistent",
+        "PYTHONPATH": "/nonexistent",
+        "PYTHONUNBUFFERED": "1",
+    }
+    request = json.dumps({"id": 1, "op": "health", "params": {}}) + "\n"
+
+    def serve(*flags: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, *flags, str(main), "--stdio"],
+            input=request,
+            capture_output=True,
+            text=True,
+            env=inherited,
+            timeout=60,
+        )
+
+    assert serve().returncode != 0
+    isolated = serve("-I")
+    assert json.loads(isolated.stdout.splitlines()[0])["ok"], isolated.stderr

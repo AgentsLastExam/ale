@@ -30,17 +30,22 @@ from ale.core.sandbox import DesktopResolution
 from ale.core.taskspec import McpSource, SkillSource
 
 __all__ = [
+    "GPU_MEMORY_MARGIN_MB",
     "AgentConfig",
     "AgentJudgeConfig",
     "ArtifactPolicy",
     "AssetCollectionConfig",
+    "DaytonaProviderConfig",
+    "DockerProviderConfig",
     "FleetConfig",
     "GatewayLimits",
     "LLMJudgeConfig",
     "LoggingPolicy",
     "ModelProvider",
+    "ProviderId",
     "RunConfig",
     "RunTimeouts",
+    "SandboxConfig",
     "SandboxRetentionConfig",
     "VerificationConfig",
     "ale_repo_path",
@@ -240,8 +245,49 @@ class SandboxRetentionConfig(BaseModel):
     verifier: Literal["destroy", "keep"] = "destroy"
 
 
+#: Every Provider a Run can select, by provider id. A leaf starts Sandboxes on this machine:
+#: Docker under one of its runtimes (``docker:<runtime>``), QEMU, Firecracker or Orchard. A
+#: scheduler places them on machines it manages, with the leaves there: the Fleet on its
+#: Nodes, Daytona on its own.
+ProviderId = Literal[
+    "docker:runc",
+    "docker:kata",
+    "docker:gvisor",
+    "qemu",
+    "firecracker",
+    "orchard",
+    "fleet",
+    "daytona",
+]
+
+
+#: The device memory, in MiB, a GPU must have free beyond a shared Sandbox's need by default.
+GPU_MEMORY_MARGIN_MB = 4096
+
+
+class DockerProviderConfig(BaseModel):
+    """Settings for every Docker leaf."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    gpus: tuple[Annotated[int, Field(ge=0, strict=True)], ...] = ()
+    """The Host's GPU indices Docker may lease; empty leases any of them."""
+    gpu_memory_margin_mb: int = Field(default=GPU_MEMORY_MARGIN_MB, ge=0, strict=True)
+    """The device memory, in MiB, a GPU must have free beyond a shared Sandbox's
+    ``gpu_memory_mb`` to admit it: other tenants' jobs grow after they start."""
+
+    # --- validation ---
+
+    @field_validator("gpus")
+    @classmethod
+    def _gpu_indices(cls, values: tuple[int, ...]) -> tuple[int, ...]:
+        if len(set(values)) != len(values):
+            raise ValueError("Docker GPU indices must be unique")
+        return values
+
+
 class DaytonaProviderConfig(BaseModel):
-    """Settings for the Daytona container backend. The API key is read from the environment."""
+    """Settings for the Daytona scheduler. The API key is read from the environment."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -265,38 +311,39 @@ class FleetConfig(BaseModel):
     token_env: str = Field(default="ALE_FLEET_TOKEN", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-class ContainerProviderConfig(BaseModel):
+class SandboxConfig(BaseModel):
+    """Which Providers start a Run's Sandboxes, and their settings."""
+
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["docker", "firecracker", "daytona", "fleet"] = "docker"
-    gpus: tuple[Annotated[int, Field(ge=0, strict=True)], ...] = ()
-    runtime: Literal["runc", "kata"] = "runc"
-    """The runtime Docker starts each sandbox with: ``kata`` runs it in a microVM of its own."""
+    providers: tuple[ProviderId, ...] = ("docker:runc", "qemu", "orchard")
+    """In order of preference: each Sandbox goes to the first one that serves its needs. The
+    choice is by capability alone, never by load, so one configuration always chooses the
+    same way; a scheduler's own leaves are its deployment's to configure."""
+    docker: DockerProviderConfig = DockerProviderConfig()
     daytona: DaytonaProviderConfig = DaytonaProviderConfig()
+    fleet: FleetConfig = FleetConfig()
 
-    @field_validator("gpus")
+    # --- validation ---
+
+    @field_validator("providers")
     @classmethod
-    def _gpu_indices(cls, values: tuple[int, ...]) -> tuple[int, ...]:
-        if len(set(values)) != len(values):
-            raise ValueError("Docker GPU indices must be unique")
+    def _one_of_each(cls, values: tuple[ProviderId, ...]) -> tuple[ProviderId, ...]:
+        if not values:
+            raise ValueError("sandbox.providers names no Provider")
+        if repeated := sorted({value for value in values if values.count(value) > 1}):
+            raise ValueError(f"sandbox.providers names {', '.join(repeated)} more than once")
         return values
 
     @model_validator(mode="after")
-    def _gpus_are_docker_only(self) -> Self:
-        if self.gpus and self.provider != "docker":
-            raise ValueError("container.gpus selects Docker devices; it needs provider = docker")
-        if self.runtime != "runc" and self.provider != "docker":
+    def _settings_have_their_provider(self) -> Self:
+        if self.docker.gpus and not any(name.startswith("docker:") for name in self.providers):
             raise ValueError(
-                "container.runtime selects Docker's runtime; it needs provider = docker"
+                "sandbox.docker.gpus selects Docker devices; sandbox.providers names no Docker leaf"
             )
+        if "fleet" in self.providers and not self.fleet.url:
+            raise ValueError("the fleet Provider needs sandbox.fleet.url, its control plane")
         return self
-
-
-class VmProviderConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    provider: Literal["qemu", "fleet"] = "qemu"
-    """``fleet`` sends macOS VMs to the Fleet too; otherwise they run on the local Orchard."""
 
 
 _SCHEDULING_FIELDS = frozenset({"episodes", "episode_retries", "resume", "concurrency"})
@@ -316,9 +363,7 @@ class RunConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    container: ContainerProviderConfig = ContainerProviderConfig()
-    vm: VmProviderConfig = VmProviderConfig()
-    fleet: FleetConfig = FleetConfig()
+    sandbox: SandboxConfig = SandboxConfig()
     artifacts: ArtifactPolicy = ArtifactPolicy()
     agent: AgentConfig = AgentConfig()
     gateway: GatewayConfig = GatewayConfig()
@@ -370,14 +415,6 @@ class RunConfig(BaseModel):
     @property
     def authentication_source(self) -> Literal["cli", "run", "preset", "default"]:
         return self._authentication_source
-
-    # --- validation ---
-
-    @model_validator(mode="after")
-    def _fleet_has_a_control_plane(self) -> Self:
-        if "fleet" in (self.container.provider, self.vm.provider) and not self.fleet.url:
-            raise ValueError("provider = fleet needs fleet.url, the control plane's address")
-        return self
 
 
 def parse_override(text: str) -> tuple[list[str], Any]:

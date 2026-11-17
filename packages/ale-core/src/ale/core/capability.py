@@ -1,0 +1,219 @@
+"""Capability profiles, and the one rule that decides whether a profile serves a Sandbox.
+
+A leaf, a Provider that starts Sandboxes on the machine it runs on, declares each real
+combination it can start as a :class:`CapabilityProfile`. A Run choosing a Provider and a
+Fleet placing a Sandbox on a Node both compare the Sandbox's :class:`SandboxNeeds` with
+profiles through :func:`unmet`, so the same Sandbox is accepted or refused the same way
+wherever it is asked for.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable
+from enum import StrEnum
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from ale.core.taskspec import ContainerFeature, ImageKind, NetworkMode, OperatingSystem, Resources
+
+__all__ = [
+    "Arch",
+    "CapabilityProfile",
+    "GpuHold",
+    "GpuModel",
+    "SandboxNeeds",
+    "accepts_model",
+    "closest",
+    "unmet",
+]
+
+_STRICT = ConfigDict(frozen=True, extra="forbid")
+
+
+class Arch(StrEnum):
+    """The instruction set a Sandbox runs, which its image fixes."""
+
+    X86_64 = "x86_64"
+    ARM64 = "arm64"
+
+    @classmethod
+    def of(cls, operating_system: OperatingSystem) -> Arch:
+        """What a Task's Sandbox runs. A Task names no architecture: ALE's images and the
+        Tasks built on them are x86-64, apart from macOS, which only Apple silicon runs."""
+        return cls.ARM64 if operating_system is OperatingSystem.MACOS else cls.X86_64
+
+
+class GpuHold(StrEnum):
+    """How a Sandbox holds a GPU."""
+
+    WHOLE = "whole"
+    """To itself: no other Sandbox shares it."""
+    LIMIT = "limit"
+    """Shared by ``gpu_memory_mb``, which a limit on the device memory it allocates enforces."""
+    WATCHED = "watched"
+    """Shared by ``gpu_memory_mb``, which nothing enforces as it allocates: its Provider watches
+    what it uses, and acts once it uses more."""
+
+
+class GpuModel(BaseModel):
+    """A GPU model a leaf attaches."""
+
+    model_config = _STRICT
+
+    name: str = Field(min_length=1)
+    """As ``nvidia-smi`` names it, which a Task's ``gpu_types`` accept."""
+    memory_mb: int | None = Field(default=None, ge=1)
+    """The most device memory, in MiB, a Sandbox may need on one GPU of this model: on a leaf
+    that shares GPUs, the most it admits on an empty one, its ``memory.total`` less what the
+    driver reserves and the leaf's margin; on one that gives them whole, its memory. None
+    where the leaf does not know it."""
+
+
+class CapabilityProfile(BaseModel):
+    """One real combination of what a leaf can start.
+
+    A leaf lists combinations rather than independent lists of what it offers: a Mac that
+    runs macOS and arm64 Linux does not run x86-64 Windows, and a runtime that gives a
+    container ``perf`` may attach no GPU.
+    """
+
+    model_config = _STRICT
+
+    provider: str = Field(min_length=1)
+    """The provider id of the leaf that starts it, such as ``docker:runc``."""
+    kind: ImageKind
+    os: OperatingSystem
+    arch: Arch
+    gui: bool
+    """Whether a desktop can be shown. Whether a Sandbox has one is its image's business, so
+    no need asks for it."""
+    network_modes: frozenset[NetworkMode]
+    snapshot: bool = False
+    """Whether it saves snapshots and boots Sandboxes from them."""
+    gpus: bool = False
+    """Whether it attaches NVIDIA GPUs."""
+    gpu_models: tuple[GpuModel, ...] = ()
+    """The models of the GPUs it attaches; empty when it learns them only as it attaches them."""
+    gpu_hold: GpuHold = GpuHold.WHOLE
+    """How a Sandbox that names ``gpu_memory_mb`` holds its GPUs: shared with others, limited
+    or watched, where the leaf shares them; whole where it does not. A Sandbox that names none
+    always holds them whole."""
+    max_cpus: int | None = Field(default=None, ge=1)
+    max_memory_mb: int | None = Field(default=None, ge=1)
+    container_features: frozenset[ContainerFeature] = frozenset()
+    """What it gives a container Sandbox that asks for it."""
+
+
+class SandboxNeeds(BaseModel):
+    """What one Sandbox needs of the leaf that starts it, from its request or Fleet
+    demand."""
+
+    model_config = _STRICT
+
+    kind: ImageKind
+    os: OperatingSystem
+    arch: Arch
+    network_mode: NetworkMode
+    resources: Resources
+    snapshot: bool = False
+    """Whether it saves a snapshot at its end or boots from one."""
+
+
+#: Harbor's names whose words are not the model's, by the model they stand for: GKE
+#: accelerator labels, which Harbor takes on GKE and Daytona, and its ``h100-mega``.
+_ALIASES = {
+    "nvidia-tesla-t4": "T4",
+    "nvidia-tesla-a100": "A100 40GB",
+    "h100-mega": "H100 80GB",
+    "nvidia-h100-mega-80gb": "H100 80GB",
+    "nvidia-h200-141gb": "H200",
+}
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+def accepts_model(gpu_types: tuple[str, ...], model: str) -> bool:
+    """Whether a Task accepting ``gpu_types`` accepts the GPU nvidia-smi names ``model``.
+
+    The rule is the Task authoring spec's: a name accepts a model whose words include all of
+    its own, in order; no names accept every model.
+    """
+    words = _WORD.findall(model.lower())
+    for gpu_type in gpu_types:
+        name = gpu_type.strip().lower()
+        remaining = iter(words)
+        wanted = _WORD.findall(_ALIASES.get(name, name).lower())
+        if wanted and all(word in remaining for word in wanted):
+            return True
+    return not gpu_types
+
+
+def _listed(values: Iterable[str]) -> str:
+    return ", ".join(sorted(values)) or "none"
+
+
+def _holds(model: GpuModel, resources: Resources) -> bool:
+    """Whether a GPU of ``model`` serves a Sandbox of ``resources``: of a model it accepts, with
+    the memory it needs on it, unless the leaf does not know the model's memory."""
+    return accepts_model(resources.gpu_types, model.name) and (
+        resources.gpu_memory_mb is None
+        or model.memory_mb is None
+        or model.memory_mb >= resources.gpu_memory_mb
+    )
+
+
+def _model(model: GpuModel) -> str:
+    return model.name if model.memory_mb is None else f"{model.name} ({model.memory_mb} MiB)"
+
+
+def unmet(profile: CapabilityProfile, needs: SandboxNeeds) -> tuple[str, ...]:
+    """Why ``profile`` does not serve ``needs``, one reason each; none when it does.
+
+    Only what a profile declares is compared. What changes from moment to moment, such as
+    the CPUs or GPUs free now, is for whoever starts or places the Sandbox to check.
+    """
+    resources = needs.resources
+    reasons: list[str] = []
+    if profile.kind is not needs.kind:
+        reasons.append(f"starts {profile.kind} Sandboxes, not {needs.kind}")
+    if profile.os is not needs.os:
+        reasons.append(f"runs {profile.os}, not {needs.os}")
+    if profile.arch is not needs.arch:
+        reasons.append(f"runs {profile.arch}, not {needs.arch}")
+    if needs.network_mode not in profile.network_modes:
+        reasons.append(
+            f"network {needs.network_mode} is not one it applies ({_listed(profile.network_modes)})"
+        )
+    if profile.max_cpus is not None and resources.cpus > profile.max_cpus:
+        reasons.append(f"{resources.cpus} CPUs exceed its {profile.max_cpus}")
+    if profile.max_memory_mb is not None and resources.memory_mb > profile.max_memory_mb:
+        reasons.append(f"{resources.memory_mb} MB of memory exceed its {profile.max_memory_mb} MB")
+    if resources.gpus and not profile.gpus:
+        reasons.append("attaches no GPUs")
+    elif (
+        resources.gpus
+        and profile.gpu_models
+        and not any(_holds(model, resources) for model in profile.gpu_models)
+    ):
+        wanted = [f"of gpu_types {list(resources.gpu_types)}"] if resources.gpu_types else []
+        if resources.gpu_memory_mb is not None:
+            wanted.append(f"with gpu_memory_mb {resources.gpu_memory_mb}")
+        reasons.append(
+            f"attaches {_listed(map(_model, profile.gpu_models))}, none {' '.join(wanted)}"
+        )
+    if missing := set(resources.container_features) - profile.container_features:
+        reasons.append(
+            f"gives no container features {_listed(missing)} "
+            f"(gives {_listed(profile.container_features)})"
+        )
+    if needs.snapshot and not profile.snapshot:
+        reasons.append("saves and boots no snapshots")
+    return tuple(reasons)
+
+
+def closest(profiles: Iterable[CapabilityProfile], needs: SandboxNeeds) -> tuple[str, ...]:
+    """Why the profile that misses the fewest of ``needs`` misses them; none when one of
+    ``profiles`` serves them all."""
+    return min(
+        (unmet(profile, needs) for profile in profiles), key=len, default=("offers no profile",)
+    )

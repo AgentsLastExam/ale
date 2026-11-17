@@ -50,6 +50,11 @@ class Transport(Protocol):
 
     async def recv(self) -> str: ...
 
+    async def explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
+        """What to raise for ``error``, which :meth:`recv` raised: a transport that can say
+        why the guest went away says it. Called outside the call's timeout."""
+        ...
+
     async def close(self) -> None: ...
 
 
@@ -70,7 +75,8 @@ class StdioTransport:
         )
         assert self._proc.stdin is not None
         pipe = self._proc.stdin.get_extra_info("pipe")
-        with contextlib.suppress(AttributeError, OSError):
+        # A process that has already exited may have had its pipe closed by asyncio.
+        with contextlib.suppress(AttributeError, OSError, ValueError):
             fcntl.fcntl(pipe.fileno(), fcntl.F_SETPIPE_SZ, _PIPE_BYTES)
 
     async def send(self, data: bytes) -> None:
@@ -90,6 +96,9 @@ class StdioTransport:
             detail = stderr.decode("utf-8", "replace").strip()
             raise GuestUnreachableError(f"guest session closed{': ' + detail if detail else ''}")
         return raw.decode("utf-8").strip()
+
+    async def explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
+        return error
 
     async def close(self) -> None:
         proc, self._proc = self._proc, None
@@ -180,6 +189,9 @@ class TcpTransport:
             raise GuestUnreachableError("guest closed the connection")
         return raw.decode("utf-8").strip()
 
+    async def explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
+        return error
+
     async def close(self) -> None:
         writer, self._writer = self._writer, None
         self._reader = None
@@ -231,7 +243,7 @@ class GuestClient:
             output_sequence = 0
             acknowledged_output = op == "exec" and bool((params or {}).get("output_ack"))
             while True:
-                line = await asyncio.wait_for(self._transport.recv(), timeout=timeout_sec)
+                line = await self._receive(timeout_sec)
                 if not line:
                     continue
                 message = json.loads(line)
@@ -277,6 +289,15 @@ class GuestClient:
                 raise GuestUnreachableError(
                     f"guest operation {op!r} failed [{error.get('code')}]: {error.get('message')}"
                 )
+
+    async def _receive(self, timeout_sec: float | None) -> str:
+        """The next line within ``timeout_sec``, or what the transport says of its end. The
+        timeout bounds the guest's answer, not finding out why there will be none."""
+        try:
+            return await asyncio.wait_for(self._transport.recv(), timeout=timeout_sec)
+        except GuestUnreachableError as error:
+            ended = error
+        raise await self._transport.explain(ended)
 
     async def health(self) -> dict[str, Any]:
         data, _ = await self.call("health", timeout_sec=30)

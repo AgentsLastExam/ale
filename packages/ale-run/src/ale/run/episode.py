@@ -31,6 +31,7 @@ from ale.core.errors import (
     BudgetExceededError,
     EnvironmentError_,
     PhaseTimeoutError,
+    ProviderCapabilityError,
     RetentionFinalizationError,
     TaskDefinitionError,
     TaskError,
@@ -43,6 +44,7 @@ from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
 from ale.core.sandbox import (
     DesktopResolution,
     Identity,
+    Provider,
     RetainedSandbox,
     Sandbox,
     SandboxRequest,
@@ -61,7 +63,11 @@ from ale.run.protocol.episode_protocol import SETUP_TIMEOUT_SEC, EpisodeProtocol
 from ale.run.provenance import ProvenanceInputs, build_lock, judge_provenance
 from ale.run.providers import ProviderRegistry
 from ale.run.recording import EpisodeRecording, Redactor
-from ale.run.task_images import prepare_task_image, prepare_verifier_image
+from ale.run.task_images import (
+    prepare_task_image,
+    prepare_verifier_image,
+    resolve_image_kinds,
+)
 from ale.run.verification import judge_endpoints, open_judge_sessions
 from ale_verify import JudgeInvocation
 
@@ -151,7 +157,7 @@ async def run_episode_with_retries(
 @dataclass
 class _LeaseEntry:
     sandbox: Sandbox
-    provider_name: str
+    provider: Provider
     roles: tuple[Literal["solver", "verifier"], ...]
     requested: Literal["destroy", "keep", "snapshot"]
     sanitation: Literal["not-run", "succeeded", "failed"] = "not-run"
@@ -162,7 +168,8 @@ class _Lease:
     """Hands out sandboxes and guarantees they are reaped.
 
     An episode may lease several — a solver and a separate verifier, say — so the lease
-    tracks them rather than assuming one.
+    tracks them rather than assuming one. Each comes from the Provider the Run selected for
+    its role: ``solver`` by provider id, and ``verifier`` for a separate verifier.
     """
 
     def __init__(
@@ -170,8 +177,13 @@ class _Lease:
         providers: ProviderRegistry,
         retention: SandboxRetentionConfig,
         desktop_resolution: DesktopResolution = DesktopResolution(),
+        *,
+        solver: str,
+        verifier: str | None = None,
     ) -> None:
         self.providers = providers
+        self.solver = solver
+        self.verifier = verifier
         self.retention = retention
         self.desktop_resolution = desktop_resolution
         self.live: list[_LeaseEntry] = []
@@ -180,9 +192,12 @@ class _Lease:
 
     async def acquire(self, request: SandboxRequest) -> Sandbox:
         roles, policy = self._policy(request)
-        provider = self.providers.get(request.image_kind, request.os)
+        selected = self.verifier if request.role is SandboxRole.VERIFIER else self.solver
+        if selected is None:
+            raise ProviderCapabilityError(f"no Provider was selected for a {request.role} Sandbox")
+        provider = self.providers.get(selected)
         sandbox = await provider.create(self._configured(request, policy))
-        self.live.append(_LeaseEntry(sandbox, provider.name, roles, policy))
+        self.live.append(_LeaseEntry(sandbox, provider, roles, policy))
         return sandbox
 
     async def adopt(
@@ -191,7 +206,8 @@ class _Lease:
         """Take over a retained Sandbox: this episode's retention decides its fate."""
         roles, policy = self._policy(request)
         sandbox = await attach(self._configured(request, policy))
-        self.live.append(_LeaseEntry(sandbox, sandbox.allocation.provider, roles, policy))
+        provider = self.providers.get(sandbox.allocation.provider)
+        self.live.append(_LeaseEntry(sandbox, provider, roles, policy))
         return sandbox
 
     def _configured(
@@ -289,9 +305,8 @@ class _Lease:
 
     async def _destroy_snapshot(self, entry: _LeaseEntry, handle: str) -> None:
         try:
-            sandbox_request = entry.sandbox.request
-            provider = self.providers.get(sandbox_request.image_kind, sandbox_request.os)
-            await provider.destroy_retained(handle)
+            # The Provider that made it, which alone holds it.
+            await entry.provider.destroy_retained(handle)
         except Exception as exc:
             entry.sanitation_reason = str(exc)
             raise RetentionFinalizationError(f"could not destroy snapshot {handle}: {exc}") from exc
@@ -301,7 +316,7 @@ class _Lease:
                     roles=entry.roles,
                     requested=entry.requested,
                     outcome="destroyed",
-                    provider=entry.provider_name,
+                    provider=entry.provider.name,
                     reason=entry.sanitation_reason,
                 )
             )
@@ -329,7 +344,7 @@ class _Lease:
                     roles=entry.roles,
                     requested=entry.requested,
                     outcome=outcome,
-                    provider=entry.provider_name,
+                    provider=entry.provider.name,
                     reason=entry.sanitation_reason,
                 )
             )
@@ -596,10 +611,21 @@ async def run_episode(
         task.variables = ResolvedVariables()
     variables = task.variables
     task.asset_observation = observe_task_assets(task)
+    await resolve_image_kinds([task])
+    sandbox_retention = sandbox_retention or SandboxRetentionConfig()
+    # A caller that selected Providers for its Tasks has also checked them on this Host.
+    alone = task.provider is None
+    if alone:
+        await providers.select([task], snapshots=sandbox_retention.solver == "snapshot")
+    assert task.provider is not None
     if task.prepared_image is None:
-        task.prepared_image = await prepare_task_image(task, providers)
+        task.prepared_image = await prepare_task_image(task, providers.get(task.provider))
     if task.prepared_verifier_image is None:
-        task.prepared_verifier_image = await prepare_verifier_image(task, providers)
+        task.prepared_verifier_image = await prepare_verifier_image(
+            task, providers.get(task.verifier_provider or task.provider)
+        )
+    if alone:
+        await providers.preflight([task])
     episode_id = episode_id or f"{task_component(task.spec.name)}-{uuid.uuid4().hex[:8]}"
     trajectory_id = trajectory_id or f"trajectory-{uuid.uuid4().hex}"
     episode_dir = run_dir / episode_id
@@ -653,7 +679,13 @@ async def run_episode(
     sink = _Artifacts(
         episode_dir, enabled=collect_artifacts or separate, retained=collect_artifacts
     )
-    lease = _Lease(providers, sandbox_retention or SandboxRetentionConfig(), desktop_resolution)
+    lease = _Lease(
+        providers,
+        sandbox_retention,
+        desktop_resolution,
+        solver=task.provider,
+        verifier=task.verifier_provider,
+    )
     started_at = datetime.now(UTC)
     started = time.monotonic()
     ctx = EpisodeContext(

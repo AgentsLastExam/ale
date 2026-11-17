@@ -23,6 +23,7 @@ from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.session import GatewaySession, SessionRegistry
+from ale.run.providers import missing_features
 from ale.run.providers.daytona.provider import DAEMON_PORTS, DaytonaProvider
 
 pytestmark = [
@@ -132,6 +133,7 @@ class TestDaytonaProvider(ProviderConformance):
     provider = DaytonaProvider()
     image = ImageRef(kind="container", reference=CONTAINER_BASE)
     gui_image = image  # the ALE container base is a desktop image, and Daytona must run it
+    missing_features = staticmethod(missing_features)
 
     async def request(self, **overrides: object) -> SandboxRequest:
         resources = overrides.get("resources", Resources(cpus=1, memory_mb=1024))

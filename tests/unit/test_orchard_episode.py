@@ -379,7 +379,7 @@ def episode_fixture(
         name="agentslastexam/mac-fixture",
         config={
             "artifacts": [OUTPUT],
-            "environment": {"os": "macos", "vm_image": IMAGE},
+            "environment": {"os": "macos", "image": IMAGE},
             "agent": {"network_mode": "public"},
         },
         dockerfile=None,
@@ -388,9 +388,8 @@ def episode_fixture(
     setup = task / "environment" / "setup" / "setup.sh"
     setup.parent.mkdir(parents=True)
     setup.write_text("#!/bin/bash\n# In-memory phase fixture.\n")
-    spec = load_tasks(task)[0].spec
     registry = ProviderRegistry(RunConfig())
-    provider = registry.get(spec.image.kind, spec.os)
+    provider = registry.get("orchard")
     assert isinstance(provider, OrchardProvider)
     controller = MemoryOrchard(guest)
     monkeypatch.setattr(provider, "_local_orchard", SimpleNamespace(client=lambda: controller))
@@ -485,14 +484,13 @@ async def test_orchard_separate_verifier_restores_solver_artifacts_and_modes(
         task,
         {
             "verifier": {
-                "environment": {"vm_image": IMAGE, "cpus": 2, "memory_mb": 4096},
+                "environment": {"image": IMAGE, "cpus": 2, "memory_mb": 4096},
             }
         },
     )
     verifier = MemoryGuest()
     verifier_controller = MemoryOrchard(verifier)
-    spec = load_tasks(task)[0].spec
-    provider = providers.get(spec.image.kind, spec.os)
+    provider = providers.get("orchard")
     monkeypatch.setattr(
         provider,
         "_local_orchard",

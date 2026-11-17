@@ -21,9 +21,9 @@ from tests.unit.test_fleet_control import (
 )
 from typer.testing import CliRunner
 
+from ale.core.capability import Arch
 from ale.core.fleet import (
     AcquireRequest,
-    Arch,
     EpisodeReport,
     GpuPool,
     Heartbeat,
@@ -271,5 +271,5 @@ class TestCommand:
         control.register(linux("box"))
         ask(control, 1, container())
         (node,) = control.status().nodes
-        assert "docker container linux/x86_64" in node.profiles
+        assert "docker:runc container linux/x86_64" in node.profiles
         assert node.used.cpus == 2

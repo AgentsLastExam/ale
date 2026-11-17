@@ -1,17 +1,18 @@
 # Container and VM sandbox image specification
 
 Normative for standard container and VM Tasks. Every solver and dedicated verifier runs
-in a container or a VM. Linux builds a Dockerfile (a VM with `[environment].vm = true`) or
-uses an image directly (`docker_image`, `vm_image`); Windows and macOS use `vm_image`
-directly, or build `environment/build.ps1` or `environment/build.sh` on `vm_base`.
+in a container or a VM. A Linux container builds `environment/Dockerfile`; a VM builds
+`environment/build.sh` (`build.ps1` on Windows) on the VM image `[environment].image` names;
+an image named alone is used directly ([Source selection](#source-selection-and-identity)).
 
 ## What a Linux image needs
 
 A Linux Task may build from any x86-64 image with glibc that has:
 
-- the agent account the Task names with `[agent].user`, with a home;
+- the agent account the Task names with `[agent].user`, with a home; a VM build's base must
+  have it already, since ALE installs the framework for it before the build runs;
 - for a container, a long-lived command that ALE does not replace;
-- for a VM, a bootable systemd system (the VM base provides one);
+- for a VM, a qcow2 disk of a bootable systemd system (the VM base is one);
 - for GUI work, a running desktop session, such as an X server with a window manager,
   that starts at the [desktop resolution](#desktop-resolution) it is given.
 
@@ -22,8 +23,12 @@ of the Task's own build or the image it names (the framework layer):
   `/opt/ale`, so it always speaks the protocol of the engine driving it;
 - the framework's own Python at a pinned version, which guestd runs on whatever Python the
   image has (or lacks): `/opt/ale/python` on Linux and macOS, `C:\ProgramData\ALE\python` on
-  Windows. Only the framework's identity can run it, except on macOS, where the agent's
-  desktop tool and Harness helpers run it too; the agent's PATH never includes it;
+  Windows. guestd runs it isolated (`-I`), in a directory only the framework writes, and so
+  does every root process guestd starts on it, so neither the image's `PYTHON*` variables,
+  which a container's exec inherits, nor the agent's files change their modules or the
+  buffering of guestd's replies. Only the framework's identity can run it, except on macOS,
+  where the agent's desktop tool and Harness helpers run it too; the agent's PATH never
+  includes it;
 - Cua Driver at a pinned version, the one desktop capture and input implementation, which
   every account may run, because the agent's `cua-desktop` MCP server runs it too;
 - for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
@@ -36,12 +41,12 @@ of the Task's own build or the image it names (the framework layer):
 - a marker file recording which framework the image carries: `/opt/ale/framework` on
   Linux and macOS, `C:\ProgramData\ALE\framework` on Windows.
 
-A VM disk named by a qcow2 `vm_image` gets the same pieces, installed offline into a layer
-on the disk by the VM builder's libguestfs, so nothing on the disk runs on the Host. On
-Linux its small appliance VM runs the disk's own programs that the setup calls; on Windows
-the install is file and registry edits only. Each layer is made once per disk and
-framework and then used directly, and a disk that already carries this framework is used
-as it is.
+A Linux or Windows VM disk, used directly or as a build's base, gets the same pieces,
+installed offline into a layer on the disk by the VM builder's libguestfs, so nothing on the
+disk runs on the Host. On Linux its small appliance VM runs the disk's own programs that the
+setup calls; on Windows the install is file and registry edits only. Each layer is made once
+per disk and framework and then used directly, and a disk that already carries this
+framework is used as it is.
 
 An image or disk handed straight to a Provider, rather than prepared from a Task, gets the
 same layer from the Provider when it does not carry this framework, so every sandbox runs
@@ -115,9 +120,10 @@ desktop starts at its display's preferred mode. How each Provider sets them is i
 
 - `container-ubuntu22-base` provides an Ubuntu 22.04 GNOME desktop container and the
   `user` account.
-- `vm-ubuntu24-base` provides Ubuntu 24.04, systemd, full GNOME/GDM and the `user`
-  account for QEMU. It has no firewall of its own: network policy is enforced by the QEMU
-  runner outside the guest ([security.md](security.md#1-a-sandbox-has-only-declared-ways-out)).
+- `vm-ubuntu24-base` is a published VM disk of Ubuntu 24.04 with systemd, full GNOME/GDM and
+  the `user` account, for QEMU. It has no firewall of its own: network policy is enforced by
+  the QEMU runner outside the guest
+  ([security.md](security.md#1-a-sandbox-has-only-declared-ways-out)).
 - The Windows 10 base provides a logged-in desktop, system Python, WinGet, Chocolatey, and
   the runtimes required by autonomous agents.
 
@@ -125,10 +131,14 @@ No base carries guestd or Cua Driver; ALE installs both when it prepares a Task 
 boots a disk. The bases do not contain domain stacks, benchmark data, databases, robotics
 suites, or Task-specific tools.
 
-Repository sources are separated by responsibility: `images/base/` contains the three
-Task foundations, `images/builders/vm-materializer/` turns Linux VM OCI content into
-qcow2 and installs the framework into a Linux or Windows qcow2 named by reference, and
-`images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM.
+Repository sources are separated by responsibility:
+
+- `images/base/` contains the three Task foundations;
+- `images/builders/vm-materializer/` is the VM builder. It makes the Linux base's disk from
+  its root filesystem once per version, so initramfs, boot and partition assembly are never
+  a Task's code; it also installs the framework into Linux and Windows disks and discards a
+  VM build's free space;
+- `images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM.
 
 ## Versions
 
@@ -137,10 +147,11 @@ workflow skips a version the registry already has, and no `latest` tag is publis
 a tag that every change overwrote would change every checkout's next build behind its back.
 
 The VM builder and the QEMU runner run the engine's own logic, so they are published under
-the engine's version, such as `0.1.1`; an engine runs exactly those of its own version, and
+the engine's version, such as `0.2.0`; an engine runs exactly those of its own version, and
 a changed one ships with the next engine version. A base carries no part of the framework,
 so nothing in it depends on the engine: each base has its own version, raised when the base
-itself changes, and any engine runs any version of it.
+itself changes, and any engine runs any version of it. A container runtime that ALE builds
+for Hosts to install depends on no engine either and has a version of its own.
 
 A Task may build from any image. Task repositories maintained with ALE name an exact
 version of an ALE base, such as `container-ubuntu22-base:0.1.1`, so that a Task keeps
@@ -149,8 +160,8 @@ current version.
 
 ## Task image
 
-A local container or Linux VM image builds `environment/Dockerfile` with `environment/` as
-the sole ordinary Docker build context, less `setup/`:
+A container image builds `environment/Dockerfile` with `environment/` as the sole ordinary
+Docker build context, less `setup/`:
 
 ```dockerfile
 FROM ghcr.io/agentslastexam/container-ubuntu22-base:0.1.1
@@ -176,55 +187,68 @@ ordinary relative `COPY`; ALE creates no generated view or named BuildKit contex
 
 ## Source selection and identity
 
-Before any solver model call, ALE builds the Task's Linux Dockerfile, Windows
-`environment/build.ps1` or macOS `environment/build.sh`; failure is terminal. A Windows or
-macOS build uses `[environment].vm_base` as the base. `docker_image` and `vm_image` always
-name an image for direct use and exclude `vm_base`; on Linux one wins over a Dockerfile. A
-base requires the solver's build script for its OS; it is unsupported for Linux and
-separate verifier declarations. An image named directly is
-resolved by the matching Provider. Container and VM images are both supported and recorded
-immutably.
+Before any solver model call, ALE prepares the Task's image; failure is terminal. The Task
+folder decides how:
 
-On Linux and Windows, a `vm_image` or `vm_base` may also be an absolute host path to a
+- `environment/Dockerfile` builds a Linux container. Its `FROM` names its base, so
+  `[environment].image` beside it fails; on Windows and macOS a Dockerfile fails.
+- A build script, `environment/build.sh` on Linux and macOS or `environment/build.ps1` on
+  Windows, builds a VM on the VM image `[environment].image` names, which it requires.
+- `[environment].image` alone is used directly, resolved by the Provider selected for it.
+
+The Task folder decides every image's kind as the Task loads, so loading reads nothing
+else: Windows and macOS images are VMs, a Linux absolute path is a VM disk, and only a Linux
+image named alone by a registry reference may be either. Its manifest decides: an OCI
+manifest whose `artifactType` is `application/vnd.ale.vm-disk.v1` is an ALE VM disk, a
+container image's manifest or index (OCI or Docker) is a container, and anything else is
+refused, naming its type. The Run reads each such manifest once, with the Host's Docker
+credentials, before it selects a Provider, places a Sandbox or records anything about the
+image, since each of those depends on the kind; [Fleet](fleet.md) Nodes receive the kind
+decided. A digest-pinned reference the Host already holds, as a pulled disk or a Docker
+image, is answered without the registry. An image only the local Docker daemon holds cannot
+be named: nothing could pin it and no other Host could run it. Container and VM images are
+both recorded immutably.
+
+On Linux and Windows, `[environment].image` may also be an absolute host path to a
 standalone qcow2; a macOS image is always a Tart OCI reference. Local disks are structurally
 checked and their actual file bytes are SHA-256 hashed at preparation, without contacting a
 registry. Disks with backing or external data files are rejected: ALE knows a layer's parent
 only for the layers it makes, so a disk it is handed must hold its whole content. The
 operator must keep prepared local disks unchanged while they are in use.
 
-Any other Linux or Windows `vm_image`, or Windows `vm_base`, names a VM disk published to
-an OCI registry with `ale vm-image push`, and its identity is the manifest digest. The
-standalone qcow2 travels as fixed-size chunks, each compressed alone as one layer, because
-a whole disk in one layer approaches registries' documented limits on a layer and an
-upload, and downloads over a single connection, which reaches about half the throughput of
-several. Every chunk is checked against the digest of its uncompressed bytes, and a
-downloaded one also against its layer digest, before the disk is used. The published qcow2
-is itself uncompressed, so the one copy a Host pulls is also the base of the layers built on
-it, read without decompressing. Its format is in the
+Any other Linux or Windows VM image names a VM disk published to an OCI registry with
+`ale vm-image push`, and its identity is the manifest digest. The standalone qcow2 travels
+as fixed-size chunks, each compressed alone as one layer, because a whole disk in one layer
+approaches registries' documented limits on a layer and an upload, and downloads over a
+single connection, which reaches about half the throughput of several. Every chunk is
+checked against the digest of its uncompressed bytes, and a downloaded one also against its
+layer digest, before the disk is used. The published qcow2 is itself uncompressed, so the
+one copy a Host pulls, once per manifest digest, is also the base of the layers every Task
+builds on it, read without decompressing. Its format is in the
 [Providers README](../../packages/ale-run/src/ale/run/providers/README.md#registry-disks).
 
 A Provider may keep a prepared VM disk as a chain of layers, each holding only what changed
 on the one below, rather than flattening it, so a Host stores a base once under all the
-Tasks built on it; the QEMU Provider keeps a Windows Task image and a snapshot that way
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#disk-layers)). A layer's
-identity is the hash of its parent's identity and the SHA-256 of its own bytes, as an OCI
-ChainID is; the bottom disk's is the identity it was resolved under, whatever form a Host
-stores it in. Each layer is hashed once, when it is made, and a chain in which a layer sits
-on another parent than the one it recorded is refused, so the top layer's identity covers
-the whole disk without hashing it whole.
+Tasks built on it; the QEMU Provider keeps a Linux or Windows Task image and a snapshot
+that way ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#disk-layers)).
+A layer's identity is the hash of its parent's identity and the SHA-256 of its own bytes, as
+an OCI ChainID is; the bottom disk's is the identity it was resolved under, whatever form a
+Host stores it in. Each layer is hashed once, when it is made, and a chain in which a layer
+sits on another parent than the one it recorded is refused, so the top layer's identity
+covers the whole disk without hashing it whole.
 
 The authored image source digest covers the build context except its asset root ([Task
 assets](task-assets.md)) and `setup/`, so normal Task identity and asset provenance remain
-separate and a setup change never rebuilds the image. A prepared Linux image is recorded
+separate and a setup change never rebuilds the image. A prepared container image is recorded
 under the same context's file contents, its asset inventory (path, size, modification time
 and mode, as for asset dirtiness) and the framework identity. An unchanged Task finds its
 image there and uses it directly, without asking Docker to build or check anything, so a
-base tag that moves is not followed: name exact base versions. Windows and macOS cache keys
-include the actual image asset bytes. Dirty or unsynchronized assets disable resume and
-reporting. RunLock schema 2 records declaration, preparation, Provider, and exact observed
-identity; it does not invent a whole-disk content digest. Local Linux VMs record OCI and
-materializer identities; local Windows and macOS VMs record builder identity and resolved
-base materials, and a layered disk's prepared identity is its top layer's.
+base tag that moves is not followed: name exact base versions. VM build cache keys include
+the actual image asset bytes. Dirty or unsynchronized assets disable resume and reporting.
+RunLock schema 3 records declaration, preparation, Provider, and exact observed identity; it
+does not invent a whole-disk content digest. A VM built from the Task folder records its
+builder identity and resolved base materials, and a layered disk's prepared identity is its
+top layer's.
 
 ## Reverification
 
@@ -240,8 +264,10 @@ repository, Task path and commit, clean on both sides. Any outside change, any a
 evidence requires a fresh solver run. This also protects direct CLI use.
 
 When only verification changed, ALE does not build or resolve the solver image again.
-It attaches the retained solver using the source RunLock's exact image identity, and
-prepares only a separate verifier image when needed. Provider attachment remains strict;
+It attaches the retained solver using the source RunLock's exact image identity, takes the
+image's kind from that RunLock rather than the registry, and prepares only a separate
+verifier image when needed. A solver image declared otherwise than in the source RunLock
+requires a fresh solver run. Provider attachment remains strict;
 missing retained resources are not replaced with a different sandbox. The new RunLock
 keeps the actual solver image and records the new verifier. No image-config or layer
 comparison is needed. New builds resolve immutable output digests from Buildx metadata,
@@ -249,28 +275,24 @@ not mutable tags that concurrent builds can overwrite.
 
 ## VM preparation
 
-A Linux VM Task's `environment/Dockerfile` usually ends in `vm-ubuntu24-base`. ALE adds
-the framework layer, exports the resulting OCI rootfs and runs its pinned materializer, which owns
-initramfs, boot, partition assembly, and the minimal bootable qcow2 template. Reuse is
-keyed by the layered OCI and materializer identities and validated structurally without
-hashing the whole disk.
+A Linux or Windows Task image is built in a temporary VM whose disk is a framed layer on
+the resolved base. ALE stages only `environment/` less `setup/` and executes `build.sh` or
+`build.ps1` there under the framework's identity, with network access for unattended
+installation. The script has `build_timeout_sec`, one hour by default, for installation,
+integrity checks and extraction; Host-to-VM staging happens before that timer starts. ALE
+removes the build materials, shuts down the VM, and keeps its disk as the Task's layer on
+the base. Linux and Windows share this one path, its cache and its layers, and a Task never
+assembles boot or a disk itself. Reuse covers the whole build and is keyed by base,
+framework, builder, and every file staged; there is no per-command cache or new recipe
+language. Authoring details belong to [Task authoring](task-authoring.md#environment).
 
-Windows 10 has no public ISO build path in ALE. The current base starts from the GCP image
-`agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1` recipe
-installs and pins ALE's cross-platform components, and `compact.sh` validates the
+Windows 10 has no public ISO build path in ALE. The current Windows base starts from the GCP
+image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
+recipe installs and pins ALE's cross-platform components, and `compact.sh` validates the
 resulting qcow2 and rewrites it uncompressed. Episodes always cold-boot a fresh overlay,
-over a retention snapshot when they continue one. ALE creates no ready snapshot or warm pool;
-the [Fleet](fleet.md) places Sandboxes on other machines but starts none before a request.
-
-Windows Task preparation boots a temporary VM whose disk is a framed layer on the resolved
-base, stages only `environment/` less `setup/`, and executes `build.ps1` there with network
-access for unattended installation. The image script has a one-hour budget for
-installation, integrity checks and extraction; Host-to-VM staging happens before that timer
-starts.
-ALE removes the build materials, shuts down the VM, and keeps its disk as the Task's layer
-on the base. Reuse covers the whole build and is keyed by base, framework, builder, and every file
-staged; there is no per-command cache or new recipe language. Authoring details belong to
-[Task authoring](task-authoring.md#environment).
+over a retention snapshot when they continue one. ALE creates no ready snapshot or warm
+pool; the [Fleet](fleet.md) places Sandboxes on other machines but starts none before a
+request.
 
 A macOS Task image builds the same way on the local Orchard: `build.sh` runs as root in a
 VM of the base framed for `admin`, and the stopped VM is kept as a local Tart image on the
@@ -321,16 +343,25 @@ Runtime never downloads it.
 
 ## Verifier images
 
-Shared verification uses the solver image. Separate verification uses, in Harbor's order:
+Shared verification uses the solver image. Separate verification uses one of:
 
-1. `[verifier.environment].docker_image` or `vm_image`, resolved through the matching Provider;
-2. on Linux, `tests/Dockerfile` built with `tests/` as context, as a VM with
-   `[verifier.environment].vm = true`;
-3. the prepared solver image.
+1. `[verifier.environment].image`, used directly and resolved through the verifier's
+   Provider; its kind follows the [solver's rules](#source-selection-and-identity) under
+   the Task's `os`;
+2. on Linux, a container built from `tests/Dockerfile` with `tests/` as context, which
+   requires separate verification and fails a Windows or macOS Task;
+3. otherwise the very image the solver runs, checked by the verifier's Provider when that
+   is not the solver's, so the two never resolve a tag apart. Where either is the Fleet,
+   which prepares images on its Nodes, the verifier's Provider prepares it again from the
+   solver's declaration: a named image at the digest the solver's resolved to, unless the
+   solver is on the Fleet, whose Node resolves the tag only after the Run has prepared its
+   images, so the verifier resolves it again; a built image is built again, so a build that
+   is not reproducible can give the verifier another image.
 
-The local verifier context is fixed at `tests/`; its Dockerfile is the declaration. Named
-images are pulled and resolved to an immutable repository/content identity before
-solver execution.
+Naming an image beside `tests/Dockerfile` fails, as the Dockerfile names its base in `FROM`,
+and a verifier never builds on a base. The local verifier context is fixed at `tests/`; its
+Dockerfile is the declaration. Named images are pulled and resolved to an immutable
+repository/content identity before solver execution.
 
 Any verifier image must satisfy the same guest contract and permit ALE to stage
 `ale_verify`. Verification runs as framework-controlled Task code.
@@ -363,9 +394,12 @@ Given a conforming image, the Docker Provider:
   [resolution](#desktop-resolution) and waits for it;
 - applies CPU, memory, writable storage, network, sudo, and GPU requests or rejects them;
 - injects only selected NVIDIA devices through the configured runtime/CDI path;
-- observes the resulting image, runtime and resource allocation;
-- labels every ALE container with episode, physical role, requested retention, and GPU
-  identity;
+- observes the resulting image, runtime and resource allocation, and refuses a container
+  that ran otherwise than its leaf asked, so a Host's defaults never stand in for what the
+  RunLock records
+  ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#docker-runtimes));
+- labels every ALE container with episode, physical role, requested retention, GPU
+  identity and, on a GPU it shares, the memory it reserved there;
 - destroys by default, or after framework sanitation returns a retained handle or saves a
   snapshot.
 
@@ -392,14 +426,14 @@ than rounded.
 Retained handles are always provider-qualified: `docker:<runtime-id>` for containers,
 `qemu:<runtime-id>` for QEMU VMs, `firecracker:<runtime-id>` for Firecracker microVMs,
 `daytona:<sandbox-id>` for Daytona, `orchard:<vm>:<uid>` for Orchard VMs and `fleet:<sandbox>`
-for a Sandbox kept on the [Fleet](fleet.md#lifecycle), whichever Provider its Node used.
+for a Sandbox kept on the [Fleet](fleet.md#lifecycle), whichever leaf its Node used.
 Unqualified handles are rejected. Listing, destroying and attaching are Provider
 operations, routed by the Provider a handle or RunLock names, so a new backend needs no CLI
 change, apart from the Fleet, which `ale sandbox` reaches at `$ALE_FLEET_URL` and
 `--continue-from` through the Run's own Fleet connection.
 
 GPU workload libraries such as CUDA, PyTorch, and simulators, and the Vulkan ICD and GLVND
-EGL vendor files a renderer loads, remain Task Dockerfile responsibility: not every
+EGL vendor files a renderer loads, remain the Task image's responsibility: not every
 injection path mounts those files. Tasks request a count and the models they accept
 ([GPUs](task-authoring.md#gpus)). Provider configuration may narrow the devices a Provider
 leases, such as Docker host indices, but never widens the models a Task accepts; ALE
@@ -412,6 +446,39 @@ so a Task finds the same driver whichever backend runs it. The Provider, not the
 decides which Host driver files enter the sandbox, because an image would otherwise choose
 what of the Host reaches it. How each Provider does it is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-driver-capabilities).
+
+### GPU memory
+
+A Sandbox whose Task names `gpu_memory_mb` ([GPUs](task-authoring.md#gpus)) may share each
+of its GPUs with other such Sandboxes; one that names none takes its GPUs whole. A
+capability profile says how a leaf holds such a Sandbox: shared under a limit, shared and
+watched, or whole, and gives each GPU model's memory where the leaf knows it: for a leaf
+that shares GPUs, the most it admits a Sandbox with on an empty GPU of that model, so that
+selection never chooses a leaf whose admission could not. A leaf serves such a Sandbox only
+with a model whose memory, where it knows it, is at least the need; a leaf that gives it
+whole GPUs gives it only such a model. A leaf that shares a GPU:
+
+- admits a Sandbox to it only while no Sandbox holds it whole and its headroom, the memory
+  free there less what the Sandboxes sharing it reserved and do not use yet, leaves the
+  need and a margin, and decides under one lock, which every process admitting through the
+  same container daemon takes, until the Sandbox has started, so that two never take the
+  same memory. The margin is for other tenants' jobs,
+  which grow after they start; a refusal names each GPU it considered and why;
+- holds a Sandbox to its share with a limit where its runtime has one, under which an
+  allocation past it fails as on a full GPU and the Sandbox goes on. Where none does, it
+  watches what the Sandbox uses while a Run holds it and kills the Sandbox's largest process
+  on a GPU past its share, as the OOM killer kills a process past a memory limit: memory
+  past a share is memory another Sandbox was admitted with, and going past it is the
+  Sandbox's own doing, so the episode goes on with what the agent makes of it rather than
+  ending in an environment error that would rerun or unscore it. Where a limit's
+  accounting fails, which is ALE's failure, it stops the Sandbox and the episode ends in an
+  environment error that says what used how much. Every selection says which leaves only
+  watch, and for how many Sandboxes;
+- records in the RunLock what it reserved on each GPU, how the Sandbox is held to it, and
+  each GPU's total and free memory when it admitted the Sandbox.
+
+How each leaf does it is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-memory).
 
 ## Permissions
 
@@ -436,7 +503,7 @@ account's interactive session and launches agent commands with the desktop's lim
 token, unless the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a limited
 desktop session are required; the Provider checks both framework and agent privileges
 before Task execution. A Windows Task image is rebuilt when the framework changes, and a
-direct `vm_image` disk is framed like any other.
+disk named directly by `[environment].image` is framed like any other.
 
 Elevation is never part of an image. On every system the Provider sets it as every sandbox
 the agent works in starts, before Task code runs, so one prepared image serves a Task with
@@ -454,6 +521,61 @@ use sudo.
 ALE does not pre-create artifacts or repair their ownership: image/setup/agent code owns
 their type and existence.
 
+## Provider selection
+
+A Task states what its Sandboxes need and never names a Provider or runtime, so it runs
+unchanged wherever a Provider serves it. A Provider is one of two classes. A
+[leaf](lexicon.md) starts Sandboxes on the machine it runs on, and declares each real
+combination it can start as a [capability profile](lexicon.md): kind, operating system,
+architecture, desktop, network modes, snapshots, GPUs, their models and memory and how it
+shares them, CPU and memory limits, and container features. A scheduler places Sandboxes on
+machines it manages, which start them with the leaves there, and offers what those leaves
+do: the Fleet those of the leaves its registered Nodes lend, Daytona the one of its own
+Sandboxes. Which leaves a scheduler uses, and in which order, is its own configuration,
+never a Run's.
+
+A Sandbox needs its image's kind and operating system, the architecture that system implies
+(arm64 for macOS, x86-64 otherwise), its network mode, its resources (CPUs, memory, GPUs,
+the models it accepts and the memory it needs on each, container features), and snapshots
+when it saves or boots from one. One rule compares needs with a profile, naming each need
+the profile misses, wherever a Provider or Node is chosen: in a Run's selection, in every
+leaf's `create`, and in the Fleet's placement, so a Sandbox is accepted or refused the same
+way wherever it is asked for. A leaf may also refuse by rules no profile states
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles)
+lists them); they hold wherever it runs, so selection asks them of a leaf, and of the
+leaves a scheduler would use, by the method `create` asks. A request that `create` would
+refuse is thus refused before the Run starts.
+
+The Run's `sandbox.providers` lists provider ids in order of preference. Each Sandbox, a
+Task's solver and a separate verifier by its own needs, goes to the first Provider with a
+profile that serves it and no rule of its own against it. The choice is by capability alone,
+never by load, so one configuration always chooses the same way. Every Task is selected once
+the kinds of its images are decided and before any image is prepared or Sandbox started. A
+Run with a Sandbox that no listed Provider serves is refused whole, naming each such Task
+and role and why each Provider does not serve it, rather than failing its episodes one by
+one.
+
+Before any episode starts, the Run has each selected leaf run its preflight with the needs
+of the Sandboxes selected for it, which finds what the leaf runs those with, such as its
+container runtimes, and again only for needs a later selection adds. Then, for each set of
+container features its selected Sandboxes ask for, the leaf starts one throwaway Sandbox as
+it would the first that asks for that set, and the Run probes each feature in it as root;
+one it lacks refuses the Run, naming the leaf and the feature. What only a running Sandbox
+shows of the Host, such as that it runs on the runtime the leaf names, the preflight leaves
+as a check, which runs once, in the first such Sandbox, or in one started for it alone when
+no Sandbox asks for a feature. A profile says what a leaf gives; only the Host shows that it
+gives it here, where a kernel setting or a missing device can take a feature away. Each set
+is probed on its own because a grant one feature brings can make another pass. A scheduler's
+leaves run on machines the Run does not reach, and the Run checks none of them.
+
+A prepared image belongs to the Provider selected for it, so one image is prepared once for
+each Provider that runs it. A Sandbox kept or snapshotted is reached only through the
+Provider that kept it, so a continuation's solver needs what booting it from a snapshot
+needs, and is refused before any image is prepared unless the Run selects that Provider
+for it. The RunLock records, for the solver and a separate verifier, the Provider selected
+and the leaf that started the Sandbox
+([Security](security.md#7-a-result-carries-what-produced-it)).
+
 ## Provider contract
 
 A Provider turns a SandboxRequest into a running Sandbox that holds the guarantees below,
@@ -466,13 +588,16 @@ Task content (the engine).
 
 | Guarantee | Enforced by | Conformance test |
 |---|---|---|
+| It declares its capability profiles, and refuses, before creating anything, a request that they or its own rules do not serve, by the check the Run's selection made | Provider: `profiles` and `refusals`; a leaf's `accepts` in `create`, the Fleet's placement | `test_declares_profiles`, `test_refuses_up_front_a_container_feature_none_of_its_profiles_gives`, `test_rejects_a_request_it_cannot_serve` |
 | Every sandbox runs the framework of the engine driving it, whatever image or disk it was handed | Provider in `create` | `test_a_sandbox_carries_the_engines_framework` |
 | Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[agent].sudo` asks, whatever image or snapshot it starts from | Provider in `create`: set at every start, then checked both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected`, `test_one_image_serves_an_agent_with_and_without_elevation`, `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |
+| Replies of any size arrive whatever Python variables the image sets | the Provider starting guestd isolated; guestd writing each reply whole | `test_large_replies_arrive_whatever_python_the_image_configures` |
 | Framework phases have the network; after `close_egress` the agent reaches its Gateway (and, for `allowlist`, the declared hosts) and nothing else; `open` Tasks are never sealed | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |
 | Every Sandbox reaches its Gateway at the same fixed port, whatever port the Host serves it on, and a reattached Sandbox reaches a later run's Gateway there: an agent may keep the address in its native session | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_reattached_sandbox_reaches_a_later_gateway_at_the_same_address` |
-| Resources are applied or rejected; the RunLock records the observed image and allocation | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
+| Resources are applied or rejected; the RunLock records the observed image and allocation, with the Provider selected for the Sandbox and the leaf whose profile served it | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
+| A container Sandbox that asks for the container features a profile declares has each of them, as root | Provider in `create`; the Run's preflight on the Host | `test_gives_every_container_feature_it_declares` |
 | Destroy is idempotent; retained sandboxes can be listed and destroyed through their Provider | Provider | `test_destroy_is_idempotent`, `test_a_retained_sandbox_can_be_listed_and_destroyed` |
 | A Provider that can names each Sandbox by a `handle`, by which another process on the same machine drives it again (`reattach`) or destroys it (`discard`) after the creating process is gone, whatever its retention ([which Providers do, and how](../../packages/ale-run/src/ale/run/providers/README.md#reattaching-by-handle)) | Provider | `test_a_sandbox_is_driven_again_by_its_handle` |
 | A snapshot holds the disk, any number of Sandboxes boot from it, and it is listed and destroyed through its Provider; a Provider without snapshots refuses them before provisioning | Provider | `test_a_snapshot_boots_new_sandboxes_with_its_files` |
@@ -482,10 +607,10 @@ Task content (the engine).
 
 `open_egress` and `close_egress` are abstract: a default that did nothing would let a new
 backend run the agent with the network while its RunLock said `block`. A backend that
-cannot change policy at runtime raises there, and one that cannot apply a policy rejects it
-in `accepts`. A Provider is complete when it passes `ale.core.testkit.ProviderConformance`;
-an escape the suite cannot observe, such as a platform's own in-sandbox service, is that
-Provider's to close and to check in `create`.
+cannot change policy at runtime raises there, and one that cannot apply a policy leaves its
+mode out of its profiles. A Provider is complete when it passes
+`ale.core.testkit.ProviderConformance`; an escape the suite cannot observe, such as a
+platform's own in-sandbox service, is that Provider's to close and to check in `create`.
 
 ## Base-image changes
 

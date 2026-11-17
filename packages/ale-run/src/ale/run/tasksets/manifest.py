@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import tomllib
 from functools import cached_property
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from pydantic import ValidationError
@@ -34,6 +34,7 @@ __all__ = [
     "TASK_CONFIG",
     "ManifestTask",
     "TaskFolder",
+    "describe",
     "discover_task_folders",
     "load_task_folder",
     "load_tasks",
@@ -45,9 +46,18 @@ ENVIRONMENT_DIR = "environment"
 #: Below ``environment/``: never part of an image build context.
 SETUP_DIR = "setup"
 WINDOWS_BUILD = "build.ps1"
-MACOS_BUILD = "build.sh"
-#: The script a Windows or macOS Task builds its image with, on ``[environment].vm_base``.
-BUILD_SCRIPTS = {OperatingSystem.WINDOWS: WINDOWS_BUILD, OperatingSystem.MACOS: MACOS_BUILD}
+SHELL_BUILD = "build.sh"
+#: The script that builds a VM image on ``[environment].image``, by the Task's OS.
+BUILD_SCRIPTS = {
+    OperatingSystem.LINUX: SHELL_BUILD,
+    OperatingSystem.WINDOWS: WINDOWS_BUILD,
+    OperatingSystem.MACOS: SHELL_BUILD,
+}
+_OS_LABELS = {
+    OperatingSystem.LINUX: "Linux",
+    OperatingSystem.WINDOWS: "Windows",
+    OperatingSystem.MACOS: "macOS",
+}
 _SOURCE_EXCLUDES = (*ASSET_ROOTS, ".ale-cache")
 
 
@@ -61,7 +71,7 @@ def _read_toml(path: Path) -> dict[str, Any]:
         raise TaskDefinitionError(f"invalid TOML in {path}: {exc}") from exc
 
 
-def _describe(error: ValidationError) -> str:
+def describe(error: ValidationError) -> str:
     """One readable line per problem, each naming the ``task.toml`` key it is about."""
     problems = []
     for item in error.errors():
@@ -89,8 +99,7 @@ class TaskFolder:
         return _file(self.environment_dir / "Dockerfile")
 
     def build_script(self, operating_system: OperatingSystem) -> Path | None:
-        name = BUILD_SCRIPTS.get(operating_system)
-        return _file(self.environment_dir / name) if name else None
+        return _file(self.environment_dir / BUILD_SCRIPTS[operating_system])
 
     @property
     def verifier_dockerfile(self) -> Path | None:
@@ -267,12 +276,12 @@ def _load_folder(folder: TaskFolder) -> ManifestTask:
     try:
         config = TaskConfig.model_validate(_read_toml(path))
     except ValidationError as exc:
-        raise TaskDefinitionError(f"invalid {path}: {_describe(exc)}") from exc
+        raise TaskDefinitionError(f"invalid {path}: {describe(exc)}") from exc
     _require_files(folder, config.environment.os)
     try:
         spec = _spec(config, folder)
     except ValidationError as exc:
-        raise TaskDefinitionError(f"invalid Task {folder.root}: {_describe(exc)}") from exc
+        raise TaskDefinitionError(f"invalid Task {folder.root}: {describe(exc)}") from exc
     except TaskDefinitionError as exc:
         raise TaskDefinitionError(f"invalid Task {folder.root}: {exc}") from exc
     return ManifestTask(spec, folder)
@@ -291,7 +300,9 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
             "storage_mb": config.environment.storage_mb,
             "gpus": config.environment.gpus,
             "gpu_types": config.environment.gpu_types or (),
+            "gpu_memory_mb": config.environment.gpu_memory_mb,
             "sudo": config.agent.sudo,
+            "container_features": config.environment.container_features,
         },
         network=config.agent.network,
         workdir=config.agent.workdir,
@@ -320,86 +331,86 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
 
 
 def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
-    """The solver image: one named directly wins over a build definition, as in Harbor.
+    """The solver image, from ``[environment].image`` and what ``environment/`` holds.
 
-    ``[environment]`` decides what ``environment/`` builds: a Dockerfile for a container or
-    a Linux VM, ``build.ps1`` for Windows and ``build.sh`` for macOS, each on ``vm_base``.
+    A Dockerfile builds a Linux container and names its base in ``FROM``. A build script
+    (``build.ps1`` on Windows, ``build.sh`` elsewhere) builds a VM on ``image``. ``image``
+    alone is used directly.
     """
     environment, user = config.environment, config.agent.user
+    operating_system, image = environment.os, environment.image
+    linux = operating_system is OperatingSystem.LINUX
+    label, script = _OS_LABELS[operating_system], BUILD_SCRIPTS[operating_system]
     timeout = environment.build_timeout_sec
-    script = BUILD_SCRIPTS.get(environment.os)
-    if environment.os is not OperatingSystem.WINDOWS and _file(
+    if operating_system is not OperatingSystem.WINDOWS and _file(
         folder.environment_dir / WINDOWS_BUILD
     ):
         raise TaskDefinitionError("environment/build.ps1 requires os 'windows'")
-    if environment.kind is ImageKind.CONTAINER:
-        ref = environment.docker_image
-        if ref is None and folder.dockerfile is None:
-            raise TaskDefinitionError(
-                "a container Task requires environment/Dockerfile or [environment].docker_image"
-            )
-        return ImageSpec(kind=ImageKind.CONTAINER, ref=ref, user=user, build_timeout_sec=timeout)
-
-    if script is not None:
-        label = "Windows" if environment.os is OperatingSystem.WINDOWS else "macOS"
-        built = folder.build_script(environment.os)
-        if folder.dockerfile is not None:
+    if folder.dockerfile is not None:
+        if not linux:
             raise TaskDefinitionError(
                 f"a {label} Task builds environment/{script}, not a Dockerfile"
             )
-        if built is not None and environment.vm_base is None:
-            raise TaskDefinitionError(f"environment/{script} requires [environment].vm_base")
-        if environment.vm_base is not None and built is None:
-            raise TaskDefinitionError(f"[environment].vm_base requires environment/{script}")
-        if environment.vm_base is None and environment.vm_image is None:
+        if image is not None:
             raise TaskDefinitionError(
-                f"a {label} Task requires environment/{script} or [environment].vm_image"
+                "environment/Dockerfile names its base in FROM; remove [environment].image"
             )
-        return ImageSpec(
-            kind=ImageKind.VM,
-            ref=environment.vm_image,
-            base_ref=environment.vm_base,
-            user=user,
-            build_timeout_sec=timeout,
-        )
+        return ImageSpec(kind=ImageKind.CONTAINER, user=user, build_timeout_sec=timeout)
+    if folder.build_script(operating_system) is not None:
+        if image is None:
+            raise TaskDefinitionError(
+                f"environment/{script} requires [environment].image, the base it builds on"
+            )
+        return ImageSpec(kind=ImageKind.VM, base_ref=image, user=user, build_timeout_sec=timeout)
+    if image is None:
+        needed = "environment/Dockerfile or [environment].image" if linux else "[environment].image"
+        raise TaskDefinitionError(f"a {label} Task requires {needed}")
+    kind = _named_kind(image, operating_system)
+    return ImageSpec(kind=kind, ref=image, user=user, build_timeout_sec=timeout)
 
-    if environment.vm_image is None and folder.dockerfile is None:
-        raise TaskDefinitionError(
-            "a Linux VM Task requires environment/Dockerfile or [environment].vm_image"
-        )
-    return ImageSpec(
-        kind=ImageKind.VM, ref=environment.vm_image, user=user, build_timeout_sec=timeout
-    )
+
+def _named_kind(image: str, operating_system: OperatingSystem) -> ImageKind | None:
+    """What an image named alone is, as far as the Task decides it.
+
+    Windows and macOS run only VMs, and an absolute path is a local VM disk. A Linux
+    registry reference is either kind, so the registry decides it before preparation.
+    """
+    if operating_system is not OperatingSystem.LINUX or PurePosixPath(image).is_absolute():
+        return ImageKind.VM
+    return None
 
 
 def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
-    """Harbor's verifier semantics, with a VM as another kind of verifier image."""
+    """Harbor's verifier semantics; a Windows or macOS verifier image is a VM."""
     verifier = config.verifier
     dockerfile = folder.verifier_dockerfile
     if verifier.mode is VerificationMode.SHARED:
         if dockerfile is not None:
             raise TaskDefinitionError("tests/Dockerfile requires separate verification")
         return VerifySpec()
-    if dockerfile is not None and config.environment.os is not OperatingSystem.LINUX:
+    operating_system = config.environment.os
+    if dockerfile is not None and operating_system is not OperatingSystem.LINUX:
         raise TaskDefinitionError(
-            "only a Linux verifier builds tests/Dockerfile; reuse the solver image or name a "
-            "vm_image"
+            "only a Linux verifier builds tests/Dockerfile; reuse the solver image or name "
+            "[verifier.environment].image"
         )
 
     environment = verifier.environment
     # Without a verifier environment, a separate verifier gets the solver's resources.
     sized = environment or config.environment
+    named = environment.image if environment is not None else None
     user = config.agent.user
     image: ImageSpec | None = None
-    if environment is not None and environment.docker_image is not None:
-        image = ImageSpec(kind=ImageKind.CONTAINER, ref=environment.docker_image, user=user)
-    elif environment is not None and environment.vm_image is not None:
-        image = ImageSpec(kind=ImageKind.VM, ref=environment.vm_image, user=user)
-    elif dockerfile is not None:
-        kind = environment.kind if environment is not None else ImageKind.CONTAINER
-        image = ImageSpec(kind=kind, user=user, build_timeout_sec=sized.build_timeout_sec)
-    elif environment is not None and environment.vm:
-        raise TaskDefinitionError("[verifier.environment].vm requires vm_image or tests/Dockerfile")
+    if dockerfile is not None:
+        if named is not None:
+            raise TaskDefinitionError(
+                "tests/Dockerfile names its base in FROM; remove [verifier.environment].image"
+            )
+        image = ImageSpec(
+            kind=ImageKind.CONTAINER, user=user, build_timeout_sec=sized.build_timeout_sec
+        )
+    elif named is not None:
+        image = ImageSpec(kind=_named_kind(named, operating_system), ref=named, user=user)
 
     resources = VerifierResources(
         cpus=sized.cpus or config.environment.cpus,
@@ -407,6 +418,8 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
         storage_mb=sized.storage_mb,
         gpus=sized.gpus,
         gpu_types=sized.gpu_types or (),
+        gpu_memory_mb=sized.gpu_memory_mb,
+        container_features=sized.container_features,
     )
     return VerifySpec(environment_mode=VerificationMode.SEPARATE, image=image, resources=resources)
 

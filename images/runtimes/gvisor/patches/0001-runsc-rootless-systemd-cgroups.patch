@@ -1,0 +1,232 @@
+runsc: systemd cgroups under rootless Docker
+
+What: when runsc runs as root of a user namespace that an unprivileged host user
+owns, as under rootless Docker with the systemd cgroup driver, it asks that
+user's own systemd manager for the container's scope, over the session bus at
+$DBUS_SESSION_BUS_ADDRESS, else $XDG_RUNTIME_DIR/bus, else /run/user/<uid>/bus.
+It places the scope under that manager's cgroup and enables only the
+controllers the system delegated to it.
+
+Why: stock runsc asks the system manager, which refuses a rootless caller
+("Interactive authentication required"). The only way out is --ignore-cgroups,
+which drops --memory and --cpus. runc already uses the user's own manager.
+
+Verified: under rootless Docker 29.9.3 (systemd cgroup driver, cgroup v2,
+kernel 5.15), stock runsc of this release fails to create a container with
+--memory 512m with "Interactive authentication required". With this patch a
+container run with --memory 512m --memory-swap 512m --cpus 1.5 gets the scope
+user@<uid>.service/user.slice/docker-<id>.scope with memory.max 536870912,
+memory.swap.max 0 and cpu.max "150000 100000"; allocating 1.5 GB in it is
+OOM-killed (memory.events oom_kill 1), and four busy processes use 1.47 CPUs
+over 20 s, throttled in 202 periods. With DBUS_SESSION_BUS_ADDRESS unset,
+runsc reaches the bus at /run/user/<uid>/bus, and at $XDG_RUNTIME_DIR/bus
+when that is a socket, which it tries first. Under rootful Docker 29.1.3
+(cgroup v2, kernel 7.0) containers still start in system.slice with their
+limits.
+
+diff --git a/runsc/cgroup/systemd.go b/runsc/cgroup/systemd.go
+index 0840f17..8f8384a 100644
+--- a/runsc/cgroup/systemd.go
++++ b/runsc/cgroup/systemd.go
+@@ -62,6 +62,13 @@ type cgroupSystemd struct {
+ 	Parent string
+ 	// ScopePrefix is the prefix for the scope name.
+ 	ScopePrefix string
++	// ManagerRoot is the cgroup of the systemd manager that owns the scope,
++	// relative to the unified mountpoint. It is empty for the system manager
++	// and names the user's manager (e.g.
++	// /user.slice/user-1000.slice/user@1000.service) when runsc runs as root
++	// of a user namespace that an unprivileged user owns, as under rootless
++	// Docker.
++	ManagerRoot string
+ 
+ 	// initialResources is retained from Install until a successful Join.
+ 	// It is not serialized; Update receives the current resources explicitly.
+@@ -89,12 +96,20 @@ func newCgroupV2Systemd(cgv2 *cgroupV2) (*cgroupSystemd, error) {
+ 	if err := validSlice(cg.Parent); err != nil {
+ 		return nil, fmt.Errorf("%w: %v", ErrInvalidGroupPath, err)
+ 	}
+-	// Rewrite Path so that it is compatible with cgroupv2 methods.
+-	cg.Path = filepath.Join(expandSlice(cg.Parent), cg.unitName())
+-	conn, err := systemdDbus.NewWithContext(ctx)
++	conn, err := systemdConn(ctx)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if _, rootless := hostUIDOfRoot(); rootless {
++		root, err := managerControlGroup(conn)
++		if err != nil {
++			conn.Close()
++			return nil, err
++		}
++		cg.ManagerRoot = root
++	}
++	// Rewrite Path so that it is compatible with cgroupv2 methods.
++	cg.Path = filepath.Join(cg.ManagerRoot, expandSlice(cg.Parent), cg.unitName())
+ 	var version int
+ 	if version, err = systemdVersion(conn); err != nil {
+ 		return nil, fmt.Errorf("error parsing systemd version: %v", err)
+@@ -200,7 +215,7 @@ func (c *cgroupSystemd) Update(res *specs.LinuxResources) error {
+ 	}
+ 
+ 	ctx := context.Background()
+-	conn, err := systemdDbus.NewWithContext(ctx)
++	conn, err := systemdConn(ctx)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -219,7 +234,7 @@ func (c *cgroupSystemd) unitName() string {
+ // MakePath builds a path to the given controller.
+ func (c *cgroupSystemd) MakePath(string) string {
+ 	fullSlicePath := expandSlice(c.Parent)
+-	path := filepath.Join(c.Mountpoint, fullSlicePath, c.unitName())
++	path := filepath.Join(c.Mountpoint, c.ManagerRoot, fullSlicePath, c.unitName())
+ 	return path
+ }
+ 
+@@ -240,7 +255,7 @@ func (c *cgroupSystemd) Join() (func(), error) {
+ 	clean := cleanup.Make(func() { _ = c.Uninstall() })
+ 	defer clean.Clean()
+ 
+-	conn, err := systemdDbus.NewWithContext(ctx)
++	conn, err := systemdConn(ctx)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -431,3 +446,136 @@ func CreateMockSystemdCgroup() Cgroup {
+ 		},
+ 	}
+ }
++
++// systemdConn connects to the systemd manager that owns the container's
++// cgroups. That is the system manager, unless runsc runs as root of a user
++// namespace whose root is an unprivileged user on the host, as under rootless
++// Docker: the system manager then refuses to create the scope
++// ("Interactive authentication required"), so runsc uses that user's own
++// manager over the session bus, as runc does. The bus authenticates the peer
++// by its host uid, so the connection names that uid rather than the
++// namespace's 0.
++func systemdConn(ctx context.Context) (*systemdDbus.Conn, error) {
++	uid, rootless := hostUIDOfRoot()
++	if !rootless {
++		return systemdDbus.NewWithContext(ctx)
++	}
++	address, err := userBusAddress(uid)
++	if err != nil {
++		return nil, err
++	}
++	return systemdDbus.NewConnection(func() (*dbus.Conn, error) {
++		conn, err := dbus.Dial(address, dbus.WithContext(ctx))
++		if err != nil {
++			return nil, fmt.Errorf("dialing the user's session bus %q: %w", address, err)
++		}
++		if err := conn.Auth([]dbus.Auth{dbus.AuthExternal(strconv.Itoa(uid))}); err != nil {
++			conn.Close()
++			return nil, fmt.Errorf("authenticating to the user's session bus as uid %d: %w", uid, err)
++		}
++		if err := conn.Hello(); err != nil {
++			conn.Close()
++			return nil, err
++		}
++		return conn, nil
++	})
++}
++
++// hostUIDOfRoot returns the uid that the calling process's effective uid maps
++// to in the parent user namespace, and whether that is an unprivileged user,
++// i.e. whether runsc runs rootless under a user namespace.
++func hostUIDOfRoot() (int, bool) {
++	data, err := os.ReadFile("/proc/self/uid_map")
++	if err != nil {
++		return 0, false
++	}
++	euid := uint64(os.Geteuid())
++	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
++		fields := strings.Fields(line)
++		if len(fields) != 3 {
++			continue
++		}
++		inside, err1 := strconv.ParseUint(fields[0], 10, 32)
++		outside, err2 := strconv.ParseUint(fields[1], 10, 32)
++		length, err3 := strconv.ParseUint(fields[2], 10, 32)
++		if err1 != nil || err2 != nil || err3 != nil {
++			continue
++		}
++		if euid >= inside && euid < inside+length {
++			host := outside + (euid - inside)
++			return int(host), host != 0
++		}
++	}
++	return 0, false
++}
++
++// userBusAddress returns the address of the session bus of the user with
++// the given host uid.
++func userBusAddress(uid int) (string, error) {
++	if address := os.Getenv("DBUS_SESSION_BUS_ADDRESS"); address != "" {
++		return address, nil
++	}
++	candidates := []string{fmt.Sprintf("/run/user/%d/bus", uid)}
++	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
++		candidates = append([]string{filepath.Join(dir, "bus")}, candidates...)
++	}
++	for _, path := range candidates {
++		if fi, err := os.Stat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
++			return "unix:path=" + path, nil
++		}
++	}
++	return "", fmt.Errorf("rootless systemd cgroups need the session bus of uid %d: none of %v is a socket; set DBUS_SESSION_BUS_ADDRESS", uid, candidates)
++}
++
++// managerControlGroup returns the cgroup of the manager conn talks to,
++// relative to the unified mountpoint.
++func managerControlGroup(conn *systemdDbus.Conn) (string, error) {
++	value, err := conn.GetManagerProperty("ControlGroup")
++	if err != nil {
++		return "", fmt.Errorf("reading the systemd manager's ControlGroup: %w", err)
++	}
++	if unquoted, err := strconv.Unquote(value); err == nil {
++		value = unquoted
++	}
++	if !strings.HasPrefix(value, "/") {
++		return "", fmt.Errorf("unexpected systemd manager ControlGroup %q", value)
++	}
++	return value, nil
++}
++
++// createCgroupPaths is cgroupV2's, started at the manager's own cgroup when
++// the scope belongs to a user's manager: the cgroups above it belong to the
++// system manager and are not the user's to write, and systemd has already
++// enabled the delegated controllers down to it.
++func (c *cgroupSystemd) createCgroupPaths() (bool, error) {
++	if c.ManagerRoot == "" {
++		return c.cgroupV2.createCgroupPaths()
++	}
++	rel, err := filepath.Rel(c.ManagerRoot, c.Path)
++	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
++		return false, fmt.Errorf("cgroup %q is not under its manager's cgroup %q", c.Path, c.ManagerRoot)
++	}
++	sub := c.cgroupV2
++	sub.Mountpoint = filepath.Join(c.Mountpoint, c.ManagerRoot)
++	sub.Path = "/" + rel
++	sub.Own = nil
++	// A user's manager has only the controllers the system delegated to it,
++	// and enabling any other in its subtree fails with ENOENT.
++	delegated, err := os.ReadFile(filepath.Join(sub.Mountpoint, controllersFile))
++	if err != nil {
++		return false, err
++	}
++	available := make(map[string]bool)
++	for _, name := range strings.Fields(string(delegated)) {
++		available[name] = true
++	}
++	sub.Controllers = nil
++	for _, name := range c.Controllers {
++		if available[name] {
++			sub.Controllers = append(sub.Controllers, name)
++		}
++	}
++	created, err := sub.createCgroupPaths()
++	c.Own = append(c.Own, sub.Own...)
++	return created, err
++}

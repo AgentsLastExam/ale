@@ -25,11 +25,11 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
+from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds
 from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from ale.core.ids import content_hash
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
-    Capabilities,
     DesktopResolution,
     ExecOutputSink,
     ExecResult,
@@ -101,7 +101,7 @@ _RECONNECT_TIMEOUT_SEC = 120
 _OPEN_POLICY: tuple[tuple[str, ...], tuple[str, ...]] = (("0.0.0.0/0",), ())
 #: guestd from the sources framing installed, on the framework's Python.
 _GUESTD = (
-    "import runpy,sys; sys.path.insert(0,'/opt/ale/guestd'); "
+    "import os,runpy,sys; os.chdir('/'); sys.path.insert(0,'/opt/ale/guestd'); "
     "runpy.run_path('/opt/ale/guestd/main.py',run_name='__main__')"
 )
 #: Prints the home of the account named by its argument, or nothing when there is none.
@@ -175,6 +175,26 @@ def _owned_vm(handle: str) -> tuple[str, str]:
     if not handle.startswith(HANDLE_PREFIX) or not separator or not name.startswith("ale-"):
         raise ProviderCapabilityError(f"{handle!r} is not an Orchard VM handle")
     return name, uid
+
+
+def _check_environment(env: dict[str, str]) -> None:
+    """Refuse variables the guest cannot take or the framework's own commands depend on.
+
+    The engine fills a request's environment, never a Task, so this guards the root command
+    line that starts the guest service, whoever sent the request; it is no need of a Task's
+    that a Run could check up front.
+    """
+    if any(
+        not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or "\0" in value
+        for key, value in env.items()
+    ):
+        raise ProviderCapabilityError("Invalid guest environment variable")
+    if any(
+        key.startswith(("DYLD_", "LD_", "PYTHON", "ALE_CUA_"))
+        or key in {"PATH", "HOME", "SHELL", "ENV", "BASH_ENV"}
+        for key in env
+    ):
+        raise ProviderCapabilityError("Task cannot override trusted framework environment")
 
 
 def _sealed_policy(request: SandboxRequest) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -685,21 +705,26 @@ class OrchardProvider(Provider):
             self._local_orchard = LocalOrchard.load()
         return self._local_orchard
 
-    def capabilities(self) -> Capabilities:
+    async def profiles(self) -> tuple[CapabilityProfile, ...]:
         modes = {NetworkMode.OPEN}
         # A Fleet places Tasks by these; the versions are checked when a VM is made.
         with contextlib.suppress(ProviderCapabilityError):
             check_softnet()
             modes |= {NetworkMode.BLOCK, NetworkMode.ALLOWLIST}
-        return Capabilities(
-            operating_systems=frozenset({OperatingSystem.MACOS}),
-            # Framing requires the image to sign the Task's account in to a desktop.
-            gui=True,
-            network_modes=frozenset(modes),
-            snapshot=True,
+        return (
+            CapabilityProfile(
+                provider=self.id,
+                kind=ImageKind.VM,
+                os=OperatingSystem.MACOS,
+                arch=Arch.ARM64,
+                # Framing requires the image to sign the Task's account in to a desktop.
+                gui=True,
+                network_modes=frozenset(modes),
+                snapshot=True,
+            ),
         )
 
-    async def preflight(self) -> None:
+    async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> None:
         check_framer()
         client = self._local().client()
         try:
@@ -775,39 +800,38 @@ class OrchardProvider(Provider):
             raise ProviderCapabilityError("the prepared Orchard image does not match its reference")
         return result
 
-    def accepts(self, request: SandboxRequest) -> None:
-        if request.network.mode is not NetworkMode.OPEN:
-            check_softnet()  # says what to run, where the generic refusal would not
-        super().accepts(request)
-        if request.resources.gpus:
-            raise ProviderCapabilityError("Orchard GPU allocations are not supported")
-        if request.resources.storage_mb and request.resources.storage_mb % 1024:
-            raise ProviderCapabilityError("Orchard storage_mb must be a whole GiB")
-        if any(
-            not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or "\0" in value
-            for key, value in request.env.items()
-        ):
-            raise ProviderCapabilityError("Invalid guest environment variable")
-        if any(
-            key.startswith(("DYLD_", "LD_", "PYTHON", "ALE_CUA_"))
-            or key in {"PATH", "HOME", "SHELL", "ENV", "BASH_ENV"}
-            for key in request.env
-        ):
-            raise ProviderCapabilityError("Task cannot override trusted framework environment")
-        if request.user == "root":
-            raise ProviderCapabilityError("The agent account must not be root")
+    async def unserved(
+        self, needs: SandboxNeeds, *, user: str, role: SandboxRole
+    ) -> tuple[str, ...]:
+        reasons = await super().unserved(needs, user=user, role=role)
+        if needs.os is OperatingSystem.MACOS and needs.network_mode is not NetworkMode.OPEN:
+            try:
+                check_softnet()
+            except ProviderCapabilityError as error:
+                # Says what to run on this Mac, where its profile only lacks the mode.
+                reasons += (str(error),)
+        return reasons
+
+    def refusals(self, needs: SandboxNeeds, *, user: str, role: SandboxRole) -> tuple[str, ...]:
+        problems: list[str] = []
+        storage = needs.resources.storage_mb
+        if storage and storage % 1024:
+            problems.append("Orchard storage_mb must be a whole GiB")
+        if user == "root":
+            problems.append("The agent account must not be root")
         if (
-            request.user == CONTROL_ACCOUNT
-            and not request.sudo
-            and request.role is not SandboxRole.VERIFIER
+            user == CONTROL_ACCOUNT
+            and not needs.resources.sudo
+            and role is not SandboxRole.VERIFIER
         ):
             # Revoking would take the account's sudo from ALE too, which runs as root
             # through it.
-            raise ProviderCapabilityError(
+            problems.append(
                 f"ALE controls macOS VMs through the {CONTROL_ACCOUNT} account, which keeps "
                 "passwordless sudo, so a Task that runs as it must declare [agent].sudo = true; "
                 "use another account for a Task without elevated privileges"
             )
+        return tuple(problems)
 
     async def _resolve_host(self, guest: GuestClient, request: SandboxRequest) -> str | None:
         """The Mac's address as the VM reaches it, when it reaches a Gateway or a proxy there."""
@@ -1080,7 +1104,8 @@ class OrchardProvider(Provider):
         return await self._create(request, agent=False)
 
     async def _create(self, request: SandboxRequest, *, agent: bool) -> OrchardSandbox:
-        self.accepts(request)
+        await self.accepts(request)
+        _check_environment(request.env)
         restricted = request.network.mode is not NetworkMode.OPEN
         local = self._local()
         if restricted:
@@ -1179,7 +1204,8 @@ class OrchardProvider(Provider):
                     storage_mb=storage,
                     sudo=request.sudo,
                     network_mode=request.network.mode,
-                    provider=self.name,
+                    provider=self.id,
+                    leaf=self.id,
                     desktop_resolution=desktop,
                 ),
             )

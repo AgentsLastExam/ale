@@ -41,6 +41,7 @@ __all__ = [
     "base_layer",
     "chain_identity",
     "chain_mounts",
+    "classify_image",
     "finished_layer",
     "layer_identity",
     "layer_parent",
@@ -87,6 +88,17 @@ _BLOCK = 8 << 20
 #: Zero runs this long, the default qcow2 cluster size, are left as holes when pulled.
 _SPARSE = 64 << 10
 _ZEROS = bytes(_SPARSE)
+#: What a registry serves for a container image: an index of per-platform images, or one
+#: image, whose config is an image config and whose layers are filesystem layers.
+_CONTAINER_INDEXES = (
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+)
+_CONTAINER_CONFIGS = (
+    "application/vnd.oci.image.config.v1+json",
+    "application/vnd.docker.container.image.v1+json",
+)
+_CONTAINER_LAYERS = ("application/vnd.oci.image.layer.", "application/vnd.docker.image.rootfs.")
 
 
 def _select_repo_digest(declared: str, repo_digests: list[str]) -> str:
@@ -190,6 +202,75 @@ async def resolve_registry_reference(reference: str) -> str:
     registry, _, name = reference.rpartition("/")
     repository = name.partition("@")[0].partition(":")[0]
     return f"{registry}/{repository}@{digest}"
+
+
+async def classify_image(reference: str) -> ImageKind:
+    """Whether a registry reference names a container image or an ALE VM disk, by its
+    manifest.
+
+    A reference pinned by digest that this Host already holds, as a pulled VM disk or as a
+    Docker image, is answered without the registry. Anything else is read through Buildx, as
+    ``resolve_registry_reference`` reads it, so the Host's Docker credentials and Docker
+    Hub's short names apply. A tag that only the local Docker daemon knows is not an image a
+    Task can name: nothing could pin it, and no other Host could run it.
+    """
+    digest = reference.rpartition("@")[2] if "@" in reference else None
+    if digest is not None:
+        cached = cache_root() / "vm-images" / digest.removeprefix("sha256:") / "disk.qcow2"
+        if await finished_layer(cached) == digest:
+            return ImageKind.VM
+        try:
+            code, _, _ = await _run(
+                "docker", "image", "inspect", "--format", "{{.Id}}", reference, timeout=30
+            )
+        except OSError:
+            # No Docker CLI, so not held here; the read below says what is missing.
+            code = 1
+        if code == 0:
+            return ImageKind.CONTAINER
+    try:
+        code, output, _ = await _run(
+            "docker", "buildx", "imagetools", "inspect", "--raw", reference, timeout=60
+        )
+    except OSError:
+        raise ProviderStartError(
+            "Reading an image's manifest requires Docker CLI with Buildx on the ALE Host"
+        ) from None
+    if code != 0:
+        # Not the CLI's own words: a credential helper may print secrets.
+        raise ProviderStartError(
+            f"could not read the manifest of {reference}; check the reference and the Host's "
+            "registry access (docker login). An image only the local Docker daemon holds "
+            "cannot be named: build it from environment/Dockerfile or push it to a registry"
+        )
+    try:
+        manifest = json.loads(output)
+    except ValueError:
+        manifest = None
+    if not isinstance(manifest, dict):
+        raise ProviderStartError(f"{reference} answered with no manifest")
+    media_type, artifact = manifest.get("mediaType"), manifest.get("artifactType")
+    config = manifest.get("config")
+    config_type = config.get("mediaType") if isinstance(config, dict) else None
+    layers = manifest.get("layers")
+    layer_types = [
+        str(layer.get("mediaType")) for layer in layers if isinstance(layer, dict)
+    ] if isinstance(layers, list) else []  # fmt: skip
+    # Such as a Tart VM's disk, which a manifest with an image config may carry as well.
+    foreign = next((kind for kind in layer_types if not kind.startswith(_CONTAINER_LAYERS)), None)
+    if media_type == MANIFEST and artifact == VM_DISK:
+        return ImageKind.VM
+    # An index need not state its media type; its list of manifests marks it.
+    index = media_type in _CONTAINER_INDEXES or (
+        media_type is None and isinstance(manifest.get("manifests"), list)
+    )
+    if artifact is None and (index or (config_type in _CONTAINER_CONFIGS and foreign is None)):
+        return ImageKind.CONTAINER
+    shown = next((str(kind) for kind in (artifact, foreign, config_type, media_type) if kind), "")
+    raise ProviderStartError(
+        f"{reference} is neither a container image nor an ALE VM disk "
+        f"({shown[:100] or 'unknown type'})"
+    )
 
 
 async def resolve_container_image(image: ImageRef) -> PreparedTaskImage:
