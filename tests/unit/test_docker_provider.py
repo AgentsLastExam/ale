@@ -473,6 +473,43 @@ async def test_a_kata_or_gvisor_sandbox_boots_on_a_network_of_its_own(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("removal", ["timed out", "refused"])
+async def test_a_destroyed_sandbox_removes_its_network_whatever_its_container_removal_did(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, removal: str
+) -> None:
+    """A loaded daemon can time out removing the container; the network is still asked to
+    go, and one Docker keeps, since the container still holds it, is logged by name."""
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[:2] == ("rm", "-f"):
+            if removal == "timed out":
+                raise ProviderStartError("docker rm -f timed out after 300s")
+            return 1, "", "Error response from daemon: cannot remove container"
+        if argv[:2] == ("network", "rm"):
+            return (
+                1,
+                "",
+                "Error response from daemon: error while removing network: has active endpoints",
+            )
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    sandbox = _sandbox()
+    sandbox.confinement = _on_own_bridge(_KataConfinement)
+    sandbox.state = SandboxState.READY
+    with caplog.at_level("WARNING"):
+        if removal == "timed out":
+            with pytest.raises(ProviderStartError, match="timed out"):
+                await sandbox.destroy()
+        else:
+            await sandbox.destroy()
+    assert calls[-1] == ("network", "rm", "ale-net-e1")
+    assert "could not remove network ale-net-e1: " in caplog.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("answer", "read"),
     [

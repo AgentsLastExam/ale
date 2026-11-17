@@ -275,6 +275,14 @@ async def _netfilter_helper(container: str, commands: list[str], purpose: str) -
         raise ProviderStartError(f"could not {purpose}: {stderr.strip()}")
 
 
+async def _remove_network(network: str) -> None:
+    """Remove a sandbox's own network, saying where the operator looks when it stays: it
+    holds its subnet, and nothing else removes it."""
+    code, _, stderr = await _docker("network", "rm", network, timeout=_REMOVE_SEC)
+    if code != 0 and "not found" not in stderr:
+        _log.warning("could not remove network %s: %s", network, stderr.strip())
+
+
 async def _discard_network(network: str) -> None:
     """Remove a network ALE created for a sandbox that did not start, even while the task
     that created it is cancelled."""
@@ -558,7 +566,7 @@ class _RuncConfinement:
 
     async def remove(self) -> None:
         if self.network:
-            await _docker("network", "rm", self.network, timeout=_REMOVE_SEC)
+            await _remove_network(self.network)
 
 
 #: Run as root on the framework's Python: replaces ``/etc/resolv.conf`` with ``argv[1]``.
@@ -612,7 +620,7 @@ class _OnOwnBridge:
         return ["--network", self.network, "--label", f"{BRIDGE_MAC_LABEL}={self.host_mac}"]
 
     async def remove(self) -> None:
-        await _docker("network", "rm", self.network, timeout=_REMOVE_SEC)
+        await _remove_network(self.network)
 
     async def peers(self, container: str) -> tc.Peers:
         """The sandbox's addresses on its network, which Docker gave it, and the Host's."""
@@ -1269,11 +1277,15 @@ class DockerSandbox(Sandbox):
         await asyncio.gather(
             self._client.close(), self._file_client.close(), return_exceptions=True
         )
-        code, _, stderr = await _docker("rm", "-f", "-v", self.container, timeout=_REMOVE_SEC)
-        if code != 0:
-            # Its container keeps its disk until removed: say so where the operator looks.
-            _log.warning("could not remove %s: %s", self.container, stderr.strip())
-        await self.confinement.remove()
+        try:
+            code, _, stderr = await _docker("rm", "-f", "-v", self.container, timeout=_REMOVE_SEC)
+            if code != 0:
+                # Its container keeps its disk until removed: say so where the operator looks.
+                _log.warning("could not remove %s: %s", self.container, stderr.strip())
+        finally:
+            # Even when the container's removal failed or timed out: the network is the
+            # sandbox's alone, and one Docker still finds attached is logged by name.
+            await self.confinement.remove()
 
     async def retain(
         self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
@@ -2045,7 +2057,7 @@ class DockerProvider(Provider):
         if code != 0:
             raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
         for network in networks:
-            await _docker("network", "rm", network, timeout=_REMOVE_SEC)
+            await _remove_network(network)
 
     async def attach_retained(
         self,

@@ -219,6 +219,10 @@ reports an overlap ([`subnets.py`](subnets.py)).
   once answered six of them after 60 s, and finished them after their CLIs had given up;
   with 300 s it created all 150. A creation that times out or is cancelled removes its
   network.
+- Destroying a sandbox removes its network even when removing its container failed or
+  timed out, and logs a network Docker keeps by name: with 60 s limits, a loaded rootless
+  daemon left 38 of 40 networks when the containers' removal timed out first, and nothing
+  said so.
 
 ## Container features under gVisor
 
