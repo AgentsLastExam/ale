@@ -367,7 +367,9 @@ async def test_windows_retention_empties_the_bases_stage_directories() -> None:
         pass
 
     sandbox = SimpleNamespace(
-        request=_request(SandboxRole.SOLVER).model_copy(update={"retention": "keep"}),
+        request=_request(SandboxRole.SOLVER).model_copy(
+            update={"retention": "keep", "os": OperatingSystem.WINDOWS}
+        ),
         agent_home=r"C:\Users\user",
         exec=exec,
         write_file=write_file,

@@ -174,7 +174,7 @@ class NodeImages:
         if image.kind is None:
             # A Run names an image by its key only once its kind is decided.
             raise ProviderCapabilityError(f"the Run sent {inputs.key} before its kind was decided")
-        provider = self._lend(image.kind, spec.os)
+        provider = self._lend(image.kind, spec.os if inputs.role == "solver" else spec.verifier_os)
         if inputs.role == "solver":
             return (await prepare_task_image_result(task, provider)).image
         result = await prepare_verifier_image_result(task, provider)

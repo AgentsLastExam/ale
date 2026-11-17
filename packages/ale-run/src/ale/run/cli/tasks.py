@@ -1207,7 +1207,7 @@ async def _prepare_images(
             {
                 "image": role,
                 "provider": provider,
-                "os": task.spec.os,
+                "os": task.spec.verifier_os if own else task.spec.os,
                 "kind": spec.kind,
                 "local": task.verifier_image_source_digest if own else task.image_source_digest,
                 "ref": spec.ref,

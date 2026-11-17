@@ -24,6 +24,7 @@ pytestmark = pytest.mark.unit
 
 class StageSandbox:
     agent_home = "/home/user"
+    request = SimpleNamespace(os=OperatingSystem.LINUX)
 
     def __init__(
         self,

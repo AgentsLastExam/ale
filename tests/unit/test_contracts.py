@@ -161,8 +161,8 @@ def test_task_config_requires_only_its_version_and_name() -> None:
         ({"environment": {"workdir": "/app"}}, "environment.workdir"),
         ({"verifier": {"user": "root"}}, "verifier.user"),
         (
-            {"verifier": {"environment": {"cpus": 1, "memory_mb": 512, "os": "linux"}}},
-            "verifier.environment.os",
+            {"verifier": {"environment": {"cpus": 1, "skills_dir": "/skills"}}},
+            "verifier.environment.skills_dir",
         ),
         ({"artifacts": [{"source": "/o", "destination": "o"}]}, "artifact destination"),
         ({"artifacts": [{"source": "/o", "service": "db"}]}, "artifact service"),

@@ -7,13 +7,12 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from ale.core.errors import TaskDefinitionError
 from ale.core.sandbox import PreparedTaskImage, SandboxRequest
-from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.run import guestd
 from ale.run.framework import MARKER, framework_identity, with_framework
 from ale.run.harnesses.builtin import NopHarness
@@ -73,8 +72,7 @@ async def test_an_image_without_python_gets_the_frameworks(tmp_path: Path) -> No
         )
         assert version.stdout.strip() == "(3, 12)", version.stderr
         # Verification has no Python of the image's to use, so it gets the framework's.
-        ctx = SimpleNamespace(spec=SimpleNamespace(os=OperatingSystem.LINUX))
-        python, site = await EpisodeProtocol(NopHarness())._site_packages(ctx, sandbox)  # type: ignore[arg-type]
+        python, site = await EpisodeProtocol(NopHarness())._site_packages(sandbox)
         assert python == guestd.PYTHON["linux"] and site.startswith("/opt/ale/python/")
 
 

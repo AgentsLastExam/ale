@@ -347,9 +347,9 @@ Shared verification uses the solver image. Separate verification uses one of:
 
 1. `[verifier.environment].image`, used directly and resolved through the verifier's
    Provider; its kind follows the [solver's rules](#source-selection-and-identity) under
-   the Task's `os`;
-2. on Linux, a container built from `tests/Dockerfile` with `tests/` as context, which
-   requires separate verification and fails a Windows or macOS Task;
+   the verifier's operating system, `[verifier.environment].os` or else the Task's;
+2. for a Linux verifier, a container built from `tests/Dockerfile` with `tests/` as
+   context, which requires separate verification and fails a Windows or macOS verifier;
 3. otherwise the very image the solver runs, checked by the verifier's Provider when that
    is not the solver's, so the two never resolve a tag apart. Where either is the Fleet,
    which prepares images on its Nodes, the verifier's Provider prepares it again from the
@@ -362,6 +362,11 @@ Naming an image beside `tests/Dockerfile` fails, as the Dockerfile names its bas
 and a verifier never builds on a base. The local verifier context is fixed at `tests/`; its
 Dockerfile is the declaration. Named images are pulled and resolved to an immutable
 repository/content identity before solver execution.
+
+A verifier on another operating system than the Task's needs the first or the second, since
+the solver's image runs the Task's. Everything verification does in it, from its stage
+entry to its verifier directory and Python, follows its own system, and selection asks for
+a Provider of that system.
 
 Any verifier image must satisfy the same guest contract and permit ALE to stage
 `ale_verify`. Verification runs as framework-controlled Task code.

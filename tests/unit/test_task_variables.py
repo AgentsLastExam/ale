@@ -318,6 +318,7 @@ class _Sandbox:
     def __init__(self, stdout: str = "", *, agent_home: str = "/home/user") -> None:
         self.stdout = stdout
         self.agent_home = agent_home
+        self.request = SimpleNamespace(os=OperatingSystem.LINUX)
         self.envs: list[dict[str, str] | None] = []
 
     async def exec(self, argv, *, env=None, output_sink=None, **_: object) -> ExecResult:  # type: ignore[no-untyped-def]

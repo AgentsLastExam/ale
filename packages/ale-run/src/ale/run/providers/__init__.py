@@ -141,8 +141,8 @@ def _sandboxes(
             image.user,
             SandboxNeeds(
                 kind=image.kind,
-                os=spec.os,
-                arch=Arch.of(spec.os),
+                os=spec.verifier_os,
+                arch=Arch.of(spec.verifier_os),
                 network_mode=NetworkMode.OPEN,
                 resources=spec.verify.resources.as_resources(),
             ),

@@ -356,10 +356,10 @@ async def prepare_verifier_image_result(
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
             )
-        elif task.spec.os is not OperatingSystem.MACOS:
+        elif task.spec.verifier_os is not OperatingSystem.MACOS:
             image, reused = await _stage(
                 "framework-layer",
-                framed_disk(image, operating_system=task.spec.os, user=verify.image.user),
+                framed_disk(image, operating_system=task.spec.verifier_os, user=verify.image.user),
             )
             steps.append(
                 ImagePreparationStep(
@@ -440,7 +440,7 @@ def _on_fleet(
     key = content_hash(
         {
             "role": role,
-            "os": task.spec.os,
+            "os": task.spec.os if role == "solver" else task.spec.verifier_os,
             "image": image.model_dump(mode="json"),
             "storage_mb": task.spec.resources.storage_mb,
             "context": identity,

@@ -146,7 +146,9 @@ the agent account in its own Sandbox as `ALE_HOME`, so separate verification fin
 artifacts there.
 
 Verification runs as framework-controlled Task code with open egress and elevated privileges
-(root on Linux and macOS, Administrator on Windows), in both shared and separate modes. Task
+(root on Linux and macOS, Administrator on Windows), in both shared and separate modes, and
+follows the operating system of the Sandbox it runs in, which a separate verifier may name
+apart from the Task's ([Verifier images](sandbox-image.md#verifier-images)). Task
 code may explicitly drop privileges when executing a submitted program. ALE stages
 `ale_verify`, the instruction, optional solver trajectory, and run-level Judge
 configuration, then executes the OS entry from the verification staging directory. Linux and

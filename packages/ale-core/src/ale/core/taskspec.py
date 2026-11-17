@@ -72,6 +72,12 @@ def _task_path(path: str, operating_system: OperatingSystem) -> PurePosixPath | 
     return path_type(path)
 
 
+def _anchored(path: str, operating_system: OperatingSystem) -> bool:
+    """Whether ``path`` names a drive or a root: ``\\out`` and ``C:out`` are not absolute on
+    Windows, and are not below a start directory either."""
+    return bool(_task_path(path, operating_system).anchor)
+
+
 class Artifact(BaseModel):
     """One ``artifacts`` entry: a path or glob, below where the agent starts when relative.
 
@@ -384,6 +390,8 @@ class VerifySpec(BaseModel):
     model_config = _FROZEN
 
     environment_mode: VerificationMode = VerificationMode.SHARED
+    os: OperatingSystem | None = None
+    """A separate verifier's own operating system; ``None`` for the Task's."""
     image: ImageSpec | None = None
     resources: VerifierResources | None = None
 
@@ -392,8 +400,8 @@ class VerifySpec(BaseModel):
         if self.image is not None and self.image.base_ref is not None:
             raise ValueError("a verifier image is used directly or built, never from a base ref")
         if self.environment_mode is VerificationMode.SHARED:
-            if self.image is not None or self.resources is not None:
-                raise ValueError("shared verification cannot declare image or resources")
+            if self.image is not None or self.resources is not None or self.os is not None:
+                raise ValueError("shared verification cannot declare image, resources or os")
         elif self.resources is None:
             raise ValueError("separate verification requires explicit resources")
         return self
@@ -560,10 +568,18 @@ class TaskSpec(BaseModel):
             raise ValueError("a specification is hashed once the kinds of its images are decided")
         return content_hash(self.model_dump(mode="json"))
 
-    def start_directory(self, home: str) -> str:
-        """Where the agent starts, given the agent's ``home``: a relative artifact is below
-        it, and below the same directory of a separate verifier's account."""
-        return str(_task_path(home, self.os) / (self.workdir or ""))
+    @property
+    def verifier_os(self) -> OperatingSystem:
+        """The operating system verification runs on: a separate verifier's own, if it names
+        one, or the Task's."""
+        return self.verify.os or self.os
+
+    def start_directory(self, home: str, operating_system: OperatingSystem | None = None) -> str:
+        """Where the agent starts in a Sandbox of ``operating_system``, the Task's unless
+        given, whose agent account has ``home``: ``[agent].workdir`` below it. A relative
+        artifact is below it, in the solver and in a separate verifier alike."""
+        workdir = _task_path(self.workdir, self.os).parts if self.workdir else ()
+        return str(_task_path(home, operating_system or self.os).joinpath(*workdir))
 
     # --- validation ---
 
@@ -574,14 +590,36 @@ class TaskSpec(BaseModel):
 
     @model_validator(mode="after")
     def _kind_left_open_only_for_a_registry(self) -> Self:
-        for image in (self.image, self.verify.image):
+        for image, operating_system in (
+            (self.image, self.os),
+            (self.verify.image, self.verifier_os),
+        ):
             if image is None or image.kind is not None:
                 continue
             local = image.ref is not None and PurePosixPath(image.ref).is_absolute()
-            if self.os is not OperatingSystem.LINUX or local:
+            if operating_system is not OperatingSystem.LINUX or local:
                 raise ValueError(
                     "only a Linux image named by a registry reference leaves its kind open"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _a_verifier_on_another_system(self) -> Self:
+        """A path on one system names nothing on another, and the solver's image runs the
+        Task's system, so such a verifier receives only relative artifacts, below a relative
+        start directory, in an image of its own."""
+        if self.verifier_os is self.os:
+            return self
+        name = f"a {self.verifier_os} verifier of a {self.os} Task"
+        if self.verify.image is None:
+            raise ValueError(f"{name} needs an image of its own")
+        if self.workdir is not None and _anchored(self.workdir, self.os):
+            raise ValueError(f"{name} needs a relative [agent].workdir")
+        anchored = [
+            artifact.source for artifact in self.artifacts if _anchored(artifact.source, self.os)
+        ]
+        if anchored:
+            raise ValueError(f"{name} receives only relative artifacts, not {', '.join(anchored)}")
         return self
 
     @model_validator(mode="after")
@@ -632,7 +670,7 @@ _UNSUPPORTED_HARBOR_KEYS: dict[tuple[str, ...], frozenset[str]] = {
     (): frozenset({"multi_step_reward_strategy", "source", "steps"}),
     ("environment",): _HARBOR_ENVIRONMENT_ONLY,
     ("verifier",): frozenset({"allowed_hosts", "collect", "network_mode", "user"}),
-    ("verifier", "environment"): _HARBOR_ENVIRONMENT_ONLY | {"mcp_servers", "os", "skills_dir"},
+    ("verifier", "environment"): _HARBOR_ENVIRONMENT_ONLY | {"mcp_servers", "skills_dir"},
 }
 
 
@@ -795,13 +833,14 @@ class AgentTable(BaseModel):
 
 
 class VerifierEnvironmentTable(BaseModel):
-    """``[verifier.environment]``: a separate verifier's own image and resources.
+    """``[verifier.environment]``: a separate verifier's own system, image and resources.
 
-    ``cpus`` and ``memory_mb`` fall back to ``[environment]``'s.
+    ``os``, ``cpus`` and ``memory_mb`` fall back to ``[environment]``'s.
     """
 
     model_config = _FROZEN
 
+    os: OperatingSystem | None = None
     image: str | None = Field(default=None, min_length=1)
     """An image used directly; ``tests/Dockerfile`` builds one otherwise."""
     build_timeout_sec: float = Field(default=3600, gt=0, allow_inf_nan=False, strict=True)
@@ -813,6 +852,13 @@ class VerifierEnvironmentTable(BaseModel):
     gpu_memory_mb: int | None = Field(default=None, ge=1, strict=True)
     container_features: _ContainerFeatures = ()
     env: TaskEnv = Field(default_factory=dict)
+
+    # --- validation ---
+
+    @field_validator("os", mode="before")
+    @classmethod
+    def _any_case(cls, value: Any) -> Any:
+        return value.lower() if isinstance(value, str) else value
 
 
 class VerifierTable(BaseModel):

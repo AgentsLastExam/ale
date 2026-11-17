@@ -34,9 +34,10 @@ my-task/
     └── solve.sh               # solve.ps1 on Windows
 ```
 
-Required files are `task.toml`, `instruction.md`, and the tests and solution entries for the
-Task OS: `tests/test.sh` and `solution/solve.sh` on Linux and macOS, `test.ps1` and
-`solve.ps1` on Windows. `[environment].image` and `environment/` decide the solver's image:
+Required files are `task.toml`, `instruction.md`, the solution entry for the Task OS and the
+tests entry for the verifier's OS, the Task's unless a separate verifier names another:
+`solve.sh` and `test.sh` on Linux and macOS, `solve.ps1` and `test.ps1` on Windows.
+`[environment].image` and `environment/` decide the solver's image:
 
 - `environment/Dockerfile` builds a Linux container. It names its base in `FROM`, so an
   `image` beside it fails, and any `build.sh` beside it is only a file in its context.
@@ -111,6 +112,7 @@ environment_mode = "separate"               # shared | separate
 env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
 
 [verifier.environment]                      # a separate verifier's own sandbox
+os = "linux"                                # default [environment].os
 # image = "registry.example/verifier:tag"   # ALE; used directly instead of tests/Dockerfile
 build_timeout_sec = 3600                    # default 3600
 cpus = 1                                    # default [environment].cpus
@@ -197,6 +199,13 @@ Its image is `[verifier.environment].image`, a Linux container built from
 `tests/Dockerfile`, or else the solver's, as
 [Verifier images](sandbox-image.md#verifier-images) says. The Verification APIs and records
 are defined only in [Verification](verification.md).
+
+`[verifier.environment].os` runs the verifier on another system than the solver, such as a
+Linux container that reads a file a Windows program saved, when the verifier's tools exist
+only there. Its `tests/` entry, verifier directory and Python are that system's. It needs
+an image of its own, since the solver's runs another system, and receives only artifacts
+declared relative, below its own start directory, with `[agent].workdir` relative too: an
+absolute path on one system names nothing on the other.
 
 ### Resources and network
 
