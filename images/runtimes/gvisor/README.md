@@ -51,7 +51,7 @@ docker rm "$id"
 "$dir/runsc" --version
 ```
 
-Register it twice in `/etc/docker/daemon.json`, the same on every Host, with GPUs or
+Register it three times in `/etc/docker/daemon.json`, the same on every Host, with GPUs or
 without, and apply it with `sudo systemctl reload docker`, which leaves running containers
 alone:
 
@@ -74,14 +74,24 @@ alone:
         "--nvproxy-allowed-driver-capabilities=all",
         "--net-raw"
       ]
+    },
+    "runsc-nested": {
+      "path": "/usr/local/lib/ale-gvisor/0.1.1/runsc",
+      "runtimeArgs": [
+        "--overlay2=none",
+        "--allow-suid",
+        "--nvproxy-allowed-driver-capabilities=all",
+        "--TESTONLY-nftables"
+      ]
     }
   }
 }
 ```
 
-ALE's `docker:gvisor` leaf starts a sandbox under `runsc`, or under `runsc-net-raw` when its
-Task needs raw sockets, and its preflight refuses a Host where a runtime it needs is
-missing, is registered with other arguments than these, or is not this build
+ALE's `docker:gvisor` leaf starts a sandbox under `runsc`, under `runsc-net-raw` when its
+Task needs raw sockets, or under `runsc-nested` when it runs a container engine, and its
+preflight refuses a Host where a runtime it needs is missing, is registered with other
+arguments than these, or is not this build
 ([Providers](../../../packages/ale-run/src/ale/run/providers/README.md#docker-on-gvisor)).
 
 - Registered by `path`, `runsc` runs under containerd's runc shim, which passes it
@@ -105,6 +115,15 @@ missing, is registered with other arguments than these, or is not this build
   hold, which `runsc` otherwise removes: ping works and a packet socket captures, while a
   packet socket's write fails (`ENOTSUP`) without `--allow-packet-socket-write`, which ALE
   does not pass.
+- `--TESTONLY-nftables` gives the Sentry's network stack nf_tables, which the `iptables` of
+  Debian, Ubuntu and Alpine (its `nf_tables` variant), Docker and Podman set their rules
+  through; without it they fail with `Failed to initialize nft: Protocol not supported`.
+  The Sentry's netlink then takes nf_tables messages from a process that holds
+  `CAP_NET_ADMIN` in a network namespace, as any process does in one of its own, so only
+  the runtime for container engines passes it. It goes without `--net-raw`: the `docker.io`
+  dockerd 29.1.3 of Ubuntu 22.04 and 24.04 fails to start a container when it can open a
+  packet socket but not write one (`failed to advertise addresses: operation not
+  supported`), and only warns when it cannot open one.
 - For a container with OCI hooks, as `--gpus` adds, `runsc` refuses to mount into the
   root filesystem through a symlink, so Docker's data root must be given as a path
   without one. Reached through a symlinked home directory, for instance, it keeps GPU

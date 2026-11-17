@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -14,7 +15,7 @@ from tests.support import CONTAINER_BASE, skip_without_gvisor, skip_without_kata
 from ale.core.errors import GuestUnreachableError, MemoryExhaustedError
 from ale.core.sandbox import SANDBOX_GATEWAY_PORT, Identity, ImageRef, SandboxRequest
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
-from ale.core.testkit import ProviderConformance
+from ale.core.testkit import NESTED_CHECKS, ProviderConformance
 from ale.run import guestd
 from ale.run.framework import framework_identity
 from ale.run.providers import missing_features
@@ -70,7 +71,8 @@ class TestDockerKataProvider(TestDockerProvider):
 class TestDockerGvisorProvider(TestDockerProvider):
     """The same suite with every sandbox on gVisor, whose network the Provider confines with
     tc filters on the veth's egress and ALE's chains in netstack; the container feature test
-    runs its sandbox under the runtime registered for raw and packet sockets."""
+    runs one sandbox under the runtime registered for raw and packet sockets and one under
+    the runtime registered for container engines."""
 
     provider = DockerProvider(runtime="gvisor")
 
@@ -556,6 +558,125 @@ async def test_a_gvisor_sandbox_resolves_names_while_open_and_fails_at_once_whil
         started = time.monotonic()
         lookup = await sandbox.exec(["getent", "hosts", "example.com"], identity=Identity.AGENT)
         assert lookup.exit_code != 0 and time.monotonic() - started < 10
+
+
+#: Docker CE from Docker's own repository, as a Task's image preinstalls it.
+_DOCKER_CE = f"""\
+FROM {CONTAINER_BASE}
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \\
+    && install -m 0755 -d /etc/apt/keyrings \\
+    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \\
+    && echo "deb [signed-by=/etc/apt/keyrings/docker.asc]" \\
+        "https://download.docker.com/linux/ubuntu jammy stable" \\
+        >/etc/apt/sources.list.d/docker.list \\
+    && apt-get update && apt-get install -y --no-install-recommends \\
+        docker-ce docker-ce-cli containerd.io \\
+    && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /home/user/output && chown -R user:user /home/user/output
+"""
+#: Starts a container engine's daemon, by the command ``START``, and waits for it.
+_START_ENGINE = """
+eval "$START" >/tmp/engine-start.log 2>&1
+for _ in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
+docker info --format '{{.ServerVersion}}'
+"""
+#: Installs Docker from the image's distribution and starts its daemon by hand.
+_INSTALL_ENGINE = """
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq && apt-get install -y -qq docker.io >/dev/null || exit 2
+(dockerd >/tmp/dockerd.log 2>&1 &)
+for _ in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
+docker pull -q busybox:1.36.1 >/dev/null
+"""
+
+
+async def _volumes(container: str) -> dict[str, str]:
+    """The Docker volumes a container mounts, by the directory each is mounted at."""
+    code, raw, stderr = await _docker(
+        "inspect", "--format", "{{json .Mounts}}", container, timeout=30
+    )
+    assert code == 0, stderr
+    return {m["Destination"]: m["Name"] for m in json.loads(raw) if m["Type"] == "volume"}
+
+
+@pytest.mark.asyncio
+async def test_a_gvisor_sandbox_with_a_container_engine_keeps_its_storage_on_volumes() -> None:
+    """Under the runtime registered for container engines, which may mount, with each of
+    the engines' storage directories on a volume of its own that goes with the Sandbox. A
+    Sandbox that did not ask has none of it."""
+    skip_without_gvisor()
+    provider = DockerProvider(runtime="gvisor")
+    async with await provider.create(await _plain_request(provider, "gvisor-no-engine")) as sandbox:
+        assert sandbox.allocation.runtime == gvisor.RUNTIME
+        assert await _volumes(sandbox.container) == {}
+    asked = await _plain_request(provider, "gvisor-engine", ContainerFeature.NESTED_CONTAINERS)
+    async with await provider.create(asked) as sandbox:
+        assert sandbox.allocation.runtime == gvisor.NESTED
+        assert await missing_features(sandbox, {ContainerFeature.MOUNT}) == {}
+        volumes = await _volumes(sandbox.container)
+        assert set(volumes) == set(gvisor.ENGINE_STORAGE)
+    for name in volumes.values():
+        code, _, _ = await _docker("volume", "inspect", name, timeout=30)
+        assert code != 0, f"volume {name} outlived its Sandbox"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start", ["service docker start", "(dockerd >/tmp/dockerd.log 2>&1 &)"])
+async def test_a_gvisor_sandbox_runs_the_docker_its_image_has(tmp_path, start: str) -> None:
+    """Docker CE preinstalled in a Task's image, started by its init script or by hand,
+    runs containers as the shared suite shows of Docker installed during the run."""
+    skip_without_gvisor()
+    root = scaffold_task(tmp_path / "docker-ce")
+    (root / "environment" / "Dockerfile").write_text(_DOCKER_CE)
+    provider = DockerProvider(runtime="gvisor")
+    request = SandboxRequest(
+        episode_id="gvisor-docker-ce",
+        prepared_image=await prepare_task_image(load_tasks(root)[0], provider),
+        resources=Resources(
+            cpus=2, memory_mb=4096, container_features=(ContainerFeature.NESTED_CONTAINERS,)
+        ),
+        network=NetworkPolicy(mode=NetworkMode.OPEN),
+    )
+    async with await provider.create(request) as sandbox:
+        started = await sandbox.exec(
+            ["sh", "-c", _START_ENGINE], env={"START": start}, timeout_sec=120
+        )
+        assert started.ok and started.stdout.strip(), started.stderr[-2000:]
+        checked = await sandbox.exec(["sh", "-c", NESTED_CHECKS], timeout_sec=600)
+        assert "nested-container-ok" in checked.stdout, checked.stderr[-2000:]
+
+
+@pytest.mark.asyncio
+async def test_a_sealed_gvisor_sandbox_running_containers_reaches_nothing_past_its_seal() -> None:
+    """The engine's bridges, rules and NAT are inside netstack, and the filters outside still
+    bind what its containers send: open, a container reaches the Internet; sealed, it does
+    not, nor once root, who holds ``CAP_NET_ADMIN`` here, has flushed ALE's chains."""
+    skip_without_gvisor()
+    provider = DockerProvider(runtime="gvisor")
+    request = await _plain_request(
+        provider, "gvisor-engine-seal", ContainerFeature.NESTED_CONTAINERS
+    )
+    request = request.model_copy(
+        update={"resources": request.resources.model_copy(update={"memory_mb": 2048})}
+    )
+    reach = (
+        "docker run --rm busybox:1.36.1 sh -c "
+        "'nc -w 5 1.1.1.1 443 </dev/null && echo open || echo closed'"
+    )
+    async with await provider.create(request) as sandbox:
+        await sandbox.open_egress()
+        installed = await sandbox.exec(["sh", "-c", _INSTALL_ENGINE], timeout_sec=600)
+        assert installed.ok, installed.stderr[-2000:]
+        opened = await sandbox.exec(["sh", "-c", reach], timeout_sec=60)
+        assert opened.stdout.strip() == "open", opened.stdout + opened.stderr
+        await sandbox.close_egress()
+        sealed = await sandbox.exec(["sh", "-c", reach], timeout_sec=60)
+        assert sealed.stdout.strip() == "closed", sealed.stdout + sealed.stderr
+        flush = gvisor.set_netstack(sandbox.container, {"tables": {"filter": {}, "nat": {}}})
+        code, _, stderr = await _docker(*flush, timeout=60)
+        assert code == 0, stderr
+        flushed = await sandbox.exec(["sh", "-c", reach], timeout_sec=60)
+        assert flushed.stdout.strip() == "closed", flushed.stdout + flushed.stderr
 
 
 #: Forks 16 MiB processes until the kernel ends the sandbox.

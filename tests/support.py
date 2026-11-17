@@ -50,8 +50,9 @@ def skip_without_kata() -> None:
 
 
 def skip_without_gvisor() -> None:
-    """Skip unless Docker here registers ALE's build of gVisor's runtime, as ``runsc`` and
-    ``runsc-net-raw`` ([Providers](../packages/ale-run/src/ale/run/providers/README.md))."""
+    """Skip unless Docker here registers ALE's build of gVisor's runtime, as ``runsc``,
+    ``runsc-net-raw`` and ``runsc-nested``
+    ([Providers](../packages/ale-run/src/ale/run/providers/README.md))."""
     from ale.run.providers.docker import gvisor
 
     try:
@@ -64,7 +65,7 @@ def skip_without_gvisor() -> None:
     except (OSError, subprocess.TimeoutExpired) as error:
         pytest.skip(f"docker is not reachable: {error}")
     runtimes = json.loads(shown.stdout or "{}")
-    missing = {gvisor.RUNTIME, gvisor.NET_RAW} - set(runtimes)
+    missing = set(gvisor.ARGUMENTS) - set(runtimes)
     if missing:
         pytest.skip(f"gVisor is not registered with Docker: {', '.join(sorted(missing))}")
     path = runtimes[gvisor.RUNTIME].get("path", gvisor.RUNTIME)

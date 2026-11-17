@@ -327,8 +327,8 @@ class ResourceAllocation(BaseModel):
     Node's leaf under the Fleet, and Daytona's own, which names no machine of its."""
     runtime: str | None = None
     """The runtime that ran a container Sandbox, as Docker reports it: ``runc``,
-    ``io.containerd.kata.v2`` for a Kata microVM, or ``runsc`` or ``runsc-net-raw`` under
-    gVisor. None where the Provider has no choice."""
+    ``io.containerd.kata.v2`` for a Kata microVM, or ``runsc``, ``runsc-net-raw`` or
+    ``runsc-nested`` under gVisor. None where the Provider has no choice."""
     node: str | None = None
     """For a Sandbox a Fleet ran, the Node and the Node's leaf, as ``<node>/<leaf>``."""
     desktop_resolution: DesktopResolution | None = None

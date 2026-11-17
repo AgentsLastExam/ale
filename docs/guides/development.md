@@ -66,7 +66,7 @@ even before `uv sync`.
 |---|---|---|
 | container (`docker:runc`, default) | Docker Engine reachable, with its `runc` runtime | `just doctor` |
 | container in a Kata microVM (`docker:kata`) | Docker, `/dev/kvm`, Kata's shim on the daemon's PATH and `vhost_vsock` ([Kata](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers)) | `just doctor` for KVM; the Run's preflight names a missing shim or `/dev/kvm` |
-| container on gVisor (`docker:gvisor`) | Docker with ALE's `runsc` registered as `runsc` and `runsc-net-raw` ([install](../../images/runtimes/gvisor/README.md#install-on-a-host)) | the Run's preflight names a missing runtime or argument, another build of `runsc` or one without the GPU memory limit, or a GPU driver nvproxy does not support |
+| container on gVisor (`docker:gvisor`) | Docker with ALE's `runsc` registered as `runsc`, `runsc-net-raw` and `runsc-nested` ([install](../../images/runtimes/gvisor/README.md#install-on-a-host)) | the Run's preflight names a missing runtime or argument, another build of `runsc` or one without the GPU memory limit, or a GPU driver nvproxy does not support |
 | virtual machine (`qemu`, default) | `/dev/kvm` plus `qemu-system-x86_64`, `qemu-img` | `just doctor` |
 | microVM (`firecracker`) | Docker, `/dev/kvm` and `/dev/net/tun`; `images/build.sh ale-firecracker-runner` until the runner is published | `just doctor` for KVM; the Provider names anything else missing |
 | macOS VM (`orchard`, default) | an Apple Silicon Mac running the local Orchard of `scripts/setup_macos.py` | `uv run scripts/setup_macos.py --check` |

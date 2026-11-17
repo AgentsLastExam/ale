@@ -718,8 +718,8 @@ class _GvisorConfinement(_OnOwnBridge):
     isolated.
 
     ALE's chains in its netstack route the Gateway and refuse what the filters drop, so that
-    fails at once. The sandbox's own processes lack ``CAP_NET_ADMIN`` there; the filters
-    outside are what binds it.
+    fails at once. The sandbox's own processes lack ``CAP_NET_ADMIN`` there unless it runs a
+    container engine; the filters outside are what binds it.
     """
 
     def __init__(self, networks: _Networks, network: str, host_ip: str, host_mac: str) -> None:
@@ -815,11 +815,13 @@ async def _shows_drop(container: str, probe: str) -> bool:
 @dataclass(frozen=True)
 class Grant:
     """What a Sandbox that asks for a container feature is started with beyond its leaf's
-    own flags: Linux capabilities, and the registered runtime it needs instead of the
-    leaf's."""
+    own flags: Linux capabilities, the registered runtime it needs instead of the leaf's,
+    and directories of it that each get a Docker volume of their own, which goes with the
+    Sandbox."""
 
     capabilities: tuple[str, ...] = ()
     runtime: str | None = None
+    volumes: tuple[str, ...] = ()
 
 
 def _as_declared(memory_mb: int) -> int:
@@ -870,8 +872,16 @@ class Runtime:
     watched."""
 
     @property
-    def features(self) -> frozenset[ContainerFeature]:
-        return frozenset(self.grants)
+    def feature_sets(self) -> tuple[frozenset[ContainerFeature], ...]:
+        """The container features one Sandbox of it can have together, one set per profile:
+        a Sandbox runs under one registered runtime, so features that each need another
+        come in profiles of their own."""
+        common = frozenset(feature for feature, grant in self.grants.items() if not grant.runtime)
+        runtimes = dict.fromkeys(grant.runtime for grant in self.grants.values() if grant.runtime)
+        return tuple(
+            common | {feature for feature, grant in self.grants.items() if grant.runtime == name}
+            for name in runtimes
+        ) or (common,)
 
     @property
     def gpu_hold(self) -> GpuHold:
@@ -880,14 +890,18 @@ class Runtime:
             return GpuHold.WHOLE
         return GpuHold.LIMIT if self.gpu_memory_flag else GpuHold.WATCHED
 
-    def granted(self, features: Sequence[ContainerFeature]) -> tuple[str, tuple[str, ...]]:
-        """The registered runtime and the capabilities of a Sandbox that asks for
-        ``features``: the union of their grants."""
+    def granted(self, features: Sequence[ContainerFeature]) -> tuple[str, Grant]:
+        """The registered runtime a Sandbox that asks for ``features`` runs under, the one a
+        feature of them needs or else the leaf's own, and the capabilities and volumes it
+        is started with: the union of their grants."""
         grants = [self.grants[feature] for feature in features]
         runtimes = {grant.runtime for grant in grants if grant.runtime}
         assert len(runtimes) <= 1, f"{features} need runtimes {runtimes}"
-        capabilities = sorted({name for grant in grants for name in grant.capabilities})
-        return (runtimes.pop() if runtimes else self.registered), tuple(capabilities)
+        union = Grant(
+            capabilities=tuple(sorted({name for grant in grants for name in grant.capabilities})),
+            volumes=tuple(sorted({path for grant in grants for path in grant.volumes})),
+        )
+        return (runtimes.pop() if runtimes else self.registered), union
 
     def names(self, needs: Sequence[SandboxNeeds]) -> list[str]:
         """The registered names Sandboxes of ``needs`` run under; with none, every one."""
@@ -905,8 +919,9 @@ class Runtime:
 #: Each Docker leaf's runtime, by the part of its provider id after ``docker:``. runc gives
 #: raw sockets to every container, as Docker does by default; Kata's microVM runs no seccomp
 #: filter, and ``mount`` adds ``CAP_SYS_ADMIN``. Docker's GPU injection does not reach a
-#: Kata microVM. gVisor runs a Sandbox that needs raw sockets under the runtime registered
-#: for them.
+#: Kata microVM. gVisor runs a Sandbox that needs raw sockets, or that runs a container
+#: engine, under the runtime registered for it, with the engine's capabilities and its
+#: storage on volumes.
 RUNTIMES: dict[str, Runtime] = {
     "runc": Runtime(
         "runc", {ContainerFeature.RAW_SOCKETS: Grant()}, gpus=True, confinement=_RuncConfinement
@@ -934,6 +949,11 @@ RUNTIMES: dict[str, Runtime] = {
             ContainerFeature.FUSE: Grant(),
             ContainerFeature.MOUNT: Grant(capabilities=("SYS_ADMIN",)),
             ContainerFeature.RAW_SOCKETS: Grant(runtime=gvisor.NET_RAW),
+            ContainerFeature.NESTED_CONTAINERS: Grant(
+                capabilities=gvisor.ENGINE_CAPABILITIES,
+                runtime=gvisor.NESTED,
+                volumes=gvisor.ENGINE_STORAGE,
+            ),
         },
         gpus=True,
         confinement=_GvisorConfinement,
@@ -1405,8 +1425,10 @@ class DockerSandbox(Sandbox):
     ) -> RetainedSandbox:
         """Stop the container and commit its filesystem as a labelled local image.
 
-        A sandbox mounts no volumes, so the commit holds all of its files. The image keeps
-        the container's labels and command; a snapshot holds no GPU and reserves no memory.
+        Only a sandbox that runs a container engine mounts volumes, which a commit does not
+        keep, and its profile takes no snapshots, so the commit holds all of the files. The
+        image keeps the container's labels and command; a snapshot holds no GPU and reserves
+        no memory.
         """
         # The relay ends with this container; the image keeps the account's own settings.
         await relay.stop(self._client, self.request)
@@ -1476,21 +1498,26 @@ class DockerProvider(Provider):
     async def profiles(self) -> tuple[CapabilityProfile, ...]:
         runtime = RUNTIMES[self.runtime]
         models = await self._models() if runtime.gpus else ()
-        return (
-            CapabilityProfile(
-                provider=self.id,
-                kind=ImageKind.CONTAINER,
-                os=OperatingSystem.LINUX,
-                arch=machine_arch(),
-                gui=True,  # depends on the image; the GUI base image provides a desktop
-                network_modes=frozenset(NetworkMode),
-                snapshot=True,
-                gpus=bool(models),
-                gpu_models=models,
-                gpu_hold=runtime.gpu_hold if models else GpuHold.WHOLE,
-                container_features=runtime.features,
-            ),
-        )
+        profiles = []
+        for features in runtime.feature_sets:
+            # A commit keeps no volume, so a Sandbox with storage on one saves no snapshot.
+            on_volumes = any(runtime.grants[feature].volumes for feature in features)
+            profiles.append(
+                CapabilityProfile(
+                    provider=self.id,
+                    kind=ImageKind.CONTAINER,
+                    os=OperatingSystem.LINUX,
+                    arch=machine_arch(),
+                    gui=True,  # depends on the image; the GUI base image provides a desktop
+                    network_modes=frozenset(NetworkMode),
+                    snapshot=not on_volumes,
+                    gpus=bool(models),
+                    gpu_models=models,
+                    gpu_hold=runtime.gpu_hold if models else GpuHold.WHOLE,
+                    container_features=features,
+                )
+            )
+        return tuple(profiles)
 
     async def _models(self) -> tuple[GpuModel, ...]:
         """The models of the Host GPUs it may lease, read once: a Host's GPUs are a fact of
@@ -1526,7 +1553,7 @@ class DockerProvider(Provider):
         profile declares when none are given, registered with exactly the arguments the
         runtime takes, and the leaf's devices. A runtime ALE builds must be this engine's
         build, and one that proxies the NVIDIA driver must support the Host's when GPUs may
-        be attached: a Sandbox needs them, or, with no needs, its profile offers them. One
+        be attached: a Sandbox needs them, or, with no needs, its profiles offer them. One
         that limits a shared Sandbox's GPU memory must list the flag that does when a Sandbox
         may share GPUs. What a Sandbox of it must show is returned as a check."""
         if shutil.which("docker") is None:
@@ -1665,7 +1692,7 @@ class DockerProvider(Provider):
         container = f"ale-{sandbox_id}"
         isolated = request.network.mode is not NetworkMode.OPEN
         # Named even for runc: a Host whose default runtime is another would run it there.
-        registered, capabilities = runtime.granted(resources.container_features)
+        registered, grant = runtime.granted(resources.container_features)
         argv = [
             "run", "-d", "--name", container,
             "--label", f"{LABEL}={request.episode_id}",
@@ -1678,8 +1705,10 @@ class DockerProvider(Provider):
             "--runtime", registered,
             *runtime.flags,
         ]  # fmt: skip
-        for capability in capabilities:
+        for capability in grant.capabilities:
             argv += ["--cap-add", capability]
+        for path in grant.volumes:
+            argv += ["--mount", f"type=volume,dst={path}"]
         for key, value in request.env.items():
             argv += ["-e", f"{key}={value}"]
         argv += ["-e", f"{CONTAINER_VARIABLE}={request.desktop_resolution}"]

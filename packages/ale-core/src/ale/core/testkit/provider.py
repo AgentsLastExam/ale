@@ -108,13 +108,31 @@ for target in sys.argv[1:]:
 
 #: A container image to run inside a Sandbox, pinned so the check stays the same.
 _BUSYBOX = "busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
-#: Installs Docker from the image's distribution, starts it, and runs a container in it.
+#: What Tasks do with a container engine, once it runs: a container deletes a file of its
+#: image, which its layer marks with a whiteout, reaches the Internet, resolves another on a
+#: network of their own and reaches the port that one publishes.
+NESTED_CHECKS = f"""
+set -ex
+docker run --rm {_BUSYBOX} sh -c 'rm /bin/ls && ! test -e /bin/ls'
+docker run --rm {_BUSYBOX} wget -q -T 30 -O /dev/null http://example.com/
+docker network create ale-nested >/dev/null
+docker run -d --name ale-nested-web --network ale-nested -p 18080:80 {_BUSYBOX} \\
+    sh -c 'mkdir /w && echo served >/w/index.html && exec httpd -f -p 80 -h /w' >/dev/null
+docker run --rm --network ale-nested {_BUSYBOX} wget -q -T 30 -O - http://ale-nested-web/ \\
+    | grep -qx served
+docker run --rm --network host {_BUSYBOX} wget -q -T 30 -O - http://127.0.0.1:18080/ \\
+    | grep -qx served
+docker rm -f ale-nested-web >/dev/null
+docker network rm ale-nested >/dev/null
+echo nested-container-ok
+"""
+#: Installs Docker from the image's distribution, starts its daemon by hand, and checks it.
 _NESTED = f"""
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq && apt-get install -y -qq docker.io >/dev/null || exit 2
 (dockerd >/tmp/dockerd.log 2>&1 &)
 for _ in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
-docker run --rm {_BUSYBOX} echo nested-container-ok
+{NESTED_CHECKS}
 """
 
 

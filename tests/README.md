@@ -24,7 +24,8 @@ address pools
 ([Docker runtimes](../packages/ale-run/src/ale/run/providers/README.md#docker-runtimes)).
 The Kata tests run only where Kata is installed
 ([Providers](../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers)),
-and the gVisor tests only where Docker registers ALE's build of `runsc`
+and the gVisor tests only where Docker registers ALE's build of `runsc` under every name its
+README shows
 ([gVisor](../packages/ale-run/src/ale/run/providers/README.md#docker-on-gvisor)).
 
 Run `just test-harnesses` after changing a Harness, a Gateway dialect or a CLI pin, and

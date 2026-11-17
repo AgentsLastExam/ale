@@ -283,33 +283,99 @@ relays each connection to that port on the Host's loopback (`rootless.py`).
 
 ## Container features under gVisor
 
-**Problem.** On `runsc`, `--cap-add NET_RAW` gave no raw socket, `--cap-add ALL` gave no
-`perf_event_open`, `bpf` or `io_uring`, and the `docker.io` dockerd of Ubuntu 22.04 failed
-to start in a sandbox (`iptables/1.8.7 Failed to initialize nft: Protocol not supported`).
+**Problem.** On `runsc`, `--cap-add NET_RAW` gave no raw socket, and `--cap-add ALL` gave
+no `perf_event_open`, `bpf` or `io_uring`.
 
 **Context.** `runsc` removes `CAP_NET_RAW` from every container unless it runs with
 `--net-raw`; `--allow-packet-socket-write` lets a packet socket write as well. Docker gives
 a runtime arguments only from its registration, and letting a container's annotations
 override `runsc`'s flags (`--allow-flag-override`) would let it override any of them. The
-Sentry implements neither perf events, BPF nor io_uring, and netstack no nf_tables (it is
-test-only in this release): a container engine runs only once the Task has switched it to
-iptables-legacy, as Docker's own dind image does.
+Sentry implements neither perf events, BPF nor io_uring.
 
-**Solution.** Two registrations of the same `runsc`, with the arguments its
+**Solution.** Registrations of the same `runsc`, with the arguments its
 [README](../../../../../../../images/runtimes/gvisor/README.md#install-on-a-host) shows:
-`runsc`, and `runsc-net-raw`, which adds `--net-raw`. `docker:gvisor` gives
-`user_namespaces` and `fuse` with no grant, `mount` with `CAP_SYS_ADMIN`, and `raw_sockets`
-by running the Sandbox under `runsc-net-raw`; a Sandbox gets the union of its features'
-grants.
+`runsc`, `runsc-net-raw`, which adds `--net-raw`, and `runsc-nested` (below).
+`docker:gvisor` gives `user_namespaces` and `fuse` with no grant, `mount` with
+`CAP_SYS_ADMIN`, and `raw_sockets` by running the Sandbox under `runsc-net-raw`; a Sandbox
+gets the union of its features' grants.
 
 **Decisions.**
 - A Sandbox that needs no raw socket runs under `runsc`, so it cannot craft packets; one
   that does captures with a packet socket but cannot write one, since the feature promises
   what ping and packet capture need.
-- No `nested_containers`: a profile declares a feature only when its guarantee holds for
-  any Task, and this one would hold only for a Task that chose iptables-legacy.
 - `perf`, `bpf` and `io_uring` are not offered; a Task that needs one runs on Kata or
   Firecracker.
+
+## A container engine in a gVisor sandbox
+
+**Problem.** A distribution's Docker failed to start in a gVisor sandbox:
+`iptables: Failed to initialize nft: Protocol not supported` (Ubuntu 22.04's and 24.04's
+`docker.io` 29.1.3, November 2026). Once it started, with nf_tables, it failed to start a
+container: `mount callback failed on /tmp/containerd-mount…: symlink /proc/mounts
+…/etc/mtab: file exists`, and `rm` of a file of an image failed with `EPERM`.
+
+**Context.** Debian's, Ubuntu's and Alpine's `iptables` is the `nf_tables` variant; Docker
+29 and Podman's netavark set their rules through it, or through nf_tables directly. gVisor's
+netstack implements nf_tables behind `--TESTONLY-nftables` (release-20261109.0): its netlink
+takes nf_tables messages from a process with `CAP_NET_ADMIN` in a network namespace, which
+any process holds in one it creates, since the Sentry gives every container user namespaces.
+netstack runs a packet through its iptables tables and then its nf_tables ones, as Linux
+runs both, but each tracks connections in a table of its own, and they shared a packet's
+connection and NAT flags: once ALE had set its chains, Docker's first connection panicked
+the Sentry (`packet already had NAT: DNAT performed`); ALE's patch 0008 gives each its own
+state. The libnftnl of iptables 1.8.7 (Ubuntu 22.04, the container base) writes a
+batch's subsystem id in host byte order, which Linux takes and gVisor refused
+(`Unknown subsystem id 2560`), and that iptables writes `--sport`, `--dport` and
+`--tcp-flags` with the xtables `tcp` and `udp` matches, which gVisor took as placeholders
+that matched every packet: a lookup through Docker's embedded DNS server got no answer.
+ALE's patches 0006 and 0007 do both as Linux does. A container engine keeps its images in
+overlay layers whose whiteouts, 0:0 character devices, mark what a layer deletes; the
+Host's overlayfs, a sandbox's root, refuses to create one (`ovl_mknod`, `EPERM` under runc
+too), while gVisor creates them on a gofer filesystem with the `userxattr` option. A
+dockerd 29.1.3 that may open a packet socket but not write one, as under `--net-raw`, fails
+to start a container (`failed to advertise addresses: operation not supported`); Docker CE
+29.10 only warns, and both only warn when they cannot open one.
+
+**Solution.** A Sandbox that asks for `nested_containers` runs under `runsc-nested`,
+registered with `--TESTONLY-nftables` and without `--net-raw`, with `--cap-add NET_ADMIN`,
+`SYS_ADMIN` and `SYS_RESOURCE`, and with a Docker volume of its own on each of
+`/var/lib/docker`, `/var/lib/containerd` and `/var/lib/containers` (`gvisor.py`), removed
+with the Sandbox. ALE's chains stay in netstack's iptables tables, which the engine's
+nf_tables rules do not touch, and each set tracks and NATs connections on its own. Raw
+sockets and a container engine are profiles of their own, since each needs a registration of
+its own.
+
+**Decisions.**
+- nf_tables in the Sentry rather than iptables-legacy: it holds for any distribution, for
+  Docker installed at any time, started by its init script or by hand, set to its nftables
+  backend or not. Switching the Sandbox to iptables-legacy, by `update-alternatives` or a
+  legacy `iptables` first on the PATH, misses an init script that sets its own PATH, an
+  engine set to nftables, and netavark.
+- Only Sandboxes that ask for it reach nf_tables: the parser and interpreter are test-only
+  code in the Sentry, which every process could otherwise drive from a network namespace
+  of its own. The price is a third registration on every Host.
+- No `--net-raw` under `runsc-nested`, rather than a fourth registration with
+  `--allow-packet-socket-write`: a Sandbox gets raw sockets or a container engine, not both,
+  and a nested container gets no raw socket; ping still works through ICMP datagram
+  sockets.
+- `NET_ADMIN`, `SYS_ADMIN` and `SYS_RESOURCE`, measured as what Docker's engines need:
+  without `NET_ADMIN` dockerd does not start, without `SYS_ADMIN` it starts no container,
+  and without `SYS_RESOURCE` Debian's `/etc/init.d/docker` fails at `ulimit -n 1048576`, as
+  it does under runc. They stay in the Sentry and give nothing on the Host; `SYS_PTRACE`,
+  which gVisor's own guide lists, was not needed.
+- Volumes rather than a tmpfs, which would charge every image layer to the Sandbox's memory.
+  A commit keeps no volume, so the profile for container engines takes no snapshots,
+  rather than lose the engine's images and containers in one: an engine's layers,
+  whiteouts among them, cannot be part of an image's layer, whose whiteouts would read as
+  the layer's own.
+- gVisor's own gaps are closed as ALE patches that do what Linux does, rather than worked
+  around in the Sandbox, so that a Task needs nothing for gVisor.
+- ALE's chains stay in iptables rather than move to nf_tables, whose gVisor implementation
+  has no `REJECT`: a refusal there would wait out the seal's drop again.
+- Podman's storage works on its volume, and its containers run on the host network, but
+  its own networks are not offered: past the recursive bind of a namespace file that gVisor
+  refuses (`EINVAL`, which Linux allows), the CNI bridge plugin's hairpin mode and a netlink
+  request of netavark 1.4 fail too.
 
 ## A gVisor sandbox's memory and death
 

@@ -283,14 +283,17 @@ class TestDeclaration:
         for leaf in lent.values():
             assert isinstance(leaf, DockerProvider)
             assert (leaf.gpus, leaf.gpu_memory_margin_mb) == ((0, 1), 2048)
-        runc, kata, gvisor = declaration.profiles
-        assert (runc.provider, kata.provider, gvisor.provider) == (
+        # gVisor lends a profile for raw sockets and one for a container engine.
+        runc, kata, gvisor, nested = declaration.profiles
+        assert (runc.provider, kata.provider, gvisor.provider, nested.provider) == (
             "docker:runc",
             "docker:kata",
+            "docker:gvisor",
             "docker:gvisor",
         )
         assert ContainerFeature.MOUNT in kata.container_features
         assert ContainerFeature.RAW_SOCKETS in gvisor.container_features
+        assert ContainerFeature.NESTED_CONTAINERS in nested.container_features
         assert runc.container_features == {ContainerFeature.RAW_SOCKETS}
         # Only a leaf that attaches GPUs offers the Node's, by their models and memory, and
         # says how a Sandbox that shares one is held to its share.
