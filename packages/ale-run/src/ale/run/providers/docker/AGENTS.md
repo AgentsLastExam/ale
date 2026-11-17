@@ -271,7 +271,9 @@ the session ended under rootful Docker, up to 10.5 s under rootless Docker on a 
 
 **Solution.** The Provider adds the Sentry's memory to `--memory` (the Providers README has
 the measure), passes `--oom-score-adj 500`, and, for every Docker leaf, waits on a container
-whose guestd session's stream ended unasked and reports from its state why the sandbox died.
+whose guestd session's stream ended unasked and reports from its state why the sandbox died,
+an OOM kill in it among the reasons
+([A sandbox that runs out of its memory](#a-sandbox-that-runs-out-of-its-memory)).
 
 **Decisions.**
 - The Sentry's allowance is measured beside the framework's processes alone, the desktop
@@ -286,9 +288,60 @@ whose guestd session's stream ended unasked and reports from its state why the s
 - Only an end of the stream ALE did not cause, of a session guestd answered on: ALE closes
   a session before it destroys, keeps or snapshots the Sandbox, and that end is no death; a
   guestd that never answered failed to start, which its stderr says at once.
-- `OOMKilled` alone is no death: Docker keeps it once the OOM killer has taken any process
-  of the container, which a gVisor sandbox survives. Memory is blamed only with exit code
-  137.
+
+## A sandbox that runs out of its memory
+
+**Problem.** A Sandbox whose processes used up its memory, and died of it, ended its episode
+as an environment error, which is retried: an agent could fill memory to turn a failing
+episode into a fresh one. Under Kata Docker records none of the guest's OOM kills.
+
+**Context.** Measured with the container base at 1024 MiB (November 2026, Linux 7.0, Docker
+29.1.3, Kata 4.3.1, runsc release-20261109.0+ale.0.1.0):
+- One process allocating past the limit is killed alone on every leaf, and the Sandbox
+  lives.
+- 400 forked 16 MiB processes end the whole sandbox under runc (the OOM killer reached
+  supervisord: exit 137) and gVisor (exit 137 or 139); under Kata the guest kills them one
+  by one and the sandbox lives. A tmpfs mounted with `mount` and written full ends a gVisor
+  or Kata sandbox; `/dev/shm`, 64 MiB under runc and gVisor and half the VM under Kata,
+  fills without harm.
+- Docker's `OOMKilled` turns true at the first OOM kill of any process of the container,
+  one `docker exec` started included, and stays true while the container runs on and after
+  it stops, by `docker kill` too; under runc and runsc, with rootful Docker 29.1.3 and
+  rootless Docker 29.9.3 (Linux 5.15 and 6.12) alike. It counts kills for a limit around the
+  container as well: under a systemd slice whose `MemoryMax` (768 MiB) was below the
+  container's `--memory` (2048 MiB), standing in for the Host, the container counted `oom 0`
+  while the OOM killer ended its processes, and Docker reported `OOMKilled`.
+- Under Kata `OOMKilled` stays false although the container's cgroup in the guest counted
+  `oom_kill 1`. In the guest the microVM runs out before the container's cgroup does
+  (`global_oom`, `CONSTRAINT_NONE`), so its `oom` stays 0 while `oom_kill` counts every
+  kill.
+- A Kata hypervisor killed from outside, as the Host's OOM killer would, left the container
+  exited (255) within 5 s but its `docker exec` sessions open, so a command waited out its
+  timeout, which in an episode is the agent's final `timeout`.
+
+**Solution.** The container's state, which the Provider reads once a guestd session ended
+unasked (above), says under runc and gVisor whether an OOM kill came first: `OOMKilled`.
+Under Kata a watcher in the guest ([`memory.py`](../memory.py)) writes the container's
+`memory.events` to a `docker exec` session at every change, and any `oom_kill` or `oom`
+there counts. A loss after such a kill raises `MemoryExhaustedError`. Under Kata the Sandbox
+also waits on its container and ends guestd's sessions once it stops.
+
+**Decisions.**
+- Docker's record, read once when the Sandbox is lost, rather than the container's cgroup
+  watched while it lives: it costs no thread per Sandbox, and it outlives the container,
+  whose cgroup goes with it. It does not say whose limit was reached, which ALE does not
+  need: a loss to the Host's memory ends the Episode as one to the Sandbox's does.
+- Any OOM kill since the Sandbox started counts, as `OOMKilled` keeps it: a Sandbox that
+  survived one, as a small container base whose desktop the OOM killer took while it
+  started can, and was lost later is lost to memory.
+- A loss after an OOM kill is a memory death whatever the exit code: the Sentry ended once
+  with 139, and what killed the main process followed from the memory.
+- Under Kata every kill in the guest counts, since the microVM's memory is the Task's. Its
+  watcher is in the sandbox, where root could end it; that only hides an exhaustion behind a
+  lost session, as root ending guestd does. A hypervisor the Host's OOM killer ends leaves
+  no record in the guest, and its loss stays a lost guest.
+- A stop by ALE's GPU watchdog stays an environment error, its memory notwithstanding: ALE
+  stopped it.
 
 ## guestd's replies under gVisor
 

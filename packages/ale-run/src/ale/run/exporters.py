@@ -16,6 +16,7 @@ from ale.core.trajectory import (
     AtifStep,
     AtifTrajectory,
 )
+from ale.core.verdict import FINAL_STATUSES
 
 __all__ = [
     "PrimeRlSample",
@@ -55,8 +56,13 @@ def scalar_reward(
     result: ResultRecord,
     aggregate: Callable[[dict[str, float]], float],
 ) -> float:
+    """One number for an episode: its rewards aggregated by the caller's policy, zero for the
+    agent's own final outcome without rewards, such as ``memory_exhausted``. An episode the
+    environment or the Task failed has no score."""
     if result.rewards is None:
-        raise ValueError("failed episodes have no rewards to aggregate")
+        if result.status in FINAL_STATUSES:
+            return 0.0
+        raise ValueError(f"a {result.status} episode has no score")
     return float(aggregate(dict(result.rewards)))
 
 

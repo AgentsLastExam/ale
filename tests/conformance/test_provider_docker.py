@@ -11,7 +11,7 @@ from typing import Literal
 import pytest
 from tests.support import CONTAINER_BASE, skip_without_gvisor, skip_without_kata
 
-from ale.core.errors import GuestUnreachableError
+from ale.core.errors import GuestUnreachableError, MemoryExhaustedError
 from ale.core.sandbox import SANDBOX_GATEWAY_PORT, Identity, ImageRef, SandboxRequest
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
@@ -558,27 +558,100 @@ async def test_a_gvisor_sandbox_resolves_names_while_open_and_fails_at_once_whil
         assert lookup.exit_code != 0 and time.monotonic() - started < 10
 
 
+#: Forks 16 MiB processes until the kernel ends the sandbox.
+_MANY = """
+import os, time
+for _ in range(400):
+    if os.fork() == 0:
+        held = bytearray(16 << 20)
+        for page in range(0, len(held), 4096):
+            held[page] = 1
+        time.sleep(600)
+        os._exit(0)
+    time.sleep(0.02)
+time.sleep(600)
+"""
+
+
 @pytest.mark.asyncio
-async def test_a_gvisor_sandbox_that_fills_its_memory_with_a_tmpfs_says_it_died() -> None:
-    """A tmpfs is the Sentry's memory, so filling the limit with one ends the whole sandbox,
-    and the session that ends says so."""
-    skip_without_gvisor()
-    provider = DockerProvider(runtime="gvisor")
-    request = await _plain_request(provider, "gvisor-tmpfs", ContainerFeature.MOUNT)
+@pytest.mark.parametrize("runtime", ["runc", "gvisor"])
+async def test_a_sandbox_whose_processes_take_its_memory_dies_of_it(runtime: str) -> None:
+    """The OOM killer ends its processes until the sandbox goes: under runc, largest first,
+    up to the container's main process; under gVisor, the Sentry. Docker records the kills."""
+    if runtime == "gvisor":
+        skip_without_gvisor()
+    provider = DockerProvider(runtime=runtime)
+    async with await provider.create(await _plain_request(provider, f"many-{runtime}")) as sandbox:
+        with pytest.raises(MemoryExhaustedError) as lost:
+            await sandbox.exec(["python3", "-c", _MANY], identity=Identity.AGENT, timeout_sec=300)
+    assert str(lost.value).startswith(
+        "the sandbox itself died after an OOM kill in it (its Task declares 512 MiB): Docker "
+        "recorded OOMKilled, and its main process exited with code "
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["gvisor", "kata"])
+async def test_a_sandbox_that_fills_its_memory_with_a_tmpfs_dies_of_it(runtime: str) -> None:
+    """Under gVisor a tmpfs is the Sentry's memory, and under Kata the microVM's, so filling
+    the limit with one ends the whole sandbox, whatever the OOM killer ranks; under Kata only
+    the guest kernel saw it, and its watcher in the guest says so."""
+    if runtime == "gvisor":
+        skip_without_gvisor()
+    else:
+        skip_without_kata()
+    provider = DockerProvider(runtime=runtime)
+    request = await _plain_request(provider, f"{runtime}-tmpfs", ContainerFeature.MOUNT)
     fill = (
         "mkdir -p /mnt/fill && mount -t tmpfs -o size=4g none /mnt/fill && "
         "dd if=/dev/zero of=/mnt/fill/zeros bs=1M count=2048"
     )
     async with await provider.create(request) as sandbox:
-        with pytest.raises(GuestUnreachableError, match="exceeded its memory limit"):
+        with pytest.raises(MemoryExhaustedError) as lost:
             await sandbox.exec(["sh", "-c", fill], timeout_sec=120)
+    # The whole sandbox or only guestd first, as the kernel picks.
+    evidence = "its cgroup counted" if runtime == "kata" else "Docker recorded OOMKilled"
+    assert "after an OOM kill in it (its Task declares 512 MiB): " in str(lost.value)
+    assert evidence in str(lost.value)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("runtime", ["runc", "gvisor"])
-async def test_a_docker_sandbox_killed_from_outside_says_so(runtime: str) -> None:
+@pytest.mark.parametrize("runtime", ["runc", "gvisor", "kata"])
+async def test_a_sandbox_lost_after_an_oom_kill_it_survived_is_lost_to_memory(
+    runtime: str,
+) -> None:
+    """One process killed for the Sandbox's memory, the Sandbox answering after it, and then
+    a kill from outside: an OOM kill since the Sandbox started counts."""
     if runtime == "gvisor":
         skip_without_gvisor()
+    elif runtime == "kata":
+        skip_without_kata()
+    provider = DockerProvider(runtime=runtime)
+    async with await provider.create(await _plain_request(provider, f"later-{runtime}")) as sandbox:
+        allocated = await sandbox.exec(
+            ["python3", "-c", _ALLOCATE], identity=Identity.AGENT, timeout_sec=300
+        )
+        assert not allocated.ok and not allocated.timed_out
+        await asyncio.sleep(1)
+        assert (await sandbox.exec(["true"])).ok  # it goes on, as an agent's would
+        running = asyncio.ensure_future(sandbox.exec(["sleep", "60"], timeout_sec=120))
+        await asyncio.sleep(2)
+        code, _, stderr = await _docker("kill", sandbox.container)
+        assert code == 0, stderr
+        with pytest.raises(MemoryExhaustedError) as lost:
+            await running
+    assert str(lost.value).startswith("the sandbox itself died after an OOM kill in it"), lost
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["runc", "gvisor", "kata"])
+async def test_a_docker_sandbox_killed_from_outside_says_so(runtime: str) -> None:
+    """A kill from outside, with no OOM kill in the Sandbox before, is a lost Sandbox that
+    says so: an environment error."""
+    if runtime == "gvisor":
+        skip_without_gvisor()
+    elif runtime == "kata":
+        skip_without_kata()
     provider = DockerProvider(runtime=runtime)
     async with await provider.create(
         await _plain_request(provider, f"killed-{runtime}")
@@ -587,8 +660,11 @@ async def test_a_docker_sandbox_killed_from_outside_says_so(runtime: str) -> Non
         await asyncio.sleep(2)
         code, _, stderr = await _docker("kill", sandbox.container)
         assert code == 0, stderr
-        with pytest.raises(GuestUnreachableError, match="itself died: it was killed from outside"):
+        with pytest.raises(
+            GuestUnreachableError, match="itself died: it was killed from outside"
+        ) as lost:
             await running
+        assert type(lost.value) is GuestUnreachableError
 
 
 @pytest.mark.asyncio

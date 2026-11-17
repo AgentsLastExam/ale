@@ -42,3 +42,43 @@ handshake ends at once and no name resolves. The test checked a bare connect.
 **Decision.** The sandbox is closed in every way that carries data, so nothing changes in
 the Provider. Whether the network is open is judged by a completed TLS handshake with a
 public host, in `_set_egress` and in every test.
+
+## A sandbox that runs out of its memory
+
+**Problem.** A Daytona sandbox whose processes used up its memory died with nothing to say
+why: guestd's session ended (`guest session closed`), the episode became an environment
+error and was retried, and ALE's teardown then failed with
+`409 Sandbox state change in progress`.
+
+**Context.** Measured on Daytona's `us` region, daemon 0.232.2, with the container base at
+1 GiB (November 2026):
+- The sandbox is a container in a user namespace, with cgroup v2 and a cgroup namespace: its
+  `/sys/fs/cgroup` holds `memory.max` of 1 GiB, every process sits in `/init.scope` below
+  it, and `/sys/fs/cgroup/memory.events` counts `oom` for that limit. `dmesg` prints nothing
+  and `/proc/meminfo` shows Daytona's host.
+- One process allocating past the limit is killed alone. 400 forked 16 MiB processes, or a
+  tmpfs that root mounts and writes full, end the whole sandbox within 1.4 to 2.8 s, the
+  OOM killer taking the desktop first and then Daytona's daemon, PID 1. `/dev/shm` is
+  64 MiB and fills without harm.
+- Daytona's record of a sandbox that died so says `stopped` with no `errorReason`; it then
+  destroys it by itself within 10 to 25 s (`desiredState` `destroyed`), refusing a delete
+  meanwhile with 409, and keeps none: a longer `autoDeleteInterval` is refused in the
+  region.
+- A watcher in the sandbox waiting on `memory.events` with `POLLPRI` had `oom` at the Host
+  0.2 to 0.8 s before guestd's session ended; one reading every 2 s missed it.
+
+**Solution.** `_Memory` in [provider.py](provider.py) starts `memory.WATCHER` over an SSH
+session of its own once the framework is in place; a lost guestd session waits up to 10 s
+for that session to end too, and raises `MemoryExhaustedError` if the sandbox's
+`memory.events` counts any `oom_kill` or `oom`. `delete_sandbox` takes a 409 for a sandbox
+Daytona already destroys as success, and waits for it to go.
+
+**Decisions.**
+- Both counts, since the sandbox started: Daytona's host could end its processes too, which
+  counts `oom_kill` alone, and a loss after that is memory's as well; the message gives
+  both, so `oom` 0 points at the host.
+- Watched from inside, since nothing outside says why: the watcher shares the sandbox's
+  memory and root can end it, which only hides an exhaustion behind a lost session.
+- ALE does not rank the agent's commands for the OOM killer here: 1000 kept the sandbox
+  alive in both fatal cases, but the sandbox an agent's memory ends is the agent's result
+  either way.

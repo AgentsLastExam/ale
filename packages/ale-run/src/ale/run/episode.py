@@ -30,6 +30,7 @@ from ale.core.errors import (
     AgentRefusalError,
     BudgetExceededError,
     EnvironmentError_,
+    MemoryExhaustedError,
     PhaseTimeoutError,
     ProviderCapabilityError,
     RetentionFinalizationError,
@@ -53,7 +54,7 @@ from ale.core.sandbox import (
 from ale.core.task import ResolvedVariables, Task
 from ale.core.taskspec import NetworkMode, OperatingSystem, VerificationMode
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
-from ale.core.verdict import Status, Verdict
+from ale.core.verdict import FINAL_STATUSES, Status, Verdict
 from ale.run import artifact_files
 from ale.run.assets import observe_task_assets
 from ale.run.framework import MACOS_PYTHON
@@ -81,20 +82,20 @@ _STATUS_BY_ERROR: tuple[tuple[type[BaseException], Status], ...] = (
     (AgentRefusalError, Status.REFUSED),
     (AgentError, Status.AGENT_ERROR),
     (TaskError, Status.TASK_ERROR),
+    (MemoryExhaustedError, Status.MEMORY_EXHAUSTED),
     (EnvironmentError_, Status.ENV_ERROR),
 )
 
 
-#: Outcomes another attempt must not replace. A completed zero is a score, and a limit
-#: termination or a refusal is the measured agent's own result: retrying a limit would grant
-#: a fresh budget.
-_FINAL_STATUSES = frozenset(
-    {Status.COMPLETED, Status.TIMEOUT, Status.BUDGET_EXCEEDED, Status.REFUSED}
-)
+def status_for(error: BaseException, *, agents: bool = True) -> Status:
+    """Map a raised error to the status a result should carry.
 
-
-def status_for(error: BaseException) -> Status:
-    """Map a raised error to the status a result should carry."""
+    A Sandbox lost to memory is the agent's result only where ``agents``, that is, the
+    Sandbox the agent ran in, from its phase on; elsewhere the code that ran there was the
+    Task's.
+    """
+    if isinstance(error, MemoryExhaustedError) and not agents:
+        return Status.TASK_ERROR
     for error_type, status in _STATUS_BY_ERROR:
         if isinstance(error, error_type):
             return status
@@ -127,7 +128,7 @@ async def run_episode_with_retries(
         result = await execute()
         failure = result.record.failure
         if (
-            result.record.status in _FINAL_STATUSES
+            result.record.status in FINAL_STATUSES
             or attempt == retries
             or (
                 failure is not None
@@ -742,8 +743,16 @@ async def run_episode(
                 reason=type(exc).__name__,
             )
         phase = _phase_of(exc, ctx.failure_phase)
+        status = status_for(exc, agents=_agents_sandbox(task, ctx, phase))
+        if status is Status.MEMORY_EXHAUSTED:
+            ctx.limit_termination = LimitTermination(
+                layer="sandbox",
+                name="memory_mb",
+                configured_value=task.spec.resources.memory_mb,
+                reason=type(exc).__name__,
+            )
         verdict = Verdict.failed(
-            status_for(exc),
+            status,
             exc,
             phase=phase,
             message=redact(str(exc)),
@@ -959,6 +968,14 @@ def _gateway_refusal(session: GatewaySession | None) -> LimitTermination | None:
         observed_value=refusal.observed,
         reason="the Gateway refused a model call",
     )
+
+
+def _agents_sandbox(task: Task, ctx: EpisodeContext, phase: str | None) -> bool:
+    """Whether a Sandbox lost in ``phase`` holds the agent's work: the one it ran in, from
+    its phase on, installing its Harness included, holds what it left there, processes and
+    files in memory too. Setup and a separate verifier run the Task's code alone."""
+    separate = task.spec.verify.environment_mode is VerificationMode.SEPARATE
+    return ctx.agent_started and not (separate and phase == Phase.VERIFY.value)
 
 
 def _phase_of(error: BaseException, recorded_phase: object = None) -> str | None:

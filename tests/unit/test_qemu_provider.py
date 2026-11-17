@@ -23,6 +23,7 @@ from tests.support import FakeQemuImg, write_qcow2
 from ale.core.capability import Arch
 from ale.core.errors import (
     GuestUnreachableError,
+    MemoryExhaustedError,
     ProviderCapabilityError,
     ProviderStartError,
     TaskDefinitionError,
@@ -47,6 +48,7 @@ from ale.core.taskspec import (
 from ale.run.framework import MATERIALIZER_IMAGE
 from ale.run.gpu import parse_nvidia_smi
 from ale.run.images import chain_identity
+from ale.run.providers import runner
 from ale.run.providers.qemu.provider import (
     EPISODE_LABEL,
     GATEWAY_CHAIN,
@@ -723,8 +725,8 @@ async def test_qemu_retained_solver_can_be_reattached(
         return 0, json.dumps([record]), ""
 
     class Transport:
-        def __init__(self, host: str, port: int, *, token: str) -> None:
-            assert (host, port, token) == ("127.0.0.1", 17411, "retained-token")
+        def __init__(self, port: int, token: str, console: object) -> None:
+            assert (port, token) == (17411, "retained-token") and console is not None
 
         async def start(self, *, timeout_sec: float, interval_sec: float) -> None:
             assert timeout_sec > 0
@@ -742,7 +744,7 @@ async def test_qemu_retained_solver_can_be_reattached(
         return "user", "/home/user", False
 
     monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
-    monkeypatch.setattr("ale.run.providers.runner.TcpTransport", Transport)
+    monkeypatch.setattr("ale.run.providers.runner._RunnerTransport", Transport)
     monkeypatch.setattr("ale.run.providers.runner.GuestClient", Client)
     monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
     allocation = ResourceAllocation(
@@ -846,7 +848,7 @@ class _LeftRunning:
             return "user", "/home/user", False
 
         monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
-        monkeypatch.setattr("ale.run.providers.runner.TcpTransport", Transport)
+        monkeypatch.setattr("ale.run.providers.runner._RunnerTransport", Transport)
         monkeypatch.setattr("ale.run.providers.runner.GuestClient", lambda _: self.client)
         monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
         self.allocation = ResourceAllocation(
@@ -1642,3 +1644,58 @@ def test_only_whole_clusters_of_ntfs_free_space_are_discarded() -> None:
     empty = Volume(start=0, length=5 * gib, cluster=4 * kib, bitmap=bytes(5 * gib // 4096 // 8))
     pieces = list(discardable([(0, 5 * gib)], [empty], 64 * kib))
     assert pieces == [(0, gib), (gib, gib), (2 * gib, gib), (3 * gib, gib), (4 * gib, gib)]
+
+
+@pytest.mark.parametrize(
+    ("console", "lost"),
+    [
+        (
+            "[   18.87] Out of memory: Killed process 1612 (python3) total-vm:3170564kB\n"
+            "[   19.10] Kernel panic - not syncing: System is deadlocked on memory\n",
+            "guestd in the VM was lost after an OOM kill in it (its Task declares 4096 MiB): its "
+            "console shows 2 messages of its kernel's OOM killer, the last 'System is "
+            "deadlocked on memory'",
+        ),
+        # For a cgroup's limit in the VM: an OOM kill all the same.
+        (
+            "[    3.02] Out of memory: Killed process 802 (gnome-shell) total-vm:9123kB\n"
+            "[    6.27] Started ale-guestd.service - ALE guest service.\n"
+            "[   41.50] Memory cgroup out of memory: Killed process 2210 (python3) "
+            "total-vm:812345kB\n",
+            "guestd in the VM was lost after an OOM kill in it (its Task declares 4096 MiB): its "
+            "console shows 2 messages of its kernel's OOM killer, the last 'Memory cgroup out of "
+            "memory: Killed process 2210 (python3)'",
+        ),
+        ("[    6.27] Started ale-guestd.service - ALE guest service.\n", None),
+    ],
+)
+async def test_a_lost_guest_is_explained_by_its_kernels_console(
+    monkeypatch: pytest.MonkeyPatch, console: str, lost: str | None
+) -> None:
+    """The runner's log is the guest's serial console, read whole, since the guest booted:
+    the connection here answers once and ends."""
+    asked: list[tuple[str, ...]] = []
+
+    async def logs(*argv: str, timeout: float) -> tuple[int, str, str]:
+        asked.append(argv)
+        return 0, console, ""
+
+    monkeypatch.setattr("ale.run.providers.runner.run", logs)
+    guest_console = runner.Console("ale-qemu-e1", 4096)
+    transport = runner._RunnerTransport(17411, "token", guest_console)
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"{}\n")
+    reader.feed_eof()
+    transport._reader = reader  # what start connects
+    assert await transport.recv() == "{}"
+    with pytest.raises(GuestUnreachableError) as ended:
+        await transport.recv()
+    explained = await transport.explain(ended.value)
+    assert asked == [("docker", "logs", "ale-qemu-e1")]
+    if lost is None:
+        assert explained is ended.value
+    else:
+        assert isinstance(explained, MemoryExhaustedError)
+        assert str(explained) == f"{lost} (guest closed the connection)"
+    assert await transport.explain(ended.value) is explained  # asked once, then kept
+    assert len(asked) == 1

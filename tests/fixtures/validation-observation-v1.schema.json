@@ -52,6 +52,7 @@
             "task_error",
             "timeout",
             "budget_exceeded",
+            "memory_exhausted",
             "cancelled",
             "refused"
           ]

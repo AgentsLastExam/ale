@@ -29,6 +29,7 @@ from ale.core.errors import (
     AgentError,
     BudgetExceededError,
     EnvironmentError_,
+    GuestUnreachableError,
     PhaseTimeoutError,
     ProviderCapabilityError,
     TaskError,
@@ -888,6 +889,8 @@ class EpisodeProtocol:
             raw = {
                 path: await sandbox.read_file(path) for path in (reward, record) if path in written
             }
+        except GuestUnreachableError:
+            raise  # the Sandbox was lost, which is no defect of what the verifier wrote
         except Exception as exc:
             raise VerifierOutputError(f"verify result could not be read: {exc}") from exc
         if reward not in raw:

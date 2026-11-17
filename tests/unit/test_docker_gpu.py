@@ -484,11 +484,13 @@ class Sink:
 def _watched_sandbox(
     hold: GpuHold, watchdog: gpu_sharing.Watchdog | None = None
 ) -> tuple[DockerSandbox, tuple[_Session, _Session]]:
-    sessions = (_Session([], "ale-e1"), _Session([], "ale-e1"))
+    sessions = (_Session([], "ale-e1", 1024), _Session([], "ale-e1", 1024))
     sandbox = DockerSandbox.__new__(DockerSandbox)
     sandbox.container = "ale-e1"
     sandbox.container_id = A
     sandbox._sessions = sessions
+    sandbox._watcher = None
+    sandbox._stopping = None
     sandbox._watchdog = watchdog or gpu_sharing.Watchdog()
     sandbox._context = contextvars.copy_context()
     sandbox.state = SandboxState.READY
@@ -875,8 +877,8 @@ def _starts(monkeypatch: pytest.MonkeyPatch, runtime: str) -> None:
     """A Sandbox that Docker started is driven through stand-ins: guestd, its contract, its
     GPUs (G2 as nvproxy shows it) and its confinement."""
 
-    async def connect(_provider: DockerProvider, container: str, _user: str) -> _Session:
-        session = _Session([], container)
+    async def connect(_provider: DockerProvider, container: str, *_: object) -> _Session:
+        session = _Session([], container, 1024)
         session.client = SimpleNamespace(close=_nothing)  # type: ignore[assignment]
         return session
 

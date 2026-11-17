@@ -47,7 +47,12 @@ from urllib.parse import SplitResult, urlsplit
 
 from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model
 from ale.core.config import DaytonaProviderConfig
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.core.errors import (
+    GuestUnreachableError,
+    MemoryExhaustedError,
+    ProviderCapabilityError,
+    ProviderStartError,
+)
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     ExecOutputSink,
@@ -83,6 +88,7 @@ from ale.run.providers.daytona.image import (
 )
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.docker import DockerProvider
+from ale.run.providers.memory import WATCHER, GuestEvents
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, StdioTransport
@@ -314,6 +320,69 @@ class _SshHost:
         shutil.rmtree(self._directory, ignore_errors=True)
 
 
+#: How long a lost guestd session waits for the memory watcher's session to end too, as it
+#: does with its Sandbox: it arrived 0.2 to 0.8 s before guestd's end when the Sandbox died.
+_SETTLE_SEC = 10.0
+
+
+class _Memory:
+    """The OOM kills in the Sandbox as its cgroup counts them, once the watcher runs, which
+    guestd's sessions consult when their stream ends unasked."""
+
+    def __init__(self, memory_mb: int) -> None:
+        #: The memory its Task declares.
+        self.memory_mb = memory_mb
+        self.watcher: GuestEvents | None = None
+
+    async def watch(self, ssh: _SshHost) -> None:
+        """Start the watcher on the Sandbox's own cgroup, whose limit is the Task's."""
+        command = f"cd / && exec {PYTHON} -I -c {shlex.quote(WATCHER)}"
+        self.watcher = await GuestEvents.start(await ssh.argv(command))
+
+    async def close(self) -> None:
+        if self.watcher is not None:
+            await self.watcher.close()
+
+
+class _Session(StdioTransport):
+    """guestd over SSH, whose stream ending unasked, once guestd has answered, says whether
+    an OOM kill in the Sandbox came first."""
+
+    def __init__(self, argv: Sequence[str], memory: _Memory) -> None:
+        super().__init__(argv)
+        self._memory = memory
+        self._answered = False
+        self._closing = False
+        #: What the end of its stream was found to mean, which a later call then raises too.
+        self._explained: GuestUnreachableError | None = None
+
+    async def recv(self) -> str:
+        line = await super().recv()
+        self._answered = True
+        return line
+
+    async def close(self) -> None:
+        self._closing = True
+        await super().close()
+
+    async def explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
+        watcher = self._memory.watcher
+        if self._closing or not self._answered or watcher is None:
+            return error
+        if self._explained is not None:
+            return self._explained
+        await watcher.settled(_SETTLE_SEC)
+        explained = error
+        if (evidence := watcher.oom_killed()) is not None:
+            explained = MemoryExhaustedError(
+                f"the sandbox was lost after an OOM kill in it (its Task declares "
+                f"{self._memory.memory_mb} MiB): {evidence} ({error})"
+            )
+            explained.__cause__ = error
+        self._explained = explained
+        return explained
+
+
 class _Tunnel:
     """The Host end of the stream tunnel; reconnects if its SSH session drops."""
 
@@ -430,6 +499,7 @@ class DaytonaSandbox(Sandbox):
         allocation: ResourceAllocation,
         agent_user: str,
         agent_home: str,
+        memory: _Memory,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -445,6 +515,7 @@ class DaytonaSandbox(Sandbox):
         self._client = client
         self._file_client = file_client
         self._tunnel = tunnel
+        self._memory = memory
         self._local_gateway = local_gateway
         self._sealed = False
         #: The loopback address guestd relays the agent to the egress proxy from, while sealed.
@@ -594,6 +665,8 @@ class DaytonaSandbox(Sandbox):
         for client in (self._client, self._file_client):
             with contextlib.suppress(Exception):
                 await client.close()
+        with contextlib.suppress(Exception):
+            await self._memory.close()
         if self._tunnel is not None:
             with contextlib.suppress(Exception):
                 await self._tunnel.close()
@@ -717,6 +790,7 @@ class DaytonaProvider(Provider):
         client: GuestClient | None = None
         file_client: GuestClient | None = None
         tunnel: _Tunnel | None = None
+        memory = _Memory(request.resources.memory_mb)
         try:
             published, daytona_id, data = await self._start(
                 request, framed, sandbox_id, local_gateway
@@ -730,9 +804,10 @@ class DaytonaProvider(Provider):
             allocation = _observed_allocation(request, data)
             ssh = _SshHost(self._api, daytona_id)
             environment = _guest_environment(config, request, local_gateway)
-            client = await _connect(ssh, request.user, environment)
+            client = await _connect(ssh, request.user, environment, memory)
             agent_home, has_desktop = await _guest_contract(client)
             await _require_framework(client, request)
+            await memory.watch(ssh)
             await set_elevation(
                 client, request.user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
             )
@@ -755,11 +830,16 @@ class DaytonaProvider(Provider):
                         )
                     }
                 )
-            file_client = await _connect(ssh, request.user, environment)
+            file_client = await _connect(ssh, request.user, environment, memory)
         except BaseException:
             await asyncio.shield(
                 _discard(
-                    self._api, daytona_id, ssh=ssh, clients=(client, file_client), tunnel=tunnel
+                    self._api,
+                    daytona_id,
+                    ssh=ssh,
+                    clients=(client, file_client),
+                    tunnel=tunnel,
+                    memory=memory,
                 )
             )
             raise
@@ -777,6 +857,7 @@ class DaytonaProvider(Provider):
             allocation=allocation,
             agent_user=request.user,
             agent_home=agent_home,
+            memory=memory,
         )
 
     async def _start(
@@ -925,20 +1006,29 @@ class DaytonaProvider(Provider):
         client: GuestClient | None = None
         file_client: GuestClient | None = None
         tunnel: _Tunnel | None = None
+        memory = _Memory(allocation.memory_mb)
         try:
             environment = _guest_environment(config, attached, local_gateway)
-            client = await _connect(ssh, request.user, environment)
+            client = await _connect(ssh, request.user, environment, memory)
             agent_home, _ = await _guest_contract(client)
             await _require_framework(client, attached)
+            await memory.watch(ssh)
             await _seal_daemon(client, request.user)  # idempotent: the rules persist
             if listeners:
                 tunnel = _Tunnel(ssh, listeners=listeners, targets=targets)
                 await tunnel.start()
-            file_client = await _connect(ssh, request.user, environment)
+            file_client = await _connect(ssh, request.user, environment, memory)
         except BaseException:
             # Not ours to delete: only the connections are undone.
             await asyncio.shield(
-                _discard(self._api, None, ssh=ssh, clients=(client, file_client), tunnel=tunnel)
+                _discard(
+                    self._api,
+                    None,
+                    ssh=ssh,
+                    clients=(client, file_client),
+                    tunnel=tunnel,
+                    memory=memory,
+                )
             )
             raise
         return DaytonaSandbox(
@@ -955,6 +1045,7 @@ class DaytonaProvider(Provider):
             allocation=allocation,
             agent_user=request.user,
             agent_home=agent_home,
+            memory=memory,
         )
 
 
@@ -962,7 +1053,12 @@ class DaytonaProvider(Provider):
 
 
 async def _connect(
-    ssh: _SshHost, agent_user: str, environment: dict[str, str], *, timeout_sec: float = 120
+    ssh: _SshHost,
+    agent_user: str,
+    environment: dict[str, str],
+    memory: _Memory,
+    *,
+    timeout_sec: float = 120,
 ) -> GuestClient:
     """guestd over SSH, retrying while the sandbox's daemon is still starting.
 
@@ -974,7 +1070,7 @@ async def _connect(
     command = _guestd_command(agent_user, environment)
     last: Exception | None = None
     while True:
-        transport = StdioTransport(await ssh.argv(command))
+        transport = _Session(await ssh.argv(command), memory)
         await transport.start()
         client = GuestClient(transport)
         try:
@@ -1216,11 +1312,15 @@ async def _discard(
     ssh: _SshHost | None = None,
     clients: Sequence[GuestClient | None] = (),
     tunnel: _Tunnel | None = None,
+    memory: _Memory | None = None,
 ) -> None:
     """Undo a failed start, leaving nothing behind and never raising."""
     if tunnel is not None:
         with contextlib.suppress(Exception):
             await tunnel.close()
+    if memory is not None:
+        with contextlib.suppress(Exception):
+            await memory.close()
     for client in clients:
         if client is not None:
             with contextlib.suppress(Exception):

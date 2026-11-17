@@ -216,7 +216,10 @@ feasibility and network-policy selection. `ale lint` requires
 
 `[environment]` resources are the whole Sandbox's allocation. The image's own processes, such
 as the GUI base images' desktop, share it with the agent and every program the agent starts,
-so a GUI Task leaves an agent CLI room above the desktop.
+so a GUI Task leaves an agent CLI room above the desktop. `memory_mb` holds files in memory,
+such as a tmpfs, too, and, with shared verification, the verifier beside what the agent left;
+a Sandbox lost after it ran out ends its Episode
+([Episode protocol](episode-protocol.md#agent-or-oracle)).
 
 ### GPUs
 

@@ -14,7 +14,12 @@ from typing import Any
 import pytest
 
 from ale.core.config import RunConfig
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.core.errors import (
+    GuestUnreachableError,
+    MemoryExhaustedError,
+    ProviderCapabilityError,
+    ProviderStartError,
+)
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     Identity,
@@ -43,12 +48,14 @@ from ale.run.providers.daytona.provider import (
     _guest_environment,
     _guestd_command,
     _image_unavailable,
+    _Memory,
     _observed_allocation,
     _observed_gpus,
     _parse_ssh,
     _register_driver_libraries,
     _sandbox_name,
     _seal_daemon,
+    _Session,
     _SshHost,
     _start_image_command,
     _Tunnel,
@@ -217,6 +224,7 @@ def network_sandbox(api: NetworkApi, policy: NetworkPolicy) -> tuple[DaytonaSand
         ),
         agent_user="user",
         agent_home="/home/user",
+        memory=_Memory(2048),
     )
     return sandbox, client
 
@@ -851,3 +859,47 @@ async def test_a_sandbox_someone_elses_tool_made_is_never_destroyed() -> None:
     with pytest.raises(ProviderCapabilityError, match="not a Daytona sandbox handle"):
         await provider.destroy_retained("docker:their-sandbox")
     assert api.deleted == []
+
+
+@pytest.mark.parametrize(
+    ("counts", "lost"),
+    [
+        # Its own cgroup reached the Task's limit.
+        (
+            "oom 3 oom_kill 2",
+            "MemoryExhaustedError: the sandbox was lost after an OOM kill in it (its Task "
+            "declares 1024 MiB): its cgroup counted 2 OOM kills and 3 times its memory reached "
+            "its limit",
+        ),
+        # Processes killed without its limit reached, by Daytona's host: memory all the same.
+        (
+            "oom 0 oom_kill 4",
+            "MemoryExhaustedError: the sandbox was lost after an OOM kill in it (its Task "
+            "declares 1024 MiB): its cgroup counted 4 OOM kills and 0 times its memory reached "
+            "its limit",
+        ),
+        ("oom 0 oom_kill 0", None),
+    ],
+)
+async def test_a_lost_guestd_session_says_whether_an_oom_kill_came_first(
+    counts: str, lost: str | None
+) -> None:
+    """The watcher's session, a process here that writes what a watcher in the Sandbox
+    would and then ends with it, is read until it ends; its counts are the Sandbox's since
+    it started."""
+    memory = _Memory(1024)
+    memory.watcher = await daytona_module.GuestEvents.start(
+        ["sh", "-c", f"echo oom 0 oom_kill 0; sleep 0.3; echo {counts}"]
+    )
+    session = _Session(["sh", "-c", "echo {}; sleep 0.1; echo closed >&2"], memory)
+    await session.start()
+    assert await session.recv() == "{}"
+    with pytest.raises(GuestUnreachableError) as ended:
+        await session.recv()
+    explained = await session.explain(ended.value)
+    await memory.close()
+    if lost is None:
+        assert explained is ended.value
+    else:
+        assert isinstance(explained, MemoryExhaustedError)
+        assert f"MemoryExhaustedError: {explained}" == f"{lost} (guest session closed: closed)"

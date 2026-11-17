@@ -99,6 +99,26 @@ async def test_delete_waits_until_the_sandbox_is_gone(daytona: tuple[DaytonaApi,
     assert [call[0] for call in fake.calls].count("GET") == 2
 
 
+async def test_deleting_a_sandbox_daytona_already_destroys_waits_for_it(
+    daytona: tuple[DaytonaApi, Fake],
+) -> None:
+    """A Sandbox whose processes all died, its memory run out, Daytona stops and destroys
+    itself, and refuses a delete meanwhile; one in another change is still refused."""
+    api, fake = daytona
+    fake.on("DELETE", "/sandbox/x", respond(409, {"message": "Sandbox state change in progress"}))
+    fake.on(
+        "GET",
+        "/sandbox/x",
+        respond(200, {"state": "destroying", "desiredState": "destroyed"}),
+        respond(404, {"message": "not found"}),
+    )
+    await api.delete_sandbox("x")
+    fake.on("DELETE", "/sandbox/y", respond(409, {"message": "Sandbox state change in progress"}))
+    fake.on("GET", "/sandbox/y", respond(200, {"state": "starting", "desiredState": "started"}))
+    with pytest.raises(DaytonaError, match="state change in progress"):
+        await api.delete_sandbox("y")
+
+
 async def test_a_create_that_may_have_happened_is_never_repeated(
     daytona: tuple[DaytonaApi, Fake],
 ) -> None:
